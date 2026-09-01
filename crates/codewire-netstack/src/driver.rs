@@ -7,7 +7,7 @@
 //! `Send` and ordinary-async-shaped while smoltcp stays single-threaded.
 //!
 //! Responsibilities each wakeup:
-//!   1. Stage inbound IP packets from the WireGuard/peer side into the device.
+//!   1. Stage inbound IP packets from the consumer transport into the device.
 //!   2. Apply pending control commands (connect/bind/send/close/drop).
 //!   3. `poll` smoltcp (advances handshakes, ACKs, retransmits, emits packets).
 //!   4. Service every managed socket: drain RX -> stream, push queued TX into
@@ -46,7 +46,7 @@ pub(crate) enum Command {
     /// Bind a listener on `port`; reply with the listener's incoming-stream
     /// receiver wired up.
     Bind {
-        port: u16,
+        endpoint: IpListenEndpoint,
         reply: tokio::sync::oneshot::Sender<TcpListener>,
     },
     /// Dial `remote`; reply with the connecting stream (resolves before the
@@ -101,7 +101,7 @@ struct Driver {
     device: ChannelDevice,
     sockets: SocketSet<'static>,
     conns: HashMap<SocketHandle, Conn>,
-    listeners: HashMap<u16, ListenSlot>,
+    listeners: HashMap<IpListenEndpoint, ListenSlot>,
     /// Clone handed to every stream so its writes/closes reach us.
     cmd_tx: mpsc::UnboundedSender<Command>,
 }
@@ -115,25 +115,26 @@ impl Driver {
 
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
-            Command::Bind { port, reply } => {
+            Command::Bind { endpoint, reply } => {
                 let (to_listener, incoming) = mpsc::unbounded_channel();
                 let mut slot = ListenSlot {
                     to_listener,
                     listening: Vec::new(),
                 };
                 for _ in 0..LISTEN_BACKLOG {
-                    if let Some(h) = self.spawn_listen_socket(port) {
+                    if let Some(h) = self.spawn_listen_socket(endpoint) {
                         slot.listening.push(h);
                     }
                 }
-                self.listeners.insert(port, slot);
+                self.listeners.insert(endpoint, slot);
                 tracing::debug!(
-                    port,
+                    listen_addr = ?endpoint.addr,
+                    listen_port = endpoint.port,
                     backlog = LISTEN_BACKLOG,
-                    "rust tailnet netstack listener bound"
+                    "rust userspace netstack listener bound"
                 );
                 let listener = TcpListener {
-                    port,
+                    endpoint,
                     incoming,
                     _tx: self.cmd_tx.clone(),
                 };
@@ -154,7 +155,7 @@ impl Driver {
                         remote_addr = ?remote.addr,
                         remote_port = remote.port,
                         local_port,
-                        "rust tailnet netstack TCP connect started"
+                        "rust userspace netstack TCP connect started"
                     );
                     self.conns.insert(handle, Conn::new(to_stream));
                 } else {
@@ -164,7 +165,7 @@ impl Driver {
                         remote_port = remote.port,
                         local_port,
                         error = ?result.err(),
-                        "rust tailnet netstack TCP connect setup failed"
+                        "rust userspace netstack TCP connect setup failed"
                     );
                     self.sockets.remove(handle);
                 }
@@ -191,10 +192,9 @@ impl Driver {
         }
     }
 
-    /// Create a new socket parked in LISTEN on `port`.
-    fn spawn_listen_socket(&mut self, port: u16) -> Option<SocketHandle> {
+    /// Create a new socket parked on one listen endpoint.
+    fn spawn_listen_socket(&mut self, endpoint: IpListenEndpoint) -> Option<SocketHandle> {
         let mut socket = Self::fresh_tcp_socket();
-        let endpoint = IpListenEndpoint { addr: None, port };
         socket.listen(endpoint).ok()?;
         Some(self.sockets.add(socket))
     }
@@ -281,30 +281,35 @@ impl Driver {
     fn service_sockets(&mut self) {
         // 1) Promote any LISTEN socket that became connected into an accepted
         //    stream, and replenish the backlog.
-        let mut promotions: Vec<(u16, SocketHandle)> = Vec::new();
-        for (port, slot) in self.listeners.iter() {
+        let mut promotions: Vec<(IpListenEndpoint, SocketHandle)> = Vec::new();
+        for (endpoint, slot) in self.listeners.iter() {
             for &h in slot.listening.iter() {
                 let socket = self.sockets.get::<tcp::Socket>(h);
                 let state = socket.state();
                 if matches!(state, tcp::State::Established | tcp::State::CloseWait) {
                     tracing::debug!(
-                        port,
+                        listen_addr = ?endpoint.addr,
+                        listen_port = endpoint.port,
                         ?state,
-                        "rust tailnet netstack TCP listener socket established"
+                        "rust userspace netstack TCP listener socket established"
                     );
-                    promotions.push((*port, h));
+                    promotions.push((*endpoint, h));
                 }
             }
         }
-        for (port, h) in promotions {
+        for (endpoint, h) in promotions {
             // Remove from the backlog list and wire up a stream.
             let mut new_listener: Option<SocketHandle> = None;
-            if let Some(slot) = self.listeners.get_mut(&port) {
+            if let Some(slot) = self.listeners.get_mut(&endpoint) {
                 slot.listening.retain(|&x| x != h);
                 let (to_stream, rx) = mpsc::unbounded_channel();
                 let stream = TcpStream::new(h, rx, self.cmd_tx.clone());
                 if slot.to_listener.send(stream).is_ok() {
-                    tracing::debug!(port, "rust tailnet netstack TCP stream accepted");
+                    tracing::debug!(
+                        listen_addr = ?endpoint.addr,
+                        listen_port = endpoint.port,
+                        "rust userspace netstack TCP stream accepted"
+                    );
                     self.conns.insert(h, Conn::new(to_stream));
                 } else {
                     // Listener gone; abort the socket.
@@ -313,10 +318,10 @@ impl Driver {
                 }
             }
             // Replenish backlog outside the borrow above.
-            if self.listeners.contains_key(&port) {
-                new_listener = self.spawn_listen_socket(port);
+            if self.listeners.contains_key(&endpoint) {
+                new_listener = self.spawn_listen_socket(endpoint);
             }
-            if let (Some(slot), Some(nh)) = (self.listeners.get_mut(&port), new_listener) {
+            if let (Some(slot), Some(nh)) = (self.listeners.get_mut(&endpoint), new_listener) {
                 slot.listening.push(nh);
             }
         }
@@ -351,7 +356,7 @@ impl Driver {
                             Ok(n) => {
                                 tracing::debug!(
                                     bytes = n,
-                                    "rust tailnet netstack queued TCP transmit bytes"
+                                    "rust userspace netstack queued TCP transmit bytes"
                                 );
                                 conn.pending_tx.drain(..n);
                             }
@@ -371,7 +376,7 @@ impl Driver {
                     Ok(v) if !v.is_empty() => {
                         tracing::debug!(
                             bytes = v.len(),
-                            "rust tailnet netstack delivered TCP receive bytes"
+                            "rust userspace netstack delivered TCP receive bytes"
                         );
                         if let Some(conn) = self.conns.get_mut(&h) {
                             if let Some(tx) = &conn.to_stream {
@@ -434,27 +439,45 @@ pub(crate) struct DriverHandle {
     pub(crate) cmd_tx: mpsc::UnboundedSender<Command>,
 }
 
-/// Spawn the driver task. `inbound` delivers decrypted IP packets from the
-/// WireGuard/peer side; the driver's device emits outbound IP packets on the
+/// Spawn the driver task. `inbound` delivers IP packets from the consumer
+/// transport; the driver's device emits outbound IP packets on the
 /// `outbound` sender supplied when the device was built.
 pub(crate) fn spawn(
     local_ip: IpAddress,
     prefix_len: u8,
+    accept_any_ip: bool,
+    default_gateway: Option<IpAddress>,
     mut inbound: mpsc::UnboundedReceiver<Vec<u8>>,
     device: ChannelDevice,
-) -> DriverHandle {
+) -> std::io::Result<DriverHandle> {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
     let handle = DriverHandle {
         cmd_tx: cmd_tx.clone(),
     };
 
     let mut device = device;
-    // Build the interface at the IP medium with our tailnet address.
+    // Build the interface at the bare-IP medium with the configured address.
     let config = Config::new(HardwareAddress::Ip);
     let mut iface = Interface::new(config, &mut device, now());
     iface.update_ip_addrs(|addrs| {
         let _ = addrs.push(IpCidr::new(local_ip, prefix_len));
     });
+    iface.set_any_ip(accept_any_ip);
+    match default_gateway {
+        Some(IpAddress::Ipv4(gateway)) => {
+            iface
+                .routes_mut()
+                .add_default_ipv4_route(gateway)
+                .map_err(|_| std::io::Error::other("netstack IPv4 route table is full"))?;
+        }
+        Some(IpAddress::Ipv6(gateway)) => {
+            iface
+                .routes_mut()
+                .add_default_ipv6_route(gateway)
+                .map_err(|_| std::io::Error::other("netstack IPv6 route table is full"))?;
+        }
+        None => {}
+    }
 
     let mut driver = Driver {
         iface,
@@ -487,7 +510,7 @@ pub(crate) fn spawn(
             };
 
             tokio::select! {
-                // Inbound IP packet from the peer/WireGuard side.
+                // Inbound IP packet from the consumer transport.
                 pkt = inbound.recv() => {
                     match pkt {
                         Some(pkt) => {
@@ -529,5 +552,5 @@ pub(crate) fn spawn(
         }
     });
 
-    handle
+    Ok(handle)
 }

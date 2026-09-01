@@ -1,0 +1,22 @@
+[package]
+name = "codewire-netstack"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license = "BSD-3-Clause"
+description = "Codewire's transport-neutral userspace TCP/IP stream adapter."
+repository = "https://github.com/codewiresh/codewire"
+
+[dependencies]
+smoltcp = { version = "0.13", default-features = false, features = [
+    "alloc",
+    "medium-ip",
+    "proto-ipv6",
+    "proto-ipv4",
+    "socket-tcp",
+] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

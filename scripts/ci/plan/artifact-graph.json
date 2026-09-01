@@ -125,6 +125,7 @@
       "kind": "file-set",
       "inputs": [
         "crates/codewire-derp/**",
+        "crates/codewire-netstack/**",
         "crates/codewire-proto/**",
         "crates/codewire-tailnet/**",
         "deployments/docker/derp.Cargo.lock",

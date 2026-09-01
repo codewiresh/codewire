@@ -1,6 +1,7 @@
 //! Shared seed codec, canonical initramfs writer, and Linux guest helpers for
 //! the Codewire-owned microVM spike.
 
+mod network;
 mod newc;
 mod progress;
 mod seed;
@@ -17,6 +18,12 @@ mod setup_verify;
 #[cfg(target_os = "linux")]
 mod workspace_plan;
 
+pub use network::{
+    GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,
+    NETWORK_HOST_HELLO_LEN, NETWORK_MAX_PACKET_BYTES, NetworkDirection, NetworkError,
+    NetworkGuestAck, NetworkHostHello, NetworkKey, NetworkRole, NetworkSession,
+    encoded_network_frame_len,
+};
 pub use newc::{
     NewcError, canonical_guest_root_newc, canonical_newc, write_canonical_guest_root_initramfs,
     write_canonical_initramfs,

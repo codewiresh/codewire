@@ -147,7 +147,7 @@ select_all_transport() {
   select_token transport
   select_token transport_derp_contract
   for package in \
-      codewire_tailnet codewire_gateway codewire_daemon codewire_local_vmm \
+      codewire_netstack codewire_tailnet codewire_gateway codewire_daemon codewire_local_vmm \
       codewire_mesh codewire_derp codewire_udp_relay codewire_coordinator \
       codewire_vmm_guest_probe; do
     select_token "transport_pkg_${package}"
@@ -752,7 +752,7 @@ if [ "$event_selected" = false ]; then
           select_token rust
           select_token rust_pkg_codewire_desktop
           ;;
-        codewire-tailnet|codewire-gateway|codewire-daemon|codewire-local-vmm|\
+        codewire-netstack|codewire-tailnet|codewire-gateway|codewire-daemon|codewire-local-vmm|\
         codewire-mesh|codewire-derp|codewire-udp-relay|codewire-coordinator|\
         codewire-vmm-guest-probe)
           select_token transport
@@ -772,7 +772,7 @@ if [ "$event_selected" = false ]; then
       if [ "$path" = "crates/$crate/Cargo.toml" ]; then
         case "$crate" in
           codewire-daemon|codewire-gateway|codewire-gateway-proto|\
-          codewire-local-vmm|codewire-proto|codewire-tailnet|codewire-derp|\
+          codewire-local-vmm|codewire-netstack|codewire-proto|codewire-tailnet|codewire-derp|\
           codewire-vmm-guest-probe)
             select_token rust_curated_locks
             ;;
@@ -782,6 +782,19 @@ if [ "$event_selected" = false ]; then
     fi
 
     case "$path" in
+      testdata/local-vm-network/*)
+        # Shared authenticated packet fixtures are consumed by the guest probe
+        # and therefore by its local VMM host runner.
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        recognized=true
+        ;;
+      crates/codewire-netstack/*)
+        # The tailnet wrapper consumes the shared userspace TCP/IP engine.
+        select_token transport
+        select_token transport_pkg_codewire_tailnet
+        ;;
       crates/codewire-daemon/*|crates/codewire-gateway-proto/*)
         # The local VMM host and guest link the private daemon contract
         # directly; changes must verify those reverse dependencies too.

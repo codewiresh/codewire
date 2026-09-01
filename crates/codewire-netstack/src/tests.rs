@@ -2,7 +2,7 @@
 //!
 //! This is the hard gate: it proves a real userspace TCP handshake + data
 //! transfer happens over the bare-IP-packet abstraction, with no kernel TUN,
-//! no WireGuard, and no real sockets involved. We stand up two [`Netstack`]
+//! no encrypted transport and no real sockets involved. We stand up two [`Netstack`]
 //! instances and cross-wire their packet channels:
 //!
 //! ```text
@@ -10,13 +10,12 @@
 //!   B.outbound ──────────────► A.inbound
 //! ```
 //!
-//! Then B binds a port, A connects to B's tailnet IP:port, and we exchange
+//! Then B binds a port, A connects to B's interface IP:port, and we exchange
 //! bytes in **both directions** over the resulting TCP streams. If the
-//! payloads round-trip, the netstack unknown (the gvisor-`netstack` equivalent
-//! flagged in #190) is retired: smoltcp drove a SYN/SYN-ACK/ACK handshake and
+//! payloads round-trip, smoltcp drove a SYN/SYN-ACK/ACK handshake and
 //! segmented data purely through our `phy::Device` channel seam.
 
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,17 +24,16 @@ use smoltcp::wire::{IpAddress, IpProtocol, Ipv6Packet, TcpPacket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use super::Netstack;
+use super::{Netstack, NetstackConfig};
 
-/// Tailnet ULA addresses inside Codewire's `fd7a:115c:a1e0::/48` range — the
-/// same prefix the Go tailnet uses. A is `::a`, B is `::b`.
+/// Documentation-only ULA addresses for the in-process endpoints.
 const A_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x000a);
 const B_IP: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0x000b);
 const PREFIX: u8 = 48;
 
 /// Build two netstacks with their packet channels cross-wired so each one's
 /// outbound IP packets become the other's inbound packets — an in-process
-/// "wire" standing in for the WireGuard tunnel.
+/// "wire" standing in for an arbitrary packet transport.
 fn wired_pair() -> (Netstack, Netstack) {
     // A.out -> B.in
     let (a_out_tx, b_in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -63,7 +61,7 @@ async fn loopback_tcp_handshake_and_bidirectional_transfer() {
         stream
     });
 
-    // A connects to B's tailnet IP:port.
+    // A connects to B's interface IP:port.
     let dst = SocketAddr::new(IpAddr::V6(B_IP), port);
     let mut a_stream = tokio::time::timeout(Duration::from_secs(5), a.connect(dst))
         .await
@@ -101,10 +99,110 @@ async fn loopback_tcp_handshake_and_bidirectional_transfer() {
     assert_eq!(&got_back, response, "A must receive exactly what B sent");
 }
 
-/// Audit one wire packet the way a Go tailnet peer would: tailscale's
-/// netstack (`gro.RXChecksumOffload`) silently drops any packet whose
-/// transport checksum does not verify, so every TCP segment leaving our stack
-/// must carry a fully computed checksum.
+#[tokio::test]
+async fn any_ip_destination_bridges_only_through_an_injected_stream() {
+    const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+    const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const ORIGINAL_DESTINATION: SocketAddr =
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 19)), 443);
+
+    let (guest_out, worker_in) = mpsc::unbounded_channel();
+    let (worker_out, guest_in) = mpsc::unbounded_channel();
+    let guest = Netstack::with_config(
+        NetstackConfig {
+            local_ip: IpAddr::V4(GUEST_IP),
+            prefix_len: 30,
+            mtu: 1_500,
+            verify_rx_checksums: true,
+            accept_any_ip: false,
+            default_gateway: Some(IpAddr::V4(WORKER_IP)),
+        },
+        guest_in,
+        guest_out,
+    )
+    .expect("guest netstack config");
+    let worker = Netstack::with_config(
+        NetstackConfig {
+            local_ip: IpAddr::V4(WORKER_IP),
+            prefix_len: 30,
+            mtu: 1_500,
+            verify_rx_checksums: true,
+            accept_any_ip: true,
+            default_gateway: None,
+        },
+        worker_in,
+        worker_out,
+    )
+    .expect("worker netstack config");
+
+    let mut listener = worker
+        .bind_endpoint(ORIGINAL_DESTINATION)
+        .await
+        .expect("bind exact external destination");
+    assert_eq!(listener.local_endpoint(), Some(ORIGINAL_DESTINATION));
+
+    let accepted = tokio::spawn(async move {
+        listener
+            .accept()
+            .await
+            .expect("worker accepts guest connection")
+    });
+    let mut guest_stream =
+        tokio::time::timeout(Duration::from_secs(5), guest.connect(ORIGINAL_DESTINATION))
+            .await
+            .expect("guest connect did not hang")
+            .expect("guest connect");
+    let mut worker_stream = tokio::time::timeout(Duration::from_secs(5), accepted)
+        .await
+        .expect("worker accept did not hang")
+        .expect("worker accept task");
+
+    // The duplex pair models a connected stream injected by the egress
+    // broker. Neither userspace netstack owns or creates a host socket.
+    let (mut worker_connector, mut synthetic_upstream) = tokio::io::duplex(4096);
+    let bridge = tokio::spawn(async move {
+        tokio::io::copy_bidirectional(&mut worker_stream, &mut worker_connector).await
+    });
+
+    let request = b"synthetic request through broker connector";
+    guest_stream.write_all(request).await.expect("guest write");
+    let mut received = vec![0; request.len()];
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        synthetic_upstream.read_exact(&mut received),
+    )
+    .await
+    .expect("injected connector read did not hang")
+    .expect("injected connector read");
+    assert_eq!(received, request);
+
+    let response = b"synthetic response from broker connector";
+    synthetic_upstream
+        .write_all(response)
+        .await
+        .expect("injected connector write");
+    let mut returned = vec![0; response.len()];
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        guest_stream.read_exact(&mut returned),
+    )
+    .await
+    .expect("guest response did not hang")
+    .expect("guest response read");
+    assert_eq!(returned, response);
+
+    guest_stream.shutdown().await.expect("guest shutdown");
+    drop(guest_stream);
+    drop(synthetic_upstream);
+    tokio::time::timeout(Duration::from_secs(5), bridge)
+        .await
+        .expect("bridge shutdown did not hang")
+        .expect("bridge task")
+        .expect("bridge copy");
+}
+
+/// Audit one wire packet like a checksum-verifying peer: every TCP segment
+/// leaving the stack must carry a fully computed checksum.
 fn audit_tunnel_packet(pkt: &[u8], failures: &Mutex<Vec<String>>, tcp_segments: &AtomicUsize) {
     let ip = match Ipv6Packet::new_checked(pkt) {
         Ok(ip) => ip,
@@ -155,13 +253,13 @@ fn spawn_auditing_wire(
     });
 }
 
-/// Cross-language checksum contract. A Rust↔Rust loopback passes even with
+/// Checksum contract. A same-engine loopback passes even with
 /// checksums disabled on both ends (neither side verifies), which is exactly
-/// how a broken-TX-checksum stack can look green locally while a real Go peer
-/// drops every packet on ingress. Here the wire itself plays the Go peer and
+/// how a broken-TX-checksum stack can look green locally while a strict peer
+/// drops every packet on ingress. Here the wire itself plays that peer and
 /// fails the test if any segment would not survive `gro.RXChecksumOffload`.
 #[tokio::test]
-async fn loopback_packets_carry_go_verifiable_checksums() {
+async fn loopback_packets_carry_verifiable_checksums() {
     let failures = Arc::new(Mutex::new(Vec::new()));
     let tcp_segments = Arc::new(AtomicUsize::new(0));
 
@@ -214,7 +312,7 @@ async fn loopback_packets_carry_go_verifiable_checksums() {
     let failures = failures.lock().unwrap();
     assert!(
         failures.is_empty(),
-        "wire packets a Go peer would drop: {failures:?}"
+        "wire packets a checksum-verifying peer would drop: {failures:?}"
     );
     assert!(
         tcp_segments.load(Ordering::Relaxed) >= 3,
@@ -223,7 +321,7 @@ async fn loopback_packets_carry_go_verifiable_checksums() {
 }
 
 /// A larger, multi-segment transfer to prove smoltcp is actually segmenting,
-/// ACKing, and reassembling across our TUNNEL_MTU-sized packets (not just fitting one
+/// ACKing, and reassembling across configured-MTU packets (not just fitting one
 /// payload in a single packet).
 #[tokio::test]
 async fn loopback_multi_segment_stream() {

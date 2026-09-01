@@ -279,6 +279,7 @@ class FixtureRepository:
                     "kind": "file-set",
                     "inputs": [
                         "crates/codewire-derp/**",
+                        "crates/codewire-netstack/**",
                         "crates/codewire-proto/**",
                         "crates/codewire-tailnet/**",
                         "deployments/docker/derp.Cargo.lock",
@@ -575,6 +576,7 @@ dependencies = ["core"]
         self.write("apps/dashboard/README.md", "unrelated app\n")
         self.write("apps/docs/zola/content/_index.md", "fixture docs\n")
         self.write("crates/codewire-derp/src/lib.rs", "pub fn derp() {}\n")
+        self.write("crates/codewire-netstack/src/lib.rs", "pub fn netstack() {}\n")
         self.write("crates/codewire-proto/src/lib.rs", "pub fn proto() {}\n")
         self.write("crates/codewire-tailnet/src/lib.rs", "pub fn tailnet() {}\n")
         self.write("crates/unrelated/src/lib.rs", "pub fn runtime_unrelated() {}\n")
@@ -904,6 +906,13 @@ class PlannerFixtureTests(unittest.TestCase):
             self.runtime_states(self.repo.plan()),
             ("affected", "affected", "unaffected", "affected", "affected"),
         )
+
+    def test_shared_netstack_affects_tailnet_runtime_images(self) -> None:
+        self.repo.change(
+            "crates/codewire-netstack/src/lib.rs",
+            "pub fn netstack() { panic!(); }\n",
+        )
+        self.assertEqual(self.runtime_states(self.repo.plan()), ("affected",) * 5)
 
     def test_proto_input_affects_every_runtime_image(self) -> None:
         self.repo.change(

@@ -1,14 +1,12 @@
 //! A [`smoltcp::phy::Device`] backed by a packet I/O channel.
 //!
-//! This is the seam the WireGuard layer will eventually drive. smoltcp speaks
-//! only to a `Device`; we make that `Device` read inbound IP packets from a
+//! smoltcp speaks only to a `Device`; this adapter reads inbound IP packets from a
 //! queue (filled from the inbound channel before each poll) and write outbound
 //! IP packets to an unbounded sender (drained by whoever owns the other side —
-//! in the loopback proof, the peer netstack's inbound channel; in production,
-//! the WireGuard encrypt-and-send path).
+//! in the loopback proof, the peer netstack's inbound channel).
 //!
-//! Medium is [`Medium::Ip`]: the tunnel carries bare IP packets with no
-//! Ethernet/L2 framing, exactly like gvisor's `channel.Endpoint` on the Go side.
+//! Medium is [`Medium::Ip`]: the transport carries bare IP packets with no
+//! Ethernet/L2 framing.
 
 use std::collections::VecDeque;
 
@@ -16,35 +14,6 @@ use smoltcp::phy::{self, Checksum, Device, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
 use smoltcp::wire::{IpAddress, IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket};
 use tokio::sync::mpsc::UnboundedSender;
-
-/// Cross-node pod-network MTU budget in the current dev/prod topology.
-///
-/// The tailnet's UDP paths (direct and shared peer relay) must survive the
-/// most constrained underlay hop. In the current clusters that hop is pod
-/// networking at MTU 1230 (Cilium VXLAN over the nodes' tailscale mesh:
-/// 1280 - 50). A tunnel IP packet gains WireGuard (16 header + 16 tag),
-/// Geneve (8) on the peer-relay path, outer UDP (8), and an outer IP header
-/// (40 for IPv6), so the inner packet must stay at or below
-/// 1230 - 32 - 8 - 8 - 40 = 1142. We advertise 1130 for margin.
-pub const POD_NETWORK_MTU: usize = 1230;
-pub const WIREGUARD_DATA_PACKET_OVERHEAD: usize = 32;
-pub const PEER_RELAY_GENEVE_OVERHEAD: usize = 8;
-pub const OUTER_IPV6_UDP_OVERHEAD: usize = 48;
-pub const PEER_RELAY_UDP_PAYLOAD_BUDGET: usize = POD_NETWORK_MTU - OUTER_IPV6_UDP_OVERHEAD;
-pub const PEER_RELAY_INNER_PACKET_BUDGET: usize =
-    PEER_RELAY_UDP_PAYLOAD_BUDGET - WIREGUARD_DATA_PACKET_OVERHEAD - PEER_RELAY_GENEVE_OVERHEAD;
-
-/// MTU advertised to smoltcp, which also sets the TCP MSS we advertise to
-/// peers — the lever that keeps Go tailnet clients' segments deliverable.
-///
-/// The conventional tailnet MTU is 1280, but a larger value here only helps
-/// same-node pod placements where eBPF redirects skip the MTU check — which
-/// made oversized segments work or vanish depending on where the relay pod
-/// landed. A single conservative value keeps the data plane placement-proof;
-/// DERP (stream transport) is unaffected either way.
-pub const TUNNEL_MTU: usize = 1130;
-
-const _: () = assert!(TUNNEL_MTU <= PEER_RELAY_INNER_PACKET_BUDGET);
 
 /// A channel-backed smoltcp device.
 ///
@@ -54,13 +23,17 @@ const _: () = assert!(TUNNEL_MTU <= PEER_RELAY_INNER_PACKET_BUDGET);
 pub struct ChannelDevice {
     pub(crate) inbound: VecDeque<Vec<u8>>,
     pub(crate) outbound: UnboundedSender<Vec<u8>>,
+    mtu: usize,
+    verify_rx_checksums: bool,
 }
 
 impl ChannelDevice {
-    pub fn new(outbound: UnboundedSender<Vec<u8>>) -> Self {
+    pub fn new(outbound: UnboundedSender<Vec<u8>>, mtu: usize, verify_rx_checksums: bool) -> Self {
         Self {
             inbound: VecDeque::new(),
             outbound,
+            mtu,
+            verify_rx_checksums,
         }
     }
 
@@ -84,17 +57,21 @@ impl Device for ChannelDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ip;
-        caps.max_transmission_unit = TUNNEL_MTU;
-        // Tunnel peers validate checksums off the wire (tailscale's netstack
-        // drops any packet whose IPv4/TCP/UDP checksum does not verify), so
-        // every emitted packet must carry a computed checksum. Inbound packets
-        // already arrive over authenticated WireGuard, so skipping RX
-        // verification is safe and tolerates offload-style partial checksums.
-        caps.checksum.ipv4 = Checksum::Tx;
-        caps.checksum.tcp = Checksum::Tx;
-        caps.checksum.udp = Checksum::Tx;
-        caps.checksum.icmpv4 = Checksum::Tx;
-        caps.checksum.icmpv6 = Checksum::Tx;
+        caps.max_transmission_unit = self.mtu;
+        // Every emitted packet carries a computed checksum. Consumers choose
+        // whether inbound checksums must be verified: hostile VM input enables
+        // it, while an authenticated transport with receive-offload-style
+        // partial checksums may disable only the RX side.
+        let checksum = if self.verify_rx_checksums {
+            Checksum::Both
+        } else {
+            Checksum::Tx
+        };
+        caps.checksum.ipv4 = checksum;
+        caps.checksum.tcp = checksum;
+        caps.checksum.udp = checksum;
+        caps.checksum.icmpv4 = checksum;
+        caps.checksum.icmpv6 = checksum;
         caps
     }
 
@@ -177,7 +154,7 @@ fn log_tcp_packet(direction: &'static str, pkt: &[u8]) {
         tracing::debug!(
             direction,
             packet_len = pkt.len(),
-            "rust tailnet netstack TCP packet parse skipped"
+            "rust userspace netstack TCP packet parse skipped"
         );
         return;
     };
@@ -188,7 +165,7 @@ fn log_tcp_packet(direction: &'static str, pkt: &[u8]) {
             packet_len = pkt.len(),
             src_ip = %src_ip,
             dst_ip = %dst_ip,
-            "rust tailnet netstack TCP packet parse failed"
+            "rust userspace netstack TCP packet parse failed"
         );
         return;
     };
@@ -209,7 +186,7 @@ fn log_tcp_packet(direction: &'static str, pkt: &[u8]) {
         psh = tcp.psh(),
         window_len = tcp.window_len(),
         payload_len = tcp.payload().len(),
-        "rust tailnet netstack TCP packet"
+        "rust userspace netstack TCP packet"
     );
 }
 
@@ -220,18 +197,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn channel_device_uses_virtual_tunnel_checksum_capabilities() {
+    fn channel_device_uses_configured_mtu_and_checksum_capabilities() {
         let (outbound, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let device = ChannelDevice::new(outbound);
+        let device = ChannelDevice::new(outbound, 1500, true);
         let caps = device.capabilities();
 
         assert_eq!(caps.medium, Medium::Ip);
-        assert_eq!(caps.max_transmission_unit, TUNNEL_MTU);
-        assert!(!caps.checksum.ipv4.rx());
+        assert_eq!(caps.max_transmission_unit, 1500);
+        assert!(caps.checksum.ipv4.rx());
         assert!(caps.checksum.ipv4.tx());
-        assert!(!caps.checksum.tcp.rx());
+        assert!(caps.checksum.tcp.rx());
         assert!(caps.checksum.tcp.tx());
-        assert!(!caps.checksum.udp.rx());
+        assert!(caps.checksum.udp.rx());
         assert!(caps.checksum.udp.tx());
     }
 }

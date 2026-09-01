@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/codewire-derp",
+    "crates/codewire-netstack",
     "crates/codewire-proto",
     "crates/codewire-tailnet",
 ]
@@ -14,6 +15,7 @@ license = "BSD-3-Clause"
 authors = ["Sonica"]
 
 [workspace.dependencies]
+codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-proto = { path = "crates/codewire-proto", default-features = false }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 

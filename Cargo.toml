@@ -20,6 +20,7 @@ members = [
     "crates/codewire-project",
     "crates/codewire-project-proto",
     "crates/codewire-mesh",
+    "crates/codewire-netstack",
     "crates/codewire-oidc",
     "crates/codewire-orchestration",
     "crates/codewire-proto",
@@ -60,6 +61,7 @@ codewire-admin-proto = { path = "crates/codewire-admin-proto", default-features 
 codewire-daemon = { path = "crates/codewire-daemon" }
 codewire-daemon-bridge = { path = "crates/codewire-daemon-bridge" }
 codewire-derp = { path = "crates/codewire-derp" }
+codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 codewire-udp-relay = { path = "crates/codewire-udp-relay" }
 codewire-vmm-guest-probe = { path = "crates/codewire-vmm-guest-probe" }

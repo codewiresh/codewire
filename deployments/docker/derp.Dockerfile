@@ -11,6 +11,7 @@ WORKDIR /src
 COPY deployments/docker/derp.Cargo.toml ./Cargo.toml
 COPY deployments/docker/derp.Cargo.lock ./Cargo.lock
 COPY crates/codewire-derp ./crates/codewire-derp
+COPY crates/codewire-netstack ./crates/codewire-netstack
 COPY crates/codewire-proto ./crates/codewire-proto
 COPY crates/codewire-tailnet ./crates/codewire-tailnet
 COPY proto ./proto

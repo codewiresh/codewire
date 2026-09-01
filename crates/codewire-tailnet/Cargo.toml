@@ -13,6 +13,7 @@ repository = "https://github.com/codewiresh/codewire"
 # WireGuard Noise handshake + ChaCha20-Poly1305 transport. We use the
 # data-plane crypto only; path selection / netstack are ours (see #45/#46).
 boringtun = "0.7"
+codewire-netstack = { workspace = true }
 
 # DERP relay client (#46): NaCl crypto_box (X25519 + XSalsa20-Poly1305)
 # matches the Tailscale DERP wire contract; tokio-rustls/rustls for the
@@ -24,18 +25,6 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-pki-types = "1"
 webpki-roots = "1"
-
-# Userspace TCP/IP netstack (#59): smoltcp at the IP layer (`medium-ip`, no
-# Ethernet framing — the tunnel carries bare IP); `proto-ipv6` for the ULA
-# tailnet (`fd7a:115c:a1e0::/48`), `proto-ipv4` for 4-in-6; `alloc` for the
-# heap-backed `SocketSet`/buffers on a std host.
-smoltcp = { version = "0.13", default-features = false, features = [
-    "alloc",
-    "medium-ip",
-    "proto-ipv6",
-    "proto-ipv4",
-    "socket-tcp",
-] }
 
 # Node wire types (#48). The Node JSON preserves the Tailscale-compatible
 # shape, so serde drives the byte-for-byte parity; uuid/chrono mirror Go's

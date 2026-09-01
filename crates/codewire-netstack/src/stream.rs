@@ -19,7 +19,7 @@ use super::driver::Command;
 /// side stitches them back into the caller's buffer.
 pub(crate) type ByteChunk = Vec<u8>;
 
-/// A userspace TCP stream over the tailnet.
+/// A userspace TCP stream over the consumer-supplied packet transport.
 ///
 /// Mirrors the `net.Conn` returned by the Go `Conn.DialContextTCP` /
 /// `listener.Accept`. Reads pull decrypted application bytes that the driver
@@ -143,12 +143,11 @@ impl Drop for TcpStream {
     }
 }
 
-/// A userspace TCP listener over the tailnet.
+/// A userspace TCP listener over the consumer-supplied packet transport.
 ///
-/// Mirrors the `net.Listener` returned by the Go `Conn.Listen("tcp", addr)`:
-/// each `accept()` yields the next inbound [`TcpStream`].
+/// Each `accept()` yields the next inbound [`TcpStream`].
 pub struct TcpListener {
-    pub(crate) port: u16,
+    pub(crate) endpoint: smoltcp::wire::IpListenEndpoint,
     pub(crate) incoming: mpsc::UnboundedReceiver<TcpStream>,
     /// Kept so the driver knows the listener is still alive; on drop the driver
     /// stops accepting on this port.
@@ -164,6 +163,19 @@ impl TcpListener {
 
     /// The local port this listener is bound to.
     pub fn local_port(&self) -> u16 {
-        self.port
+        self.endpoint.port
+    }
+
+    /// The exact address of this listener, when it is not a wildcard bind.
+    pub fn local_endpoint(&self) -> Option<std::net::SocketAddr> {
+        let address = match self.endpoint.addr? {
+            smoltcp::wire::IpAddress::Ipv4(address) => {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::from(address.octets()))
+            }
+            smoltcp::wire::IpAddress::Ipv6(address) => {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::from(address.octets()))
+            }
+        };
+        Some(std::net::SocketAddr::new(address, self.endpoint.port))
     }
 }
