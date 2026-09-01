@@ -41,6 +41,31 @@ pub const WORKER_STATUS_MAX_BYTES: usize = 64;
 const WORKER_NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
 const WORKER_CONTROL_BYTES: usize = 64;
 
+#[cfg(target_env = "musl")]
+type ControlLength = libc::socklen_t;
+#[cfg(not(target_env = "musl"))]
+type ControlLength = libc::size_t;
+
+#[cfg(target_env = "musl")]
+fn encode_control_length(value: usize) -> Option<ControlLength> {
+    value.try_into().ok()
+}
+
+#[cfg(not(target_env = "musl"))]
+fn encode_control_length(value: usize) -> Option<ControlLength> {
+    Some(value)
+}
+
+#[cfg(target_env = "musl")]
+fn decode_control_length(value: ControlLength) -> usize {
+    value as usize
+}
+
+#[cfg(not(target_env = "musl"))]
+fn decode_control_length(value: ControlLength) -> usize {
+    value
+}
+
 const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB1\0";
 const BOOTSTRAP_LEN: usize = 64;
 const PACKET_QUEUE: usize = 256;
@@ -269,7 +294,8 @@ pub(crate) fn send_worker_network_descriptor(bootstrap: RawFd, network: RawFd) -
     message.msg_iov = &raw mut vector;
     message.msg_iovlen = 1;
     message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
-    message.msg_controllen = control_space;
+    message.msg_controllen = encode_control_length(control_space)
+        .ok_or_else(|| io::Error::other("network descriptor control record is too large"))?;
     let header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
     if header.is_null() {
         return Err(io::Error::other(
@@ -279,7 +305,11 @@ pub(crate) fn send_worker_network_descriptor(bootstrap: RawFd, network: RawFd) -
     unsafe {
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as usize;
+        (*header).cmsg_len =
+            encode_control_length(libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as usize)
+                .ok_or_else(|| {
+                    io::Error::other("network descriptor control record is too large")
+                })?;
         std::ptr::write(libc::CMSG_DATA(header).cast::<RawFd>(), network);
     }
     let sent = unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) };
@@ -308,7 +338,8 @@ fn receive_worker_network_descriptor(bootstrap: RawFd) -> Result<OwnedFd, Networ
     message.msg_iov = &raw mut vector;
     message.msg_iovlen = 1;
     message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
-    message.msg_controllen = WORKER_CONTROL_BYTES;
+    message.msg_controllen = encode_control_length(WORKER_CONTROL_BYTES)
+        .ok_or(NetworkWorkerError::InheritedDescriptor)?;
     let received = unsafe { libc::recvmsg(bootstrap, &raw mut message, libc::MSG_CMSG_CLOEXEC) };
     if received != marker.len() as isize
         || marker[0] != WORKER_NETWORK_DESCRIPTOR_MARKER
@@ -325,11 +356,12 @@ fn receive_worker_network_descriptor(bootstrap: RawFd) -> Result<OwnedFd, Networ
             return Err(NetworkWorkerError::InheritedDescriptor);
         }
         let minimum = unsafe { libc::CMSG_LEN(0) as usize };
-        if header_ref.cmsg_len < minimum {
+        let header_len = decode_control_length(header_ref.cmsg_len);
+        if header_len < minimum {
             return Err(NetworkWorkerError::InheritedDescriptor);
         }
-        let payload = header_ref.cmsg_len - minimum;
-        if payload == 0 || payload % std::mem::size_of::<RawFd>() != 0 {
+        let payload = header_len - minimum;
+        if payload == 0 || !payload.is_multiple_of(std::mem::size_of::<RawFd>()) {
             return Err(NetworkWorkerError::InheritedDescriptor);
         }
         let count = payload / std::mem::size_of::<RawFd>();
