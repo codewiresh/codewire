@@ -135,6 +135,10 @@ fn provider(value: &str) -> ProviderId {
     ProviderId::parse(value).expect("provider ID")
 }
 
+fn environment(value: &str) -> EnvironmentId {
+    EnvironmentId::parse(value).expect("environment ID")
+}
+
 fn catalog() -> ProviderCatalog {
     ProviderCatalog::from_definitions([ProviderDefinition {
         id: provider("openai"),
@@ -412,6 +416,241 @@ fn profile_revisions_are_immutable_and_only_current_references_block_deletion() 
     authority
         .delete_credential(&second.metadata.id)
         .expect("delete unreferenced credential");
+}
+
+#[test]
+fn environment_bindings_pin_revisions_survive_restart_and_guard_deletion() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("open authority");
+    let first = authority
+        .add_credential(new_credential("first"), material(b"first-token"))
+        .expect("add first credential");
+    let second = authority
+        .add_credential(new_credential("second"), material(b"second-token"))
+        .expect("add second credential");
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("work").expect("profile name"),
+            profile_entries(&first.metadata.id),
+        )
+        .expect("create profile");
+    let environment_id = environment("env-one");
+    let binding = EnvironmentAccessBinding {
+        environment_id: environment_id.clone(),
+        profile_id: profile.profile.id.clone(),
+        profile_revision: profile.profile.revision,
+    };
+    let created = authority
+        .create_environment_access_binding(binding.clone())
+        .expect("create binding");
+    assert_eq!(created.binding, binding);
+    assert_eq!(
+        authority.create_environment_access_binding(binding.clone()),
+        Err(LocalCredentialError::EnvironmentBindingAlreadyExists)
+    );
+
+    let updated_profile = authority
+        .update_profile(
+            &profile.profile.id,
+            profile.profile.revision,
+            profile_entries(&second.metadata.id),
+        )
+        .expect("update profile");
+    let grants = authority
+        .evaluate_environment_grants(&environment_id, 7)
+        .expect("evaluate pinned grants");
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].environment_generation, 7);
+    assert_eq!(grants[0].profile_revision, profile.profile.revision);
+    assert_eq!(grants[0].credential_id, first.metadata.id);
+    assert_eq!(
+        authority.delete_credential(&first.metadata.id),
+        Err(LocalCredentialError::CredentialInUse)
+    );
+    assert_eq!(
+        authority.delete_profile(&profile.profile.id),
+        Err(LocalCredentialError::ProfileInUse)
+    );
+    drop(authority);
+
+    let authority =
+        LocalCredentialAuthority::open(&root, store, catalog()).expect("reopen authority");
+    assert_eq!(
+        authority
+            .list_environment_access_bindings()
+            .expect("list bindings"),
+        vec![created.clone()]
+    );
+    assert_eq!(
+        authority.replace_environment_access_binding(
+            &environment_id,
+            &profile.profile.id,
+            updated_profile.profile.revision,
+            profile.profile.id.clone(),
+            updated_profile.profile.revision,
+        ),
+        Err(LocalCredentialError::StaleEnvironmentBinding)
+    );
+    let replaced = authority
+        .replace_environment_access_binding(
+            &environment_id,
+            &profile.profile.id,
+            profile.profile.revision,
+            profile.profile.id.clone(),
+            updated_profile.profile.revision,
+        )
+        .expect("replace binding");
+    assert_eq!(
+        replaced.binding.profile_revision,
+        updated_profile.profile.revision
+    );
+    assert_eq!(replaced.created_at_unix_ms, created.created_at_unix_ms);
+    assert!(replaced.updated_at_unix_ms >= created.updated_at_unix_ms);
+    let grants = authority
+        .evaluate_environment_grants(&environment_id, 8)
+        .expect("evaluate replaced grants");
+    assert_eq!(grants[0].environment_generation, 8);
+    assert_eq!(grants[0].credential_id, second.metadata.id);
+    authority
+        .delete_credential(&first.metadata.id)
+        .expect("delete unbound historical credential");
+    assert!(matches!(
+        authority.replace_environment_access_binding(
+            &environment_id,
+            &profile.profile.id,
+            updated_profile.profile.revision,
+            profile.profile.id.clone(),
+            profile.profile.revision,
+        ),
+        Err(LocalCredentialError::Access(
+            AccessError::CredentialMissing { .. }
+        ))
+    ));
+    assert_eq!(
+        authority
+            .get_environment_access_binding(&environment_id)
+            .expect("binding remains current")
+            .binding
+            .profile_revision,
+        updated_profile.profile.revision
+    );
+
+    authority
+        .revoke_credential(&second.metadata.id)
+        .expect("revoke selected credential");
+    assert!(matches!(
+        authority.evaluate_environment_grants(&environment_id, 9),
+        Err(LocalCredentialError::Access(
+            AccessError::CredentialInactive { .. }
+        ))
+    ));
+    assert_eq!(
+        authority.delete_environment_access_binding(
+            &environment_id,
+            &profile.profile.id,
+            profile.profile.revision,
+        ),
+        Err(LocalCredentialError::StaleEnvironmentBinding)
+    );
+    authority
+        .delete_environment_access_binding(
+            &environment_id,
+            &profile.profile.id,
+            updated_profile.profile.revision,
+        )
+        .expect("delete binding");
+    authority
+        .delete_profile(&profile.profile.id)
+        .expect("delete unbound profile");
+    assert_eq!(
+        authority.get_environment_access_binding(&environment_id),
+        Err(LocalCredentialError::EnvironmentBindingNotFound)
+    );
+}
+
+#[test]
+fn environment_binding_rejects_missing_revisions_and_zero_generations() {
+    let temp = TempDir::new().expect("temporary directory");
+    let authority = LocalCredentialAuthority::open(
+        &authority_root(&temp),
+        TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+        catalog(),
+    )
+    .expect("open authority");
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"synthetic-token"))
+        .expect("add credential");
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("work").expect("profile name"),
+            profile_entries(&credential.metadata.id),
+        )
+        .expect("create profile");
+    let environment_id = environment("env-one");
+
+    assert_eq!(
+        authority.create_environment_access_binding(EnvironmentAccessBinding {
+            environment_id: environment_id.clone(),
+            profile_id: profile.profile.id.clone(),
+            profile_revision: 99,
+        }),
+        Err(LocalCredentialError::ProfileRevisionNotFound)
+    );
+    authority
+        .create_environment_access_binding(EnvironmentAccessBinding {
+            environment_id: environment_id.clone(),
+            profile_id: profile.profile.id,
+            profile_revision: profile.profile.revision,
+        })
+        .expect("create binding");
+    assert!(matches!(
+        authority.evaluate_environment_grants(&environment_id, 0),
+        Err(LocalCredentialError::Access(AccessError::ZeroGeneration {
+            field: "environment generation"
+        }))
+    ));
+}
+
+#[test]
+fn corrupt_environment_binding_metadata_fails_authority_restart() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("open authority");
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"synthetic-token"))
+        .expect("add credential");
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("work").expect("profile name"),
+            profile_entries(&credential.metadata.id),
+        )
+        .expect("create profile");
+    authority
+        .create_environment_access_binding(EnvironmentAccessBinding {
+            environment_id: environment("env-one"),
+            profile_id: profile.profile.id,
+            profile_revision: profile.profile.revision,
+        })
+        .expect("create binding");
+    drop(authority);
+
+    let connection = Connection::open(root.join(DATABASE_FILE)).expect("open metadata database");
+    connection
+        .execute(
+            "UPDATE environment_access_bindings SET environment_id = 'INVALID'",
+            [],
+        )
+        .expect("tamper binding");
+    drop(connection);
+    assert!(matches!(
+        LocalCredentialAuthority::open(&root, store, catalog()),
+        Err(LocalCredentialError::CorruptMetadata)
+    ));
 }
 
 #[test]

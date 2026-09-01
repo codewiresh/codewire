@@ -19,7 +19,7 @@ pub use client::{AuthorityInfo, LocalCredentialClient};
 pub use service::{serve_local_credential_authority, serve_os_local_credential_authority};
 pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -29,8 +29,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use codewire_access::{
     AccessError, AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference,
     AccessProfileScope, CapabilitySlot, CredentialAuthKind, CredentialId, CredentialMetadata,
-    CredentialStatus, Owner, OwnerId, Placement, ProviderCatalog, ProviderId,
-    validate_profile_entries,
+    CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantContext, Owner,
+    OwnerId, Placement, ProviderCatalog, ProviderId, derive_grants, validate_profile_entries,
 };
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedStorePersistence,
@@ -92,6 +92,13 @@ pub struct AccessProfileRevisionRecord {
     pub profile: AccessProfile,
     pub profile_created_at_unix_ms: u64,
     pub revision_created_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentAccessBindingRecord {
+    pub binding: EnvironmentAccessBinding,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
 }
 
 /// Material lease for the future authority/broker process. Debug output never
@@ -560,7 +567,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 
     pub fn delete_credential(&self, id: &CredentialId) -> Result<(), LocalCredentialError> {
         let connection = self.connection()?;
-        if current_profile_references_credential(&connection, id)? {
+        if profile_or_binding_references_credential(&connection, id)? {
             return Err(LocalCredentialError::CredentialInUse);
         }
         let record = load_internal_credential(&connection, id, None)?;
@@ -797,6 +804,9 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 
     pub fn delete_profile(&self, id: &AccessProfileId) -> Result<(), LocalCredentialError> {
         let connection = self.connection()?;
+        if environment_binding_references_profile(&connection, id)? {
+            return Err(LocalCredentialError::ProfileInUse);
+        }
         let changed = connection
             .execute("DELETE FROM profiles WHERE id = ?1", [id.as_str()])
             .map_err(database_error)?;
@@ -804,6 +814,165 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             return Err(LocalCredentialError::ProfileNotFound);
         }
         Ok(())
+    }
+
+    pub fn create_environment_access_binding(
+        &self,
+        binding: EnvironmentAccessBinding,
+    ) -> Result<EnvironmentAccessBindingRecord, LocalCredentialError> {
+        binding.validate()?;
+        let connection = self.connection()?;
+        if environment_binding_exists(&connection, &binding.environment_id)? {
+            return Err(LocalCredentialError::EnvironmentBindingAlreadyExists);
+        }
+        derive_local_environment_grants(&connection, &binding, 1, &self.owner_id, &self.catalog)?;
+        let now = unix_millis()?;
+        let changed = connection
+            .execute(
+                "INSERT INTO environment_access_bindings(
+                   environment_id, profile_id, profile_revision,
+                   created_at_unix_ms, updated_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![
+                    binding.environment_id.as_str(),
+                    binding.profile_id.as_str(),
+                    i64::try_from(binding.profile_revision)
+                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                    i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?,
+                ],
+            )
+            .map_err(database_error)?;
+        if changed != 1 {
+            return Err(LocalCredentialError::CorruptMetadata);
+        }
+        load_environment_access_binding(&connection, &binding.environment_id)
+    }
+
+    pub fn replace_environment_access_binding(
+        &self,
+        environment_id: &EnvironmentId,
+        expected_profile_id: &AccessProfileId,
+        expected_profile_revision: u64,
+        profile_id: AccessProfileId,
+        profile_revision: u64,
+    ) -> Result<EnvironmentAccessBindingRecord, LocalCredentialError> {
+        let replacement = EnvironmentAccessBinding {
+            environment_id: environment_id.clone(),
+            profile_id,
+            profile_revision,
+        };
+        replacement.validate()?;
+        let connection = self.connection()?;
+        let current = load_environment_access_binding(&connection, environment_id)?;
+        if current.binding.profile_id != *expected_profile_id
+            || current.binding.profile_revision != expected_profile_revision
+        {
+            return Err(LocalCredentialError::StaleEnvironmentBinding);
+        }
+        derive_local_environment_grants(
+            &connection,
+            &replacement,
+            1,
+            &self.owner_id,
+            &self.catalog,
+        )?;
+        let changed = connection
+            .execute(
+                "UPDATE environment_access_bindings
+                 SET profile_id = ?4, profile_revision = ?5, updated_at_unix_ms = ?6
+                 WHERE environment_id = ?1 AND profile_id = ?2 AND profile_revision = ?3",
+                params![
+                    environment_id.as_str(),
+                    expected_profile_id.as_str(),
+                    i64::try_from(expected_profile_revision)
+                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                    replacement.profile_id.as_str(),
+                    i64::try_from(replacement.profile_revision)
+                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                    i64::try_from(unix_millis()?).map_err(|_| LocalCredentialError::InvalidTime)?,
+                ],
+            )
+            .map_err(database_error)?;
+        if changed != 1 {
+            return Err(LocalCredentialError::StaleEnvironmentBinding);
+        }
+        load_environment_access_binding(&connection, environment_id)
+    }
+
+    pub fn get_environment_access_binding(
+        &self,
+        environment_id: &EnvironmentId,
+    ) -> Result<EnvironmentAccessBindingRecord, LocalCredentialError> {
+        let connection = self.connection()?;
+        load_environment_access_binding(&connection, environment_id)
+    }
+
+    pub fn list_environment_access_bindings(
+        &self,
+    ) -> Result<Vec<EnvironmentAccessBindingRecord>, LocalCredentialError> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT environment_id FROM environment_access_bindings
+                 ORDER BY environment_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(database_error)?;
+        rows.map(|row| {
+            let id = EnvironmentId::parse(row.map_err(database_error)?)
+                .map_err(|_| LocalCredentialError::CorruptMetadata)?;
+            load_environment_access_binding(&connection, &id)
+        })
+        .collect()
+    }
+
+    pub fn delete_environment_access_binding(
+        &self,
+        environment_id: &EnvironmentId,
+        expected_profile_id: &AccessProfileId,
+        expected_profile_revision: u64,
+    ) -> Result<(), LocalCredentialError> {
+        let connection = self.connection()?;
+        let current = load_environment_access_binding(&connection, environment_id)?;
+        if current.binding.profile_id != *expected_profile_id
+            || current.binding.profile_revision != expected_profile_revision
+        {
+            return Err(LocalCredentialError::StaleEnvironmentBinding);
+        }
+        let changed = connection
+            .execute(
+                "DELETE FROM environment_access_bindings
+                 WHERE environment_id = ?1 AND profile_id = ?2 AND profile_revision = ?3",
+                params![
+                    environment_id.as_str(),
+                    expected_profile_id.as_str(),
+                    i64::try_from(expected_profile_revision)
+                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                ],
+            )
+            .map_err(database_error)?;
+        if changed != 1 {
+            return Err(LocalCredentialError::StaleEnvironmentBinding);
+        }
+        Ok(())
+    }
+
+    pub fn evaluate_environment_grants(
+        &self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+    ) -> Result<Vec<DerivedGrant>, LocalCredentialError> {
+        let connection = self.connection()?;
+        let binding = load_environment_access_binding(&connection, environment_id)?.binding;
+        derive_local_environment_grants(
+            &connection,
+            &binding,
+            environment_generation,
+            &self.owner_id,
+            &self.catalog,
+        )
     }
 
     fn reconcile(&self) -> Result<(), LocalCredentialError> {
@@ -857,6 +1026,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 }
             }
         }
+        validate_environment_access_bindings(&connection)?;
         validate_database(&connection)
     }
 
@@ -1088,6 +1258,17 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
                FOREIGN KEY(profile_id, revision)
                  REFERENCES profile_revisions(profile_id, revision) ON DELETE CASCADE
              ) STRICT;
+             CREATE TABLE environment_access_bindings(
+               environment_id TEXT PRIMARY KEY NOT NULL,
+               profile_id TEXT NOT NULL,
+               profile_revision INTEGER NOT NULL CHECK(profile_revision > 0),
+               created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
+               updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
+               FOREIGN KEY(profile_id, profile_revision)
+                 REFERENCES profile_revisions(profile_id, revision) ON DELETE RESTRICT
+             ) STRICT;
+             CREATE INDEX environment_access_bindings_profile
+               ON environment_access_bindings(profile_id, profile_revision);
              COMMIT;",
         )
         .map_err(database_error)?;
@@ -1117,6 +1298,7 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
         "profiles",
         "profile_revisions",
         "profile_entries",
+        "environment_access_bindings",
     ] {
         let present = connection
             .query_row(
@@ -1139,6 +1321,16 @@ fn validate_database(connection: &Connection) -> Result<(), LocalCredentialError
         .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
         .map_err(database_error)?;
     if result != "ok" {
+        return Err(LocalCredentialError::InvalidDatabase);
+    }
+    let foreign_key_violation = connection
+        .query_row("SELECT 1 FROM pragma_foreign_key_check LIMIT 1", [], |_| {
+            Ok(())
+        })
+        .optional()
+        .map_err(database_error)?
+        .is_some();
+    if foreign_key_violation {
         return Err(LocalCredentialError::InvalidDatabase);
     }
     Ok(())
@@ -1442,7 +1634,7 @@ fn delete_pending_delete(
     Ok(())
 }
 
-fn current_profile_references_credential(
+fn profile_or_binding_references_credential(
     connection: &Connection,
     id: &CredentialId,
 ) -> Result<bool, LocalCredentialError> {
@@ -1453,11 +1645,139 @@ fn current_profile_references_credential(
                JOIN profile_entries e
                  ON e.profile_id = p.id AND e.revision = p.current_revision
                WHERE e.credential_id = ?1
+             ) OR EXISTS(
+               SELECT 1 FROM environment_access_bindings b
+               JOIN profile_entries e
+                 ON e.profile_id = b.profile_id AND e.revision = b.profile_revision
+               WHERE e.credential_id = ?1
              )",
             [id.as_str()],
             |row| row.get(0),
         )
         .map_err(database_error)
+}
+
+fn environment_binding_exists(
+    connection: &Connection,
+    environment_id: &EnvironmentId,
+) -> Result<bool, LocalCredentialError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM environment_access_bindings WHERE environment_id = ?1
+             )",
+            [environment_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(database_error)
+}
+
+fn environment_binding_references_profile(
+    connection: &Connection,
+    profile_id: &AccessProfileId,
+) -> Result<bool, LocalCredentialError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM environment_access_bindings WHERE profile_id = ?1
+             )",
+            [profile_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(database_error)
+}
+
+fn load_environment_access_binding(
+    connection: &Connection,
+    environment_id: &EnvironmentId,
+) -> Result<EnvironmentAccessBindingRecord, LocalCredentialError> {
+    let raw = connection
+        .query_row(
+            "SELECT profile_id, profile_revision, created_at_unix_ms, updated_at_unix_ms
+             FROM environment_access_bindings WHERE environment_id = ?1",
+            [environment_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(database_error)?
+        .ok_or(LocalCredentialError::EnvironmentBindingNotFound)?;
+    let record = EnvironmentAccessBindingRecord {
+        binding: EnvironmentAccessBinding {
+            environment_id: environment_id.clone(),
+            profile_id: AccessProfileId::parse(raw.0)
+                .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+            profile_revision: u64::try_from(raw.1)
+                .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+        },
+        created_at_unix_ms: u64::try_from(raw.2)
+            .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+        updated_at_unix_ms: u64::try_from(raw.3)
+            .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+    };
+    record.binding.validate()?;
+    if record.updated_at_unix_ms < record.created_at_unix_ms {
+        return Err(LocalCredentialError::CorruptMetadata);
+    }
+    Ok(record)
+}
+
+fn derive_local_environment_grants(
+    connection: &Connection,
+    binding: &EnvironmentAccessBinding,
+    environment_generation: u64,
+    owner_id: &OwnerId,
+    catalog: &ProviderCatalog,
+) -> Result<Vec<DerivedGrant>, LocalCredentialError> {
+    let profile =
+        load_profile_revision(connection, &binding.profile_id, binding.profile_revision)?.profile;
+    let credentials = load_ready_credential_metadata(connection)?;
+    let context = GrantContext {
+        environment_id: binding.environment_id.clone(),
+        environment_generation,
+        placement: Placement::Local,
+        user_id: owner_id.clone(),
+        organization_id: None,
+        allow_personal_credentials: false,
+        authorized_credentials: profile.entries.values().cloned().collect::<BTreeSet<_>>(),
+    };
+    derive_grants(
+        &context,
+        binding,
+        &profile,
+        &credentials,
+        catalog,
+        unix_seconds()?,
+    )
+    .map_err(Into::into)
+}
+
+fn validate_environment_access_bindings(
+    connection: &Connection,
+) -> Result<(), LocalCredentialError> {
+    let environment_ids = {
+        let mut statement = connection
+            .prepare("SELECT environment_id FROM environment_access_bindings")
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(database_error)?;
+        rows.map(|row| row.map_err(database_error))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for environment_id in environment_ids {
+        let environment_id = EnvironmentId::parse(environment_id)
+            .map_err(|_| LocalCredentialError::CorruptMetadata)?;
+        let binding = load_environment_access_binding(connection, &environment_id)?.binding;
+        load_profile_revision(connection, &binding.profile_id, binding.profile_revision)?;
+    }
+    Ok(())
 }
 
 fn insert_profile_revision(
@@ -1780,7 +2100,7 @@ pub enum LocalCredentialError {
     CredentialMaterialMissing,
     #[error("local credential protected entry unexpectedly already exists")]
     ProtectedEntryCollision,
-    #[error("local credential is selected by a current access profile")]
+    #[error("local credential is selected by an access profile or environment")]
     CredentialInUse,
     #[error("local access profile was not found")]
     ProfileNotFound,
@@ -1788,6 +2108,14 @@ pub enum LocalCredentialError {
     ProfileRevisionNotFound,
     #[error("local access profile revision changed")]
     StaleProfileRevision,
+    #[error("local access profile is selected by an environment")]
+    ProfileInUse,
+    #[error("local environment access binding already exists")]
+    EnvironmentBindingAlreadyExists,
+    #[error("local environment access binding was not found")]
+    EnvironmentBindingNotFound,
+    #[error("local environment access binding changed")]
+    StaleEnvironmentBinding,
     #[error(transparent)]
     Access(#[from] AccessError),
     #[error(transparent)]

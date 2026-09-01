@@ -156,7 +156,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
     assert_eq!(
         client.info(),
         AuthorityInfo {
-            protocol_version: 2,
+            protocol_version: 3,
             protected_store_persistence: ProtectedStorePersistence::ProcessLifetime,
         }
     );
@@ -280,6 +280,153 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let (shutdown, task) = start_server(config.clone(), store).await;
+    let mut client = connect_when_ready(&config).await;
+    let credential = client
+        .add_credential(
+            NewCredential {
+                provider: provider("openai"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "bound-codex".into(),
+                account_hint: Some("bound@example.test".into()),
+                expires_at_unix: Some(4_102_444_800),
+            },
+            ProtectedValue::from_slice(FIRST_MATERIAL).unwrap(),
+        )
+        .await
+        .unwrap();
+    let entries = BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]);
+    let profile = client
+        .create_profile(&AccessProfileName::parse("bound").unwrap(), &entries)
+        .await
+        .unwrap();
+    let environment_id = EnvironmentId::parse("env-bound").unwrap();
+    let binding = EnvironmentAccessBinding {
+        environment_id: environment_id.clone(),
+        profile_id: profile.profile.id.clone(),
+        profile_revision: profile.profile.revision,
+    };
+    let created = client
+        .create_environment_access_binding(&binding)
+        .await
+        .unwrap();
+    assert_eq!(created.binding, binding);
+    assert_eq!(
+        client
+            .create_environment_access_binding(&binding)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::AlreadyExists
+    );
+    assert_eq!(
+        client
+            .get_environment_access_binding(&environment_id)
+            .await
+            .unwrap(),
+        created
+    );
+    assert_eq!(
+        client.list_environment_access_bindings().await.unwrap(),
+        vec![created.clone()]
+    );
+    let grants = client
+        .evaluate_environment_grants(&environment_id, 41)
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].environment_generation, 41);
+    assert_eq!(grants[0].credential_id, credential.metadata.id);
+    let rendered = format!("{grants:?}");
+    assert!(!rendered.contains("synthetic"));
+    assert!(!rendered.contains("protected_entry"));
+
+    let updated = client
+        .update_profile(&profile.profile.id, profile.profile.revision, &entries)
+        .await
+        .unwrap();
+    let stale = client
+        .replace_environment_access_binding(
+            &environment_id,
+            &profile.profile.id,
+            updated.profile.revision,
+            &profile.profile.id,
+            updated.profile.revision,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code(), Code::FailedPrecondition);
+    let replaced = client
+        .replace_environment_access_binding(
+            &environment_id,
+            &profile.profile.id,
+            profile.profile.revision,
+            &profile.profile.id,
+            updated.profile.revision,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replaced.binding.profile_revision, updated.profile.revision);
+    assert_eq!(
+        client
+            .delete_profile(&profile.profile.id)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    drop(client);
+
+    let (shutdown, task) = start_server(config.clone(), TestProtectedStore::default()).await;
+    let mut client = connect_when_ready(&config).await;
+    assert_eq!(
+        client
+            .get_environment_access_binding(&environment_id)
+            .await
+            .unwrap()
+            .binding,
+        replaced.binding
+    );
+    assert_eq!(
+        client
+            .delete_environment_access_binding(
+                &environment_id,
+                &profile.profile.id,
+                profile.profile.revision,
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    client
+        .delete_environment_access_binding(
+            &environment_id,
+            &profile.profile.id,
+            updated.profile.revision,
+        )
+        .await
+        .unwrap();
+    client.delete_profile(&profile.profile.id).await.unwrap();
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+
+    let database = fs::read(config.root.join(DATABASE_FILE)).unwrap();
+    assert!(
+        !database
+            .windows(FIRST_MATERIAL.len())
+            .any(|value| value == FIRST_MATERIAL)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     let temp = tempfile::tempdir().unwrap();
     let config = runtime_config(&temp);
@@ -292,7 +439,7 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 2);
+    assert_eq!(client.info().protocol_version, 3);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     drop(shutdown);
@@ -323,7 +470,7 @@ async fn losing_launcher_waits_for_the_admitted_authority() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 2);
+    assert_eq!(client.info().protocol_version, 3);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     assert!(!config.socket().exists());

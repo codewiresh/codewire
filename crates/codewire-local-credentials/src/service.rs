@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use codewire_access::{
     AccessError, AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot,
-    CredentialAuthKind, CredentialId, CredentialStatus, ProviderCatalog, ProviderId,
-    builtin_provider_catalog,
+    CredentialAuthKind, CredentialId, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
+    EnvironmentId, ProviderCatalog, ProviderId, builtin_provider_catalog,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, OsProtectedStore, ProtectedStore, ProtectedStorePersistence,
@@ -27,7 +27,8 @@ use crate::transport::{
 };
 use crate::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AccessProfileRecord, AccessProfileRevisionRecord,
-    CredentialRecord, LocalCredentialAuthority, LocalCredentialError, NewCredential,
+    CredentialRecord, EnvironmentAccessBindingRecord, LocalCredentialAuthority,
+    LocalCredentialError, NewCredential,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -360,6 +361,118 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         run_blocking(move || authority.delete_profile(&id)).await?;
         Ok(Response::new(v1::DeleteAccessProfileResponse {}))
     }
+
+    async fn create_environment_access_binding(
+        &self,
+        request: Request<v1::CreateEnvironmentAccessBindingRequest>,
+    ) -> Result<Response<v1::EnvironmentAccessBinding>, Status> {
+        let request = request.into_inner();
+        let binding = EnvironmentAccessBinding {
+            environment_id: environment_id(request.environment_id)?,
+            profile_id: profile_id(request.profile_id)?,
+            profile_revision: request.profile_revision,
+        };
+        binding.validate().map_err(status_for_access_error)?;
+        let authority = Arc::clone(&self.authority);
+        let binding =
+            run_blocking(move || authority.create_environment_access_binding(binding)).await?;
+        Ok(Response::new(environment_binding_to_proto(binding)))
+    }
+
+    async fn replace_environment_access_binding(
+        &self,
+        request: Request<v1::ReplaceEnvironmentAccessBindingRequest>,
+    ) -> Result<Response<v1::EnvironmentAccessBinding>, Status> {
+        let request = request.into_inner();
+        let environment_id = environment_id(request.environment_id)?;
+        let expected_profile_id = profile_id(request.expected_profile_id)?;
+        let profile_id = profile_id(request.profile_id)?;
+        if request.expected_profile_revision == 0 || request.profile_revision == 0 {
+            return Err(Status::invalid_argument(
+                "invalid environment access binding revision",
+            ));
+        }
+        let authority = Arc::clone(&self.authority);
+        let binding = run_blocking(move || {
+            authority.replace_environment_access_binding(
+                &environment_id,
+                &expected_profile_id,
+                request.expected_profile_revision,
+                profile_id,
+                request.profile_revision,
+            )
+        })
+        .await?;
+        Ok(Response::new(environment_binding_to_proto(binding)))
+    }
+
+    async fn get_environment_access_binding(
+        &self,
+        request: Request<v1::EnvironmentAccessBindingSelector>,
+    ) -> Result<Response<v1::EnvironmentAccessBinding>, Status> {
+        let environment_id = environment_id(request.into_inner().environment_id)?;
+        let authority = Arc::clone(&self.authority);
+        let binding =
+            run_blocking(move || authority.get_environment_access_binding(&environment_id)).await?;
+        Ok(Response::new(environment_binding_to_proto(binding)))
+    }
+
+    async fn list_environment_access_bindings(
+        &self,
+        _request: Request<v1::ListEnvironmentAccessBindingsRequest>,
+    ) -> Result<Response<v1::ListEnvironmentAccessBindingsResponse>, Status> {
+        let authority = Arc::clone(&self.authority);
+        let bindings = run_blocking(move || authority.list_environment_access_bindings()).await?;
+        Ok(Response::new(v1::ListEnvironmentAccessBindingsResponse {
+            bindings: bindings
+                .into_iter()
+                .map(environment_binding_to_proto)
+                .collect(),
+        }))
+    }
+
+    async fn delete_environment_access_binding(
+        &self,
+        request: Request<v1::DeleteEnvironmentAccessBindingRequest>,
+    ) -> Result<Response<v1::DeleteEnvironmentAccessBindingResponse>, Status> {
+        let request = request.into_inner();
+        let environment_id = environment_id(request.environment_id)?;
+        let expected_profile_id = profile_id(request.expected_profile_id)?;
+        if request.expected_profile_revision == 0 {
+            return Err(Status::invalid_argument(
+                "invalid environment access binding revision",
+            ));
+        }
+        let authority = Arc::clone(&self.authority);
+        run_blocking(move || {
+            authority.delete_environment_access_binding(
+                &environment_id,
+                &expected_profile_id,
+                request.expected_profile_revision,
+            )
+        })
+        .await?;
+        Ok(Response::new(v1::DeleteEnvironmentAccessBindingResponse {}))
+    }
+
+    async fn evaluate_environment_grants(
+        &self,
+        request: Request<v1::EvaluateEnvironmentGrantsRequest>,
+    ) -> Result<Response<v1::EvaluateEnvironmentGrantsResponse>, Status> {
+        let request = request.into_inner();
+        let environment_id = environment_id(request.environment_id)?;
+        if request.environment_generation == 0 {
+            return Err(Status::invalid_argument("invalid environment generation"));
+        }
+        let authority = Arc::clone(&self.authority);
+        let grants = run_blocking(move || {
+            authority.evaluate_environment_grants(&environment_id, request.environment_generation)
+        })
+        .await?;
+        Ok(Response::new(v1::EvaluateEnvironmentGrantsResponse {
+            grants: grants.into_iter().map(derived_grant_to_proto).collect(),
+        }))
+    }
 }
 
 async fn run_blocking<T, F>(operation: F) -> Result<T, Status>
@@ -379,6 +492,10 @@ fn credential_id(value: String) -> Result<CredentialId, Status> {
 
 fn profile_id(value: String) -> Result<AccessProfileId, Status> {
     AccessProfileId::parse(value).map_err(status_for_access_error)
+}
+
+fn environment_id(value: String) -> Result<EnvironmentId, Status> {
+    EnvironmentId::parse(value).map_err(status_for_access_error)
 }
 
 fn profile_entries(
@@ -500,6 +617,39 @@ fn profile_to_proto(
     }
 }
 
+fn environment_binding_to_proto(
+    record: EnvironmentAccessBindingRecord,
+) -> v1::EnvironmentAccessBinding {
+    v1::EnvironmentAccessBinding {
+        environment_id: record.binding.environment_id.to_string(),
+        profile_id: record.binding.profile_id.to_string(),
+        profile_revision: record.binding.profile_revision,
+        created_at_unix_ms: record.created_at_unix_ms,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+    }
+}
+
+fn derived_grant_to_proto(grant: DerivedGrant) -> v1::DerivedGrant {
+    v1::DerivedGrant {
+        environment_id: grant.environment_id.to_string(),
+        environment_generation: grant.environment_generation,
+        profile_id: grant.profile_id.to_string(),
+        profile_revision: grant.profile_revision,
+        capability_slot: grant.capability_slot.to_string(),
+        credential_id: grant.credential_id.to_string(),
+        credential_revocation_generation: grant.credential_revocation_generation,
+        expires_at_unix: grant.expires_at_unix,
+        permissions: grant
+            .permissions
+            .into_iter()
+            .map(|permission| v1::GrantPermission {
+                operation: permission.operation.to_string(),
+                route: permission.route.to_string(),
+            })
+            .collect(),
+    }
+}
+
 fn status_for_access_error(_error: AccessError) -> Status {
     Status::invalid_argument("invalid local credential request")
 }
@@ -509,16 +659,24 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::AlreadyExists => {
             Status::already_exists("local credential record already exists")
         }
+        LocalCredentialError::EnvironmentBindingAlreadyExists => {
+            Status::already_exists("local environment access binding already exists")
+        }
         LocalCredentialError::CredentialNotFound
         | LocalCredentialError::ProfileNotFound
         | LocalCredentialError::ProfileRevisionNotFound => {
             Status::not_found("local credential record was not found")
+        }
+        LocalCredentialError::EnvironmentBindingNotFound => {
+            Status::not_found("local environment access binding was not found")
         }
         LocalCredentialError::CredentialUnavailable
         | LocalCredentialError::CredentialInactive
         | LocalCredentialError::CredentialMaterialMissing
         | LocalCredentialError::CredentialInUse
         | LocalCredentialError::StaleProfileRevision
+        | LocalCredentialError::ProfileInUse
+        | LocalCredentialError::StaleEnvironmentBinding
         | LocalCredentialError::ProtectedEntryCollision
         | LocalCredentialError::OwnerMismatch
         | LocalCredentialError::ProtectedStoreMismatch

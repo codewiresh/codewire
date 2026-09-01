@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::process::Child;
 use std::time::Duration;
 
 use codewire_access::{
-    AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot,
-    CredentialAuthKind, CredentialId, CredentialMetadata, CredentialStatus, Owner, OwnerId,
-    Placement, ProviderId,
+    AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference, BrokerOperationId,
+    BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId, CredentialMetadata,
+    CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantPermission,
+    Owner, OwnerId, Placement, ProviderId,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
@@ -20,8 +21,8 @@ use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
 };
 use crate::{
-    AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord, LOCAL_OWNER_ID,
-    NewCredential,
+    AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord,
+    EnvironmentAccessBindingRecord, LOCAL_OWNER_ID, NewCredential,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -337,6 +338,105 @@ impl LocalCredentialClient {
             .await?;
         Ok(())
     }
+
+    pub async fn create_environment_access_binding(
+        &mut self,
+        binding: &EnvironmentAccessBinding,
+    ) -> Result<EnvironmentAccessBindingRecord, Status> {
+        environment_binding_from_proto(
+            self.inner
+                .create_environment_access_binding(v1::CreateEnvironmentAccessBindingRequest {
+                    environment_id: binding.environment_id.to_string(),
+                    profile_id: binding.profile_id.to_string(),
+                    profile_revision: binding.profile_revision,
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn replace_environment_access_binding(
+        &mut self,
+        environment_id: &EnvironmentId,
+        expected_profile_id: &AccessProfileId,
+        expected_profile_revision: u64,
+        profile_id: &AccessProfileId,
+        profile_revision: u64,
+    ) -> Result<EnvironmentAccessBindingRecord, Status> {
+        environment_binding_from_proto(
+            self.inner
+                .replace_environment_access_binding(v1::ReplaceEnvironmentAccessBindingRequest {
+                    environment_id: environment_id.to_string(),
+                    expected_profile_id: expected_profile_id.to_string(),
+                    expected_profile_revision,
+                    profile_id: profile_id.to_string(),
+                    profile_revision,
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn get_environment_access_binding(
+        &mut self,
+        environment_id: &EnvironmentId,
+    ) -> Result<EnvironmentAccessBindingRecord, Status> {
+        environment_binding_from_proto(
+            self.inner
+                .get_environment_access_binding(v1::EnvironmentAccessBindingSelector {
+                    environment_id: environment_id.to_string(),
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn list_environment_access_bindings(
+        &mut self,
+    ) -> Result<Vec<EnvironmentAccessBindingRecord>, Status> {
+        self.inner
+            .list_environment_access_bindings(v1::ListEnvironmentAccessBindingsRequest {})
+            .await?
+            .into_inner()
+            .bindings
+            .into_iter()
+            .map(environment_binding_from_proto)
+            .collect()
+    }
+
+    pub async fn delete_environment_access_binding(
+        &mut self,
+        environment_id: &EnvironmentId,
+        expected_profile_id: &AccessProfileId,
+        expected_profile_revision: u64,
+    ) -> Result<(), Status> {
+        self.inner
+            .delete_environment_access_binding(v1::DeleteEnvironmentAccessBindingRequest {
+                environment_id: environment_id.to_string(),
+                expected_profile_id: expected_profile_id.to_string(),
+                expected_profile_revision,
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn evaluate_environment_grants(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+    ) -> Result<Vec<DerivedGrant>, Status> {
+        self.inner
+            .evaluate_environment_grants(v1::EvaluateEnvironmentGrantsRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+            })
+            .await?
+            .into_inner()
+            .grants
+            .into_iter()
+            .map(derived_grant_from_proto)
+            .collect()
+    }
 }
 
 fn terminate_unadmitted_child(child: &mut Child) {
@@ -467,6 +567,62 @@ fn profile_from_proto(value: v1::AccessProfileRevision) -> Result<AccessProfile,
     };
     profile.validate().map_err(data_loss)?;
     Ok(profile)
+}
+
+fn environment_binding_from_proto(
+    value: v1::EnvironmentAccessBinding,
+) -> Result<EnvironmentAccessBindingRecord, Status> {
+    let binding = EnvironmentAccessBinding {
+        environment_id: EnvironmentId::parse(value.environment_id).map_err(data_loss)?,
+        profile_id: AccessProfileId::parse(value.profile_id).map_err(data_loss)?,
+        profile_revision: value.profile_revision,
+    };
+    binding.validate().map_err(data_loss)?;
+    if value.updated_at_unix_ms < value.created_at_unix_ms {
+        return Err(Status::data_loss(
+            "local credential authority returned invalid metadata",
+        ));
+    }
+    Ok(EnvironmentAccessBindingRecord {
+        binding,
+        created_at_unix_ms: value.created_at_unix_ms,
+        updated_at_unix_ms: value.updated_at_unix_ms,
+    })
+}
+
+fn derived_grant_from_proto(value: v1::DerivedGrant) -> Result<DerivedGrant, Status> {
+    let mut permissions = BTreeSet::new();
+    for permission in value.permissions {
+        let permission = GrantPermission {
+            operation: BrokerOperationId::parse(permission.operation).map_err(data_loss)?,
+            route: BrokerRouteId::parse(permission.route).map_err(data_loss)?,
+        };
+        if !permissions.insert(permission) {
+            return Err(Status::data_loss(
+                "local credential authority returned invalid metadata",
+            ));
+        }
+    }
+    if value.environment_generation == 0
+        || value.profile_revision == 0
+        || value.credential_revocation_generation == 0
+        || permissions.is_empty()
+    {
+        return Err(Status::data_loss(
+            "local credential authority returned invalid metadata",
+        ));
+    }
+    Ok(DerivedGrant {
+        environment_id: EnvironmentId::parse(value.environment_id).map_err(data_loss)?,
+        environment_generation: value.environment_generation,
+        profile_id: AccessProfileId::parse(value.profile_id).map_err(data_loss)?,
+        profile_revision: value.profile_revision,
+        capability_slot: CapabilitySlot::parse(value.capability_slot).map_err(data_loss)?,
+        credential_id: CredentialId::parse(value.credential_id).map_err(data_loss)?,
+        credential_revocation_generation: value.credential_revocation_generation,
+        expires_at_unix: value.expires_at_unix,
+        permissions,
+    })
 }
 
 fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
