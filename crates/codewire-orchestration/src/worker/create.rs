@@ -16,8 +16,8 @@ use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::template::{
     DOCKER_MODE_LOCAL_DIND_DIRECT, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, default_tolerations, runtime_profile_spec,
-    validate_managed_runtime_profile,
+    RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, confidential_init_data, default_tolerations,
+    runtime_profile_spec, validate_managed_runtime_profile,
 };
 use crate::sandbox::{
     CANONICAL_WORKSPACE_RUNTIME_IMAGE, ClaimOpts, claim_name, environment_pod_selector,
@@ -775,20 +775,43 @@ pub(super) fn ready_timeout_for_isolation(isolation_tier: &str) -> Duration {
     }
 }
 
-pub(super) async fn reconcile_confidential_runtime_before_replacement(
+pub(super) async fn authorize_confidential_runtime(
+    ctx: &WorkerContext,
+    opts: &TemplateOpts,
+    authority: &ActivityAuthority,
+    authoritative_states: &[&str],
+) -> anyhow::Result<()> {
+    if opts.runtime_profile_spec().profile != RUNTIME_PROFILE_CONFIDENTIAL || opts.disk_gib <= 0 {
+        return Ok(());
+    }
+    let storage = ctx
+        .confidential_storage
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("confidential storage providers are not configured"))?;
+    let init_data = confidential_init_data(opts)?;
+    authority
+        .run_external_mutation(
+            authoritative_states,
+            storage.authorize_init_data(
+                &opts.environment_id,
+                &opts.confidential_storage_manifest_uri,
+                init_data.as_bytes(),
+            ),
+        )
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn confidential_runtime_template_opts(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
     confidential_storage_manifest_uri: &str,
-    authority: &ActivityAuthority,
-    authoritative_states: &[&str],
-    client: &SandboxClient,
-    stale: &WorkspacePodIdentity,
-) -> anyhow::Result<()> {
-    if env.isolation_tier != "confidential" {
-        return Ok(());
-    }
+) -> anyhow::Result<TemplateOpts> {
+    anyhow::ensure!(
+        env.isolation_tier == "confidential",
+        "environment is not confidential"
+    );
     let env_id = env.id.as_str();
-
     let preset_id = env
         .preset_id
         .as_deref()
@@ -812,6 +835,40 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
         cfg.allow_diagnostic_runtime,
     )
     .map_err(|error| anyhow::anyhow!("runtime profile: {error}"))?;
+    Ok(template_opts)
+}
+
+pub(super) async fn authorize_confidential_runtime_for_environment(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    confidential_storage_manifest_uri: &str,
+    authority: &ActivityAuthority,
+    authoritative_states: &[&str],
+) -> anyhow::Result<()> {
+    if env.isolation_tier != "confidential" {
+        return Ok(());
+    }
+    let template_opts =
+        confidential_runtime_template_opts(ctx, env, confidential_storage_manifest_uri).await?;
+    authorize_confidential_runtime(ctx, &template_opts, authority, authoritative_states).await
+}
+
+pub(super) async fn reconcile_confidential_runtime_before_replacement(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    confidential_storage_manifest_uri: &str,
+    authority: &ActivityAuthority,
+    authoritative_states: &[&str],
+    client: &SandboxClient,
+    stale: &WorkspacePodIdentity,
+) -> anyhow::Result<()> {
+    if env.isolation_tier != "confidential" {
+        return Ok(());
+    }
+    let env_id = env.id.as_str();
+    let template_opts =
+        confidential_runtime_template_opts(ctx, env, confidential_storage_manifest_uri).await?;
+    authorize_confidential_runtime(ctx, &template_opts, authority, authoritative_states).await?;
 
     let kernel_params = authority
         .run_external_mutation(
@@ -1140,6 +1197,31 @@ async fn run_environment_create(
                     .await?;
                     record_error(&svc, authority, env_id, &format!("runtime profile: {e}")).await?;
                     anyhow::bail!(e);
+                }
+                if let Err(e) = authorize_confidential_runtime(
+                    ctx,
+                    &template_opts,
+                    authority,
+                    CREATE_MUTATION_STATES,
+                )
+                .await
+                {
+                    emit_create_log(
+                        authority,
+                        "create_claim",
+                        "failed",
+                        &format!("{e:#}"),
+                        duration_meta(started),
+                    )
+                    .await?;
+                    record_error(
+                        &svc,
+                        authority,
+                        env_id,
+                        &format!("init-data authorization: {e:#}"),
+                    )
+                    .await?;
+                    return Err(e);
                 }
                 let claim_opts = environment_claim_opts(
                     cfg,

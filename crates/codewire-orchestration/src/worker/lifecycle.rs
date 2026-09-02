@@ -13,8 +13,9 @@ use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::create::{
-    SandboxWorkerCfg, environment_per_env_template_name, environment_template_opts,
-    ready_timeout_for_isolation, reconcile_confidential_runtime_before_replacement,
+    SandboxWorkerCfg, authorize_confidential_runtime_for_environment,
+    environment_per_env_template_name, environment_template_opts, ready_timeout_for_isolation,
+    reconcile_confidential_runtime_before_replacement,
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
@@ -31,6 +32,7 @@ use crate::sandbox::client::SandboxClient;
 const DELETED_TIMEOUT: Duration = Duration::from_secs(120);
 const POD_IP_POLL_TIMEOUT: Duration = Duration::from_secs(300); // start: 5-minute pod IP poll
 const START_MUTATION_STATES: &[&str] = &["starting"];
+const RUNNING_MUTATION_STATES: &[&str] = &["running"];
 const STOP_MUTATION_STATES: &[&str] = &["stopping"];
 const DESTROY_MUTATION_STATES: &[&str] = &["destroying"];
 const DESTROY_CLEANUP_MUTATION_STATES: &[&str] = &["destroying", "destroyed"];
@@ -39,6 +41,14 @@ fn is_lifecycle_control_loss(error: &anyhow::Error) -> bool {
     is_authority_lost(error)
         || is_setup_activity_cancelled(error)
         || is_setup_recovery_failed(error)
+}
+
+fn needs_running_confidential_authorization(
+    state: &str,
+    desired_state: &str,
+    isolation_tier: &str,
+) -> bool {
+    state == "running" && desired_state == "started" && isolation_tier == "confidential"
 }
 
 async fn await_reconcile_or_cancel<T, F>(
@@ -335,6 +345,7 @@ pub async fn handle_environment_start(
     };
 
     let ready_timeout = ready_timeout_for_isolation(&env.isolation_tier);
+    let mut confidential_runtime_authorized = false;
     if env.state == "error" {
         let stale = match client.workspace_pod_replacement_candidate(env_id).await {
             Ok(stale) => stale,
@@ -368,6 +379,7 @@ pub async fn handle_environment_start(
                     &stale,
                 )
                 .await?;
+                confidential_runtime_authorized = true;
                 authority
                     .run_external_mutation(
                         START_MUTATION_STATES,
@@ -400,6 +412,33 @@ pub async fn handle_environment_start(
                 return Err(error);
             }
         }
+    }
+
+    if let Some(manifest_uri) = confidential_storage_manifest_uri.as_deref()
+        && !confidential_runtime_authorized
+        && let Err(error) = await_reconcile_or_cancel(
+            &activity_ctx,
+            authorize_confidential_runtime_for_environment(
+                ctx,
+                &env,
+                manifest_uri,
+                authority,
+                START_MUTATION_STATES,
+            ),
+        )
+        .await
+    {
+        if is_lifecycle_control_loss(&error) {
+            return Err(error);
+        }
+        record_environment_error(
+            &svc,
+            authority,
+            env_id,
+            &format!("init-data authorization: {error:#}"),
+        )
+        .await?;
+        return Err(error);
     }
 
     // Scale the sandbox back up to 1 replica.
@@ -763,6 +802,37 @@ pub async fn handle_environment_reconcile(
         Action::Noop if env.state == "destroyed" && env.desired_state == "destroyed" => {
             Ok(ReconcileOutcome::Destroyed)
         }
+        Action::Noop
+            if needs_running_confidential_authorization(
+                &env.state,
+                &env.desired_state,
+                &env.isolation_tier,
+            ) =>
+        {
+            let storage = ctx.confidential_storage.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("confidential storage providers are not configured")
+            })?;
+            let manifest_uri = await_reconcile_or_cancel(
+                &activity_ctx,
+                authority.run_external_mutation(
+                    RUNNING_MUTATION_STATES,
+                    storage.ensure_ready(env_id, env.disk_gb),
+                ),
+            )
+            .await?;
+            await_reconcile_or_cancel(
+                &activity_ctx,
+                authorize_confidential_runtime_for_environment(
+                    ctx,
+                    &env,
+                    &manifest_uri,
+                    authority,
+                    RUNNING_MUTATION_STATES,
+                ),
+            )
+            .await?;
+            Ok(ReconcileOutcome::Continue)
+        }
         Action::Noop => Ok(ReconcileOutcome::Continue),
         Action::Create => {
             // D3 (Temporal-only): create chains setup inline rather than
@@ -826,6 +896,32 @@ pub async fn handle_environment_reconcile(
                 "environment.reconcile: unhandled case"
             );
             Ok(ReconcileOutcome::Continue)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_running_confidential_authorization;
+
+    #[test]
+    fn authorization_backfill_selects_only_stable_running_confidential_environments() {
+        assert!(needs_running_confidential_authorization(
+            "running",
+            "started",
+            "confidential"
+        ));
+        for candidate in [
+            ("running", "stopped", "confidential"),
+            ("starting", "started", "confidential"),
+            ("stopped", "stopped", "confidential"),
+            ("running", "started", "standard"),
+        ] {
+            assert!(!needs_running_confidential_authorization(
+                candidate.0,
+                candidate.1,
+                candidate.2,
+            ));
         }
     }
 }

@@ -54,6 +54,25 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
     workspace::render_sandbox_blueprint(opts)
 }
 
+/// Return the exact raw TOML bytes that the hypervisor annotation compresses
+/// and the SNP verifier hashes into HOST_DATA. Callers use this single source
+/// of truth when preauthorizing a confidential environment in Trustee.
+pub(crate) fn confidential_init_data(opts: &TemplateOpts) -> anyhow::Result<String> {
+    let runtime_spec = opts.runtime_profile_spec();
+    anyhow::ensure!(
+        runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL && opts.disk_gib > 0,
+        "init-data authorization requires confidential persistent storage"
+    );
+    anyhow::ensure!(
+        runtime_policy::uses_kata_policy_init_data(opts, &runtime_spec),
+        "confidential runtime does not emit measured Kata init-data"
+    );
+    opts.validate_confidential_storage_manifest()?;
+    crate::confidential_storage::validate_environment_id(&opts.environment_id)?;
+
+    Ok(encoding::build_codewire_kata_policy_init_data(opts, true))
+}
+
 // Constants mirrored from internal/sandbox/types.go and internal/shim.
 pub const DEFAULT_GATEWAY_IMAGE: &str = "ghcr.io/codewiresh/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836";
 pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
