@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,7 +24,7 @@ use tower::ServiceExt as _;
 
 use super::*;
 use crate::control::v1;
-use crate::service::{serve_until, serve_until_with_spawner};
+use crate::service::{serve_until, serve_until_with_process_spawners, serve_until_with_spawner};
 use crate::transport::{
     bind_owner_only, bind_owner_only_for_uid, current_uid, owner_only_connector,
     remove_bound_socket,
@@ -208,6 +208,134 @@ impl LocalBrokerProcessSpawner for TestBrokerSpawner {
     }
 }
 
+#[derive(Clone)]
+struct TestRepositorySpawner {
+    store: TestProtectedStore,
+    leased_material: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
+    fn spawn(
+        &self,
+        config: &LocalRepositoryProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalRepositorySpawnError> {
+        let commit = prepare_test_repository_bundle(&config.staging_directory)
+            .map_err(|_| LocalRepositorySpawnError::Spawn)?;
+        authority_peer
+            .set_nonblocking(true)
+            .map_err(|_| LocalRepositorySpawnError::Spawn)?;
+        let stream =
+            UnixStream::from_std(authority_peer).map_err(|_| LocalRepositorySpawnError::Spawn)?;
+        let store = self.store.clone();
+        let request_id = config.request_id;
+        let leased_material = self.leased_material.clone();
+        let marker = config.staging_directory.join("lease-complete");
+        let task = tokio::spawn(async move {
+            let Ok(mut client) =
+                LocalCredentialRepositoryLeaseClient::connect(stream, store, request_id).await
+            else {
+                return;
+            };
+            if client.report_ready().await.is_err() {
+                return;
+            }
+            let Ok(lease) = client.lease().await else {
+                return;
+            };
+            let _ = leased_material.send(lease.material().to_vec());
+            let _ = fs::write(marker, b"ready");
+        });
+        self.tasks
+            .lock()
+            .map_err(|_| LocalRepositorySpawnError::Spawn)?
+            .push(task);
+        let marker = config.staging_directory.join("lease-complete");
+        let mut child = tokio::process::Command::new("/bin/sh");
+        child
+            .arg("-c")
+            .arg("while [ ! -f \"$1\" ]; do sleep 0.01; done")
+            .arg("codewire-test-repository-executor")
+            .arg(marker)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let child = child
+            .spawn()
+            .map_err(|_| LocalRepositorySpawnError::Spawn)?;
+        let _ = commit;
+        Ok(child)
+    }
+}
+
+fn prepare_test_repository_bundle(staging: &std::path::Path) -> io::Result<String> {
+    let repository = staging.join("fixture");
+    let status = Command::new("/usr/bin/git")
+        .args(["init", "--quiet", "--initial-branch", "main"])
+        .arg(&repository)
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other("initialize fixture repository"));
+    }
+    fs::write(repository.join("README.md"), b"credential-free fixture\n")?;
+    for arguments in [
+        vec!["add", "README.md"],
+        vec![
+            "-c",
+            "user.name=Codewire Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+        vec!["update-ref", "refs/codewire/source", "HEAD"],
+    ] {
+        let status = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repository)
+            .args(arguments)
+            .status()?;
+        if !status.success() {
+            return Err(io::Error::other("prepare fixture repository"));
+        }
+    }
+    let output = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("resolve fixture commit"));
+    }
+    let commit = String::from_utf8(output.stdout)
+        .map_err(|_| io::Error::other("invalid fixture commit"))?
+        .trim()
+        .to_owned();
+    let bundle = staging.join("source.bundle");
+    let status = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&repository)
+        .arg("bundle")
+        .arg("create")
+        .arg(&bundle)
+        .arg("refs/codewire/source")
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other("create fixture bundle"));
+    }
+    fs::set_permissions(&bundle, fs::Permissions::from_mode(0o600))?;
+    let size = fs::metadata(&bundle)?.len();
+    let result = staging.join("result");
+    fs::write(&result, format!("main\n{commit}\n{size}\n"))?;
+    fs::set_permissions(result, fs::Permissions::from_mode(0o600))?;
+    Ok(commit)
+}
+
 async fn start_server_with_spawner(
     config: AuthorityRuntimeConfig,
     store: TestProtectedStore,
@@ -225,6 +353,31 @@ async fn start_server_with_spawner(
             async move {
                 let _ = shutdown_rx.await;
             },
+            Some(spawner),
+        )
+        .await
+    });
+    (shutdown_tx, task)
+}
+
+async fn start_server_with_repository_spawner(
+    config: AuthorityRuntimeConfig,
+    store: TestProtectedStore,
+    spawner: Arc<dyn LocalRepositoryProcessSpawner>,
+) -> (
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), AuthorityRuntimeError>>,
+) {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        serve_until_with_process_spawners(
+            config,
+            store,
+            codewire_access::builtin_provider_catalog(),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            None,
             Some(spawner),
         )
         .await
@@ -255,7 +408,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
     assert_eq!(
         client.info(),
         AuthorityInfo {
-            protocol_version: 4,
+            protocol_version: 5,
             protected_store_persistence: ProtectedStorePersistence::ProcessLifetime,
         }
     );
@@ -391,6 +544,69 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
                 .any(|value| value == material)
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let (material_tx, mut material_rx) = tokio::sync::mpsc::unbounded_channel();
+    let spawner = Arc::new(TestRepositorySpawner {
+        store: store.clone(),
+        leased_material: material_tx,
+        tasks: Arc::new(Mutex::new(Vec::new())),
+    });
+    let (shutdown, task) =
+        start_server_with_repository_spawner(config.clone(), store, spawner).await;
+    let mut client = connect_when_ready(&config).await;
+    let token = b"synthetic-private-github-token";
+    let credential = client
+        .add_credential(
+            NewCredential {
+                provider: provider("github"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "github-work".to_owned(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            ProtectedValue::from_slice(token).unwrap(),
+        )
+        .await
+        .unwrap();
+    let profile = client
+        .create_profile(
+            &AccessProfileName::parse("github-work").unwrap(),
+            &BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+        )
+        .await
+        .unwrap();
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    let mut prepared = control
+        .prepare_git_repository(
+            Uuid::new_v4(),
+            &profile.profile.id,
+            profile.profile.revision,
+            "https://github.com/codewire/codewire.git".to_owned(),
+            "main".to_owned(),
+            String::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.branch, "main");
+    assert_eq!(prepared.commit.len(), 40);
+    let mut bundle = Vec::new();
+    while let Some(chunk) = prepared.next_bundle_chunk().await.unwrap() {
+        bundle.extend_from_slice(&chunk);
+    }
+    assert_eq!(u64::try_from(bundle.len()).unwrap(), prepared.bundle_size);
+    assert!(!bundle.windows(token.len()).any(|window| window == token));
+    assert_eq!(material_rx.recv().await.unwrap(), token);
+
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -656,7 +872,7 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 4);
+    assert_eq!(client.info().protocol_version, 5);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     drop(shutdown);
@@ -687,7 +903,7 @@ async fn losing_launcher_waits_for_the_admitted_authority() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 4);
+    assert_eq!(client.info().protocol_version, 5);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     assert!(!config.socket().exists());

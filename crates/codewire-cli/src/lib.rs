@@ -49,9 +49,9 @@ const CLI_VERSION: &str = match option_env!("CODEWIRE_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-/// Reassert the broker's non-dumpable state immediately after `execve`, which
-/// resets this flag for an ordinary executable. The hidden broker entrypoint
-/// performs the remaining parent, capability, session, and environment checks.
+/// Reassert a credential-bearing child's non-dumpable state immediately after
+/// `execve`, which resets this flag for an ordinary executable. The selected
+/// hidden entrypoint performs its remaining confinement checks.
 #[cfg(target_os = "linux")]
 pub fn prepare_local_credential_broker_process() -> std::io::Result<()> {
     // SAFETY: this scalar prctl affects only the current broker process.
@@ -226,6 +226,12 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
     LocalCredentialBrokerConfinementProbe,
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-git-repository-executor", hide = true)]
+    LocalGitRepositoryExecutor(LocalGitRepositoryExecutorArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-git-credential-helper", hide = true)]
+    LocalGitCredentialHelper(LocalGitCredentialHelperArgs),
     #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
     #[command(name = "__local-credential-broker-synthetic-smoke-check", hide = true)]
     LocalCredentialBrokerSyntheticSmokeCheck,
@@ -377,6 +383,10 @@ where
         Command::LocalCredentialBrokerConfinementProbe => {
             run_local_credential_broker_confinement_probe().await
         }
+        #[cfg(target_os = "linux")]
+        Command::LocalGitRepositoryExecutor(args) => run_local_git_repository_executor(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalGitCredentialHelper(args) => run_local_git_credential_helper(args),
         #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
         Command::LocalCredentialBrokerSyntheticSmokeCheck => {
             println!("codewire-local-credential-broker-synthetic-smoke:v1");

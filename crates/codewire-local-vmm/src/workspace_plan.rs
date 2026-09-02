@@ -9,15 +9,19 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use codewire_access::AccessProfileId;
+use codewire_local_credentials::{
+    AuthorityRuntimeConfig, LocalCredentialControlClient, validate_github_https_source,
+};
 use codewire_project::{ProjectSpec, RepositorySpec};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::time::timeout;
 use url::Url;
@@ -263,6 +267,8 @@ pub(crate) fn validate_local_mount_destination(
 pub(crate) async fn prepare_repository_plan(
     engine_state_root: &Path,
     repositories: &[RepositorySpec],
+    credential_access: Option<&RepositoryCredentialAccess>,
+    credential_authority: &AuthorityRuntimeConfig,
 ) -> Result<WorkspacePlan, WorkspacePlanError> {
     if repositories.is_empty() || repositories.len() > codewire_project::MAX_REPOSITORIES {
         return Err(WorkspacePlanError::InvalidPlan);
@@ -271,12 +277,54 @@ pub(crate) async fn prepare_repository_plan(
     let content = ContentStore::create(&root)?;
     let mut inputs = Vec::with_capacity(repositories.len());
     for repository in repositories {
-        inputs.push(prepare_repository(&root, &content, repository).await?);
+        inputs.push(
+            prepare_repository(
+                &root,
+                &content,
+                repository,
+                credential_access,
+                credential_authority,
+            )
+            .await?,
+        );
     }
     WorkspacePlan::from_inputs(inputs)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepositoryCredentialAccess {
+    pub(crate) request_id: Uuid,
+    pub(crate) profile_id: AccessProfileId,
+    pub(crate) profile_revision: u64,
+}
+
 async fn prepare_repository(
+    root: &PrivateRoot,
+    content: &ContentStore,
+    repository: &RepositorySpec,
+    credential_access: Option<&RepositoryCredentialAccess>,
+    credential_authority: &AuthorityRuntimeConfig,
+) -> Result<WorkspaceInput, WorkspacePlanError> {
+    match prepare_anonymous_repository(root, content, repository).await {
+        Ok(input) => Ok(input),
+        Err(WorkspacePlanError::GitCommandFailed)
+            if credential_access.is_some()
+                && validate_github_https_source(&repository.source).is_ok() =>
+        {
+            prepare_authenticated_repository(
+                root,
+                content,
+                repository,
+                credential_access.expect("credential access checked"),
+                credential_authority,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn prepare_anonymous_repository(
     root: &PrivateRoot,
     content: &ContentStore,
     repository: &RepositorySpec,
@@ -369,6 +417,130 @@ async fn prepare_repository(
         source: repository.source.clone(),
         commit,
         branch,
+        destination: repository.destination.clone(),
+        bundle_digest: digest,
+        bundle_size: size,
+    })
+}
+
+async fn prepare_authenticated_repository(
+    root: &PrivateRoot,
+    content: &ContentStore,
+    repository: &RepositorySpec,
+    access: &RepositoryCredentialAccess,
+    credential_authority: &AuthorityRuntimeConfig,
+) -> Result<WorkspaceInput, WorkspacePlanError> {
+    validate_github_https_source(&repository.source)
+        .map_err(|_| WorkspacePlanError::UnsupportedRepositorySource)?;
+    let staging_name = format!("repository-prepare-{}", Uuid::new_v4());
+    let staging = root.create_dir(Path::new(&staging_name), 0o700)?;
+    let mut cleanup = PreparationCleanup::new(staging.clone());
+    let bare = staging.join("source.git");
+    git_status(
+        &staging,
+        [
+            OsStr::new("init"),
+            OsStr::new("--bare"),
+            OsStr::new("--quiet"),
+            bare.as_os_str(),
+        ],
+    )
+    .await?;
+    let mut client = LocalCredentialControlClient::connect(credential_authority)
+        .await
+        .map_err(|_| WorkspacePlanError::CredentialAuthorityUnavailable)?;
+    let mut prepared = client
+        .prepare_git_repository(
+            access.request_id,
+            &access.profile_id,
+            access.profile_revision,
+            repository.source.clone(),
+            repository.branch.clone(),
+            repository.revision.clone(),
+        )
+        .await
+        .map_err(|_| WorkspacePlanError::CredentialRepositoryUnavailable)?;
+    if (!repository.branch.is_empty() && prepared.branch != repository.branch)
+        || (!repository.revision.is_empty() && !prepared.branch.is_empty())
+    {
+        return Err(WorkspacePlanError::CredentialRepositoryInvalid);
+    }
+    let bundle = staging.join("source.bundle");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&bundle)
+        .map_err(|source| WorkspacePlanError::Io {
+            path: bundle.clone(),
+            source,
+        })?;
+    let mut file = tokio::fs::File::from_std(file);
+    let mut written = 0_u64;
+    while let Some(chunk) = prepared
+        .next_bundle_chunk()
+        .await
+        .map_err(|_| WorkspacePlanError::CredentialRepositoryInvalid)?
+    {
+        written = written
+            .checked_add(
+                u64::try_from(chunk.len()).map_err(|_| WorkspacePlanError::BundleTooLarge)?,
+            )
+            .ok_or(WorkspacePlanError::BundleTooLarge)?;
+        if written > MAXIMUM_GIT_BUNDLE_BYTES {
+            return Err(WorkspacePlanError::BundleTooLarge);
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|source| WorkspacePlanError::Io {
+                path: bundle.clone(),
+                source,
+            })?;
+    }
+    file.flush()
+        .await
+        .map_err(|source| WorkspacePlanError::Io {
+            path: bundle.clone(),
+            source,
+        })?;
+    drop(file);
+    if written != prepared.bundle_size {
+        return Err(WorkspacePlanError::CredentialRepositoryInvalid);
+    }
+    git_status(
+        &bare,
+        [
+            OsStr::new("bundle"),
+            OsStr::new("verify"),
+            bundle.as_os_str(),
+        ],
+    )
+    .await?;
+    let listed = git_text(
+        &bare,
+        [
+            OsStr::new("bundle"),
+            OsStr::new("list-heads"),
+            bundle.as_os_str(),
+            OsStr::new("refs/codewire/source"),
+        ],
+        512,
+    )
+    .await?;
+    if listed.trim() != format!("{} refs/codewire/source", prepared.commit) {
+        return Err(WorkspacePlanError::CredentialRepositoryInvalid);
+    }
+    let (digest, size, file) = digest_bundle(&bundle)?;
+    if size != prepared.bundle_size {
+        return Err(WorkspacePlanError::CredentialRepositoryInvalid);
+    }
+    content.admit_file(&digest, size, file).await?;
+    cleanup.remove()?;
+
+    Ok(WorkspaceInput::Repository {
+        source: repository.source.clone(),
+        commit: prepared.commit,
+        branch: prepared.branch,
         destination: repository.destination.clone(),
         bundle_digest: digest,
         bundle_size: size,
@@ -712,6 +884,12 @@ pub enum WorkspacePlanError {
     GitUnavailable,
     #[error("remote Git preparation failed")]
     GitCommandFailed,
+    #[error("local credential authority is unavailable for protected repository preparation")]
+    CredentialAuthorityUnavailable,
+    #[error("protected GitHub repository preparation is unavailable")]
+    CredentialRepositoryUnavailable,
+    #[error("protected GitHub repository output is invalid")]
+    CredentialRepositoryInvalid,
     #[error("remote Git preparation timed out")]
     GitTimeout,
     #[error("remote Git output exceeded the safety limit")]

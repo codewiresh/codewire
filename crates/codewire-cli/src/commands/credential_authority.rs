@@ -12,7 +12,8 @@ use anyhow::Context as _;
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AuthorityRuntimeConfig, AuthorityRuntimeError,
     LocalBrokerProcessConfig, LocalBrokerProcessSpawner, LocalBrokerSpawnError,
-    LocalCredentialClient, serve_os_local_credential_authority_with_broker_spawner,
+    LocalCredentialClient, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
+    LocalRepositorySpawnError, serve_os_local_credential_authority_with_process_spawners,
 };
 
 use super::{LocalCredentialAuthorityArgs, LocalCredentialAuthorityProbeArgs};
@@ -38,11 +39,11 @@ pub(crate) async fn run_local_credential_authority(
     args: LocalCredentialAuthorityArgs,
 ) -> anyhow::Result<()> {
     let config = authority_config(args.root)?;
-    let spawner = Arc::new(CwLocalBrokerSpawner {
+    let spawner = Arc::new(CwLocalCredentialProcessSpawner {
         executable: config.executable.clone(),
         authority_root: config.root.clone(),
     });
-    serve_os_local_credential_authority_with_broker_spawner(config, spawner)
+    serve_os_local_credential_authority_with_process_spawners(config, spawner.clone(), spawner)
         .await
         .context("run local credential authority")
 }
@@ -139,12 +140,12 @@ fn spawn_authority(config: &AuthorityRuntimeConfig) -> Result<Child, AuthorityRu
     command.spawn().map_err(|_| AuthorityRuntimeError::Spawn)
 }
 
-struct CwLocalBrokerSpawner {
+struct CwLocalCredentialProcessSpawner {
     executable: PathBuf,
     authority_root: PathBuf,
 }
 
-impl LocalBrokerProcessSpawner for CwLocalBrokerSpawner {
+impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
@@ -219,6 +220,75 @@ impl LocalBrokerProcessSpawner for CwLocalBrokerSpawner {
             });
         }
         command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn)
+    }
+}
+
+impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
+    fn spawn(
+        &self,
+        config: &LocalRepositoryProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalRepositorySpawnError> {
+        let authority_fd = authority_peer.as_raw_fd();
+        if authority_fd < 3 {
+            return Err(LocalRepositorySpawnError::InvalidConfiguration);
+        }
+        let parent_pid = unsafe { libc::getpid() };
+        let allowed_environment = authority_environment(|name| env::var_os(name));
+        let mut command = tokio::process::Command::new(&self.executable);
+        command
+            .arg("__local-git-repository-executor")
+            .arg("--authority-fd")
+            .arg("3")
+            .arg("--request-id")
+            .arg(config.request_id.to_string())
+            .arg("--staging-directory")
+            .arg(&config.staging_directory)
+            .env_clear()
+            .envs(allowed_environment)
+            .current_dir(&config.staging_directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        // SAFETY: this post-fork hook transfers one authority-created socket
+        // to FD 3 and applies the same capability-empty, no-new-privileges,
+        // non-dumpable, parent-bound confinement as the long-lived broker.
+        unsafe {
+            command.pre_exec(move || {
+                confine_spawned_process()?;
+                if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0
+                    || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
+                    || libc::setsid() < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() != parent_pid {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                if authority_fd == 3 {
+                    if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                } else if libc::dup3(authority_fd, 3, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::syscall(
+                    libc::SYS_close_range,
+                    4_u32,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::umask(0o077);
+                Ok(())
+            });
+        }
+        command
+            .spawn()
+            .map_err(|_| LocalRepositorySpawnError::Spawn)
     }
 }
 

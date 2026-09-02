@@ -40,9 +40,18 @@ pub fn builtin_provider_catalog() -> ProviderCatalog {
         ProviderDefinition {
             id: ProviderId::parse("github").expect("built-in GitHub provider ID"),
             authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
-            // #1910 owns the dedicated host-side repository executor. Keep
-            // the capability absent until that credential-bearing path lands.
-            capabilities: BTreeMap::new(),
+            capabilities: BTreeMap::from([(
+                CapabilitySlot::github(),
+                CapabilityPolicy {
+                    authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+                    permissions: BTreeSet::from([GrantPermission {
+                        operation: BrokerOperationId::parse("git-fetch")
+                            .expect("built-in Git fetch operation ID"),
+                        route: BrokerRouteId::parse("github-https")
+                            .expect("built-in GitHub HTTPS route ID"),
+                    }]),
+                },
+            )]),
         },
     ])
     .expect("built-in provider catalog")
@@ -83,6 +92,15 @@ mod tests {
             github.authentication_kinds,
             BTreeSet::from([CredentialAuthKind::OAuth])
         );
-        assert!(github.capabilities.is_empty());
+        assert_eq!(
+            github.capabilities[&CapabilitySlot::github()],
+            CapabilityPolicy {
+                authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+                permissions: BTreeSet::from([GrantPermission {
+                    operation: BrokerOperationId::parse("git-fetch").unwrap(),
+                    route: BrokerRouteId::parse("github-https").unwrap(),
+                }]),
+            }
+        );
     }
 }

@@ -31,13 +31,13 @@ struct StoreState {
 }
 
 #[derive(Clone)]
-struct TestProtectedStore {
+pub(crate) struct TestProtectedStore {
     state: Arc<Mutex<StoreState>>,
     persistence: ProtectedStorePersistence,
 }
 
 impl TestProtectedStore {
-    fn new(persistence: ProtectedStorePersistence) -> Self {
+    pub(crate) fn new(persistence: ProtectedStorePersistence) -> Self {
         Self {
             state: Arc::new(Mutex::new(StoreState::default())),
             persistence,
@@ -350,6 +350,75 @@ fn broker_operation_lease_rederives_the_bound_grant_before_material_access() {
     assert!(!rendered.contains("synthetic-operation-token"));
     assert!(!rendered.contains("protected_entry"));
     assert_eq!(lease.with_material(<[u8]>::to_vec), secret);
+}
+
+#[test]
+fn repository_lease_binds_exact_github_profile_revision_and_route() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority = LocalCredentialAuthority::open(
+        &authority_root(&temp),
+        store,
+        codewire_access::builtin_provider_catalog(),
+    )
+    .expect("open authority");
+    let credential = authority
+        .add_credential(
+            NewCredential {
+                provider: provider("github"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "github-work".to_owned(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            material(b"synthetic-github-token"),
+        )
+        .expect("add GitHub credential");
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("github-work").unwrap(),
+            BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+        )
+        .expect("create GitHub profile");
+    let request = RepositoryCredentialLeaseRequest {
+        request_id: Uuid::new_v4(),
+        profile_id: profile.profile.id.clone(),
+        profile_revision: profile.profile.revision,
+        source: "https://github.com/codewire/codewire.git".to_owned(),
+        branch: "main".to_owned(),
+        revision: String::new(),
+    };
+    let admission = authority
+        .admit_repository_credential_operation(&request)
+        .expect("admit repository lease");
+    assert_eq!(admission.credential.metadata.id, credential.metadata.id);
+    assert_eq!(admission.profile_id, profile.profile.id);
+    assert_eq!(admission.profile_revision, 1);
+    assert_eq!(
+        admission.permission,
+        crate::repository::github_fetch_permission()
+    );
+    assert_eq!(admission.material_generation, 1);
+
+    let mut invalid_source = request.clone();
+    invalid_source.source = "https://example.com/codewire/codewire.git".to_owned();
+    assert!(matches!(
+        authority.admit_repository_credential_operation(&invalid_source),
+        Err(LocalCredentialError::CredentialOperationLeaseDenied)
+    ));
+    let mut missing_revision = request.clone();
+    missing_revision.profile_revision = 2;
+    assert!(matches!(
+        authority.admit_repository_credential_operation(&missing_revision),
+        Err(LocalCredentialError::ProfileRevisionNotFound)
+    ));
+    authority
+        .revoke_credential(&credential.metadata.id)
+        .expect("revoke GitHub credential");
+    assert!(matches!(
+        authority.admit_repository_credential_operation(&request),
+        Err(LocalCredentialError::CredentialInactive)
+    ));
 }
 
 #[test]

@@ -31,6 +31,10 @@ mod credential_broker_confinement;
 #[cfg(target_os = "linux")]
 pub(crate) use credential_broker_confinement::run_local_credential_broker_confinement_probe;
 #[cfg(target_os = "linux")]
+mod credential_repository;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_repository::*;
+#[cfg(target_os = "linux")]
 mod credentials;
 #[cfg(target_os = "linux")]
 pub(crate) use credentials::*;
@@ -310,6 +314,25 @@ pub(crate) struct LocalCredentialBrokerArgs {
     pub(crate) supervisor_socket: PathBuf,
     #[arg(long)]
     pub(crate) credential_authentication_kind: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalGitRepositoryExecutorArgs {
+    #[arg(long)]
+    pub(crate) authority_fd: i32,
+    #[arg(long)]
+    pub(crate) request_id: String,
+    #[arg(long)]
+    pub(crate) staging_directory: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalGitCredentialHelperArgs {
+    #[arg(long)]
+    pub(crate) credential_socket: PathBuf,
+    pub(crate) operation: String,
 }
 
 #[cfg(target_os = "linux")]

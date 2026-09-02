@@ -15,7 +15,12 @@ fn main() {
     let broker = std::env::args_os().nth(1).is_some_and(|argument| {
         matches!(
             argument.to_str(),
-            Some("__local-credential-broker" | "__local-credential-broker-confinement-probe")
+            Some(
+                "__local-credential-broker"
+                    | "__local-credential-broker-confinement-probe"
+                    | "__local-git-repository-executor"
+                    | "__local-git-credential-helper"
+            )
         )
     });
     #[cfg(not(target_os = "linux"))]

@@ -17,7 +17,9 @@ use codewire_protected_store::{
 };
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, watch};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
 use crate::broker_channel::{
     BrokerLeaseAuditLog, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT, serve_broker_lease_channel_with_ready,
@@ -26,6 +28,12 @@ use crate::control::v1::local_credential_authority_service_server::{
     LocalCredentialAuthorityService, LocalCredentialAuthorityServiceServer,
 };
 use crate::control::v1::{self, CredentialAuthenticationKind};
+use crate::repository::{
+    LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner, PreparedRepositoryMetadata,
+    RepositoryExecutorError, cleanup_repository_staging, create_repository_staging,
+    prepared_bundle_path, read_prepared_repository, remove_repository_staging,
+    serve_repository_lease_channel_with_ready, validate_repository_lease_request,
+};
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, bind_owner_only,
     remove_bound_socket,
@@ -34,7 +42,7 @@ use crate::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AccessProfileRecord, AccessProfileRevisionRecord,
     CredentialRecord, EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime,
     LocalBrokerProcessConfig, LocalBrokerProcessSpawner, LocalCredentialAuthority,
-    LocalCredentialError, NewCredential,
+    LocalCredentialError, NewCredential, RepositoryCredentialLeaseRequest,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -43,10 +51,15 @@ const BROKER_READY_STABILITY: std::time::Duration = std::time::Duration::from_mi
 const BROKER_RESTART_MIN_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const BROKER_RESTART_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 const BROKER_STABLE_RUNTIME: std::time::Duration = std::time::Duration::from_secs(30);
+const REPOSITORY_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const REPOSITORY_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(310);
+const REPOSITORY_CHANNEL_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+const REPOSITORY_STREAM_CHUNK_BYTES: usize = 48 * 1024;
 
 struct AuthorityRpc<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
     brokers: Arc<BrokerProcessManager<S>>,
+    repositories: Arc<RepositoryProcessManager<S>>,
     broker_audit: Arc<BrokerLeaseAuditLog>,
     shutdown: watch::Sender<bool>,
 }
@@ -56,6 +69,7 @@ impl<S: ProtectedStore> Clone for AuthorityRpc<S> {
         Self {
             authority: Arc::clone(&self.authority),
             brokers: Arc::clone(&self.brokers),
+            repositories: Arc::clone(&self.repositories),
             broker_audit: Arc::clone(&self.broker_audit),
             shutdown: self.shutdown.clone(),
         }
@@ -92,6 +106,25 @@ pub async fn serve_os_local_credential_authority_with_broker_spawner(
         builtin_provider_catalog(),
         std::future::pending(),
         Some(spawner),
+    )
+    .await
+}
+
+/// Run the production authority with both authority-owned credential-bearing
+/// child launchers. Neither launcher is exposed through the owner RPC API.
+pub async fn serve_os_local_credential_authority_with_process_spawners(
+    config: AuthorityRuntimeConfig,
+    broker_spawner: Arc<dyn LocalBrokerProcessSpawner>,
+    repository_spawner: Arc<dyn LocalRepositoryProcessSpawner>,
+) -> Result<(), AuthorityRuntimeError> {
+    verify_production_process_confinement()?;
+    serve_until_with_process_spawners(
+        config,
+        OsProtectedStore,
+        builtin_provider_catalog(),
+        std::future::pending(),
+        Some(broker_spawner),
+        Some(repository_spawner),
     )
     .await
 }
@@ -157,12 +190,31 @@ where
     S: ProtectedStore + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
+    serve_until_with_process_spawners(config, protected_store, catalog, shutdown, spawner, None)
+        .await
+}
+
+pub(crate) async fn serve_until_with_process_spawners<S, F>(
+    config: AuthorityRuntimeConfig,
+    protected_store: S,
+    catalog: ProviderCatalog,
+    shutdown: F,
+    broker_spawner: Option<Arc<dyn LocalBrokerProcessSpawner>>,
+    repository_spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
+) -> Result<(), AuthorityRuntimeError>
+where
+    S: ProtectedStore + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
     config.prepare_root()?;
+    let authority_root = config.root.clone();
     let authority = Arc::new(LocalCredentialAuthority::open(
         &config.root,
         protected_store,
         catalog,
     )?);
+    cleanup_repository_staging(&authority_root)
+        .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
     // The persistence singleton lock is held before a stale endpoint is ever
     // removed, so a losing process cannot unlink the live authority socket.
     let (incoming, socket_identity) = bind_owner_only(&config)?;
@@ -170,12 +222,18 @@ where
     let broker_audit = Arc::new(BrokerLeaseAuditLog::default());
     let brokers = Arc::new(BrokerProcessManager::new(
         Arc::clone(&authority),
-        spawner,
+        broker_spawner,
         Arc::clone(&broker_audit),
+    ));
+    let repositories = Arc::new(RepositoryProcessManager::new(
+        Arc::clone(&authority),
+        repository_spawner,
+        authority_root,
     ));
     let service = AuthorityRpc {
         authority,
         brokers: Arc::clone(&brokers),
+        repositories,
         broker_audit,
         shutdown: shutdown_tx,
     };
@@ -203,6 +261,157 @@ where
     brokers.shutdown_all().await;
     let cleanup = remove_bound_socket(&config, &socket_identity);
     result.and(cleanup)
+}
+
+struct RepositoryProcessManager<S: ProtectedStore> {
+    authority: Arc<LocalCredentialAuthority<S>>,
+    spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
+    authority_root: PathBuf,
+}
+
+impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
+    fn new(
+        authority: Arc<LocalCredentialAuthority<S>>,
+        spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
+        authority_root: PathBuf,
+    ) -> Self {
+        Self {
+            authority,
+            spawner,
+            authority_root,
+        }
+    }
+
+    async fn prepare(
+        &self,
+        authorization: RepositoryCredentialLeaseRequest,
+    ) -> Result<PreparedRepository, Status> {
+        validate_repository_lease_request(&authorization)
+            .map_err(|_| Status::invalid_argument("invalid repository preparation request"))?;
+        let authority = Arc::clone(&self.authority);
+        let preflight = authorization.clone();
+        run_blocking(move || authority.admit_repository_credential_operation(&preflight)).await?;
+        let spawner = self.spawner.as_ref().cloned().ok_or_else(|| {
+            Status::unavailable("local repository executor launcher is unavailable")
+        })?;
+        let staging =
+            create_repository_staging(&self.authority_root).map_err(repository_executor_status)?;
+        let cleanup = RepositoryStagingGuard {
+            path: Some(staging.clone()),
+        };
+        let config = LocalRepositoryProcessConfig {
+            request_id: authorization.request_id,
+            staging_directory: staging.clone(),
+        };
+        config
+            .validate()
+            .map_err(|_| Status::invalid_argument("invalid repository preparation request"))?;
+        let (authority_stream, executor_stream) = std::os::unix::net::UnixStream::pair()
+            .map_err(|_| Status::unavailable("local repository executor is unavailable"))?;
+        authority_stream
+            .set_nonblocking(true)
+            .map_err(|_| Status::unavailable("local repository executor is unavailable"))?;
+        let authority_stream = UnixStream::from_std(authority_stream)
+            .map_err(|_| Status::unavailable("local repository executor is unavailable"))?;
+        let mut child = spawner
+            .spawn(&config, executor_stream)
+            .map_err(|_| Status::unavailable("local repository executor is unavailable"))?;
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+        let mut lease_task = tokio::spawn(serve_repository_lease_channel_with_ready(
+            Arc::clone(&self.authority),
+            authority_stream,
+            authorization,
+            ready_tx,
+        ));
+        let mut start_timeout = Box::pin(tokio::time::sleep(REPOSITORY_START_TIMEOUT));
+        let ready = tokio::select! {
+            ready = &mut ready_rx => ready.is_ok(),
+            _ = child.wait() => false,
+            _ = &mut lease_task => false,
+            _ = &mut start_timeout => false,
+        };
+        if !ready {
+            stop_repository_child(&mut child, &mut lease_task).await;
+            return Err(Status::unavailable(
+                "local repository executor failed to start",
+            ));
+        }
+        let mut execution_timeout = Box::pin(tokio::time::sleep(REPOSITORY_EXECUTION_TIMEOUT));
+        let status = tokio::select! {
+            status = child.wait() => {
+                match status {
+                    Ok(status) => status,
+                    Err(_) => {
+                        stop_repository_child(&mut child, &mut lease_task).await;
+                        return Err(Status::unavailable(
+                            "local repository executor is unavailable",
+                        ));
+                    }
+                }
+            }
+            _ = &mut execution_timeout => {
+                stop_repository_child(&mut child, &mut lease_task).await;
+                return Err(Status::deadline_exceeded(
+                    "local repository preparation timed out",
+                ));
+            }
+            _ = &mut lease_task => {
+                match tokio::time::timeout(REPOSITORY_CHANNEL_CLOSE_GRACE, child.wait()).await {
+                    Ok(Ok(status)) => status,
+                    _ => {
+                        stop_repository_child(&mut child, &mut lease_task).await;
+                        return Err(Status::unavailable(
+                            "local repository credential lease is unavailable",
+                        ));
+                    }
+                }
+            }
+        };
+        lease_task.abort();
+        if !status.success() {
+            return Err(Status::unavailable("local repository preparation failed"));
+        }
+        let metadata = read_prepared_repository(&staging).map_err(repository_executor_status)?;
+        let bundle = tokio::fs::File::open(prepared_bundle_path(&staging))
+            .await
+            .map_err(|_| Status::unavailable("local repository output is unavailable"))?;
+        Ok(PreparedRepository {
+            metadata,
+            bundle,
+            _cleanup: cleanup,
+        })
+    }
+}
+
+struct PreparedRepository {
+    metadata: PreparedRepositoryMetadata,
+    bundle: tokio::fs::File,
+    _cleanup: RepositoryStagingGuard,
+}
+
+struct RepositoryStagingGuard {
+    path: Option<PathBuf>,
+}
+
+impl Drop for RepositoryStagingGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = remove_repository_staging(&path);
+        }
+    }
+}
+
+async fn stop_repository_child(
+    child: &mut tokio::process::Child,
+    lease_task: &mut tokio::task::JoinHandle<Result<(), crate::RepositoryLeaseChannelError>>,
+) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    lease_task.abort();
+}
+
+fn repository_executor_status(_: RepositoryExecutorError) -> Status {
+    Status::unavailable("local repository preparation failed")
 }
 
 struct BrokerProcessEntry {
@@ -939,6 +1148,93 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         Ok(Response::new(
             v1::ListRecentBrokerLeaseAuditEventsResponse { events },
         ))
+    }
+
+    type PrepareGitRepositoryStream =
+        ReceiverStream<Result<v1::PreparedGitRepositoryChunk, Status>>;
+
+    async fn prepare_git_repository(
+        &self,
+        request: Request<v1::PrepareGitRepositoryRequest>,
+    ) -> Result<Response<Self::PrepareGitRepositoryStream>, Status> {
+        let request = request.into_inner();
+        let request_id = Uuid::parse_str(&request.request_id)
+            .ok()
+            .filter(|request_id| {
+                !request_id.is_nil() && request_id.to_string() == request.request_id
+            })
+            .ok_or_else(|| Status::invalid_argument("invalid repository preparation request"))?;
+        let authorization = RepositoryCredentialLeaseRequest {
+            request_id,
+            profile_id: profile_id(request.profile_id)?,
+            profile_revision: request.profile_revision,
+            source: request.source,
+            branch: request.branch,
+            revision: request.revision,
+        };
+        let prepared = self.repositories.prepare(authorization).await?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(stream_prepared_repository(prepared, sender));
+        Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+}
+
+async fn stream_prepared_repository(
+    mut prepared: PreparedRepository,
+    sender: tokio::sync::mpsc::Sender<Result<v1::PreparedGitRepositoryChunk, Status>>,
+) {
+    use tokio::io::AsyncReadExt as _;
+
+    let metadata = v1::PreparedGitRepositoryChunk {
+        value: Some(v1::prepared_git_repository_chunk::Value::Metadata(
+            v1::PreparedGitRepositoryMetadata {
+                branch: prepared.metadata.branch.clone(),
+                commit: prepared.metadata.commit.clone(),
+                bundle_size: prepared.metadata.bundle_size,
+            },
+        )),
+    };
+    if sender.send(Ok(metadata)).await.is_err() {
+        return;
+    }
+    let mut remaining = prepared.metadata.bundle_size;
+    let mut buffer = vec![0_u8; REPOSITORY_STREAM_CHUNK_BYTES];
+    while remaining > 0 {
+        let limit = usize::try_from(remaining.min(buffer.len() as u64))
+            .expect("repository stream chunk bound fits usize");
+        let length = match prepared.bundle.read(&mut buffer[..limit]).await {
+            Ok(0) | Err(_) => {
+                let _ = sender
+                    .send(Err(Status::data_loss(
+                        "local repository bundle ended unexpectedly",
+                    )))
+                    .await;
+                return;
+            }
+            Ok(length) => length,
+        };
+        remaining -= u64::try_from(length).expect("repository read length fits u64");
+        if sender
+            .send(Ok(v1::PreparedGitRepositoryChunk {
+                value: Some(v1::prepared_git_repository_chunk::Value::Bundle(
+                    buffer[..length].to_vec(),
+                )),
+            }))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    match prepared.bundle.read(&mut buffer[..1]).await {
+        Ok(0) => {}
+        _ => {
+            let _ = sender
+                .send(Err(Status::data_loss(
+                    "local repository bundle size changed",
+                )))
+                .await;
+        }
     }
 }
 

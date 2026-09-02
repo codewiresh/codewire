@@ -77,8 +77,8 @@ use crate::workspace::{
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 use crate::workspace_plan::{
-    WorkspaceInput, WorkspacePlan, WorkspacePlanError, prepare_repository_plan,
-    validate_local_mount_destination,
+    RepositoryCredentialAccess, WorkspaceInput, WorkspacePlan, WorkspacePlanError,
+    prepare_repository_plan, validate_local_mount_destination,
 };
 
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 3;
@@ -1350,9 +1350,22 @@ impl SupervisorCore {
         let mut inputs = if project.repositories.is_empty() {
             Vec::new()
         } else {
-            prepare_repository_plan(&self.config.engine_root(), &project.repositories)
-                .await?
-                .inputs
+            let credential_access = create_request_access_selection(request, &project)?.map(
+                |(profile_id, profile_revision, _)| RepositoryCredentialAccess {
+                    request_id: Uuid::parse_str(&request.request_id)
+                        .expect("validated create request ID"),
+                    profile_id,
+                    profile_revision,
+                },
+            );
+            prepare_repository_plan(
+                &self.config.engine_root(),
+                &project.repositories,
+                credential_access.as_ref(),
+                &self.config.credential_authority_config(),
+            )
+            .await?
+            .inputs
         };
         if !request.local_mounts.is_empty() {
             let mounts = request.local_mounts.clone();

@@ -1417,19 +1417,18 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw credentials --local profile create "$CREDENTIAL_PROFILE_NAME"
   run_cw credentials --local profile set \
     "$CREDENTIAL_PROFILE_NAME" codex "$CREDENTIAL_ID"
-  run_cw_expect_failure credentials --local profile set \
+  run_cw credentials --local profile set \
     "$CREDENTIAL_PROFILE_NAME" github "$GITHUB_CREDENTIAL_ID"
-  rg -qF 'provider github does not support slot github with this authentication kind' \
-    "$LAST_STDERR" || die 'unrouted GitHub capability did not fail closed'
   run_cw credentials --local profile get "$CREDENTIAL_PROFILE_NAME" --output json
-  jq -e --arg credential "$CREDENTIAL_ID" '
+  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" '
     length == 1 and
     .[0].placement == "local" and
     .[0].owner == "user/local-user" and
     .[0].name == "native-broker" and
-    .[0].revision == 2 and
-    (.[0].entries | length) == 1 and
-    .[0].entries.codex == $credential
+    .[0].revision == 3 and
+    (.[0].entries | length) == 2 and
+    .[0].entries.codex == $credential and
+    .[0].entries.github == $github
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic access profile metadata drifted'
   CREATE_ACCESS_ARGS=(--access-profile "user/$CREDENTIAL_PROFILE_NAME")
 else
@@ -1470,7 +1469,7 @@ jq -e --arg listen "127.0.0.1:$HOST_PORT" --arg network "$MESH_NETWORK" '
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   jq -e '
     .access_profile == "user/native-broker" and
-    .access_profile_revision == 2
+    .access_profile_revision == 3
   ' "$LAST_STDOUT" >/dev/null || die 'created native environment access profile drifted'
 fi
 [[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'

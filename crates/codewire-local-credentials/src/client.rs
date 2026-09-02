@@ -14,10 +14,12 @@ use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
 };
 use tonic::Status;
+use uuid::Uuid;
 
 use crate::broker_channel::MAX_BROKER_LEASE_AUDIT_LIST_LIMIT;
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
+use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector, validate_github_https_source};
 use crate::service::auth_kind_to_proto;
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
@@ -30,6 +32,13 @@ use crate::{
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
 const AUTHORITY_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn valid_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorityInfo {
@@ -52,6 +61,66 @@ pub struct LocalCredentialClient {
 pub struct LocalCredentialControlClient {
     inner: LocalCredentialAuthorityServiceClient<tonic::transport::Channel>,
     info: AuthorityInfo,
+}
+
+/// Credential-free output stream from one authority-owned repository
+/// executor. The first response metadata is validated before this value is
+/// constructed; subsequent items can contain Git bundle bytes only.
+pub struct PreparedGitRepository {
+    pub branch: String,
+    pub commit: String,
+    pub bundle_size: u64,
+    remaining: u64,
+    finished: bool,
+    stream: tonic::Streaming<v1::PreparedGitRepositoryChunk>,
+}
+
+impl std::fmt::Debug for PreparedGitRepository {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedGitRepository")
+            .field("branch", &self.branch)
+            .field("commit", &self.commit)
+            .field("bundle_size", &self.bundle_size)
+            .field("remaining", &self.remaining)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedGitRepository {
+    pub async fn next_bundle_chunk(&mut self) -> Result<Option<Vec<u8>>, Status> {
+        if self.finished {
+            return Ok(None);
+        }
+        let message = self.stream.message().await?;
+        if self.remaining == 0 {
+            self.finished = true;
+            return if message.is_none() {
+                Ok(None)
+            } else {
+                Err(Status::data_loss(
+                    "local repository authority returned trailing output",
+                ))
+            };
+        }
+        let chunk = message.ok_or_else(|| {
+            Status::data_loss("local repository authority returned a truncated bundle")
+        })?;
+        let Some(v1::prepared_git_repository_chunk::Value::Bundle(bytes)) = chunk.value else {
+            return Err(Status::data_loss(
+                "local repository authority returned invalid chunk ordering",
+            ));
+        };
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| Status::data_loss("local repository bundle chunk is invalid"))?;
+        if bytes.is_empty() || length > self.remaining {
+            return Err(Status::data_loss(
+                "local repository authority returned an invalid bundle chunk",
+            ));
+        }
+        self.remaining -= length;
+        Ok(Some(bytes))
+    }
 }
 
 impl std::fmt::Debug for LocalCredentialControlClient {
@@ -505,6 +574,66 @@ impl LocalCredentialControlClient {
 
     pub fn info(&self) -> AuthorityInfo {
         self.info
+    }
+
+    pub async fn prepare_git_repository(
+        &mut self,
+        request_id: Uuid,
+        profile_id: &AccessProfileId,
+        profile_revision: u64,
+        source: String,
+        branch: String,
+        revision: String,
+    ) -> Result<PreparedGitRepository, Status> {
+        if request_id.is_nil()
+            || profile_revision == 0
+            || validate_github_https_source(&source).is_err()
+            || (!branch.is_empty() && !valid_git_selector(&branch))
+            || (!revision.is_empty() && !valid_git_selector(&revision))
+            || (!branch.is_empty() && !revision.is_empty())
+        {
+            return Err(Status::invalid_argument(
+                "invalid repository preparation request",
+            ));
+        }
+        let mut stream = self
+            .inner
+            .prepare_git_repository(v1::PrepareGitRepositoryRequest {
+                request_id: request_id.to_string(),
+                profile_id: profile_id.to_string(),
+                profile_revision,
+                source,
+                branch,
+                revision,
+            })
+            .await?
+            .into_inner();
+        let first = stream
+            .message()
+            .await?
+            .ok_or_else(|| Status::data_loss("local repository authority returned no output"))?;
+        let Some(v1::prepared_git_repository_chunk::Value::Metadata(metadata)) = first.value else {
+            return Err(Status::data_loss(
+                "local repository authority returned invalid chunk ordering",
+            ));
+        };
+        if (!metadata.branch.is_empty() && !valid_git_selector(&metadata.branch))
+            || !valid_object_id(&metadata.commit)
+            || metadata.bundle_size == 0
+            || metadata.bundle_size > MAX_GIT_BUNDLE_BYTES
+        {
+            return Err(Status::data_loss(
+                "local repository authority returned invalid metadata",
+            ));
+        }
+        Ok(PreparedGitRepository {
+            branch: metadata.branch,
+            commit: metadata.commit,
+            bundle_size: metadata.bundle_size,
+            remaining: metadata.bundle_size,
+            finished: false,
+            stream,
+        })
     }
 
     pub async fn ensure_environment_access_binding(

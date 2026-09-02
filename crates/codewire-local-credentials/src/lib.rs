@@ -14,6 +14,7 @@ mod broker_channel;
 mod broker_process;
 mod client;
 mod control;
+mod repository;
 mod service;
 mod transport;
 
@@ -25,10 +26,20 @@ pub use broker_process::{
     EnvironmentBrokerRuntime, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
     LocalBrokerSpawnError,
 };
-pub use client::{AuthorityInfo, LocalCredentialClient, LocalCredentialControlClient};
+pub use client::{
+    AuthorityInfo, LocalCredentialClient, LocalCredentialControlClient, PreparedGitRepository,
+};
+pub use repository::{
+    LocalCredentialRepositoryLeaseClient, LocalRepositoryGitProcessSpawner,
+    LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner, LocalRepositorySpawnError,
+    MAX_GIT_BUNDLE_BYTES, RepositoryCredentialLease, RepositoryExecutorError,
+    RepositoryLeaseChannelError, run_git_credential_helper, run_local_repository_executor,
+    validate_github_https_source,
+};
 pub use service::{
     serve_local_credential_authority, serve_os_local_credential_authority,
     serve_os_local_credential_authority_with_broker_spawner,
+    serve_os_local_credential_authority_with_process_spawners,
 };
 pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
 
@@ -180,6 +191,30 @@ pub struct CredentialOperationLeaseRequest {
     pub capability_slot: CapabilitySlot,
     pub operation: BrokerOperationId,
     pub route: BrokerRouteId,
+}
+
+/// Material-free authorization for one pre-create repository fetch.
+///
+/// This is deliberately separate from an environment grant: repository
+/// resolution happens before the create intent has allocated and durably
+/// bound an environment ID. The exact local profile revision still selects
+/// the only credential and capability that the one-shot executor may borrow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepositoryCredentialLeaseRequest {
+    pub request_id: Uuid,
+    pub profile_id: AccessProfileId,
+    pub profile_revision: u64,
+    pub source: String,
+    pub branch: String,
+    pub revision: String,
+}
+
+pub(crate) struct RepositoryCredentialAdmission {
+    credential: CredentialRecord,
+    profile_id: AccessProfileId,
+    profile_revision: u64,
+    permission: GrantPermission,
+    material_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1091,6 +1126,61 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         Ok(CredentialOperationAdmission {
             credential: record.public,
             grant,
+            permission,
+            material_generation: record.material_generation,
+        })
+    }
+
+    pub(crate) fn admit_repository_credential_operation(
+        &self,
+        request: &RepositoryCredentialLeaseRequest,
+    ) -> Result<RepositoryCredentialAdmission, LocalCredentialError> {
+        if crate::repository::validate_repository_lease_request(request).is_err() {
+            return Err(LocalCredentialError::CredentialOperationLeaseDenied);
+        }
+        let connection = self.connection()?;
+        let profile =
+            load_profile_revision(&connection, &request.profile_id, request.profile_revision)?
+                .profile;
+        let capability_slot = CapabilitySlot::github();
+        let credential_id = profile
+            .entries
+            .get(&capability_slot)
+            .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)?;
+        let record =
+            load_internal_credential(&connection, credential_id, Some(MaterialState::Ready))?;
+        let permission = GrantPermission {
+            operation: BrokerOperationId::parse("git-fetch")
+                .expect("canonical Git fetch operation ID"),
+            route: BrokerRouteId::parse("github-https").expect("canonical GitHub HTTPS route ID"),
+        };
+        let capability = self
+            .catalog
+            .get(&record.public.metadata.provider)
+            .and_then(|provider| provider.capabilities.get(&capability_slot))
+            .filter(|capability| {
+                capability
+                    .authentication_kinds
+                    .contains(&record.public.metadata.authentication_kind)
+                    && capability.permissions.contains(&permission)
+            })
+            .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)?;
+        debug_assert!(capability.permissions.contains(&permission));
+        if record.public.metadata.provider.as_str() != "github"
+            || record.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+            || record.public.metadata.status != CredentialStatus::Active
+        {
+            return Err(LocalCredentialError::CredentialInactive);
+        }
+        if let Some(expires_at) = record.public.metadata.expires_at_unix
+            && expires_at <= unix_seconds()?
+        {
+            return Err(LocalCredentialError::CredentialInactive);
+        }
+        Ok(RepositoryCredentialAdmission {
+            credential: record.public,
+            profile_id: request.profile_id.clone(),
+            profile_revision: request.profile_revision,
             permission,
             material_generation: record.material_generation,
         })
