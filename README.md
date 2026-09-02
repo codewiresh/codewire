@@ -63,7 +63,7 @@ cargo build -p codewire-cli-bin --bin cw
 ./target/debug/cw env create --local \
   --name codewire-dev \
   --cpu 2 \
-  --memory 16Gi \
+  --memory 8GB \
   --path .
 
 # Creation selects it, so enter it without a platform login or target argument.
@@ -77,12 +77,16 @@ cargo build -p codewire-cli-bin --bin cw
 
 # CPU and memory apply on restart; the persistent ext4 disk grows offline.
 ./target/debug/cw env resize --local codewire-dev \
-  --cpu 4 --memory 24Gi --disk 40Gi --yes
+  --cpu 4 --memory 16GB --disk 40GB --yes
 
 # Read-only inventory: this never adopts, repairs, or deletes an orphan.
 ./target/debug/cw doctor local
 ./target/debug/cw env rm --local codewire-dev --yes
 ```
+
+Familiar resource inputs are binary quantities: `8GB` of memory allocates 8192
+MiB, and `2048MB` of disk resolves to 2 GiB. `GiB`/`MiB` and their shorter
+`Gi`/`Mi` spellings also work, and suffixes are case-insensitive.
 
 An exact clean Git root becomes an independent clone of its checked-out commit;
 host hooks, credential helpers, embedded remote credentials, unrelated refs,
@@ -91,9 +95,12 @@ environment-owned point-in-time copy. Use `--path-mode clone` or
 `--path-mode copy` to override automatic classification; direct host access is
 never inferred from `--path`. The primary workspace runs directly in the
 canonical Codewire OCI workspace image beneath trusted guest init and runc;
-Docker does not own it. Multi-repository `repositories` entries use the same
-normalized project model as the platform. `image` in `codewire.yaml` and
-`--image` select any valid OCI workspace image. A bare `ports` entry declares
+Docker does not own it. A `codewire.yaml` may combine portable `repositories`
+with local `mounts` using `mode: copy`; relative mount sources resolve from the
+configuration file, and each becomes an environment-owned point-in-time copy.
+Multi-repository entries use the same normalized project model as the platform.
+`image` in `codewire.yaml` and `--image` select any valid OCI workspace image. A
+bare `ports` entry declares
 a guest application port; an explicit `HOST:GUEST` entry also publishes it for
 the VM lifetime on `127.0.0.1:HOST` only:
 
@@ -116,7 +123,7 @@ the product smoke. The host owns Mesh identity and transport, and the VM sees
 only admitted TCP streams for its declared application ports. Access profiles
 select material-free credential grants whose protected values remain in the
 isolated host broker. Preset, install/startup, environment, agent/skill, secret,
-and explicit mount options still fail explicitly while the remaining Forgejo
+and direct-mount options still fail explicitly while the remaining Forgejo
 #1910 slices are completed. An owner-only SQLite WAL is the authoritative
 supervisor state; preview JSON state is imported exactly once. Lifecycle
 effects are journaled, disk shrink is rejected, and delete moves the

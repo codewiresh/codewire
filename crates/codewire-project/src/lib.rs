@@ -51,9 +51,14 @@ pub enum ProjectError {
 pub struct ProjectDocument {
     pub spec: ProjectSpec,
     pub local: LocalProjectIntent,
+    working_directory_explicit: bool,
 }
 
 impl ProjectDocument {
+    pub fn working_directory_is_explicit(&self) -> bool {
+        self.working_directory_explicit
+    }
+
     pub fn ensure_platform_compatible(&self) -> Result<(), ProjectError> {
         if !self.local.mounts.is_empty() {
             return Err(ProjectError::PlatformUnsupported { field: "mounts" });

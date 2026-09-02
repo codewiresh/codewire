@@ -24,6 +24,7 @@ SMOKE_ROOT=''
 SMOKE_HOME=''
 STATE_ROOT=''
 WORKSPACE=''
+MOUNT_SOURCE=''
 PLATFORM_CONFIG=''
 TRIPWIRE=''
 TRANSCRIPT=''
@@ -89,8 +90,8 @@ codewire-local-vmm. Missing KVM, artifacts, or required tools fail nonzero.
 
 The smoke uses an isolated HOME and short private native state root, poisons
 the platform destination, installs Docker/Lima/QEMU tripwires, starts an
-isolated standalone Codewire Mesh/DERP pair, and creates
-disposable multi-repository and filesystem-copy fixtures. Initial create
+isolated standalone Codewire Mesh/DERP pair, and creates disposable mixed
+repository/copy-mount and implicit filesystem-copy fixtures. Initial create
 permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
 credential-free git.example.invalid/GitHub preparation, independent copy preparation,
@@ -373,6 +374,15 @@ DERP_PORT="${LOCAL_PORTS[2]}"
 for port in "$HOST_PORT" "$MESH_PORT" "$DERP_PORT"; do
   [[ "$port" =~ ^[0-9]+$ ]] || die 'failed to select a loopback smoke port'
 done
+MOUNT_SOURCE="$SMOKE_ROOT/m"
+mkdir -m 0700 "$MOUNT_SOURCE" "$MOUNT_SOURCE/nested"
+printf 'copy mount before creation\n' >"$MOUNT_SOURCE/data.txt"
+printf 'hidden copy mount content\n' >"$MOUNT_SOURCE/.hidden"
+printf 'nested copy mount content\n' >"$MOUNT_SOURCE/nested/file.txt"
+printf '#!/bin/sh\nprintf "copy-mount-executable-ok\\n"\n' >"$MOUNT_SOURCE/tool.sh"
+chmod 0755 "$MOUNT_SOURCE/tool.sh"
+ln "$MOUNT_SOURCE/data.txt" "$MOUNT_SOURCE/hardlink.txt"
+ln -s nested/file.txt "$MOUNT_SOURCE/link.txt"
 cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
 image: $WORKSPACE_IMAGE
@@ -383,6 +393,10 @@ repositories:
   - source: https://github.com/noeljackson/method.git
     revision: $GITHUB_COMMIT
     destination: /workspace/github
+mounts:
+  - source: ../m
+    destination: /workspace/fixtures
+    mode: copy
 working_directory: /workspace/github
 ports:
   - $HOST_PORT:3000
@@ -1434,7 +1448,7 @@ else
 fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
-run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi \
+run_cw env create --local --name "$NAME" --cpu 2 --memory 16GB \
   --path "$WORKSPACE" "${CREATE_ACCESS_ARGS[@]}" --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
@@ -1447,7 +1461,7 @@ jq -e --arg listen "127.0.0.1:$HOST_PORT" --arg network "$MESH_NETWORK" '
   .cpu == 2 and
   .memory == "16Gi" and
   .working_directory == "/workspace/github" and
-  .workspace_inputs == 2 and
+  .workspace_inputs == 3 and
   .network == $network and
   (has("error_code") | not) and
   .ports == [{"listen": $listen, "guest_port": 3000}] and
@@ -1464,6 +1478,8 @@ fi
   die 'source Git credential helper ran during native clone preparation'
 printf 'host changed after environment creation\n' >"$WORKSPACE/README.md"
 printf 'host-only untracked content\n' >"$WORKSPACE/host-only.txt"
+printf 'copy mount host changed after creation\n' >"$MOUNT_SOURCE/data.txt"
+printf 'copy mount host-only content\n' >"$MOUNT_SOURCE/host-only.txt"
 run_cw env list --local --output json
 jq -e '
   length == 2 and
@@ -1703,7 +1719,7 @@ log 'checking guest identity, live resources, workspace, and durable output'
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; printf "guest-machine-id="; cat /etc/machine-id; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d /workspace/github/.git; test -d /workspace/gitea/.git; test -z "$(git -C /workspace/github status --porcelain=v1 --untracked-files=all)"; test -z "$(git -C /workspace/gitea status --porcelain=v1 --untracked-files=all)"; printf "guest-github-head="; git -C /workspace/github rev-parse HEAD; printf "guest-gitea-head="; git -C /workspace/gitea rev-parse HEAD; printf "guest-github-readme-sha="; sha256sum /workspace/github/README.md | cut -d " " -f 1; printf "guest-gitea-readme-sha="; sha256sum /workspace/gitea/README.md | cut -d " " -f 1; printf "guest-github-origin="; git -C /workspace/github config --local --get remote.origin.url; printf "guest-gitea-origin="; git -C /workspace/gitea config --local --get remote.origin.url; git -C /workspace/github config --local --list; git -C /workspace/gitea config --local --list; printf persistence-ok > /workspace/sentinel.txt'
+  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; printf "guest-machine-id="; cat /etc/machine-id; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d /workspace/github/.git; test -d /workspace/gitea/.git; test -z "$(git -C /workspace/github status --porcelain=v1 --untracked-files=all)"; test -z "$(git -C /workspace/gitea status --porcelain=v1 --untracked-files=all)"; grep -qx "copy mount before creation" /workspace/fixtures/data.txt; grep -qx "hidden copy mount content" /workspace/fixtures/.hidden; grep -qx "nested copy mount content" /workspace/fixtures/nested/file.txt; test "$(readlink /workspace/fixtures/link.txt)" = nested/file.txt; test "$(stat -c %h /workspace/fixtures/data.txt)" = 1; test "$(stat -c %h /workspace/fixtures/hardlink.txt)" = 1; test ! -e /workspace/fixtures/host-only.txt; /workspace/fixtures/tool.sh; printf guest-copy-mount-write > /workspace/fixtures/guest-only.txt; printf "guest-github-head="; git -C /workspace/github rev-parse HEAD; printf "guest-gitea-head="; git -C /workspace/gitea rev-parse HEAD; printf "guest-github-readme-sha="; sha256sum /workspace/github/README.md | cut -d " " -f 1; printf "guest-gitea-readme-sha="; sha256sum /workspace/gitea/README.md | cut -d " " -f 1; printf "guest-github-origin="; git -C /workspace/github config --local --get remote.origin.url; printf "guest-gitea-origin="; git -C /workspace/gitea config --local --get remote.origin.url; git -C /workspace/github config --local --list; git -C /workspace/gitea config --local --list; printf persistence-ok > /workspace/sentinel.txt'
 rg -qF 'guest-cwd=/workspace/github' "$LAST_STDOUT" ||
   die 'session did not start in the configured repository working directory'
 rg -qF 'guest-pid1-comm=init' "$LAST_STDOUT" ||
@@ -1722,6 +1738,8 @@ rg -qF 'guest-effective-capabilities=0000000000000000' "$LAST_STDOUT" ||
 rg -qF 'guest-cpus=2' "$LAST_STDOUT" || die 'guest did not observe exactly 2 vCPUs'
 rg -q '^workspace-node=v[0-9]+\.' "$LAST_STDOUT" ||
   die 'session did not execute from the canonical Codewire workspace image'
+rg -qF 'copy-mount-executable-ok' "$LAST_STDOUT" ||
+  die 'explicit copy mount executable content was unavailable in the guest'
 rg -qF "guest-github-head=$GITHUB_COMMIT" "$LAST_STDOUT" ||
   die 'GitHub workspace does not identify the pinned commit'
 rg -qF "guest-gitea-head=$GITEA_COMMIT" "$LAST_STDOUT" ||
@@ -1735,7 +1753,7 @@ rg -qF 'guest-github-origin=https://github.com/noeljackson/method.git' "$LAST_ST
 rg -qF 'guest-gitea-origin=https://git.example.invalid/supplychain.git' "$LAST_STDOUT" ||
   die 'git.example.invalid workspace origin metadata is not the sanitized public source'
 if rg -qF 'host-secret' "$LAST_STDOUT" || rg -qF 'credential.helper' "$LAST_STDOUT" ||
-   rg -qF "$WORKSPACE" "$LAST_STDOUT"; then
+   rg -qF "$WORKSPACE" "$LAST_STDOUT" || rg -qF "$MOUNT_SOURCE" "$LAST_STDOUT"; then
   die 'host Git credential or source-path metadata entered the guest clone'
 fi
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
@@ -1834,9 +1852,11 @@ REPLACEMENT_RUNNER_PID="$(native_database_value runner_pid)"
 [[ -f "$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json" ]] ||
   die 'restart removed the environment-pinned runtime generation manifest'
 RUNNER_PID="$REPLACEMENT_RUNNER_PID"
-run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; git -C /workspace/github rev-parse HEAD; git -C /workspace/gitea rev-parse HEAD; cat /etc/machine-id'
+run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; cat /workspace/fixtures/guest-only.txt; grep -qx "copy mount before creation" /workspace/fixtures/data.txt; test ! -e /workspace/fixtures/host-only.txt; git -C /workspace/github rev-parse HEAD; git -C /workspace/gitea rev-parse HEAD; cat /etc/machine-id'
 rg -qF 'persistence-ok' "$LAST_STDOUT" ||
   die 'workspace sentinel did not survive cached-runtime restart'
+rg -qF 'guest-copy-mount-write' "$LAST_STDOUT" ||
+  die 'explicit copy mount guest state did not survive cached-runtime restart'
 rg -qF "$GITHUB_COMMIT" "$LAST_STDOUT" ||
   die 'GitHub workspace did not survive cached-runtime restart'
 rg -qF "$GITEA_COMMIT" "$LAST_STDOUT" ||
@@ -1961,7 +1981,7 @@ wait_for_journal_complete ||
   die 'native lifecycle journal contains a pending or partial operation'
 
 log 'checking journaled offline disk growth and restart-applied CPU and memory'
-run_cw env resize --local "$NAME" --cpu 3 --memory 12Gi --disk 21Gi --yes --force --output json
+run_cw env resize --local "$NAME" --cpu 3 --memory 12GB --disk 21GB --yes --force --output json
 jq -e '
   .state == "running" and
   .cpu == 3 and
@@ -2011,6 +2031,12 @@ wait_for_journal_complete ||
   die 'host-only content changed during guest clone lifecycle'
 [[ ! -e "$WORKSPACE/sentinel.txt" ]] ||
   die 'guest writes escaped the environment-owned clone into the host source'
+[[ "$(cat "$MOUNT_SOURCE/data.txt")" == 'copy mount host changed after creation' ]] ||
+  die 'explicit copy mount guest read or write mutated the selected host source'
+[[ "$(cat "$MOUNT_SOURCE/host-only.txt")" == 'copy mount host-only content' ]] ||
+  die 'explicit copy mount deletion mutated host-only content'
+[[ ! -e "$MOUNT_SOURCE/guest-only.txt" ]] ||
+  die 'explicit copy mount guest writes escaped or synchronized into the host source'
 [[ "$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')" == "$SOURCE_CONFIG_SHA256" ]] ||
   die 'native clone preparation mutated the host Git configuration'
 [[ -x "$WORKSPACE/.git/hooks/post-checkout" ]] ||
@@ -2033,7 +2059,7 @@ ln "$WORKSPACE/data.txt" "$WORKSPACE/hardlink.txt"
 ln -s data.txt "$WORKSPACE/link.txt"
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
-run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi \
+run_cw env create --local --name "$NAME" --cpu 2 --memory 16GB \
   --path "$WORKSPACE" --path-mode copy --no-network --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180

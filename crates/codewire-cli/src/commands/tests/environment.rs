@@ -16,7 +16,7 @@
             "--cpu",
             "2",
             "--memory",
-            "16Gi",
+            "8GB",
             "--path",
             ".",
             "--path-mode",
@@ -38,7 +38,7 @@
         assert_eq!(args.backend, None);
         assert_eq!(args.name.as_deref(), Some("workspace"));
         assert_eq!(args.cpu.as_deref(), Some("2"));
-        assert_eq!(args.memory.as_deref(), Some("16Gi"));
+        assert_eq!(args.memory.as_deref(), Some("8GB"));
         assert_eq!(args.path.as_deref(), Some(std::path::Path::new(".")));
         assert_eq!(args.path_mode, Some(PathModeArg::Copy));
         assert_eq!(args.output, OutputFormat::Json);
@@ -82,9 +82,9 @@
             "--cpu",
             "0.5",
             "--memory",
-            "512Mi",
+            "512MB",
             "--disk",
-            "20Gi",
+            "40GB",
             "--yes",
         ])
         .unwrap();
@@ -100,8 +100,8 @@
         assert!(!platform);
         assert_eq!(args.environment, "workspace");
         assert_eq!(args.cpu.as_deref(), Some("0.5"));
-        assert_eq!(args.memory.as_deref(), Some("512Mi"));
-        assert_eq!(args.disk.as_deref(), Some("20Gi"));
+        assert_eq!(args.memory.as_deref(), Some("512MB"));
+        assert_eq!(args.disk.as_deref(), Some("40GB"));
         assert!(args.yes);
     }
 
@@ -129,8 +129,19 @@
         assert!(parse_resize_cpu("1.2345").is_err());
         assert_eq!(parse_resize_memory("512Mi").unwrap(), 512);
         assert_eq!(parse_resize_memory("4Gi").unwrap(), 4096);
-        assert!(parse_resize_memory("4GB").is_err());
+        assert_eq!(parse_resize_memory("16gi").unwrap(), 16 * 1024);
+        assert_eq!(parse_resize_memory("16gb").unwrap(), 16 * 1024);
+        assert_eq!(parse_resize_memory("1024mb").unwrap(), 1024);
+        assert_eq!(parse_resize_memory("2048mb").unwrap(), 2048);
+        assert_eq!(parse_resize_memory("8GB").unwrap(), 8192);
+        assert_eq!(parse_resize_memory("8GiB").unwrap(), 8192);
         assert_eq!(parse_resize_disk("20Gi").unwrap(), 20);
+        assert_eq!(parse_resize_disk("1024mb").unwrap(), 1);
+        assert_eq!(parse_resize_disk("2048mb").unwrap(), 2);
+        assert!(parse_resize_disk("1536mb").is_err());
+        assert_eq!(parse_resize_disk("40gb").unwrap(), 40);
+        assert_eq!(parse_resize_disk("40GB").unwrap(), 40);
+        assert_eq!(parse_resize_disk("40GiB").unwrap(), 40);
         assert!(parse_resize_disk("0Gi").is_err());
 
         let args = EnvResizeArgs {
@@ -573,9 +584,9 @@
             "--cpu",
             "2000",
             "--memory",
-            "4096",
+            "8gb",
             "--disk",
-            "40",
+            "40gb",
             "--image",
             "workspace",
             "--install",
@@ -611,8 +622,8 @@
         assert_eq!(args.name.as_deref(), Some("builder"));
         assert_eq!(args.ttl.as_deref(), Some("1h"));
         assert_eq!(args.cpu.as_deref(), Some("2000"));
-        assert_eq!(args.memory.as_deref(), Some("4096"));
-        assert_eq!(args.disk.as_deref(), Some("40"));
+        assert_eq!(args.memory.as_deref(), Some("8gb"));
+        assert_eq!(args.disk.as_deref(), Some("40gb"));
         assert_eq!(args.image.as_deref(), Some("workspace"));
         assert_eq!(args.coding_agent.as_deref(), Some("codex"));
         assert!(args.no_org_secrets);
@@ -639,9 +650,9 @@
             "--cpu",
             "2000",
             "--memory",
-            "4096",
+            "8gb",
             "--disk",
-            "40",
+            "40gb",
             "--image",
             "workspace",
             "--install",
@@ -670,7 +681,7 @@
         assert_eq!(request.preset_id.as_deref(), Some("preset_123"));
         assert_eq!(request.name.as_deref(), Some("builder"));
         assert_eq!(request.cpu_millicores, Some(2000));
-        assert_eq!(request.memory_mb, Some(4096));
+        assert_eq!(request.memory_mb, Some(8 * 1024));
         assert_eq!(request.disk_gb, Some(40));
         assert_eq!(request.ttl_seconds, Some(5400));
         assert_eq!(request.preset_slug, "go");

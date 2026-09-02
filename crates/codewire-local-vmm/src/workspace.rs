@@ -463,14 +463,13 @@ fn provision_workspace_plan(
                         prepare_git_clone(&source, &destination, &staging_dir)?;
                     }
                     WorkspaceSourceMode::Copy => {
-                        let manifest = copy_directory_manifest(
-                            &open_source_directory(&source.source_path)?,
-                            Some(&destination),
+                        prepare_copy_input(
+                            &source,
+                            identity,
+                            &destination,
+                            &workspace,
                             workspace_content_limit(disk_bytes),
                         )?;
-                        if &manifest.sha256 != identity {
-                            return Err(WorkspaceError::SourceChanged);
-                        }
                     }
                 }
             }
@@ -520,6 +519,40 @@ fn provision_workspace_plan(
         plan_sha256: plan.sha256()?,
         state_disk: paths.state_disk,
     })
+}
+
+fn prepare_copy_input(
+    source: &WorkspaceSource,
+    identity: &str,
+    destination: &Path,
+    workspace: &Path,
+    maximum_bytes: u64,
+) -> Result<(), WorkspaceError> {
+    let existing_bytes = bounded_staging_regular_bytes(workspace, maximum_bytes)?;
+    let remaining_bytes = maximum_bytes
+        .checked_sub(existing_bytes)
+        .ok_or(WorkspaceError::WorkspaceTooLarge)?;
+    if destination != workspace {
+        fs::create_dir(destination).map_err(|source| WorkspaceError::Io {
+            path: destination.to_owned(),
+            source,
+        })?;
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o755)).map_err(|source| {
+            WorkspaceError::Io {
+                path: destination.to_owned(),
+                source,
+            }
+        })?;
+    }
+    let manifest = copy_directory_manifest(
+        &open_source_directory(&source.source_path)?,
+        Some(destination),
+        remaining_bytes,
+    )?;
+    if manifest.sha256 != identity {
+        return Err(WorkspaceError::SourceChanged);
+    }
+    Ok(())
 }
 
 fn staging_workspace_destination(
@@ -2230,5 +2263,56 @@ mod tests {
             fs::metadata(&snapshot.state_disk).unwrap().len(),
             MINIMUM_STATE_DISK_BYTES
         );
+    }
+
+    #[test]
+    fn nested_copy_input_provisioning_builds_the_ext4_workspace_disk() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("fixture.txt"), b"copied\n").unwrap();
+        let admitted =
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES).unwrap();
+        let plan = WorkspacePlan::from_inputs(vec![WorkspaceInput::local(
+            &admitted,
+            "/workspace/fixtures",
+        )])
+        .unwrap();
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+        let snapshot = ensure_workspace_plan(
+            engine.path(),
+            Uuid::new_v4(),
+            &plan,
+            MINIMUM_STATE_DISK_BYTES,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.plan_sha256, plan.sha256().unwrap());
+        assert_eq!(
+            fs::metadata(&snapshot.state_disk).unwrap().len(),
+            MINIMUM_STATE_DISK_BYTES
+        );
+    }
+
+    #[test]
+    fn copy_input_respects_the_remaining_aggregate_workspace_budget() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("fixture.txt"), b"four").unwrap();
+        let admitted = inspect_workspace(source.path(), WorkspaceSelection::Copy, 4).unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let workspace = staging.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("existing.txt"), b"12345").unwrap();
+
+        assert!(matches!(
+            prepare_copy_input(
+                &admitted,
+                &admitted.commit,
+                &workspace.join("fixtures"),
+                &workspace,
+                8,
+            ),
+            Err(WorkspaceError::WorkspaceTooLarge)
+        ));
     }
 }

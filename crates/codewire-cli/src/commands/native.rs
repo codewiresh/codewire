@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 
@@ -361,8 +362,12 @@ pub(crate) async fn create_native_environment(
                 .context("parse local access profile reference")?,
         });
     }
-    let (request_source_path, implicit_path_mode) =
-        native_workspace_request(&source_path, &project.spec, args.path_mode)?;
+    let (request_source_path, implicit_path_mode) = native_workspace_request(
+        &source_path,
+        &project.spec,
+        &project.local_mounts,
+        args.path_mode,
+    )?;
     let vcpus = match args.cpu.as_deref() {
         Some(value) => parse_native_cpu(value)?,
         None => project.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
@@ -403,8 +408,16 @@ pub(crate) async fn create_native_environment(
         }
         None => None,
     };
+    if !project.local_mounts.is_empty() {
+        eprintln!(
+            "Warning: copy mounts expose every selected file to the guest, including credentials deliberately stored beneath a selected source."
+        );
+    }
+    let NativeProjectPlan {
+        spec, local_mounts, ..
+    } = project;
     let (project_spec_json, project_spec_sha256) =
-        canonical_native_project_intent(project.spec, vcpus, memory_mib, disk_bytes)?;
+        canonical_native_project_intent(spec, vcpus, memory_mib, disk_bytes)?;
     let mut client = native_client().await?;
     client
         .create(v1::CreateEnvironmentRequest {
@@ -426,6 +439,7 @@ pub(crate) async fn create_native_environment(
             access_profile_revision: access_selection
                 .map(|selection| selection.1)
                 .unwrap_or_default(),
+            local_mounts,
         })
         .await
         .map_err(native_status)
@@ -1001,6 +1015,7 @@ fn canonical_current_executable() -> anyhow::Result<PathBuf> {
 struct NativeProjectPlan {
     spec: codewire_project::ProjectSpec,
     host_ports: Vec<codewire_project::HostPortBinding>,
+    local_mounts: Vec<v1::LocalMountInput>,
     vcpus: Option<u32>,
     memory_mib: Option<u32>,
     disk_bytes: Option<u64>,
@@ -1036,6 +1051,10 @@ fn native_codewire_yaml(
             unsupported.join(", ")
         );
     }
+    let config_directory = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("native codewire.yaml has no parent directory"))?;
+    let local_mounts = resolve_native_local_mounts(config_directory, &document.local.mounts)?;
     let resources = &document.spec.resources;
     let vcpus = resources
         .cpu_millicores
@@ -1049,6 +1068,7 @@ fn native_codewire_yaml(
     Ok(NativeProjectPlan {
         spec: document.spec,
         host_ports: document.local.host_ports,
+        local_mounts,
         vcpus,
         memory_mib,
         disk_bytes,
@@ -1063,7 +1083,10 @@ fn native_unsupported_project_fields(
     if !spec.preset.is_empty() {
         unsupported.push("preset");
     }
-    if spec.repositories.is_empty() && spec.working_directory != "/workspace" {
+    if spec.repositories.is_empty()
+        && document.local.mounts.is_empty()
+        && spec.working_directory != "/workspace"
+    {
         unsupported.push("working_directory");
     }
     if !spec.install_command.is_empty() {
@@ -1084,10 +1107,46 @@ fn native_unsupported_project_fields(
     if !spec.secrets.is_empty() {
         unsupported.push("secrets");
     }
-    if !document.local.mounts.is_empty() {
-        unsupported.push("mounts");
-    }
     unsupported
+}
+
+fn resolve_native_local_mounts(
+    config_directory: &Path,
+    mounts: &[codewire_project::LocalMountIntent],
+) -> anyhow::Result<Vec<v1::LocalMountInput>> {
+    mounts
+        .iter()
+        .map(|mount| {
+            if mount.mode == codewire_project::LocalMountMode::Direct {
+                anyhow::bail!("native local direct mounts are not available yet; use mode: copy");
+            }
+            if mount.read_only.is_some() {
+                anyhow::bail!("copy mounts cannot carry read_only");
+            }
+            let requested = Path::new(&mount.source);
+            let requested = if requested.is_absolute() {
+                requested.to_owned()
+            } else {
+                config_directory.join(requested)
+            };
+            let source = std::fs::canonicalize(&requested)
+                .with_context(|| format!("resolve copy mount source {}", requested.display()))?;
+            let metadata = std::fs::metadata(&source)
+                .with_context(|| format!("inspect copy mount source {}", source.display()))?;
+            if source == Path::new("/") || !metadata.is_dir() {
+                anyhow::bail!(
+                    "copy mount source must be a directory other than the host root: {}",
+                    source.display()
+                );
+            }
+            Ok(v1::LocalMountInput {
+                source_path: source.as_os_str().as_bytes().to_vec(),
+                destination: mount.destination.clone(),
+                mode: v1::LocalMountMode::Copy as i32,
+                read_only: None,
+            })
+        })
+        .collect()
 }
 
 fn native_vcpus_from_millicores(millicores: u32) -> anyhow::Result<u32> {
@@ -1154,11 +1213,14 @@ fn workspace_source_mode_name(value: WorkspaceSourceMode) -> &'static str {
 fn native_workspace_request(
     source_path: &Path,
     spec: &codewire_project::ProjectSpec,
+    local_mounts: &[v1::LocalMountInput],
     requested_mode: Option<PathModeArg>,
 ) -> anyhow::Result<(String, String)> {
-    if !spec.repositories.is_empty() {
+    if !spec.repositories.is_empty() || !local_mounts.is_empty() {
         if requested_mode.is_some() {
-            anyhow::bail!("--path-mode applies only when codewire.yaml has no repositories");
+            anyhow::bail!(
+                "--path-mode applies only when codewire.yaml has no repositories or mounts"
+            );
         }
         return Ok((String::new(), String::new()));
     }
@@ -1236,19 +1298,19 @@ fn parse_native_cpu(value: &str) -> anyhow::Result<u32> {
 
 fn parse_native_memory(value: &str) -> anyhow::Result<u32> {
     let value = value.trim();
-    let memory_mib = if let Some(amount) = value.strip_suffix("Gi") {
+    let memory_mib = if let Some(amount) = strip_ascii_case_suffix(value, &["gib", "gi", "gb"]) {
         amount
             .parse::<u32>()
             .context("invalid native memory quantity")?
             .checked_mul(1024)
             .ok_or_else(|| anyhow::anyhow!("native memory quantity is too large"))?
-    } else if let Some(amount) = value.strip_suffix("Mi") {
+    } else if let Some(amount) = strip_ascii_case_suffix(value, &["mib", "mi", "mb"]) {
         amount
             .parse::<u32>()
             .context("invalid native memory quantity")?
     } else {
         value.parse::<u32>().with_context(|| {
-            format!("invalid native memory quantity {value:?}; use 512Mi or 16Gi")
+            format!("invalid native memory quantity {value:?}; use 512MB or 8GB")
         })?
     };
     if !(128..=65_536).contains(&memory_mib) {
@@ -1260,13 +1322,22 @@ fn parse_native_memory(value: &str) -> anyhow::Result<u32> {
 fn parse_native_disk(value: &str) -> anyhow::Result<u64> {
     const GIB: u64 = 1024 * 1024 * 1024;
     let value = value.trim();
-    let gib = value
-        .strip_suffix("Gi")
-        .unwrap_or(value)
-        .parse::<u64>()
-        .with_context(|| {
-            format!("invalid native disk quantity {value:?}; use a value such as 20Gi")
+    let gib = if let Some(amount) = strip_ascii_case_suffix(value, &["mib", "mi", "mb"]) {
+        let mib = amount.parse::<u64>().with_context(|| {
+            format!("invalid native disk quantity {value:?}; use a value such as 40GB")
         })?;
+        if !mib.is_multiple_of(1024) {
+            anyhow::bail!("native disk quantity must resolve to a whole GB");
+        }
+        mib / 1024
+    } else {
+        strip_ascii_case_suffix(value, &["gib", "gi", "gb"])
+            .unwrap_or(value)
+            .parse::<u64>()
+            .with_context(|| {
+                format!("invalid native disk quantity {value:?}; use a value such as 40GB")
+            })?
+    };
     let bytes = gib
         .checked_mul(GIB)
         .ok_or_else(|| anyhow::anyhow!("native disk quantity is too large"))?;
@@ -1274,6 +1345,14 @@ fn parse_native_disk(value: &str) -> anyhow::Result<u64> {
         anyhow::bail!("native disk must be from 1Gi through 1024Gi");
     }
     Ok(bytes)
+}
+
+fn strip_ascii_case_suffix<'a>(value: &'a str, suffixes: &[&str]) -> Option<&'a str> {
+    let lowercase = value.to_ascii_lowercase();
+    suffixes
+        .iter()
+        .find(|suffix| lowercase.ends_with(**suffix))
+        .map(|suffix| &value[..value.len() - suffix.len()])
 }
 
 fn native_status(status: tonic::Status) -> anyhow::Error {
@@ -1287,8 +1366,16 @@ mod tests {
     #[test]
     fn native_resource_quantities_match_the_canonical_command() {
         assert_eq!(parse_native_cpu("2").unwrap(), 2);
-        assert_eq!(parse_native_memory("16Gi").unwrap(), 16 * 1024);
-        assert_eq!(parse_native_disk("20Gi").unwrap(), 20 * 1024 * 1024 * 1024);
+        assert_eq!(parse_native_memory("16gi").unwrap(), 16 * 1024);
+        assert_eq!(parse_native_memory("16gb").unwrap(), 16 * 1024);
+        assert_eq!(parse_native_memory("1024mb").unwrap(), 1024);
+        assert_eq!(parse_native_memory("2048mb").unwrap(), 2048);
+        assert_eq!(parse_native_memory("8GB").unwrap(), 8 * 1024);
+        assert_eq!(parse_native_memory("8GiB").unwrap(), 8 * 1024);
+        assert_eq!(parse_native_disk("40gb").unwrap(), 40 * 1024 * 1024 * 1024);
+        assert_eq!(parse_native_disk("2048mb").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(parse_native_disk("40GB").unwrap(), 40 * 1024 * 1024 * 1024);
+        assert_eq!(parse_native_disk("40GiB").unwrap(), 40 * 1024 * 1024 * 1024);
     }
 
     #[test]
@@ -1560,12 +1647,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("codewire.yaml"),
-            "version: 1\ncpu: 2000m\nmemory: 16Gi\ndisk: 40Gi\n",
+            "version: 1\ncpu: 2000m\nmemory: 8GB\ndisk: 40GB\n",
         )
         .unwrap();
         let resources = native_codewire_yaml(temp.path(), None).unwrap();
         assert_eq!(resources.vcpus, Some(2));
-        assert_eq!(resources.memory_mib, Some(16 * 1024));
+        assert_eq!(resources.memory_mib, Some(8 * 1024));
         assert_eq!(resources.disk_bytes, Some(40 * 1024 * 1024 * 1024));
     }
 
@@ -1586,15 +1673,52 @@ mod tests {
     }
 
     #[test]
-    fn native_yaml_recognizes_mode_bearing_mounts_before_runtime_assembly() {
+    fn native_yaml_resolves_copy_mounts_relative_to_the_config_file() {
         let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("config")).unwrap();
+        let fixtures = temp.path().join("fixtures");
+        std::fs::create_dir(&fixtures).unwrap();
+        std::fs::write(
+            temp.path().join("config/dev.yaml"),
+            "mounts: [{source: ../fixtures, destination: /workspace/fixtures, mode: copy}]\n",
+        )
+        .unwrap();
+        let project =
+            native_codewire_yaml(temp.path(), Some(Path::new("config/dev.yaml"))).unwrap();
+        assert_eq!(project.spec.working_directory, "/workspace/fixtures");
+        assert_eq!(project.local_mounts.len(), 1);
+        assert_eq!(
+            project.local_mounts[0].source_path,
+            fixtures.as_os_str().as_bytes()
+        );
+        assert_eq!(
+            project.local_mounts[0].mode,
+            v1::LocalMountMode::Copy as i32
+        );
+        assert_eq!(project.local_mounts[0].read_only, None);
+        assert_eq!(
+            native_workspace_request(temp.path(), &project.spec, &project.local_mounts, None,)
+                .unwrap(),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn native_yaml_rejects_direct_mounts_until_the_vmm_share_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("fixtures")).unwrap();
         std::fs::write(
             temp.path().join("codewire.yaml"),
-            "mounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: copy}]\n",
+            "mounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: direct, read_only: true}]\n",
         )
         .unwrap();
         let error = native_codewire_yaml(temp.path(), None).unwrap_err();
-        assert!(error.to_string().contains("fields: mounts"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("native local direct mounts are not available yet"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1619,15 +1743,21 @@ working_directory: /workspace/github
         assert_eq!(project.spec.repositories.len(), 2);
         assert_eq!(project.spec.working_directory, "/workspace/github");
         assert_eq!(
-            native_workspace_request(temp.path(), &project.spec, None).unwrap(),
+            native_workspace_request(temp.path(), &project.spec, &project.local_mounts, None)
+                .unwrap(),
             (String::new(), String::new())
         );
-        let error = native_workspace_request(temp.path(), &project.spec, Some(PathModeArg::Copy))
-            .unwrap_err();
+        let error = native_workspace_request(
+            temp.path(),
+            &project.spec,
+            &project.local_mounts,
+            Some(PathModeArg::Copy),
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("--path-mode applies only when codewire.yaml has no repositories"),
+                .contains("codewire.yaml has no repositories or mounts"),
             "{error}"
         );
     }

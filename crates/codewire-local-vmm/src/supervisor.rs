@@ -5,8 +5,10 @@
 //! credentials never are.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -74,7 +76,10 @@ use crate::workspace::{
     workspace_content_limit,
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
-use crate::workspace_plan::{WorkspacePlan, WorkspacePlanError, prepare_repository_plan};
+use crate::workspace_plan::{
+    WorkspaceInput, WorkspacePlan, WorkspacePlanError, prepare_repository_plan,
+    validate_local_mount_destination,
+};
 
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 3;
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -994,6 +999,10 @@ impl EnvironmentRecord {
                 (None, None) => true,
                 (Some(bytes), Some(digest)) => {
                     validate_project_intent(bytes, digest, None).is_err()
+                        || serde_json::from_slice::<codewire_project::ProjectSpec>(bytes)
+                            .map_or(true, |project| {
+                                self.workspace_plan.validate_for_project(&project).is_err()
+                            })
                 }
                 _ => true,
             }
@@ -1321,7 +1330,7 @@ impl SupervisorCore {
         let project: codewire_project::ProjectSpec =
             serde_json::from_slice(&request.project_spec_json)
                 .map_err(|_| SupervisorError::InvalidRequest)?;
-        if project.repositories.is_empty() {
+        if project.repositories.is_empty() && request.local_mounts.is_empty() {
             let requested_source = PathBuf::from(&request.source_path);
             let path_mode = parse_implicit_path_mode(&request.implicit_path_mode)?;
             let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
@@ -1334,11 +1343,45 @@ impl SupervisorCore {
             })
             .await
             .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
-            return WorkspacePlan::local(&source).map_err(Into::into);
+            let plan = WorkspacePlan::local(&source)?;
+            validate_request_workspace_plan(request, &project, &plan)?;
+            return Ok(plan);
         }
-        prepare_repository_plan(&self.config.engine_root(), &project.repositories)
+        let mut inputs = if project.repositories.is_empty() {
+            Vec::new()
+        } else {
+            prepare_repository_plan(&self.config.engine_root(), &project.repositories)
+                .await?
+                .inputs
+        };
+        if !request.local_mounts.is_empty() {
+            let mounts = request.local_mounts.clone();
+            let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
+            let local_inputs = tokio::task::spawn_blocking(move || {
+                mounts
+                    .into_iter()
+                    .map(|mount| {
+                        let requested_source =
+                            PathBuf::from(OsString::from_vec(mount.source_path.clone()));
+                        let source = inspect_workspace(
+                            &requested_source,
+                            WorkspaceSelection::Copy,
+                            maximum_copy_bytes,
+                        )?;
+                        if source.source_path.as_os_str().as_bytes() != mount.source_path {
+                            return Err(WorkspaceError::SourceChanged);
+                        }
+                        Ok(WorkspaceInput::local(&source, &mount.destination))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
             .await
-            .map_err(Into::into)
+            .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
+            inputs.extend(local_inputs);
+        }
+        let plan = WorkspacePlan::from_inputs(inputs)?;
+        validate_request_workspace_plan(request, &project, &plan)?;
+        Ok(plan)
     }
 
     async fn stage_workspace_generation(
@@ -4762,7 +4805,9 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         validate_mesh_for_project(mesh, &project)?;
     }
     create_request_access_selection(request, &project)?;
-    if project.repositories.is_empty() {
+    validate_local_mount_requests(&request.local_mounts)?;
+    validate_request_destinations(&project, &request.local_mounts)?;
+    if project.repositories.is_empty() && request.local_mounts.is_empty() {
         parse_implicit_path_mode(&request.implicit_path_mode)?;
         if request.source_path.is_empty() || !Path::new(&request.source_path).is_absolute() {
             return Err(SupervisorError::InvalidRequest);
@@ -4771,6 +4816,63 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         return Err(SupervisorError::InvalidRequest);
     }
     parse_request_id(&request.request_id)
+}
+
+fn validate_local_mount_requests(mounts: &[v1::LocalMountInput]) -> Result<(), SupervisorError> {
+    const MAXIMUM_HOST_PATH_BYTES: usize = 4096;
+
+    if mounts.len() > codewire_project::MAX_LOCAL_MOUNTS {
+        return Err(SupervisorError::InvalidRequest);
+    }
+    for mount in mounts {
+        if mount.source_path.is_empty()
+            || mount.source_path.len() > MAXIMUM_HOST_PATH_BYTES
+            || mount.source_path.contains(&0)
+            || mount.mode != v1::LocalMountMode::Copy as i32
+            || mount.read_only.is_some()
+            || validate_local_mount_destination(&mount.destination).is_err()
+        {
+            return Err(SupervisorError::InvalidRequest);
+        }
+        let path = PathBuf::from(OsString::from_vec(mount.source_path.clone()));
+        if !path.is_absolute() || path == Path::new("/") {
+            return Err(SupervisorError::InvalidRequest);
+        }
+        let mut normalized = PathBuf::from("/");
+        for component in path.components().skip(1) {
+            let std::path::Component::Normal(component) = component else {
+                return Err(SupervisorError::InvalidRequest);
+            };
+            normalized.push(component);
+        }
+        if normalized.as_os_str().as_bytes() != mount.source_path {
+            return Err(SupervisorError::InvalidRequest);
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_destinations(
+    project: &codewire_project::ProjectSpec,
+    mounts: &[v1::LocalMountInput],
+) -> Result<(), SupervisorError> {
+    let mut destinations = project
+        .repositories
+        .iter()
+        .map(|repository| repository.destination.as_str())
+        .chain(mounts.iter().map(|mount| mount.destination.as_str()))
+        .collect::<Vec<_>>();
+    destinations.sort_unstable();
+    for pair in destinations.windows(2) {
+        if pair[0] == pair[1]
+            || pair[1]
+                .strip_prefix(pair[0])
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            return Err(SupervisorError::InvalidRequest);
+        }
+    }
+    Ok(())
 }
 
 fn validate_project_intent(
@@ -4793,7 +4895,6 @@ fn validate_project_intent(
         || format!("{:x}", Sha256::digest(canonical_json)) != expected_sha256
         || spec.image.is_empty()
         || !spec.preset.is_empty()
-        || (spec.repositories.is_empty() && spec.working_directory != "/workspace")
         || !spec.install_command.is_empty()
         || !spec.startup_script.is_empty()
         || !spec.environment.is_empty()
@@ -5143,6 +5244,10 @@ fn create_operation_payload(
     request: &v1::CreateEnvironmentRequest,
     workspace_plan: &WorkspacePlan,
 ) -> Result<serde_json::Value, SupervisorError> {
+    validate_create(request)?;
+    let project: codewire_project::ProjectSpec = serde_json::from_slice(&request.project_spec_json)
+        .map_err(|_| SupervisorError::InvalidRequest)?;
+    validate_request_workspace_plan(request, &project, workspace_plan)?;
     let project_spec_json = std::str::from_utf8(&request.project_spec_json)
         .expect("validated canonical project JSON is UTF-8");
     let host_ports = host_ports_from_proto(&request.host_ports)?;
@@ -5254,6 +5359,13 @@ fn create_request_from_operation(
     workspace_plan
         .validate()
         .map_err(|_| SupervisorError::InvalidState)?;
+    let project: codewire_project::ProjectSpec =
+        serde_json::from_slice(&project_spec_json).map_err(|_| SupervisorError::InvalidState)?;
+    let local_mounts = local_mounts_from_workspace_plan(
+        &source_path,
+        project.repositories.len(),
+        &workspace_plan,
+    )?;
     let request = v1::CreateEnvironmentRequest {
         name,
         source_path,
@@ -5264,13 +5376,109 @@ fn create_request_from_operation(
         project_spec_json,
         project_spec_sha256,
         implicit_path_mode,
+        local_mounts,
         host_ports: host_ports_to_proto(&host_ports),
         mesh: mesh_attachment_to_proto(mesh.as_ref()),
         access_profile_id,
         access_profile_revision,
     };
     validate_create(&request)?;
+    validate_request_workspace_plan(&request, &project, &workspace_plan)
+        .map_err(|_| SupervisorError::InvalidState)?;
     Ok((request, workspace_plan))
+}
+
+fn validate_request_workspace_plan(
+    request: &v1::CreateEnvironmentRequest,
+    project: &codewire_project::ProjectSpec,
+    workspace_plan: &WorkspacePlan,
+) -> Result<(), SupervisorError> {
+    workspace_plan.validate_for_project(project)?;
+    let repository_count = project.repositories.len();
+    if !request.source_path.is_empty() {
+        let [
+            WorkspaceInput::Local {
+                source_path,
+                mode,
+                destination,
+                ..
+            },
+        ] = workspace_plan.inputs.as_slice()
+        else {
+            return Err(SupervisorError::InvalidRequest);
+        };
+        if source_path != OsStr::new(&request.source_path).as_bytes()
+            || *mode != parse_implicit_path_mode(&request.implicit_path_mode)?
+            || destination != "/workspace"
+            || !request.local_mounts.is_empty()
+        {
+            return Err(SupervisorError::InvalidRequest);
+        }
+        return Ok(());
+    }
+
+    let local_inputs = workspace_plan
+        .inputs
+        .get(repository_count..)
+        .ok_or(SupervisorError::InvalidRequest)?;
+    if local_inputs.len() != request.local_mounts.len() {
+        return Err(SupervisorError::InvalidRequest);
+    }
+    for (input, mount) in local_inputs.iter().zip(&request.local_mounts) {
+        let WorkspaceInput::Local {
+            source_path,
+            mode,
+            destination,
+            ..
+        } = input
+        else {
+            return Err(SupervisorError::InvalidRequest);
+        };
+        if source_path != &mount.source_path
+            || *mode != WorkspaceSourceMode::Copy
+            || destination != &mount.destination
+            || mount.mode != v1::LocalMountMode::Copy as i32
+            || mount.read_only.is_some()
+        {
+            return Err(SupervisorError::InvalidRequest);
+        }
+    }
+    Ok(())
+}
+
+fn local_mounts_from_workspace_plan(
+    source_path: &str,
+    repository_count: usize,
+    workspace_plan: &WorkspacePlan,
+) -> Result<Vec<v1::LocalMountInput>, SupervisorError> {
+    if !source_path.is_empty() {
+        return Ok(Vec::new());
+    }
+    workspace_plan
+        .inputs
+        .get(repository_count..)
+        .ok_or(SupervisorError::InvalidState)?
+        .iter()
+        .map(|input| {
+            let WorkspaceInput::Local {
+                source_path,
+                mode: WorkspaceSourceMode::Copy,
+                destination,
+                ..
+            } = input
+            else {
+                return Err(SupervisorError::InvalidState);
+            };
+            validate_local_mount_destination(destination)
+                .map_err(|_| SupervisorError::InvalidState)?;
+            Ok(v1::LocalMountInput {
+                source_path: source_path.clone(),
+                destination: destination.clone(),
+                mode: v1::LocalMountMode::Copy as i32,
+                read_only: None,
+            })
+        })
+        .collect()
 }
 
 fn supervisor_effect(
@@ -7835,20 +8043,6 @@ mod tests {
             validate_project_intent(&bytes, &digest, Some((4, 16 * 1024, disk_bytes))).is_err()
         );
 
-        let mut unsupported_working_directory: codewire_project::ProjectSpec =
-            serde_json::from_slice(&bytes).unwrap();
-        unsupported_working_directory.working_directory = "/workspace/missing".to_owned();
-        let unsupported_bytes = unsupported_working_directory.canonical_json().unwrap();
-        let unsupported_digest = format!("{:x}", Sha256::digest(&unsupported_bytes));
-        assert!(
-            validate_project_intent(
-                &unsupported_bytes,
-                &unsupported_digest,
-                Some((2, 16 * 1024, disk_bytes)),
-            )
-            .is_err()
-        );
-
         let mut noncanonical = bytes.clone();
         noncanonical.push(b'\n');
         let noncanonical_digest = format!("{:x}", Sha256::digest(&noncanonical));
@@ -7902,6 +8096,7 @@ mod tests {
             project_spec_json,
             project_spec_sha256,
             implicit_path_mode: "clone".to_owned(),
+            local_mounts: Vec::new(),
             host_ports: vec![v1::HostPortBinding {
                 host_port: 18_080,
                 guest_port: 3_000,
@@ -8099,6 +8294,133 @@ mod tests {
         let mut wrong_ports = attachment.clone();
         wrong_ports.guest_ports = vec![3_000];
         assert!(validate_mesh_for_project(&wrong_ports, &project).is_err());
+    }
+
+    #[test]
+    fn create_journal_reconstructs_explicit_copy_mounts_from_the_durable_plan() {
+        let project = codewire_project::ProjectSpec {
+            image: "registry.example/codewire/workspace:latest".to_owned(),
+            working_directory: "/workspace/fixtures".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(16 * 1024),
+                disk_gib: Some(20),
+            },
+            ..Default::default()
+        };
+        let project_spec_json = project.canonical_json().unwrap();
+        let request = v1::CreateEnvironmentRequest {
+            name: "copy".to_owned(),
+            source_path: String::new(),
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
+            project_spec_json,
+            implicit_path_mode: String::new(),
+            local_mounts: vec![v1::LocalMountInput {
+                source_path: b"/host/fixtures".to_vec(),
+                destination: "/workspace/fixtures".to_owned(),
+                mode: v1::LocalMountMode::Copy as i32,
+                read_only: None,
+            }],
+            host_ports: Vec::new(),
+            mesh: None,
+            access_profile_id: String::new(),
+            access_profile_revision: 0,
+        };
+        validate_create(&request).unwrap();
+        let workspace_plan = WorkspacePlan::from_inputs(vec![WorkspaceInput::local(
+            &crate::workspace::WorkspaceSource {
+                source_path: PathBuf::from("/host/fixtures"),
+                commit: "a".repeat(40),
+                mode: WorkspaceSourceMode::Copy,
+            },
+            "/workspace/fixtures",
+        )])
+        .unwrap();
+        let operation = OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: Uuid::parse_str(&request.request_id).unwrap(),
+            environment_id: Some(Uuid::new_v4()),
+            kind: OperationKind::Create,
+            phase: OperationPhase::Intent,
+            checkpoint: 0,
+            payload: create_operation_payload(&request, &workspace_plan).unwrap(),
+            result: None,
+            error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
+        };
+
+        assert_eq!(
+            create_request_from_operation(&operation).unwrap(),
+            (request.clone(), workspace_plan)
+        );
+
+        let mut direct = request;
+        direct.local_mounts[0].mode = v1::LocalMountMode::Direct as i32;
+        direct.local_mounts[0].read_only = Some(true);
+        assert!(matches!(
+            validate_create(&direct),
+            Err(SupervisorError::InvalidRequest)
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_preparation_admits_an_explicit_copy_mount_without_an_implicit_path() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("fixture.txt"), b"copy fixture").unwrap();
+        let source = fs::canonicalize(source.path()).unwrap();
+        let project = codewire_project::ProjectSpec {
+            image: "registry.example/codewire/workspace:latest".to_owned(),
+            working_directory: "/workspace/fixtures".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(16 * 1024),
+                disk_gib: Some(20),
+            },
+            ..Default::default()
+        };
+        let project_spec_json = project.canonical_json().unwrap();
+        let request = v1::CreateEnvironmentRequest {
+            name: "copy".to_owned(),
+            source_path: String::new(),
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
+            project_spec_json,
+            implicit_path_mode: String::new(),
+            local_mounts: vec![v1::LocalMountInput {
+                source_path: source.as_os_str().as_bytes().to_vec(),
+                destination: "/workspace/fixtures".to_owned(),
+                mode: v1::LocalMountMode::Copy as i32,
+                read_only: None,
+            }],
+            host_ports: Vec::new(),
+            mesh: None,
+            access_profile_id: String::new(),
+            access_profile_revision: 0,
+        };
+        validate_create(&request).unwrap();
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let plan = core.prepare_create_workspace_plan(&request).await.unwrap();
+
+        assert_eq!(plan.inputs.len(), 1);
+        assert!(matches!(
+            &plan.inputs[0],
+            WorkspaceInput::Local {
+                source_path,
+                mode: WorkspaceSourceMode::Copy,
+                destination,
+                ..
+            } if source_path == source.as_os_str().as_bytes()
+                && destination == "/workspace/fixtures"
+        ));
+        plan.validate_for_project(&project).unwrap();
     }
 
     #[test]
@@ -9010,6 +9332,7 @@ mod tests {
             project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
             project_spec_json,
             implicit_path_mode: String::new(),
+            local_mounts: Vec::new(),
             host_ports: Vec::new(),
             mesh: None,
             access_profile_id: String::new(),

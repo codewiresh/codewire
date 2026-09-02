@@ -69,7 +69,8 @@ enum OperationPhase {
 }
 
 // The next bounded, auditable lifecycle effect. Raw host paths, process output,
-// guest serial data, credentials and daemon capabilities never enter this API.
+// guest serial data, credentials and daemon capabilities never enter operation
+// progress or its public projection.
 enum OperationStage {
   OPERATION_STAGE_UNSPECIFIED = 0;
   OPERATION_STAGE_RECORD_ENVIRONMENT = 1;
@@ -162,17 +163,22 @@ message CreateEnvironmentRequest {
   // when the portable project declares repositories; otherwise exactly clone
   // or copy after CLI-side auto resolution.
   string implicit_path_mode = 9;
+  // Local-only explicit filesystem grants. Source paths are canonical host
+  // bytes and never enter the portable project contract or the guest. Copy is
+  // supported first; direct remains fail-closed until its VMM attachment and
+  // confinement contract is implemented.
+  repeated LocalMountInput local_mounts = 10;
   // Canonical creation-time loopback TCP publications. These are local-only
   // host resources and are not part of the placement-neutral ProjectSpec.
-  repeated HostPortBinding host_ports = 10;
+  repeated HostPortBinding host_ports = 11;
   // Optional non-secret binding to one exact Mesh network. The supervisor
   // persists only this status-visible metadata; setup authority remains in an
   // isolated host process and never enters this API.
-  MeshAttachment mesh = 11;
+  MeshAttachment mesh = 12;
   // Material-free exact revision resolved from project_spec_json.access.profile.
   // Both fields are empty/zero when the project selects no credential access.
-  string access_profile_id = 12;
-  uint64 access_profile_revision = 13;
+  string access_profile_id = 13;
+  uint64 access_profile_revision = 14;
 }
 
 message HostPortBinding {
@@ -196,6 +202,19 @@ enum MeshEnrollmentAuthSource {
   MESH_ENROLLMENT_AUTH_SOURCE_UNSPECIFIED = 0;
   MESH_ENROLLMENT_AUTH_SOURCE_STANDALONE_LOCAL = 1;
   MESH_ENROLLMENT_AUTH_SOURCE_HOSTED_CURRENT = 2;
+}
+
+enum LocalMountMode {
+  LOCAL_MOUNT_MODE_UNSPECIFIED = 0;
+  LOCAL_MOUNT_MODE_COPY = 1;
+  LOCAL_MOUNT_MODE_DIRECT = 2;
+}
+
+message LocalMountInput {
+  bytes source_path = 1;
+  string destination = 2;
+  LocalMountMode mode = 3;
+  optional bool read_only = 4;
 }
 
 message EnvironmentSelector {

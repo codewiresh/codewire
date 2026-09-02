@@ -43,6 +43,23 @@ app_ports: [{port: 3000}]
 }
 
 #[test]
+fn accepts_human_gigabyte_resource_quantities() {
+    let document = parse_project_yaml("memory: 8GB\ndisk: 40GB\n").unwrap();
+    assert_eq!(document.spec.resources.memory_mib, Some(8 * 1024));
+    assert_eq!(document.spec.resources.disk_gib, Some(40));
+
+    for (quantity, memory_mib) in [
+        ("16gi", 16 * 1024),
+        ("16gb", 16 * 1024),
+        ("1024mb", 1024),
+        ("2048mb", 2048),
+    ] {
+        let document = parse_project_yaml(&format!("memory: {quantity}\n")).unwrap();
+        assert_eq!(document.spec.resources.memory_mib, Some(memory_mib));
+    }
+}
+
+#[test]
 fn normalizes_repositories_workdir_skills_and_access_profile() {
     let document = parse_project_yaml(
         r#"
@@ -77,7 +94,7 @@ access: {profile: user/work}
 }
 
 #[test]
-fn defaults_working_directory_from_repository_count() {
+fn defaults_working_directory_from_workspace_input_count() {
     let none = parse_project_yaml("{}\n").unwrap();
     assert_eq!(none.spec.working_directory, "/workspace");
 
@@ -89,6 +106,18 @@ fn defaults_working_directory_from_repository_count() {
     )
     .unwrap();
     assert_eq!(many.spec.working_directory, "/workspace");
+
+    let mount = parse_project_yaml(
+        "mounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: copy}]\n",
+    )
+    .unwrap();
+    assert_eq!(mount.spec.working_directory, "/workspace/fixtures");
+
+    let mixed = parse_project_yaml(
+        "repositories: [{url: https://example.com/app.git}]\nmounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: copy}]\n",
+    )
+    .unwrap();
+    assert_eq!(mixed.spec.working_directory, "/workspace");
 }
 
 #[test]

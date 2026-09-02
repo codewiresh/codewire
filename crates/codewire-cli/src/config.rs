@@ -583,6 +583,7 @@ pub struct CodewireSecretsConfig {
 fn legacy_codewire_config(
     document: codewire_project::ProjectDocument,
 ) -> Result<CodewireConfig, codewire_project::ProjectError> {
+    let working_directory_explicit = document.working_directory_is_explicit();
     let spec = document.spec;
     if !spec.repositories.is_empty() {
         return Err(codewire_project::ProjectError::InvalidField {
@@ -591,7 +592,7 @@ fn legacy_codewire_config(
                 .to_string(),
         });
     }
-    if spec.working_directory != "/workspace" {
+    if working_directory_explicit && spec.working_directory != "/workspace" {
         return Err(codewire_project::ProjectError::InvalidField {
             field: "working_directory",
             detail: "the legacy Docker/Lima backend does not support an explicit workdir"
