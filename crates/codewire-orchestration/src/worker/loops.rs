@@ -163,16 +163,28 @@ async fn reconciler_loop(
 ) {
     let mut ticker = tokio::time::interval(RECONCILER_INTERVAL);
     ticker.tick().await; // align with Go's NewTicker (first fire after interval)
+    let mut startup_recovery_observed = false;
     loop {
         tokio::select! {
             _ = leader_notify.notified() => {
                 if is_leader.load(Ordering::SeqCst) {
                     recover_on_startup(&ctx).await;
+                    startup_recovery_observed = true;
                 }
             }
             _ = ticker.tick() => {
                 if is_leader.load(Ordering::SeqCst) {
+                    // Notify does not retain a permit when leadership is won
+                    // before this task begins waiting. The first leader tick
+                    // is therefore the fallback that makes startup recovery,
+                    // including CPV authorization migration, deterministic.
+                    if !startup_recovery_observed {
+                        recover_on_startup(&ctx).await;
+                        startup_recovery_observed = true;
+                    }
                     run_reconciliation(&ctx).await;
+                } else {
+                    startup_recovery_observed = false;
                 }
             }
         }
@@ -418,6 +430,7 @@ async fn reconcile_stuck_environments(ctx: &WorkerContext) {
 /// Mirrors `recoverOnStartup` + `recoverInterruptedEnvironments`.
 async fn recover_on_startup(ctx: &WorkerContext) {
     reconcile_pending_organization_deletions(ctx).await;
+    enqueue_running_confidential_authorization_backfill(ctx).await;
 
     let kinds: Vec<String> = RECOVERY_JOURNAL_KINDS
         .iter()
@@ -462,6 +475,47 @@ async fn recover_on_startup(ctx: &WorkerContext) {
         tracing::info!(recovered, "reconciler: startup recovery complete");
     } else {
         tracing::debug!("reconciler: startup recovery — no interrupted environments found");
+    }
+}
+
+/// Preauthorize the source-rendered init-data for confidential sandboxes that
+/// were already running before the owner-authorization contract was deployed.
+/// The stable environment workflow supplies the same durable generation and
+/// row-lock fence as every ordinary lifecycle mutation. Repeated leader
+/// acquisition is intentionally idempotent and also repairs retained RVPS
+/// state before a later policy rollout selects the authorization record.
+async fn enqueue_running_confidential_authorization_backfill(ctx: &WorkerContext) {
+    if ctx.confidential_storage.is_none() {
+        return;
+    }
+    let ids: Vec<(String,)> = match sqlx::query_as(
+        r#"SELECT id
+             FROM environments
+            WHERE state = 'running'
+              AND desired_state = 'started'
+              AND isolation_tier = 'confidential'"#,
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(error = %error, "reconciler: query confidential authorization backfill");
+            return;
+        }
+    };
+
+    for (id,) in ids {
+        if let Err(error) = enqueue_environment_reconcile(
+            ctx,
+            &id,
+            true,
+            "confidential init-data authorization backfill",
+        )
+        .await
+        {
+            tracing::error!(environment_id = id, error = %error, "reconciler: enqueue confidential authorization backfill failed");
+        }
     }
 }
 

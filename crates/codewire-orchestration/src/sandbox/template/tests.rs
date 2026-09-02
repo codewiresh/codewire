@@ -1383,6 +1383,35 @@ mod tests {
     }
 
     #[test]
+    fn owner_authorization_hashes_the_exact_measured_init_data_bytes() {
+        let opts = TemplateOpts {
+            name: "tmpl-confidential-owner-authorization".into(),
+            image: "ghcr.io/codewiresh/workspace-base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+            environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+            confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
+            disk_gib: 20,
+            kata_coco_init_data_enabled: true,
+            ..Default::default()
+        };
+
+        let authorized = confidential_init_data(&opts).unwrap();
+        let rendered = render_sandbox_template("codewire-runtime", &opts);
+        let measured = decode_gzip_base64(
+            rendered["spec"]["podTemplate"]["metadata"]["annotations"]
+                [KATA_COCO_INIT_DATA_ANNOTATION_KEY]
+                .as_str()
+                .unwrap(),
+        );
+
+        assert_eq!(authorized, measured);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(authorized.as_bytes())),
+            format!("{:x}", Sha256::digest(measured.as_bytes()))
+        );
+    }
+
+    #[test]
     fn measured_key_release_claim_requires_the_exact_protected_contract() {
         let mut opts = TemplateOpts {
             runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),

@@ -40,6 +40,8 @@ pub(crate) const KBS_RESOURCE_PREFIX: &str = "default/codewire-workspace-luks";
 const KBS_MANIFEST_RESOURCE_PREFIX: &str = "default/codewire-storage-manifests";
 const OPENBAO_PARENT_PATH: &str = "confidential-storage";
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_INIT_DATA_BYTES: usize = 1024 * 1024;
+const CPV_INIT_DATA_AUTHORIZATION_PREFIX: &str = "codewire_cpv_init_data";
 const MANIFEST_SCHEMA_VERSION: i32 = 3;
 const PROTECTION_PROFILE: &str = "luks2-integrity-rw";
 const PROTECTION_PROFILE_VERSION: i32 = 1;
@@ -191,6 +193,16 @@ pub trait KbsAdmin: Send + Sync {
         &self,
         manifest_uri: &str,
         manifest: &[u8],
+    ) -> Result<(), ProviderError>;
+    async fn set_init_data_authorization(
+        &self,
+        environment_id: &str,
+        storage_manifest_tag: &str,
+        init_data_sha256: &str,
+    ) -> Result<(), ProviderError>;
+    async fn revoke_init_data_authorization(
+        &self,
+        environment_id: &str,
     ) -> Result<(), ProviderError>;
     async fn delete_manifest_resource(&self, manifest_uri: &str) -> Result<(), ProviderError>;
     async fn delete_key_resource(&self, environment_id: &str) -> Result<(), ProviderError>;
@@ -385,12 +397,52 @@ impl ConfidentialStorageManager {
         Ok(manifest_uri)
     }
 
+    /// Atomically replace the single owner authorization for an environment
+    /// with the digest of the exact raw init-data bytes rendered into its
+    /// SandboxTemplate. Resources are provisioned first and the workload is
+    /// mutated only after this succeeds, so every partial ordering denies
+    /// access rather than authorizing an unmeasured tuple.
+    pub async fn authorize_init_data(
+        &self,
+        environment_id: &str,
+        manifest_uri: &str,
+        init_data: &[u8],
+    ) -> anyhow::Result<String> {
+        validate_environment_id(environment_id)?;
+        anyhow::ensure!(
+            !init_data.is_empty() && init_data.len() <= MAX_INIT_DATA_BYTES,
+            "confidential init-data size is invalid"
+        );
+        let storage_manifest_tag = manifest_resource_tag(manifest_uri)
+            .ok_or_else(|| anyhow::anyhow!("confidential storage manifest URI is invalid"))?;
+        let init_data_sha256 = hex_sha256(init_data);
+
+        if let Err(error) = self
+            .kbs
+            .set_init_data_authorization(environment_id, storage_manifest_tag, &init_data_sha256)
+            .await
+        {
+            self.record_provider_error(environment_id, &error).await;
+            return Err(error.into());
+        }
+
+        Ok(init_data_sha256)
+    }
+
     /// Delete both key copies after the caller has proved that Sandbox, PVC,
     /// PV, and Longhorn volume resources are absent. Every provider operation
     /// is idempotent, so Temporal retries resume safely.
     pub async fn delete_after_storage_absent(&self, environment_id: &str) -> anyhow::Result<()> {
         validate_environment_id(environment_id)?;
         let manifest_uri = self.metadata.mark_deleting(environment_id).await?;
+        if let Err(error) = self
+            .kbs
+            .revoke_init_data_authorization(environment_id)
+            .await
+        {
+            self.record_provider_error(environment_id, &error).await;
+            return Err(error.into());
+        }
         if let Some(manifest_uri) = manifest_uri
             && let Err(error) = self.kbs.delete_manifest_resource(&manifest_uri).await
         {
@@ -1192,6 +1244,47 @@ impl TrusteeKbsClient {
         )
     }
 
+    fn reference_value_url(&self) -> Result<Url, ProviderError> {
+        let mut url = self.base_url.clone();
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| ProviderError::new("KBS authorization URL construction", None))?;
+        path.pop_if_empty().extend(["kbs", "v0", "reference-value"]);
+        drop(path);
+        Ok(url)
+    }
+
+    async fn set_reference_value(
+        &self,
+        reference_id: String,
+        value: serde_json::Value,
+        stage: &'static str,
+    ) -> Result<(), ProviderError> {
+        let mut references = serde_json::Map::new();
+        references.insert(reference_id, value);
+        let provenance =
+            serde_json::to_vec(&references).map_err(|_| ProviderError::new(stage, None))?;
+        let message = serde_json::json!({
+            "version": "0.1.0",
+            "type": "sample",
+            "payload": STANDARD.encode(provenance),
+        });
+        let token = self.token()?;
+        let response = self
+            .http
+            .post(self.reference_value_url()?)
+            .bearer_auth(token.as_str())
+            .json(&message)
+            .send()
+            .await
+            .map_err(|_| ProviderError::new(stage, None))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ProviderError::new(stage, Some(response.status())))
+        }
+    }
+
     fn token(&self) -> Result<Zeroizing<String>, ProviderError> {
         let value = Zeroizing::new(
             std::fs::read_to_string(&self.admin_token_file)
@@ -1266,6 +1359,66 @@ impl KbsAdmin for TrusteeKbsClient {
                 Some(response.status()),
             ))
         }
+    }
+
+    async fn set_init_data_authorization(
+        &self,
+        environment_id: &str,
+        storage_manifest_tag: &str,
+        init_data_sha256: &str,
+    ) -> Result<(), ProviderError> {
+        validate_environment_id(environment_id)
+            .map_err(|_| ProviderError::new("KBS init-data authorization validation", None))?;
+        storage_manifest_tag
+            .strip_prefix("sha256-")
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+            .ok_or_else(|| ProviderError::new("KBS init-data authorization validation", None))?;
+        if init_data_sha256.len() != 64
+            || !init_data_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(ProviderError::new(
+                "KBS init-data authorization validation",
+                None,
+            ));
+        }
+
+        self.set_reference_value(
+            format!("{CPV_INIT_DATA_AUTHORIZATION_PREFIX}/{environment_id}"),
+            serde_json::json!({
+                "schema_version": 1,
+                "state": "authorized",
+                "environment_id": environment_id,
+                "storage_manifest_tag": storage_manifest_tag,
+                "init_data_sha256": init_data_sha256,
+            }),
+            "KBS init-data authorization provision",
+        )
+        .await
+    }
+
+    async fn revoke_init_data_authorization(
+        &self,
+        environment_id: &str,
+    ) -> Result<(), ProviderError> {
+        validate_environment_id(environment_id)
+            .map_err(|_| ProviderError::new("KBS init-data authorization validation", None))?;
+        self.set_reference_value(
+            format!("{CPV_INIT_DATA_AUTHORIZATION_PREFIX}/{environment_id}"),
+            serde_json::json!({
+                "schema_version": 1,
+                "state": "revoked",
+                "environment_id": environment_id,
+            }),
+            "KBS init-data authorization revoke",
+        )
+        .await
     }
 
     async fn delete_manifest_resource(&self, manifest_uri: &str) -> Result<(), ProviderError> {
@@ -1592,6 +1745,7 @@ mod tests {
     struct MemoryKbs {
         values: Mutex<Vec<Zeroizing<Vec<u8>>>>,
         manifests: Mutex<Vec<(String, Vec<u8>)>>,
+        authorizations: Mutex<Vec<(String, String, String)>>,
         fail: bool,
         events: Arc<Mutex<Vec<&'static str>>>,
     }
@@ -1617,6 +1771,27 @@ mod tests {
                 .lock()
                 .await
                 .push((uri.into(), manifest.to_vec()));
+            Ok(())
+        }
+
+        async fn set_init_data_authorization(
+            &self,
+            environment_id: &str,
+            storage_manifest_tag: &str,
+            init_data_sha256: &str,
+        ) -> Result<(), ProviderError> {
+            self.events.lock().await.push("kbs.authorization-set");
+            self.authorizations.lock().await.push((
+                environment_id.into(),
+                storage_manifest_tag.into(),
+                init_data_sha256.into(),
+            ));
+            Ok(())
+        }
+
+        async fn revoke_init_data_authorization(&self, _: &str) -> Result<(), ProviderError> {
+            self.events.lock().await.push("kbs.authorization-revoke");
+            self.authorizations.lock().await.clear();
             Ok(())
         }
 
@@ -1653,6 +1828,7 @@ mod tests {
         let kbs = Arc::new(MemoryKbs {
             values: Mutex::new(Vec::new()),
             manifests: Mutex::new(Vec::new()),
+            authorizations: Mutex::new(Vec::new()),
             fail: fail_kbs,
             events: events.clone(),
         });
@@ -1749,6 +1925,48 @@ mod tests {
                 "metadata.ready",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn init_data_authorization_binds_exact_bytes_and_manifest() {
+        let MemoryHarness {
+            manager,
+            kbs,
+            events,
+            ..
+        } = manager(false);
+        let manifest_uri = manager.ensure_ready(ENVIRONMENT_ID, 20).await.unwrap();
+        events.lock().await.clear();
+        let init_data = b"exact raw init-data TOML bytes\n";
+
+        let digest = manager
+            .authorize_init_data(ENVIRONMENT_ID, &manifest_uri, init_data)
+            .await
+            .unwrap();
+
+        assert_eq!(digest, hex_sha256(init_data));
+        assert_eq!(events.lock().await.as_slice(), ["kbs.authorization-set"]);
+        assert_eq!(
+            kbs.authorizations.lock().await.as_slice(),
+            [(
+                ENVIRONMENT_ID.to_string(),
+                manifest_resource_tag(&manifest_uri).unwrap().to_string(),
+                hex_sha256(init_data),
+            )]
+        );
+
+        let count = kbs.authorizations.lock().await.len();
+        assert!(
+            manager
+                .authorize_init_data(
+                    ENVIRONMENT_ID,
+                    "kbs:///default/not-approved/value",
+                    init_data
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(kbs.authorizations.lock().await.len(), count);
     }
 
     #[tokio::test]
@@ -1929,6 +2147,7 @@ mod tests {
             events.lock().await.as_slice(),
             [
                 "metadata.deleting",
+                "kbs.authorization-revoke",
                 "kbs.manifest-delete",
                 "kbs.key-delete",
                 "openbao.delete",
@@ -2205,6 +2424,16 @@ mod tests {
             .set_manifest_resource(&manifest_uri, manifest)
             .await
             .unwrap();
+        let manifest_tag = manifest_resource_tag(&manifest_uri).unwrap();
+        let init_data_sha256 = hex_sha256(b"exact init-data");
+        client
+            .set_init_data_authorization(ENVIRONMENT_ID, manifest_tag, &init_data_sha256)
+            .await
+            .unwrap();
+        client
+            .revoke_init_data_authorization(ENVIRONMENT_ID)
+            .await
+            .unwrap();
         client
             .delete_manifest_resource(&manifest_uri)
             .await
@@ -2213,7 +2442,7 @@ mod tests {
         server.abort();
 
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 6);
         for (_, _, authorization, _, _) in requests.iter() {
             assert_eq!(authorization, "Bearer admin-token");
         }
@@ -2234,11 +2463,34 @@ mod tests {
         );
         assert_eq!(requests[1].3, "application/octet-stream");
         assert_eq!(requests[1].4, manifest);
-        assert_eq!(requests[2].0, reqwest::Method::DELETE);
-        assert_eq!(requests[2].1, requests[1].1);
-        assert!(requests[2].4.is_empty());
-        assert_eq!(requests[3].0, reqwest::Method::DELETE);
-        assert_eq!(requests[3].1, requests[0].1);
-        assert!(requests[3].4.is_empty());
+        for (index, expected_state) in [(2, "authorized"), (3, "revoked")] {
+            assert_eq!(requests[index].0, reqwest::Method::POST);
+            assert_eq!(requests[index].1, "/kbs/v0/reference-value");
+            assert_eq!(requests[index].3, "application/json");
+            let message: serde_json::Value = serde_json::from_slice(&requests[index].4).unwrap();
+            assert_eq!(message["version"], "0.1.0");
+            assert_eq!(message["type"], "sample");
+            let payload = STANDARD
+                .decode(message["payload"].as_str().unwrap())
+                .unwrap();
+            let values: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            let record = &values[format!("{CPV_INIT_DATA_AUTHORIZATION_PREFIX}/{ENVIRONMENT_ID}")];
+            assert_eq!(record["schema_version"], 1);
+            assert_eq!(record["state"], expected_state);
+            assert_eq!(record["environment_id"], ENVIRONMENT_ID);
+            if expected_state == "authorized" {
+                assert_eq!(record["storage_manifest_tag"], manifest_tag);
+                assert_eq!(record["init_data_sha256"], init_data_sha256);
+            } else {
+                assert!(record.get("storage_manifest_tag").is_none());
+                assert!(record.get("init_data_sha256").is_none());
+            }
+        }
+        assert_eq!(requests[4].0, reqwest::Method::DELETE);
+        assert_eq!(requests[4].1, requests[1].1);
+        assert!(requests[4].4.is_empty());
+        assert_eq!(requests[5].0, reqwest::Method::DELETE);
+        assert_eq!(requests[5].1, requests[0].1);
+        assert!(requests[5].4.is_empty());
     }
 }
