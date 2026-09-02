@@ -289,10 +289,7 @@ pub(crate) fn send_worker_host_port_descriptor(bootstrap: RawFd, stream: RawFd) 
     send_worker_descriptor(bootstrap, stream, WORKER_HOST_PORT_DESCRIPTOR_MARKER)
 }
 
-pub(crate) fn send_worker_mesh_ingress_descriptor(
-    bootstrap: RawFd,
-    stream: RawFd,
-) -> io::Result<()> {
+pub(crate) fn send_mesh_ingress_descriptor(bootstrap: RawFd, stream: RawFd) -> io::Result<()> {
     validate_inherited_unix_socket(stream).map_err(io::Error::other)?;
     send_worker_descriptor(bootstrap, stream, WORKER_MESH_INGRESS_DESCRIPTOR_MARKER)
 }
@@ -368,7 +365,7 @@ fn receive_worker_broker_descriptor(bootstrap: RawFd) -> Result<OwnedFd, Network
     Ok(descriptor)
 }
 
-pub(crate) async fn receive_worker_mesh_ingress_descriptor(
+pub(crate) async fn receive_mesh_ingress_descriptor(
     control: &tokio::net::UnixStream,
 ) -> Result<OwnedFd, NetworkWorkerError> {
     loop {
@@ -957,7 +954,7 @@ async fn run_ingress_control(
             let frame = mesh_receiver
                 .decode(&frame, &keys.mesh)
                 .map_err(|_| NetworkWorkerError::Protocol)?;
-            let descriptor = receive_worker_mesh_ingress_descriptor(&control).await?;
+            let descriptor = receive_mesh_ingress_descriptor(&control).await?;
             (frame.binding.guest_port, descriptor)
         } else {
             return Err(NetworkWorkerError::Protocol);
@@ -2076,7 +2073,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            receive_worker_mesh_ingress_descriptor(&worker).await,
+            receive_mesh_ingress_descriptor(&worker).await,
             Err(NetworkWorkerError::InheritedDescriptor)
         ));
 
@@ -2090,14 +2087,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            receive_worker_mesh_ingress_descriptor(&worker).await,
+            receive_mesh_ingress_descriptor(&worker).await,
             Err(NetworkWorkerError::InheritedDescriptor)
         ));
 
         let (datagram, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
-        assert!(
-            send_worker_mesh_ingress_descriptor(runner.as_raw_fd(), datagram.as_raw_fd()).is_err()
-        );
+        assert!(send_mesh_ingress_descriptor(runner.as_raw_fd(), datagram.as_raw_fd()).is_err());
     }
 
     #[test]
@@ -2222,7 +2217,7 @@ mod tests {
         runner.write_all(&frame).await.unwrap();
         runner.flush().await.unwrap();
         let (mut mesh_peer, bridge) = StdUnixStream::pair().unwrap();
-        send_worker_mesh_ingress_descriptor(runner.as_raw_fd(), bridge.as_raw_fd()).unwrap();
+        send_mesh_ingress_descriptor(runner.as_raw_fd(), bridge.as_raw_fd()).unwrap();
 
         let mut incoming = tokio::time::timeout(Duration::from_secs(2), inbound_rx.recv())
             .await

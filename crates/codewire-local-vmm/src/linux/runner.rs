@@ -47,8 +47,8 @@ use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
     WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES,
     decode_worker_startup_status, encode_product_worker_bootstrap, encode_worker_bootstrap,
-    send_worker_broker_descriptor, send_worker_host_port_descriptor,
-    send_worker_mesh_ingress_descriptor, send_worker_network_descriptor,
+    send_mesh_ingress_descriptor, send_worker_broker_descriptor, send_worker_host_port_descriptor,
+    send_worker_network_descriptor,
 };
 
 use super::confinement::lock_process_privileges;
@@ -1813,7 +1813,7 @@ async fn transfer_mesh_ingress_connection(
         control,
         accepted.stream.as_raw_fd(),
         deadline,
-        send_worker_mesh_ingress_descriptor,
+        send_mesh_ingress_descriptor,
     )
     .await
     .map_err(|_| RunnerError::IngressControl)
@@ -3057,7 +3057,7 @@ mod tests {
     use crate::linux::process::ProcessIdentity;
     use crate::linux::state::RootGenerationPaths;
     use crate::mesh_ingress::{MESH_INGRESS_CONTROL_FRAME_LEN, MeshIngressControlReceiver};
-    use crate::network_worker::receive_worker_mesh_ingress_descriptor;
+    use crate::network_worker::receive_mesh_ingress_descriptor;
 
     fn test_runner() -> (tempfile::TempDir, CloudHypervisorRunner) {
         let parent = tempfile::tempdir().unwrap();
@@ -3663,7 +3663,7 @@ mod tests {
         assert_eq!(decoded.binding.guest_port, 4_000);
         let descriptor = tokio::time::timeout(
             Duration::from_secs(1),
-            receive_worker_mesh_ingress_descriptor(&worker_control),
+            receive_mesh_ingress_descriptor(&worker_control),
         )
         .await
         .expect("Mesh ingress descriptor was not forwarded")

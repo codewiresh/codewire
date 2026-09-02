@@ -7,27 +7,135 @@
 //! control channel; neither the guest nor the worker receives Mesh identity.
 
 use std::io;
+use std::os::fd::AsRawFd as _;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use codewire_tailnet::conn::Conn;
 use codewire_tailnet::netstack::{TcpListener, TcpStream};
-use tokio::io::copy_bidirectional;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, copy_bidirectional};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::mesh_ingress::{
-    MeshIngressError, MeshIngressPublisher, validate_canonical_mesh_ingress_ports,
+    MESH_INGRESS_CONTROL_FRAME_LEN, MESH_INGRESS_CONTROL_KEY_LEN, MeshIngressBinding,
+    MeshIngressControlFrame, MeshIngressControlReceiver, MeshIngressError, MeshIngressPublisher,
+    validate_canonical_mesh_ingress_ports,
 };
+use crate::network_worker::{receive_mesh_ingress_descriptor, send_mesh_ingress_descriptor};
 
 const MESH_ACCEPT_QUEUE_CAPACITY: usize = 64;
 const MAX_ACTIVE_MESH_STREAMS: usize = 256;
+const MESH_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Generation-bound client used by the isolated Mesh process to submit only
+/// connected AF_UNIX stream capabilities to the environment runner.
+pub struct MeshIngressSubmitter {
+    control: tokio::net::UnixStream,
+    environment_id: Uuid,
+    generation: u64,
+    key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+    next_sequence: u64,
+}
+
+impl MeshIngressSubmitter {
+    pub fn new(
+        control: tokio::net::UnixStream,
+        environment_id: Uuid,
+        generation: u64,
+        key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+    ) -> Result<Self, MeshTransportError> {
+        if environment_id.is_nil() || generation == 0 || key.iter().all(|byte| *byte == 0) {
+            return Err(MeshTransportError::InvalidSubmission);
+        }
+        Ok(Self {
+            control,
+            environment_id,
+            generation,
+            key,
+            next_sequence: 1,
+        })
+    }
+
+    async fn submit(
+        &mut self,
+        guest_port: u16,
+        stream: &StdUnixStream,
+    ) -> Result<(), MeshTransportError> {
+        let binding = MeshIngressBinding::new(guest_port)?;
+        let frame = MeshIngressControlFrame::encode(
+            self.environment_id,
+            self.generation,
+            self.next_sequence,
+            binding,
+            &self.key,
+        )?;
+        let deadline = tokio::time::Instant::now() + MESH_SUBMISSION_TIMEOUT;
+        tokio::time::timeout_at(deadline, async {
+            self.control.write_all(&frame).await?;
+            self.control.flush().await
+        })
+        .await
+        .map_err(|_| MeshTransportError::SubmissionControl)?
+        .map_err(|_| MeshTransportError::SubmissionControl)?;
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                self.control
+                    .writable()
+                    .await
+                    .map_err(|_| MeshTransportError::SubmissionControl)?;
+                match send_mesh_ingress_descriptor(self.control.as_raw_fd(), stream.as_raw_fd()) {
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                    Ok(()) => return Ok(()),
+                    Err(_) => return Err(MeshTransportError::SubmissionControl),
+                }
+            }
+        })
+        .await
+        .map_err(|_| MeshTransportError::SubmissionControl)??;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(MeshTransportError::InvalidSubmission)?;
+        Ok(())
+    }
+}
+
+enum MeshIngressTarget {
+    InProcess(MeshIngressPublisher),
+    Isolated(MeshIngressSubmitter),
+}
+
+impl MeshIngressTarget {
+    async fn publish(
+        &mut self,
+        guest_port: u16,
+        stream: &StdUnixStream,
+    ) -> Result<bool, MeshTransportError> {
+        match self {
+            Self::InProcess(publisher) => {
+                match publisher.publish(guest_port, stream.try_clone()?) {
+                    Ok(()) => Ok(true),
+                    Err(MeshIngressError::PublisherFull) => Ok(false),
+                    Err(error) => Err(MeshTransportError::Admission(error)),
+                }
+            }
+            Self::Isolated(submitter) => {
+                submitter.submit(guest_port, stream).await?;
+                Ok(true)
+            }
+        }
+    }
+}
 
 /// A fully bound set of immutable Mesh application-port listeners.
 pub struct MeshIngressBridge {
     _conn: Arc<Conn>,
     listeners: Vec<(u16, TcpListener)>,
-    publisher: MeshIngressPublisher,
+    target: MeshIngressTarget,
 }
 
 impl MeshIngressBridge {
@@ -35,6 +143,24 @@ impl MeshIngressBridge {
         conn: Arc<Conn>,
         guest_ports: &[u16],
         publisher: MeshIngressPublisher,
+    ) -> Result<Self, MeshTransportError> {
+        Self::bind_target(conn, guest_ports, MeshIngressTarget::InProcess(publisher)).await
+    }
+
+    /// Bind listeners whose accepted streams cross an authenticated private
+    /// descriptor channel into the environment runner.
+    pub async fn bind_isolated(
+        conn: Arc<Conn>,
+        guest_ports: &[u16],
+        submitter: MeshIngressSubmitter,
+    ) -> Result<Self, MeshTransportError> {
+        Self::bind_target(conn, guest_ports, MeshIngressTarget::Isolated(submitter)).await
+    }
+
+    async fn bind_target(
+        conn: Arc<Conn>,
+        guest_ports: &[u16],
+        target: MeshIngressTarget,
     ) -> Result<Self, MeshTransportError> {
         validate_canonical_mesh_ingress_ports(guest_ports)?;
         let mut listeners = Vec::with_capacity(guest_ports.len());
@@ -51,11 +177,14 @@ impl MeshIngressBridge {
         Ok(Self {
             _conn: conn,
             listeners,
-            publisher,
+            target,
         })
     }
 
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), MeshTransportError> {
+    pub async fn run(
+        mut self,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Result<(), MeshTransportError> {
         if *shutdown.borrow() {
             return Ok(());
         }
@@ -87,8 +216,13 @@ impl MeshIngressBridge {
                     let (publisher_stream, bridge_stream) = StdUnixStream::pair()?;
                     bridge_stream.set_nonblocking(true)?;
                     let bridge_stream = tokio::net::UnixStream::from_std(bridge_stream)?;
-                    self.publisher
-                        .publish(accepted.guest_port, publisher_stream)?;
+                    if !self
+                        .target
+                        .publish(accepted.guest_port, &publisher_stream)
+                        .await?
+                    {
+                        continue;
+                    }
                     bridges.spawn(bridge_mesh_stream(accepted.stream, bridge_stream));
                 }
                 completed = acceptors.join_next(), if !acceptors.is_empty() => {
@@ -146,6 +280,48 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
+/// Receive authenticated stream capabilities from one isolated Mesh process
+/// and publish them into the runner-owned generation queue. A closed channel
+/// removes Mesh reachability without changing VM or general-egress state.
+pub async fn receive_mesh_ingress_submissions(
+    mut control: tokio::net::UnixStream,
+    publisher: MeshIngressPublisher,
+    environment_id: Uuid,
+    generation: u64,
+    guest_ports: Vec<u16>,
+    key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+) -> Result<(), MeshTransportError> {
+    if key.iter().all(|byte| *byte == 0) {
+        return Err(MeshTransportError::InvalidSubmission);
+    }
+    let mut receiver = MeshIngressControlReceiver::new(environment_id, generation, &guest_ports)?;
+    loop {
+        let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
+        match control.read(&mut frame[..1]).await {
+            Ok(0) => return Ok(()),
+            Ok(1) => {}
+            Ok(_) => unreachable!("one-byte Mesh submission prefix buffer"),
+            Err(_) => return Err(MeshTransportError::SubmissionControl),
+        }
+        control
+            .read_exact(&mut frame[1..])
+            .await
+            .map_err(|_| MeshTransportError::SubmissionControl)?;
+        let frame = receiver
+            .decode(&frame, &key)
+            .map_err(|_| MeshTransportError::InvalidSubmission)?;
+        let descriptor = receive_mesh_ingress_descriptor(&control)
+            .await
+            .map_err(|_| MeshTransportError::SubmissionControl)?;
+        let stream = StdUnixStream::from(descriptor);
+        match publisher.publish(frame.binding.guest_port, stream) {
+            Ok(()) | Err(MeshIngressError::PublisherFull) => {}
+            Err(MeshIngressError::PublisherClosed) => return Ok(()),
+            Err(error) => return Err(MeshTransportError::Admission(error)),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MeshTransportError {
     #[error("Mesh ingress admission failed: {0}")]
@@ -158,6 +334,10 @@ pub enum MeshTransportError {
     ListenerClosed,
     #[error("Mesh stream bridge task failed")]
     BridgeTask,
+    #[error("Mesh ingress submission is invalid")]
+    InvalidSubmission,
+    #[error("Mesh ingress submission control failed")]
+    SubmissionControl,
     #[error("Mesh stream bridge I/O failed: {0}")]
     Io(#[from] io::Error),
 }
@@ -256,7 +436,27 @@ mod tests {
         );
         let ports = vec![3_000];
         let (publisher, mut published) = mesh_ingress_channel(&ports).unwrap();
-        let bridge = MeshIngressBridge::bind(peer, &ports, publisher)
+        let (submission, runner) = StdUnixStream::pair().unwrap();
+        submission.set_nonblocking(true).unwrap();
+        runner.set_nonblocking(true).unwrap();
+        let environment_id = Uuid::new_v4();
+        let key = [0x6d; MESH_INGRESS_CONTROL_KEY_LEN];
+        let submitter = MeshIngressSubmitter::new(
+            tokio::net::UnixStream::from_std(submission).unwrap(),
+            environment_id,
+            7,
+            Zeroizing::new(key),
+        )
+        .unwrap();
+        let submission_receiver = tokio::spawn(receive_mesh_ingress_submissions(
+            tokio::net::UnixStream::from_std(runner).unwrap(),
+            publisher,
+            environment_id,
+            7,
+            ports.clone(),
+            Zeroizing::new(key),
+        ));
+        let bridge = MeshIngressBridge::bind_isolated(peer, &ports, submitter)
             .await
             .unwrap();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -297,6 +497,11 @@ mod tests {
             .expect("Mesh bridge did not stop")
             .unwrap()
             .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), submission_receiver)
+            .await
+            .expect("Mesh submission receiver did not observe transport shutdown")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -314,5 +519,77 @@ mod tests {
             publisher.publish(3_000, stream),
             Err(MeshIngressError::PublisherClosed)
         );
+    }
+
+    #[tokio::test]
+    async fn isolated_submission_rejects_the_wrong_generation_key() {
+        let ports = vec![3_000];
+        let (publisher, mut published) = mesh_ingress_channel(&ports).unwrap();
+        let (submission, runner) = StdUnixStream::pair().unwrap();
+        submission.set_nonblocking(true).unwrap();
+        runner.set_nonblocking(true).unwrap();
+        let environment_id = Uuid::new_v4();
+        let receiver = tokio::spawn(receive_mesh_ingress_submissions(
+            tokio::net::UnixStream::from_std(runner).unwrap(),
+            publisher,
+            environment_id,
+            9,
+            ports,
+            Zeroizing::new([0x41; MESH_INGRESS_CONTROL_KEY_LEN]),
+        ));
+        let mut submitter = MeshIngressSubmitter::new(
+            tokio::net::UnixStream::from_std(submission).unwrap(),
+            environment_id,
+            9,
+            Zeroizing::new([0x42; MESH_INGRESS_CONTROL_KEY_LEN]),
+        )
+        .unwrap();
+        let (stream, _peer) = StdUnixStream::pair().unwrap();
+        submitter.submit(3_000, &stream).await.unwrap();
+
+        assert!(matches!(
+            receiver.await.unwrap(),
+            Err(MeshTransportError::InvalidSubmission)
+        ));
+        assert!(published.recv().await.is_none());
+        let (invalid, _peer) = StdUnixStream::pair().unwrap();
+        invalid.set_nonblocking(true).unwrap();
+        assert!(
+            MeshIngressSubmitter::new(
+                tokio::net::UnixStream::from_std(invalid).unwrap(),
+                Uuid::nil(),
+                9,
+                Zeroizing::new([0x42; MESH_INGRESS_CONTROL_KEY_LEN]),
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_submission_distinguishes_clean_close_from_truncation() {
+        let environment_id = Uuid::new_v4();
+        let key = [0x51; MESH_INGRESS_CONTROL_KEY_LEN];
+        for (prefix, expected_ok) in [(&b""[..], true), (&b"C"[..], false)] {
+            let (sender, runner) = StdUnixStream::pair().unwrap();
+            sender.set_nonblocking(true).unwrap();
+            runner.set_nonblocking(true).unwrap();
+            let (publisher, _published) = mesh_ingress_channel(&[3_000]).unwrap();
+            let receiver = tokio::spawn(receive_mesh_ingress_submissions(
+                tokio::net::UnixStream::from_std(runner).unwrap(),
+                publisher,
+                environment_id,
+                11,
+                vec![3_000],
+                Zeroizing::new(key),
+            ));
+            let mut sender = tokio::net::UnixStream::from_std(sender).unwrap();
+            sender.write_all(prefix).await.unwrap();
+            sender.shutdown().await.unwrap();
+            let result = receiver.await.unwrap();
+            assert_eq!(result.is_ok(), expected_ok);
+            if !expected_ok {
+                assert!(matches!(result, Err(MeshTransportError::SubmissionControl)));
+            }
+        }
     }
 }

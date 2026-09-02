@@ -99,6 +99,9 @@ pub enum Error {
     /// Transport setup did not produce a usable coordinator response in time.
     #[error("coordinator setup timed out after {0:?}")]
     SetupTimeout(Duration),
+    /// The first usable setup response violated the coordinator contract.
+    #[error("coordinator setup response is invalid")]
+    InvalidSetupResponse,
 }
 
 impl crate::CodewireClient {
@@ -753,6 +756,15 @@ impl MeshCoordinatorPeerSession {
         Ok(())
     }
 
+    /// Consume the DERP map received while establishing this exact session.
+    ///
+    /// Enrollment credentials are one-use, so a peer must build its transport
+    /// from this setup response instead of opening a second coordinator
+    /// connection merely to discover relay configuration.
+    pub fn take_setup_derp_map(&mut self) -> Result<serde_json::Value, Error> {
+        take_mesh_setup_derp_map(&mut self.pending_responses)
+    }
+
     /// Subscribe a dial-only session to one target node.
     pub async fn subscribe(&mut self, target_node: impl Into<String>) -> Result<(), Error> {
         self.stream
@@ -907,6 +919,18 @@ impl MeshCoordinatorPeerSession {
             }
         }
     }
+}
+
+fn take_mesh_setup_derp_map(
+    pending: &mut VecDeque<MeshCoordinatorServiceCoordinateResponse>,
+) -> Result<serde_json::Value, Error> {
+    let response = pending.pop_front().ok_or(Error::InvalidSetupResponse)?;
+    let Some(mesh_coordinator_service_coordinate_response::Msg::DerpMap(derp)) = response.msg
+    else {
+        pending.push_front(response);
+        return Err(Error::InvalidSetupResponse);
+    };
+    serde_json::from_slice(&derp.derp_map_json).map_err(Error::from)
 }
 
 fn coordinator_tls_config() -> Result<Arc<rustls::ClientConfig>, Error> {
@@ -1164,7 +1188,9 @@ fn node_conversion_error(message: &'static str) -> serde_json::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_proto::codewire::internal::v1::{CoordinatePeerRemove, CoordinatePeerUpdate};
+    use codewire_proto::codewire::internal::v1::{
+        CoordinateDerpMap, CoordinatePeerRemove, CoordinatePeerUpdate,
+    };
     use codewire_tailnet::node::{DiscoPublic, NodePublic, prefix_from_uuid};
     use std::future::Future;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1308,6 +1334,32 @@ mod tests {
             CoordinatorWireProtocol::PublicEdgeGrpc.connectrpc(),
             Protocol::Grpc
         );
+    }
+
+    #[test]
+    fn mesh_setup_derp_map_is_consumed_from_the_live_session_only() {
+        let expected = serde_json::json!({"Regions": {"1": {"RegionID": 1}}});
+        let mut pending = VecDeque::from([MeshCoordinatorServiceCoordinateResponse {
+            msg: CoordinateDerpMap {
+                derp_map_json: serde_json::to_vec(&expected).unwrap(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        }]);
+        assert_eq!(take_mesh_setup_derp_map(&mut pending).unwrap(), expected);
+        assert!(pending.is_empty());
+
+        let first = MeshCoordinatorServiceCoordinateResponse {
+            msg: CoordinatePing::default().into(),
+            ..Default::default()
+        };
+        let mut pending = VecDeque::from([first.clone()]);
+        assert!(matches!(
+            take_mesh_setup_derp_map(&mut pending),
+            Err(Error::InvalidSetupResponse)
+        ));
+        assert_eq!(pending.pop_front(), Some(first));
     }
 
     #[test]
