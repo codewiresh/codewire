@@ -16,6 +16,9 @@ use codewire_local_vmm::egress_broker::{
 use codewire_local_vmm::host_port::{
     HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
 };
+use codewire_local_vmm::mesh_ingress::{
+    MESH_INGRESS_CONTROL_KEY_LEN, MeshIngressBinding, MeshIngressControlFrame,
+};
 use codewire_local_vmm::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, WORKER_BROKER_READY_MESSAGE,
     WORKER_PREPARED_MESSAGE, WORKER_READY_MESSAGE, WORKER_STATUS_MAX_BYTES,
@@ -30,6 +33,7 @@ use uuid::Uuid;
 const BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
 const HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
+const MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
 const CONTROL_BYTES: usize = 64;
 
 #[repr(C)]
@@ -256,12 +260,16 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     let token = "product-worker-process-test-token-0123456789abcdef";
     let network_key = NetworkKey::derive(token, vm_id, generation).unwrap();
     let host_port_key = [0x7b; HOST_PORT_CONTROL_KEY_LEN];
+    let mesh_ingress_key = [0x4d; MESH_INGRESS_CONTROL_KEY_LEN];
+    let mesh_ingress_port = 3_001;
     let worker_bootstrap = encode_product_worker_bootstrap(
         vm_id,
         generation,
         &network_key,
         &broker_key,
         &host_port_key,
+        &mesh_ingress_key,
+        &[mesh_ingress_port],
     )
     .unwrap();
     let worker_source = worker_child_socket.as_raw_fd();
@@ -376,6 +384,26 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
             status.code()
         );
     }
+    assert!(worker.0.try_wait().unwrap().is_none());
+
+    let (mut mesh_peer, mesh_bridge) = std::os::unix::net::UnixStream::pair().unwrap();
+    let mesh_frame = MeshIngressControlFrame::encode(
+        vm_id,
+        generation,
+        1,
+        MeshIngressBinding::new(mesh_ingress_port).unwrap(),
+        &mesh_ingress_key,
+    )
+    .unwrap();
+    worker_parent.write_all(&mesh_frame).unwrap();
+    send_descriptor(
+        worker_parent.as_raw_fd(),
+        mesh_bridge.as_raw_fd(),
+        MESH_INGRESS_DESCRIPTOR_MARKER,
+    );
+    drop(mesh_bridge);
+    mesh_peer.write_all(b"mesh-process-boundary").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
     assert!(worker.0.try_wait().unwrap().is_none());
 
     drop(guest);

@@ -39,6 +39,7 @@ use crate::host_port::{
     validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
+use crate::mesh_ingress::MESH_INGRESS_CONTROL_KEY_LEN;
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
     WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES,
@@ -1918,6 +1919,7 @@ async fn spawn_network_worker_process(
         .map_err(|_| RunnerError::NetworkWorkerSpawn)?;
     let product_worker = matches!(&attachment, WorkerBrokerAttachment::Product { .. });
     let host_port_key = product_worker.then(fresh_host_port_control_key);
+    let mesh_ingress_key = product_worker.then(fresh_mesh_ingress_control_key);
     let (bytes, mut broker_endpoint) = match attachment {
         WorkerBrokerAttachment::Product {
             endpoint,
@@ -1931,6 +1933,10 @@ async fn spawn_network_worker_process(
                 host_port_key
                     .as_deref()
                     .expect("product worker has a host-port control key"),
+                mesh_ingress_key
+                    .as_deref()
+                    .expect("product worker has a Mesh ingress control key"),
+                &[],
             )
             .map(|bytes| Zeroizing::new(bytes.to_vec())),
             Some(endpoint),
@@ -2652,6 +2658,16 @@ fn fresh_egress_broker_key() -> Zeroizing<[u8; BROKER_IPC_KEY_LEN]> {
 fn fresh_host_port_control_key() -> Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]> {
     loop {
         let mut key = Zeroizing::new([0_u8; HOST_PORT_CONTROL_KEY_LEN]);
+        OsRng.fill_bytes(key.as_mut());
+        if key.iter().any(|byte| *byte != 0) {
+            return key;
+        }
+    }
+}
+
+fn fresh_mesh_ingress_control_key() -> Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]> {
+    loop {
+        let mut key = Zeroizing::new([0_u8; MESH_INGRESS_CONTROL_KEY_LEN]);
         OsRng.fill_bytes(key.as_mut());
         if key.iter().any(|byte| *byte != 0) {
             return key;

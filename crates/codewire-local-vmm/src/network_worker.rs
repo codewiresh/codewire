@@ -42,11 +42,15 @@ use zeroize::Zeroizing;
 
 use crate::host_port::{
     HOST_PORT_CONTROL_FRAME_LEN, HOST_PORT_CONTROL_KEY_LEN, HostPortBinding,
-    HostPortControlReceiver,
+    HostPortControlReceiver, is_host_port_control_frame,
 };
 use crate::linux::confinement::{
     install_denied_syscalls, install_deny_all_filesystem_domain as restrict_filesystem,
     require_single_threaded_process as require_single_thread,
+};
+use crate::mesh_ingress::{
+    MAX_MESH_INGRESS_PORTS, MESH_INGRESS_CONTROL_KEY_LEN, MeshIngressControlReceiver,
+    is_mesh_ingress_control_frame, validate_canonical_mesh_ingress_ports,
 };
 
 pub const NETWORK_BOOTSTRAP_FD: RawFd = 4;
@@ -57,6 +61,7 @@ pub const WORKER_STATUS_MAX_BYTES: usize = 64;
 const WORKER_BROKER_DESCRIPTOR_MARKER: u8 = b'B';
 const WORKER_NETWORK_DESCRIPTOR_MARKER: u8 = b'N';
 const WORKER_HOST_PORT_DESCRIPTOR_MARKER: u8 = b'P';
+const WORKER_MESH_INGRESS_DESCRIPTOR_MARKER: u8 = b'M';
 const WORKER_CONTROL_BYTES: usize = 64;
 
 #[cfg(target_env = "musl")]
@@ -86,13 +91,16 @@ fn decode_control_length(value: ControlLength) -> usize {
 
 const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB1\0";
 const BOOTSTRAP_LEN: usize = 64;
-const PRODUCT_BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB2\0";
-const PRODUCT_BOOTSTRAP_LEN: usize = 160;
+const PRODUCT_BOOTSTRAP_MAGIC: &[u8; 8] = b"CWNETB3\0";
+const PRODUCT_BOOTSTRAP_LEN: usize = 336;
 const PRODUCT_POLICY_DIGEST_OFFSET: usize = 64;
 const PRODUCT_BROKER_KEY_OFFSET: usize = 96;
 const PRODUCT_HOST_PORT_KEY_OFFSET: usize = 128;
+const PRODUCT_MESH_INGRESS_KEY_OFFSET: usize = 160;
+const PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET: usize = 192;
+const PRODUCT_MESH_INGRESS_PORTS_OFFSET: usize = 194;
 const PACKET_QUEUE: usize = 256;
-const MAX_INBOUND_HOST_PORT_FLOWS: usize = 64;
+const MAX_INBOUND_STREAM_FLOWS: usize = 64;
 const NETWORK_MTU: usize = 1_500;
 const DNS_MESSAGE_LIMIT: usize = 1_232;
 const BROKER_TIMEOUT: Duration = Duration::from_secs(2);
@@ -281,6 +289,15 @@ pub(crate) fn send_worker_host_port_descriptor(bootstrap: RawFd, stream: RawFd) 
     send_worker_descriptor(bootstrap, stream, WORKER_HOST_PORT_DESCRIPTOR_MARKER)
 }
 
+#[cfg(test)]
+pub(crate) fn send_worker_mesh_ingress_descriptor(
+    bootstrap: RawFd,
+    stream: RawFd,
+) -> io::Result<()> {
+    validate_inherited_unix_socket(stream).map_err(io::Error::other)?;
+    send_worker_descriptor(bootstrap, stream, WORKER_MESH_INGRESS_DESCRIPTOR_MARKER)
+}
+
 fn send_worker_descriptor(bootstrap: RawFd, descriptor: RawFd, marker: u8) -> io::Result<()> {
     validate_inherited_unix_socket(bootstrap).map_err(io::Error::other)?;
     if descriptor < 0 {
@@ -350,6 +367,26 @@ fn receive_worker_broker_descriptor(bootstrap: RawFd) -> Result<OwnedFd, Network
         .map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
     validate_inherited_unix_socket(descriptor.as_raw_fd())?;
     Ok(descriptor)
+}
+
+async fn receive_worker_mesh_ingress_descriptor(
+    control: &tokio::net::UnixStream,
+) -> Result<OwnedFd, NetworkWorkerError> {
+    loop {
+        control
+            .readable()
+            .await
+            .map_err(|_| NetworkWorkerError::FrameIo)?;
+        match receive_worker_descriptor(control.as_raw_fd(), WORKER_MESH_INGRESS_DESCRIPTOR_MARKER)
+        {
+            Ok(descriptor) => {
+                validate_inherited_unix_socket(descriptor.as_raw_fd())?;
+                return Ok(descriptor);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => return Err(NetworkWorkerError::InheritedDescriptor),
+        }
+    }
 }
 
 fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::Result<OwnedFd> {
@@ -610,16 +647,23 @@ pub fn encode_worker_bootstrap(
 }
 
 /// Encode the product bootstrap containing one generation network key, one
-/// policy digest, and separate non-provider broker and host-port HMAC keys.
+/// policy digest, separate non-provider ingress/broker HMAC keys, and the
+/// immutable Mesh guest-port allowlist.
 pub fn encode_product_worker_bootstrap(
     vm_id: Uuid,
     generation: u64,
     network_key: &NetworkKey,
     broker_key: &[u8; BROKER_IPC_KEY_LEN],
     host_port_key: &[u8; HOST_PORT_CONTROL_KEY_LEN],
+    mesh_ingress_key: &[u8; MESH_INGRESS_CONTROL_KEY_LEN],
+    mesh_ingress_ports: &[u16],
 ) -> Result<Zeroizing<[u8; PRODUCT_BOOTSTRAP_LEN]>, NetworkWorkerError> {
     validate_identity(vm_id, generation)?;
-    if broker_key.iter().all(|byte| *byte == 0) || host_port_key.iter().all(|byte| *byte == 0) {
+    if broker_key.iter().all(|byte| *byte == 0)
+        || host_port_key.iter().all(|byte| *byte == 0)
+        || mesh_ingress_key.iter().all(|byte| *byte == 0)
+        || validate_canonical_mesh_ingress_ports(mesh_ingress_ports).is_err()
+    {
         return Err(NetworkWorkerError::InvalidBootstrap);
     }
     let policy = CompiledPolicy::developer_baseline();
@@ -631,7 +675,16 @@ pub fn encode_product_worker_bootstrap(
     bytes[PRODUCT_POLICY_DIGEST_OFFSET..PRODUCT_BROKER_KEY_OFFSET]
         .copy_from_slice(policy.digest().as_bytes());
     bytes[PRODUCT_BROKER_KEY_OFFSET..PRODUCT_HOST_PORT_KEY_OFFSET].copy_from_slice(broker_key);
-    bytes[PRODUCT_HOST_PORT_KEY_OFFSET..].copy_from_slice(host_port_key);
+    bytes[PRODUCT_HOST_PORT_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET]
+        .copy_from_slice(host_port_key);
+    bytes[PRODUCT_MESH_INGRESS_KEY_OFFSET..PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET]
+        .copy_from_slice(mesh_ingress_key);
+    bytes[PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET..PRODUCT_MESH_INGRESS_PORTS_OFFSET]
+        .copy_from_slice(&(mesh_ingress_ports.len() as u16).to_le_bytes());
+    for (index, port) in mesh_ingress_ports.iter().enumerate() {
+        let offset = PRODUCT_MESH_INGRESS_PORTS_OFFSET + index * std::mem::size_of::<u16>();
+        bytes[offset..offset + std::mem::size_of::<u16>()].copy_from_slice(&port.to_le_bytes());
+    }
     Ok(bytes)
 }
 
@@ -640,6 +693,8 @@ struct ProductWorkerBootstrap {
     broker_binding: BrokerIpcBinding,
     broker_key: BrokerIpcKey,
     host_port_key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+    mesh_ingress_ports: Vec<u16>,
 }
 
 /// Entrypoint used only by the hidden product `cw` worker command.
@@ -710,6 +765,8 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
         bootstrap,
         prepared.network_key,
         prepared.host_port_key,
+        prepared.mesh_ingress_key,
+        prepared.mesh_ingress_ports,
         vm_id,
         generation,
         broker,
@@ -772,6 +829,8 @@ async fn run_prepared_product_worker<B: EgressBroker>(
     bootstrap: StdUnixStream,
     key: NetworkKey,
     host_port_key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+    mesh_ingress_ports: Vec<u16>,
     vm_id: Uuid,
     generation: u64,
     broker: Arc<B>,
@@ -796,25 +855,29 @@ async fn run_prepared_product_worker<B: EgressBroker>(
         .map_err(|_| NetworkWorkerError::BootstrapIo)?;
     let control =
         tokio::net::UnixStream::from_std(bootstrap).map_err(|_| NetworkWorkerError::BootstrapIo)?;
-    let (host_ports_tx, host_ports_rx) = mpsc::channel(MAX_INBOUND_HOST_PORT_FLOWS);
+    let (inbound_tx, inbound_rx) = mpsc::channel(MAX_INBOUND_STREAM_FLOWS);
     let (status_tx, status_rx) = oneshot::channel::<&'static [u8]>();
     let status = Arc::new(StdMutex::new(Some(status_tx)));
     let ready_status = Arc::clone(&status);
-    let mut control_task = tokio::spawn(run_host_port_control(
+    let mut control_task = tokio::spawn(run_ingress_control(
         control,
         status_rx,
-        host_ports_tx,
-        host_port_key,
+        inbound_tx,
+        IngressControlKeys {
+            host_port: host_port_key,
+            mesh: mesh_ingress_key,
+        },
+        mesh_ingress_ports,
         vm_id,
         generation,
     ));
-    let session = run_host_session_with_ports(
+    let session = run_host_session_with_ingress(
         network,
         key,
         vm_id,
         generation,
         broker,
-        Some(host_ports_rx),
+        Some(inbound_rx),
         move || publish_product_worker_status(&ready_status, WORKER_READY_MESSAGE),
     );
     tokio::pin!(session);
@@ -846,16 +909,22 @@ fn publish_product_worker_status(
         .map_err(|_| io::Error::other("network worker status channel closed"))
 }
 
-struct InboundHostPort {
-    binding: HostPortBinding,
+struct InboundGuestStream {
+    guest_port: u16,
     stream: TransferredStream,
 }
 
-async fn run_host_port_control(
+struct IngressControlKeys {
+    host_port: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    mesh: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+}
+
+async fn run_ingress_control(
     control: tokio::net::UnixStream,
     status: oneshot::Receiver<&'static [u8]>,
-    host_ports: mpsc::Sender<InboundHostPort>,
-    key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    inbound: mpsc::Sender<InboundGuestStream>,
+    keys: IngressControlKeys,
+    mesh_ingress_ports: Vec<u16>,
     vm_id: Uuid,
     generation: u64,
 ) -> Result<(), NetworkWorkerError> {
@@ -866,22 +935,32 @@ async fn run_host_port_control(
         return Err(NetworkWorkerError::Protocol);
     }
 
-    let mut receiver = HostPortControlReceiver::new(vm_id, generation)
+    let mut host_port_receiver = HostPortControlReceiver::new(vm_id, generation)
+        .map_err(|_| NetworkWorkerError::Protocol)?;
+    let mut mesh_receiver = MeshIngressControlReceiver::new(vm_id, generation, &mesh_ingress_ports)
         .map_err(|_| NetworkWorkerError::Protocol)?;
     loop {
         let mut frame = [0_u8; HOST_PORT_CONTROL_FRAME_LEN];
         read_worker_control_exact(&control, &mut frame).await?;
-        let frame = receiver
-            .decode(&frame, &key)
-            .map_err(|_| NetworkWorkerError::Protocol)?;
-        let descriptor = receive_worker_host_port_descriptor(&control, frame.binding).await?;
+        let (guest_port, descriptor) = if is_host_port_control_frame(&frame) {
+            let frame = host_port_receiver
+                .decode(&frame, &keys.host_port)
+                .map_err(|_| NetworkWorkerError::Protocol)?;
+            let descriptor = receive_worker_host_port_descriptor(&control, frame.binding).await?;
+            (frame.binding.guest_port, descriptor)
+        } else if is_mesh_ingress_control_frame(&frame) {
+            let frame = mesh_receiver
+                .decode(&frame, &keys.mesh)
+                .map_err(|_| NetworkWorkerError::Protocol)?;
+            let descriptor = receive_worker_mesh_ingress_descriptor(&control).await?;
+            (frame.binding.guest_port, descriptor)
+        } else {
+            return Err(NetworkWorkerError::Protocol);
+        };
         let stream =
             transferred_stream(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)?;
-        host_ports
-            .send(InboundHostPort {
-                binding: frame.binding,
-                stream,
-            })
+        inbound
+            .send(InboundGuestStream { guest_port, stream })
             .await
             .map_err(|_| NetworkWorkerError::Engine)?;
     }
@@ -1358,8 +1437,40 @@ fn decode_product_worker_bootstrap(
     let broker_key =
         BrokerIpcKey::from_bytes(*broker_key).map_err(|_| NetworkWorkerError::InvalidBootstrap)?;
     let mut host_port_key = Zeroizing::new([0_u8; HOST_PORT_CONTROL_KEY_LEN]);
-    host_port_key.copy_from_slice(&bytes[PRODUCT_HOST_PORT_KEY_OFFSET..]);
+    host_port_key
+        .copy_from_slice(&bytes[PRODUCT_HOST_PORT_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET]);
     if host_port_key.iter().all(|byte| *byte == 0) {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let mut mesh_ingress_key = Zeroizing::new([0_u8; MESH_INGRESS_CONTROL_KEY_LEN]);
+    mesh_ingress_key.copy_from_slice(
+        &bytes[PRODUCT_MESH_INGRESS_KEY_OFFSET..PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET],
+    );
+    if mesh_ingress_key.iter().all(|byte| *byte == 0) {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let port_count = u16::from_le_bytes(
+        bytes[PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET..PRODUCT_MESH_INGRESS_PORTS_OFFSET]
+            .try_into()
+            .expect("fixed Mesh ingress port count"),
+    ) as usize;
+    if port_count > MAX_MESH_INGRESS_PORTS {
+        return Err(NetworkWorkerError::InvalidBootstrap);
+    }
+    let mut mesh_ingress_ports = Vec::with_capacity(port_count);
+    for index in 0..port_count {
+        let offset = PRODUCT_MESH_INGRESS_PORTS_OFFSET + index * std::mem::size_of::<u16>();
+        mesh_ingress_ports.push(u16::from_le_bytes(
+            bytes[offset..offset + std::mem::size_of::<u16>()]
+                .try_into()
+                .expect("fixed Mesh ingress port"),
+        ));
+    }
+    let used_ports_end =
+        PRODUCT_MESH_INGRESS_PORTS_OFFSET + port_count * std::mem::size_of::<u16>();
+    if bytes[used_ports_end..].iter().any(|byte| *byte != 0)
+        || validate_canonical_mesh_ingress_ports(&mesh_ingress_ports).is_err()
+    {
         return Err(NetworkWorkerError::InvalidBootstrap);
     }
     Ok(ProductWorkerBootstrap {
@@ -1367,6 +1478,8 @@ fn decode_product_worker_bootstrap(
         broker_binding,
         broker_key,
         host_port_key,
+        mesh_ingress_key,
+        mesh_ingress_ports,
     })
 }
 
@@ -1393,16 +1506,16 @@ where
     B: EgressBroker,
     R: FnOnce() -> io::Result<()> + Send,
 {
-    run_host_session_with_ports(stream, key, vm_id, generation, broker, None, ready).await
+    run_host_session_with_ingress(stream, key, vm_id, generation, broker, None, ready).await
 }
 
-async fn run_host_session_with_ports<S, B, R>(
+async fn run_host_session_with_ingress<S, B, R>(
     mut stream: S,
     key: NetworkKey,
     vm_id: Uuid,
     generation: u64,
     broker: Arc<B>,
-    host_ports: Option<mpsc::Receiver<InboundHostPort>>,
+    inbound: Option<mpsc::Receiver<InboundGuestStream>>,
     ready: R,
 ) -> Result<(), NetworkWorkerError>
 where
@@ -1469,14 +1582,7 @@ where
     let (guest_packet_tx, guest_packets) = mpsc::channel(PACKET_QUEUE);
     let reader = read_authenticated_frames(stream_read, Arc::clone(&session), guest_packet_tx);
     let writer = write_authenticated_frames(stream_write, session, outbound_packets);
-    let dispatcher = dispatch_packets(
-        guest_packets,
-        stack,
-        to_stack,
-        from_stack,
-        broker,
-        host_ports,
-    );
+    let dispatcher = dispatch_packets(guest_packets, stack, to_stack, from_stack, broker, inbound);
     tokio::pin!(reader, writer, dispatcher);
     tokio::select! {
         result = &mut reader => result,
@@ -1560,7 +1666,7 @@ async fn dispatch_packets<B: EgressBroker>(
     to_stack: mpsc::Sender<Vec<u8>>,
     outbound: mpsc::Sender<Vec<u8>>,
     broker: Arc<B>,
-    mut host_ports: Option<mpsc::Receiver<InboundHostPort>>,
+    mut inbound: Option<mpsc::Receiver<InboundGuestStream>>,
 ) -> Result<(), NetworkWorkerError> {
     let mut listeners = HashMap::<SocketAddr, tokio::task::JoinHandle<()>>::new();
     let mut inbound_bridges = JoinSet::new();
@@ -1569,17 +1675,17 @@ async fn dispatch_packets<B: EgressBroker>(
             packet = packets.recv() => {
                 packet.ok_or(NetworkWorkerError::FrameIo)?
             }
-            incoming = next_inbound_host_port(&mut host_ports) => {
+            incoming = next_inbound_guest_stream(&mut inbound) => {
                 let Some(mut incoming) = incoming else {
-                    host_ports = None;
+                    inbound = None;
                     continue;
                 };
-                if inbound_bridges.len() >= MAX_INBOUND_HOST_PORT_FLOWS {
+                if inbound_bridges.len() >= MAX_INBOUND_STREAM_FLOWS {
                     continue;
                 }
                 let destination = SocketAddr::new(
                     IpAddr::V4(GUEST_IP),
-                    incoming.binding.guest_port,
+                    incoming.guest_port,
                 );
                 let guest = tokio::time::timeout(BROKER_TIMEOUT, stack.connect(destination)).await;
                 let Ok(Ok(mut guest)) = guest else {
@@ -1671,11 +1777,11 @@ async fn dispatch_packets<B: EgressBroker>(
     }
 }
 
-async fn next_inbound_host_port(
-    host_ports: &mut Option<mpsc::Receiver<InboundHostPort>>,
-) -> Option<InboundHostPort> {
-    match host_ports {
-        Some(host_ports) => host_ports.recv().await,
+async fn next_inbound_guest_stream(
+    inbound: &mut Option<mpsc::Receiver<InboundGuestStream>>,
+) -> Option<InboundGuestStream> {
+    match inbound {
+        Some(inbound) => inbound.recv().await,
         None => std::future::pending().await,
     }
 }
@@ -1792,6 +1898,7 @@ mod tests {
     use tokio::io::{DuplexStream, duplex};
 
     use crate::host_port::HostPortControlFrame;
+    use crate::mesh_ingress::{MeshIngressBinding, MeshIngressControlFrame};
 
     const TOKEN: &str = "local-worker-test-token-0123456789abcdef";
     const TEST_DESTINATION: SocketAddr =
@@ -1949,6 +2056,45 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn mesh_descriptor_is_role_bound_and_must_be_a_connected_unix_stream() {
+        let (runner, worker) = StdUnixStream::pair().unwrap();
+        runner.set_nonblocking(true).unwrap();
+        worker.set_nonblocking(true).unwrap();
+        let worker = tokio::net::UnixStream::from_std(worker).unwrap();
+        let (_peer, bridge) = StdUnixStream::pair().unwrap();
+
+        send_worker_descriptor(
+            runner.as_raw_fd(),
+            bridge.as_raw_fd(),
+            WORKER_HOST_PORT_DESCRIPTOR_MARKER,
+        )
+        .unwrap();
+        assert!(matches!(
+            receive_worker_mesh_ingress_descriptor(&worker).await,
+            Err(NetworkWorkerError::InheritedDescriptor)
+        ));
+
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let _client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        send_worker_descriptor(
+            runner.as_raw_fd(),
+            accepted.as_raw_fd(),
+            WORKER_MESH_INGRESS_DESCRIPTOR_MARKER,
+        )
+        .unwrap();
+        assert!(matches!(
+            receive_worker_mesh_ingress_descriptor(&worker).await,
+            Err(NetworkWorkerError::InheritedDescriptor)
+        ));
+
+        let (datagram, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        assert!(
+            send_worker_mesh_ingress_descriptor(runner.as_raw_fd(), datagram.as_raw_fd()).is_err()
+        );
+    }
+
     #[test]
     fn host_port_descriptor_must_be_the_exact_connected_loopback_stream() {
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -1990,13 +2136,17 @@ mod tests {
         worker.set_nonblocking(true).unwrap();
         let mut runner = tokio::net::UnixStream::from_std(runner).unwrap();
         let worker = tokio::net::UnixStream::from_std(worker).unwrap();
-        let (host_ports_tx, mut host_ports_rx) = mpsc::channel(1);
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(1);
         let (status_tx, status_rx) = oneshot::channel();
-        let control = tokio::spawn(run_host_port_control(
+        let control = tokio::spawn(run_ingress_control(
             worker,
             status_rx,
-            host_ports_tx,
-            Zeroizing::new(key),
+            inbound_tx,
+            IngressControlKeys {
+                host_port: Zeroizing::new(key),
+                mesh: Zeroizing::new([0x4d; MESH_INGRESS_CONTROL_KEY_LEN]),
+            },
+            Vec::new(),
             vm_id,
             generation,
         ));
@@ -2015,15 +2165,69 @@ mod tests {
         runner.flush().await.unwrap();
         send_worker_host_port_descriptor(runner.as_raw_fd(), accepted.as_raw_fd()).unwrap();
 
-        let mut incoming = tokio::time::timeout(Duration::from_secs(2), host_ports_rx.recv())
+        let mut incoming = tokio::time::timeout(Duration::from_secs(2), inbound_rx.recv())
             .await
             .expect("control did not deliver the stream")
             .expect("control closed the host-port channel");
-        assert_eq!(incoming.binding, binding);
+        assert_eq!(incoming.guest_port, binding.guest_port);
         client.write_all(b"transferred").unwrap();
         let mut received = [0_u8; 11];
         incoming.stream.read_exact(&mut received).await.unwrap();
         assert_eq!(&received, b"transferred");
+
+        drop(runner);
+        assert!(matches!(
+            control.await.unwrap(),
+            Err(NetworkWorkerError::FrameIo)
+        ));
+    }
+
+    #[tokio::test]
+    async fn authenticated_mesh_control_delivers_only_an_allowed_unix_stream() {
+        let (vm_id, generation) = identity();
+        let mesh_key = [0x4d; MESH_INGRESS_CONTROL_KEY_LEN];
+        let guest_port = 3_000;
+        let (runner, worker) = StdUnixStream::pair().unwrap();
+        runner.set_nonblocking(true).unwrap();
+        worker.set_nonblocking(true).unwrap();
+        let mut runner = tokio::net::UnixStream::from_std(runner).unwrap();
+        let worker = tokio::net::UnixStream::from_std(worker).unwrap();
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(1);
+        let (status_tx, status_rx) = oneshot::channel();
+        let control = tokio::spawn(run_ingress_control(
+            worker,
+            status_rx,
+            inbound_tx,
+            IngressControlKeys {
+                host_port: Zeroizing::new([0xa5; HOST_PORT_CONTROL_KEY_LEN]),
+                mesh: Zeroizing::new(mesh_key),
+            },
+            vec![guest_port],
+            vm_id,
+            generation,
+        ));
+        status_tx.send(WORKER_READY_MESSAGE).unwrap();
+        let mut ready = [0_u8; WORKER_READY_MESSAGE.len()];
+        runner.read_exact(&mut ready).await.unwrap();
+        assert_eq!(&ready, WORKER_READY_MESSAGE);
+
+        let binding = MeshIngressBinding::new(guest_port).unwrap();
+        let frame =
+            MeshIngressControlFrame::encode(vm_id, generation, 1, binding, &mesh_key).unwrap();
+        runner.write_all(&frame).await.unwrap();
+        runner.flush().await.unwrap();
+        let (mut mesh_peer, bridge) = StdUnixStream::pair().unwrap();
+        send_worker_mesh_ingress_descriptor(runner.as_raw_fd(), bridge.as_raw_fd()).unwrap();
+
+        let mut incoming = tokio::time::timeout(Duration::from_secs(2), inbound_rx.recv())
+            .await
+            .expect("control did not deliver the Mesh stream")
+            .expect("control closed the ingress channel");
+        assert_eq!(incoming.guest_port, guest_port);
+        mesh_peer.write_all(b"mesh-stream").unwrap();
+        let mut received = [0_u8; 11];
+        incoming.stream.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"mesh-stream");
 
         drop(runner);
         assert!(matches!(
@@ -2115,12 +2319,16 @@ mod tests {
         let network_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
         let broker_key = [0x5a; BROKER_IPC_KEY_LEN];
         let host_port_key = [0xa5; HOST_PORT_CONTROL_KEY_LEN];
+        let mesh_ingress_key = [0x4d; MESH_INGRESS_CONTROL_KEY_LEN];
+        let mesh_ingress_ports = [22, 3_000];
         let bytes = encode_product_worker_bootstrap(
             vm_id,
             generation,
             &network_key,
             &broker_key,
             &host_port_key,
+            &mesh_ingress_key,
+            &mesh_ingress_ports,
         )
         .unwrap();
         let decoded = decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation).unwrap();
@@ -2135,6 +2343,7 @@ mod tests {
                 .network_key
                 .with_bytes(|actual| assert_eq!(actual, expected));
         });
+        assert_eq!(decoded.mesh_ingress_ports, mesh_ingress_ports);
         assert!(decode_product_worker_bootstrap(bytes.as_ref(), vm_id, generation + 1).is_err());
 
         let mut wrong_policy = bytes.clone();
@@ -2152,14 +2361,41 @@ mod tests {
                 &network_key,
                 &[0_u8; BROKER_IPC_KEY_LEN],
                 &host_port_key,
+                &mesh_ingress_key,
+                &mesh_ingress_ports,
             )
             .is_err()
         );
         let mut zero_host_port_key = bytes.clone();
-        zero_host_port_key[PRODUCT_HOST_PORT_KEY_OFFSET..].fill(0);
+        zero_host_port_key[PRODUCT_HOST_PORT_KEY_OFFSET..PRODUCT_MESH_INGRESS_KEY_OFFSET].fill(0);
         assert!(
             decode_product_worker_bootstrap(zero_host_port_key.as_ref(), vm_id, generation)
                 .is_err()
+        );
+        let mut zero_mesh_ingress_key = bytes.clone();
+        zero_mesh_ingress_key
+            [PRODUCT_MESH_INGRESS_KEY_OFFSET..PRODUCT_MESH_INGRESS_PORT_COUNT_OFFSET]
+            .fill(0);
+        assert!(
+            decode_product_worker_bootstrap(zero_mesh_ingress_key.as_ref(), vm_id, generation)
+                .is_err()
+        );
+        let mut noncanonical_mesh_ports = bytes.clone();
+        noncanonical_mesh_ports[PRODUCT_MESH_INGRESS_PORTS_OFFSET
+            ..PRODUCT_MESH_INGRESS_PORTS_OFFSET + std::mem::size_of::<u16>()]
+            .copy_from_slice(&3_000_u16.to_le_bytes());
+        noncanonical_mesh_ports[PRODUCT_MESH_INGRESS_PORTS_OFFSET + std::mem::size_of::<u16>()
+            ..PRODUCT_MESH_INGRESS_PORTS_OFFSET + 2 * std::mem::size_of::<u16>()]
+            .copy_from_slice(&22_u16.to_le_bytes());
+        assert!(
+            decode_product_worker_bootstrap(noncanonical_mesh_ports.as_ref(), vm_id, generation)
+                .is_err()
+        );
+        let mut nonzero_padding = bytes.clone();
+        nonzero_padding[PRODUCT_MESH_INGRESS_PORTS_OFFSET
+            + mesh_ingress_ports.len() * std::mem::size_of::<u16>()] = 1;
+        assert!(
+            decode_product_worker_bootstrap(nonzero_padding.as_ref(), vm_id, generation).is_err()
         );
         assert!(
             !bytes
@@ -2251,15 +2487,15 @@ mod tests {
         let network_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
         let (host_endpoint, guest_endpoint) = duplex(128 * 1024);
         let broker = Arc::new(FixtureBroker::new(None, None));
-        let (host_ports_tx, host_ports_rx) = mpsc::channel(MAX_INBOUND_HOST_PORT_FLOWS);
+        let (inbound_tx, inbound_rx) = mpsc::channel(MAX_INBOUND_STREAM_FLOWS);
         let (ready_tx, ready_rx) = oneshot::channel();
-        let mut host = tokio::spawn(run_host_session_with_ports(
+        let mut host = tokio::spawn(run_host_session_with_ingress(
             host_endpoint,
             network_key,
             vm_id,
             generation,
             broker,
-            Some(host_ports_rx),
+            Some(inbound_rx),
             move || {
                 ready_tx
                     .send(())
@@ -2310,9 +2546,9 @@ mod tests {
         client.set_nonblocking(true).unwrap();
         let mut client = tokio::net::TcpStream::from_std(client).unwrap();
         let binding = HostPortBinding::new(address.port(), guest_port).unwrap();
-        host_ports_tx
-            .send(InboundHostPort {
-                binding,
+        inbound_tx
+            .send(InboundGuestStream {
+                guest_port: binding.guest_port,
                 stream: transferred_stream(OwnedFd::from(accepted)).unwrap(),
             })
             .await
@@ -2364,7 +2600,7 @@ mod tests {
             0
         );
 
-        drop(host_ports_tx);
+        drop(inbound_tx);
         guest_transport.abort();
         assert!(guest_transport.await.unwrap_err().is_cancelled());
         assert!(matches!(

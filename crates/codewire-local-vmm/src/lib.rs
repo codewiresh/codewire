@@ -25,6 +25,8 @@ pub mod hybrid_vsock;
 #[cfg(target_os = "linux")]
 mod lifecycle;
 #[cfg(target_os = "linux")]
+pub mod mesh_ingress;
+#[cfg(target_os = "linux")]
 pub mod network_worker;
 #[cfg(target_os = "linux")]
 pub mod workspace;

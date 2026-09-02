@@ -22,6 +22,10 @@ const HOST_PORT_CONTROL_TAG_OFFSET: usize = 48;
 
 type HmacSha256 = Hmac<Sha256>;
 
+pub(crate) fn is_host_port_control_frame(frame: &[u8; HOST_PORT_CONTROL_FRAME_LEN]) -> bool {
+    &frame[..HOST_PORT_CONTROL_MAGIC.len()] == HOST_PORT_CONTROL_MAGIC
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct HostPortBinding {
