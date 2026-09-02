@@ -9,8 +9,10 @@
 //! request plus response redaction state. Those values must remain inside the
 //! broker process.
 
+mod codex;
 mod openai;
 
+pub use codex::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
 pub use openai::{
     OpenAiApiKeyAdapter, OpenAiStreamingResponse, PreparedOpenAiRequest, PreparedOpenAiResponse,
 };
@@ -77,4 +79,8 @@ pub enum CredentialBrokerError {
     /// The protected provider value cannot be used by this adapter.
     #[error("protected credential material is invalid for this provider")]
     InvalidCredentialMaterial,
+    /// The guest endpoint cannot be represented by the credential-free Codex
+    /// provider projection.
+    #[error("credential broker guest endpoint is invalid")]
+    InvalidGuestEndpoint,
 }

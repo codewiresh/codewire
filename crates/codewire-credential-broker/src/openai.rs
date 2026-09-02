@@ -262,6 +262,10 @@ fn openai_responses_route() -> ProxyRouteConfig {
             "content-type".to_owned(),
             "openai-beta".to_owned(),
             "originator".to_owned(),
+            "session-id".to_owned(),
+            "thread-id".to_owned(),
+            "x-client-request-id".to_owned(),
+            "x-codex-beta-features".to_owned(),
             "x-codex-inference-call-id".to_owned(),
             "x-codex-installation-id".to_owned(),
             "x-codex-parent-thread-id".to_owned(),
@@ -395,6 +399,16 @@ mod tests {
             "x-codex-turn-metadata",
             HeaderValue::from_static("synthetic-metadata"),
         );
+        headers.insert(
+            "x-codex-beta-features",
+            HeaderValue::from_static("synthetic-feature"),
+        );
+        headers.insert(
+            "x-client-request-id",
+            HeaderValue::from_static("synthetic-request"),
+        );
+        headers.insert("session-id", HeaderValue::from_static("synthetic-session"));
+        headers.insert("thread-id", HeaderValue::from_static("synthetic-thread"));
         headers
     }
 
@@ -444,6 +458,10 @@ mod tests {
             HeaderValue::from_static("chunked"),
         );
         headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("999999"));
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("synthetic-codex/1.0"),
+        );
         let body = br#"{"model":"synthetic-model","input":"hello"}"#;
         let prepared = OpenAiApiKeyAdapter::new()
             .expect("adapter")
@@ -480,6 +498,7 @@ mod tests {
             header::CONNECTION,
             header::TRANSFER_ENCODING,
             header::CONTENT_LENGTH,
+            header::USER_AGENT,
         ] {
             assert!(!headers.contains_key(blocked));
         }
@@ -487,6 +506,17 @@ mod tests {
             headers.get("x-codex-turn-metadata"),
             Some(&HeaderValue::from_static("synthetic-metadata"))
         );
+        for (name, value) in [
+            ("x-codex-beta-features", "synthetic-feature"),
+            ("x-client-request-id", "synthetic-request"),
+            ("session-id", "synthetic-session"),
+            ("thread-id", "synthetic-thread"),
+        ] {
+            assert_eq!(
+                headers.get(name).and_then(|value| value.to_str().ok()),
+                Some(value)
+            );
+        }
         let mut upstream_headers = HeaderMap::new();
         upstream_headers.insert(
             header::CONTENT_TYPE,
