@@ -31,6 +31,7 @@ pub mod key;
 pub use client::{BoxedStream, Client, ReceivedMessage};
 pub use key::{NodePrivate, NodePublic};
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -108,7 +109,34 @@ pub async fn connect_plain<R>(
 where
     R: rand_core::RngCore + rand_core::CryptoRng,
 {
-    let mut tcp = TcpStream::connect(addr).await?;
+    let tcp = TcpStream::connect(addr).await?;
+    finish_plain(tcp, host, private, rng).await
+}
+
+/// Connect to one already-resolved DERP address without invoking name
+/// resolution. `host` remains the HTTP authority used by the DERP upgrade.
+pub async fn connect_plain_resolved<R>(
+    addr: SocketAddr,
+    host: &str,
+    private: key::NodePrivate,
+    rng: &mut R,
+) -> Result<Client<TcpStream>, Error>
+where
+    R: rand_core::RngCore + rand_core::CryptoRng,
+{
+    let tcp = TcpStream::connect(addr).await?;
+    finish_plain(tcp, host, private, rng).await
+}
+
+async fn finish_plain<R>(
+    mut tcp: TcpStream,
+    host: &str,
+    private: key::NodePrivate,
+    rng: &mut R,
+) -> Result<Client<TcpStream>, Error>
+where
+    R: rand_core::RngCore + rand_core::CryptoRng,
+{
     http_upgrade(&mut tcp, host).await?;
     Client::handshake(tcp, private, rng).await
 }
@@ -129,10 +157,39 @@ pub async fn connect_tls<R>(
 where
     R: rand_core::RngCore + rand_core::CryptoRng,
 {
+    let tcp = TcpStream::connect(addr).await?;
+    finish_tls(tcp, host, config, private, rng).await
+}
+
+/// Connect to one already-resolved TLS DERP address while retaining `host`
+/// for certificate identity and HTTP authority.
+pub async fn connect_tls_resolved<R>(
+    addr: SocketAddr,
+    host: &str,
+    config: rustls::ClientConfig,
+    private: key::NodePrivate,
+    rng: &mut R,
+) -> Result<Client<tokio_rustls::client::TlsStream<TcpStream>>, Error>
+where
+    R: rand_core::RngCore + rand_core::CryptoRng,
+{
+    let tcp = TcpStream::connect(addr).await?;
+    finish_tls(tcp, host, config, private, rng).await
+}
+
+async fn finish_tls<R>(
+    tcp: TcpStream,
+    host: &str,
+    config: rustls::ClientConfig,
+    private: key::NodePrivate,
+    rng: &mut R,
+) -> Result<Client<tokio_rustls::client::TlsStream<TcpStream>>, Error>
+where
+    R: rand_core::RngCore + rand_core::CryptoRng,
+{
     let server_name = rustls_pki_types::ServerName::try_from(host.to_string())
         .map_err(|_| Error::Tls("invalid server name".into()))?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-    let tcp = TcpStream::connect(addr).await?;
     let mut tls = connector
         .connect(server_name, tcp)
         .await

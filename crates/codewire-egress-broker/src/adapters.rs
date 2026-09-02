@@ -57,6 +57,51 @@ impl SystemDnsResolver {
         Self::from_builder(builder, SYSTEM_DNS_QUERY_TIMEOUT)
     }
 
+    /// Resolve one exact canonical host into a bounded, de-duplicated address
+    /// set without consulting the hosts file or applying a search suffix.
+    ///
+    /// This is the non-policy adapter seam used by trusted host transports
+    /// which must finish name resolution before entering a filesystem-denied
+    /// process domain. Workload DNS still goes through [`DnsResolver`] and the
+    /// policy/lease state machine.
+    pub async fn resolve_host_addresses(
+        &self,
+        name: &str,
+    ) -> Result<Vec<IpAddr>, BrokerAdapterFailure> {
+        let canonical = canonical_record_name(name)?;
+        if canonical != name {
+            return Err(BrokerAdapterFailure::Malformed);
+        }
+        let mut addresses = BTreeSet::new();
+        for family in [DnsRecordFamily::Ipv4, DnsRecordFamily::Ipv6] {
+            match self
+                .resolve(DnsResolverRequest {
+                    name: canonical.clone(),
+                    family,
+                })
+                .await?
+            {
+                DnsResolverOutcome::Positive(resolution) => {
+                    addresses.extend(
+                        resolution
+                            .addresses()
+                            .iter()
+                            .copied()
+                            .map(|address| address.address()),
+                    );
+                }
+                DnsResolverOutcome::NoData => {}
+                DnsResolverOutcome::NameError => {
+                    return Err(BrokerAdapterFailure::Unavailable);
+                }
+            }
+        }
+        if addresses.is_empty() {
+            return Err(BrokerAdapterFailure::Unavailable);
+        }
+        Ok(addresses.into_iter().collect())
+    }
+
     fn from_builder(
         mut builder: ResolverBuilder<TokioRuntimeProvider>,
         query_timeout: Duration,
@@ -338,6 +383,7 @@ mod tests {
     const TEST_NAME: &str = "allowed.example.com";
     const TEST_ALIAS: &str = "edge.example.net";
     const TEST_V4: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
+    const TEST_V6: Ipv6Addr = Ipv6Addr::new(0x2606, 0x2800, 0x220, 1, 0, 0, 0, 0x34);
 
     fn name(value: &str) -> Name {
         Name::from_str(value).unwrap()
@@ -516,6 +562,48 @@ mod tests {
         let (observed_name, observed_type) = observed_receiver.await.unwrap();
         assert_eq!(observed_name.to_ascii_lowercase(), "allowed.example.com.");
         assert_eq!(observed_type, RecordType::A);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn trusted_host_resolution_combines_exact_a_and_aaaa_answers() {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let mut buffer = [0_u8; 1_232];
+                let (length, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                let request = Message::from_vec(&buffer[..length]).unwrap();
+                let query = request.queries[0].clone();
+                let mut response = request.into_response();
+                response.metadata.recursion_available = true;
+                match query.query_type() {
+                    RecordType::A => response.add_answer(a(&format!("{TEST_NAME}."), TEST_V4, 60)),
+                    RecordType::AAAA => {
+                        response.add_answer(aaaa(&format!("{TEST_NAME}."), TEST_V6, 60))
+                    }
+                    other => panic!("unexpected query type {other:?}"),
+                };
+                socket
+                    .send_to(&response.to_vec().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+        let resolver = SystemDnsResolver::from_config(
+            loopback_resolver_config(address),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolver.resolve_host_addresses(TEST_NAME).await.unwrap(),
+            vec![IpAddr::V4(TEST_V4), IpAddr::V6(TEST_V6)]
+        );
+        assert_eq!(
+            resolver.resolve_host_addresses("Allowed.Example.Com").await,
+            Err(BrokerAdapterFailure::Malformed)
+        );
         server.await.unwrap();
     }
 
