@@ -201,6 +201,30 @@ impl MeshTransportStartupFailure {
         }
     }
 
+    pub(crate) fn runner_error_code(self) -> &'static str {
+        match self {
+            Self::InvalidIdentity => "mesh_transport_invalid_identity",
+            Self::InheritedDescriptor => "mesh_transport_inherited_descriptor",
+            Self::AmbientEnvironment => "mesh_transport_ambient_environment",
+            Self::ThreadConfinement => "mesh_transport_thread_confinement",
+            Self::BootstrapIo => "mesh_transport_bootstrap_io",
+            Self::InvalidBootstrap => "mesh_transport_invalid_bootstrap",
+            Self::EnrollmentIo => "mesh_transport_enrollment_io",
+            Self::InvalidEnrollment => "mesh_transport_invalid_enrollment",
+            Self::ResolverInitialization => "mesh_transport_resolver_initialization",
+            Self::CoordinatorResolution => "mesh_transport_coordinator_resolution",
+            Self::CoordinatorSetup => "mesh_transport_coordinator_setup",
+            Self::DerpMap => "mesh_transport_derp_map",
+            Self::TransportResolution => "mesh_transport_transport_resolution",
+            Self::PrivilegeConfinement => "mesh_transport_privilege_confinement",
+            Self::FilesystemConfinement => "mesh_transport_filesystem_confinement",
+            Self::SyscallConfinement => "mesh_transport_syscall_confinement",
+            Self::TransportSetup => "mesh_transport_transport_setup",
+            Self::StatusIo => "mesh_transport_status_io",
+            Self::Protocol => "mesh_transport_protocol",
+        }
+    }
+
     pub fn from_exit_code(code: i32) -> Option<Self> {
         match code {
             80 => Some(Self::InvalidIdentity),
@@ -1619,6 +1643,13 @@ mod tests {
             assert_eq!(
                 MeshTransportStartupFailure::from_exit_code(failure.exit_code()),
                 Some(failure)
+            );
+            assert!(failure.runner_error_code().len() <= 64);
+            assert!(
+                failure
+                    .runner_error_code()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
             );
         }
     }

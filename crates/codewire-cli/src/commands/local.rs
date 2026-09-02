@@ -279,11 +279,29 @@ pub(crate) fn resolve_env_create_mesh_bootstrap(
     };
 
     let organization_id = trimmed_required(organization_id, "organization ID")?.to_string();
+    let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)?;
+    let owner_network = owner
+        .as_ref()
+        .filter(|owner| {
+            owner.auth_source == LocalMeshOwnerAuthSource::HostedCurrent
+                && config::same_mesh_url(&owner.mesh_url, &mesh_url)
+                && owner.organization_id == organization_id
+        })
+        .and_then(|owner| owner.selected_network.as_deref())
+        .and_then(trimmed_str)
+        .map(str::to_owned);
+    let selected_override = requested_network
+        .map(str::to_owned)
+        .or_else(|| {
+            env.var(config::CODEWIRE_MESH_NETWORK_ENV)
+                .and_then(|network| trimmed_str(&network).map(str::to_owned))
+        })
+        .or(owner_network);
     let mesh = match config::resolve_mesh_with_token_provider(
         config::MeshResolveOptions {
             mesh_url: Some(mesh_url),
             auth_token: None,
-            network_id: requested_network.map(str::to_string),
+            network_id: selected_override,
             platform_server_url: Some(platform.server_url.clone()),
         },
         paths,
@@ -307,7 +325,14 @@ pub(crate) fn resolve_env_create_mesh_bootstrap(
         return Ok(None);
     };
 
-    if !explicit_network && !assume_yes {
+    let auto_connect = owner.as_ref().is_some_and(|owner| {
+        owner.auth_source == LocalMeshOwnerAuthSource::HostedCurrent
+            && config::same_mesh_url(&owner.mesh_url, &mesh.mesh_url)
+            && owner.organization_id == organization_id
+            && owner.selected_network.as_deref() == Some(network_id.as_str())
+            && owner.auto_connect
+    });
+    if !explicit_network && !assume_yes && !auto_connect {
         if !stdin_is_interactive() {
             return Ok(None);
         }

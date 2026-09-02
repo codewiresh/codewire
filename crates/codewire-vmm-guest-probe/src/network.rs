@@ -5,6 +5,9 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 pub const GUEST_NETWORK_VSOCK_PORT: u32 = 7_775;
+/// Guest PID 1 keeps the fail-closed network agent alive long enough for the
+/// host to admit both isolated product processes and authenticate the session.
+pub const NETWORK_HOST_READY_TIMEOUT_SECONDS: u64 = 60;
 pub const NETWORK_HOST_HELLO_LEN: usize = 96;
 pub const NETWORK_GUEST_ACK_LEN: usize = 72;
 pub const NETWORK_HOST_READY_LEN: usize = 72;

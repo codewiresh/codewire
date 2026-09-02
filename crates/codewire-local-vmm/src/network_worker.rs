@@ -182,6 +182,30 @@ impl NetworkWorkerStartupFailure {
         }
     }
 
+    pub(crate) fn runner_error_code(self) -> &'static str {
+        match self {
+            Self::InvalidIdentity => "network_worker_invalid_identity",
+            Self::InheritedDescriptor => "network_worker_inherited_descriptor",
+            Self::AmbientEnvironment => "network_worker_ambient_environment",
+            Self::ThreadConfinement => "network_worker_thread_confinement",
+            Self::BootstrapIo => "network_worker_bootstrap_io",
+            Self::InvalidBootstrap => "network_worker_invalid_bootstrap",
+            Self::FilesystemConfinement => "network_worker_filesystem_confinement",
+            Self::SyscallConfinement => "network_worker_syscall_confinement",
+            Self::HelloWriteTimeout => "network_worker_hello_write_timeout",
+            Self::HelloWriteIo => "network_worker_hello_write_io",
+            Self::AcknowledgementReadTimeout => "network_worker_acknowledgement_read_timeout",
+            Self::AcknowledgementReadIo => "network_worker_acknowledgement_read_io",
+            Self::AcknowledgementInvalid => "network_worker_acknowledgement_invalid",
+            Self::PreparedIo => "network_worker_prepared_io",
+            Self::HostReadyIo => "network_worker_host_ready_io",
+            Self::StatusIo => "network_worker_status_io",
+            Self::Protocol => "network_worker_protocol",
+            Self::FrameIo => "network_worker_frame_io",
+            Self::Engine => "network_worker_engine",
+        }
+    }
+
     pub fn from_exit_code(code: i32) -> Option<Self> {
         Some(match code {
             20 => Self::InvalidIdentity,
@@ -1957,6 +1981,13 @@ mod tests {
             assert_eq!(
                 decode_worker_startup_status(failure.message()),
                 Some(NetworkWorkerStartupStatus::Failed(failure))
+            );
+            assert!(failure.runner_error_code().len() <= 64);
+            assert!(
+                failure
+                    .runner_error_code()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
             );
             let mut trailing = failure.message().to_vec();
             trailing.push(b'x');

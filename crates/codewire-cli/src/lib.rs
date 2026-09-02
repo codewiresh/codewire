@@ -305,7 +305,7 @@ where
         Command::Preset { command } => handle_preset_command(&globals, command).await,
         Command::Secrets { command } => handle_secrets_command(&globals, command).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
-        Command::Mesh { command } => handle_mesh_command(&globals, command),
+        Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         Command::Daemon => codewire_daemon::run_entrypoint().await,
         #[cfg(target_os = "linux")]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,

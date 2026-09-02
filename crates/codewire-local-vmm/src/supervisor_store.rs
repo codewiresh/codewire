@@ -1586,6 +1586,7 @@ mod tests {
                 mode: 0o140600,
             },
             artifact_generation: "c".repeat(64),
+            error_code: None,
         });
         EnvironmentRecord {
             id: Uuid::new_v4(),

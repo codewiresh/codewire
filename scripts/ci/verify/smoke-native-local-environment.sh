@@ -8,6 +8,8 @@ readonly LINUX_SUN_PATH_BYTES=108
 readonly LONGEST_SOCKET_SUFFIX='/engine/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock'
 
 CW_BIN=''
+MESH_BIN=''
+DERP_BIN=''
 DATA_PLANE_SMOKE_BIN=''
 STATE_PROBE_BIN=''
 ARTIFACT_ROOT=''
@@ -28,6 +30,10 @@ SOURCE_HOOK_MARKER=''
 SOURCE_CREDENTIAL_MARKER=''
 SOURCE_CONFIG_SHA256=''
 HOST_PORT=''
+MESH_PORT=''
+DERP_PORT=''
+MESH_NETWORK='native-smoke-network'
+MESH_ORGANIZATION_ID=''
 GITEA_COMMIT='bcbae548ab2f4f0e407068aa8717cec341084d7a'
 GITEA_README_SHA256='d4911db7bc817528fbcbaaf39e76851700084b65494dac1e29afb997867ac006'
 GITHUB_COMMIT='93f68ba4abc9f6e222481265b9b759e71d332575'
@@ -38,6 +44,7 @@ COMMAND_INDEX=0
 LAST_STDOUT=''
 LAST_STDERR=''
 ENV_CREATED=0
+MESH_STARTED=0
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 
@@ -45,6 +52,8 @@ usage() {
   cat <<'USAGE' >&2
 usage: smoke-native-local-environment.sh \
   --cw-bin ABSOLUTE_PATH \
+  --mesh-bin ABSOLUTE_PATH \
+  --derp-bin ABSOLUTE_PATH \
   --data-plane-smoke-bin ABSOLUTE_PATH \
   --state-probe-bin ABSOLUTE_PATH \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
@@ -57,7 +66,8 @@ exact Cloud Hypervisor, kernel, and product guest-root artifacts admitted by
 codewire-local-vmm. Missing KVM, artifacts, or required tools fail nonzero.
 
 The smoke uses an isolated HOME and short private native state root, poisons
-the platform destination, installs Docker/Lima/QEMU tripwires, and creates
+the platform destination, installs Docker/Lima/QEMU tripwires, starts an
+isolated standalone Codewire Mesh/DERP pair, and creates
 disposable multi-repository and filesystem-copy fixtures. Initial create
 permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
@@ -65,8 +75,8 @@ credential-free git.example.invalid/GitHub preparation, independent copy prepara
 create/info, loopback-only host-port publication, bounded daemon diagnostics and
 repair, bare run and shell, PTY behavior, saved output and nonzero status,
 cached-runtime restart after the installed artifact lock advances, offline
-disk/CPU/memory resize, supervisor crash recovery, and journaled exact deletion
-cleanup.
+disk/CPU/memory resize, supervisor crash recovery, Mesh attachment and typed
+transport-loss recovery, and journaled exact deletion cleanup.
 USAGE
 }
 
@@ -110,6 +120,16 @@ while [[ $# -gt 0 ]]; do
       CW_BIN="$2"
       shift 2
       ;;
+    --mesh-bin)
+      [[ $# -ge 2 && -z "$MESH_BIN" ]] || { usage; exit 2; }
+      MESH_BIN="$2"
+      shift 2
+      ;;
+    --derp-bin)
+      [[ $# -ge 2 && -z "$DERP_BIN" ]] || { usage; exit 2; }
+      DERP_BIN="$2"
+      shift 2
+      ;;
     --data-plane-smoke-bin)
       [[ $# -ge 2 && -z "$DATA_PLANE_SMOKE_BIN" ]] || { usage; exit 2; }
       DATA_PLANE_SMOKE_BIN="$2"
@@ -146,7 +166,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$CW_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
+[[ -n "$CW_BIN" && -n "$MESH_BIN" && -n "$DERP_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
   usage
   exit 2
 }
@@ -163,6 +183,10 @@ done
 
 require_absolute_canonical_file 'cw binary' "$CW_BIN"
 [[ -x "$CW_BIN" ]] || die "cw binary is not executable: $CW_BIN"
+require_absolute_canonical_file 'Mesh binary' "$MESH_BIN"
+[[ -x "$MESH_BIN" ]] || die "Mesh binary is not executable: $MESH_BIN"
+require_absolute_canonical_file 'DERP binary' "$DERP_BIN"
+[[ -x "$DERP_BIN" ]] || die "DERP binary is not executable: $DERP_BIN"
 require_absolute_canonical_file 'public data-plane smoke binary' "$DATA_PLANE_SMOKE_BIN"
 [[ -x "$DATA_PLANE_SMOKE_BIN" ]] ||
   die "public data-plane smoke binary is not executable: $DATA_PLANE_SMOKE_BIN"
@@ -244,7 +268,7 @@ env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
 printf '#!/bin/sh\ntouch %q\n' "$SOURCE_HOOK_MARKER" >"$WORKSPACE/.git/hooks/post-checkout"
 chmod 0700 "$WORKSPACE/.git/hooks/post-checkout"
 SOURCE_CONFIG_SHA256="$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')"
-HOST_PORT="$(
+mapfile -t LOCAL_PORTS < <(
   /usr/bin/env python3 - <<'PY'
 import os
 import socket
@@ -253,20 +277,33 @@ lower = 20_000
 upper = 29_999
 span = upper - lower + 1
 start = lower + (os.getpid() % span)
+listeners = []
 for offset in range(span):
     port = lower + ((start - lower + offset) % span)
+    listener = None
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-            listener.bind(("127.0.0.1", port))
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", port))
     except OSError:
+        if listener is not None:
+            listener.close()
         continue
-    print(port)
-    break
-else:
-    raise SystemExit("no free loopback port in the native smoke range")
+    listeners.append(listener)
+    if len(listeners) == 3:
+        break
+if len(listeners) != 3:
+    raise SystemExit("fewer than three loopback ports are free in the native smoke range")
+for listener in listeners:
+    print(listener.getsockname()[1])
 PY
-)"
-[[ "$HOST_PORT" =~ ^[0-9]+$ ]] || die 'failed to select a loopback host port'
+)
+[[ ${#LOCAL_PORTS[@]} -eq 3 ]] || die 'failed to select three loopback smoke ports'
+HOST_PORT="${LOCAL_PORTS[0]}"
+MESH_PORT="${LOCAL_PORTS[1]}"
+DERP_PORT="${LOCAL_PORTS[2]}"
+for port in "$HOST_PORT" "$MESH_PORT" "$DERP_PORT"; do
+  [[ "$port" =~ ^[0-9]+$ ]] || die 'failed to select a loopback smoke port'
+done
 cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
 repositories:
@@ -289,7 +326,7 @@ cw_isolated() {
         HTTP_PROXY=http://127.0.0.1:1
         HTTPS_PROXY=http://127.0.0.1:1
         ALL_PROXY=http://127.0.0.1:1
-        NO_PROXY=
+        'NO_PROXY=127.0.0.1,localhost'
       )
     fi
     cd "$WORKSPACE"
@@ -341,6 +378,34 @@ run_cw_expect_failure() {
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   LAST_STDOUT="$stdout_file"
   LAST_STDERR="$stderr_file"
+}
+
+start_smoke_mesh() {
+  run_cw mesh up \
+    --binary "$MESH_BIN" \
+    --derp-binary "$DERP_BIN" \
+    --base-url "http://127.0.0.1:$MESH_PORT" \
+    --listen "127.0.0.1:$MESH_PORT" \
+    --derp-url "http://127.0.0.1:$DERP_PORT" \
+    --derp-listen "127.0.0.1:$DERP_PORT" \
+    --output json
+  jq -e \
+    --arg mesh_url "http://127.0.0.1:$MESH_PORT" \
+    --arg derp_url "http://127.0.0.1:$DERP_PORT" '
+      .started == true and
+      .base_url == $mesh_url and
+      .derp.url == $derp_url and
+      (.pid | type == "number" and . > 0) and
+      (.derp.pid | type == "number" and . > 0)
+    ' "$LAST_STDOUT" >/dev/null || die 'standalone Mesh startup metadata drifted'
+  MESH_STARTED=1
+}
+
+stop_smoke_mesh() {
+  run_cw mesh down --output json
+  jq -e '.stopped == true and .state == "stopped"' "$LAST_STDOUT" >/dev/null ||
+    die 'standalone Mesh shutdown metadata drifted'
+  MESH_STARTED=0
 }
 
 run_public_data_smoke() {
@@ -657,6 +722,13 @@ cleanup() {
   if ! terminate_exact_supervisor; then
     cleanup_status=1
   fi
+  if [[ "$MESH_STARTED" -eq 1 ]]; then
+    if ! cw_isolated mesh down --output json >/dev/null 2>&1; then
+      cleanup_status=1
+    else
+      MESH_STARTED=0
+    fi
+  fi
   if [[ "$status" -ne 0 ]] && ! terminate_remaining_owned_processes; then
     cleanup_status=1
   fi
@@ -682,14 +754,55 @@ rg -qF 'already exists in the legacy Docker/Lima state' "$LAST_STDERR" ||
 [[ ! -e "$STATE_ROOT/state.json" && ! -e "$STATE_ROOT/supervisor.db" ]] ||
   die 'rejected native creation wrote native state'
 
-log 'creating account-free 2-vCPU, 16-GiB native environment'
+log 'starting isolated standalone Mesh and selecting the smoke network'
+start_smoke_mesh
+MESH_OWNER_CONTEXT="$SMOKE_HOME/.codewire/mesh_owner.json"
+[[ -f "$MESH_OWNER_CONTEXT" && ! -L "$MESH_OWNER_CONTEXT" ]] ||
+  die 'standalone Mesh did not write its credential-free owner projection'
+[[ "$(stat -c '%a' "$MESH_OWNER_CONTEXT")" == 600 ]] ||
+  die 'standalone Mesh owner projection is not mode 0600'
+jq -e \
+  --arg mesh_url "http://127.0.0.1:$MESH_PORT" '
+    .schema_version == 1 and
+    .auth_source == "standalone_local" and
+    .mesh_url == $mesh_url and
+    (.organization_id | type == "string" and length > 0) and
+    .selected_network == null and
+    .auto_connect == false
+  ' "$MESH_OWNER_CONTEXT" >/dev/null || die 'standalone Mesh owner projection drifted'
+if rg -qi 'token|secret|credential|api[_-]?key' "$MESH_OWNER_CONTEXT"; then
+  die 'credential material or a credential field entered the Mesh owner projection'
+fi
+MESH_ORGANIZATION_ID="$(jq -er '.organization_id' "$MESH_OWNER_CONTEXT")"
+run_cw network create "$MESH_NETWORK" --org "$MESH_ORGANIZATION_ID"
+rg -qF "Network \"$MESH_NETWORK\" created and selected" "$LAST_STDERR" ||
+  die 'standalone smoke network was not selected'
+run_cw network use "$MESH_NETWORK" --auto-connect
+rg -qF 'new environments connect automatically' "$LAST_STDERR" ||
+  die 'standalone smoke network did not enable automatic attachment'
+jq -e --arg network "$MESH_NETWORK" '
+  .selected_network == $network and .auto_connect == true
+' \
+  "$MESH_OWNER_CONTEXT" >/dev/null || die 'selected network did not reach the owner projection'
+run_cw mesh status --output json
+jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT" '
+  .configured == true and
+  .mesh_url == $mesh_url and
+  .selected_network == $network and
+  .auto_connect == true and
+  .local.state == "running" and
+  .local.derp.state == "running"
+' "$LAST_STDOUT" >/dev/null || die 'standalone Mesh status drifted after default selection'
+
+log 'creating account-free Mesh-attached 2-vCPU, 16-GiB native environment'
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
-run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi --path "$WORKSPACE" --output json
+run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi \
+  --path "$WORKSPACE" --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
-jq -e --arg listen "127.0.0.1:$HOST_PORT" '
+jq -e --arg listen "127.0.0.1:$HOST_PORT" --arg network "$MESH_NETWORK" '
   .name == "native-smoke" and
   .backend == "cloud-hypervisor" and
   .state == "running" and
@@ -698,6 +811,8 @@ jq -e --arg listen "127.0.0.1:$HOST_PORT" '
   .memory == "16Gi" and
   .working_directory == "/workspace/github" and
   .workspace_inputs == 2 and
+  .network == $network and
+  (has("error_code") | not) and
   .ports == [{"listen": $listen, "guest_port": 3000}] and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
@@ -730,7 +845,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:6:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:8:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
@@ -916,7 +1031,7 @@ DAEMON_GUEST_SENTINEL='guest-output-must-not-enter-daemon-logs-1909'
 run_cw run --no-tty -- /bin/sh -lc "printf '%s\\n' '$DAEMON_GUEST_SENTINEL'"
 rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT" || die 'guest diagnostic sentinel was not emitted'
 run_cw env --local daemon logs "$NAME"
-rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=7 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
+rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=8 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
   die 'native daemon logs did not expose the trusted create journal record'
 [[ "$(stat -c '%s' "$LAST_STDOUT")" -le 65536 ]] || die 'native daemon logs exceeded their public bound'
 if rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT"; then
@@ -943,7 +1058,7 @@ if ! (
       CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
       CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
       HTTP_PROXY='http://127.0.0.1:1' HTTPS_PROXY='http://127.0.0.1:1' \
-      ALL_PROXY='http://127.0.0.1:1' NO_PROXY='' \
+      ALL_PROXY='http://127.0.0.1:1' NO_PROXY='127.0.0.1,localhost' \
       /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 30s \
       /usr/bin/script -qefc "$CW_BIN shell" "$PTY_LOG"
 ) >"$SMOKE_ROOT/pty.stdout" 2>"$SMOKE_ROOT/pty.stderr"; then
@@ -1024,6 +1139,39 @@ jq -e '.state == "running" and .cpu == 2 and .memory == "16Gi" and .disk == "20G
 [[ "$(native_database_value runner_pid)" == "$RUNNER_PID" ]] ||
   die 'replacement supervisor substituted a different runner'
 run_public_data_smoke
+
+log 'checking typed Mesh transport loss and repair through normal CLI status'
+stop_smoke_mesh
+wait_for_environment_state error ||
+  die 'coordinator loss was not classified as an environment error'
+jq -e --arg network "$MESH_NETWORK" '
+  .state == "error" and
+  .network == $network and
+  .error_code == "mesh_transport_exit"
+' "$LAST_STDOUT" >/dev/null || die 'typed Mesh transport failure did not reach CLI status'
+run_cw env --local daemon status "$NAME" --output json
+jq -e '
+  .state == "unhealthy" and
+  .message == "local environment runtime requires repair"
+' "$LAST_STDOUT" >/dev/null || die 'daemon status remained healthy after Mesh transport loss'
+start_smoke_mesh
+jq -e --arg network "$MESH_NETWORK" '
+  .selected_network == $network and .auto_connect == true
+' \
+  "$MESH_OWNER_CONTEXT" >/dev/null || die 'Mesh restart lost the selected network projection'
+run_cw env --local daemon repair "$NAME" --output json
+jq -e '
+  .replaced_pod_name == "" and
+  .status.state == "ready" and
+  .status.message == "local environment daemon is ready"
+' "$LAST_STDOUT" >/dev/null || die 'native daemon did not repair after Mesh transport loss'
+run_cw env info --local "$NAME" --output json
+jq -e --arg network "$MESH_NETWORK" '
+  .state == "running" and
+  .network == $network and
+  (has("error_code") | not)
+' "$LAST_STDOUT" >/dev/null || die 'Mesh repair did not clear the typed runtime failure'
+RUNNER_PID="$(native_database_value runner_pid)"
 
 log 'checking exact 2-vCPU, 16-GiB VMM death classification and daemon repair'
 VMM_PID="$(recorded_vmm_pid)" || die 'persisted VMM process identity was not readable'
@@ -1106,8 +1254,8 @@ jq -e '
 ' "$LAST_STDOUT" >/dev/null || die 'native resize result drifted'
 [[ "$(stat -c '%s' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/state.raw")" == 22548578304 ]] ||
   die 'native state disk file did not grow to 21 GiB'
-[[ "$(native_database_value resize_operation)" == 'restart:completed:7' ]] ||
-  die 'native resize journal did not commit all six effect checkpoints'
+[[ "$(native_database_value resize_operation)" == 'restart:completed:8' ]] ||
+  die 'native resize journal did not commit all eight effect checkpoints'
 run_cw run --no-tty -- /bin/sh -lc \
   'printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; cat /workspace/sentinel.txt'
 rg -qF 'guest-cpus=3' "$LAST_STDOUT" || die 'resized guest did not observe exactly 3 vCPUs'
@@ -1170,7 +1318,7 @@ ln -s data.txt "$WORKSPACE/link.txt"
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
 run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi \
-  --path "$WORKSPACE" --path-mode copy --output json
+  --path "$WORKSPACE" --path-mode copy --no-network --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
@@ -1207,6 +1355,8 @@ ENV_CREATED=0
 run_cw doctor local --output json
 jq -e '.orphans == [] and .reclaimable_bytes == 0' "$LAST_STDOUT" >/dev/null ||
   die 'copy-mode deletion left native owned state'
+stop_smoke_mesh
+[[ ! -e "$MESH_OWNER_CONTEXT" ]] || die 'Mesh owner projection remained after Mesh shutdown'
 
 [[ ! -e "$TRIPWIRE" ]] || die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
 [[ "$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')" == "$LEGACY_SHA256" ]] ||

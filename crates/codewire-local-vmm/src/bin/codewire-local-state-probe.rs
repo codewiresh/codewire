@@ -79,6 +79,8 @@ mod linux {
         process: ProcessIdentity,
         socket: SocketIdentity,
         artifact_generation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
     }
 
     #[derive(Debug, Deserialize, Serialize)]
@@ -338,6 +340,13 @@ mod linux {
             require(encoded.len() <= 64 * 1024)?;
             let runner: RunnerRecord = serde_json::from_slice(&encoded)?;
             require(valid_sha256(&runner.artifact_generation) && runner.process.pid > 0)?;
+            require(runner.error_code.as_deref().is_none_or(|error_code| {
+                !error_code.is_empty()
+                    && error_code.len() <= 64
+                    && error_code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            }))?;
             Ok(runner)
         }
 
@@ -388,11 +397,12 @@ mod linux {
 
     fn terminal_checkpoint(kind: &str) -> Option<u32> {
         match kind {
-            "create" => Some(7),
+            "create" => Some(8),
             "start" => Some(6),
             "stop" => Some(3),
-            "restart" | "grow_disk" => Some(7),
-            "update_workspace" | "rollback_workspace" => Some(8),
+            "restart" => Some(8),
+            "grow_disk" => Some(6),
+            "update_workspace" | "rollback_workspace" => Some(9),
             "delete" => Some(5),
             "reconcile" => Some(2),
             _ => None,
@@ -541,7 +551,7 @@ mod linux {
                     .unwrap();
                 writer
                     .execute(
-                        "INSERT INTO operations VALUES ('op-a', 'create', 'completed', 7, 1)",
+                        "INSERT INTO operations VALUES ('op-a', 'create', 'completed', 8, 1)",
                         [],
                     )
                     .unwrap();
@@ -568,6 +578,7 @@ mod linux {
                     mode: 0o140600,
                 },
                 artifact_generation: "b".repeat(64),
+                error_code: None,
             }
         }
 

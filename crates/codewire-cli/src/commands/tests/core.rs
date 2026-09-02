@@ -346,6 +346,45 @@
     }
 
     #[test]
+    fn platform_login_projects_only_hosted_mesh_owner_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = ResolvePaths::from_home_and_env(
+            home.path().to_path_buf(),
+            &config::MapEnv::default(),
+        );
+        let credentials = codewire_client::OAuthCredentials::new(
+            "https://api.codewire-dev.sh",
+            codewire_client::CODEWIRE_CLI_OAUTH_CLIENT_ID,
+            "synthetic-access-canary",
+            "synthetic-refresh-canary",
+            u64::MAX,
+            codewire_client::CODEWIRE_CLI_OAUTH_SCOPES,
+        )
+        .unwrap();
+
+        save_login_platform_config(
+            &paths,
+            "https://api.codewire-dev.sh",
+            &credentials,
+            Some("org-alpha"),
+        )
+        .unwrap();
+
+        let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.auth_source, LocalMeshOwnerAuthSource::HostedCurrent);
+        assert_eq!(owner.mesh_url, "https://mesh.codewire-dev.sh");
+        assert_eq!(owner.organization_id, "org-alpha");
+        assert!(owner.selected_network.is_none());
+        assert!(!owner.auto_connect);
+        let encoded = fs::read_to_string(local_mesh_owner_context_path(&paths.mesh_data_dir))
+            .unwrap();
+        assert!(!encoded.contains("synthetic-access-canary"));
+        assert!(!encoded.contains("synthetic-refresh-canary"));
+    }
+
+    #[test]
     fn login_parser_accepts_default_org() {
         let cli = Cli::try_parse_from(["cw", "login", "--org", "codewire"]).unwrap();
         let Command::Login(args) = cli.command else {

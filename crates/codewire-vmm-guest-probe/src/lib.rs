@@ -20,9 +20,10 @@ mod workspace_plan;
 
 pub use network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,
-    NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NETWORK_KEY_LEN, NETWORK_MAX_PACKET_BYTES,
-    NetworkDirection, NetworkError, NetworkGuestAck, NetworkHostHello, NetworkHostReady,
-    NetworkKey, NetworkRole, NetworkSession, encoded_network_frame_len,
+    NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS,
+    NETWORK_KEY_LEN, NETWORK_MAX_PACKET_BYTES, NetworkDirection, NetworkError, NetworkGuestAck,
+    NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
+    encoded_network_frame_len,
 };
 pub use newc::{
     NewcError, canonical_guest_root_newc, canonical_newc, write_canonical_guest_root_initramfs,

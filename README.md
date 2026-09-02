@@ -101,13 +101,25 @@ ports:
   - 18080:8080
 ```
 
-Custom image, preset, install/startup, environment, agent/skill,
-secret/credential, network, and explicit mount options still fail explicitly
-while the remaining Forgejo #1910 slices are completed. An owner-only SQLite
-WAL is the authoritative supervisor state; preview JSON state is imported
-exactly once. Lifecycle effects are journaled, disk shrink is rejected, and
-delete moves the environment tree to an operation-specific trash generation
-before removing only known runtime files.
+Native local environments join Mesh only when `--network NAME` is explicit or
+a selected network is confirmed; `--no-network` always disables attachment.
+Use `cw network use NAME --auto-connect` to make the selected network the
+durable no-prompt default for new local and platform environments at the
+matching Mesh origin and organization; running `cw network use NAME` without
+that flag restores confirmation. Native local creation with no selected network
+starts neither Mesh transport nor platform access. Once attachment is selected,
+native local and platform creation fail instead of silently creating a
+disconnected environment when enrollment cannot be completed.
+`cw mesh up` provides the standalone offline/self-hosted coordinator used by
+the product smoke. The host owns Mesh identity and transport, and the VM sees
+only admitted TCP streams for its declared application ports. Custom image,
+preset, install/startup, environment, agent/skill, secret/credential, and
+explicit mount options still fail explicitly while the remaining Forgejo #1910
+slices are completed. An owner-only SQLite WAL is the authoritative supervisor
+state; preview JSON state is imported exactly once. Lifecycle effects are
+journaled, disk shrink is rejected, and delete moves the environment tree to
+an operation-specific trash generation before removing only known runtime
+files.
 
 Developers with artifacts staged outside the default cache can point the CLI
 at them and run the complete product smoke:
@@ -115,6 +127,9 @@ at them and run the complete product smoke:
 ```bash
 export CODEWIRE_NATIVE_ARTIFACT_ROOT=/absolute/path/to/artifacts
 export CODEWIRE_NATIVE_ARTIFACT_LOCK=/absolute/path/to/artifacts.lock.json
+cargo build -p codewire-cli-bin --bin cw \
+  -p codewire-mesh --bin codewire-mesh \
+  -p codewire-derp --bin codewire-derp
 cargo build -p codewire-local-vmm \
   --bin codewire-local-public-data-smoke \
   --bin codewire-local-state-probe
@@ -123,6 +138,8 @@ chmod 0700 .tmp
 
 scripts/ci/verify/smoke-native-local-environment.sh \
   --cw-bin "$PWD/target/debug/cw" \
+  --mesh-bin "$PWD/target/debug/codewire-mesh" \
+  --derp-bin "$PWD/target/debug/codewire-derp" \
   --data-plane-smoke-bin "$PWD/target/debug/codewire-local-public-data-smoke" \
   --state-probe-bin "$PWD/target/debug/codewire-local-state-probe" \
   --artifact-root "$CODEWIRE_NATIVE_ARTIFACT_ROOT" \

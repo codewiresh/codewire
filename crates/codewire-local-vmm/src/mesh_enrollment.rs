@@ -157,6 +157,29 @@ impl MeshEnrollmentStartupFailure {
         100 + self as i32
     }
 
+    pub(crate) fn runner_error_code(self) -> &'static str {
+        match self {
+            Self::InvalidIdentity => "mesh_enrollment_broker_invalid_identity",
+            Self::InheritedDescriptor => "mesh_enrollment_broker_inherited_descriptor",
+            Self::AmbientEnvironment => "mesh_enrollment_broker_ambient_environment",
+            Self::ThreadConfinement => "mesh_enrollment_broker_thread_confinement",
+            Self::BootstrapIo => "mesh_enrollment_broker_bootstrap_io",
+            Self::InvalidBootstrap => "mesh_enrollment_broker_invalid_bootstrap",
+            Self::CredentialUnavailable => "mesh_enrollment_broker_credential_unavailable",
+            Self::ResolverInitialization => "mesh_enrollment_broker_resolver_initialization",
+            Self::EndpointResolution => "mesh_enrollment_broker_endpoint_resolution",
+            Self::HttpClient => "mesh_enrollment_broker_http_client",
+            Self::PrivilegeConfinement => "mesh_enrollment_broker_privilege_confinement",
+            Self::FilesystemConfinement => "mesh_enrollment_broker_filesystem_confinement",
+            Self::SyscallConfinement => "mesh_enrollment_broker_syscall_confinement",
+            Self::EnrollmentRequest => "mesh_enrollment_broker_enrollment_request",
+            Self::InvalidEnrollmentResponse => "mesh_enrollment_broker_invalid_enrollment_response",
+            Self::TransferIo => "mesh_enrollment_broker_transfer_io",
+            Self::StatusIo => "mesh_enrollment_broker_status_io",
+            Self::Protocol => "mesh_enrollment_broker_protocol",
+        }
+    }
+
     pub fn from_exit_code(code: i32) -> Option<Self> {
         ALL_FAILURES
             .into_iter()
@@ -751,6 +774,13 @@ mod tests {
             assert_eq!(
                 decode_mesh_enrollment_startup_status(&failure.message()),
                 Some(MeshEnrollmentStartupStatus::Failed(failure))
+            );
+            assert!(failure.runner_error_code().len() <= 64);
+            assert!(
+                failure
+                    .runner_error_code()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
             );
         }
         assert_eq!(

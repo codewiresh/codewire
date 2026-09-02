@@ -36,7 +36,10 @@ use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
 
-const DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+// A cached restart still cold-boots the kernel, trusted init, the OCI
+// workspace, and its daemon. Keep that path bounded, but give authenticated
+// guest progress the same product window as host-network attachment.
+const DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 const SETUP_DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 const DAEMON_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const PROGRESS_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
@@ -151,6 +154,7 @@ impl RunnerEvents {
             state: v1::EnvironmentState::Stopped as i32,
             generation,
             artifact_generation: artifact_generation.clone(),
+            error_code: String::new(),
         };
         let initial = v1::RunnerEvent {
             sequence: 1,
@@ -199,6 +203,7 @@ impl RunnerEvents {
                 state: state as i32,
                 generation,
                 artifact_generation: self.artifact_generation.clone(),
+                error_code: error_code.unwrap_or_default().to_owned(),
             }),
             stage: stage as i32,
             guest_sequence: guest.map_or(0, |update| update.sequence),
@@ -271,6 +276,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             running: None,
             generation,
             state: v1::EnvironmentState::Stopped,
+            error_code: None,
             adopted: false,
             mesh_data_dir: config.mesh_data_dir,
             platform_config_dir: config.platform_config_dir,
@@ -303,6 +309,7 @@ struct RunnerState {
     running: Option<RunningVm>,
     generation: u64,
     state: v1::EnvironmentState,
+    error_code: Option<&'static str>,
     adopted: bool,
     mesh_data_dir: PathBuf,
     platform_config_dir: PathBuf,
@@ -315,6 +322,7 @@ impl RunnerState {
             state: self.state as i32,
             generation: self.generation,
             artifact_generation: self.artifact_generation.clone(),
+            error_code: self.error_code.unwrap_or_default().to_owned(),
         }
     }
 
@@ -333,33 +341,39 @@ impl RunnerState {
             ExitClass::GuestShutdown => {
                 self.running = None;
                 self.state = v1::EnvironmentState::Stopped;
+                self.error_code = None;
                 Ok(error_code)
             }
             ExitClass::VmmFailure(_) => {
                 self.running = None;
                 self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
                 Ok(error_code)
             }
             ExitClass::NetworkWorkerFailure(_) => {
                 // Keep ownership of the live, now fail-closed VMM so an
                 // explicit stop/restart can reap it safely.
                 self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
                 Ok(error_code)
             }
             ExitClass::EgressBrokerFailure(_) => {
                 // The public packet path is fail-closed as soon as the
                 // separately confined policy broker disappears.
                 self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
                 Ok(error_code)
             }
             ExitClass::IngressForwarderFailure => {
                 self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
                 Ok(error_code)
             }
             ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
                 // Mesh ingress is fail-closed as soon as either the isolated
                 // transport or its authenticated runner receiver disappears.
                 self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
                 Ok(error_code)
             }
         }
@@ -507,6 +521,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             return Err(Status::already_exists("environment is already running"));
         }
         state.state = v1::EnvironmentState::Starting;
+        state.error_code = None;
         self.events.publish(
             v1::EnvironmentState::Starting,
             request.generation,
@@ -535,6 +550,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             Ok(prepared) => prepared,
             Err(error) => {
                 state.state = v1::EnvironmentState::Error;
+                state.error_code = Some("prepare_failed");
                 self.events.publish(
                     v1::EnvironmentState::Error,
                     request.generation,
@@ -561,6 +577,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             Ok(running) => running,
             Err(error) => {
                 state.state = v1::EnvironmentState::Error;
+                state.error_code = Some("vmm_start_failed");
                 self.events.publish(
                     v1::EnvironmentState::Error,
                     request.generation,
@@ -580,6 +597,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             Err(()) => {
                 let _ = running.stop().await;
                 state.state = v1::EnvironmentState::Error;
+                state.error_code = Some("network_worker_failed");
                 self.events.publish(
                     v1::EnvironmentState::Error,
                     request.generation,
@@ -600,13 +618,15 @@ impl EnvironmentRunnerService for RunnerRpc {
             .await
         {
             let _ = running.stop().await;
+            let error_code = network_start_error_code(&error);
             state.state = v1::EnvironmentState::Error;
+            state.error_code = Some(error_code);
             self.events.publish(
                 v1::EnvironmentState::Error,
                 request.generation,
                 v1::RunnerStage::Error,
                 None,
-                Some("network_worker_failed"),
+                Some(error_code),
             )?;
             return Err(map_start_error(error));
         }
@@ -622,6 +642,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         {
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
+            state.error_code = Some("guest_start_failed");
             self.events.publish(
                 v1::EnvironmentState::Error,
                 request.generation,
@@ -634,6 +655,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         if running.discard_one_boot_inputs().is_err() {
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
+            state.error_code = Some("input_cleanup_failed");
             self.events.publish(
                 v1::EnvironmentState::Error,
                 request.generation,
@@ -645,6 +667,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state.generation = request.generation;
         state.state = v1::EnvironmentState::Running;
+        state.error_code = None;
         state.running = Some(running);
         self.events.publish(
             v1::EnvironmentState::Running,
@@ -692,6 +715,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state.running = None;
         state.state = v1::EnvironmentState::Stopped;
+        state.error_code = None;
         self.events.publish(
             v1::EnvironmentState::Stopped,
             state.generation,
@@ -731,6 +755,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             .await
             .map_err(|_| Status::internal("tracked VMM cleanup failed"))?;
         state.state = v1::EnvironmentState::Stopped;
+        state.error_code = None;
         self.events.publish(
             v1::EnvironmentState::Stopped,
             state.generation,
@@ -917,6 +942,37 @@ fn parse_mesh_attachment(request: &v1::StartVmRequest) -> Result<Option<MeshAtta
 
 fn map_start_error(error: RunnerError) -> Status {
     Status::failed_precondition(error.to_string())
+}
+
+fn network_start_error_code(error: &RunnerError) -> &'static str {
+    match error {
+        RunnerError::InvalidNetworkWorker => "network_worker_invalid",
+        RunnerError::NetworkWorkerSpawn => "network_worker_spawn",
+        RunnerError::NetworkWorkerStartTimeout => "network_worker_start_timeout",
+        RunnerError::NetworkWorkerBootstrap => "network_worker_bootstrap",
+        RunnerError::NetworkWorkerStartup(failure) => failure.runner_error_code(),
+        RunnerError::NetworkWorkerWait => "network_worker_wait",
+        RunnerError::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
+        RunnerError::HostPortUnavailable(_) => "host_port_unavailable",
+        RunnerError::IngressControl => "ingress_forwarder_start",
+        RunnerError::EgressBrokerSpawn => "egress_broker_spawn",
+        RunnerError::EgressBrokerStartTimeout => "egress_broker_start_timeout",
+        RunnerError::EgressBrokerBootstrap => "egress_broker_bootstrap",
+        RunnerError::EgressBrokerStartup(failure) => failure.runner_error_code(),
+        RunnerError::EgressBrokerWait => "egress_broker_wait",
+        RunnerError::EgressBrokerKillTimeout => "egress_broker_kill_timeout",
+        RunnerError::MeshTransportSpawn => "mesh_transport_spawn",
+        RunnerError::MeshTransportStartTimeout => "mesh_transport_start_timeout",
+        RunnerError::MeshTransportBootstrap => "mesh_transport_bootstrap",
+        RunnerError::MeshTransportStartup(failure) => failure.runner_error_code(),
+        RunnerError::MeshEnrollmentBrokerSpawn => "mesh_enrollment_broker_spawn",
+        RunnerError::MeshEnrollmentBrokerStartTimeout => "mesh_enrollment_broker_start_timeout",
+        RunnerError::MeshEnrollmentBrokerBootstrap => "mesh_enrollment_broker_bootstrap",
+        RunnerError::MeshEnrollmentBrokerStartup(failure) => failure.runner_error_code(),
+        RunnerError::MeshProcessWait => "mesh_process_wait",
+        RunnerError::MeshProcessKillTimeout => "mesh_process_kill_timeout",
+        _ => "network_stack_failed",
+    }
 }
 
 fn map_grow_error(error: RunnerError) -> Status {
@@ -1242,6 +1298,34 @@ mod tests {
         let status = map_start_error(RunnerError::StartTimeout);
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
         assert_eq!(status.message(), "Cloud Hypervisor startup timed out");
+        assert_eq!(
+            network_start_error_code(&RunnerError::NetworkWorkerStartTimeout),
+            "network_worker_start_timeout"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::MeshTransportStartTimeout),
+            "mesh_transport_start_timeout"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::MeshTransportStartup(
+                crate::mesh_process::MeshTransportStartupFailure::TransportSetup,
+            )),
+            "mesh_transport_transport_setup"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::MeshEnrollmentBrokerStartup(
+                crate::mesh_enrollment::MeshEnrollmentStartupFailure::EnrollmentRequest,
+            )),
+            "mesh_enrollment_broker_enrollment_request"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::HostPortUnavailable(3_000)),
+            "host_port_unavailable"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::StartTimeout),
+            "network_stack_failed"
+        );
     }
 
     #[test]
@@ -1464,7 +1548,22 @@ mod tests {
         assert_eq!(*receiver.borrow_and_update(), update);
         assert_eq!(update.sequence, 2);
         assert_eq!(update.guest_sequence, 5);
+        assert_eq!(update.runner.as_ref().unwrap().error_code, "");
         assert!(!format!("{update:?}").contains(PROGRESS_TOKEN));
+
+        let failed = events
+            .publish(
+                v1::EnvironmentState::Error,
+                1,
+                v1::RunnerStage::Error,
+                None,
+                Some("mesh_ingress_receiver_exit"),
+            )
+            .unwrap();
+        assert_eq!(
+            failed.runner.as_ref().unwrap().error_code,
+            "mesh_ingress_receiver_exit"
+        );
     }
 
     #[test]

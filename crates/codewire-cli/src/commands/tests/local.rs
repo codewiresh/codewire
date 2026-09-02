@@ -71,6 +71,27 @@
     }
 
     #[test]
+    fn network_use_parser_accepts_explicit_environment_auto_connect() {
+        let cli = Cli::try_parse_from([
+            "cw",
+            "network",
+            "use",
+            "project-alpha",
+            "--auto-connect",
+        ])
+        .unwrap();
+
+        let Command::Network {
+            command: NetworkCommand::Use(args),
+        } = cli.command
+        else {
+            panic!("expected network use command");
+        };
+        assert_eq!(args.name, "project-alpha");
+        assert!(args.auto_connect);
+    }
+
+    #[test]
     fn local_mesh_start_spec_defaults_to_loopback_and_explicit_local_identity() {
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::default();
@@ -169,6 +190,43 @@
     }
 
     #[test]
+    fn mesh_status_auto_connect_applies_only_to_the_saved_network() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = ResolvePaths::from_home_and_env(
+            home.path().to_path_buf(),
+            &config::MapEnv::default(),
+        );
+        config::save_mesh_connection(
+            &paths.mesh_data_dir,
+            "https://mesh.example.com",
+            "synthetic-token",
+        )
+        .unwrap();
+        config::save_selected_mesh_network_preference(
+            &paths.mesh_data_dir,
+            "project-alpha",
+            true,
+        )
+        .unwrap();
+        let globals = Globals {
+            server: None,
+            token: None,
+        };
+
+        let saved = mesh_status_report(&globals, &paths, &config::MapEnv::default());
+        assert_eq!(saved.selected_network.as_deref(), Some("project-alpha"));
+        assert!(saved.auto_connect);
+
+        let overridden_env = config::MapEnv::new([(
+            config::CODEWIRE_MESH_NETWORK_ENV,
+            "project-beta",
+        )]);
+        let overridden = mesh_status_report(&globals, &paths, &overridden_env);
+        assert_eq!(overridden.selected_network.as_deref(), Some("project-beta"));
+        assert!(!overridden.auto_connect);
+    }
+
+    #[test]
     fn mesh_status_report_includes_auth_source_when_ready() {
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::new([
@@ -254,13 +312,32 @@
             mesh_url: "http://127.0.0.1:18090".to_string(),
             organization_id: "local-org-alpha".to_string(),
             selected_network: Some("initial".to_string()),
+            auto_connect: false,
         };
         save_local_mesh_owner_context(dir.path(), &context).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                fs::metadata(local_mesh_owner_context_path(dir.path()))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
 
         update_local_mesh_owner_selection(
             dir.path(),
             Some("https://mesh.example.com"),
             Some("hosted"),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -276,6 +353,7 @@
             dir.path(),
             Some("http://127.0.0.1:18090/"),
             Some(" project-alpha "),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -286,17 +364,91 @@
                 .as_deref(),
             Some("project-alpha")
         );
-
-        update_local_mesh_owner_selection(dir.path(), None, None).unwrap();
         assert!(
             load_local_mesh_owner_context(dir.path())
                 .unwrap()
                 .unwrap()
-                .selected_network
-                .is_none()
+                .auto_connect
         );
+
+        update_local_mesh_owner_selection(dir.path(), None, None, false).unwrap();
+        let cleared = load_local_mesh_owner_context(dir.path()).unwrap().unwrap();
+        assert!(cleared.selected_network.is_none());
+        assert!(!cleared.auto_connect);
         remove_local_mesh_owner_context(dir.path()).unwrap();
         assert!(load_local_mesh_owner_context(dir.path()).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn hosted_mesh_owner_projection_is_origin_and_organization_scoped() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = ResolvePaths::from_home_and_env(
+            home.path().to_path_buf(),
+            &config::MapEnv::default(),
+        );
+
+        refresh_hosted_mesh_owner_context(
+            &paths,
+            "https://api.codewire-dev.sh",
+            Some("org-alpha"),
+        )
+        .unwrap();
+        let hosted = load_local_mesh_owner_context(&paths.mesh_data_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hosted.auth_source, LocalMeshOwnerAuthSource::HostedCurrent);
+        assert_eq!(hosted.mesh_url, "https://mesh.codewire-dev.sh");
+        assert_eq!(hosted.organization_id, "org-alpha");
+        assert!(hosted.selected_network.is_none());
+        assert!(!hosted.auto_connect);
+
+        let down = handle_mesh_down(&paths).await.unwrap();
+        assert_eq!(down.state, "not_running");
+        assert!(
+            load_local_mesh_owner_context(&paths.mesh_data_dir)
+                .unwrap()
+                .is_some(),
+            "stopping a nonexistent standalone coordinator must not clear hosted Mesh intent"
+        );
+
+        update_local_mesh_owner_selection(
+            &paths.mesh_data_dir,
+            Some("https://mesh.codewire-dev.sh"),
+            Some("project-alpha"),
+            true,
+        )
+        .unwrap();
+        refresh_hosted_mesh_owner_context(
+            &paths,
+            "https://api.codewire-dev.sh",
+            Some("org-alpha"),
+        )
+        .unwrap();
+        let unchanged = load_local_mesh_owner_context(&paths.mesh_data_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.selected_network.as_deref(), Some("project-alpha"));
+        assert!(unchanged.auto_connect);
+
+        refresh_hosted_mesh_owner_context(
+            &paths,
+            "https://api.codewire-dev.sh",
+            Some("org-beta"),
+        )
+        .unwrap();
+        let changed = load_local_mesh_owner_context(&paths.mesh_data_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.organization_id, "org-beta");
+        assert!(changed.selected_network.is_none());
+        assert!(!changed.auto_connect);
+
+        remove_hosted_mesh_owner_context(&paths.mesh_data_dir).unwrap();
+        assert!(
+            load_local_mesh_owner_context(&paths.mesh_data_dir)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

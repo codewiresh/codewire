@@ -29,6 +29,7 @@ pub(crate) async fn handle_network_command(
                     &paths.mesh_data_dir,
                     Some(&mesh.mesh_url),
                     Some(network_id),
+                    false,
                 )?;
                 eprintln!("Network {network_id:?} created and selected");
             }
@@ -39,13 +40,29 @@ pub(crate) async fn handle_network_command(
         },
         NetworkCommand::Use(args) => {
             let network_id = trimmed_required(&args.name, "network name")?;
-            config::save_selected_mesh_network(&paths.mesh_data_dir, network_id)?;
-            update_local_mesh_owner_selection(&paths.mesh_data_dir, None, Some(network_id))?;
-            eprintln!("Selected network {network_id:?}");
+            config::save_selected_mesh_network_preference(
+                &paths.mesh_data_dir,
+                network_id,
+                args.auto_connect,
+            )?;
+            update_local_mesh_owner_selection(
+                &paths.mesh_data_dir,
+                None,
+                Some(network_id),
+                args.auto_connect,
+            )?;
+            eprintln!(
+                "Selected network {network_id:?} ({})",
+                if args.auto_connect {
+                    "new environments connect automatically"
+                } else {
+                    "new environments ask before connecting"
+                }
+            );
         }
         NetworkCommand::Clear => {
             config::clear_selected_mesh_network(&paths.mesh_data_dir)?;
-            update_local_mesh_owner_selection(&paths.mesh_data_dir, None, None)?;
+            update_local_mesh_owner_selection(&paths.mesh_data_dir, None, None, false)?;
             eprintln!("Cleared selected network");
         }
         NetworkCommand::Nodes(args) => {
@@ -100,6 +117,7 @@ pub(crate) async fn handle_network_command(
                 &paths.mesh_data_dir,
                 Some(&mesh.mesh_url),
                 Some(&joined.network_id),
+                false,
             )?;
             eprintln!("Joined network {:?}", joined.network_id);
             eprintln!("Selected network is ready for Mesh commands.");
@@ -150,13 +168,16 @@ pub(crate) async fn handle_network_command(
     Ok(())
 }
 
-pub(crate) fn handle_mesh_command(globals: &Globals, command: MeshCommand) -> anyhow::Result<()> {
+pub(crate) async fn handle_mesh_command(
+    globals: &Globals,
+    command: MeshCommand,
+) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
     match command {
         MeshCommand::Up(args) => {
             let output = args.output;
-            let report = handle_mesh_up(&paths, args)?;
+            let report = handle_mesh_up(&paths, args).await?;
             print_mesh_up_report(&report, output)
         }
         MeshCommand::Status(args) => {
@@ -164,7 +185,7 @@ pub(crate) fn handle_mesh_command(globals: &Globals, command: MeshCommand) -> an
             print_mesh_status_report(&report, args.output)
         }
         MeshCommand::Down(args) => {
-            let report = handle_mesh_down(&paths)?;
+            let report = handle_mesh_down(&paths).await?;
             print_mesh_down_report(&report, args.output)
         }
     }
@@ -176,6 +197,7 @@ pub(crate) struct MeshStatusReport {
     pub(crate) configured: bool,
     pub(crate) mesh_url: Option<String>,
     pub(crate) selected_network: Option<String>,
+    pub(crate) auto_connect: bool,
     pub(crate) auth_configured: bool,
     pub(crate) auth_source: Option<config::MeshAuthSource>,
     pub(crate) local: LocalMeshStatus,
@@ -226,6 +248,8 @@ pub(crate) struct LocalMeshOwnerContext {
     pub(crate) organization_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) selected_network: Option<String>,
+    #[serde(default)]
+    pub(crate) auto_connect: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -304,12 +328,20 @@ pub(crate) fn mesh_status_report(
         .map(config::ResolvedMeshConfig::auth_configured)
         .unwrap_or(false);
     let auth_source = resolved.as_ref().map(|mesh| mesh.auth_source);
+    let auto_connect = config::load_mesh_config(&paths.mesh_data_dir)
+        .ok()
+        .is_some_and(|mesh| {
+            mesh.mesh_auto_connect.unwrap_or(false)
+                && mesh.mesh_selected_network.as_deref().and_then(trimmed_str)
+                    == selected_network.as_deref().and_then(trimmed_str)
+        });
 
     MeshStatusReport {
         mesh_data_dir: paths.mesh_data_dir.display().to_string(),
         configured: mesh_url.is_some(),
         mesh_url,
         selected_network,
+        auto_connect,
         auth_configured,
         auth_source,
         local: local_mesh_status(&paths.mesh_data_dir),
@@ -348,6 +380,10 @@ pub(crate) fn format_mesh_status_report(report: &MeshStatusReport) -> String {
     out.push_str(&format!(
         "Network:     {}\n",
         report.selected_network.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!(
+        "Auto-connect: {}\n",
+        if report.auto_connect { "yes" } else { "no" }
     ));
     out.push_str(&format!(
         "Auth:        {}\n",
@@ -408,15 +444,17 @@ pub(crate) fn mesh_auth_source_label(source: config::MeshAuthSource) -> &'static
     }
 }
 
-pub(crate) fn handle_mesh_up(
+pub(crate) async fn handle_mesh_up(
     paths: &ResolvePaths,
     args: MeshUpArgs,
 ) -> anyhow::Result<MeshUpReport> {
     let local_identity = config::ensure_local_mesh_identity(&paths.mesh_data_dir)
         .context("initialize standalone Mesh identity")?;
-    let selected_network = config::load_mesh_config(&paths.mesh_data_dir)?
+    let mesh_config = config::load_mesh_config(&paths.mesh_data_dir)?;
+    let selected_network = mesh_config
         .mesh_selected_network
         .and_then(|network| trimmed_str(&network).map(str::to_owned));
+    let auto_connect = selected_network.is_some() && mesh_config.mesh_auto_connect.unwrap_or(false);
     if let Some(runtime) = load_local_mesh_runtime(&paths.mesh_data_dir)?
         && local_process_is_running(runtime.pid)
     {
@@ -429,15 +467,16 @@ pub(crate) fn handle_mesh_up(
                     mesh_url: runtime.base_url.clone(),
                     organization_id: local_identity.organization_id,
                     selected_network,
+                    auto_connect,
                 },
             )?;
             return Ok(mesh_up_report(false, &runtime));
         }
-        stop_local_process(runtime.pid, "local Codewire Mesh")?;
+        stop_local_process(runtime.pid, "local Codewire Mesh").await?;
         if let Some(derp) = runtime.derp.as_ref()
             && local_process_is_running(derp.pid)
         {
-            stop_local_process(derp.pid, "local Codewire DERP")?;
+            stop_local_process(derp.pid, "local Codewire DERP").await?;
         }
         remove_local_mesh_runtime(&paths.mesh_data_dir)?;
     }
@@ -453,35 +492,105 @@ pub(crate) fn handle_mesh_up(
         Ok(pid) => pid,
         Err(err) => {
             if let Some(derp) = derp.as_ref() {
-                let _ = stop_local_process(derp.pid, "local Codewire DERP");
+                let _ = stop_local_process(derp.pid, "local Codewire DERP").await;
             }
             return Err(err);
         }
     };
-    config::save_mesh_connection(&paths.mesh_data_dir, &spec.base_url, &spec.auth_token)
-        .context("save local mesh config")?;
-
+    if let Err(error) = wait_for_standalone_mesh_catalog(
+        paths,
+        &spec,
+        &organization_id,
+        selected_network.as_deref(),
+    )
+    .await
+    {
+        let _ = stop_local_process(pid, "local Codewire Mesh").await;
+        if let Some(derp) = derp.as_ref() {
+            let _ = stop_local_process(derp.pid, "local Codewire DERP").await;
+        }
+        return Err(error);
+    }
     let runtime = LocalMeshRuntime {
         pid,
-        base_url: spec.base_url,
-        listen_addr: spec.listen_addr,
+        base_url: spec.base_url.clone(),
+        listen_addr: spec.listen_addr.clone(),
         binary: spec.binary.display().to_string(),
         log_path: spec.log_path.display().to_string(),
         started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         derp,
     };
-    save_local_mesh_runtime(&paths.mesh_data_dir, &runtime)?;
-    save_local_mesh_owner_context(
-        &paths.mesh_data_dir,
-        &LocalMeshOwnerContext {
-            schema_version: 1,
-            auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
-            mesh_url: runtime.base_url.clone(),
-            organization_id,
-            selected_network,
-        },
-    )?;
+    let persist = (|| -> anyhow::Result<()> {
+        config::save_mesh_connection(&paths.mesh_data_dir, &spec.base_url, &spec.auth_token)
+            .context("save local mesh config")?;
+        save_local_mesh_runtime(&paths.mesh_data_dir, &runtime)?;
+        save_local_mesh_owner_context(
+            &paths.mesh_data_dir,
+            &LocalMeshOwnerContext {
+                schema_version: 1,
+                auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
+                mesh_url: runtime.base_url.clone(),
+                organization_id,
+                selected_network,
+                auto_connect,
+            },
+        )
+    })();
+    if let Err(error) = persist {
+        let mesh_stop = stop_local_process(runtime.pid, "local Codewire Mesh").await;
+        let derp_stop = match runtime.derp.as_ref() {
+            Some(derp) => stop_local_process(derp.pid, "local Codewire DERP").await,
+            None => Ok(()),
+        };
+        if let Err(cleanup) = mesh_stop.and(derp_stop) {
+            return Err(error.context(format!(
+                "started local Mesh state could not be persisted and process cleanup failed: {cleanup}"
+            )));
+        }
+        let _ = remove_local_mesh_runtime(&paths.mesh_data_dir);
+        let _ = remove_mesh_owner_context_for_auth_source(
+            &paths.mesh_data_dir,
+            LocalMeshOwnerAuthSource::StandaloneLocal,
+        );
+        return Err(error);
+    }
     Ok(mesh_up_report(true, &runtime))
+}
+
+async fn wait_for_standalone_mesh_catalog(
+    paths: &ResolvePaths,
+    spec: &LocalMeshStartSpec,
+    organization_id: &str,
+    selected_network: Option<&str>,
+) -> anyhow::Result<()> {
+    let env = OsEnv;
+    let resolved = config::resolve_mesh(
+        config::MeshResolveOptions {
+            mesh_url: Some(spec.base_url.clone()),
+            auth_token: Some(spec.auth_token.clone()),
+            ..config::MeshResolveOptions::default()
+        },
+        paths,
+        &env,
+    )?;
+    let client = MeshClient::new(&resolved)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = match selected_network {
+            Some(network_id) => client.create_network(organization_id, network_id).await,
+            None => client.list_networks(organization_id).await.map(|_| ()),
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                drop(error);
+            }
+            Err(error) => {
+                return Err(error).context("initialize standalone Mesh catalog");
+            }
+        }
+    }
 }
 
 pub(crate) fn local_mesh_runtime_matches_args(
@@ -528,9 +637,12 @@ pub(crate) fn print_mesh_up_report(
     Ok(())
 }
 
-pub(crate) fn handle_mesh_down(paths: &ResolvePaths) -> anyhow::Result<MeshDownReport> {
+pub(crate) async fn handle_mesh_down(paths: &ResolvePaths) -> anyhow::Result<MeshDownReport> {
     let Some(runtime) = load_local_mesh_runtime(&paths.mesh_data_dir)? else {
-        remove_local_mesh_owner_context(&paths.mesh_data_dir)?;
+        remove_mesh_owner_context_for_auth_source(
+            &paths.mesh_data_dir,
+            LocalMeshOwnerAuthSource::StandaloneLocal,
+        )?;
         return Ok(MeshDownReport {
             stopped: false,
             pid: None,
@@ -541,17 +653,20 @@ pub(crate) fn handle_mesh_down(paths: &ResolvePaths) -> anyhow::Result<MeshDownR
     let mut stopped = false;
     let mesh_running = local_process_is_running(runtime.pid);
     if mesh_running {
-        stop_local_process(runtime.pid, "local Codewire Mesh")?;
+        stop_local_process(runtime.pid, "local Codewire Mesh").await?;
         stopped = true;
     }
     if let Some(derp) = runtime.derp.as_ref()
         && local_process_is_running(derp.pid)
     {
-        stop_local_process(derp.pid, "local Codewire DERP")?;
+        stop_local_process(derp.pid, "local Codewire DERP").await?;
         stopped = true;
     }
     remove_local_mesh_runtime(&paths.mesh_data_dir)?;
-    remove_local_mesh_owner_context(&paths.mesh_data_dir)?;
+    remove_mesh_owner_context_for_auth_source(
+        &paths.mesh_data_dir,
+        LocalMeshOwnerAuthSource::StandaloneLocal,
+    )?;
     Ok(MeshDownReport {
         stopped,
         pid: Some(runtime.pid),
@@ -722,7 +837,13 @@ pub(crate) fn start_local_derp_process(
         .with_context(|| format!("clone {}", spec.log_path.display()))?;
     let mut child = ProcessCommand::new(&spec.binary);
     child
-        .env("LISTEN_ADDR", &spec.listen_addr)
+        // Standalone Mesh advertises its loopback DERP URL with the
+        // InsecureForTests marker so the transport can admit this one
+        // self-signed endpoint. The relay itself still runs encrypted TLS;
+        // never turn the managed local process into a plaintext DERP server.
+        .env_remove("LISTEN_ADDR")
+        .env("PORT", "-1")
+        .env("TLS_LISTEN_ADDR", &spec.listen_addr)
         .env("STUN_LISTEN_ADDR", "-1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -755,7 +876,7 @@ pub(crate) fn start_local_derp_process(
     })
 }
 
-pub(crate) fn stop_local_process(pid: u32, label: &str) -> anyhow::Result<()> {
+pub(crate) async fn stop_local_process(pid: u32, label: &str) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let status = ProcessCommand::new("kill")
@@ -764,6 +885,20 @@ pub(crate) fn stop_local_process(pid: u32, label: &str) -> anyhow::Result<()> {
             .with_context(|| format!("stop {label} pid {pid}"))?;
         if !status.success() && local_process_is_running(pid) {
             anyhow::bail!("failed to stop {label} pid {pid}: {status}");
+        }
+        if wait_for_local_process_exit(pid, Duration::from_secs(2)).await {
+            return Ok(());
+        }
+        let status = ProcessCommand::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .status()
+            .with_context(|| format!("kill unresponsive {label} pid {pid}"))?;
+        if !status.success() && local_process_is_running(pid) {
+            anyhow::bail!("failed to kill unresponsive {label} pid {pid}: {status}");
+        }
+        if !wait_for_local_process_exit(pid, Duration::from_secs(2)).await {
+            anyhow::bail!("{label} pid {pid} did not exit after SIGKILL");
         }
     }
     #[cfg(windows)]
@@ -779,6 +914,19 @@ pub(crate) fn stop_local_process(pid: u32, label: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn wait_for_local_process_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if !local_process_is_running(pid) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 pub(crate) fn local_mesh_status(data_dir: &Path) -> LocalMeshStatus {
@@ -834,10 +982,9 @@ pub(crate) fn save_local_mesh_runtime(
     data_dir: &Path,
     runtime: &LocalMeshRuntime,
 ) -> anyhow::Result<()> {
-    fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
     let path = local_mesh_runtime_path(data_dir);
     let data = serde_json::to_vec_pretty(runtime)?;
-    fs::write(&path, data).with_context(|| format!("write {}", path.display()))
+    write_owner_only_mesh_file(data_dir, &path, &data)
 }
 
 /// Keep the credential-free owner projection aligned with network selection.
@@ -847,6 +994,7 @@ pub(crate) fn update_local_mesh_owner_selection(
     data_dir: &Path,
     expected_mesh_url: Option<&str>,
     selected_network: Option<&str>,
+    auto_connect: bool,
 ) -> anyhow::Result<()> {
     let Some(mut context) = load_local_mesh_owner_context(data_dir)? else {
         return Ok(());
@@ -856,7 +1004,68 @@ pub(crate) fn update_local_mesh_owner_selection(
         return Ok(());
     }
     context.selected_network = selected_network.and_then(trimmed_str).map(str::to_owned);
+    context.auto_connect = context.selected_network.is_some() && auto_connect;
     save_local_mesh_owner_context(data_dir, &context)
+}
+
+pub(crate) fn refresh_hosted_mesh_owner_context(
+    paths: &ResolvePaths,
+    platform_server_url: &str,
+    organization_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let organization_id = organization_id.and_then(trimmed_str);
+    let mesh_url = config::derive_hosted_mesh_url_for_server(platform_server_url);
+    let existing = load_local_mesh_owner_context(&paths.mesh_data_dir)?;
+    if existing
+        .as_ref()
+        .is_some_and(|context| context.auth_source == LocalMeshOwnerAuthSource::StandaloneLocal)
+    {
+        return Ok(());
+    }
+    let (Some(mesh_url), Some(organization_id)) = (mesh_url, organization_id) else {
+        if existing
+            .as_ref()
+            .is_some_and(|context| context.auth_source == LocalMeshOwnerAuthSource::HostedCurrent)
+        {
+            remove_local_mesh_owner_context(&paths.mesh_data_dir)?;
+        }
+        return Ok(());
+    };
+    let (selected_network, auto_connect) = existing
+        .filter(|context| {
+            context.auth_source == LocalMeshOwnerAuthSource::HostedCurrent
+                && config::same_mesh_url(&context.mesh_url, &mesh_url)
+                && context.organization_id == organization_id
+        })
+        .map(|context| (context.selected_network, context.auto_connect))
+        .unwrap_or((None, false));
+    save_local_mesh_owner_context(
+        &paths.mesh_data_dir,
+        &LocalMeshOwnerContext {
+            schema_version: 1,
+            auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
+            mesh_url,
+            organization_id: organization_id.to_owned(),
+            selected_network,
+            auto_connect,
+        },
+    )
+}
+
+pub(crate) fn remove_hosted_mesh_owner_context(data_dir: &Path) -> anyhow::Result<()> {
+    remove_mesh_owner_context_for_auth_source(data_dir, LocalMeshOwnerAuthSource::HostedCurrent)
+}
+
+fn remove_mesh_owner_context_for_auth_source(
+    data_dir: &Path,
+    auth_source: LocalMeshOwnerAuthSource,
+) -> anyhow::Result<()> {
+    if load_local_mesh_owner_context(data_dir)?
+        .is_some_and(|context| context.auth_source == auth_source)
+    {
+        remove_local_mesh_owner_context(data_dir)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn load_local_mesh_owner_context(
@@ -886,10 +1095,39 @@ pub(crate) fn save_local_mesh_owner_context(
     if context.schema_version != 1 {
         anyhow::bail!("local Mesh owner context schema must be 1");
     }
-    fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
     let path = local_mesh_owner_context_path(data_dir);
     let data = serde_json::to_vec_pretty(context)?;
-    fs::write(&path, data).with_context(|| format!("write {}", path.display()))
+    write_owner_only_mesh_file(data_dir, &path, &data)
+}
+
+fn write_owner_only_mesh_file(data_dir: &Path, path: &Path, data: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("protect {}", data_dir.display()))?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("protect {}", path.display()))?;
+    }
+    file.write_all(data)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 pub(crate) fn remove_local_mesh_owner_context(data_dir: &Path) -> anyhow::Result<()> {
@@ -936,6 +1174,17 @@ pub(crate) fn local_process_is_running(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+            let state = stat
+                .rsplit_once(") ")
+                .and_then(|(_, suffix)| suffix.as_bytes().first())
+                .copied();
+            !matches!(state, Some(b'Z' | b'X') | None)
+        } else {
+            false
+        }
+        #[cfg(not(target_os = "linux"))]
         ProcessCommand::new("kill")
             .arg("-0")
             .arg(pid.to_string())

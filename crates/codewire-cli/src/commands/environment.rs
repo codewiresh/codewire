@@ -96,7 +96,7 @@ pub(crate) async fn handle_platform_env_command(
     match command {
         EnvCommand::Create(args) => {
             let mut request = prepare_platform_env_create_request(&args)?;
-            match resolve_env_create_mesh_bootstrap(
+            if let Some(bootstrap) = resolve_env_create_mesh_bootstrap(
                 &paths,
                 &env,
                 &platform,
@@ -104,26 +104,16 @@ pub(crate) async fn handle_platform_env_command(
                 args.yes,
                 args.network.as_deref(),
                 args.no_network,
-            ) {
-                Ok(Some(bootstrap)) => match create_env_mesh_invite(&bootstrap).await {
-                    Ok(invite) => inject_env_create_mesh_bootstrap(
-                        &mut request,
-                        &bootstrap.mesh.mesh_url,
-                        &bootstrap.network_id,
-                        &invite.invite_code,
-                    )?,
-                    Err(err) => {
-                        eprintln!(
-                            "Warning: mesh enrollment failed ({err}), continuing without network"
-                        );
-                    }
-                },
-                Ok(None) => {}
-                Err(err) => {
-                    eprintln!(
-                        "Warning: mesh enrollment failed ({err}), continuing without network"
-                    );
-                }
+            )? {
+                let invite = create_env_mesh_invite(&bootstrap)
+                    .await
+                    .context("create Mesh enrollment for platform environment")?;
+                inject_env_create_mesh_bootstrap(
+                    &mut request,
+                    &bootstrap.mesh.mesh_url,
+                    &bootstrap.network_id,
+                    &invite.invite_code,
+                )?;
             }
             let environment = environment_client
                 .create_environment(&org_id, &request)

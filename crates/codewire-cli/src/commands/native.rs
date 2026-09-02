@@ -124,7 +124,9 @@ impl codewire_local_vmm::mesh_enrollment::MeshEnrollmentCredentialResolver
                         config::load_platform_config(&platform_config_dir).map_err(|_| ())?;
                     let hosted =
                         config::derive_hosted_mesh_url_for_server(&platform.server_url).ok_or(())?;
-                    if !config::same_mesh_url(&hosted, &attachment.mesh_url) {
+                    if !config::same_mesh_url(&hosted, &attachment.mesh_url)
+                        || platform.default_org.trim() != attachment.organization_id
+                    {
                         return Err(());
                     }
                     let http = reqwest::Client::builder()
@@ -231,10 +233,9 @@ fn resolve_native_mesh_attachment(
         return Ok(None);
     }
 
-    // This descriptor is deliberately separate from config.toml. It contains
-    // only status-visible metadata written by `cw mesh up`; the CLI must never
-    // deserialize the standalone bearer merely to create a VM.
-    let runtime = load_local_mesh_runtime(&paths.mesh_data_dir)?;
+    // This descriptor is deliberately separate from both credential stores.
+    // It contains only status-visible metadata written by Mesh/platform setup;
+    // ordinary environment creation must never deserialize a bearer.
     let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)?;
     let environment_network = env
         .var(config::CODEWIRE_MESH_NETWORK_ENV)
@@ -253,7 +254,10 @@ fn resolve_native_mesh_attachment(
         return Ok(None);
     };
 
-    if requested_network.is_none() && !assume_yes {
+    let auto_connect = owner.as_ref().is_some_and(|owner| {
+        owner.auto_connect && owner.selected_network.as_deref() == Some(network_id.as_str())
+    });
+    if requested_network.is_none() && !assume_yes && !auto_connect {
         if !stdin_is_interactive() {
             return Ok(None);
         }
@@ -262,35 +266,47 @@ fn resolve_native_mesh_attachment(
             .map(|owner| owner.mesh_url.as_str())
             .unwrap_or("the local Mesh service");
         if !prompt_confirm_default_no(&format!(
-            "Join local Mesh network {network_id:?} at {mesh_url} for remote access. Continue"
+            "Join Codewire Mesh network {network_id:?} at {mesh_url} for remote access. Continue"
         ))? {
             return Ok(None);
         }
     }
 
-    let runtime = runtime.ok_or_else(|| {
-        anyhow::anyhow!(
-            "local Mesh is not running; run 'cw mesh up' before attaching network {network_id:?}"
-        )
-    })?;
-    if !local_process_is_running(runtime.pid) {
-        anyhow::bail!(
-            "local Mesh runtime is stale; run 'cw mesh up' before attaching network {network_id:?}"
-        );
-    }
     let owner = owner.ok_or_else(|| {
         anyhow::anyhow!(
-            "local Mesh has no owner projection; run 'cw mesh up' before attaching network {network_id:?}"
+            "no Mesh owner is configured; run 'cw login --org <org>' for hosted Mesh or run 'cw mesh up' for standalone Mesh before attaching network {network_id:?}"
         )
     })?;
-    if owner.auth_source != LocalMeshOwnerAuthSource::StandaloneLocal
-        || !config::same_mesh_url(&owner.mesh_url, &runtime.base_url)
-    {
-        anyhow::bail!("local Mesh owner projection does not match the active standalone runtime");
-    }
+    let (auth_source, proto_auth_source) = match owner.auth_source {
+        LocalMeshOwnerAuthSource::StandaloneLocal => {
+            let runtime = load_local_mesh_runtime(&paths.mesh_data_dir)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "local Mesh is not running; run 'cw mesh up' before attaching network {network_id:?}"
+                )
+            })?;
+            if !local_process_is_running(runtime.pid) {
+                anyhow::bail!(
+                    "local Mesh runtime is stale; run 'cw mesh up' before attaching network {network_id:?}"
+                );
+            }
+            if !config::same_mesh_url(&owner.mesh_url, &runtime.base_url) {
+                anyhow::bail!(
+                    "local Mesh owner projection does not match the active standalone runtime"
+                );
+            }
+            (
+                codewire_local_vmm::mesh_ingress::MeshEnrollmentAuthSource::StandaloneLocal,
+                v1::MeshEnrollmentAuthSource::StandaloneLocal,
+            )
+        }
+        LocalMeshOwnerAuthSource::HostedCurrent => (
+            codewire_local_vmm::mesh_ingress::MeshEnrollmentAuthSource::HostedCurrent,
+            v1::MeshEnrollmentAuthSource::HostedCurrent,
+        ),
+    };
 
     let attachment = codewire_local_vmm::mesh_ingress::MeshAttachment::new_with_auth_source(
-        codewire_local_vmm::mesh_ingress::MeshEnrollmentAuthSource::StandaloneLocal,
+        auth_source,
         &owner.mesh_url,
         &owner.organization_id,
         &network_id,
@@ -304,7 +320,7 @@ fn resolve_native_mesh_attachment(
         network_id: attachment.network_id,
         node_name: attachment.node_name,
         guest_ports: attachment.guest_ports.into_iter().map(u32::from).collect(),
-        auth_source: v1::MeshEnrollmentAuthSource::StandaloneLocal as i32,
+        auth_source: proto_auth_source as i32,
     }))
 }
 
@@ -565,6 +581,10 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) workspace_inputs: u32,
     pub(crate) working_directory: String,
     pub(crate) ports: Vec<NativeHostPortView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) network: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -595,6 +615,12 @@ impl From<&v1::Environment> for NativeEnvironmentView {
                     guest_port: binding.guest_port,
                 })
                 .collect(),
+            network: environment
+                .mesh
+                .as_ref()
+                .and_then(|mesh| trimmed_str(&mesh.network_id))
+                .map(str::to_owned),
+            error_code: trimmed_str(&environment.error_code).map(str::to_owned),
         }
     }
 }
@@ -617,6 +643,12 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
             "Port:        {} -> {}\n",
             port.listen, port.guest_port
         ));
+    }
+    if let Some(network) = &view.network {
+        output.push_str(&format!("Network:     {network}\n"));
+    }
+    if let Some(error_code) = &view.error_code {
+        output.push_str(&format!("Error:       {error_code}\n"));
     }
     output
 }
@@ -1035,6 +1067,7 @@ mod tests {
                 mesh_url: "http://127.0.0.1:18090".to_owned(),
                 organization_id: "local-org-alpha".to_owned(),
                 selected_network: Some("selected-network".to_owned()),
+                auto_connect: false,
             },
         )
         .unwrap();
@@ -1080,6 +1113,24 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(selected.network_id, "selected-network");
+
+        let mut owner = load_local_mesh_owner_context(&mesh_data_dir)
+            .unwrap()
+            .unwrap();
+        owner.auto_connect = true;
+        save_local_mesh_owner_context(&mesh_data_dir, &owner).unwrap();
+        let automatic = resolve_native_mesh_attachment(
+            &paths,
+            &config::MapEnv::default(),
+            "native-dev",
+            &project,
+            None,
+            false,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(automatic.network_id, "selected-network");
     }
 
     #[test]
@@ -1127,6 +1178,47 @@ mod tests {
         assert_eq!(
             conflict.to_string(),
             "--network and --no-network cannot be used together"
+        );
+    }
+
+    #[test]
+    fn native_hosted_mesh_attachment_uses_only_the_credential_free_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ResolvePaths {
+            mesh_data_dir: root.path().join("mesh"),
+            platform_config_dir: root.path().join("missing-protected-platform-store"),
+        };
+        save_local_mesh_owner_context(
+            &paths.mesh_data_dir,
+            &LocalMeshOwnerContext {
+                schema_version: 1,
+                auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
+                mesh_url: "https://mesh.codewire-dev.sh".to_owned(),
+                organization_id: "org-hosted".to_owned(),
+                selected_network: Some("project-alpha".to_owned()),
+                auto_connect: true,
+            },
+        )
+        .unwrap();
+
+        let attachment = resolve_native_mesh_attachment(
+            &paths,
+            &config::MapEnv::default(),
+            "native-dev",
+            &NativeProjectPlan::default(),
+            None,
+            false,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(attachment.mesh_url, "https://mesh.codewire-dev.sh");
+        assert_eq!(attachment.organization_id, "org-hosted");
+        assert_eq!(attachment.network_id, "project-alpha");
+        assert_eq!(attachment.node_name, "native-dev");
+        assert_eq!(
+            attachment.auth_source,
+            v1::MeshEnrollmentAuthSource::HostedCurrent as i32
         );
     }
 
@@ -1192,6 +1284,17 @@ mod tests {
         )
         .unwrap();
         assert!(resolver.resolve(&wrong_origin).await.is_err());
+
+        let wrong_organization = MeshAttachment::new_with_auth_source(
+            MeshEnrollmentAuthSource::HostedCurrent,
+            "https://mesh.codewire-dev.sh",
+            "org-other",
+            "network-hosted",
+            "node-hosted",
+            [3_000],
+        )
+        .unwrap();
+        assert!(resolver.resolve(&wrong_organization).await.is_err());
     }
 
     #[test]
@@ -1327,6 +1430,23 @@ working_directory: /workspace/github
     }
 
     #[test]
+    fn native_environment_view_reports_mesh_and_typed_runtime_failure() {
+        let environment = v1::Environment {
+            mesh: Some(v1::MeshAttachment {
+                network_id: "mesh-dev".to_owned(),
+                ..Default::default()
+            }),
+            state: v1::EnvironmentState::Error as i32,
+            error_code: "mesh_transport_exit".to_owned(),
+            ..Default::default()
+        };
+
+        let view = NativeEnvironmentView::from(&environment);
+        assert_eq!(view.network.as_deref(), Some("mesh-dev"));
+        assert_eq!(view.error_code.as_deref(), Some("mesh_transport_exit"));
+    }
+
+    #[test]
     fn native_environment_text_reports_exact_loopback_mapping() {
         let view = NativeEnvironmentView {
             id: Uuid::new_v4().to_string(),
@@ -1344,10 +1464,12 @@ working_directory: /workspace/github
                 listen: "127.0.0.1:18080".to_owned(),
                 guest_port: 8_080,
             }],
+            network: Some("mesh-dev".to_owned()),
+            error_code: None,
         };
 
-        assert!(
-            format_native_environment(&view).contains("Port:        127.0.0.1:18080 -> 8080\n")
-        );
+        let output = format_native_environment(&view);
+        assert!(output.contains("Port:        127.0.0.1:18080 -> 8080\n"));
+        assert!(output.contains("Network:     mesh-dev\n"));
     }
 }

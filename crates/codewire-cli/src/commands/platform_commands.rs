@@ -632,7 +632,7 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
     config::save_platform_config(
         &paths.platform_config_dir,
         &config::PlatformConfig {
-            server_url,
+            server_url: server_url.clone(),
             session_token: String::new(),
             default_org: selected_org
                 .as_ref()
@@ -641,6 +641,11 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
         },
     )
     .context("save config")?;
+    refresh_hosted_mesh_owner_context(
+        &paths,
+        &server_url,
+        selected_org.as_ref().map(|org| org.id.as_str()),
+    )?;
 
     if let Some(org) = &selected_org {
         eprintln!("Default org: {} ({}).", org.name, org.slug);
@@ -892,7 +897,8 @@ pub(crate) fn save_login_platform_config(
         &codewire_client::FileCredentialStore::new(&paths.platform_config_dir),
         credentials,
     )
-    .context("save OAuth credentials")
+    .context("save OAuth credentials")?;
+    refresh_hosted_mesh_owner_context(paths, server_url, default_org)
 }
 
 pub(crate) fn oauth_user_display_name(user: &OAuthUserInfo) -> String {
@@ -975,6 +981,7 @@ pub(crate) async fn handle_org_command(
             saved.default_org = selected.id.clone();
             config::save_platform_config(&paths.platform_config_dir, &saved)
                 .context("save config")?;
+            refresh_hosted_mesh_owner_context(&paths, &saved.server_url, Some(&saved.default_org))?;
             eprintln!("Current org set to {} ({}).", selected.name, selected.slug);
         }
         OrgCommand::Create(args) => {

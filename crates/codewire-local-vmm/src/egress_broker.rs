@@ -148,6 +148,24 @@ impl EgressBrokerStartupFailure {
         }
     }
 
+    pub(crate) fn runner_error_code(self) -> &'static str {
+        match self {
+            Self::InvalidIdentity => "egress_broker_invalid_identity",
+            Self::InheritedDescriptor => "egress_broker_inherited_descriptor",
+            Self::AmbientEnvironment => "egress_broker_ambient_environment",
+            Self::ThreadConfinement => "egress_broker_thread_confinement",
+            Self::BootstrapIo => "egress_broker_bootstrap_io",
+            Self::InvalidBootstrap => "egress_broker_invalid_bootstrap",
+            Self::PolicyMismatch => "egress_broker_policy_mismatch",
+            Self::ResolverInitialization => "egress_broker_resolver_initialization",
+            Self::PrivilegeConfinement => "egress_broker_privilege_confinement",
+            Self::FilesystemConfinement => "egress_broker_filesystem_confinement",
+            Self::SyscallConfinement => "egress_broker_syscall_confinement",
+            Self::StatusIo => "egress_broker_status_io",
+            Self::Protocol => "egress_broker_protocol",
+        }
+    }
+
     pub fn from_exit_code(code: i32) -> Option<Self> {
         ALL_FAILURES
             .into_iter()
@@ -610,6 +628,13 @@ mod tests {
             assert_eq!(
                 EgressBrokerStartupFailure::from_exit_code(failure.exit_code()),
                 Some(failure)
+            );
+            assert!(failure.runner_error_code().len() <= 64);
+            assert!(
+                failure
+                    .runner_error_code()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
             );
             let mut trailing = failure.message().to_vec();
             trailing.push(b'x');

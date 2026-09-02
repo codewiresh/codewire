@@ -1433,6 +1433,60 @@ secrets: {project: development, org: false, user: false}
     }
 
     #[test]
+    fn platform_env_mesh_bootstrap_honors_only_the_matching_auto_connect_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let env = config::MapEnv::default();
+        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+        save_local_mesh_owner_context(
+            &paths.mesh_data_dir,
+            &LocalMeshOwnerContext {
+                schema_version: 1,
+                auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
+                mesh_url: "https://mesh.codewire-dev.sh".to_owned(),
+                organization_id: "org-alpha".to_owned(),
+                selected_network: Some("shared-dev".to_owned()),
+                auto_connect: true,
+            },
+        )
+        .unwrap();
+        let platform = config::ResolvedPlatformConfig::static_token(
+            "https://codewire-dev.sh",
+            "platform-token",
+            true,
+            None,
+        );
+
+        let automatic = resolve_env_create_mesh_bootstrap(
+            &paths,
+            &env,
+            &platform,
+            "org-alpha",
+            false,
+            None,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(automatic.network_id, "shared-dev");
+        assert_eq!(automatic.mesh.mesh_url, "https://mesh.codewire-dev.sh");
+
+        assert!(
+            resolve_env_create_mesh_bootstrap(
+                &paths,
+                &env,
+                &platform,
+                "org-beta",
+                false,
+                None,
+                false,
+            )
+            .unwrap()
+            .is_none(),
+            "a default from another organization must not attach"
+        );
+    }
+
+    #[test]
     fn platform_env_mesh_bootstrap_does_not_inherit_saved_local_mesh_pairing() {
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::default();

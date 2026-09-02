@@ -228,6 +228,9 @@ message Environment {
   string working_directory = 14;
   repeated HostPortBinding host_ports = 15;
   MeshAttachment mesh = 16;
+  // Bounded machine-readable cause reported by the current runner. Empty
+  // unless state is ENVIRONMENT_STATE_ERROR and the runner remains owned.
+  string error_code = 17;
 }
 
 message ListEnvironmentsRequest {}
@@ -279,6 +282,9 @@ message RunnerInfo {
   uint64 generation = 3;
   // Exact immutable runtime bundle selected when this runner process started.
   string artifact_generation = 4;
+  // Bounded machine-readable cause for an error state. Empty for every
+  // non-error state.
+  string error_code = 5;
 }
 
 enum RunnerStage {

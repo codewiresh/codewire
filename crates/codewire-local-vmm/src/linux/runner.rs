@@ -4275,6 +4275,14 @@ mod tests {
             network_stack_attach_timeout(Duration::from_secs(20 * 60), NetworkWorkerMode::Product),
             Duration::from_secs(40)
         );
+        assert!(
+            Duration::from_secs(codewire_vmm_guest_probe::NETWORK_HOST_READY_TIMEOUT_SECONDS)
+                > network_stack_attach_timeout(
+                    Duration::from_secs(20 * 60),
+                    NetworkWorkerMode::Product,
+                ),
+            "the guest must outlive the complete bounded host attachment window"
+        );
         assert_eq!(
             network_stack_attach_timeout(
                 Duration::from_secs(1),

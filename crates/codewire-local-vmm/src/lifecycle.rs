@@ -72,6 +72,7 @@ const CREATE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordEnvironment,
     LifecycleEffect::ProvisionWorkspace,
     LifecycleEffect::StageWorkspaceGeneration,
+    LifecycleEffect::RecordStarting,
     LifecycleEffect::EnsureRunner,
     LifecycleEffect::StartVm,
     LifecycleEffect::RecordRunning,
@@ -84,18 +85,27 @@ const START: &[LifecycleEffect] = &[
     LifecycleEffect::RecordRunning,
 ];
 const STOP: &[LifecycleEffect] = &[LifecycleEffect::StopVm, LifecycleEffect::RecordStopped];
-const RESIZE: &[LifecycleEffect] = &[
+const RESTART: &[LifecycleEffect] = &[
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
     LifecycleEffect::GrowDisk,
     LifecycleEffect::RecordResources,
+    LifecycleEffect::RecordStarting,
     LifecycleEffect::RestartVm,
+    LifecycleEffect::RecordResizeOutcome,
+];
+const GROW_DISK: &[LifecycleEffect] = &[
+    LifecycleEffect::StopVm,
+    LifecycleEffect::RecordStopped,
+    LifecycleEffect::GrowDisk,
+    LifecycleEffect::RecordResources,
     LifecycleEffect::RecordResizeOutcome,
 ];
 const UPDATE_WORKSPACE: &[LifecycleEffect] = &[
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
+    LifecycleEffect::RecordStarting,
     LifecycleEffect::EnsureRunner,
     LifecycleEffect::StartVm,
     LifecycleEffect::RestoreDesiredPower,
@@ -105,6 +115,7 @@ const ROLLBACK_WORKSPACE: &[LifecycleEffect] = &[
     LifecycleEffect::StageRollbackGeneration,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
+    LifecycleEffect::RecordStarting,
     LifecycleEffect::EnsureRunner,
     LifecycleEffect::StartVm,
     LifecycleEffect::RestoreDesiredPower,
@@ -123,7 +134,8 @@ pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
         OperationKind::Create => CREATE,
         OperationKind::Start => START,
         OperationKind::Stop => STOP,
-        OperationKind::Restart | OperationKind::GrowDisk => RESIZE,
+        OperationKind::Restart => RESTART,
+        OperationKind::GrowDisk => GROW_DISK,
         OperationKind::UpdateWorkspace => UPDATE_WORKSPACE,
         OperationKind::RollbackWorkspace => ROLLBACK_WORKSPACE,
         OperationKind::Delete => DELETE,
@@ -334,6 +346,39 @@ mod tests {
                     expected
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_booting_plan_reserves_its_generation_before_runner_mutation() {
+        for kind in [
+            OperationKind::Create,
+            OperationKind::Start,
+            OperationKind::Restart,
+            OperationKind::UpdateWorkspace,
+            OperationKind::RollbackWorkspace,
+        ] {
+            let plan = effects(kind);
+            let reservation = plan
+                .iter()
+                .position(|effect| *effect == LifecycleEffect::RecordStarting)
+                .unwrap();
+            let runner_mutation = plan
+                .iter()
+                .position(|effect| {
+                    matches!(
+                        effect,
+                        LifecycleEffect::EnsureRunner
+                            | LifecycleEffect::StartVm
+                            | LifecycleEffect::RestartVm
+                    )
+                })
+                .unwrap();
+            assert!(reservation < runner_mutation, "{kind:?}");
+            assert_eq!(
+                plan[reservation].durability(),
+                EffectDurability::Transactional
+            );
         }
     }
 

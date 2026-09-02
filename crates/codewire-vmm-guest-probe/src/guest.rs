@@ -38,8 +38,9 @@ use zeroize::Zeroizing;
 
 use crate::network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_HOST_HELLO_LEN,
-    NETWORK_HOST_READY_LEN, NETWORK_MAX_PACKET_BYTES, NetworkGuestAck, NetworkHostHello,
-    NetworkHostReady, NetworkKey, NetworkRole, NetworkSession, encoded_network_frame_len,
+    NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS, NETWORK_MAX_PACKET_BYTES,
+    NetworkGuestAck, NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
+    encoded_network_frame_len,
 };
 use crate::setup_apply::{
     OCI_LOWER_ROOT_MODE, SetupApplyError, apply_setup_layers, verify_completed_setup_generation,
@@ -122,7 +123,8 @@ const NETWORK_GUEST_ADDRESS: &str = "192.0.2.2/30";
 const NETWORK_GATEWAY_ADDRESS: &str = "192.0.2.1";
 const NETWORK_MTU: usize = 1_500;
 const NETWORK_AGENT_START_TIMEOUT: Duration = Duration::from_secs(10);
-const NETWORK_AGENT_HOST_TIMEOUT: Duration = Duration::from_secs(30);
+const NETWORK_AGENT_HOST_TIMEOUT: Duration =
+    Duration::from_secs(NETWORK_HOST_READY_TIMEOUT_SECONDS);
 const NETWORK_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const NSFS_MAGIC: u64 = 0x6e73_6673;
 const NETWORK_AGENT_FAILURE_STAGES: &[&str] = &[

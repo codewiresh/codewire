@@ -1337,7 +1337,7 @@ pub(crate) struct MeshUpArgs {
     #[arg(
         long = "derp-listen",
         default_value = DEFAULT_LOCAL_DERP_LISTEN_ADDR,
-        help = "HTTP listen address for the local DERP process"
+        help = "TLS listen address for the managed local DERP process"
     )]
     derp_listen: String,
     #[arg(long = "no-derp", help = "Do not start a managed local DERP process")]
@@ -1388,6 +1388,11 @@ pub(crate) struct NetworkCreateArgs {
 pub(crate) struct NetworkUseArgs {
     #[arg(help = "Network name to select")]
     name: String,
+    #[arg(
+        long = "auto-connect",
+        help = "Automatically attach new environments to this network without prompting"
+    )]
+    auto_connect: bool,
 }
 
 #[derive(Debug, Args)]

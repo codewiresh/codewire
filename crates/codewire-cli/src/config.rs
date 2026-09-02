@@ -354,6 +354,8 @@ pub struct MeshConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_selected_network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_auto_connect: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_node_network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_target: Option<CurrentTargetConfig>,
@@ -1109,18 +1111,28 @@ pub fn selected_mesh_network(paths: &ResolvePaths, env: &impl Env) -> Option<Str
 }
 
 pub fn save_selected_mesh_network(data_dir: &Path, network_id: &str) -> Result<(), ConfigError> {
+    save_selected_mesh_network_preference(data_dir, network_id, false)
+}
+
+pub fn save_selected_mesh_network_preference(
+    data_dir: &Path,
+    network_id: &str,
+    auto_connect: bool,
+) -> Result<(), ConfigError> {
     let network_id = network_id.trim();
     if network_id.is_empty() {
         return Err(ConfigError::InvalidMeshSelection);
     }
     update_mesh_config(data_dir, |config| {
         config.mesh_selected_network = Some(network_id.to_string());
+        config.mesh_auto_connect = Some(auto_connect);
     })
 }
 
 pub fn clear_selected_mesh_network(data_dir: &Path) -> Result<(), ConfigError> {
     update_mesh_config(data_dir, |config| {
         config.mesh_selected_network = None;
+        config.mesh_auto_connect = None;
     })
 }
 
@@ -1298,6 +1310,7 @@ pub fn save_joined_network(
             config.mesh_url = Some(mesh_url.to_string());
         }
         config.mesh_selected_network = Some(network_id.to_string());
+        config.mesh_auto_connect = Some(false);
     })
 }
 
@@ -2629,8 +2642,32 @@ name = "builder"
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
         assert!(!data.contains("mesh_node_token"));
         assert!(data.contains("mesh_selected_network = \"project-alpha\""));
+        assert!(data.contains("mesh_auto_connect = false"));
         assert!(data.contains("[node]"));
         assert!(data.contains("name = \"builder\""));
+    }
+
+    #[test]
+    fn selected_mesh_network_auto_connect_is_an_explicit_scoped_preference() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::default();
+        let paths = paths(home.path(), &env);
+
+        save_selected_mesh_network_preference(&paths.mesh_data_dir, "project-alpha", true).unwrap();
+        let selected = load_mesh_config(&paths.mesh_data_dir).unwrap();
+        assert_eq!(
+            selected.mesh_selected_network.as_deref(),
+            Some("project-alpha")
+        );
+        assert_eq!(selected.mesh_auto_connect, Some(true));
+
+        save_selected_mesh_network(&paths.mesh_data_dir, "project-beta").unwrap();
+        let selected = load_mesh_config(&paths.mesh_data_dir).unwrap();
+        assert_eq!(
+            selected.mesh_selected_network.as_deref(),
+            Some("project-beta")
+        );
+        assert_eq!(selected.mesh_auto_connect, Some(false));
     }
 
     #[test]
@@ -2653,6 +2690,7 @@ mesh_node_token = "node-token"
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
         assert!(!data.contains("mesh_node_token"));
         assert!(!data.contains("mesh_selected_network"));
+        assert!(!data.contains("mesh_auto_connect"));
     }
 
     #[test]
