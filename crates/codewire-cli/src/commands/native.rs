@@ -63,6 +63,14 @@ pub(crate) async fn run_native_egress_broker(args: NativeEgressBrokerArgs) -> an
         .context("run native environment egress broker")
 }
 
+pub(crate) async fn run_native_mesh_transport(args: NativeMeshTransportArgs) -> anyhow::Result<()> {
+    let environment_id = Uuid::parse_str(&args.environment_id)
+        .context("native Mesh transport environment ID is invalid")?;
+    codewire_local_vmm::mesh_process::run_inherited_mesh_transport(environment_id, args.generation)
+        .await
+        .context("run native environment Mesh transport")
+}
+
 pub(crate) fn native_create_selected(args: &EnvCreateArgs) -> anyhow::Result<bool> {
     match args.backend.as_deref().map(str::trim) {
         None | Some("") | Some("native") | Some("cloud-hypervisor") => Ok(true),

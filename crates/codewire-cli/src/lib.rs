@@ -192,6 +192,9 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__native-egress-broker", hide = true)]
     NativeEgressBroker(NativeEgressBrokerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-mesh-transport", hide = true)]
+    NativeMeshTransport(NativeMeshTransportArgs),
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -235,6 +238,15 @@ pub fn native_egress_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::egress_broker::EgressBrokerProcessError>()
         .map(codewire_local_vmm::egress_broker::EgressBrokerProcessError::exit_code)
+}
+
+/// Preserve the fixed private Mesh-process failure taxonomy without printing
+/// credential-adjacent process detail to ambient stderr.
+#[cfg(target_os = "linux")]
+pub fn native_mesh_transport_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_vmm::mesh_process::MeshTransportProcessError>()
+        .map(codewire_local_vmm::mesh_process::MeshTransportProcessError::exit_code)
 }
 
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
@@ -290,6 +302,8 @@ where
         Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeEgressBroker(args) => run_native_egress_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
         Command::Logs(args) => handle_logs_command(&globals, args).await,

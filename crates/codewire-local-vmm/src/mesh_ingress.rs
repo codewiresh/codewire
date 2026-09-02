@@ -30,9 +30,10 @@ const MESH_INGRESS_CONTROL_TAG_OFFSET: usize = 48;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub(crate) struct AcceptedMeshIngress {
-    pub(crate) binding: MeshIngressBinding,
-    pub(crate) stream: StdUnixStream,
+/// One connected Mesh stream admitted by the generation-bound host receiver.
+pub struct AcceptedMeshIngress {
+    pub binding: MeshIngressBinding,
+    pub stream: StdUnixStream,
 }
 
 /// Bounded, non-secret capability used by the host Mesh owner to submit one
@@ -59,7 +60,8 @@ impl MeshIngressPublisher {
     }
 }
 
-pub(crate) fn mesh_ingress_channel(
+/// Create the bounded runner-owned Mesh admission queue.
+pub fn mesh_ingress_channel(
     allowed_ports: &[u16],
 ) -> Result<(MeshIngressPublisher, mpsc::Receiver<AcceptedMeshIngress>), MeshIngressError> {
     validate_canonical_mesh_ingress_ports(allowed_ports)?;

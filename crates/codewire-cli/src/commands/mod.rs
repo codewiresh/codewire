@@ -231,6 +231,15 @@ pub(crate) struct NativeEgressBrokerArgs {
     pub(crate) generation: u64,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct NativeMeshTransportArgs {
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) generation: u64,
+}
+
 impl EnvArgs {
     pub(crate) fn placement(&self) -> Option<EnvironmentPlacement> {
         if self.local {

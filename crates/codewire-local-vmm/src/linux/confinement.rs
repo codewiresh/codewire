@@ -175,6 +175,25 @@ pub(crate) fn install_inet_socket_only_syscalls(
     denied: &[libc::c_long],
     architecture_denied: &[libc::c_long],
 ) -> io::Result<()> {
+    install_inet_socket_syscalls(denied, architecture_denied, false)
+}
+
+/// Install the same INET socket filter while also permitting only
+/// `socketpair(AF_UNIX, SOCK_STREAM, 0)`. This gives an isolated transport a
+/// way to hand an accepted stream to its parent without admitting arbitrary
+/// local socket creation.
+pub(crate) fn install_inet_and_unix_stream_pair_syscalls(
+    denied: &[libc::c_long],
+    architecture_denied: &[libc::c_long],
+) -> io::Result<()> {
+    install_inet_socket_syscalls(denied, architecture_denied, true)
+}
+
+fn install_inet_socket_syscalls(
+    denied: &[libc::c_long],
+    architecture_denied: &[libc::c_long],
+    allow_unix_stream_pair: bool,
+) -> io::Result<()> {
     let mut filter = base_filter();
     append_denials(&mut filter, denied.iter().chain(architecture_denied));
     filter.extend([
@@ -197,8 +216,27 @@ pub(crate) fn install_inet_socket_only_syscalls(
         bpf_equal(libc::IPPROTO_UDP as u32, 0, 1),
         bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
         bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
-        bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
     ]);
+    if allow_unix_stream_pair {
+        filter.extend([
+            bpf_equal(libc::SYS_socketpair as u32, 0, 9),
+            bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_0_OFFSET),
+            bpf_equal(libc::AF_UNIX as u32, 0, 6),
+            bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_1_OFFSET),
+            bpf_statement(
+                BPF_ALU_AND_K,
+                !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
+            ),
+            bpf_equal(libc::SOCK_STREAM as u32, 0, 3),
+            bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_2_OFFSET),
+            bpf_equal(0, 0, 1),
+            bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+            bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+            bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+        ]);
+    } else {
+        filter.push(bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW));
+    }
     install_filter(&mut filter)
 }
 

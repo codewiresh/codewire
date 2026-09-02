@@ -16,8 +16,19 @@ codewire-cli = { path = "../codewire-cli" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+axum = { workspace = true }
+codewire-client = { workspace = true }
+codewire-derp = { workspace = true }
 codewire-egress-broker = { workspace = true }
 codewire-egress-policy = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
+codewire-mesh = { path = "../codewire-mesh" }
+codewire-proto = { workspace = true, features = ["client"] }
+codewire-server-core = { workspace = true }
+codewire-tailnet = { workspace = true }
+connectrpc = { workspace = true, features = ["client"] }
 libc = "0.2"
+rand = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
+zeroize = { workspace = true }

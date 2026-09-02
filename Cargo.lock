@@ -1200,13 +1200,23 @@ dependencies = [
 name = "codewire-cli-bin"
 version = "0.1.0"
 dependencies = [
+ "axum 0.8.9",
  "codewire-cli",
+ "codewire-client",
+ "codewire-derp",
  "codewire-egress-broker",
  "codewire-egress-policy",
  "codewire-local-vmm",
+ "codewire-mesh",
+ "codewire-proto",
+ "codewire-server-core",
+ "codewire-tailnet",
+ "connectrpc",
  "libc",
+ "rand 0.8.6",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -27,6 +27,8 @@ mod lifecycle;
 #[cfg(target_os = "linux")]
 pub mod mesh_ingress;
 #[cfg(target_os = "linux")]
+pub mod mesh_process;
+#[cfg(target_os = "linux")]
 pub mod mesh_transport;
 #[cfg(target_os = "linux")]
 pub mod network_worker;
