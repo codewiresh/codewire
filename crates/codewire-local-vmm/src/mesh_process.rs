@@ -45,6 +45,7 @@ pub const MESH_TRANSPORT_BOOTSTRAP_FD: RawFd = 4;
 pub const MESH_TRANSPORT_ENROLLMENT_FD: RawFd = 5;
 pub const MESH_TRANSPORT_PREPARED_MESSAGE: &[u8] = b"CWMESH1 prepared\n";
 pub const MESH_TRANSPORT_CONFINE_MESSAGE: &[u8] = b"CWMESH1 confine\n";
+pub const MESH_TRANSPORT_CONFINED_MESSAGE: &[u8] = b"CWMESH1 confined\n";
 pub const MESH_TRANSPORT_READY_MESSAGE: &[u8] = b"CWMESH1 ready\n";
 pub const MESH_TRANSPORT_STATUS_MAX_BYTES: usize = 64;
 
@@ -251,11 +252,15 @@ const ALL_FAILURES: [MeshTransportStartupFailure; 19] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshTransportStartupStatus {
+    Confined,
     Ready,
     Failed(MeshTransportStartupFailure),
 }
 
 pub fn decode_mesh_transport_startup_status(bytes: &[u8]) -> Option<MeshTransportStartupStatus> {
+    if bytes == MESH_TRANSPORT_CONFINED_MESSAGE {
+        return Some(MeshTransportStartupStatus::Confined);
+    }
     if bytes == MESH_TRANSPORT_READY_MESSAGE {
         return Some(MeshTransportStartupStatus::Ready);
     }
@@ -482,6 +487,9 @@ pub async fn run_inherited_mesh_transport(
     }
     if lock_process_privileges().is_err() {
         return fail_startup(&control, MeshTransportProcessError::PrivilegeConfinement);
+    }
+    if write_status(&control, MESH_TRANSPORT_CONFINED_MESSAGE).is_err() {
+        return fail_startup(&control, MeshTransportProcessError::StatusIo);
     }
     // Enrollment and generated transport keys enter memory only after the
     // runner has admitted the exact process and the child is non-dumpable.
@@ -1110,6 +1118,8 @@ fn decode_bootstrap(
         ));
         offset += 2;
     }
+    // Credential-store selection is intentionally absent from the transport
+    // bootstrap. Only the enrollment broker needs that non-secret locator.
     let attachment = MeshAttachment::new(
         &mesh_url,
         &organization_id,
@@ -1410,6 +1420,10 @@ mod tests {
 
     #[test]
     fn startup_status_and_exit_taxonomy_are_exact_and_bounded() {
+        assert_eq!(
+            decode_mesh_transport_startup_status(MESH_TRANSPORT_CONFINED_MESSAGE),
+            Some(MeshTransportStartupStatus::Confined)
+        );
         assert_eq!(
             decode_mesh_transport_startup_status(MESH_TRANSPORT_READY_MESSAGE),
             Some(MeshTransportStartupStatus::Ready)

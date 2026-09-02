@@ -198,6 +198,10 @@ pub(crate) struct NativeSupervisorArgs {
     pub(crate) artifact_root: PathBuf,
     #[arg(long)]
     pub(crate) artifact_lock: PathBuf,
+    #[arg(long)]
+    pub(crate) mesh_data_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) platform_config_dir: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -211,6 +215,10 @@ pub(crate) struct NativeRunnerArgs {
     pub(crate) engine_state_root: PathBuf,
     #[arg(long)]
     pub(crate) artifact_generation: String,
+    #[arg(long)]
+    pub(crate) mesh_data_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) platform_config_dir: PathBuf,
 }
 
 #[cfg(target_os = "linux")]

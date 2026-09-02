@@ -29,6 +29,7 @@ use crate::linux::confinement::{
     require_single_threaded_process,
 };
 use crate::mesh_ingress::MeshAttachment;
+pub use crate::mesh_ingress::MeshEnrollmentAuthSource;
 use crate::mesh_process::encode_mesh_transport_enrollment;
 
 pub const MESH_ENROLLMENT_BOOTSTRAP_FD: RawFd = 4;
@@ -99,17 +100,9 @@ const ENROLLMENT_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc:
 #[cfg(target_arch = "aarch64")]
 const ENROLLMENT_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MeshEnrollmentAuthSource {
-    StandaloneLocal,
-    HostedCurrent,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct BootstrapBody {
-    auth_source: MeshEnrollmentAuthSource,
     attachment: MeshAttachment,
 }
 
@@ -285,13 +278,11 @@ impl MeshEnrollmentProcessError {
 pub trait MeshEnrollmentCredentialResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
-        source: MeshEnrollmentAuthSource,
         attachment: &'a MeshAttachment,
     ) -> Pin<Box<dyn Future<Output = Result<BearerToken, ()>> + Send + 'a>>;
 }
 
 struct PreparedEnrollment {
-    auth_source: MeshEnrollmentAuthSource,
     attachment: MeshAttachment,
     addresses: Vec<SocketAddr>,
 }
@@ -304,7 +295,6 @@ struct AuthorizedEnrollment {
 pub fn encode_mesh_enrollment_bootstrap(
     environment_id: Uuid,
     generation: u64,
-    auth_source: MeshEnrollmentAuthSource,
     attachment: &MeshAttachment,
 ) -> Result<Vec<u8>, MeshEnrollmentProcessError> {
     validate_identity(environment_id, generation)?;
@@ -312,7 +302,6 @@ pub fn encode_mesh_enrollment_bootstrap(
         .validate()
         .map_err(|_| MeshEnrollmentProcessError::InvalidBootstrap)?;
     let body = serde_json::to_vec(&BootstrapBody {
-        auth_source,
         attachment: attachment.clone(),
     })
     .map_err(|_| MeshEnrollmentProcessError::InvalidBootstrap)?;
@@ -406,7 +395,6 @@ async fn prepare_enrollment(
     write_status(control, MESH_ENROLLMENT_PREPARED_MESSAGE)
         .map_err(|_| MeshEnrollmentProcessError::StatusIo)?;
     Ok(PreparedEnrollment {
-        auth_source: bootstrap.auth_source,
         attachment: bootstrap.attachment,
         addresses,
     })
@@ -417,7 +405,7 @@ async fn authorize_enrollment(
     credentials: &dyn MeshEnrollmentCredentialResolver,
 ) -> Result<AuthorizedEnrollment, MeshEnrollmentProcessError> {
     let token = credentials
-        .resolve(prepared.auth_source, &prepared.attachment)
+        .resolve(&prepared.attachment)
         .await
         .map_err(|()| MeshEnrollmentProcessError::CredentialUnavailable)?;
     let http = pinned_http_client(&prepared.attachment.mesh_url, &prepared.addresses)?;
@@ -667,19 +655,13 @@ mod tests {
             [3_000],
         )
         .unwrap();
-        let bytes = encode_mesh_enrollment_bootstrap(
-            environment_id,
-            7,
-            MeshEnrollmentAuthSource::StandaloneLocal,
-            &attachment,
-        )
-        .unwrap();
+        let bytes = encode_mesh_enrollment_bootstrap(environment_id, 7, &attachment).unwrap();
         let (mut sender, mut receiver) = StdUnixStream::pair().unwrap();
         sender.write_all(&bytes).unwrap();
         let decoded = read_bootstrap(&mut receiver, environment_id, 7).unwrap();
         assert_eq!(decoded.attachment, attachment);
         assert_eq!(
-            decoded.auth_source,
+            decoded.attachment.auth_source,
             MeshEnrollmentAuthSource::StandaloneLocal
         );
 

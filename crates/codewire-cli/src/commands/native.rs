@@ -33,6 +33,8 @@ pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow:
         root: args.root,
         artifact_root: args.artifact_root,
         artifact_lock: args.artifact_lock,
+        mesh_data_dir: args.mesh_data_dir,
+        platform_config_dir: args.platform_config_dir,
         executable,
     })
     .await
@@ -47,6 +49,8 @@ pub(crate) async fn run_native_runner(args: NativeRunnerArgs) -> anyhow::Result<
         socket: args.socket,
         engine_state_root: args.engine_state_root,
         artifact_generation: args.artifact_generation,
+        mesh_data_dir: args.mesh_data_dir,
+        platform_config_dir: args.platform_config_dir,
     })
     .await
     .context("run native environment runner")
@@ -85,11 +89,10 @@ impl codewire_local_vmm::mesh_enrollment::MeshEnrollmentCredentialResolver
 {
     fn resolve<'a>(
         &'a self,
-        source: codewire_local_vmm::mesh_enrollment::MeshEnrollmentAuthSource,
         attachment: &'a codewire_local_vmm::mesh_ingress::MeshAttachment,
     ) -> Pin<Box<dyn Future<Output = Result<codewire_client::BearerToken, ()>> + Send + 'a>> {
         Box::pin(async move {
-            match source {
+            match attachment.auth_source {
                 codewire_local_vmm::mesh_enrollment::MeshEnrollmentAuthSource::StandaloneLocal => {
                     let mesh_data_dir =
                         canonical_private_auth_root(self.paths.mesh_data_dir.clone())?;
@@ -568,6 +571,8 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
         root,
         artifact_root,
         artifact_lock,
+        mesh_data_dir: paths.mesh_data_dir,
+        platform_config_dir: paths.platform_config_dir,
         executable: canonical_current_executable()?,
     })
 }
@@ -944,7 +949,8 @@ mod tests {
                 platform_config_dir,
             },
         };
-        let attachment = MeshAttachment::new(
+        let attachment = MeshAttachment::new_with_auth_source(
+            MeshEnrollmentAuthSource::HostedCurrent,
             "https://mesh.codewire-dev.sh",
             "org-hosted",
             "network-hosted",
@@ -952,13 +958,11 @@ mod tests {
             [3_000],
         )
         .unwrap();
-        let token = resolver
-            .resolve(MeshEnrollmentAuthSource::HostedCurrent, &attachment)
-            .await
-            .unwrap();
+        let token = resolver.resolve(&attachment).await.unwrap();
         assert_eq!(token.expose_secret(), "synthetic-hosted-access");
 
-        let wrong_origin = MeshAttachment::new(
+        let wrong_origin = MeshAttachment::new_with_auth_source(
+            MeshEnrollmentAuthSource::HostedCurrent,
             "https://mesh.codewire.sh",
             "org-hosted",
             "network-hosted",
@@ -966,12 +970,7 @@ mod tests {
             [3_000],
         )
         .unwrap();
-        assert!(
-            resolver
-                .resolve(MeshEnrollmentAuthSource::HostedCurrent, &wrong_origin)
-                .await
-                .is_err()
-        );
+        assert!(resolver.resolve(&wrong_origin).await.is_err());
     }
 
     #[test]

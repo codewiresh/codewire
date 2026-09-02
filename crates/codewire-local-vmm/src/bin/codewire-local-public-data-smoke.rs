@@ -44,9 +44,11 @@ mod linux {
         let args = Args::parse(std::env::args().skip(1))?;
         let client = NativePublicDataClient::connect_or_start(
             &NativeRuntimeConfig {
-                root: args.state_root,
+                root: args.state_root.clone(),
                 artifact_root: args.artifact_root,
                 artifact_lock: args.artifact_lock,
+                mesh_data_dir: args.state_root.join("unused-mesh-auth"),
+                platform_config_dir: args.state_root.join("unused-platform-auth"),
                 executable: args.cw_bin,
             },
             &args.target,

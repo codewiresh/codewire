@@ -30,6 +30,15 @@ const MESH_INGRESS_CONTROL_TAG_OFFSET: usize = 48;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Non-secret durable selection of the owner credential store used to mint a
+/// fresh Mesh enrollment for each native VM generation.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshEnrollmentAuthSource {
+    StandaloneLocal,
+    HostedCurrent,
+}
+
 /// One connected Mesh stream admitted by the generation-bound host receiver.
 pub struct AcceptedMeshIngress {
     pub binding: MeshIngressBinding,
@@ -83,6 +92,7 @@ pub fn mesh_ingress_channel(
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MeshAttachment {
+    pub auth_source: MeshEnrollmentAuthSource,
     pub mesh_url: String,
     pub organization_id: String,
     pub network_id: String,
@@ -98,7 +108,26 @@ impl MeshAttachment {
         node_name: &str,
         guest_ports: impl IntoIterator<Item = u16>,
     ) -> Result<Self, MeshIngressError> {
+        Self::new_with_auth_source(
+            MeshEnrollmentAuthSource::StandaloneLocal,
+            mesh_url,
+            organization_id,
+            network_id,
+            node_name,
+            guest_ports,
+        )
+    }
+
+    pub fn new_with_auth_source(
+        auth_source: MeshEnrollmentAuthSource,
+        mesh_url: &str,
+        organization_id: &str,
+        network_id: &str,
+        node_name: &str,
+        guest_ports: impl IntoIterator<Item = u16>,
+    ) -> Result<Self, MeshIngressError> {
         Ok(Self {
+            auth_source,
             mesh_url: canonical_mesh_url(mesh_url)?,
             organization_id: canonical_mesh_identifier(organization_id, MAX_MESH_ID_BYTES)
                 .ok_or(MeshIngressError::InvalidAttachment)?,
@@ -111,7 +140,8 @@ impl MeshAttachment {
     }
 
     pub fn validate(&self) -> Result<(), MeshIngressError> {
-        let canonical = Self::new(
+        let canonical = Self::new_with_auth_source(
+            self.auth_source,
             &self.mesh_url,
             &self.organization_id,
             &self.network_id,
@@ -423,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn attachment_is_canonical_bounded_and_has_no_auth_field() {
+    fn attachment_is_canonical_bounded_and_contains_no_credential() {
         let attachment = MeshAttachment::new(
             " https://MESH.example.test/base/ ",
             "org-test",
@@ -434,7 +464,25 @@ mod tests {
         .unwrap();
         assert_eq!(attachment.mesh_url, "https://mesh.example.test/base");
         assert_eq!(attachment.guest_ports, vec![3_000, 8_080]);
+        assert_eq!(
+            attachment.auth_source,
+            MeshEnrollmentAuthSource::StandaloneLocal
+        );
         attachment.validate().unwrap();
+        let hosted = MeshAttachment::new_with_auth_source(
+            MeshEnrollmentAuthSource::HostedCurrent,
+            "https://mesh.example.test",
+            "org-test",
+            "network-test",
+            "dev",
+            [3_000],
+        )
+        .unwrap();
+        hosted.validate().unwrap();
+        let serialized = serde_json::to_string(&hosted).unwrap();
+        assert!(serialized.contains("hosted_current"));
+        assert!(!serialized.contains("token"));
+        assert!(!serialized.contains("bearer"));
         assert_eq!(
             MeshAttachment::new(
                 "https://mesh.example.test",

@@ -531,6 +531,9 @@ mod linux {
             ExitClass::IngressForwarderFailure => {
                 return Err(failure("OCI provisioning host-port forwarder failed"));
             }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("OCI provisioning Mesh transport failed"));
+            }
         }
         drop(provisioning);
         wait_for_identity_to_end(&provisioning_process).await?;
@@ -648,6 +651,9 @@ mod linux {
             ExitClass::IngressForwarderFailure => {
                 return Err(failure("host-port forwarder failed during guest poweroff"));
             }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("Mesh transport failed during guest poweroff"));
+            }
         }
         drop(first);
         wait_for_identity_to_end(&first_process).await?;
@@ -695,6 +701,9 @@ mod linux {
             }
             ExitClass::IngressForwarderFailure => {
                 return Err(failure("host-port forwarder failed before hard VMM kill"));
+            }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("Mesh transport failed before hard VMM kill"));
             }
         }
         drop(second);
@@ -859,6 +868,9 @@ mod linux {
             ExitClass::IngressForwarderFailure => {
                 return Err(failure("final host-port forwarder failed during stop"));
             }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("final Mesh transport failed during stop"));
+            }
         }
         drop(fourth);
         wait_for_identity_to_end(&fourth_process).await?;
@@ -914,6 +926,9 @@ mod linux {
             }
             ExitClass::IngressForwarderFailure => {
                 return Err(failure("restarted host-port forwarder failed during stop"));
+            }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("restarted Mesh transport failed during stop"));
             }
         }
         drop(fifth);
@@ -1055,6 +1070,16 @@ mod linux {
             RunnerError::EgressBrokerStartup(failure) => failure.code(),
             RunnerError::EgressBrokerWait => "egress-broker-wait",
             RunnerError::EgressBrokerKillTimeout => "egress-broker-kill-timeout",
+            RunnerError::MeshTransportSpawn => "mesh-transport-spawn",
+            RunnerError::MeshTransportStartTimeout => "mesh-transport-start-timeout",
+            RunnerError::MeshTransportBootstrap => "mesh-transport-bootstrap",
+            RunnerError::MeshTransportStartup(failure) => failure.code(),
+            RunnerError::MeshEnrollmentBrokerSpawn => "mesh-enrollment-broker-spawn",
+            RunnerError::MeshEnrollmentBrokerStartTimeout => "mesh-enrollment-broker-start-timeout",
+            RunnerError::MeshEnrollmentBrokerBootstrap => "mesh-enrollment-broker-bootstrap",
+            RunnerError::MeshEnrollmentBrokerStartup(failure) => failure.code(),
+            RunnerError::MeshProcessWait => "mesh-process-wait",
+            RunnerError::MeshProcessKillTimeout => "mesh-process-kill-timeout",
             RunnerError::ExitedDuringStart => "vmm-exited-during-start",
             RunnerError::StartTimeout => "vmm-start-timeout",
             RunnerError::Spawn => "vmm-spawn",
@@ -1075,6 +1100,8 @@ mod linux {
             Ok(ExitClass::NetworkWorkerFailure(_)) => "network-worker-failure",
             Ok(ExitClass::EgressBrokerFailure(_)) => "egress-broker-failure",
             Ok(ExitClass::IngressForwarderFailure) => "ingress-forwarder-failure",
+            Ok(ExitClass::MeshTransportFailure(_)) => "mesh-transport-failure",
+            Ok(ExitClass::MeshIngressReceiverFailure) => "mesh-ingress-receiver-failure",
             Err(_) => "unavailable",
         }
     }
@@ -1666,6 +1693,11 @@ mod linux {
                             "host-port forwarder exited while proving isolated network worker loss",
                         ));
                     }
+                    ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                        return Err(failure(
+                            "Mesh transport exited while proving isolated network worker loss",
+                        ));
+                    }
                 }
             }
         })
@@ -1698,6 +1730,12 @@ mod linux {
                         observation("vm.egress_broker_loss_exit", "host-port-forwarder");
                         return Err(failure(
                             "host-port forwarder exited before egress broker loss was observed",
+                        ));
+                    }
+                    ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                        observation("vm.egress_broker_loss_exit", "mesh-transport");
+                        return Err(failure(
+                            "Mesh transport exited before egress broker loss was observed",
                         ));
                     }
                 }
@@ -1956,6 +1994,20 @@ mod linux {
                 ExitClass::IngressForwarderFailure => {
                     return Err(failure(
                         "host-port forwarder exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::MeshTransportFailure(code) => {
+                    observation(
+                        "mesh_transport.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure(
+                        "Mesh transport exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::MeshIngressReceiverFailure => {
+                    return Err(failure(
+                        "Mesh ingress receiver exited before guest daemon readiness",
                     ));
                 }
                 ExitClass::GuestShutdown => {

@@ -17,17 +17,18 @@ use codewire_derp::{Relay, self_signed_tls_config, serve_stun, serve_tls};
 use codewire_local_vmm::mesh_enrollment::{
     MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
     MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE,
-    MESH_ENROLLMENT_STATUS_MAX_BYTES, MESH_ENROLLMENT_TRANSFER_FD, MeshEnrollmentAuthSource,
+    MESH_ENROLLMENT_STATUS_MAX_BYTES, MESH_ENROLLMENT_TRANSFER_FD,
     encode_mesh_enrollment_bootstrap,
 };
 use codewire_local_vmm::mesh_ingress::{
     MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment, mesh_ingress_channel,
 };
 use codewire_local_vmm::mesh_process::{
-    MESH_TRANSPORT_BOOTSTRAP_FD, MESH_TRANSPORT_CONFINE_MESSAGE, MESH_TRANSPORT_ENROLLMENT_FD,
-    MESH_TRANSPORT_PREPARED_MESSAGE, MESH_TRANSPORT_READY_MESSAGE, MESH_TRANSPORT_STATUS_MAX_BYTES,
-    MeshTransportStartupFailure, MeshTransportStartupStatus, decode_mesh_transport_startup_status,
-    encode_mesh_transport_bootstrap, encode_mesh_transport_enrollment,
+    MESH_TRANSPORT_BOOTSTRAP_FD, MESH_TRANSPORT_CONFINE_MESSAGE, MESH_TRANSPORT_CONFINED_MESSAGE,
+    MESH_TRANSPORT_ENROLLMENT_FD, MESH_TRANSPORT_PREPARED_MESSAGE, MESH_TRANSPORT_READY_MESSAGE,
+    MESH_TRANSPORT_STATUS_MAX_BYTES, MeshTransportStartupFailure, MeshTransportStartupStatus,
+    decode_mesh_transport_startup_status, encode_mesh_transport_bootstrap,
+    encode_mesh_transport_enrollment,
 };
 use codewire_local_vmm::mesh_transport::receive_mesh_ingress_submissions;
 use codewire_mesh::mesh_authorization::hash_local_environment_token;
@@ -424,6 +425,7 @@ fn start_transport(
 fn admit_transport(control: &mut StdUnixStream) {
     assert_eq!(read_status_frame(control), MESH_TRANSPORT_PREPARED_MESSAGE);
     control.write_all(MESH_TRANSPORT_CONFINE_MESSAGE).unwrap();
+    assert_eq!(read_status_frame(control), MESH_TRANSPORT_CONFINED_MESSAGE);
     assert_eq!(read_status_frame(control), MESH_TRANSPORT_READY_MESSAGE);
 }
 
@@ -646,6 +648,7 @@ fn mesh_transport_does_not_receive_enrollment_before_confinement_admission() {
 
     control.write_all(MESH_TRANSPORT_CONFINE_MESSAGE).unwrap();
     control.flush().unwrap();
+    assert_eq!(read_status_frame(&control), MESH_TRANSPORT_CONFINED_MESSAGE);
     drop(enrollment);
     assert_eq!(
         decode_mesh_transport_startup_status(&read_status_frame(&control)),
@@ -671,13 +674,8 @@ async fn enrollment_broker_transfers_directly_to_the_confined_mesh_process() {
     let transport_bootstrap =
         encode_mesh_transport_bootstrap(environment_id, generation, &attachment, &TEST_KEY)
             .unwrap();
-    let enrollment_bootstrap = encode_mesh_enrollment_bootstrap(
-        environment_id,
-        generation,
-        MeshEnrollmentAuthSource::StandaloneLocal,
-        &attachment,
-    )
-    .unwrap();
+    let enrollment_bootstrap =
+        encode_mesh_enrollment_bootstrap(environment_id, generation, &attachment).unwrap();
 
     // The runner-shaped parent creates this capability channel and gives one
     // end to each child. It never reads or writes the enrollment payload.
@@ -697,6 +695,19 @@ async fn enrollment_broker_transfers_directly_to_the_confined_mesh_process() {
     enrollment_control.flush().unwrap();
 
     assert_eq!(
+        read_status_frame(&transport_control),
+        MESH_TRANSPORT_PREPARED_MESSAGE
+    );
+    transport_control
+        .write_all(MESH_TRANSPORT_CONFINE_MESSAGE)
+        .unwrap();
+    transport_control.flush().unwrap();
+    assert_eq!(
+        read_status_frame(&transport_control),
+        MESH_TRANSPORT_CONFINED_MESSAGE
+    );
+
+    assert_eq!(
         read_enrollment_status_frame(&enrollment_control),
         MESH_ENROLLMENT_PREPARED_MESSAGE
     );
@@ -710,14 +721,6 @@ async fn enrollment_broker_transfers_directly_to_the_confined_mesh_process() {
     );
     assert!(enrollment_child.wait_bounded().success());
 
-    assert_eq!(
-        read_status_frame(&transport_control),
-        MESH_TRANSPORT_PREPARED_MESSAGE
-    );
-    transport_control
-        .write_all(MESH_TRANSPORT_CONFINE_MESSAGE)
-        .unwrap();
-    transport_control.flush().unwrap();
     assert_eq!(
         read_status_frame(&transport_control),
         MESH_TRANSPORT_READY_MESSAGE
@@ -835,6 +838,10 @@ async fn confined_mesh_process_relays_only_admitted_ports_and_requires_fresh_enr
         .write_all(MESH_TRANSPORT_CONFINE_MESSAGE)
         .unwrap();
     replay_control.flush().unwrap();
+    assert_eq!(
+        read_status_frame(&replay_control),
+        MESH_TRANSPORT_CONFINED_MESSAGE
+    );
     assert_eq!(
         decode_mesh_transport_startup_status(&read_status_frame(&replay_control)),
         Some(MeshTransportStartupStatus::Failed(

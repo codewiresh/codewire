@@ -18,8 +18,8 @@ use axum::http::{Request, Response, StatusCode, header};
 use codewire_local_vmm::mesh_enrollment::{
     MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
     MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE,
-    MESH_ENROLLMENT_STATUS_MAX_BYTES, MESH_ENROLLMENT_TRANSFER_FD, MeshEnrollmentAuthSource,
-    MeshEnrollmentStartupFailure, encode_mesh_enrollment_bootstrap,
+    MESH_ENROLLMENT_STATUS_MAX_BYTES, MESH_ENROLLMENT_TRANSFER_FD, MeshEnrollmentStartupFailure,
+    encode_mesh_enrollment_bootstrap,
 };
 use codewire_local_vmm::mesh_ingress::MeshAttachment;
 use codewire_mesh::mesh_authorization::hash_local_environment_token;
@@ -226,13 +226,9 @@ async fn confined_issuer_mints_one_enrollment_directly_from_standalone_owner_aut
     let (_root, mesh_root, platform_root) = private_roots(&format!("http://{}", fixture.address));
     let environment_id = Uuid::new_v4();
     let generation = 7;
-    let bootstrap = encode_mesh_enrollment_bootstrap(
-        environment_id,
-        generation,
-        MeshEnrollmentAuthSource::StandaloneLocal,
-        &attachment(fixture.address),
-    )
-    .unwrap();
+    let bootstrap =
+        encode_mesh_enrollment_bootstrap(environment_id, generation, &attachment(fixture.address))
+            .unwrap();
     let (mut control, mut transfer, mut child) =
         spawn_issuer(environment_id, generation, &mesh_root, &platform_root);
     control.write_all(&bootstrap).unwrap();
@@ -276,7 +272,6 @@ async fn owner_store_is_not_read_before_confinement_admission() {
     let bootstrap = encode_mesh_enrollment_bootstrap(
         environment_id,
         generation,
-        MeshEnrollmentAuthSource::StandaloneLocal,
         &attachment("127.0.0.1:18090".parse().unwrap()),
     )
     .unwrap();
@@ -344,13 +339,9 @@ async fn redirect_response_never_forwards_the_owner_bearer() {
     let (_root, mesh_root, platform_root) = private_roots(&format!("http://{origin_address}"));
     let environment_id = Uuid::new_v4();
     let generation = 9;
-    let bootstrap = encode_mesh_enrollment_bootstrap(
-        environment_id,
-        generation,
-        MeshEnrollmentAuthSource::StandaloneLocal,
-        &attachment(origin_address),
-    )
-    .unwrap();
+    let bootstrap =
+        encode_mesh_enrollment_bootstrap(environment_id, generation, &attachment(origin_address))
+            .unwrap();
     let (mut control, _transfer, mut child) =
         spawn_issuer(environment_id, generation, &mesh_root, &platform_root);
     control.write_all(&bootstrap).unwrap();

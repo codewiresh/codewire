@@ -173,6 +173,15 @@ message MeshAttachment {
   string node_name = 4;
   // Canonical immutable application-port set admitted for Mesh TCP ingress.
   repeated uint32 guest_ports = 5;
+  // Explicit non-secret owner store used to mint one fresh enrollment for
+  // every VM generation. Unspecified is always rejected.
+  MeshEnrollmentAuthSource auth_source = 6;
+}
+
+enum MeshEnrollmentAuthSource {
+  MESH_ENROLLMENT_AUTH_SOURCE_UNSPECIFIED = 0;
+  MESH_ENROLLMENT_AUTH_SOURCE_STANDALONE_LOCAL = 1;
+  MESH_ENROLLMENT_AUTH_SOURCE_HOSTED_CURRENT = 2;
 }
 
 message EnvironmentSelector {

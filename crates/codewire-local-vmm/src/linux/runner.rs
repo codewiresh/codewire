@@ -39,10 +39,24 @@ use crate::host_port::{
     validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
+use crate::mesh_enrollment::{
+    MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
+    MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE,
+    MESH_ENROLLMENT_STATUS_MAX_BYTES, MESH_ENROLLMENT_TRANSFER_FD, MeshEnrollmentStartupFailure,
+    MeshEnrollmentStartupStatus, decode_mesh_enrollment_startup_status,
+    encode_mesh_enrollment_bootstrap,
+};
 use crate::mesh_ingress::{
     AcceptedMeshIngress, MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment, MeshIngressControlFrame,
     MeshIngressPublisher, mesh_ingress_channel,
 };
+use crate::mesh_process::{
+    MESH_TRANSPORT_BOOTSTRAP_FD, MESH_TRANSPORT_CONFINE_MESSAGE, MESH_TRANSPORT_CONFINED_MESSAGE,
+    MESH_TRANSPORT_ENROLLMENT_FD, MESH_TRANSPORT_PREPARED_MESSAGE, MESH_TRANSPORT_READY_MESSAGE,
+    MESH_TRANSPORT_STATUS_MAX_BYTES, MeshTransportStartupFailure, MeshTransportStartupStatus,
+    decode_mesh_transport_startup_status, encode_mesh_transport_bootstrap,
+};
+use crate::mesh_transport::{MeshTransportError, receive_mesh_ingress_submissions};
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
     WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES,
@@ -70,6 +84,7 @@ const NETWORK_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const EGRESS_BROKER_READY_TIMEOUT: Duration =
     EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT.saturating_add(Duration::from_secs(5));
 const NETWORK_WORKER_ATTACH_TIMEOUT: Duration = Duration::from_secs(20);
+const MESH_STACK_ATTACH_TIMEOUT: Duration = Duration::from_secs(45);
 const NETWORK_WORKER_PROGRESS_FRAME_LIMIT: usize = 64;
 const NETWORK_WORKER_HANDSHAKE_ATTEMPT_LIMIT: usize = 8;
 const HOST_PORT_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -841,8 +856,26 @@ impl RunningVm {
         executable: &Path,
         timeout: Duration,
     ) -> Result<(), RunnerError> {
-        self.start_network_worker_with_mode(executable, timeout, NetworkWorkerMode::Product)
+        self.start_network_worker_with_mode(executable, timeout, NetworkWorkerMode::Product, None)
             .await
+    }
+
+    /// Attach the product network stack and, when configured, resolve Mesh
+    /// owner credentials only inside the isolated enrollment child.
+    pub async fn start_network_worker_with_mesh_credentials(
+        &mut self,
+        executable: &Path,
+        timeout: Duration,
+        mesh_data_dir: &Path,
+        platform_config_dir: &Path,
+    ) -> Result<(), RunnerError> {
+        self.start_network_worker_with_mode(
+            executable,
+            timeout,
+            NetworkWorkerMode::Product,
+            Some((mesh_data_dir, platform_config_dir)),
+        )
+        .await
     }
 
     /// Preserve the socket-free injected broker used only by the checked-in
@@ -857,6 +890,7 @@ impl RunningVm {
             executable,
             timeout,
             NetworkWorkerMode::InjectedVerification,
+            None,
         )
         .await
     }
@@ -866,6 +900,7 @@ impl RunningVm {
         executable: &Path,
         timeout: Duration,
         mode: NetworkWorkerMode,
+        mesh_credential_roots: Option<(&Path, &Path)>,
     ) -> Result<(), RunnerError> {
         if self.network_worker.is_some()
             || timeout.is_zero()
@@ -873,6 +908,9 @@ impl RunningVm {
             || std::fs::canonicalize(executable).ok().as_deref() != Some(executable)
             || !std::fs::metadata(executable).is_ok_and(|metadata| metadata.is_file())
             || (mode == NetworkWorkerMode::InjectedVerification && self.request.mesh.is_some())
+            || (self.request.mesh.is_some()
+                && !mesh_credential_roots
+                    .is_some_and(|(mesh, platform)| mesh.is_absolute() && platform.is_absolute()))
         {
             return Err(RunnerError::InvalidNetworkWorker);
         }
@@ -913,6 +951,7 @@ impl RunningVm {
                 generation: self.request.generation,
                 deadline,
                 mesh: self.request.mesh.as_ref(),
+                mesh_credential_roots,
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
                 Ok(mut worker) => {
@@ -922,8 +961,7 @@ impl RunningVm {
                             .request
                             .mesh
                             .as_ref()
-                            .map(|attachment| attachment.guest_ports.as_slice())
-                            .unwrap_or_default();
+                            .map(|attachment| attachment.guest_ports.as_slice());
                         if let Err(error) = start_ingress_forwarder(
                             &self.process,
                             &mut worker,
@@ -937,6 +975,25 @@ impl RunningVm {
                                 let _ = stop_egress_broker_process(broker).await;
                             }
                             return Err(error);
+                        }
+                        if launch.mesh.is_some() {
+                            let Some(publisher) = worker.mesh_ingress_publisher.clone() else {
+                                let _ = stop_network_worker_process(&mut worker).await;
+                                if let Some(broker) = worker.broker.as_mut() {
+                                    let _ = stop_egress_broker_process(broker).await;
+                                }
+                                return Err(RunnerError::MeshTransportBootstrap);
+                            };
+                            match spawn_mesh_stack_processes(&launch, publisher).await {
+                                Ok(mesh) => worker.mesh_transport = Some(mesh),
+                                Err(error) => {
+                                    let _ = stop_network_worker_process(&mut worker).await;
+                                    if let Some(broker) = worker.broker.as_mut() {
+                                        let _ = stop_egress_broker_process(broker).await;
+                                    }
+                                    return Err(error);
+                                }
+                            }
                         }
                     } else if !self.host_port_listeners.is_empty() {
                         return Err(RunnerError::InvalidNetworkWorker);
@@ -1018,6 +1075,13 @@ impl RunningVm {
             .map(|broker| broker.process.identity())
     }
 
+    pub fn mesh_transport_process_identity(&self) -> Option<&super::process::ProcessIdentity> {
+        self.network_worker
+            .as_ref()
+            .and_then(|worker| worker.mesh_transport.as_ref())
+            .map(|mesh| mesh.process.identity())
+    }
+
     /// Signal the exact runner-owned broker birth for checked-in qualified-host
     /// verification. The confined broker is deliberately non-dumpable, so a
     /// verifier must not try to reacquire it through `/proc`.
@@ -1029,6 +1093,19 @@ impl RunningVm {
             .and_then(|worker| worker.broker.as_ref())
             .ok_or(RunnerError::InvalidNetworkWorker)?;
         broker.process.signal(Signal::KILL)?;
+        Ok(())
+    }
+
+    /// Signal the exact runner-owned Mesh transport birth for checked-in
+    /// qualified-host lifecycle verification.
+    #[doc(hidden)]
+    pub fn force_kill_mesh_transport_for_verification(&self) -> Result<(), RunnerError> {
+        let mesh = self
+            .network_worker
+            .as_ref()
+            .and_then(|worker| worker.mesh_transport.as_ref())
+            .ok_or(RunnerError::InvalidNetworkWorker)?;
+        mesh.process.signal(Signal::KILL)?;
         Ok(())
     }
 
@@ -1065,6 +1142,18 @@ impl RunningVm {
                 }
                 Ok(None) => {}
                 Err(_) => return Err(RunnerError::EgressBrokerWait),
+            }
+        }
+        if let Some(mesh) = worker.mesh_transport.as_mut() {
+            match mesh.child.try_wait() {
+                Ok(Some(status)) => {
+                    return Ok(ExitClass::MeshTransportFailure(status.code()));
+                }
+                Ok(None) => {}
+                Err(_) => return Err(RunnerError::MeshProcessWait),
+            }
+            if take_mesh_ingress_receiver_exit(&mut mesh.ingress_receiver) {
+                return Ok(ExitClass::MeshIngressReceiverFailure);
             }
         }
         if take_ingress_forwarder_failure(&mut worker.ingress_forwarder) {
@@ -1298,6 +1387,70 @@ struct EgressBrokerLaunch {
     key: Zeroizing<[u8; BROKER_IPC_KEY_LEN]>,
 }
 
+struct MeshTransportProcess {
+    child: tokio::process::Child,
+    process: LiveProcess,
+    ingress_receiver: Option<JoinHandle<Result<(), MeshTransportError>>>,
+}
+
+struct MeshProcessStartup {
+    child: Option<tokio::process::Child>,
+    process: Option<LiveProcess>,
+}
+
+impl MeshProcessStartup {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child: Some(child),
+            process: None,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut tokio::process::Child {
+        self.child
+            .as_mut()
+            .expect("armed Mesh startup owns its child")
+    }
+
+    fn admit(&mut self, process: LiveProcess) {
+        self.process = Some(process);
+    }
+
+    fn disarm(mut self) -> (tokio::process::Child, LiveProcess) {
+        let child = self
+            .child
+            .take()
+            .expect("admitted Mesh startup owns its child");
+        let process = self
+            .process
+            .take()
+            .expect("admitted Mesh startup owns its process identity");
+        (child, process)
+    }
+}
+
+impl Drop for MeshProcessStartup {
+    fn drop(&mut self) {
+        if let Some(process) = &self.process {
+            let _ = process.signal(Signal::KILL);
+        }
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+struct PreparedMeshTransport {
+    startup: MeshProcessStartup,
+    control: tokio::net::UnixStream,
+    submission_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+}
+
+struct PreparedMeshEnrollment {
+    startup: MeshProcessStartup,
+    control: tokio::net::UnixStream,
+}
+
 struct NetworkStackLaunch<'a> {
     executable: &'a Path,
     working_directory: &'a Path,
@@ -1306,6 +1459,7 @@ struct NetworkStackLaunch<'a> {
     generation: u64,
     deadline: tokio::time::Instant,
     mesh: Option<&'a MeshAttachment>,
+    mesh_credential_roots: Option<(&'a Path, &'a Path)>,
 }
 
 struct NetworkWorkerProcess {
@@ -1317,6 +1471,7 @@ struct NetworkWorkerProcess {
     mesh_ingress_key: Option<Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>>,
     mesh_ingress_publisher: Option<MeshIngressPublisher>,
     ingress_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
+    mesh_transport: Option<MeshTransportProcess>,
 }
 
 fn take_ingress_forwarder_failure(
@@ -1336,6 +1491,26 @@ fn take_ingress_forwarder_failure(
     };
     let _ = forwarder.take();
     !matches!(outcome, Ok(Ok(())))
+}
+
+fn take_mesh_ingress_receiver_exit(
+    receiver: &mut Option<JoinHandle<Result<(), MeshTransportError>>>,
+) -> bool {
+    let outcome = {
+        let Some(receiver) = receiver.as_mut() else {
+            return true;
+        };
+        if !receiver.is_finished() {
+            return false;
+        }
+        (&mut *receiver).now_or_never()
+    };
+    if outcome.is_some() {
+        let _ = receiver.take();
+        true
+    } else {
+        false
+    }
 }
 
 struct NetworkWorkerStartup {
@@ -1382,6 +1557,7 @@ impl NetworkWorkerStartup {
             mesh_ingress_key,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
+            mesh_transport: None,
         }
     }
 }
@@ -1484,6 +1660,21 @@ async fn reap_failed_egress_broker_startup(
 }
 
 async fn stop_network_worker_process(worker: &mut NetworkWorkerProcess) -> Result<(), RunnerError> {
+    let mesh_result = match worker.mesh_transport.as_mut() {
+        Some(mesh) => stop_mesh_transport_process(mesh).await,
+        None => Ok(()),
+    };
+    worker.mesh_transport = None;
+    let worker_result = stop_network_worker_process_inner(worker).await;
+    match (mesh_result, worker_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
+async fn stop_network_worker_process_inner(
+    worker: &mut NetworkWorkerProcess,
+) -> Result<(), RunnerError> {
     drop(worker.mesh_ingress_publisher.take());
     if let Some(forwarder) = worker.ingress_forwarder.take() {
         forwarder.abort();
@@ -1520,6 +1711,40 @@ async fn stop_network_worker_process(worker: &mut NetworkWorkerProcess) -> Resul
         .wait()
         .await
         .map_err(|_| RunnerError::NetworkWorkerWait)?;
+    Ok(())
+}
+
+async fn stop_mesh_transport_process(mesh: &mut MeshTransportProcess) -> Result<(), RunnerError> {
+    if let Some(receiver) = mesh.ingress_receiver.take() {
+        receiver.abort();
+        let _ = receiver.await;
+    }
+    if mesh
+        .child
+        .try_wait()
+        .map_err(|_| RunnerError::MeshProcessWait)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    if mesh.process.wait_exited(SIGNAL_STOP_TIMEOUT).await? {
+        mesh.child
+            .wait()
+            .await
+            .map_err(|_| RunnerError::MeshProcessWait)?;
+        return Ok(());
+    }
+    if !signal_or_observe_exit(&mesh.process, Signal::TERM)?
+        && !mesh.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+        && !signal_or_observe_exit(&mesh.process, Signal::KILL)?
+        && !mesh.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+    {
+        return Err(RunnerError::MeshProcessKillTimeout);
+    }
+    mesh.child
+        .wait()
+        .await
+        .map_err(|_| RunnerError::MeshProcessWait)?;
     Ok(())
 }
 
@@ -1576,11 +1801,11 @@ fn start_ingress_forwarder(
     vmm: &LiveProcess,
     worker: &mut NetworkWorkerProcess,
     listeners: Vec<ReservedHostPort>,
-    mesh_ports: &[u16],
+    mesh_ports: Option<&[u16]>,
     vm_id: Uuid,
     generation: u64,
 ) -> Result<(), RunnerError> {
-    if listeners.is_empty() && mesh_ports.is_empty() {
+    if listeners.is_empty() && mesh_ports.is_none() {
         return Ok(());
     }
     let control = worker
@@ -1609,7 +1834,8 @@ fn start_ingress_forwarder(
         async_listeners.push((listener, binding));
     }
     let (mesh_ingress_publisher, mesh_ingress_receiver) =
-        mesh_ingress_channel(mesh_ports).map_err(|_| RunnerError::IngressControl)?;
+        mesh_ingress_channel(mesh_ports.unwrap_or_default())
+            .map_err(|_| RunnerError::IngressControl)?;
     let mut process_wait_descriptors = vec![
         (HostPortDependency::Vmm, vmm.duplicate_wait_descriptor()?),
         (
@@ -1623,7 +1849,7 @@ fn start_ingress_forwarder(
             broker.process.duplicate_wait_descriptor()?,
         ));
     }
-    worker.mesh_ingress_publisher = (!mesh_ports.is_empty()).then_some(mesh_ingress_publisher);
+    worker.mesh_ingress_publisher = mesh_ports.map(|_| mesh_ingress_publisher);
     worker.ingress_forwarder = Some(tokio::spawn(run_ingress_forwarder(
         control,
         IngressControlKeys {
@@ -1817,6 +2043,601 @@ async fn transfer_mesh_ingress_connection(
     )
     .await
     .map_err(|_| RunnerError::IngressControl)
+}
+
+async fn spawn_mesh_stack_processes(
+    context: &NetworkStackLaunch<'_>,
+    publisher: MeshIngressPublisher,
+) -> Result<MeshTransportProcess, RunnerError> {
+    let attachment = context.mesh.ok_or(RunnerError::MeshTransportBootstrap)?;
+    let (mesh_data_dir, platform_config_dir) = context
+        .mesh_credential_roots
+        .ok_or(RunnerError::MeshEnrollmentBrokerBootstrap)?;
+    let deadline = tokio::time::Instant::now() + MESH_STACK_ATTACH_TIMEOUT;
+    let (enrollment_transfer, transport_enrollment) =
+        StdUnixStream::pair().map_err(|_| RunnerError::MeshTransportSpawn)?;
+
+    let mut transport =
+        spawn_mesh_transport_process(context, attachment, transport_enrollment, deadline).await?;
+    let mut enrollment = match spawn_mesh_enrollment_process(
+        context,
+        attachment,
+        mesh_data_dir,
+        platform_config_dir,
+        enrollment_transfer,
+        deadline,
+    )
+    .await
+    {
+        Ok(enrollment) => enrollment,
+        Err(error) => {
+            reap_failed_mesh_process_startup(&mut transport.startup).await?;
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = write_mesh_control_frame(
+        &mut transport.control,
+        MESH_TRANSPORT_CONFINE_MESSAGE,
+        deadline,
+    )
+    .await
+    {
+        return match error {
+            MeshStatusReadError::Timeout => {
+                reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+                Err(RunnerError::MeshTransportStartTimeout)
+            }
+            MeshStatusReadError::Protocol => {
+                let failure = mesh_transport_exit_or(
+                    &mut transport.startup,
+                    RunnerError::MeshTransportBootstrap,
+                )
+                .await?;
+                reap_failed_mesh_process_startup(&mut enrollment.startup).await?;
+                Err(failure)
+            }
+        };
+    }
+    let confined_status = match read_mesh_status_frame(
+        &mut transport.control,
+        MESH_TRANSPORT_STATUS_MAX_BYTES,
+        deadline,
+    )
+    .await
+    {
+        Ok(status) => status,
+        Err(MeshStatusReadError::Timeout) => {
+            reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+            return Err(RunnerError::MeshTransportStartTimeout);
+        }
+        Err(MeshStatusReadError::Protocol) => {
+            let failure =
+                mesh_transport_exit_or(&mut transport.startup, RunnerError::MeshTransportBootstrap)
+                    .await?;
+            reap_failed_mesh_process_startup(&mut enrollment.startup).await?;
+            return Err(failure);
+        }
+    };
+    match decode_mesh_transport_startup_status(&confined_status) {
+        Some(MeshTransportStartupStatus::Confined)
+            if confined_status.as_slice() == MESH_TRANSPORT_CONFINED_MESSAGE => {}
+        Some(MeshTransportStartupStatus::Failed(failure)) => {
+            reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+            return Err(RunnerError::MeshTransportStartup(failure));
+        }
+        Some(MeshTransportStartupStatus::Ready | MeshTransportStartupStatus::Confined) | None => {
+            reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+            return Err(RunnerError::MeshTransportBootstrap);
+        }
+    }
+    if let Err(error) = write_mesh_control_frame(
+        &mut enrollment.control,
+        MESH_ENROLLMENT_CONFINE_MESSAGE,
+        deadline,
+    )
+    .await
+    {
+        return match error {
+            MeshStatusReadError::Timeout => {
+                reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+                Err(RunnerError::MeshEnrollmentBrokerStartTimeout)
+            }
+            MeshStatusReadError::Protocol => {
+                let failure = mesh_enrollment_exit_or(
+                    &mut enrollment.startup,
+                    RunnerError::MeshEnrollmentBrokerBootstrap,
+                )
+                .await?;
+                reap_failed_mesh_process_startup(&mut transport.startup).await?;
+                Err(failure)
+            }
+        };
+    }
+
+    let enrollment_status = match read_mesh_status_frame(
+        &mut enrollment.control,
+        MESH_ENROLLMENT_STATUS_MAX_BYTES,
+        deadline,
+    )
+    .await
+    {
+        Ok(status) => status,
+        Err(MeshStatusReadError::Timeout) => {
+            reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+            return Err(RunnerError::MeshEnrollmentBrokerStartTimeout);
+        }
+        Err(MeshStatusReadError::Protocol) => {
+            let error = mesh_enrollment_exit_or(
+                &mut enrollment.startup,
+                RunnerError::MeshEnrollmentBrokerBootstrap,
+            )
+            .await?;
+            reap_failed_mesh_process_startup(&mut transport.startup).await?;
+            return Err(error);
+        }
+    };
+    match decode_mesh_enrollment_startup_status(&enrollment_status) {
+        Some(MeshEnrollmentStartupStatus::Ready)
+            if enrollment_status.as_slice() == MESH_ENROLLMENT_READY_MESSAGE => {}
+        Some(MeshEnrollmentStartupStatus::Failed(failure)) => {
+            reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+            return Err(RunnerError::MeshEnrollmentBrokerStartup(failure));
+        }
+        _ => {
+            reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+            return Err(RunnerError::MeshEnrollmentBrokerBootstrap);
+        }
+    }
+    let enrollment_exit =
+        match tokio::time::timeout_at(deadline, enrollment.startup.child_mut().wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(_)) => {
+                reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+                return Err(RunnerError::MeshProcessWait);
+            }
+            Err(_) => {
+                reap_mesh_stack_startup(&mut transport.startup, &mut enrollment.startup).await?;
+                return Err(RunnerError::MeshEnrollmentBrokerStartTimeout);
+            }
+        };
+    enrollment.startup.child.take();
+    enrollment.startup.process.take();
+    if !enrollment_exit.success() {
+        reap_failed_mesh_process_startup(&mut transport.startup).await?;
+        return Err(enrollment_exit
+            .code()
+            .and_then(MeshEnrollmentStartupFailure::from_exit_code)
+            .map_or(
+                RunnerError::MeshEnrollmentBrokerBootstrap,
+                RunnerError::MeshEnrollmentBrokerStartup,
+            ));
+    }
+
+    let transport_status = match read_mesh_status_frame(
+        &mut transport.control,
+        MESH_TRANSPORT_STATUS_MAX_BYTES,
+        deadline,
+    )
+    .await
+    {
+        Ok(status) => status,
+        Err(MeshStatusReadError::Timeout) => {
+            reap_failed_mesh_process_startup(&mut transport.startup).await?;
+            return Err(RunnerError::MeshTransportStartTimeout);
+        }
+        Err(MeshStatusReadError::Protocol) => {
+            let error =
+                mesh_transport_exit_or(&mut transport.startup, RunnerError::MeshTransportBootstrap)
+                    .await?;
+            return Err(error);
+        }
+    };
+    match decode_mesh_transport_startup_status(&transport_status) {
+        Some(MeshTransportStartupStatus::Ready)
+            if transport_status.as_slice() == MESH_TRANSPORT_READY_MESSAGE => {}
+        Some(MeshTransportStartupStatus::Failed(failure)) => {
+            reap_failed_mesh_process_startup(&mut transport.startup).await?;
+            return Err(RunnerError::MeshTransportStartup(failure));
+        }
+        Some(MeshTransportStartupStatus::Confined | MeshTransportStartupStatus::Ready) | None => {
+            reap_failed_mesh_process_startup(&mut transport.startup).await?;
+            return Err(RunnerError::MeshTransportBootstrap);
+        }
+    }
+
+    let (child, process) = transport.startup.disarm();
+    let ingress_receiver = tokio::spawn(receive_mesh_ingress_submissions(
+        transport.control,
+        publisher,
+        context.vm_id,
+        context.generation,
+        attachment.guest_ports.clone(),
+        transport.submission_key,
+    ));
+    Ok(MeshTransportProcess {
+        child,
+        process,
+        ingress_receiver: Some(ingress_receiver),
+    })
+}
+
+async fn spawn_mesh_transport_process(
+    context: &NetworkStackLaunch<'_>,
+    attachment: &MeshAttachment,
+    enrollment: StdUnixStream,
+    deadline: tokio::time::Instant,
+) -> Result<PreparedMeshTransport, RunnerError> {
+    let submission_key = fresh_mesh_ingress_control_key();
+    let bootstrap = encode_mesh_transport_bootstrap(
+        context.vm_id,
+        context.generation,
+        attachment,
+        &submission_key,
+    )
+    .map_err(|_| RunnerError::MeshTransportBootstrap)?;
+    let (control_parent, control_child) =
+        StdUnixStream::pair().map_err(|_| RunnerError::MeshTransportSpawn)?;
+    control_parent
+        .set_nonblocking(true)
+        .map_err(|_| RunnerError::MeshTransportSpawn)?;
+    let mut control = tokio::net::UnixStream::from_std(control_parent)
+        .map_err(|_| RunnerError::MeshTransportSpawn)?;
+    let inherited_control = duplicate_inherited_descriptor(control_child.as_raw_fd())
+        .map_err(|_| RunnerError::MeshTransportSpawn)?;
+    let inherited_enrollment = duplicate_inherited_descriptor(enrollment.as_raw_fd())
+        .map_err(|_| RunnerError::MeshTransportSpawn)?;
+    let expected_parent = unsafe { libc::getpid() };
+    let mut command = tokio::process::Command::new(context.executable);
+    command
+        .arg("__native-mesh-transport")
+        .arg("--environment-id")
+        .arg(context.vm_id.to_string())
+        .arg("--generation")
+        .arg(context.generation.to_string())
+        .env_clear()
+        .current_dir(context.working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let control_fd = inherited_control.as_raw_fd();
+    let enrollment_fd = inherited_enrollment.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            prepare_isolated_child_pair(
+                expected_parent,
+                control_fd,
+                MESH_TRANSPORT_BOOTSTRAP_FD,
+                enrollment_fd,
+                MESH_TRANSPORT_ENROLLMENT_FD,
+            )
+        });
+    }
+    let child = command
+        .spawn()
+        .map_err(|_| RunnerError::MeshTransportSpawn)?;
+    drop(inherited_control);
+    drop(inherited_enrollment);
+    drop(control_child);
+    drop(enrollment);
+    let mut startup = MeshProcessStartup::new(child);
+    let Some(pid) = startup.child_mut().id() else {
+        reap_failed_mesh_process_startup(&mut startup).await?;
+        return Err(RunnerError::MeshTransportSpawn);
+    };
+    if let Err(error) = write_mesh_control_frame(&mut control, bootstrap.as_ref(), deadline).await {
+        return match error {
+            MeshStatusReadError::Timeout => {
+                reap_failed_mesh_process_startup(&mut startup).await?;
+                Err(RunnerError::MeshTransportStartTimeout)
+            }
+            MeshStatusReadError::Protocol => Err(mesh_transport_exit_or(
+                &mut startup,
+                RunnerError::MeshTransportBootstrap,
+            )
+            .await?),
+        };
+    }
+    let prepared =
+        match read_mesh_status_frame(&mut control, MESH_TRANSPORT_STATUS_MAX_BYTES, deadline).await
+        {
+            Ok(prepared) => prepared,
+            Err(MeshStatusReadError::Timeout) => {
+                reap_failed_mesh_process_startup(&mut startup).await?;
+                return Err(RunnerError::MeshTransportStartTimeout);
+            }
+            Err(MeshStatusReadError::Protocol) => {
+                return Err(mesh_transport_exit_or(
+                    &mut startup,
+                    RunnerError::MeshTransportBootstrap,
+                )
+                .await?);
+            }
+        };
+    if prepared.as_slice() != MESH_TRANSPORT_PREPARED_MESSAGE {
+        let error = decode_mesh_transport_startup_status(&prepared).map_or(
+            RunnerError::MeshTransportBootstrap,
+            |status| match status {
+                MeshTransportStartupStatus::Confined | MeshTransportStartupStatus::Ready => {
+                    RunnerError::MeshTransportBootstrap
+                }
+                MeshTransportStartupStatus::Failed(failure) => {
+                    RunnerError::MeshTransportStartup(failure)
+                }
+            },
+        );
+        reap_failed_mesh_process_startup(&mut startup).await?;
+        return Err(error);
+    }
+    let process = match LiveProcess::capture_child(pid, context.executable) {
+        Ok(process) => process,
+        Err(error) => {
+            let fallback = RunnerError::Recovery(error);
+            return Err(mesh_transport_exit_or(&mut startup, fallback).await?);
+        }
+    };
+    startup.admit(process);
+    Ok(PreparedMeshTransport {
+        startup,
+        control,
+        submission_key,
+    })
+}
+
+async fn spawn_mesh_enrollment_process(
+    context: &NetworkStackLaunch<'_>,
+    attachment: &MeshAttachment,
+    mesh_data_dir: &Path,
+    platform_config_dir: &Path,
+    transfer: StdUnixStream,
+    deadline: tokio::time::Instant,
+) -> Result<PreparedMeshEnrollment, RunnerError> {
+    let bootstrap = encode_mesh_enrollment_bootstrap(context.vm_id, context.generation, attachment)
+        .map_err(|_| RunnerError::MeshEnrollmentBrokerBootstrap)?;
+    let (control_parent, control_child) =
+        StdUnixStream::pair().map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
+    control_parent
+        .set_nonblocking(true)
+        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
+    let mut control = tokio::net::UnixStream::from_std(control_parent)
+        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
+    let inherited_control = duplicate_inherited_descriptor(control_child.as_raw_fd())
+        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
+    let inherited_transfer = duplicate_inherited_descriptor(transfer.as_raw_fd())
+        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
+    let expected_parent = unsafe { libc::getpid() };
+    let mut command = tokio::process::Command::new(context.executable);
+    command
+        .arg("__native-mesh-enrollment-broker")
+        .arg("--environment-id")
+        .arg(context.vm_id.to_string())
+        .arg("--generation")
+        .arg(context.generation.to_string())
+        .arg("--mesh-data-dir")
+        .arg(mesh_data_dir)
+        .arg("--platform-config-dir")
+        .arg(platform_config_dir)
+        .env_clear()
+        .current_dir(context.working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let control_fd = inherited_control.as_raw_fd();
+    let transfer_fd = inherited_transfer.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            prepare_isolated_child_pair(
+                expected_parent,
+                control_fd,
+                MESH_ENROLLMENT_BOOTSTRAP_FD,
+                transfer_fd,
+                MESH_ENROLLMENT_TRANSFER_FD,
+            )
+        });
+    }
+    let child = command
+        .spawn()
+        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
+    drop(inherited_control);
+    drop(inherited_transfer);
+    drop(control_child);
+    drop(transfer);
+    let mut startup = MeshProcessStartup::new(child);
+    let Some(pid) = startup.child_mut().id() else {
+        reap_failed_mesh_process_startup(&mut startup).await?;
+        return Err(RunnerError::MeshEnrollmentBrokerSpawn);
+    };
+    if let Err(error) = write_mesh_control_frame(&mut control, &bootstrap, deadline).await {
+        return match error {
+            MeshStatusReadError::Timeout => {
+                reap_failed_mesh_process_startup(&mut startup).await?;
+                Err(RunnerError::MeshEnrollmentBrokerStartTimeout)
+            }
+            MeshStatusReadError::Protocol => Err(mesh_enrollment_exit_or(
+                &mut startup,
+                RunnerError::MeshEnrollmentBrokerBootstrap,
+            )
+            .await?),
+        };
+    }
+    let prepared = match read_mesh_status_frame(
+        &mut control,
+        MESH_ENROLLMENT_STATUS_MAX_BYTES,
+        deadline,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(MeshStatusReadError::Timeout) => {
+            reap_failed_mesh_process_startup(&mut startup).await?;
+            return Err(RunnerError::MeshEnrollmentBrokerStartTimeout);
+        }
+        Err(MeshStatusReadError::Protocol) => {
+            return Err(mesh_enrollment_exit_or(
+                &mut startup,
+                RunnerError::MeshEnrollmentBrokerBootstrap,
+            )
+            .await?);
+        }
+    };
+    if prepared.as_slice() != MESH_ENROLLMENT_PREPARED_MESSAGE {
+        let error = decode_mesh_enrollment_startup_status(&prepared).map_or(
+            RunnerError::MeshEnrollmentBrokerBootstrap,
+            |status| match status {
+                MeshEnrollmentStartupStatus::Ready => RunnerError::MeshEnrollmentBrokerBootstrap,
+                MeshEnrollmentStartupStatus::Failed(failure) => {
+                    RunnerError::MeshEnrollmentBrokerStartup(failure)
+                }
+            },
+        );
+        reap_failed_mesh_process_startup(&mut startup).await?;
+        return Err(error);
+    }
+    let process = match LiveProcess::capture_child(pid, context.executable) {
+        Ok(process) => process,
+        Err(error) => {
+            let fallback = RunnerError::Recovery(error);
+            return Err(mesh_enrollment_exit_or(&mut startup, fallback).await?);
+        }
+    };
+    startup.admit(process);
+    Ok(PreparedMeshEnrollment { startup, control })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MeshStatusReadError {
+    Timeout,
+    Protocol,
+}
+
+async fn write_mesh_control_frame(
+    control: &mut tokio::net::UnixStream,
+    frame: &[u8],
+    deadline: tokio::time::Instant,
+) -> Result<(), MeshStatusReadError> {
+    tokio::time::timeout_at(deadline, async {
+        control.write_all(frame).await?;
+        control.flush().await
+    })
+    .await
+    .map_err(|_| MeshStatusReadError::Timeout)?
+    .map_err(|_| MeshStatusReadError::Protocol)
+}
+
+async fn read_mesh_status_frame(
+    control: &mut tokio::net::UnixStream,
+    maximum_bytes: usize,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<u8>, MeshStatusReadError> {
+    let mut frame = Vec::with_capacity(maximum_bytes);
+    loop {
+        if frame.len() == maximum_bytes {
+            return Err(MeshStatusReadError::Protocol);
+        }
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout_at(deadline, control.read(&mut byte))
+            .await
+            .map_err(|_| MeshStatusReadError::Timeout)?
+            .map_err(|_| MeshStatusReadError::Protocol)?;
+        if read == 0 || byte[0] == b'\r' || !byte[0].is_ascii() {
+            return Err(MeshStatusReadError::Protocol);
+        }
+        frame.push(byte[0]);
+        if byte[0] == b'\n' {
+            return Ok(frame);
+        }
+    }
+}
+
+async fn mesh_transport_exit_or(
+    startup: &mut MeshProcessStartup,
+    fallback: RunnerError,
+) -> Result<RunnerError, RunnerError> {
+    let exit_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        match startup.child_mut().try_wait() {
+            Ok(Some(status)) => {
+                startup.child.take();
+                startup.process.take();
+                return Ok(status
+                    .code()
+                    .and_then(MeshTransportStartupFailure::from_exit_code)
+                    .map_or(fallback, RunnerError::MeshTransportStartup));
+            }
+            Ok(None) => {}
+            Err(_) => return Err(RunnerError::MeshProcessWait),
+        }
+        if tokio::time::Instant::now() >= exit_deadline {
+            reap_failed_mesh_process_startup(startup).await?;
+            return Ok(fallback);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn mesh_enrollment_exit_or(
+    startup: &mut MeshProcessStartup,
+    fallback: RunnerError,
+) -> Result<RunnerError, RunnerError> {
+    let exit_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        match startup.child_mut().try_wait() {
+            Ok(Some(status)) => {
+                startup.child.take();
+                startup.process.take();
+                return Ok(status
+                    .code()
+                    .and_then(MeshEnrollmentStartupFailure::from_exit_code)
+                    .map_or(fallback, RunnerError::MeshEnrollmentBrokerStartup));
+            }
+            Ok(None) => {}
+            Err(_) => return Err(RunnerError::MeshProcessWait),
+        }
+        if tokio::time::Instant::now() >= exit_deadline {
+            reap_failed_mesh_process_startup(startup).await?;
+            return Ok(fallback);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn reap_mesh_stack_startup(
+    transport: &mut MeshProcessStartup,
+    enrollment: &mut MeshProcessStartup,
+) -> Result<(), RunnerError> {
+    let transport_result = reap_failed_mesh_process_startup(transport).await;
+    let enrollment_result = reap_failed_mesh_process_startup(enrollment).await;
+    match (transport_result, enrollment_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
+async fn reap_failed_mesh_process_startup(
+    startup: &mut MeshProcessStartup,
+) -> Result<(), RunnerError> {
+    if startup
+        .child_mut()
+        .try_wait()
+        .map_err(|_| RunnerError::MeshProcessWait)?
+        .is_some()
+    {
+        startup.child.take();
+        startup.process.take();
+        return Ok(());
+    }
+    if let Some(process) = startup.process.as_ref() {
+        let _ = process.signal(Signal::KILL);
+    } else {
+        let _ = startup.child_mut().start_kill();
+    }
+    tokio::time::timeout(SIGNAL_STOP_TIMEOUT, startup.child_mut().wait())
+        .await
+        .map_err(|_| RunnerError::MeshProcessKillTimeout)?
+        .map_err(|_| RunnerError::MeshProcessWait)?;
+    startup.child.take();
+    startup.process.take();
+    Ok(())
 }
 
 async fn spawn_network_stack_processes(
@@ -2412,6 +3233,46 @@ fn prepare_isolated_child(
     lock_process_privileges()
 }
 
+fn prepare_isolated_child_pair(
+    expected_parent: libc::pid_t,
+    first_source: RawFd,
+    first_target: RawFd,
+    second_source: RawFd,
+    second_target: RawFd,
+) -> io::Result<()> {
+    if first_source == second_source || first_target == second_target {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1
+        || unsafe { libc::getppid() } != expected_parent
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3_u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    for (source, target) in [(first_source, first_target), (second_source, second_target)] {
+        if source != target && unsafe { libc::dup2(source, target) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(target, libc::F_SETFD, 0) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // Both children deliberately lock privileges only after sending PREPARED.
+    // This lets the runner capture their exact executable before either child
+    // can receive an owner credential or one-use enrollment capability.
+    Ok(())
+}
+
 fn guest_poweroff_command() -> Vec<String> {
     vec![CONTAINER_INIT_PATH.to_owned(), "poweroff".to_owned()]
 }
@@ -2424,6 +3285,8 @@ pub enum ExitClass {
     NetworkWorkerFailure(Option<i32>),
     EgressBrokerFailure(Option<i32>),
     IngressForwarderFailure,
+    MeshTransportFailure(Option<i32>),
+    MeshIngressReceiverFailure,
 }
 
 async fn kill_and_reap(
@@ -2465,7 +3328,9 @@ async fn prioritize_exited_vmm(
     let exited = match observed {
         ExitClass::NetworkWorkerFailure(_)
         | ExitClass::EgressBrokerFailure(_)
-        | ExitClass::IngressForwarderFailure => {
+        | ExitClass::IngressForwarderFailure
+        | ExitClass::MeshTransportFailure(_)
+        | ExitClass::MeshIngressReceiverFailure => {
             process.wait_exited(VMM_CASCADE_EXIT_TIMEOUT).await?
         }
         ExitClass::StillRunning => process.is_exited()?,
@@ -3029,6 +3894,26 @@ pub enum RunnerError {
     EgressBrokerWait,
     #[error("egress broker did not exit after pidfd SIGKILL")]
     EgressBrokerKillTimeout,
+    #[error("Mesh transport process spawn failed")]
+    MeshTransportSpawn,
+    #[error("Mesh transport did not become ready before the startup deadline")]
+    MeshTransportStartTimeout,
+    #[error("Mesh transport private bootstrap failed")]
+    MeshTransportBootstrap,
+    #[error("Mesh transport startup failed: {0:?}")]
+    MeshTransportStartup(MeshTransportStartupFailure),
+    #[error("Mesh enrollment broker process spawn failed")]
+    MeshEnrollmentBrokerSpawn,
+    #[error("Mesh enrollment broker did not become ready before the startup deadline")]
+    MeshEnrollmentBrokerStartTimeout,
+    #[error("Mesh enrollment broker private bootstrap failed")]
+    MeshEnrollmentBrokerBootstrap,
+    #[error("Mesh enrollment broker startup failed: {0:?}")]
+    MeshEnrollmentBrokerStartup(MeshEnrollmentStartupFailure),
+    #[error("wait for isolated Mesh process failed")]
+    MeshProcessWait,
+    #[error("isolated Mesh process did not exit after pidfd SIGKILL")]
+    MeshProcessKillTimeout,
     #[error("wait for Cloud Hypervisor failed")]
     Wait,
     #[error("Cloud Hypervisor did not exit after pidfd SIGKILL")]
@@ -3396,9 +4281,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_stack_stop_reaps_worker_and_broker_independently() {
+    async fn network_stack_stop_reaps_worker_broker_and_mesh_independently() {
         let (worker_child, worker_process) = spawn_admitted_sleep("30").await;
         let (broker_child, broker_process) = spawn_admitted_sleep("30").await;
+        let (mesh_child, mesh_process) = spawn_admitted_sleep("30").await;
+        let mesh_receiver =
+            tokio::spawn(async { std::future::pending::<Result<(), MeshTransportError>>().await });
         let mut stack = NetworkWorkerProcess {
             child: worker_child,
             process: worker_process,
@@ -3411,10 +4299,16 @@ mod tests {
             mesh_ingress_key: None,
             mesh_ingress_publisher: None,
             ingress_forwarder: None,
+            mesh_transport: Some(MeshTransportProcess {
+                child: mesh_child,
+                process: mesh_process,
+                ingress_receiver: Some(mesh_receiver),
+            }),
         };
 
         stop_network_worker_process(&mut stack).await.unwrap();
         assert!(stack.child.try_wait().unwrap().is_some());
+        assert!(stack.mesh_transport.is_none());
         let broker = stack.broker.as_mut().unwrap();
         assert!(broker.child.try_wait().unwrap().is_none());
 

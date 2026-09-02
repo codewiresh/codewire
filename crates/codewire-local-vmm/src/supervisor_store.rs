@@ -29,7 +29,7 @@ const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
-const DATABASE_SCHEMA_VERSION: i64 = 7;
+const DATABASE_SCHEMA_VERSION: i64 = 8;
 // A create journal entry contains the exact canonical project JSON so replay
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
@@ -835,7 +835,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            updated_unix_ms INTEGER NOT NULL
          ) STRICT;
          PRAGMA application_id = 1129797197;
-         PRAGMA user_version = 7;
+         PRAGMA user_version = 8;
          COMMIT;",
     )?;
     validate_schema(connection)

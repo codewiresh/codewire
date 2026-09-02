@@ -506,11 +506,13 @@ find_exact_supervisor_pid() {
     [[ "$(readlink -f "$proc/exe" 2>/dev/null || true)" == "$CW_BIN" ]] || continue
     argv=()
     mapfile -d '' -t argv <"$proc/cmdline" 2>/dev/null || continue
-    [[ ${#argv[@]} -eq 8 ]] || continue
+    [[ ${#argv[@]} -eq 12 ]] || continue
     if [[ "${argv[1]}" == '__native-supervisor' &&
           "${argv[2]}" == '--root' && "${argv[3]}" == "$STATE_ROOT" &&
           "${argv[4]}" == '--artifact-root' && "${argv[5]}" == "$ARTIFACT_ROOT" &&
-          "${argv[6]}" == '--artifact-lock' && "${argv[7]}" == "$ARTIFACT_LOCK" ]]; then
+          "${argv[6]}" == '--artifact-lock' && "${argv[7]}" == "$ARTIFACT_LOCK" &&
+          "${argv[8]}" == '--mesh-data-dir' && "${argv[9]}" == "$SMOKE_HOME/.codewire" &&
+          "${argv[10]}" == '--platform-config-dir' && "${argv[11]}" == "$PLATFORM_CONFIG" ]]; then
       pid="${proc#/proc/}"
       printf '%s\n' "$pid"
       return 0

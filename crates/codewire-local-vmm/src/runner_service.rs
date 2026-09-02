@@ -32,7 +32,7 @@ use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use crate::linux::path::PrivateRoot;
 use crate::linux::runner::ExitClass;
-use crate::mesh_ingress::MeshAttachment;
+use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
 
@@ -49,6 +49,8 @@ pub struct RunnerEntrypointConfig {
     pub socket: PathBuf,
     pub engine_state_root: PathBuf,
     pub artifact_generation: String,
+    pub mesh_data_dir: PathBuf,
+    pub platform_config_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -238,6 +240,9 @@ fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
 }
 
 pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerServiceError> {
+    if !config.mesh_data_dir.is_absolute() || !config.platform_config_dir.is_absolute() {
+        return Err(RunnerServiceError::Configuration);
+    }
     let engine = PrivateRoot::open(&config.engine_state_root).map_err(RunnerError::from)?;
     let artifacts = RuntimeArtifactStore::create(&engine)
         .map_err(|_| RunnerServiceError::ArtifactStore)?
@@ -267,6 +272,8 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             generation,
             state: v1::EnvironmentState::Stopped,
             adopted: false,
+            mesh_data_dir: config.mesh_data_dir,
+            platform_config_dir: config.platform_config_dir,
         })),
         adoption: adoption_tx,
         events,
@@ -297,6 +304,8 @@ struct RunnerState {
     generation: u64,
     state: v1::EnvironmentState,
     adopted: bool,
+    mesh_data_dir: PathBuf,
+    platform_config_dir: PathBuf,
 }
 
 impl RunnerState {
@@ -347,6 +356,12 @@ impl RunnerState {
                 self.state = v1::EnvironmentState::Error;
                 Ok(error_code)
             }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                // Mesh ingress is fail-closed as soon as either the isolated
+                // transport or its authenticated runner receiver disappears.
+                self.state = v1::EnvironmentState::Error;
+                Ok(error_code)
+            }
         }
     }
 }
@@ -358,6 +373,8 @@ fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
         ExitClass::NetworkWorkerFailure(_) => Some("network_worker_exit"),
         ExitClass::EgressBrokerFailure(_) => Some("egress_broker_exit"),
         ExitClass::IngressForwarderFailure => Some("ingress_forwarder_exit"),
+        ExitClass::MeshTransportFailure(_) => Some("mesh_transport_exit"),
+        ExitClass::MeshIngressReceiverFailure => Some("mesh_ingress_receiver_exit"),
     }
 }
 
@@ -574,7 +591,12 @@ impl EnvironmentRunnerService for RunnerRpc {
             }
         };
         if let Err(error) = running
-            .start_network_worker(&worker_executable, daemon_ready_timeout)
+            .start_network_worker_with_mesh_credentials(
+                &worker_executable,
+                daemon_ready_timeout,
+                &state.mesh_data_dir,
+                &state.platform_config_dir,
+            )
             .await
         {
             let _ = running.stop().await;
@@ -663,7 +685,9 @@ impl EnvironmentRunnerService for RunnerRpc {
                 | ExitClass::VmmFailure(_)
                 | ExitClass::NetworkWorkerFailure(_)
                 | ExitClass::EgressBrokerFailure(_)
-                | ExitClass::IngressForwarderFailure => {}
+                | ExitClass::IngressForwarderFailure
+                | ExitClass::MeshTransportFailure(_)
+                | ExitClass::MeshIngressReceiverFailure => {}
             }
         }
         state.running = None;
@@ -849,7 +873,17 @@ fn parse_mesh_attachment(request: &v1::StartVmRequest) -> Result<Option<MeshAtta
         .iter()
         .map(|port| u16::try_from(*port).map_err(|_| Status::invalid_argument("invalid Mesh port")))
         .collect::<Result<Vec<_>, _>>()?;
-    let attachment = MeshAttachment::new(
+    let auth_source = match v1::MeshEnrollmentAuthSource::try_from(raw.auth_source) {
+        Ok(v1::MeshEnrollmentAuthSource::StandaloneLocal) => {
+            MeshEnrollmentAuthSource::StandaloneLocal
+        }
+        Ok(v1::MeshEnrollmentAuthSource::HostedCurrent) => MeshEnrollmentAuthSource::HostedCurrent,
+        Ok(v1::MeshEnrollmentAuthSource::Unspecified) | Err(_) => {
+            return Err(Status::invalid_argument("invalid Mesh auth source"));
+        }
+    };
+    let attachment = MeshAttachment::new_with_auth_source(
+        auth_source,
         &raw.mesh_url,
         &raw.organization_id,
         &raw.network_id,
@@ -861,6 +895,14 @@ fn parse_mesh_attachment(request: &v1::StartVmRequest) -> Result<Option<MeshAtta
         || attachment.organization_id != raw.organization_id
         || attachment.network_id != raw.network_id
         || attachment.node_name != raw.node_name
+        || match attachment.auth_source {
+            MeshEnrollmentAuthSource::StandaloneLocal => {
+                raw.auth_source != v1::MeshEnrollmentAuthSource::StandaloneLocal as i32
+            }
+            MeshEnrollmentAuthSource::HostedCurrent => {
+                raw.auth_source != v1::MeshEnrollmentAuthSource::HostedCurrent as i32
+            }
+        }
         || attachment
             .guest_ports
             .iter()
@@ -1107,6 +1149,16 @@ async fn wait_for_guest_daemon(
                                 "ingress forwarder exited before guest daemon readiness",
                             ));
                         }
+                        ExitClass::MeshTransportFailure(code) => {
+                            return Err(Status::unavailable(format!(
+                                "isolated Mesh transport exited before guest daemon readiness with status {code:?}"
+                            )));
+                        }
+                        ExitClass::MeshIngressReceiverFailure => {
+                            return Err(Status::unavailable(
+                                "Mesh ingress receiver exited before guest daemon readiness",
+                            ));
+                        }
                     }
                     if !daemon_ready
                         && let Ok(client) = running.daemon_client().await
@@ -1151,6 +1203,8 @@ pub enum RunnerServiceError {
     Serve,
     #[error("adopt private environment runner failed")]
     Adoption,
+    #[error("private environment runner configuration is invalid")]
+    Configuration,
 }
 
 #[cfg(test)]
@@ -1235,12 +1289,17 @@ mod tests {
                 network_id: "network-test".to_owned(),
                 node_name: "dev".to_owned(),
                 guest_ports: vec![3_000, 8_080],
+                auth_source: v1::MeshEnrollmentAuthSource::StandaloneLocal as i32,
             }),
             ..Default::default()
         };
         let attachment = parse_mesh_attachment(&request).unwrap().unwrap();
         assert_eq!(attachment.network_id, "network-test");
         assert_eq!(attachment.guest_ports, vec![3_000, 8_080]);
+        assert_eq!(
+            attachment.auth_source,
+            MeshEnrollmentAuthSource::StandaloneLocal
+        );
 
         let mut noncanonical = request.clone();
         noncanonical.mesh.as_mut().unwrap().guest_ports.reverse();
@@ -1248,11 +1307,18 @@ mod tests {
             parse_mesh_attachment(&noncanonical).unwrap_err().code(),
             tonic::Code::InvalidArgument
         );
-        let mut credential_url = request;
+        let mut credential_url = request.clone();
         credential_url.mesh.as_mut().unwrap().mesh_url =
             "https://user:secret@mesh.example.test".to_owned();
         assert_eq!(
             parse_mesh_attachment(&credential_url).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut unspecified = request;
+        unspecified.mesh.as_mut().unwrap().auth_source =
+            v1::MeshEnrollmentAuthSource::Unspecified as i32;
+        assert_eq!(
+            parse_mesh_attachment(&unspecified).unwrap_err().code(),
             tonic::Code::InvalidArgument
         );
         assert!(
@@ -1420,6 +1486,14 @@ mod tests {
         assert_eq!(
             runner_exit_error_code(ExitClass::IngressForwarderFailure),
             Some("ingress_forwarder_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::MeshTransportFailure(Some(4))),
+            Some("mesh_transport_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::MeshIngressReceiverFailure),
+            Some("mesh_ingress_receiver_exit")
         );
     }
 }

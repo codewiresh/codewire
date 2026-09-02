@@ -46,7 +46,8 @@ use crate::linux::state::{
 };
 use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError, VmPaths};
 use crate::mesh_ingress::{
-    MeshAttachment, canonical_mesh_ingress_ports, validate_canonical_mesh_ingress_ports,
+    MeshAttachment, MeshEnrollmentAuthSource, canonical_mesh_ingress_ports,
+    validate_canonical_mesh_ingress_ports,
 };
 use crate::oci::{
     ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
@@ -114,6 +115,8 @@ pub struct NativeRuntimeConfig {
     pub root: PathBuf,
     pub artifact_root: PathBuf,
     pub artifact_lock: PathBuf,
+    pub mesh_data_dir: PathBuf,
+    pub platform_config_dir: PathBuf,
     pub executable: PathBuf,
 }
 
@@ -137,6 +140,8 @@ impl NativeRuntimeConfig {
             &self.root,
             &self.artifact_root,
             &self.artifact_lock,
+            &self.mesh_data_dir,
+            &self.platform_config_dir,
             &self.executable,
         ] {
             if !path.is_absolute() {
@@ -2153,6 +2158,10 @@ impl SupervisorCore {
             .arg(self.config.engine_root())
             .arg("--artifact-generation")
             .arg(artifact_generation)
+            .arg("--mesh-data-dir")
+            .arg(&self.config.mesh_data_dir)
+            .arg("--platform-config-dir")
+            .arg(&self.config.platform_config_dir)
             .env_clear()
             .current_dir(&self.config.root)
             .stdin(Stdio::null())
@@ -4037,7 +4046,9 @@ fn canonicalize_mesh_attachment_proto(
         .iter()
         .map(|port| u16::try_from(*port).map_err(|_| SupervisorError::InvalidRequest))
         .collect::<Result<Vec<_>, _>>()?;
-    let attachment = MeshAttachment::new(
+    let auth_source = mesh_auth_source_from_proto(attachment.auth_source)?;
+    let attachment = MeshAttachment::new_with_auth_source(
+        auth_source,
         &attachment.mesh_url,
         &attachment.organization_id,
         &attachment.network_id,
@@ -4057,7 +4068,8 @@ fn mesh_attachment_from_proto(
     }
     canonical
         .map(|attachment| {
-            MeshAttachment::new(
+            MeshAttachment::new_with_auth_source(
+                mesh_auth_source_from_proto(attachment.auth_source)?,
                 &attachment.mesh_url,
                 &attachment.organization_id,
                 &attachment.network_id,
@@ -4083,7 +4095,29 @@ fn mesh_attachment_to_proto(attachment: Option<&MeshAttachment>) -> Option<v1::M
             .iter()
             .map(|port| u32::from(*port))
             .collect(),
+        auth_source: mesh_auth_source_to_proto(attachment.auth_source) as i32,
     })
+}
+
+fn mesh_auth_source_from_proto(raw: i32) -> Result<MeshEnrollmentAuthSource, SupervisorError> {
+    match v1::MeshEnrollmentAuthSource::try_from(raw) {
+        Ok(v1::MeshEnrollmentAuthSource::StandaloneLocal) => {
+            Ok(MeshEnrollmentAuthSource::StandaloneLocal)
+        }
+        Ok(v1::MeshEnrollmentAuthSource::HostedCurrent) => {
+            Ok(MeshEnrollmentAuthSource::HostedCurrent)
+        }
+        Ok(v1::MeshEnrollmentAuthSource::Unspecified) | Err(_) => {
+            Err(SupervisorError::InvalidRequest)
+        }
+    }
+}
+
+fn mesh_auth_source_to_proto(source: MeshEnrollmentAuthSource) -> v1::MeshEnrollmentAuthSource {
+    match source {
+        MeshEnrollmentAuthSource::StandaloneLocal => v1::MeshEnrollmentAuthSource::StandaloneLocal,
+        MeshEnrollmentAuthSource::HostedCurrent => v1::MeshEnrollmentAuthSource::HostedCurrent,
+    }
 }
 
 fn validate_host_ports_for_project(
@@ -5030,6 +5064,10 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
         .arg(&config.artifact_root)
         .arg("--artifact-lock")
         .arg(&config.artifact_lock)
+        .arg("--mesh-data-dir")
+        .arg(&config.mesh_data_dir)
+        .arg("--platform-config-dir")
+        .arg(&config.platform_config_dir)
         .env_clear()
         .current_dir(&config.root)
         .stdin(Stdio::null())
@@ -5539,6 +5577,8 @@ mod tests {
                 root: root_path,
                 artifact_root: parent.path().join("artifacts"),
                 artifact_lock: parent.path().join("artifacts.lock.json"),
+                mesh_data_dir: parent.path().join("mesh-auth"),
+                platform_config_dir: parent.path().join("platform-auth"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -5615,6 +5655,8 @@ mod tests {
                 root: root_path,
                 artifact_root: parent.path().join("artifacts"),
                 artifact_lock: parent.path().join("artifacts.lock.json"),
+                mesh_data_dir: parent.path().join("mesh-auth"),
+                platform_config_dir: parent.path().join("platform-auth"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -6831,6 +6873,7 @@ mod tests {
                 network_id: "network-test".to_owned(),
                 node_name: "dev".to_owned(),
                 guest_ports: vec![3_000],
+                auth_source: v1::MeshEnrollmentAuthSource::StandaloneLocal as i32,
             }),
         };
         validate_create(&request).unwrap();
@@ -6921,6 +6964,7 @@ mod tests {
             network_id: " network-test ".to_owned(),
             node_name: " dev ".to_owned(),
             guest_ports: vec![8_080, 3_000],
+            auth_source: v1::MeshEnrollmentAuthSource::HostedCurrent as i32,
         };
         let canonical = canonicalize_mesh_attachment_proto(Some(&raw))
             .unwrap()
@@ -6928,9 +6972,17 @@ mod tests {
         assert_eq!(canonical.mesh_url, "https://mesh.example.test/base");
         assert_eq!(canonical.node_name, "dev");
         assert_eq!(canonical.guest_ports, vec![3_000, 8_080]);
+        assert_eq!(
+            canonical.auth_source,
+            v1::MeshEnrollmentAuthSource::HostedCurrent as i32
+        );
         let attachment = mesh_attachment_from_proto(Some(&canonical))
             .unwrap()
             .unwrap();
+        assert_eq!(
+            attachment.auth_source,
+            MeshEnrollmentAuthSource::HostedCurrent
+        );
         validate_mesh_for_project(&attachment, &project).unwrap();
 
         let mut wrong_ports = attachment.clone();
@@ -7209,6 +7261,8 @@ mod tests {
                 root: root_path,
                 artifact_root: parent.path().join("artifacts"),
                 artifact_lock: parent.path().join("artifacts.lock.json"),
+                mesh_data_dir: parent.path().join("mesh-auth"),
+                platform_config_dir: parent.path().join("platform-auth"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -7807,6 +7861,8 @@ mod tests {
                 root: root_path,
                 artifact_root: parent.path().join("artifacts"),
                 artifact_lock: parent.path().join("artifacts.lock.json"),
+                mesh_data_dir: parent.path().join("mesh-auth"),
+                platform_config_dir: parent.path().join("platform-auth"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -7870,6 +7926,8 @@ mod tests {
                 root: root_path,
                 artifact_root: parent.path().join("artifacts"),
                 artifact_lock: parent.path().join("artifacts.lock.json"),
+                mesh_data_dir: parent.path().join("mesh-auth"),
+                platform_config_dir: parent.path().join("platform-auth"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
