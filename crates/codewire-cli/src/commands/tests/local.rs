@@ -246,6 +246,60 @@
     }
 
     #[test]
+    fn local_mesh_owner_projection_tracks_only_matching_network_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = LocalMeshOwnerContext {
+            schema_version: 1,
+            auth_source: LocalMeshOwnerAuthSource::StandaloneLocal,
+            mesh_url: "http://127.0.0.1:18090".to_string(),
+            organization_id: "local-org-alpha".to_string(),
+            selected_network: Some("initial".to_string()),
+        };
+        save_local_mesh_owner_context(dir.path(), &context).unwrap();
+
+        update_local_mesh_owner_selection(
+            dir.path(),
+            Some("https://mesh.example.com"),
+            Some("hosted"),
+        )
+        .unwrap();
+        assert_eq!(
+            load_local_mesh_owner_context(dir.path())
+                .unwrap()
+                .unwrap()
+                .selected_network
+                .as_deref(),
+            Some("initial")
+        );
+
+        update_local_mesh_owner_selection(
+            dir.path(),
+            Some("http://127.0.0.1:18090/"),
+            Some(" project-alpha "),
+        )
+        .unwrap();
+        assert_eq!(
+            load_local_mesh_owner_context(dir.path())
+                .unwrap()
+                .unwrap()
+                .selected_network
+                .as_deref(),
+            Some("project-alpha")
+        );
+
+        update_local_mesh_owner_selection(dir.path(), None, None).unwrap();
+        assert!(
+            load_local_mesh_owner_context(dir.path())
+                .unwrap()
+                .unwrap()
+                .selected_network
+                .is_none()
+        );
+        remove_local_mesh_owner_context(dir.path()).unwrap();
+        assert!(load_local_mesh_owner_context(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
     fn resolve_local_instance_target_matches_key_or_runtime_name() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(

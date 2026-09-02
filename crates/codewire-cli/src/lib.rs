@@ -61,6 +61,7 @@ const LIMA_RUNTIME_CLI_COPY_PATH: &str = "/tmp/codewire-cw-stage";
 const LIMA_RUNTIME_CLI_STAGE_DIR: &str = "/var/lib/codewire";
 const LIMA_RUNTIME_CLI_STAGE_PATH: &str = "/var/lib/codewire/cw";
 const LOCAL_MESH_RUNTIME_FILE: &str = "mesh_runtime.json";
+const LOCAL_MESH_OWNER_CONTEXT_FILE: &str = "mesh_owner.json";
 const LOCAL_MESH_LOG_FILE: &str = "codewire-mesh.log";
 const LOCAL_DERP_LOG_FILE: &str = "codewire-derp.log";
 
