@@ -60,7 +60,7 @@ impl MeshIngressSubmitter {
         })
     }
 
-    async fn submit(
+    pub(crate) async fn submit(
         &mut self,
         guest_port: u16,
         stream: &StdUnixStream,

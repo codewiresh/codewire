@@ -72,7 +72,10 @@ const MAX_RESOLVED_ENDPOINTS: usize = 16;
 const MAX_RESOLVED_STUN_ENDPOINTS: usize = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const NETWORK_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
-const CONFINEMENT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
+// The transport enters PREPARED before the runner spawns and admits the
+// enrollment child, so this phase covers two exact executable captures. The
+// runner retains a separate outer deadline around the complete Mesh stack.
+pub(crate) const MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(40);
 
 const MESH_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_listen,
@@ -554,6 +557,180 @@ pub async fn run_inherited_mesh_transport(
     runtime.run(liveness).await
 }
 
+/// Checked-in qualified-host seam for proving the production runner and guest
+/// ingress lifecycle without replacing the separately tested encrypted Mesh
+/// implementation. This entrypoint is not wired into the product CLI.
+#[doc(hidden)]
+pub async fn run_inherited_mesh_transport_fixture(
+    environment_id: Uuid,
+    generation: u64,
+    request: &'static [u8],
+    response: &'static [u8],
+    acknowledgement: &'static [u8],
+) -> Result<(), MeshTransportProcessError> {
+    if request.is_empty()
+        || response.is_empty()
+        || acknowledgement.is_empty()
+        || request.len() > 256
+        || response.len() > 256
+        || acknowledgement.len() > 256
+    {
+        return Err(MeshTransportProcessError::InvalidBootstrap);
+    }
+    let mut control = inherited_std_unix_stream(MESH_TRANSPORT_BOOTSTRAP_FD)?;
+    let mut enrollment = inherited_std_unix_stream(MESH_TRANSPORT_ENROLLMENT_FD)?;
+    configure_handshake_stream(&control, HANDSHAKE_TIMEOUT, || {
+        MeshTransportProcessError::BootstrapIo
+    })?;
+    configure_handshake_stream(&enrollment, NETWORK_SETUP_TIMEOUT, || {
+        MeshTransportProcessError::EnrollmentIo
+    })?;
+
+    let bootstrap = match prepare_mesh_bootstrap(&mut control, environment_id, generation) {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => return fail_startup(&control, error),
+    };
+    if let Err(error) = await_confinement_admission(&mut control) {
+        return fail_startup(&control, error);
+    }
+    if lock_process_privileges().is_err() {
+        return fail_startup(&control, MeshTransportProcessError::PrivilegeConfinement);
+    }
+    if write_status(&control, MESH_TRANSPORT_CONFINED_MESSAGE).is_err() {
+        return fail_startup(&control, MeshTransportProcessError::StatusIo);
+    }
+    let enrollment_code = match read_enrollment(&mut enrollment) {
+        Ok(enrollment) => enrollment,
+        Err(error) => return fail_startup(&control, error),
+    };
+    let expected_enrollment =
+        crate::mesh_enrollment::qualified_host_fixture_enrollment(environment_id, generation);
+    if enrollment_code.as_str() != expected_enrollment.as_str() {
+        return fail_startup(&control, MeshTransportProcessError::InvalidEnrollment);
+    }
+    drop(enrollment_code);
+    drop(expected_enrollment);
+    drop(enrollment);
+    if install_deny_all_filesystem_domain().is_err() {
+        return fail_startup(&control, MeshTransportProcessError::FilesystemConfinement);
+    }
+    if install_inet_and_unix_stream_pair_syscalls(MESH_DENIED_SYSCALLS, MESH_ARCH_DENIED_SYSCALLS)
+        .is_err()
+    {
+        return fail_startup(&control, MeshTransportProcessError::SyscallConfinement);
+    }
+    let guest_port = bootstrap
+        .attachment
+        .guest_ports
+        .first()
+        .copied()
+        .ok_or(MeshTransportProcessError::InvalidBootstrap)?;
+
+    control
+        .set_read_timeout(None)
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    control
+        .set_write_timeout(None)
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    let liveness = control
+        .try_clone()
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    let startup_liveness = control
+        .try_clone()
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    control
+        .set_nonblocking(true)
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    liveness
+        .set_nonblocking(true)
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    startup_liveness
+        .set_nonblocking(true)
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    let mut control = tokio::net::UnixStream::from_std(control)
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    let liveness = tokio::net::UnixStream::from_std(liveness)
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    let startup_liveness = tokio::net::UnixStream::from_std(startup_liveness)
+        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
+    write_status_frame(&mut control, MESH_TRANSPORT_READY_MESSAGE).await?;
+    let mut submitter = MeshIngressSubmitter::new(
+        control,
+        environment_id,
+        generation,
+        bootstrap.submission_key,
+    )?;
+    let round_trip = async {
+        loop {
+            if mesh_fixture_round_trip(
+                &mut submitter,
+                guest_port,
+                request,
+                response,
+                acknowledgement,
+            )
+            .await?
+            {
+                return Ok::<(), MeshTransportProcessError>(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::select! {
+        parent = monitor_parent(startup_liveness) => return parent,
+        result = round_trip => result?,
+    }
+    monitor_parent(liveness).await
+}
+
+async fn mesh_fixture_round_trip(
+    submitter: &mut MeshIngressSubmitter,
+    guest_port: u16,
+    request: &[u8],
+    expected_response: &[u8],
+    acknowledgement: &[u8],
+) -> Result<bool, MeshTransportProcessError> {
+    let (published, peer) =
+        StdUnixStream::pair().map_err(|_| MeshTransportProcessError::Protocol)?;
+    peer.set_nonblocking(true)
+        .map_err(|_| MeshTransportProcessError::Protocol)?;
+    submitter.submit(guest_port, &published).await?;
+    drop(published);
+    let mut peer =
+        tokio::net::UnixStream::from_std(peer).map_err(|_| MeshTransportProcessError::Protocol)?;
+    let mut response = vec![0_u8; expected_response.len()];
+    let result = tokio::time::timeout(Duration::from_millis(500), async {
+        peer.write_all(request).await?;
+        peer.read_exact(&mut response).await?;
+        if response != expected_response {
+            return Ok::<bool, std::io::Error>(false);
+        }
+        peer.write_all(acknowledgement).await?;
+        peer.shutdown().await?;
+        Ok::<bool, std::io::Error>(true)
+    })
+    .await;
+    match result {
+        Ok(Ok(true)) => Ok(true),
+        Ok(Ok(false)) => Err(MeshTransportProcessError::Protocol),
+        Ok(Err(_)) | Err(_) => Ok(false),
+    }
+}
+
+async fn write_status_frame(
+    control: &mut tokio::net::UnixStream,
+    message: &[u8],
+) -> Result<(), MeshTransportProcessError> {
+    control
+        .write_all(message)
+        .await
+        .map_err(|_| MeshTransportProcessError::StatusIo)?;
+    control
+        .flush()
+        .await
+        .map_err(|_| MeshTransportProcessError::StatusIo)
+}
+
 struct MeshRuntime {
     coordinator: MeshCoordinatorPeerSession,
     conn: Arc<Conn>,
@@ -1007,7 +1184,7 @@ fn await_confinement_admission(
     control: &mut StdUnixStream,
 ) -> Result<(), MeshTransportProcessError> {
     control
-        .set_read_timeout(Some(CONFINEMENT_ADMISSION_TIMEOUT))
+        .set_read_timeout(Some(MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT))
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     let mut admission = [0_u8; MESH_TRANSPORT_CONFINE_MESSAGE.len()];
     control

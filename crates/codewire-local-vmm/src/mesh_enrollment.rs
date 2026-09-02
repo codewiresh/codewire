@@ -43,6 +43,7 @@ const BOOTSTRAP_MAGIC: &[u8; 8] = b"CWMENRB1";
 const BOOTSTRAP_HEADER_LEN: usize = 40;
 const MAX_BOOTSTRAP_BYTES: usize = 4_096;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const MESH_ENROLLMENT_CONFINEMENT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
 const ENROLLMENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const ENROLLMENT_TTL_SECONDS: i64 = 10 * 60;
 const MAX_RESPONSE_FIELD_BYTES: usize = 512;
@@ -376,6 +377,70 @@ pub async fn run_inherited_mesh_enrollment_broker(
         .map_err(|_| MeshEnrollmentProcessError::StatusIo)
 }
 
+/// Checked-in qualified-host issuer used only by the native VMM smoke. It
+/// exercises the production runner handshake and direct child-to-child
+/// transfer with a generation-unique synthetic capability and no owner store.
+#[doc(hidden)]
+pub async fn run_inherited_mesh_enrollment_fixture(
+    environment_id: Uuid,
+    generation: u64,
+) -> Result<(), MeshEnrollmentProcessError> {
+    let mut control = inherited_std_unix_stream(MESH_ENROLLMENT_BOOTSTRAP_FD)?;
+    let mut transfer = inherited_std_unix_stream(MESH_ENROLLMENT_TRANSFER_FD)?;
+    configure_handshake_stream(&control, || MeshEnrollmentProcessError::BootstrapIo)?;
+    configure_handshake_stream(&transfer, || MeshEnrollmentProcessError::TransferIo)?;
+    transfer
+        .shutdown(Shutdown::Read)
+        .map_err(|_| MeshEnrollmentProcessError::TransferIo)?;
+
+    let prepared = match prepare_enrollment(&mut control, environment_id, generation).await {
+        Ok(prepared) => prepared,
+        Err(error) => return fail_startup(&control, error),
+    };
+    if let Err(error) = await_confinement_admission(&mut control) {
+        return fail_startup(&control, error);
+    }
+    if lock_process_privileges().is_err() {
+        return fail_startup(&control, MeshEnrollmentProcessError::PrivilegeConfinement);
+    }
+    drop(prepared);
+    if install_deny_all_filesystem_domain().is_err() {
+        return fail_startup(&control, MeshEnrollmentProcessError::FilesystemConfinement);
+    }
+    if install_inet_stream_only_syscalls(
+        ENROLLMENT_DENIED_SYSCALLS,
+        ENROLLMENT_ARCH_DENIED_SYSCALLS,
+    )
+    .is_err()
+    {
+        return fail_startup(&control, MeshEnrollmentProcessError::SyscallConfinement);
+    }
+
+    let enrollment = qualified_host_fixture_enrollment(environment_id, generation);
+    let enrollment = encode_mesh_transport_enrollment(enrollment.as_str())
+        .map_err(|_| MeshEnrollmentProcessError::InvalidEnrollmentResponse)?;
+    if transfer.write_all(enrollment.as_ref()).is_err()
+        || transfer.flush().is_err()
+        || transfer.shutdown(Shutdown::Write).is_err()
+    {
+        return fail_startup(&control, MeshEnrollmentProcessError::TransferIo);
+    }
+    drop(enrollment);
+    write_status(&control, MESH_ENROLLMENT_READY_MESSAGE)
+        .map_err(|_| MeshEnrollmentProcessError::StatusIo)
+}
+
+pub(crate) fn qualified_host_fixture_enrollment(
+    environment_id: Uuid,
+    generation: u64,
+) -> Zeroizing<String> {
+    Zeroizing::new(format!(
+        "cw_enr_smoke_{}_{}",
+        environment_id.simple(),
+        generation
+    ))
+}
+
 async fn prepare_enrollment(
     control: &mut StdUnixStream,
     environment_id: Uuid,
@@ -550,6 +615,9 @@ fn pinned_http_client(
 fn await_confinement_admission(
     control: &mut StdUnixStream,
 ) -> Result<(), MeshEnrollmentProcessError> {
+    control
+        .set_read_timeout(Some(MESH_ENROLLMENT_CONFINEMENT_ADMISSION_TIMEOUT))
+        .map_err(|_| MeshEnrollmentProcessError::BootstrapIo)?;
     let mut admission = vec![0_u8; MESH_ENROLLMENT_CONFINE_MESSAGE.len()];
     control
         .read_exact(&mut admission)
@@ -701,5 +769,17 @@ mod tests {
             Err(MeshEnrollmentProcessError::InheritedDescriptor)
         ));
         drop(client);
+    }
+
+    #[test]
+    fn qualified_host_enrollment_is_bound_to_environment_and_generation() {
+        let environment_id = Uuid::new_v4();
+        let first = qualified_host_fixture_enrollment(environment_id, 7);
+        let restarted = qualified_host_fixture_enrollment(environment_id, 8);
+        let other = qualified_host_fixture_enrollment(Uuid::new_v4(), 7);
+
+        assert!(first.starts_with("cw_enr_smoke_"));
+        assert_ne!(first.as_str(), restarted.as_str());
+        assert_ne!(first.as_str(), other.as_str());
     }
 }

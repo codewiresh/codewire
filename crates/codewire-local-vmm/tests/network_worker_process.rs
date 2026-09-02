@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, RawFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -16,8 +16,19 @@ use codewire_local_vmm::egress_broker::{
 use codewire_local_vmm::host_port::{
     HOST_PORT_CONTROL_KEY_LEN, HostPortBinding, HostPortControlFrame,
 };
+use codewire_local_vmm::mesh_enrollment::{
+    MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
+    MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE, MESH_ENROLLMENT_TRANSFER_FD,
+    encode_mesh_enrollment_bootstrap,
+};
 use codewire_local_vmm::mesh_ingress::{
-    MESH_INGRESS_CONTROL_KEY_LEN, MeshIngressBinding, MeshIngressControlFrame,
+    MESH_INGRESS_CONTROL_FRAME_LEN, MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment,
+    MeshIngressBinding, MeshIngressControlFrame, MeshIngressControlReceiver,
+};
+use codewire_local_vmm::mesh_process::{
+    MESH_TRANSPORT_BOOTSTRAP_FD, MESH_TRANSPORT_CONFINE_MESSAGE, MESH_TRANSPORT_CONFINED_MESSAGE,
+    MESH_TRANSPORT_ENROLLMENT_FD, MESH_TRANSPORT_PREPARED_MESSAGE, MESH_TRANSPORT_READY_MESSAGE,
+    encode_mesh_transport_bootstrap,
 };
 use codewire_local_vmm::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, WORKER_BROKER_READY_MESSAGE,
@@ -419,6 +430,168 @@ fn confined_product_worker_authenticates_the_separate_broker_capability() {
     );
 }
 
+#[test]
+fn confined_mesh_fixture_completes_runner_handshake_and_stream_transfer() {
+    const REQUEST: &[u8] = b"CWMESH1 host";
+    const RESPONSE: &[u8] = b"CWMESH1 guest";
+    const ACKNOWLEDGEMENT: &[u8] = b"CWMESH1 ack";
+
+    let directory = tempfile::tempdir().unwrap();
+    let vm_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+    let generation = 9_u64;
+    let guest_port = 3_001;
+    let submission_key = [0x6d; MESH_INGRESS_CONTROL_KEY_LEN];
+    let attachment = MeshAttachment::new(
+        "http://127.0.0.1:1",
+        "org-qualified-smoke",
+        "network-qualified-smoke",
+        "native-qualified-smoke",
+        [guest_port],
+    )
+    .unwrap();
+
+    let (mut transport_control, transport_control_child) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    let (mut enrollment_control, enrollment_control_child) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    let (enrollment_transfer, transport_enrollment) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    for stream in [&transport_control, &enrollment_control] {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+    }
+
+    let mut transport_command = Command::new(env!("CARGO_BIN_EXE_codewire-local-vmm-smoke"));
+    transport_command
+        .arg("__native-mesh-transport")
+        .arg("--environment-id")
+        .arg(vm_id.to_string())
+        .arg("--generation")
+        .arg(generation.to_string())
+        .env_clear()
+        .current_dir(directory.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let transport_control_source = duplicate_high_fd(transport_control_child.as_raw_fd());
+    let transport_enrollment_source = duplicate_high_fd(transport_enrollment.as_raw_fd());
+    prepare_inherited_descriptor_pair(
+        &mut transport_command,
+        transport_control_source.as_raw_fd(),
+        MESH_TRANSPORT_BOOTSTRAP_FD,
+        transport_enrollment_source.as_raw_fd(),
+        MESH_TRANSPORT_ENROLLMENT_FD,
+    );
+    let mut transport = ChildGuard(transport_command.spawn().unwrap());
+    drop(transport_control_source);
+    drop(transport_enrollment_source);
+    drop(transport_control_child);
+    drop(transport_enrollment);
+
+    let mut enrollment_command = Command::new(env!("CARGO_BIN_EXE_codewire-local-vmm-smoke"));
+    enrollment_command
+        .arg("__native-mesh-enrollment-broker")
+        .arg("--environment-id")
+        .arg(vm_id.to_string())
+        .arg("--generation")
+        .arg(generation.to_string())
+        .arg("--mesh-data-dir")
+        .arg(directory.path())
+        .arg("--platform-config-dir")
+        .arg(directory.path())
+        .env_clear()
+        .current_dir(directory.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let enrollment_control_source = duplicate_high_fd(enrollment_control_child.as_raw_fd());
+    let enrollment_transfer_source = duplicate_high_fd(enrollment_transfer.as_raw_fd());
+    prepare_inherited_descriptor_pair(
+        &mut enrollment_command,
+        enrollment_control_source.as_raw_fd(),
+        MESH_ENROLLMENT_BOOTSTRAP_FD,
+        enrollment_transfer_source.as_raw_fd(),
+        MESH_ENROLLMENT_TRANSFER_FD,
+    );
+    let mut enrollment = ChildGuard(enrollment_command.spawn().unwrap());
+    drop(enrollment_control_source);
+    drop(enrollment_transfer_source);
+    drop(enrollment_control_child);
+    drop(enrollment_transfer);
+
+    let transport_bootstrap =
+        encode_mesh_transport_bootstrap(vm_id, generation, &attachment, &submission_key).unwrap();
+    transport_control
+        .write_all(transport_bootstrap.as_ref())
+        .unwrap();
+    assert_eq!(
+        read_status_frame(&mut transport_control),
+        MESH_TRANSPORT_PREPARED_MESSAGE
+    );
+
+    let enrollment_bootstrap =
+        encode_mesh_enrollment_bootstrap(vm_id, generation, &attachment).unwrap();
+    enrollment_control.write_all(&enrollment_bootstrap).unwrap();
+    assert_eq!(
+        read_status_frame(&mut enrollment_control),
+        MESH_ENROLLMENT_PREPARED_MESSAGE
+    );
+
+    transport_control
+        .write_all(MESH_TRANSPORT_CONFINE_MESSAGE)
+        .unwrap();
+    assert_eq!(
+        read_status_frame(&mut transport_control),
+        MESH_TRANSPORT_CONFINED_MESSAGE
+    );
+    enrollment_control
+        .write_all(MESH_ENROLLMENT_CONFINE_MESSAGE)
+        .unwrap();
+    assert_eq!(
+        read_status_frame(&mut enrollment_control),
+        MESH_ENROLLMENT_READY_MESSAGE
+    );
+    assert!(enrollment.wait_bounded().success());
+    assert_eq!(
+        read_status_frame(&mut transport_control),
+        MESH_TRANSPORT_READY_MESSAGE
+    );
+
+    let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
+    transport_control.read_exact(&mut frame).unwrap();
+    let decoded = MeshIngressControlReceiver::new(vm_id, generation, &[guest_port])
+        .unwrap()
+        .decode(&frame, &submission_key)
+        .unwrap();
+    assert_eq!(decoded.binding.guest_port, guest_port);
+    let descriptor = receive_descriptor(
+        transport_control.as_raw_fd(),
+        MESH_INGRESS_DESCRIPTOR_MARKER,
+    );
+    let mut stream = std::os::unix::net::UnixStream::from(descriptor);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut request = [0_u8; REQUEST.len()];
+    stream.read_exact(&mut request).unwrap();
+    assert_eq!(&request, REQUEST);
+    stream.write_all(RESPONSE).unwrap();
+    let mut acknowledgement = [0_u8; ACKNOWLEDGEMENT.len()];
+    stream.read_exact(&mut acknowledgement).unwrap();
+    assert_eq!(&acknowledgement, ACKNOWLEDGEMENT);
+
+    drop(stream);
+    drop(transport_control);
+    assert!(transport.wait_bounded().success());
+}
+
 fn prepare_inherited_descriptor(command: &mut Command, source: RawFd, target: RawFd) {
     // SAFETY: the hook performs only descriptor syscalls before exec and
     // admits exactly one connected bootstrap capability at the fixed fd.
@@ -438,6 +611,48 @@ fn prepare_inherited_descriptor(command: &mut Command, source: RawFd, target: Ra
             }
             if libc::fcntl(target, libc::F_SETFD, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+fn duplicate_high_fd(source: RawFd) -> OwnedFd {
+    let duplicated = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10) };
+    assert!(
+        duplicated >= 10,
+        "could not duplicate inherited fixture descriptor"
+    );
+    unsafe { OwnedFd::from_raw_fd(duplicated) }
+}
+
+fn prepare_inherited_descriptor_pair(
+    command: &mut Command,
+    first_source: RawFd,
+    first_target: RawFd,
+    second_source: RawFd,
+    second_target: RawFd,
+) {
+    assert_ne!(first_source, second_source);
+    assert_ne!(first_target, second_target);
+    assert!(first_source >= 10 && second_source >= 10);
+    // SAFETY: both sources are collision-free high descriptors kept alive
+    // through spawn. The hook performs only descriptor syscalls before exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::syscall(
+                libc::SYS_close_range,
+                3_u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            for (source, target) in [(first_source, first_target), (second_source, second_target)] {
+                if libc::dup2(source, target) == -1 || libc::fcntl(target, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
@@ -491,4 +706,43 @@ fn send_descriptor(bootstrap: RawFd, descriptor: RawFd, descriptor_marker: u8) {
         unsafe { libc::sendmsg(bootstrap, &raw const message, libc::MSG_NOSIGNAL) },
         marker.len() as isize
     );
+}
+
+fn receive_descriptor(control_fd: RawFd, expected_marker: u8) -> OwnedFd {
+    let mut marker = [0_u8];
+    let mut vector = libc::iovec {
+        iov_base: marker.as_mut_ptr().cast(),
+        iov_len: marker.len(),
+    };
+    let mut control = ControlBuffer {
+        bytes: [0_u8; CONTROL_BYTES],
+    };
+    let control_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as usize };
+    assert!(control_space <= CONTROL_BYTES);
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &raw mut vector;
+    message.msg_iovlen = 1;
+    message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
+    message.msg_controllen = control_space;
+    assert_eq!(
+        unsafe { libc::recvmsg(control_fd, &raw mut message, libc::MSG_CMSG_CLOEXEC) },
+        marker.len() as isize
+    );
+    assert_eq!(marker[0], expected_marker);
+    assert_eq!(message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC), 0);
+    let header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
+    assert!(!header.is_null());
+    assert_eq!(unsafe { (*header).cmsg_level }, libc::SOL_SOCKET);
+    assert_eq!(unsafe { (*header).cmsg_type }, libc::SCM_RIGHTS);
+    assert_eq!(unsafe { (*header).cmsg_len }, unsafe {
+        libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as usize
+    });
+    assert!(unsafe { libc::CMSG_NXTHDR(&raw const message, header) }.is_null());
+    let descriptor = unsafe { std::ptr::read(libc::CMSG_DATA(header).cast::<RawFd>()) };
+    assert!(descriptor >= 0);
+    assert_ne!(
+        unsafe { libc::fcntl(descriptor, libc::F_GETFD) } & libc::FD_CLOEXEC,
+        0
+    );
+    unsafe { OwnedFd::from_raw_fd(descriptor) }
 }

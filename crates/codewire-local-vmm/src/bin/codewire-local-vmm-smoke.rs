@@ -20,7 +20,13 @@ fn main() {
     let egress_broker = isolated_command
         .as_ref()
         .is_some_and(|argument| argument == "__native-egress-broker");
-    let isolated_process = network_worker || egress_broker;
+    let mesh_transport = isolated_command
+        .as_ref()
+        .is_some_and(|argument| argument == "__native-mesh-transport");
+    let mesh_enrollment = isolated_command
+        .as_ref()
+        .is_some_and(|argument| argument == "__native-mesh-enrollment-broker");
+    let isolated_process = network_worker || egress_broker || mesh_transport || mesh_enrollment;
     let mut runtime = if isolated_process {
         tokio::runtime::Builder::new_current_thread()
     } else {
@@ -45,6 +51,18 @@ fn main() {
         if egress_broker {
             let code = error
                 .downcast_ref::<codewire_local_vmm::egress_broker::EgressBrokerProcessError>()
+                .map_or(1, |error| error.exit_code());
+            std::process::exit(code);
+        }
+        if mesh_transport {
+            let code = error
+                .downcast_ref::<codewire_local_vmm::mesh_process::MeshTransportProcessError>()
+                .map_or(1, |error| error.exit_code());
+            std::process::exit(code);
+        }
+        if mesh_enrollment {
+            let code = error
+                .downcast_ref::<codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError>()
                 .map_or(1, |error| error.exit_code());
             std::process::exit(code);
         }
@@ -77,6 +95,7 @@ mod linux {
     use codewire_local_vmm::linux::state::{
         StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
     };
+    use codewire_local_vmm::mesh_ingress::MeshAttachment;
     use codewire_local_vmm::network_worker::{
         BoxedBrokerStream, BrokerDnsAnswer, EgressBroker, TcpFlow,
     };
@@ -119,6 +138,10 @@ mod linux {
     const HOST_PORT_GUEST_PORT: u16 = 3_000;
     const HOST_PORT_REQUEST: &[u8] = b"CWPORT1 host";
     const HOST_PORT_RESPONSE: &[u8] = b"CWPORT1 guest";
+    const MESH_GUEST_PORT: u16 = 3_001;
+    const MESH_REQUEST: &[u8] = b"CWMESH1 host";
+    const MESH_RESPONSE: &[u8] = b"CWMESH1 guest";
+    const MESH_ACKNOWLEDGEMENT: &[u8] = b"CWMESH1 ack";
     const PROBE_PTY_TERM: &str = "xterm-256color";
     const PROBE_PTY_WIDTH: i32 = 80;
     const PROBE_PTY_HEIGHT: i32 = 24;
@@ -174,6 +197,7 @@ mod linux {
                 "__native-network-worker"
                     | "__native-network-worker-fixture"
                     | "__native-egress-broker"
+                    | "__native-mesh-transport"
             )
         {
             let environment_id = Uuid::parse_str(environment_id)
@@ -207,8 +231,50 @@ mod linux {
                     .await
                     .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
                 }
+                "__native-mesh-transport" => {
+                    codewire_local_vmm::mesh_process::run_inherited_mesh_transport_fixture(
+                        environment_id,
+                        generation,
+                        MESH_REQUEST,
+                        MESH_RESPONSE,
+                        MESH_ACKNOWLEDGEMENT,
+                    )
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+                }
                 _ => unreachable!("isolated command was validated"),
             };
+        }
+        if let [
+            command,
+            environment_flag,
+            environment_id,
+            generation_flag,
+            generation,
+            mesh_root_flag,
+            mesh_root,
+            platform_root_flag,
+            platform_root,
+        ] = raw_arguments.as_slice()
+            && command == "__native-mesh-enrollment-broker"
+            && environment_flag == "--environment-id"
+            && generation_flag == "--generation"
+            && mesh_root_flag == "--mesh-data-dir"
+            && platform_root_flag == "--platform-config-dir"
+            && Path::new(mesh_root).is_absolute()
+            && Path::new(platform_root).is_absolute()
+        {
+            let environment_id = Uuid::parse_str(environment_id)
+                .map_err(|_| failure("Mesh enrollment environment ID is invalid"))?;
+            let generation = generation
+                .parse::<u64>()
+                .map_err(|_| failure("Mesh enrollment generation is invalid"))?;
+            return codewire_local_vmm::mesh_enrollment::run_inherited_mesh_enrollment_fixture(
+                environment_id,
+                generation,
+            )
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>);
         }
         let arguments = match Args::parse(raw_arguments) {
             Ok(Some(arguments)) => arguments,
@@ -768,7 +834,9 @@ mod linux {
         drop(collision);
         observation("host_port.collision", "rejected");
         let prepared_four = match runner
-            .prepare(request_with_host_port(5, arguments, resources, host_port))
+            .prepare(request_with_host_port_and_mesh(
+                5, arguments, resources, host_port,
+            ))
             .await
         {
             Ok(prepared) => prepared,
@@ -822,6 +890,10 @@ mod linux {
             .egress_broker_process_identity()
             .ok_or_else(|| failure("product egress broker identity is absent"))?
             .clone();
+        let fourth_mesh = fourth
+            .mesh_transport_process_identity()
+            .ok_or_else(|| failure("product Mesh transport identity is absent"))?
+            .clone();
         observation("vm.generation.5.product_process_identities", true);
         let fourth_client = connect_ready_daemon(&mut fourth).await?;
         observation("vm.generation.5.daemon_ready", true);
@@ -843,6 +915,8 @@ mod linux {
             return Err(error);
         }
         observation("host_port.generation_5_round_trip", true);
+        require_mesh_round_trip(&fourth_client, 5).await?;
+        observation("mesh.generation_5_round_trip", true);
         fourth.force_kill_egress_broker_for_verification()?;
         observation("vm.generation.5.egress_broker_kill_sent", true);
         wait_for_egress_broker_failure(&mut fourth).await?;
@@ -876,9 +950,12 @@ mod linux {
         wait_for_identity_to_end(&fourth_process).await?;
         wait_for_identity_to_end(&fourth_worker).await?;
         wait_for_identity_to_end(&fourth_broker).await?;
+        wait_for_identity_to_end(&fourth_mesh).await?;
 
         let prepared_five = runner
-            .prepare(request_with_host_port(6, arguments, resources, host_port))
+            .prepare(request_with_host_port_and_mesh(
+                6, arguments, resources, host_port,
+            ))
             .await?;
         require_same_disk(&disk_identity, prepared_five.state_disk_identity())?;
         require_loopback_port_reserved(host_port)?;
@@ -893,6 +970,15 @@ mod linux {
             .egress_broker_process_identity()
             .ok_or_else(|| failure("restarted product egress broker identity is absent"))?
             .clone();
+        let fifth_mesh = fifth
+            .mesh_transport_process_identity()
+            .ok_or_else(|| failure("restarted product Mesh transport identity is absent"))?
+            .clone();
+        if fifth_mesh == fourth_mesh {
+            return Err(failure(
+                "Mesh transport identity was reused across generations",
+            ));
+        }
         let fifth_client = connect_ready_daemon(&mut fifth).await?;
         require_identity(
             &run_guest_command(&fifth_client, &["identity"]).await?,
@@ -911,6 +997,12 @@ mod linux {
             return Err(error);
         }
         observation("host_port.restart_restore", true);
+        require_mesh_round_trip(&fifth_client, 6).await?;
+        observation("mesh.restart_fresh_round_trip", true);
+        fifth.force_kill_mesh_transport_for_verification()?;
+        observation("vm.generation.6.mesh_transport_kill_sent", true);
+        wait_for_mesh_transport_failure(&mut fifth).await?;
+        observation("vm.generation.6.mesh_transport_loss_observed", true);
         drop(fifth_client);
         match fifth.stop().await? {
             ExitClass::GuestShutdown => {}
@@ -935,6 +1027,7 @@ mod linux {
         wait_for_identity_to_end(&fifth_process).await?;
         wait_for_identity_to_end(&fifth_worker).await?;
         wait_for_identity_to_end(&fifth_broker).await?;
+        wait_for_identity_to_end(&fifth_mesh).await?;
         wait_for_loopback_port_released(host_port).await?;
         observation("host_port.stop_release", true);
 
@@ -966,11 +1059,18 @@ mod linux {
         let current = std::env::current_exe().map_err(|_| RunnerError::InvalidNetworkWorker)?;
         let executable =
             std::fs::canonicalize(current).map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        let credential_root = running.paths().vm_dir.clone();
         running
-            .start_network_worker(&executable, DAEMON_READY_TIMEOUT)
+            .start_network_worker_with_mesh_credentials(
+                &executable,
+                DAEMON_READY_TIMEOUT,
+                &credential_root,
+                &credential_root,
+            )
             .await?;
         if running.network_worker_process_identity().is_none()
             || running.egress_broker_process_identity().is_none()
+            || running.mesh_transport_process_identity().is_none()
         {
             return Err(RunnerError::InvalidNetworkWorker);
         }
@@ -1121,6 +1221,15 @@ mod linux {
             | RunnerError::EgressBrokerStartup(_)
             | RunnerError::EgressBrokerWait
             | RunnerError::EgressBrokerKillTimeout => "egress-broker",
+            RunnerError::MeshTransportSpawn
+            | RunnerError::MeshTransportStartTimeout
+            | RunnerError::MeshTransportBootstrap
+            | RunnerError::MeshTransportStartup(_) => "mesh-transport",
+            RunnerError::MeshEnrollmentBrokerSpawn
+            | RunnerError::MeshEnrollmentBrokerStartTimeout
+            | RunnerError::MeshEnrollmentBrokerBootstrap
+            | RunnerError::MeshEnrollmentBrokerStartup(_) => "mesh-enrollment-broker",
+            RunnerError::MeshProcessWait | RunnerError::MeshProcessKillTimeout => "mesh-process",
             _ => "runner",
         }
     }
@@ -1192,6 +1301,26 @@ mod linux {
             HostPortBinding::new(host_port, HOST_PORT_GUEST_PORT)
                 .expect("smoke host-port constants are valid"),
         ];
+        request
+    }
+
+    fn request_with_host_port_and_mesh(
+        generation: u64,
+        arguments: &Args,
+        resources: RunResources,
+        host_port: u16,
+    ) -> CreateVmRequest {
+        let mut request = request_with_host_port(generation, arguments, resources, host_port);
+        request.mesh = Some(
+            MeshAttachment::new(
+                "http://127.0.0.1:1",
+                "org-qualified-smoke",
+                "network-qualified-smoke",
+                "native-qualified-smoke",
+                [MESH_GUEST_PORT],
+            )
+            .expect("qualified Mesh attachment is canonical"),
+        );
         request
     }
 
@@ -1748,6 +1877,49 @@ mod linux {
                 observation("vm.egress_broker_loss_exit", "timeout");
                 Err(failure("egress broker did not exit after exact pidfd kill"))
             }
+        }
+    }
+
+    async fn wait_for_mesh_transport_failure(running: &mut RunningVm) -> SmokeResult<()> {
+        match tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match running.try_exit()? {
+                    ExitClass::MeshTransportFailure(_) => return Ok(()),
+                    ExitClass::StillRunning => tokio::time::sleep(Duration::from_millis(20)).await,
+                    ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {
+                        return Err(failure(
+                            "VMM exited while proving isolated Mesh transport loss",
+                        ));
+                    }
+                    ExitClass::NetworkWorkerFailure(_) => {
+                        return Err(failure(
+                            "network worker exited before Mesh transport loss was observed",
+                        ));
+                    }
+                    ExitClass::EgressBrokerFailure(_) => {
+                        return Err(failure(
+                            "egress broker exited before Mesh transport loss was observed",
+                        ));
+                    }
+                    ExitClass::IngressForwarderFailure => {
+                        return Err(failure(
+                            "host-port forwarder exited before Mesh transport loss was observed",
+                        ));
+                    }
+                    ExitClass::MeshIngressReceiverFailure => {
+                        return Err(failure(
+                            "Mesh ingress receiver exited before transport loss was observed",
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(failure(
+                "Mesh transport did not exit after exact pidfd kill",
+            )),
         }
     }
 
@@ -2420,8 +2592,75 @@ mod linux {
         Ok(())
     }
 
+    async fn require_mesh_round_trip(client: &SessionClient, generation: u64) -> SmokeResult<()> {
+        let script = mesh_guest_script(generation);
+        let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), script];
+        let received_path = mesh_received_path(generation);
+        let admitted = client
+            .launch(v1::LaunchSessionRequest {
+                command: command.clone(),
+                working_dir: "/workspace".to_owned(),
+                env: Vec::new(),
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await?;
+        wait_for_session_stdout_line(client, &admitted.session_id, "CWMESH1 handler-ready").await?;
+        wait_for_session_stdout_line(client, &admitted.session_id, "CWMESH1 ready").await?;
+
+        let record = wait_for_terminal_session(client, &admitted.session_id).await?;
+        if record.command != command
+            || record.state != v1::SessionLifecycleState::Exited as i32
+            || record.exit_code != Some(0)
+            || read_session_stdout(client, &record.session_id).await?
+                != "CWMESH1 handler-ready\nCWMESH1 ready\nCWMESH1 done\n"
+        {
+            return Err(failure("guest Mesh fixture did not exit cleanly"));
+        }
+        let verified = run_workspace_command(
+            client,
+            format!(
+                "test \"$(/bin/busybox cat {received_path})\" = 'CWMESH1 host|CWMESH1 ack' && /bin/busybox rm -f {received_path} && printf 'CWMESH1 verified\\n'"
+            ),
+        )
+        .await?;
+        if verified != "CWMESH1 verified\n" {
+            return Err(failure(
+                "guest did not complete exact Mesh request/response",
+            ));
+        }
+        Ok(())
+    }
+
     fn host_port_received_path(host_port: u16) -> String {
         format!("/workspace/.cw-host-port-{host_port}")
+    }
+
+    fn mesh_received_path(generation: u64) -> String {
+        format!("/workspace/.cw-mesh-{generation}")
+    }
+
+    fn mesh_guest_script(generation: u64) -> String {
+        let received_path = mesh_received_path(generation);
+        let handler_path = format!("/workspace/.cw-mesh-handler-{generation}");
+        let guest_port_hex = format!("{MESH_GUEST_PORT:04X}");
+        format!(
+            "/bin/busybox rm -f {received_path} {handler_path}; \
+             /bin/busybox printf '#!/bin/sh\\nrequest=\"$(/bin/busybox dd bs={} count=1 2>/dev/null)\"\\ntest \"$request\" = \"CWMESH1 host\" || exit 71\\nprintf \"CWMESH1 guest\"\\nack=\"$(/bin/busybox dd bs={} count=1 2>/dev/null)\"\\ntest \"$ack\" = \"CWMESH1 ack\" || exit 72\\nprintf \"%%s|%%s\" \"$request\" \"$ack\" > {received_path}\\n' > {handler_path}; \
+             /bin/busybox chmod 0700 {handler_path}; printf 'CWMESH1 handler-ready\\n'; \
+             /bin/busybox nc -l -s 0.0.0.0 -p {MESH_GUEST_PORT} -e {handler_path} & \
+             server=\"$!\"; ready=0; i=0; \
+             while test \"$i\" -lt 200; do \
+               if /bin/busybox grep -q ':{guest_port_hex} .* 0A ' /proc/net/tcp; then ready=1; break; fi; \
+               i=$((i + 1)); /bin/busybox sleep 0.05; \
+             done; \
+             test \"$ready\" -eq 1; printf 'CWMESH1 ready\\n'; \
+             wait \"$server\"; /bin/busybox rm -f {handler_path}; printf 'CWMESH1 done\\n'",
+            MESH_REQUEST.len(),
+            MESH_ACKNOWLEDGEMENT.len(),
+        )
     }
 
     fn host_port_guest_script(host_port: u16) -> String {
@@ -3256,6 +3495,19 @@ mod linux {
             ));
             assert!(!script.contains("nc -l 0.0.0.0"));
             assert!(script.contains("/workspace/.cw-host-port-18080"));
+        }
+
+        #[test]
+        fn mesh_guest_fixture_binds_only_the_declared_guest_port() {
+            let script = mesh_guest_script(7);
+            assert!(script.contains(
+                "/bin/busybox nc -l -s 0.0.0.0 -p 3001 -e /workspace/.cw-mesh-handler-7"
+            ));
+            assert!(!script.contains("nc -l 0.0.0.0"));
+            assert!(script.contains("/workspace/.cw-mesh-7"));
+            assert!(script.contains("CWMESH1 host"));
+            assert!(script.contains("CWMESH1 guest"));
+            assert!(script.contains("CWMESH1 ack"));
         }
 
         #[test]

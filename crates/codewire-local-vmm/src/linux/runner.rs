@@ -4260,6 +4260,17 @@ mod tests {
             network_stack_attach_timeout(Duration::from_secs(15), NetworkWorkerMode::Product)
                 > EGRESS_BROKER_READY_TIMEOUT
         );
+        assert!(
+            MESH_STACK_ATTACH_TIMEOUT
+                > crate::mesh_process::MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT,
+            "the Mesh stack must retain a margin around exact child admission"
+        );
+        assert!(
+            crate::mesh_process::MESH_TRANSPORT_CONFINEMENT_ADMISSION_TIMEOUT
+                >= crate::mesh_enrollment::MESH_ENROLLMENT_CONFINEMENT_ADMISSION_TIMEOUT
+                    .saturating_mul(2),
+            "transport admission must cover its own and the enrollment child's exact captures"
+        );
         assert_eq!(
             network_stack_attach_timeout(Duration::from_secs(20 * 60), NetworkWorkerMode::Product),
             Duration::from_secs(40)
