@@ -30,12 +30,14 @@ fn permission(operation: &str, route: &str) -> GrantPermission {
 }
 
 fn catalog(auth_kinds: impl IntoIterator<Item = CredentialAuthKind>) -> ProviderCatalog {
+    let authentication_kinds = auth_kinds.into_iter().collect::<BTreeSet<_>>();
     ProviderCatalog::from_definitions([ProviderDefinition {
         id: provider_id("openai"),
+        authentication_kinds: authentication_kinds.clone(),
         capabilities: [(
             slot("codex"),
             CapabilityPolicy {
-                authentication_kinds: auth_kinds.into_iter().collect(),
+                authentication_kinds,
                 permissions: [permission("responses", "openai-api")]
                     .into_iter()
                     .collect(),
@@ -520,6 +522,7 @@ fn organization_profile_cannot_select_a_personal_credential() {
 fn duplicate_and_empty_provider_definitions_fail_closed() {
     let definition = ProviderDefinition {
         id: provider_id("openai"),
+        authentication_kinds: [CredentialAuthKind::OAuth].into_iter().collect(),
         capabilities: [(
             slot("codex"),
             CapabilityPolicy {
@@ -539,10 +542,44 @@ fn duplicate_and_empty_provider_definitions_fail_closed() {
     assert_eq!(
         ProviderCatalog::from_definitions([ProviderDefinition {
             id: provider_id("empty"),
+            authentication_kinds: BTreeSet::new(),
             capabilities: BTreeMap::new(),
         }]),
         Err(AccessError::EmptyCollection {
-            field: "provider capabilities"
+            field: "provider authentication kinds"
         })
     );
+
+    let storable_only = ProviderCatalog::from_definitions([ProviderDefinition {
+        id: provider_id("github"),
+        authentication_kinds: [CredentialAuthKind::OAuth].into_iter().collect(),
+        capabilities: BTreeMap::new(),
+    }])
+    .expect("storable provider without a runnable capability");
+    assert!(
+        storable_only
+            .get(&provider_id("github"))
+            .unwrap()
+            .supports_authentication_kind(CredentialAuthKind::OAuth)
+    );
+
+    assert!(matches!(
+        ProviderCatalog::from_definitions([ProviderDefinition {
+            id: provider_id("mismatch"),
+            authentication_kinds: [CredentialAuthKind::OAuth].into_iter().collect(),
+            capabilities: BTreeMap::from([(
+                slot("codex"),
+                CapabilityPolicy {
+                    authentication_kinds: [CredentialAuthKind::ApiKey].into_iter().collect(),
+                    permissions: [permission("responses", "openai-api")]
+                        .into_iter()
+                        .collect(),
+                },
+            )]),
+        }]),
+        Err(AccessError::UnsupportedAuthenticationKind {
+            kind: CredentialAuthKind::ApiKey,
+            ..
+        })
+    ));
 }

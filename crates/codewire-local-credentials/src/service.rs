@@ -1187,10 +1187,12 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         | LocalCredentialError::ProtectedStoreMismatch
         | LocalCredentialError::UnsupportedSchema
         | LocalCredentialError::InvalidDatabase
-        | LocalCredentialError::CorruptMetadata
-        | LocalCredentialError::Access(_) => {
+        | LocalCredentialError::CorruptMetadata => {
             Status::failed_precondition("local credential operation cannot be applied")
         }
+        // AccessError is deliberately material-free and carries the stable
+        // provider/profile diagnostic needed to repair a rejected selection.
+        LocalCredentialError::Access(error) => Status::failed_precondition(error.to_string()),
         LocalCredentialError::DatabaseUnavailable | LocalCredentialError::ProtectedStore(_) => {
             Status::unavailable("local credential authority storage is unavailable")
         }

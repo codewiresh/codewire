@@ -55,6 +55,8 @@ CREDENTIAL_PROFILE_NAME='native-broker'
 CREDENTIAL_ID=''
 CREDENTIAL_CANARY=''
 CREDENTIAL_REFRESH_CANARY=''
+GITHUB_CREDENTIAL_ID=''
+GITHUB_CREDENTIAL_CANARY=''
 KEYRING_ROOT=''
 KEYRING_RUNTIME=''
 KEYRING_RUNTIME_PARENT=''
@@ -102,9 +104,9 @@ transport-loss recovery, and journaled exact deletion cleanup.
 With --managed-credential-broker, it instead runs the focused protected-store
 product proof. That mode requires a specially featured cw binary named exactly
 cw-local-credential-broker-smoke, an isolated Secret Service implementation,
-and a private tmpfs-backed XDG runtime. It enrolls a synthetic Codex OAuth
-identity through the public command; it never contacts the provider or reads
-the desktop session keyring.
+and a private tmpfs-backed XDG runtime. It enrolls synthetic Codex and GitHub
+OAuth identities through the public commands; it never contacts either
+provider or reads the desktop session keyring or an ambient provider home.
 USAGE
 }
 
@@ -446,6 +448,22 @@ run_cw_connect_synthetic_codex() {
   LAST_STDERR="$stderr_file"
 }
 
+run_cw_connect_synthetic_github() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! cw_isolated credentials --local connect github \
+    --name native-broker-github >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'connecting the synthetic local GitHub credential failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  LAST_STDOUT="$stdout_file"
+  LAST_STDERR="$stderr_file"
+}
+
 run_cw() {
   local stdout_file stderr_file
   COMMAND_INDEX=$((COMMAND_INDEX + 1))
@@ -757,6 +775,7 @@ case "${1-}" in
     [ "$XDG_CONFIG_HOME" = "$CODEX_HOME" ]
     [ "$XDG_CACHE_HOME" = "$CODEX_HOME" ]
     [ "$TMPDIR" = "$CODEX_HOME" ]
+    [ "$(pwd -P)" = "$CODEX_HOME" ]
     [ -z "${XDG_RUNTIME_DIR+x}" ]
     [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
     [ -z "${OPENAI_API_KEY+x}" ]
@@ -788,6 +807,59 @@ EOF
   chmod 0700 "$SMOKE_ROOT/bin/codex"
   touch "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
   chmod 0600 "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
+}
+
+install_synthetic_github() {
+  cat >"$SMOKE_ROOT/bin/gh" <<'EOF'
+#!/bin/sh
+set -eu
+
+case "${1-}:${2-}" in
+  auth:login)
+    [ "$#" -eq 9 ]
+    [ "$3" = '--hostname' ]
+    [ "$4" = 'github.com' ]
+    [ "$5" = '--git-protocol' ]
+    [ "$6" = 'https' ]
+    [ "$7" = '--web' ]
+    [ "$8" = '--insecure-storage' ]
+    [ "$9" = '--skip-ssh-key' ]
+    [ "$HOME" = "$GH_CONFIG_DIR" ]
+    [ "$XDG_CONFIG_HOME" = "$GH_CONFIG_DIR" ]
+    [ "$XDG_CACHE_HOME" = "$GH_CONFIG_DIR" ]
+    [ "$TMPDIR" = "$GH_CONFIG_DIR" ]
+    [ "$(pwd -P)" = "$GH_CONFIG_DIR" ]
+    [ "$PATH" = '/usr/bin:/bin' ]
+    [ -z "${XDG_RUNTIME_DIR+x}" ]
+    [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
+    [ -z "${GH_TOKEN+x}" ]
+    [ -z "${GITHUB_TOKEN+x}" ]
+    login_parent=${GH_CONFIG_DIR%/*}
+    [ -f "$login_parent/.codewire-synthetic-login-root" ]
+    [ "$(findmnt -nro FSTYPE -T "$GH_CONFIG_DIR")" = tmpfs ]
+    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
+    [ "${#boot_id}" -eq 32 ]
+    oauth_token="cwlocalgithub$boot_id"
+    umask 077
+    printf 'github.com:\n  user: synthetic-smoke\n  oauth_token: %s\n  git_protocol: https\n' \
+      "$oauth_token" >"$GH_CONFIG_DIR/hosts.yml"
+    chmod 0600 "$GH_CONFIG_DIR/hosts.yml"
+    ;;
+  auth:token)
+    [ "$#" -eq 4 ]
+    [ "$3" = '--hostname' ]
+    [ "$4" = 'github.com' ]
+    [ -f "$GH_CONFIG_DIR/hosts.yml" ]
+    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
+    [ "${#boot_id}" -eq 32 ]
+    printf '%s\n' "cwlocalgithub$boot_id"
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+EOF
+  chmod 0700 "$SMOKE_ROOT/bin/gh"
 }
 
 secret_tool_isolated() {
@@ -1268,43 +1340,73 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   start_isolated_keyring
   CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   CREDENTIAL_REFRESH_CANARY="cwlocalrefresh$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  GITHUB_CREDENTIAL_CANARY="cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   [[ ${#CREDENTIAL_CANARY} -ge 16 && ${#CREDENTIAL_CANARY} -le 256 &&
      "$CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated credential canary is invalid'
   [[ ${#CREDENTIAL_REFRESH_CANARY} -ge 16 && ${#CREDENTIAL_REFRESH_CANARY} -le 256 &&
      "$CREDENTIAL_REFRESH_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated credential refresh canary is invalid'
+  [[ ${#GITHUB_CREDENTIAL_CANARY} -ge 16 && ${#GITHUB_CREDENTIAL_CANARY} -le 256 &&
+     "$GITHUB_CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated GitHub credential canary is invalid'
   install_synthetic_codex
-  for canary in "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY"; do
-    if rg -qF "$canary" "$SMOKE_ROOT/bin/codex"; then
-      die 'synthetic Codex executable contains a generated credential canary'
+  install_synthetic_github
+  for canary in "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY" \
+    "$GITHUB_CREDENTIAL_CANARY"; do
+    if rg -qF "$canary" "$SMOKE_ROOT/bin/codex" "$SMOKE_ROOT/bin/gh"; then
+      die 'synthetic provider executable contains a generated credential canary'
     fi
   done
 
-  log 'enrolling one synthetic protected Codex OAuth credential through the public command'
+  log 'enrolling synthetic protected Codex and GitHub OAuth credentials through public commands'
   run_cw_connect_synthetic_codex
+  run_cw_connect_synthetic_github
   [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
     -name '.codewire-codex-login-*' -print -quit)" ]] ||
     die 'transient Codex login directory remained after enrollment'
+  [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
+    -name '.codewire-github-login-*' -print -quit)" ]] ||
+    die 'transient GitHub login directory remained after enrollment'
   run_cw credentials --local list --output json
   jq -e '
-    length == 1 and
-    .[0].placement == "local" and
-    .[0].owner == "user/local-user" and
-    .[0].provider == "openai" and
-    .[0].authentication_kind == "oauth" and
-    .[0].name == "native-broker-codex" and
-    .[0].account_hint == "native-smoke@example.test" and
-    .[0].status == "active" and
-    .[0].revocation_generation == 1 and
-    .[0].protected_store_persistence == "operating_system" and
-    .[0].cleanup_pending == false
+    length == 2 and
+    any(.[];
+      .placement == "local" and
+      .owner == "user/local-user" and
+      .provider == "openai" and
+      .authentication_kind == "oauth" and
+      .name == "native-broker-codex" and
+      .account_hint == "native-smoke@example.test" and
+      .status == "active" and
+      .revocation_generation == 1 and
+      .protected_store_persistence == "operating_system" and
+      .cleanup_pending == false
+    ) and
+    any(.[];
+      .placement == "local" and
+      .owner == "user/local-user" and
+      .provider == "github" and
+      .authentication_kind == "oauth" and
+      .name == "native-broker-github" and
+      .account_hint == null and
+      .status == "active" and
+      .revocation_generation == 1 and
+      .protected_store_persistence == "operating_system" and
+      .cleanup_pending == false
+    )
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic protected credential metadata drifted'
-  CREDENTIAL_ID="$(jq -er '.[0].id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+  CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "openai") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
     die 'synthetic protected credential ID is invalid'
+  GITHUB_CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "github") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+    die 'synthetic protected GitHub credential ID is invalid'
   run_cw credentials --local profile create "$CREDENTIAL_PROFILE_NAME"
   run_cw credentials --local profile set \
     "$CREDENTIAL_PROFILE_NAME" codex "$CREDENTIAL_ID"
+  run_cw_expect_failure credentials --local profile set \
+    "$CREDENTIAL_PROFILE_NAME" github "$GITHUB_CREDENTIAL_ID"
+  rg -qF 'provider github does not support slot github with this authentication kind' \
+    "$LAST_STDERR" || die 'unrouted GitHub capability did not fail closed'
   run_cw credentials --local profile get "$CREDENTIAL_PROFILE_NAME" --output json
   jq -e --arg credential "$CREDENTIAL_ID" '
     length == 1 and
@@ -1436,12 +1538,14 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     die 'broker-bound native stop returned before its lifecycle journal became terminal'
   scan_for_credential_canary before-delete-access-token "$CREDENTIAL_CANARY"
   scan_for_credential_canary before-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
+  scan_for_credential_canary before-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
 
   log 'deleting the environment, profile, credential, and protected-store entry'
   run_cw env rm --local "$NAME" --yes
   ENV_CREATED=0
   run_cw credentials --local profile delete "$CREDENTIAL_PROFILE_NAME" --yes
   run_cw credentials --local delete "$CREDENTIAL_ID" --yes
+  run_cw credentials --local delete "$GITHUB_CREDENTIAL_ID" --yes
   run_cw credentials --local list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'synthetic credential metadata remained after deletion'
@@ -1456,10 +1560,19 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     >/dev/null 2>"$SMOKE_ROOT/deleted-keyring-entry.stderr"; then
     die 'synthetic protected-store entry remained after credential deletion'
   fi
+  if secret_tool_isolated lookup \
+    application codewire \
+    service sh.codewire.credentials \
+    entry "local/credentials/$GITHUB_CREDENTIAL_ID/material-v1" \
+    >/dev/null 2>"$SMOKE_ROOT/deleted-github-keyring-entry.stderr"; then
+    die 'synthetic GitHub protected-store entry remained after credential deletion'
+  fi
   scan_for_credential_canary after-delete-access-token "$CREDENTIAL_CANARY"
   scan_for_credential_canary after-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
+  scan_for_credential_canary after-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
   unset CREDENTIAL_CANARY
   unset CREDENTIAL_REFRESH_CANARY
+  unset GITHUB_CREDENTIAL_CANARY
 
   [[ ! -e "$TRIPWIRE" ]] ||
     die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"

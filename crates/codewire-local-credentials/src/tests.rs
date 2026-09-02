@@ -150,6 +150,7 @@ fn environment(value: &str) -> EnvironmentId {
 fn catalog() -> ProviderCatalog {
     ProviderCatalog::from_definitions([ProviderDefinition {
         id: provider("openai"),
+        authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
         capabilities: [(
             CapabilitySlot::codex(),
             CapabilityPolicy {
@@ -169,6 +170,10 @@ fn catalog() -> ProviderCatalog {
 fn catalog_with_incompatible_api_key_slot() -> ProviderCatalog {
     ProviderCatalog::from_definitions([ProviderDefinition {
         id: provider("openai"),
+        authentication_kinds: BTreeSet::from([
+            CredentialAuthKind::OAuth,
+            CredentialAuthKind::ApiKey,
+        ]),
         capabilities: BTreeMap::from([
             (
                 CapabilitySlot::codex(),

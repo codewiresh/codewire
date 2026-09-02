@@ -94,6 +94,7 @@ fn provider(value: &str) -> ProviderId {
 fn catalog() -> ProviderCatalog {
     ProviderCatalog::from_definitions([ProviderDefinition {
         id: provider("openai"),
+        authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
         capabilities: BTreeMap::from([(
             CapabilitySlot::codex(),
             CapabilityPolicy {
@@ -292,6 +293,21 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
             .id,
         profile.profile.id
     );
+
+    let incompatible = client
+        .update_profile(
+            &profile.profile.id,
+            profile.profile.revision,
+            &BTreeMap::from([(CapabilitySlot::github(), credential.metadata.id.clone())]),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(incompatible.code(), Code::FailedPrecondition);
+    assert_eq!(
+        incompatible.message(),
+        "provider openai does not support slot github with this authentication kind"
+    );
+    assert!(!incompatible.message().contains("synthetic"));
 
     let in_use = client
         .delete_credential(&credential.metadata.id)

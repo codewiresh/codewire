@@ -176,26 +176,37 @@ impl CapabilityPolicy {
 #[serde(deny_unknown_fields)]
 pub struct ProviderDefinition {
     pub id: ProviderId,
+    /// Credential forms that may be persisted for this provider even when no
+    /// runtime adapter for one of its capability slots has landed yet.
+    pub authentication_kinds: BTreeSet<CredentialAuthKind>,
     pub capabilities: BTreeMap<CapabilitySlot, CapabilityPolicy>,
 }
 
 impl ProviderDefinition {
     fn validate(&self) -> Result<(), AccessError> {
-        if self.capabilities.is_empty() {
+        if self.authentication_kinds.is_empty() {
             return Err(AccessError::EmptyCollection {
-                field: "provider capabilities",
+                field: "provider authentication kinds",
             });
         }
         for policy in self.capabilities.values() {
             policy.validate()?;
+            if let Some(kind) = policy
+                .authentication_kinds
+                .iter()
+                .find(|kind| !self.authentication_kinds.contains(kind))
+            {
+                return Err(AccessError::UnsupportedAuthenticationKind {
+                    provider: self.id.clone(),
+                    kind: *kind,
+                });
+            }
         }
         Ok(())
     }
 
     pub fn supports_authentication_kind(&self, kind: CredentialAuthKind) -> bool {
-        self.capabilities
-            .values()
-            .any(|policy| policy.authentication_kinds.contains(&kind))
+        self.authentication_kinds.contains(&kind)
     }
 }
 

@@ -553,6 +553,7 @@ mod tests {
     fn catalog(provider_id: &str, authentication_kind: CredentialAuthKind) -> ProviderCatalog {
         ProviderCatalog::from_definitions([ProviderDefinition {
             id: provider(provider_id),
+            authentication_kinds: BTreeSet::from([authentication_kind]),
             capabilities: BTreeMap::from([(
                 CapabilitySlot::codex(),
                 CapabilityPolicy {

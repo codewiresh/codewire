@@ -5,31 +5,46 @@ use crate::{
     GrantPermission, ProviderCatalog, ProviderDefinition, ProviderId,
 };
 
-/// Return the provider capabilities implemented by the current Codewire
-/// credential stack.
+/// Return the provider credential forms and capabilities admitted by the
+/// current Codewire credential stack.
 ///
-/// The catalog is deliberately narrower than the type system. GitHub, SSH,
-/// Claude, and other adapters are added only with their owning
-/// refresh, routing, and compatibility tests. An absent combination is
-/// unsupported rather than inferred from ambient host configuration.
+/// The catalog is deliberately narrower than the type system. Storable
+/// provider credentials and runnable capability adapters are both explicit:
+/// enrollment may land before execution without making a half-working grant
+/// selectable. An absent combination is unsupported rather than inferred from
+/// ambient host configuration.
 pub fn builtin_provider_catalog() -> ProviderCatalog {
-    ProviderCatalog::from_definitions([ProviderDefinition {
-        id: ProviderId::parse("openai").expect("built-in OpenAI provider ID"),
-        capabilities: BTreeMap::from([(
-            CapabilitySlot::codex(),
-            CapabilityPolicy {
-                authentication_kinds: BTreeSet::from([
-                    CredentialAuthKind::OAuth,
-                    CredentialAuthKind::ApiKey,
-                ]),
-                permissions: BTreeSet::from([GrantPermission {
-                    operation: BrokerOperationId::parse("responses")
-                        .expect("built-in Responses operation ID"),
-                    route: BrokerRouteId::parse("openai-api").expect("built-in OpenAI route ID"),
-                }]),
-            },
-        )]),
-    }])
+    ProviderCatalog::from_definitions([
+        ProviderDefinition {
+            id: ProviderId::parse("openai").expect("built-in OpenAI provider ID"),
+            authentication_kinds: BTreeSet::from([
+                CredentialAuthKind::OAuth,
+                CredentialAuthKind::ApiKey,
+            ]),
+            capabilities: BTreeMap::from([(
+                CapabilitySlot::codex(),
+                CapabilityPolicy {
+                    authentication_kinds: BTreeSet::from([
+                        CredentialAuthKind::OAuth,
+                        CredentialAuthKind::ApiKey,
+                    ]),
+                    permissions: BTreeSet::from([GrantPermission {
+                        operation: BrokerOperationId::parse("responses")
+                            .expect("built-in Responses operation ID"),
+                        route: BrokerRouteId::parse("openai-api")
+                            .expect("built-in OpenAI route ID"),
+                    }]),
+                },
+            )]),
+        },
+        ProviderDefinition {
+            id: ProviderId::parse("github").expect("built-in GitHub provider ID"),
+            authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+            // #1910 owns the dedicated host-side repository executor. Keep
+            // the capability absent until that credential-bearing path lands.
+            capabilities: BTreeMap::new(),
+        },
+    ])
     .expect("built-in provider catalog")
 }
 
@@ -38,7 +53,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_admit_only_implemented_openai_codex_capabilities() {
+    fn builtins_separate_storable_credentials_from_runnable_capabilities() {
         let catalog = builtin_provider_catalog();
         let provider = catalog
             .get(&ProviderId::parse("openai").unwrap())
@@ -52,6 +67,7 @@ mod tests {
             codex.authentication_kinds,
             BTreeSet::from([CredentialAuthKind::OAuth, CredentialAuthKind::ApiKey,])
         );
+        assert_eq!(provider.authentication_kinds, codex.authentication_kinds);
         assert_eq!(
             codex.permissions,
             BTreeSet::from([GrantPermission {
@@ -59,6 +75,14 @@ mod tests {
                 route: BrokerRouteId::parse("openai-api").unwrap(),
             }])
         );
-        assert!(catalog.get(&ProviderId::parse("github").unwrap()).is_none());
+
+        let github = catalog
+            .get(&ProviderId::parse("github").unwrap())
+            .expect("GitHub provider");
+        assert_eq!(
+            github.authentication_kinds,
+            BTreeSet::from([CredentialAuthKind::OAuth])
+        );
+        assert!(github.capabilities.is_empty());
     }
 }

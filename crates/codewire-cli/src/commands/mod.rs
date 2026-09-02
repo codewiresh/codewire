@@ -362,6 +362,7 @@ pub(crate) struct CredentialConnectArgs {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum CredentialConnectProviderArg {
     Codex,
+    Github,
 }
 
 #[cfg(target_os = "linux")]

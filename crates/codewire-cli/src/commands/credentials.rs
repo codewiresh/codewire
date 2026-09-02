@@ -21,6 +21,7 @@ use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
 };
 use serde::Serialize;
+use tokio::io::AsyncReadExt as _;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{
@@ -35,6 +36,10 @@ use super::{
 const CODEX_AUTH_FILE_NAME: &str = "auth.json";
 const TMPFS_MAGIC: rustix::fs::FsWord = 0x0102_1994;
 const CODEX_LOGOUT_TIMEOUT: Duration = Duration::from_secs(30);
+const GITHUB_HOST: &str = "github.com";
+const GITHUB_CHILD_PATH: &str = "/usr/bin:/bin";
+const GITHUB_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_GITHUB_TOKEN_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CredentialPlacement {
@@ -70,6 +75,7 @@ async fn connect_credential(
 ) -> anyhow::Result<()> {
     match args.provider {
         CredentialConnectProviderArg::Codex => connect_codex(client, args).await,
+        CredentialConnectProviderArg::Github => connect_github(client, args).await,
     }
 }
 
@@ -78,22 +84,7 @@ async fn connect_codex(
     args: CredentialConnectArgs,
 ) -> anyhow::Result<()> {
     let display_name = trimmed_required(&args.name, "credential name")?.to_owned();
-    if client
-        .list_credentials()
-        .await
-        .context("check local credential name")?
-        .iter()
-        .any(|record| {
-            record
-                .metadata
-                .display_name
-                .eq_ignore_ascii_case(&display_name)
-        })
-    {
-        anyhow::bail!(
-            "local credential {display_name:?} already exists; use a distinct name for another Codex identity"
-        );
-    }
+    require_unique_credential_name(client, &display_name, "Codex").await?;
     let CompletedCodexLogin {
         imported,
         login_home,
@@ -139,6 +130,320 @@ async fn connect_codex(
         record.metadata.display_name, record.metadata.id
     );
     Ok(())
+}
+
+async fn connect_github(
+    client: &mut LocalCredentialClient,
+    args: CredentialConnectArgs,
+) -> anyhow::Result<()> {
+    let display_name = trimmed_required(&args.name, "credential name")?.to_owned();
+    require_unique_credential_name(client, &display_name, "GitHub").await?;
+    let CompletedGitHubLogin {
+        material,
+        login_home,
+    } = run_isolated_github_login().await?;
+    let record = match client
+        .add_credential(
+            NewCredential {
+                provider: ProviderId::parse("github").expect("built-in GitHub provider ID"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name,
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            material,
+        )
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            if let Err(cleanup_error) = login_home.remove() {
+                return Err(cleanup_error).context(
+                    "remove transient GitHub login material after protected-store failure; the completed authorization may remain active and can be revoked in GitHub settings",
+                );
+            }
+            return Err(error).context(
+                "store local GitHub credential; the completed GitHub CLI authorization may remain active and can be revoked in GitHub settings",
+            );
+        }
+    };
+    if let Err(error) = login_home.remove() {
+        let _ = client.revoke_credential(&record.metadata.id).await;
+        let _ = client.delete_credential(&record.metadata.id).await;
+        return Err(error).context(
+            "remove transient GitHub login material; the completed GitHub CLI authorization may remain active and can be revoked in GitHub settings",
+        );
+    }
+    eprintln!(
+        "Local GitHub credential {:?} connected ({}).",
+        record.metadata.display_name, record.metadata.id
+    );
+    Ok(())
+}
+
+async fn require_unique_credential_name(
+    client: &mut LocalCredentialClient,
+    display_name: &str,
+    provider_label: &str,
+) -> anyhow::Result<()> {
+    if client
+        .list_credentials()
+        .await
+        .context("check local credential name")?
+        .iter()
+        .any(|record| {
+            record
+                .metadata
+                .display_name
+                .eq_ignore_ascii_case(display_name)
+        })
+    {
+        anyhow::bail!(
+            "local credential {display_name:?} already exists; use a distinct name for another {provider_label} identity"
+        );
+    }
+    Ok(())
+}
+
+struct CompletedGitHubLogin {
+    material: ProtectedValue,
+    login_home: GitHubLoginHome,
+}
+
+async fn run_isolated_github_login() -> anyhow::Result<CompletedGitHubLogin> {
+    let login_home = GitHubLoginHome::create()?;
+    let executable = resolve_github_executable()?;
+    run_isolated_github_login_with(
+        login_home,
+        executable,
+        std::ffi::OsString::from(GITHUB_CHILD_PATH),
+        true,
+    )
+    .await
+}
+
+async fn run_isolated_github_login_with(
+    login_home: GitHubLoginHome,
+    executable: PathBuf,
+    path: std::ffi::OsString,
+    interactive: bool,
+) -> anyhow::Result<CompletedGitHubLogin> {
+    if interactive {
+        eprintln!(
+            "Starting an isolated GitHub CLI OAuth login. No ambient GitHub login will be read."
+        );
+    }
+    let mut command = isolated_github_command(&executable, &path, &login_home);
+    command.args([
+        "auth",
+        "login",
+        "--hostname",
+        GITHUB_HOST,
+        "--git-protocol",
+        "https",
+        "--web",
+        "--insecure-storage",
+        "--skip-ssh-key",
+    ]);
+    if interactive {
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    } else {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
+    let status = match command.status().await {
+        Ok(status) => status,
+        Err(error) => {
+            login_home
+                .remove()
+                .context("remove GitHub login staging after launch failure")?;
+            return Err(error).context("run isolated GitHub CLI login");
+        }
+    };
+    if !status.success() {
+        login_home
+            .remove()
+            .context("remove GitHub login staging after incomplete authorization")?;
+        anyhow::bail!("GitHub CLI OAuth login did not complete; no local credential was stored");
+    }
+    let material = match read_isolated_github_token(&executable, &path, &login_home).await {
+        Ok(material) => material,
+        Err(error) => {
+            login_home
+                .remove()
+                .context("remove GitHub login staging after token import failure")?;
+            return Err(error).context(
+                "import isolated GitHub CLI login; the completed authorization may remain active and can be revoked in GitHub settings",
+            );
+        }
+    };
+    Ok(CompletedGitHubLogin {
+        material,
+        login_home,
+    })
+}
+
+fn isolated_github_command(
+    executable: &Path,
+    path: &std::ffi::OsStr,
+    login_home: &GitHubLoginHome,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", login_home.path())
+        .env("GH_CONFIG_DIR", login_home.path())
+        .env("XDG_CONFIG_HOME", login_home.path())
+        .env("XDG_CACHE_HOME", login_home.path())
+        .env("TMPDIR", login_home.path())
+        .current_dir(login_home.path())
+        .kill_on_drop(true);
+    command
+}
+
+async fn read_isolated_github_token(
+    executable: &Path,
+    path: &std::ffi::OsStr,
+    login_home: &GitHubLoginHome,
+) -> anyhow::Result<ProtectedValue> {
+    let mut command = isolated_github_command(executable, path, login_home);
+    command
+        .args(["auth", "token", "--hostname", GITHUB_HOST])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().context("read isolated GitHub CLI token")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("GitHub CLI token output was unavailable"))?;
+    let output_limit =
+        u64::try_from(MAX_GITHUB_TOKEN_BYTES + 3).expect("GitHub token output bound fits u64");
+    let output = tokio::time::timeout(GITHUB_TOKEN_TIMEOUT, async move {
+        let mut output = Zeroizing::new(Vec::with_capacity(MAX_GITHUB_TOKEN_BYTES + 2));
+        stdout
+            .take(output_limit)
+            .read_to_end(&mut output)
+            .await
+            .context("read isolated GitHub CLI token")?;
+        if output.len() > MAX_GITHUB_TOKEN_BYTES + 2 {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            anyhow::bail!("GitHub CLI token output exceeded the safety limit");
+        }
+        let status = child
+            .wait()
+            .await
+            .context("wait for isolated GitHub CLI token export")?;
+        if !status.success() {
+            anyhow::bail!("GitHub CLI could not export its isolated OAuth token");
+        }
+        Ok::<_, anyhow::Error>(output)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("GitHub CLI token export timed out"))??;
+    parse_github_token_output(output)
+}
+
+fn parse_github_token_output(mut output: Zeroizing<Vec<u8>>) -> anyhow::Result<ProtectedValue> {
+    if output.last() == Some(&b'\n') {
+        output.pop();
+        if output.last() == Some(&b'\r') {
+            output.pop();
+        }
+    }
+    if output.is_empty()
+        || output.len() > MAX_GITHUB_TOKEN_BYTES
+        || !output.iter().all(u8::is_ascii_graphic)
+    {
+        anyhow::bail!("GitHub CLI returned an invalid OAuth token");
+    }
+    ProtectedValue::new(std::mem::take(&mut *output)).context("prepare protected GitHub credential")
+}
+
+fn resolve_github_executable() -> anyhow::Result<PathBuf> {
+    resolve_provider_executable("gh", "GitHub CLI")
+}
+
+fn resolve_provider_executable(name: &str, label: &str) -> anyhow::Result<PathBuf> {
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| anyhow::anyhow!("PATH is unavailable; install the official {label}"))?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(name);
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            continue;
+        }
+        let executable = std::fs::canonicalize(&candidate)
+            .with_context(|| format!("resolve the {label} executable"))?;
+        let metadata = std::fs::metadata(&executable)
+            .with_context(|| format!("inspect the {label} executable"))?;
+        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+            return Ok(executable);
+        }
+    }
+    anyhow::bail!("official {label} was not found on PATH; install it and retry")
+}
+
+struct GitHubLoginHome {
+    path: Option<PathBuf>,
+}
+
+impl GitHubLoginHome {
+    fn create() -> anyhow::Result<Self> {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!("XDG_RUNTIME_DIR is required for protected GitHub login staging")
+            })?;
+        Self::create_in(&runtime)
+    }
+
+    fn create_in(runtime: &Path) -> anyhow::Result<Self> {
+        validate_private_tmpfs_runtime(runtime)?;
+        let path = runtime.join(format!(".codewire-github-login-{}", uuid::Uuid::new_v4()));
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .context("create private GitHub login staging directory")?;
+        validate_private_directory(&path)?;
+        Ok(Self { path: Some(path) })
+    }
+
+    fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("GitHub login home is available until removal")
+    }
+
+    fn remove(mut self) -> anyhow::Result<()> {
+        let path = self
+            .path
+            .take()
+            .expect("GitHub login home is removed at most once");
+        validate_private_directory(&path)?;
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            self.path = Some(path);
+            return Err(error).context("remove private GitHub login staging directory");
+        }
+        Ok(())
+    }
+}
+
+impl Drop for GitHubLoginHome {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 struct CompletedCodexLogin {
@@ -232,6 +537,7 @@ fn isolated_codex_command(
         .env("XDG_CONFIG_HOME", login_home.path())
         .env("XDG_CACHE_HOME", login_home.path())
         .env("TMPDIR", login_home.path())
+        .current_dir(login_home.path())
         .kill_on_drop(true);
     command
 }
@@ -301,14 +607,14 @@ fn validate_private_tmpfs_runtime(path: &Path) -> anyhow::Result<()> {
     let directory = File::open(path).context("open private runtime directory")?;
     let statistics = rustix::fs::fstatfs(&directory).context("inspect runtime filesystem")?;
     if statistics.f_type != TMPFS_MAGIC {
-        anyhow::bail!("XDG_RUNTIME_DIR must be backed by tmpfs for Codex login staging");
+        anyhow::bail!("XDG_RUNTIME_DIR must be backed by tmpfs for provider login staging");
     }
     Ok(())
 }
 
 fn validate_private_directory(path: &Path) -> anyhow::Result<()> {
     if !path.is_absolute() {
-        anyhow::bail!("private Codex login directory must be absolute");
+        anyhow::bail!("private provider login directory must be absolute");
     }
     let metadata =
         std::fs::symlink_metadata(path).context("inspect private Codex login directory")?;
@@ -319,7 +625,7 @@ fn validate_private_directory(path: &Path) -> anyhow::Result<()> {
         || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.permissions().mode() & 0o077 != 0
     {
-        anyhow::bail!("private Codex login directory failed ownership or mode validation");
+        anyhow::bail!("private provider login directory failed ownership or mode validation");
     }
     Ok(())
 }
@@ -355,25 +661,7 @@ fn read_private_codex_auth_file(root: &Path) -> anyhow::Result<Zeroizing<Vec<u8>
 }
 
 fn resolve_codex_executable() -> anyhow::Result<PathBuf> {
-    let path = std::env::var_os("PATH")
-        .ok_or_else(|| anyhow::anyhow!("PATH is unavailable; install the official Codex CLI"))?;
-    for directory in std::env::split_paths(&path) {
-        let candidate = directory.join("codex");
-        let Ok(metadata) = std::fs::metadata(&candidate) else {
-            continue;
-        };
-        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-            continue;
-        }
-        let executable =
-            std::fs::canonicalize(&candidate).context("resolve the Codex CLI executable")?;
-        let metadata =
-            std::fs::metadata(&executable).context("inspect the Codex CLI executable")?;
-        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-            return Ok(executable);
-        }
-    }
-    anyhow::bail!("official Codex CLI was not found on PATH; install it and retry")
+    resolve_provider_executable("codex", "Codex CLI")
 }
 
 fn credential_placement(local: bool, platform: bool) -> anyhow::Result<CredentialPlacement> {
@@ -1043,6 +1331,28 @@ mod tests {
             })
         ));
 
+        let connect_github = Cli::try_parse_from([
+            "cw",
+            "credentials",
+            "--local",
+            "connect",
+            "github",
+            "--name",
+            "work-github",
+        ])
+        .unwrap();
+        assert!(matches!(
+            connect_github.command,
+            Command::Credentials(CredentialsArgs {
+                local: true,
+                platform: false,
+                command: CredentialsCommand::Connect(CredentialConnectArgs {
+                    provider: CredentialConnectProviderArg::Github,
+                    ..
+                }),
+            })
+        ));
+
         let add = Cli::try_parse_from([
             "cw",
             "credentials",
@@ -1232,6 +1542,98 @@ mod tests {
                 .join(CODEX_AUTH_FILE_NAME)
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn isolated_github_login_uses_only_its_private_tmpfs_configuration() {
+        let root = tempfile::Builder::new()
+            .prefix("codewire-github-login-test-")
+            .tempdir_in("/dev/shm")
+            .expect("private tmpfs test root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("make tmpfs test root private");
+        let executable_root = tempfile::Builder::new()
+            .prefix("codewire-github-executable-test-")
+            .tempdir_in(
+                std::env::current_exe()
+                    .expect("current executable")
+                    .parent()
+                    .expect("test executable directory"),
+            )
+            .expect("synthetic executable root");
+        let executable = executable_root.path().join("synthetic-gh");
+        let script = concat!(
+            "#!/bin/sh\n",
+            "case \"${1-}:${2-}\" in\n",
+            "auth:login)\n",
+            "  [ \"$#\" -eq 9 ] || exit 20\n",
+            "  [ \"$3\" = '--hostname' ] || exit 21\n",
+            "  [ \"$4\" = 'github.com' ] || exit 22\n",
+            "  [ \"$5\" = '--git-protocol' ] || exit 23\n",
+            "  [ \"$6\" = 'https' ] || exit 24\n",
+            "  [ \"$7\" = '--web' ] || exit 25\n",
+            "  [ \"$8\" = '--insecure-storage' ] || exit 26\n",
+            "  [ \"$9\" = '--skip-ssh-key' ] || exit 27\n",
+            "  [ \"$HOME\" = \"$GH_CONFIG_DIR\" ] || exit 28\n",
+            "  [ \"$XDG_CONFIG_HOME\" = \"$GH_CONFIG_DIR\" ] || exit 29\n",
+            "  [ \"$XDG_CACHE_HOME\" = \"$GH_CONFIG_DIR\" ] || exit 30\n",
+            "  [ \"$TMPDIR\" = \"$GH_CONFIG_DIR\" ] || exit 31\n",
+            "  [ \"$(pwd -P)\" = \"$GH_CONFIG_DIR\" ] || exit 32\n",
+            "  [ \"$PATH\" = '/usr/bin:/bin' ] || exit 33\n",
+            "  [ -z \"${GH_TOKEN+x}\" ] || exit 34\n",
+            "  [ -z \"${GITHUB_TOKEN+x}\" ] || exit 35\n",
+            "  umask 077\n",
+            "  printf '%s' 'isolated-login' >\"$GH_CONFIG_DIR/hosts.yml\"\n",
+            "  ;;\n",
+            "auth:token)\n",
+            "  [ \"$#\" -eq 4 ] || exit 36\n",
+            "  [ \"$3\" = '--hostname' ] || exit 37\n",
+            "  [ \"$4\" = 'github.com' ] || exit 38\n",
+            "  [ -f \"$GH_CONFIG_DIR/hosts.yml\" ] || exit 39\n",
+            "  printf '%s\\n' 'synthetic-github-oauth-material'\n",
+            "  ;;\n",
+            "*) exit 40 ;;\n",
+            "esac\n",
+        );
+        std::fs::write(&executable, script).expect("write synthetic GitHub executable");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .expect("make synthetic GitHub executable private");
+        let login_home = GitHubLoginHome::create_in(root.path()).expect("isolated login home");
+        let completed = run_isolated_github_login_with(
+            login_home,
+            executable,
+            std::ffi::OsString::from("/usr/bin:/bin"),
+            false,
+        )
+        .await
+        .expect("synthetic isolated login");
+        assert_eq!(
+            completed.material.expose_secret(),
+            b"synthetic-github-oauth-material"
+        );
+        let login_path = completed.login_home.path().to_owned();
+        completed
+            .login_home
+            .remove()
+            .expect("remove isolated login home");
+        assert!(!login_path.exists());
+    }
+
+    #[test]
+    fn github_token_import_is_single_line_ascii_and_bounded() {
+        let token = parse_github_token_output(Zeroizing::new(b"synthetic-token\r\n".to_vec()))
+            .expect("valid synthetic GitHub token");
+        assert_eq!(token.expose_secret(), b"synthetic-token");
+
+        for rejected in [
+            Vec::new(),
+            b"one\ntwo\n".to_vec(),
+            b"contains space\n".to_vec(),
+            vec![0xff, b'\n'],
+            vec![b'x'; MAX_GITHUB_TOKEN_BYTES + 1],
+        ] {
+            assert!(parse_github_token_output(Zeroizing::new(rejected)).is_err());
+        }
     }
 
     #[test]

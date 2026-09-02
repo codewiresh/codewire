@@ -1175,6 +1175,7 @@ mod tests {
     fn catalog_with_authentication(authentication_kind: CredentialAuthKind) -> ProviderCatalog {
         ProviderCatalog::from_definitions([ProviderDefinition {
             id: ProviderId::parse("openai").unwrap(),
+            authentication_kinds: BTreeSet::from([authentication_kind]),
             capabilities: BTreeMap::from([(
                 CapabilitySlot::codex(),
                 CapabilityPolicy {
