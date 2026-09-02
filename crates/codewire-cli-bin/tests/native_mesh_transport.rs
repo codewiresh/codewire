@@ -627,6 +627,38 @@ fn cw_hidden_mesh_transport_preserves_its_typed_failure_exit() {
     );
 }
 
+#[test]
+fn mesh_transport_does_not_receive_enrollment_before_confinement_admission() {
+    let environment_id = Uuid::new_v4();
+    let generation = 5;
+    let bootstrap = encode_mesh_transport_bootstrap(
+        environment_id,
+        generation,
+        &attachment("127.0.0.1:1".parse().unwrap()),
+        &TEST_KEY,
+    )
+    .unwrap();
+    let (mut control, enrollment, mut child) = spawn_transport(environment_id, generation);
+
+    control.write_all(&bootstrap).unwrap();
+    control.flush().unwrap();
+    assert_eq!(read_status_frame(&control), MESH_TRANSPORT_PREPARED_MESSAGE);
+
+    control.write_all(MESH_TRANSPORT_CONFINE_MESSAGE).unwrap();
+    control.flush().unwrap();
+    drop(enrollment);
+    assert_eq!(
+        decode_mesh_transport_startup_status(&read_status_frame(&control)),
+        Some(MeshTransportStartupStatus::Failed(
+            MeshTransportStartupFailure::EnrollmentIo
+        ))
+    );
+    assert_eq!(
+        child.wait_bounded().code(),
+        Some(MeshTransportStartupFailure::EnrollmentIo.exit_code())
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enrollment_broker_transfers_directly_to_the_confined_mesh_process() {
     let fixture = start_fixture(false).await;
@@ -795,6 +827,14 @@ async fn confined_mesh_process_relays_only_admitted_ports_and_requires_fresh_enr
         .shutdown(std::net::Shutdown::Write)
         .unwrap();
     drop(replay_enrollment);
+    assert_eq!(
+        read_status_frame(&replay_control),
+        MESH_TRANSPORT_PREPARED_MESSAGE
+    );
+    replay_control
+        .write_all(MESH_TRANSPORT_CONFINE_MESSAGE)
+        .unwrap();
+    replay_control.flush().unwrap();
     assert_eq!(
         decode_mesh_transport_startup_status(&read_status_frame(&replay_control)),
         Some(MeshTransportStartupStatus::Failed(

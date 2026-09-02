@@ -3,9 +3,10 @@
 //! The process receives non-secret attachment intent and a generation HMAC
 //! key on one inherited AF_UNIX stream. A distinct one-shot stream carries the
 //! enrollment capability and closes immediately after transfer. The child
-//! resolves and pins every network endpoint before entering a filesystem-
-//! denied, privilege-locked, syscall-confined domain; it never accepts a
-//! credential through argv, environment, disk, or the runner submission path.
+//! becomes non-dumpable before receiving enrollment, then resolves and pins
+//! every network endpoint before entering a filesystem- and syscall-confined
+//! domain. It never accepts a credential through argv, environment, disk, or
+//! the runner submission path.
 
 use std::io::{self, Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -468,35 +469,34 @@ pub async fn run_inherited_mesh_transport(
     configure_handshake_stream(&control, HANDSHAKE_TIMEOUT, || {
         MeshTransportProcessError::BootstrapIo
     })?;
-    configure_handshake_stream(&enrollment, HANDSHAKE_TIMEOUT, || {
+    configure_handshake_stream(&enrollment, NETWORK_SETUP_TIMEOUT, || {
         MeshTransportProcessError::EnrollmentIo
     })?;
 
-    let prepared =
-        match prepare_mesh(&mut control, &mut enrollment, environment_id, generation).await {
-            Ok(prepared) => prepared,
-            Err(error) => return fail_startup(&control, error),
-        };
-    drop(enrollment);
-
+    let bootstrap = match prepare_mesh_bootstrap(&mut control, environment_id, generation) {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => return fail_startup(&control, error),
+    };
     if let Err(error) = await_confinement_admission(&mut control) {
         return fail_startup(&control, error);
     }
-    let confinement = lock_process_privileges()
-        .map_err(|_| MeshTransportProcessError::PrivilegeConfinement)
-        .and_then(|()| {
-            install_deny_all_filesystem_domain()
-                .map_err(|_| MeshTransportProcessError::FilesystemConfinement)
-        })
-        .and_then(|()| {
-            install_inet_and_unix_stream_pair_syscalls(
-                MESH_DENIED_SYSCALLS,
-                MESH_ARCH_DENIED_SYSCALLS,
-            )
-            .map_err(|_| MeshTransportProcessError::SyscallConfinement)
-        });
-    if let Err(error) = confinement {
-        return fail_startup(&control, error);
+    if lock_process_privileges().is_err() {
+        return fail_startup(&control, MeshTransportProcessError::PrivilegeConfinement);
+    }
+    // Enrollment and generated transport keys enter memory only after the
+    // runner has admitted the exact process and the child is non-dumpable.
+    let prepared = match prepare_mesh(bootstrap, &mut enrollment).await {
+        Ok(prepared) => prepared,
+        Err(error) => return fail_startup(&control, error),
+    };
+    drop(enrollment);
+    if install_deny_all_filesystem_domain().is_err() {
+        return fail_startup(&control, MeshTransportProcessError::FilesystemConfinement);
+    }
+    if install_inet_and_unix_stream_pair_syscalls(MESH_DENIED_SYSCALLS, MESH_ARCH_DENIED_SYSCALLS)
+        .is_err()
+    {
+        return fail_startup(&control, MeshTransportProcessError::SyscallConfinement);
     }
 
     control
@@ -697,18 +697,26 @@ async fn monitor_parent(
     }
 }
 
-async fn prepare_mesh(
+fn prepare_mesh_bootstrap(
     control: &mut StdUnixStream,
-    enrollment: &mut StdUnixStream,
     environment_id: Uuid,
     generation: u64,
-) -> Result<PreparedMesh, MeshTransportProcessError> {
+) -> Result<Bootstrap, MeshTransportProcessError> {
     validate_identity(environment_id, generation)?;
     if std::env::vars_os().next().is_some() {
         return Err(MeshTransportProcessError::AmbientEnvironment);
     }
     require_single_threaded_process().map_err(|_| MeshTransportProcessError::ThreadConfinement)?;
     let bootstrap = read_bootstrap(control, environment_id, generation)?;
+    write_status(control, MESH_TRANSPORT_PREPARED_MESSAGE)
+        .map_err(|_| MeshTransportProcessError::StatusIo)?;
+    Ok(bootstrap)
+}
+
+async fn prepare_mesh(
+    bootstrap: Bootstrap,
+    enrollment: &mut StdUnixStream,
+) -> Result<PreparedMesh, MeshTransportProcessError> {
     let enrollment = read_enrollment(enrollment)?;
     let resolver = SystemDnsResolver::from_system_config()
         .map_err(|_| MeshTransportProcessError::ResolverInitialization)?;
@@ -742,8 +750,6 @@ async fn prepare_mesh(
     let wireguard_secret = StaticSecret::random_from_rng(OsRng);
     let disco_private = DiscoPrivate::generate(&mut OsRng);
     require_single_threaded_process().map_err(|_| MeshTransportProcessError::ThreadConfinement)?;
-    write_status(control, MESH_TRANSPORT_PREPARED_MESSAGE)
-        .map_err(|_| MeshTransportProcessError::StatusIo)?;
     Ok(PreparedMesh {
         bootstrap,
         coordinator,
