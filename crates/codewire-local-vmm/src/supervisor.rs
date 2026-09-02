@@ -16,6 +16,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use codewire_access::{
+    AccessProfileId, AccessProfileReference, AccessProfileScope, EnvironmentAccessBinding,
+    EnvironmentId,
+};
+use codewire_local_credentials::{
+    AuthorityRuntimeConfig, EnvironmentBrokerRuntime as AuthorityBrokerRuntime,
+    LocalCredentialControlClient,
+};
 use futures::Stream;
 use rustix::fs::{FlockOperation, flock};
 use rustix::process::Signal;
@@ -68,7 +76,7 @@ use crate::workspace::{
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 use crate::workspace_plan::{WorkspacePlan, WorkspacePlanError, prepare_repository_plan};
 
-pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 1;
+pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 3;
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OPERATION_WATCH_BUFFER: usize = 8;
@@ -88,6 +96,16 @@ struct PreparedWorkspaceBoot {
     setup_root_generation: String,
     setup_total_bytes: u64,
     setup_header_sha256: String,
+}
+
+#[derive(Clone)]
+struct CredentialBrokerEnsureRequest {
+    authority: AuthorityRuntimeConfig,
+    environment_id: EnvironmentId,
+    environment_generation: u64,
+    environment_name: String,
+    supervisor_socket: PathBuf,
+    enabled: bool,
 }
 
 #[derive(Clone)]
@@ -117,6 +135,7 @@ pub struct NativeRuntimeConfig {
     pub artifact_lock: PathBuf,
     pub mesh_data_dir: PathBuf,
     pub platform_config_dir: PathBuf,
+    pub credential_authority_root: PathBuf,
     pub executable: PathBuf,
 }
 
@@ -142,6 +161,7 @@ impl NativeRuntimeConfig {
             &self.artifact_lock,
             &self.mesh_data_dir,
             &self.platform_config_dir,
+            &self.credential_authority_root,
             &self.executable,
         ] {
             if !path.is_absolute() {
@@ -160,6 +180,13 @@ impl NativeRuntimeConfig {
             return Err(SupervisorError::InvalidConfiguration);
         }
         Ok(())
+    }
+
+    fn credential_authority_config(&self) -> AuthorityRuntimeConfig {
+        AuthorityRuntimeConfig {
+            root: self.credential_authority_root.clone(),
+            executable: self.executable.clone(),
+        }
     }
 }
 
@@ -302,6 +329,34 @@ impl NativeSupervisorClient {
         self.follow_environment_operation(operation, name).await
     }
 
+    pub async fn apply_access(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+        target: Option<(&str, &str, u64)>,
+    ) -> Result<v1::Environment, Status> {
+        let (access_profile, access_profile_id, access_profile_revision, clear) = match target {
+            Some((reference, profile_id, revision)) => {
+                (reference.to_owned(), profile_id.to_owned(), revision, false)
+            }
+            None => (String::new(), String::new(), 0, true),
+        };
+        let operation = self
+            .inner
+            .apply_environment_access(v1::ApplyEnvironmentAccessRequest {
+                name: name.to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: environment_id.to_owned(),
+                access_profile,
+                access_profile_id,
+                access_profile_revision,
+                clear,
+            })
+            .await?
+            .into_inner();
+        self.follow_environment_operation(operation, name).await
+    }
+
     pub async fn delete(&mut self, name: &str) -> Result<v1::DeleteEnvironmentResponse, Status> {
         let operation = self
             .inner
@@ -321,6 +376,17 @@ impl NativeSupervisorClient {
         Ok(self
             .inner
             .get_daemon_access(read_selector(name))
+            .await?
+            .into_inner())
+    }
+
+    pub async fn ensure_credential_broker(
+        &mut self,
+        name: &str,
+    ) -> Result<v1::CredentialBrokerRuntime, Status> {
+        Ok(self
+            .inner
+            .ensure_credential_broker(read_selector(name))
             .await?
             .into_inner())
     }
@@ -603,6 +669,10 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) project_spec_json: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) project_spec_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) access_profile: Option<AccessProfileReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) access_binding: Option<EnvironmentAccessBinding>,
     pub(crate) runner: Option<RunnerRecord>,
     #[serde(default)]
     pub(crate) active_artifact_generation: Option<String>,
@@ -618,6 +688,10 @@ pub(crate) struct EnvironmentRecord {
 
 impl EnvironmentRecord {
     fn proto(&self, selected: bool) -> v1::Environment {
+        let project = self
+            .project_spec_json
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<codewire_project::ProjectSpec>(bytes).ok());
         v1::Environment {
             id: self.id.to_string(),
             name: self.name.clone(),
@@ -631,13 +705,19 @@ impl EnvironmentRecord {
             workspace_plan_sha256: self.workspace_plan.sha256().unwrap_or_default(),
             workspace_input_count: u32::try_from(self.workspace_plan.inputs.len())
                 .unwrap_or_default(),
-            working_directory: self
-                .project_spec_json
-                .as_deref()
-                .and_then(|bytes| {
-                    serde_json::from_slice::<codewire_project::ProjectSpec>(bytes).ok()
-                })
-                .map(|project| project.working_directory)
+            working_directory: project
+                .as_ref()
+                .map(|project| project.working_directory.clone())
+                .unwrap_or_default(),
+            access_profile: self
+                .access_profile
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            access_profile_revision: self
+                .access_binding
+                .as_ref()
+                .map(|binding| binding.profile_revision)
                 .unwrap_or_default(),
             host_ports: host_ports_to_proto(&self.host_ports),
             mesh: mesh_attachment_to_proto(self.mesh.as_ref()),
@@ -917,6 +997,7 @@ impl EnvironmentRecord {
                 }
                 _ => true,
             }
+            || !environment_access_metadata_valid(self)
             || self
                 .project_spec_json
                 .as_deref()
@@ -1106,6 +1187,98 @@ impl SupervisorCore {
             .environments
             .get_mut(name)
             .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))
+    }
+
+    async fn access_control_client(
+        &mut self,
+    ) -> Result<LocalCredentialControlClient, SupervisorError> {
+        LocalCredentialControlClient::connect(&self.config.credential_authority_config())
+            .await
+            .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)
+    }
+
+    async fn bind_environment_access(
+        &mut self,
+        request: &v1::CreateEnvironmentRequest,
+        environment_id: Uuid,
+    ) -> Result<(), SupervisorError> {
+        let Some((binding, reference)) = create_request_access_binding(request, environment_id)?
+        else {
+            return Ok(());
+        };
+        self.access_control_client()
+            .await?
+            .ensure_environment_access_binding(&binding, &reference)
+            .await
+            .map(|_| ())
+            .map_err(credential_control_error)
+    }
+
+    async fn require_environment_access(&mut self, name: &str) -> Result<(), SupervisorError> {
+        let Some(expected) = self.environment(name)?.access_binding.clone() else {
+            return Ok(());
+        };
+        let current = self
+            .access_control_client()
+            .await?
+            .get_environment_access_binding(&expected.environment_id)
+            .await
+            .map_err(credential_control_error)?;
+        if current.binding != expected {
+            return Err(SupervisorError::EnvironmentAccessUnavailable);
+        }
+        Ok(())
+    }
+
+    async fn stop_environment_broker_if_present(
+        &mut self,
+        environment: &EnvironmentRecord,
+    ) -> Result<(), SupervisorError> {
+        if environment.generation == 0 {
+            return Ok(());
+        }
+        let Ok(environment_id) = access_environment_id(environment.id) else {
+            return Err(SupervisorError::InvalidState);
+        };
+        let mut client = match self.access_control_client().await {
+            Ok(client) => client,
+            // The authority owns every broker as a child with a parent-death
+            // signal. If the authority itself is unavailable, no surviving
+            // managed broker can keep serving this environment.
+            Err(SupervisorError::CredentialAuthorityUnavailable) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        client
+            .stop_environment_broker(&environment_id, Some(environment.generation))
+            .await
+            .map_err(credential_control_error)
+    }
+
+    async fn revoke_environment_access_best_effort(&mut self, environment_id: Uuid) -> bool {
+        let Ok(environment_id) = access_environment_id(environment_id) else {
+            return true;
+        };
+        let Ok(mut client) = self.access_control_client().await else {
+            return true;
+        };
+        client
+            .delete_environment_access_binding_if_present(&environment_id)
+            .await
+            .is_err()
+    }
+
+    async fn environment_access_cleanup_pending(&mut self, environment_id: Uuid) -> bool {
+        let Ok(environment_id) = access_environment_id(environment_id) else {
+            return true;
+        };
+        let Ok(mut client) = self.access_control_client().await else {
+            return true;
+        };
+        match client.get_environment_access_binding(&environment_id).await {
+            Ok(_) => true,
+            Err(status) if status.code() == tonic::Code::NotFound => false,
+            Err(_) => true,
+        }
     }
 
     fn orphan_inventory(&self) -> Result<v1::ListOrphansResponse, SupervisorError> {
@@ -1379,6 +1552,9 @@ impl SupervisorCore {
         {
             return Err(SupervisorError::InvalidState);
         }
+        let expected_access = create_request_access_binding(request, environment_id)?;
+        let expected_access_binding = expected_access.as_ref().map(|(binding, _)| binding.clone());
+        let expected_access_profile = expected_access.map(|(_, reference)| reference);
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
@@ -1396,6 +1572,8 @@ impl SupervisorCore {
                                 != Some(request.project_spec_json.as_slice())
                             || environment.project_spec_sha256.as_deref()
                                 != Some(request.project_spec_sha256.as_str())
+                            || environment.access_profile != expected_access_profile
+                            || environment.access_binding != expected_access_binding
                             || &environment.workspace_plan != workspace_plan
                         {
                             return Err(SupervisorError::AlreadyExists(request.name.clone()));
@@ -1419,6 +1597,8 @@ impl SupervisorCore {
                                 workspace_plan: workspace_plan.clone(),
                                 project_spec_json: Some(request.project_spec_json.clone()),
                                 project_spec_sha256: Some(request.project_spec_sha256.clone()),
+                                access_profile: expected_access_profile.clone(),
+                                access_binding: expected_access_binding.clone(),
                                 runner: None,
                                 active_artifact_generation: Some(artifact_generation),
                                 staging_artifact_generation: None,
@@ -1430,6 +1610,11 @@ impl SupervisorCore {
                         next_state.current = Some(request.name.clone());
                     }
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
+                }
+                LifecycleEffect::BindEnvironmentAccess => {
+                    self.bind_environment_access(request, environment_id)
+                        .await?;
+                    operation = self.checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::ProvisionWorkspace => {
                     let environment = self.environment(&request.name)?.clone();
@@ -1637,6 +1822,37 @@ impl SupervisorCore {
                         };
                         self.abort_replayed_workspace_transition(&operation, name, error_code)
                             .await?;
+                        continue;
+                    }
+                };
+                let result = self
+                    .state
+                    .environments
+                    .get(name)
+                    .map(environment_operation_result)
+                    .ok_or(SupervisorError::InvalidState)?;
+                self.complete_operation(&operation, &result)?;
+                continue;
+            }
+            if operation.kind == OperationKind::ApplyEnvironmentAccess {
+                let operation = match self.apply_environment_access(name, &operation).await {
+                    Ok(operation) => operation,
+                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                        // The authority is intentionally not spawned by the
+                        // supervisor. Keep the exact transition pending until
+                        // an owner-side CLI operation admits the authority.
+                        return Err(SupervisorError::CredentialAuthorityUnavailable);
+                    }
+                    Err(SupervisorError::CredentialAuthorityUnavailable) => {
+                        self.fail_operation(&operation, "credential_authority_unavailable")?;
+                        continue;
+                    }
+                    Err(SupervisorError::EnvironmentAccessUnavailable) => {
+                        self.fail_operation(&operation, "environment_access_conflict")?;
+                        continue;
+                    }
+                    Err(_) => {
+                        self.fail_operation(&operation, "environment_access_apply_failed")?;
                         continue;
                     }
                 };
@@ -2446,6 +2662,8 @@ impl SupervisorCore {
             return Err(SupervisorError::Orphaned);
         }
         let environment = self.environment(name)?.clone();
+        self.stop_environment_broker_if_present(&environment)
+            .await?;
         if environment.runner.is_none() {
             return Ok(());
         }
@@ -2482,6 +2700,10 @@ impl SupervisorCore {
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
+                LifecycleEffect::RequireEnvironmentAccess => {
+                    self.require_environment_access(name).await?;
+                    operation = self.checkpoint_operation(&operation)?;
+                }
                 LifecycleEffect::RecordStarting => {
                     let mut next_state = self.state.clone();
                     let environment = next_state
@@ -2686,6 +2908,12 @@ impl SupervisorCore {
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
+                LifecycleEffect::RequireEnvironmentAccess => {
+                    if was_running {
+                        self.require_environment_access(name).await?;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
                 LifecycleEffect::StopVm => {
                     self.ensure_vm_stopped(name).await?;
                     operation = self.checkpoint_operation(&operation)?;
@@ -2797,6 +3025,12 @@ impl SupervisorCore {
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             match effect {
+                LifecycleEffect::RequireEnvironmentAccess => {
+                    if parameters.was_running {
+                        self.require_environment_access(name).await?;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
                 LifecycleEffect::StageWorkspaceGeneration
                     if operation.kind == OperationKind::UpdateWorkspace =>
                 {
@@ -2899,6 +3133,67 @@ impl SupervisorCore {
         Ok(operation)
     }
 
+    async fn apply_environment_access(
+        &mut self,
+        name: &str,
+        operation: &OperationRecord,
+    ) -> Result<OperationRecord, SupervisorError> {
+        let transition = environment_access_transition(operation, self.environment(name)?)?;
+        let environment_id = access_environment_id(
+            operation
+                .environment_id
+                .ok_or(SupervisorError::InvalidState)?,
+        )?;
+        let mut operation = operation.clone();
+        while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
+            match effect {
+                LifecycleEffect::ApplyEnvironmentAccess => {
+                    let expected = transition
+                        .expected
+                        .as_ref()
+                        .map(|selection| &selection.binding);
+                    let target = transition
+                        .target
+                        .as_ref()
+                        .map(|selection| (&selection.binding, &selection.reference));
+                    self.access_control_client()
+                        .await?
+                        .apply_environment_access_binding(&environment_id, expected, target)
+                        .await
+                        .map_err(credential_control_error)?;
+                    operation = self.checkpoint_operation(&operation)?;
+                }
+                LifecycleEffect::RecordEnvironmentAccess => {
+                    let current = environment_access_selection(self.environment(name)?)?;
+                    if current != transition.target {
+                        if current != transition.expected {
+                            return Err(SupervisorError::InvalidState);
+                        }
+                        let mut next_state = self.state.clone();
+                        let environment = next_state
+                            .environments
+                            .get_mut(name)
+                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
+                        environment.access_profile = transition
+                            .target
+                            .as_ref()
+                            .map(|selection| selection.reference.clone());
+                        environment.access_binding = transition
+                            .target
+                            .as_ref()
+                            .map(|selection| selection.binding.clone());
+                        operation = self.checkpoint_state_operation(&operation, next_state)?;
+                    } else {
+                        operation =
+                            self.checkpoint_state_operation(&operation, self.state.clone())?;
+                    }
+                }
+                _ => return Err(SupervisorError::InvalidState),
+            }
+        }
+        Ok(operation)
+    }
+
     async fn abort_workspace_transition(
         &mut self,
         operation: &OperationRecord,
@@ -2971,6 +3266,7 @@ impl SupervisorCore {
         let environment_id = operation
             .environment_id
             .ok_or(SupervisorError::InvalidState)?;
+        let revoke_access = delete_operation_revoke_access(operation, name)?;
         if operation.kind != OperationKind::Delete {
             return Err(SupervisorError::InvalidState);
         }
@@ -3027,6 +3323,14 @@ impl SupervisorCore {
                     }
                     operation = self.checkpoint_operation(&operation)?;
                 }
+                LifecycleEffect::RevokeEnvironmentAccess => {
+                    if revoke_access {
+                        cleanup_pending |= self
+                            .revoke_environment_access_best_effort(environment_id)
+                            .await;
+                    }
+                    operation = self.checkpoint_operation(&operation)?;
+                }
                 LifecycleEffect::RemoveEnvironment => {
                     let mut next_state = self.state.clone();
                     next_state.environments.remove(name);
@@ -3062,6 +3366,11 @@ impl SupervisorCore {
         // after applying CleanupTrash but before completing the operation.
         cleanup_pending |= self.collect_unreferenced_content().is_err();
         cleanup_pending |= self.collect_unreferenced_runtime_artifacts().is_err();
+        if revoke_access {
+            cleanup_pending |= self
+                .environment_access_cleanup_pending(environment_id)
+                .await;
+        }
         Ok((operation, cleanup_pending))
     }
 
@@ -3079,6 +3388,56 @@ impl SupervisorCore {
             .daemon_access()
             .await
             .map_err(|_| SupervisorError::RunnerUnavailable)
+    }
+
+    fn credential_broker_ensure_request(
+        &self,
+        name: &str,
+    ) -> Result<CredentialBrokerEnsureRequest, SupervisorError> {
+        let environment = self.environment(name)?;
+        if environment.state != StoredEnvironmentState::Running || environment.generation == 0 {
+            return Err(SupervisorError::NotRunning);
+        }
+        Ok(CredentialBrokerEnsureRequest {
+            authority: self.config.credential_authority_config(),
+            environment_id: access_environment_id(environment.id)?,
+            environment_generation: environment.generation,
+            environment_name: environment.name.clone(),
+            supervisor_socket: self.config.supervisor_socket(),
+            enabled: environment.access_binding.is_some(),
+        })
+    }
+}
+
+async fn ensure_credential_broker(
+    request: CredentialBrokerEnsureRequest,
+) -> Result<AuthorityBrokerRuntime, SupervisorError> {
+    if !request.enabled {
+        return Ok(AuthorityBrokerRuntime {
+            environment_id: request.environment_id,
+            environment_generation: request.environment_generation,
+            running: false,
+        });
+    }
+    let mut client = LocalCredentialControlClient::connect(&request.authority)
+        .await
+        .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)?;
+    client
+        .ensure_environment_broker(
+            &request.environment_id,
+            request.environment_generation,
+            &request.environment_name,
+            &request.supervisor_socket,
+        )
+        .await
+        .map_err(credential_control_error)
+}
+
+fn credential_broker_runtime_proto(runtime: AuthorityBrokerRuntime) -> v1::CredentialBrokerRuntime {
+    v1::CredentialBrokerRuntime {
+        environment_id: runtime.environment_id.to_string(),
+        environment_generation: runtime.environment_generation,
+        running: runtime.running,
     }
 }
 
@@ -3109,9 +3468,14 @@ impl SupervisorRpc {
             } else {
                 core.execute_pending_operations().await
             };
+            let deferred_for_authority = recovering
+                && matches!(
+                    &result,
+                    Err(SupervisorError::CredentialAuthorityUnavailable)
+                );
             service.worker_running.store(false, Ordering::Release);
             drop(core);
-            if result.is_err() {
+            if result.is_err() && !deferred_for_authority {
                 let _ = service.shutdown.send(true);
             }
         });
@@ -3511,6 +3875,66 @@ impl LocalSupervisorService for SupervisorRpc {
         Ok(Response::new(response))
     }
 
+    async fn apply_environment_access(
+        &self,
+        request: Request<v1::ApplyEnvironmentAccessRequest>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        let request = request.into_inner();
+        if !valid_environment_name(&request.name) {
+            return Err(Status::invalid_argument("invalid environment name"));
+        }
+        let request_id = parse_request_id(&request.request_id).map_err(Status::from)?;
+        let expected_environment_id = parse_optional_environment_id(&request.environment_id)
+            .map_err(Status::from)?
+            .ok_or_else(|| Status::invalid_argument("environment ID is required"))?;
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
+        let environment = core
+            .environment(&request.name)
+            .map_err(Status::from)?
+            .clone();
+        require_expected_environment(&environment, Some(expected_environment_id))?;
+        let target = apply_environment_access_request_target(&request, environment.id)
+            .map_err(Status::from)?;
+        let existing = core
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?;
+        let operation = if let Some(operation) = existing {
+            let transition = environment_access_transition(&operation, &environment)
+                .map_err(|_| Status::aborted("local lifecycle request ID collision"))?;
+            if transition.target != target {
+                return Err(Status::aborted("local lifecycle request ID collision"));
+            }
+            operation
+        } else {
+            let expected = environment_access_selection(&environment).map_err(Status::from)?;
+            let payload = apply_environment_access_operation_payload(
+                &request.name,
+                expected.as_ref(),
+                target.as_ref(),
+            );
+            core.store
+                .begin_operation(
+                    request_id,
+                    Some(environment.id),
+                    OperationKind::ApplyEnvironmentAccess,
+                    &payload,
+                )
+                .map_err(SupervisorError::from)
+                .map_err(Status::from)?
+        };
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
+        }
+        Ok(Response::new(response))
+    }
+
     async fn delete_environment(
         &self,
         request: Request<v1::EnvironmentSelector>,
@@ -3522,10 +3946,11 @@ impl LocalSupervisorService for SupervisorRpc {
             .operation_by_request(request_id)
             .map_err(SupervisorError::from)
             .map_err(Status::from)?;
-        let payload = serde_json::json!({"name": name});
         let operation = match existing {
             Some(operation) => {
-                if operation.kind != OperationKind::Delete || operation.payload != payload {
+                if operation.kind != OperationKind::Delete
+                    || delete_operation_revoke_access(&operation, &name).is_err()
+                {
                     return Err(Status::aborted("local lifecycle request ID collision"));
                 }
                 if expected_environment_id.is_some()
@@ -3539,6 +3964,11 @@ impl LocalSupervisorService for SupervisorRpc {
                 let environment = core.environment(&name).map_err(Status::from)?;
                 require_expected_environment(environment, expected_environment_id)?;
                 let environment_id = environment.id;
+                let payload = serde_json::json!({
+                    "name": name,
+                    "revoke_access": environment_uses_access_profile(environment)
+                        .map_err(Status::from)?,
+                });
                 core.store
                     .begin_operation(
                         request_id,
@@ -3708,6 +4138,26 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(Status::from)?;
         core.daemon_access(&name)
             .await
+            .map(Response::new)
+            .map_err(Status::from)
+    }
+
+    async fn ensure_credential_broker(
+        &self,
+        request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::CredentialBrokerRuntime>, Status> {
+        let name = selected_name(request.into_inner())?;
+        let broker_request = {
+            let mut core = self.core.lock().await;
+            core.replay_pending_operations()
+                .await
+                .map_err(Status::from)?;
+            core.credential_broker_ensure_request(&name)
+                .map_err(Status::from)?
+        };
+        ensure_credential_broker(broker_request)
+            .await
+            .map(credential_broker_runtime_proto)
             .map(Response::new)
             .map_err(Status::from)
     }
@@ -3885,6 +4335,7 @@ fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status>
         OperationKind::Restart => v1::OperationKind::Restart,
         OperationKind::UpdateWorkspace => v1::OperationKind::UpdateWorkspace,
         OperationKind::RollbackWorkspace => v1::OperationKind::RollbackWorkspace,
+        OperationKind::ApplyEnvironmentAccess => v1::OperationKind::ApplyEnvironmentAccess,
         OperationKind::Delete => v1::OperationKind::Delete,
         OperationKind::GrowDisk => v1::OperationKind::GrowDisk,
         OperationKind::Reconcile => v1::OperationKind::Reconcile,
@@ -3981,6 +4432,8 @@ fn operation_stage(operation: &OperationRecord) -> Result<v1::OperationStage, St
     };
     Ok(match effect {
         LifecycleEffect::RecordEnvironment => v1::OperationStage::RecordEnvironment,
+        LifecycleEffect::BindEnvironmentAccess => v1::OperationStage::BindEnvironmentAccess,
+        LifecycleEffect::RequireEnvironmentAccess => v1::OperationStage::RequireEnvironmentAccess,
         LifecycleEffect::ProvisionWorkspace => v1::OperationStage::ProvisionWorkspace,
         LifecycleEffect::StageWorkspaceGeneration => v1::OperationStage::StageWorkspaceGeneration,
         LifecycleEffect::RecordStarting => v1::OperationStage::RecordStarting,
@@ -3996,8 +4449,11 @@ fn operation_stage(operation: &OperationRecord) -> Result<v1::OperationStage, St
         LifecycleEffect::StageRollbackGeneration => v1::OperationStage::StageRollbackGeneration,
         LifecycleEffect::RestoreDesiredPower => v1::OperationStage::RestoreDesiredPower,
         LifecycleEffect::RecordWorkspaceTransition => v1::OperationStage::RecordWorkspaceTransition,
+        LifecycleEffect::ApplyEnvironmentAccess => v1::OperationStage::ApplyEnvironmentAccess,
+        LifecycleEffect::RecordEnvironmentAccess => v1::OperationStage::RecordEnvironmentAccess,
         LifecycleEffect::PrepareDelete => v1::OperationStage::PrepareDelete,
         LifecycleEffect::MoveToTrash => v1::OperationStage::MoveToTrash,
+        LifecycleEffect::RevokeEnvironmentAccess => v1::OperationStage::RevokeEnvironmentAccess,
         LifecycleEffect::RemoveEnvironment => v1::OperationStage::RemoveEnvironment,
         LifecycleEffect::CleanupTrash => v1::OperationStage::CleanupTrash,
         LifecycleEffect::RecordObservation => v1::OperationStage::RecordObservation,
@@ -4305,6 +4761,7 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         }
         validate_mesh_for_project(mesh, &project)?;
     }
+    create_request_access_selection(request, &project)?;
     if project.repositories.is_empty() {
         parse_implicit_path_mode(&request.implicit_path_mode)?;
         if request.source_path.is_empty() || !Path::new(&request.source_path).is_absolute() {
@@ -4344,7 +4801,6 @@ fn validate_project_intent(
         || !spec.agent_environment.is_empty()
         || !spec.skills.is_empty()
         || !spec.secrets.is_empty()
-        || !spec.credentials.is_empty()
     {
         return Err(());
     }
@@ -4357,6 +4813,271 @@ fn validate_project_intent(
         return Err(());
     }
     Ok(())
+}
+
+fn create_request_access_selection(
+    request: &v1::CreateEnvironmentRequest,
+    project: &codewire_project::ProjectSpec,
+) -> Result<Option<(AccessProfileId, u64, AccessProfileReference)>, SupervisorError> {
+    match (
+        project.access.as_ref(),
+        request.access_profile_id.is_empty(),
+        request.access_profile_revision,
+    ) {
+        (None, true, 0) => Ok(None),
+        (Some(access), false, revision)
+            if revision > 0 && access.profile.scope() == AccessProfileScope::User =>
+        {
+            Ok(Some((
+                AccessProfileId::parse(request.access_profile_id.clone())
+                    .map_err(|_| SupervisorError::InvalidRequest)?,
+                revision,
+                access.profile.clone(),
+            )))
+        }
+        _ => Err(SupervisorError::InvalidRequest),
+    }
+}
+
+fn create_request_access_binding(
+    request: &v1::CreateEnvironmentRequest,
+    environment_id: Uuid,
+) -> Result<Option<(EnvironmentAccessBinding, AccessProfileReference)>, SupervisorError> {
+    let project: codewire_project::ProjectSpec = serde_json::from_slice(&request.project_spec_json)
+        .map_err(|_| SupervisorError::InvalidRequest)?;
+    let Some((profile_id, profile_revision, reference)) =
+        create_request_access_selection(request, &project)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        EnvironmentAccessBinding {
+            environment_id: access_environment_id(environment_id)?,
+            profile_id,
+            profile_revision,
+        },
+        reference,
+    )))
+}
+
+fn access_environment_id(environment_id: Uuid) -> Result<EnvironmentId, SupervisorError> {
+    EnvironmentId::parse(environment_id.to_string()).map_err(|_| SupervisorError::InvalidState)
+}
+
+fn environment_uses_access_profile(
+    environment: &EnvironmentRecord,
+) -> Result<bool, SupervisorError> {
+    if !environment_access_metadata_valid(environment) {
+        return Err(SupervisorError::InvalidState);
+    }
+    Ok(environment.access_binding.is_some())
+}
+
+fn environment_access_metadata_valid(environment: &EnvironmentRecord) -> bool {
+    match (
+        environment.access_profile.as_ref(),
+        environment.access_binding.as_ref(),
+    ) {
+        (None, None) => true,
+        (Some(reference), Some(binding)) => {
+            reference.scope() == AccessProfileScope::User
+                && binding.validate().is_ok()
+                && access_environment_id(environment.id).is_ok_and(|environment_id| {
+                    environment_id.as_str() == binding.environment_id.as_str()
+                })
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExactEnvironmentAccess {
+    reference: AccessProfileReference,
+    binding: EnvironmentAccessBinding,
+}
+
+fn environment_access_selection(
+    environment: &EnvironmentRecord,
+) -> Result<Option<ExactEnvironmentAccess>, SupervisorError> {
+    if !environment_access_metadata_valid(environment) {
+        return Err(SupervisorError::InvalidState);
+    }
+    Ok(environment
+        .access_profile
+        .as_ref()
+        .zip(environment.access_binding.as_ref())
+        .map(|(reference, binding)| ExactEnvironmentAccess {
+            reference: reference.clone(),
+            binding: binding.clone(),
+        }))
+}
+
+fn apply_environment_access_request_target(
+    request: &v1::ApplyEnvironmentAccessRequest,
+    environment_id: Uuid,
+) -> Result<Option<ExactEnvironmentAccess>, SupervisorError> {
+    if request.clear {
+        if !request.access_profile.is_empty()
+            || !request.access_profile_id.is_empty()
+            || request.access_profile_revision != 0
+        {
+            return Err(SupervisorError::InvalidRequest);
+        }
+        return Ok(None);
+    }
+    if request.access_profile.is_empty()
+        || request.access_profile_id.is_empty()
+        || request.access_profile_revision == 0
+    {
+        return Err(SupervisorError::InvalidRequest);
+    }
+    let reference = request
+        .access_profile
+        .parse::<AccessProfileReference>()
+        .map_err(|_| SupervisorError::InvalidRequest)?;
+    if reference.scope() != AccessProfileScope::User {
+        return Err(SupervisorError::InvalidRequest);
+    }
+    let binding = EnvironmentAccessBinding {
+        environment_id: access_environment_id(environment_id)?,
+        profile_id: AccessProfileId::parse(request.access_profile_id.clone())
+            .map_err(|_| SupervisorError::InvalidRequest)?,
+        profile_revision: request.access_profile_revision,
+    };
+    binding
+        .validate()
+        .map_err(|_| SupervisorError::InvalidRequest)?;
+    Ok(Some(ExactEnvironmentAccess { reference, binding }))
+}
+
+fn environment_access_selection_value(
+    selection: Option<&ExactEnvironmentAccess>,
+) -> serde_json::Value {
+    selection.map_or(serde_json::Value::Null, |selection| {
+        serde_json::json!({
+            "reference": selection.reference.to_string(),
+            "profile_id": selection.binding.profile_id.to_string(),
+            "profile_revision": selection.binding.profile_revision,
+        })
+    })
+}
+
+fn apply_environment_access_operation_payload(
+    name: &str,
+    expected: Option<&ExactEnvironmentAccess>,
+    target: Option<&ExactEnvironmentAccess>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "expected": environment_access_selection_value(expected),
+        "target": environment_access_selection_value(target),
+    })
+}
+
+fn parse_environment_access_selection(
+    value: &serde_json::Value,
+    environment_id: Uuid,
+) -> Result<Option<ExactEnvironmentAccess>, SupervisorError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let fields = value
+        .as_object()
+        .filter(|fields| fields.len() == 3)
+        .ok_or(SupervisorError::InvalidState)?;
+    let reference = fields
+        .get("reference")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SupervisorError::InvalidState)?
+        .parse::<AccessProfileReference>()
+        .map_err(|_| SupervisorError::InvalidState)?;
+    if reference.scope() != AccessProfileScope::User {
+        return Err(SupervisorError::InvalidState);
+    }
+    let profile_id = fields
+        .get("profile_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SupervisorError::InvalidState)
+        .and_then(|id| {
+            AccessProfileId::parse(id.to_owned()).map_err(|_| SupervisorError::InvalidState)
+        })?;
+    let profile_revision = fields
+        .get("profile_revision")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|revision| *revision > 0)
+        .ok_or(SupervisorError::InvalidState)?;
+    let binding = EnvironmentAccessBinding {
+        environment_id: access_environment_id(environment_id)?,
+        profile_id,
+        profile_revision,
+    };
+    binding
+        .validate()
+        .map_err(|_| SupervisorError::InvalidState)?;
+    Ok(Some(ExactEnvironmentAccess { reference, binding }))
+}
+
+struct EnvironmentAccessTransition {
+    expected: Option<ExactEnvironmentAccess>,
+    target: Option<ExactEnvironmentAccess>,
+}
+
+fn environment_access_transition(
+    operation: &OperationRecord,
+    environment: &EnvironmentRecord,
+) -> Result<EnvironmentAccessTransition, SupervisorError> {
+    if operation.kind != OperationKind::ApplyEnvironmentAccess
+        || operation.environment_id != Some(environment.id)
+    {
+        return Err(SupervisorError::InvalidState);
+    }
+    let fields = operation
+        .payload
+        .as_object()
+        .filter(|fields| fields.len() == 3)
+        .ok_or(SupervisorError::InvalidState)?;
+    if fields.get("name").and_then(serde_json::Value::as_str) != Some(environment.name.as_str()) {
+        return Err(SupervisorError::InvalidState);
+    }
+    Ok(EnvironmentAccessTransition {
+        expected: parse_environment_access_selection(
+            fields
+                .get("expected")
+                .ok_or(SupervisorError::InvalidState)?,
+            environment.id,
+        )?,
+        target: parse_environment_access_selection(
+            fields.get("target").ok_or(SupervisorError::InvalidState)?,
+            environment.id,
+        )?,
+    })
+}
+
+fn delete_operation_revoke_access(
+    operation: &OperationRecord,
+    name: &str,
+) -> Result<bool, SupervisorError> {
+    let fields = operation
+        .payload
+        .as_object()
+        .filter(|fields| fields.len() == 2)
+        .ok_or(SupervisorError::InvalidState)?;
+    if fields.get("name").and_then(serde_json::Value::as_str) != Some(name) {
+        return Err(SupervisorError::InvalidState);
+    }
+    fields
+        .get("revoke_access")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(SupervisorError::InvalidState)
+}
+
+fn credential_control_error(status: Status) -> SupervisorError {
+    match status.code() {
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Unknown => {
+            SupervisorError::CredentialAuthorityUnavailable
+        }
+        _ => SupervisorError::EnvironmentAccessUnavailable,
+    }
 }
 
 fn parse_implicit_path_mode(value: &str) -> Result<WorkspaceSourceMode, SupervisorError> {
@@ -4438,6 +5159,8 @@ fn create_operation_payload(
         "implicit_path_mode": request.implicit_path_mode,
         "host_ports": host_ports,
         "mesh": mesh,
+        "access_profile_id": request.access_profile_id,
+        "access_profile_revision": request.access_profile_revision,
         "workspace_plan": workspace_plan,
     }))
 }
@@ -4451,7 +5174,7 @@ fn create_request_from_operation(
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 11)
+        .filter(|fields| fields.len() == 13)
         .ok_or(SupervisorError::InvalidState)?;
     let name = fields
         .get("name")
@@ -4512,6 +5235,15 @@ fn create_request_from_operation(
     if mesh.as_ref().is_some_and(|mesh| mesh.validate().is_err()) {
         return Err(SupervisorError::InvalidState);
     }
+    let access_profile_id = fields
+        .get("access_profile_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SupervisorError::InvalidState)?
+        .to_owned();
+    let access_profile_revision = fields
+        .get("access_profile_revision")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(SupervisorError::InvalidState)?;
     let workspace_plan: WorkspacePlan = serde_json::from_value(
         fields
             .get("workspace_plan")
@@ -4534,6 +5266,8 @@ fn create_request_from_operation(
         implicit_path_mode,
         host_ports: host_ports_to_proto(&host_ports),
         mesh: mesh_attachment_to_proto(mesh.as_ref()),
+        access_profile_id,
+        access_profile_revision,
     };
     validate_create(&request)?;
     Ok((request, workspace_plan))
@@ -5163,6 +5897,24 @@ fn validate_workspace_transition_start(
     if workspace_storage_generation(active)? != parameters.prior_storage_generation {
         return Err(SupervisorError::InvalidState);
     }
+    let target_project_json = match &parameters.intent {
+        WorkspaceTransitionIntent::Update {
+            project_spec_json, ..
+        } => project_spec_json.as_slice(),
+        WorkspaceTransitionIntent::Rollback { .. } => environment
+            .rollback_workspace_generation
+            .as_ref()
+            .ok_or(SupervisorError::InvalidState)?
+            .project_spec_json()?,
+    };
+    let target_project: codewire_project::ProjectSpec =
+        serde_json::from_slice(target_project_json).map_err(|_| SupervisorError::InvalidState)?;
+    if matches!(parameters.intent, WorkspaceTransitionIntent::Update { .. })
+        && target_project.access.as_ref().map(|access| &access.profile)
+            != environment.access_profile.as_ref()
+    {
+        return Err(SupervisorError::InvalidState);
+    }
     if let WorkspaceTransitionIntent::Rollback {
         rollback_storage_generation,
     } = &parameters.intent
@@ -5253,6 +6005,8 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
         .arg(&config.mesh_data_dir)
         .arg("--platform-config-dir")
         .arg(&config.platform_config_dir)
+        .arg("--credential-authority-root")
+        .arg(&config.credential_authority_root)
         .env_clear()
         .current_dir(&config.root)
         .stdin(Stdio::null())
@@ -5333,8 +6087,12 @@ impl From<SupervisorError> for Status {
             SupervisorError::NotRunning
             | SupervisorError::Orphaned
             | SupervisorError::OperationTerminal
-            | SupervisorError::ArtifactGenerationChanged => {
+            | SupervisorError::ArtifactGenerationChanged
+            | SupervisorError::EnvironmentAccessUnavailable => {
                 Status::failed_precondition(error.to_string())
+            }
+            SupervisorError::CredentialAuthorityUnavailable => {
+                Status::unavailable(error.to_string())
             }
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
@@ -5372,6 +6130,10 @@ pub enum SupervisorError {
     InvalidState,
     #[error("native supervisor state must never contain a secret")]
     SecretInState,
+    #[error("local credential authority is unavailable")]
+    CredentialAuthorityUnavailable,
+    #[error("local environment access binding is unavailable")]
+    EnvironmentAccessUnavailable,
     #[error("local environment {0:?} was not found")]
     NotFound(String),
     #[error("local environment is not running")]
@@ -5648,6 +6410,8 @@ mod tests {
             .unwrap(),
             project_spec_json: Some(project_spec_json),
             project_spec_sha256: Some(project_spec_sha256),
+            access_profile: None,
+            access_binding: None,
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,
@@ -5655,6 +6419,29 @@ mod tests {
             staging_workspace_generation: None,
             rollback_workspace_generation: None,
         }
+    }
+
+    fn project_environment_with_access() -> EnvironmentRecord {
+        let mut environment = project_environment();
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        project.access = Some(codewire_project::AccessBinding {
+            profile: "user/work".parse().unwrap(),
+        });
+        let project_spec_json = project.canonical_json().unwrap();
+        environment.project_spec_sha256 = Some(format!(
+            "{:x}",
+            Sha256::digest(project_spec_json.as_slice())
+        ));
+        environment.project_spec_json = Some(project_spec_json);
+        environment.access_profile = Some("user/work".parse().unwrap());
+        environment.access_binding = Some(EnvironmentAccessBinding {
+            environment_id: access_environment_id(environment.id).unwrap(),
+            profile_id: AccessProfileId::parse("profile-work").unwrap(),
+            profile_revision: 7,
+        });
+        environment.validate("dev").unwrap();
+        environment
     }
 
     fn workspace_update_payload(
@@ -5764,6 +6551,7 @@ mod tests {
                 artifact_lock: parent.path().join("artifacts.lock.json"),
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
+                credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -5842,6 +6630,7 @@ mod tests {
                 artifact_lock: parent.path().join("artifacts.lock.json"),
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
+                credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -5972,7 +6761,7 @@ mod tests {
             environment_id,
             OperationKind::UpdateWorkspace,
             &payload,
-            6,
+            7,
         );
         let request_id = operation.request_id;
 
@@ -5984,7 +6773,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(operation.phase, OperationPhase::Completed);
-        assert_eq!(operation.checkpoint, 9);
+        assert_eq!(operation.checkpoint, 10);
         let environment = core.environment("dev").unwrap();
         assert_eq!(environment.state, StoredEnvironmentState::Stopped);
         assert_eq!(environment.generation, 2);
@@ -6045,7 +6834,7 @@ mod tests {
             environment_id,
             OperationKind::RollbackWorkspace,
             &payload,
-            6,
+            7,
         );
         let request_id = operation.request_id;
 
@@ -6057,7 +6846,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(operation.phase, OperationPhase::Completed);
-        assert_eq!(operation.checkpoint, 9);
+        assert_eq!(operation.checkpoint, 10);
         let environment = core.environment("dev").unwrap();
         assert_eq!(environment.state, StoredEnvironmentState::Running);
         assert_eq!(environment.generation, 2);
@@ -6114,6 +6903,43 @@ mod tests {
         assert!(validate_workspace_transition_start(&environment, &parameters).is_err());
     }
 
+    #[test]
+    fn workspace_update_cannot_change_the_bound_access_profile() {
+        let mut environment = project_environment();
+        let project_json = environment.project_spec_json.clone().unwrap();
+        let project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        environment.active_workspace_generation = Some(test_workspace_generation(
+            &project_json,
+            &project_sha256,
+            b"active",
+        ));
+        let mut next_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&project_json).unwrap();
+        next_project.access = Some(codewire_project::AccessBinding {
+            profile: "user/work".parse().unwrap(),
+        });
+        let next_project_json = next_project.canonical_json().unwrap();
+        let next_project_sha256 = format!("{:x}", Sha256::digest(&next_project_json));
+        let payload = workspace_update_payload(
+            &environment,
+            &next_project_json,
+            &next_project_sha256,
+            false,
+        );
+        let parameters = workspace_transition_parameters(
+            &test_workspace_transition_operation(
+                &environment,
+                OperationKind::UpdateWorkspace,
+                payload,
+                0,
+            ),
+            &environment,
+        )
+        .unwrap();
+
+        assert!(validate_workspace_transition_start(&environment, &parameters).is_err());
+    }
+
     #[tokio::test]
     async fn exact_noop_update_replays_without_reboot_or_rollback_rotation() {
         let mut environment = project_environment();
@@ -6139,16 +6965,19 @@ mod tests {
                 &payload,
             )
             .unwrap();
-        let operation = core
-            .store
-            .advance_operation(
-                operation.operation_id,
-                operation.checkpoint,
-                OperationPhase::EffectApplied,
-                None,
-                None,
-            )
-            .unwrap();
+        let mut operation = operation;
+        for _ in 0..2 {
+            operation = core
+                .store
+                .advance_operation(
+                    operation.operation_id,
+                    operation.checkpoint,
+                    OperationPhase::EffectApplied,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
 
         core.replay_pending_operations().await.unwrap();
 
@@ -6295,7 +7124,7 @@ mod tests {
                 &payload,
             )
             .unwrap();
-        for _ in 0..6 {
+        for _ in 0..7 {
             operation = core
                 .store
                 .advance_operation(
@@ -6325,7 +7154,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(operation.phase, OperationPhase::Completed);
-        assert_eq!(operation.checkpoint, 9);
+        assert_eq!(operation.checkpoint, 10);
         let environment = core.environment("dev").unwrap();
         assert_eq!(environment.state, StoredEnvironmentState::Stopped);
         assert_eq!(environment.generation, 2);
@@ -6397,7 +7226,7 @@ mod tests {
                 &payload,
             )
             .unwrap();
-        for _ in 0..6 {
+        for _ in 0..7 {
             operation = core
                 .store
                 .advance_operation(
@@ -6419,7 +7248,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(operation.phase, OperationPhase::Completed);
-        assert_eq!(operation.checkpoint, 9);
+        assert_eq!(operation.checkpoint, 10);
         let environment = core.environment("dev").unwrap();
         assert_eq!(environment.state, StoredEnvironmentState::Running);
         assert_eq!(environment.generation, 2);
@@ -6509,17 +7338,20 @@ mod tests {
         } = same_image_runtime_transition(&environment);
         environment.state = StoredEnvironmentState::Running;
         environment.active_workspace_generation = Some(active.clone());
-        environment.staging_workspace_generation = Some(staging);
-        environment.staging_artifact_generation = Some(staging_artifact);
         environment.validate("dev").unwrap();
         let payload = workspace_update_payload(&environment, &project_json, &project_sha256, true);
 
         for checkpoint in 1..=7 {
             let mut interrupted = environment.clone();
+            if checkpoint >= 2 {
+                interrupted.staging_workspace_generation = Some(staging.clone());
+                interrupted.staging_artifact_generation = Some(staging_artifact.clone());
+            }
             if checkpoint >= 4 {
-                reserve_boot_generation(&mut interrupted, 2).unwrap();
-            } else if checkpoint >= 3 {
                 interrupted.state = StoredEnvironmentState::Stopped;
+            }
+            if checkpoint >= 5 {
+                reserve_boot_generation(&mut interrupted, 2).unwrap();
             }
             let (_parent, mut core) = test_supervisor_core_after_host_reboot(
                 interrupted,
@@ -6539,7 +7371,7 @@ mod tests {
             assert!(recovered.staging_workspace_generation.is_none());
             assert!(recovered.staging_artifact_generation.is_none());
             assert_eq!(recovered.state, StoredEnvironmentState::Stopped);
-            assert_eq!(recovered.generation, if checkpoint >= 4 { 2 } else { 1 });
+            assert_eq!(recovered.generation, if checkpoint >= 5 { 2 } else { 1 });
             recovered.validate("dev").unwrap();
             core.ensure_no_unowned_workspace_staging().unwrap();
             assert!(
@@ -6584,20 +7416,23 @@ mod tests {
         };
         for checkpoint in 1..=7 {
             let mut interrupted = base.clone();
-            interrupted
-                .stage_rollback_workspace_generation(
-                    &parameters.prior_storage_generation,
-                    rollback_storage_generation,
-                )
-                .unwrap();
+            if checkpoint >= 2 {
+                interrupted
+                    .stage_rollback_workspace_generation(
+                        &parameters.prior_storage_generation,
+                        rollback_storage_generation,
+                    )
+                    .unwrap();
+            }
             if checkpoint >= 4 {
-                reserve_boot_generation(&mut interrupted, 2).unwrap();
-            } else if checkpoint >= 3 {
                 interrupted.state = StoredEnvironmentState::Stopped;
+            }
+            if checkpoint >= 5 {
+                reserve_boot_generation(&mut interrupted, 2).unwrap();
             }
             assert_eq!(
                 interrupted.staging_artifact_generation,
-                Some(rollback_artifact.clone())
+                (checkpoint >= 2).then(|| rollback_artifact.clone())
             );
             interrupted.validate("dev").unwrap();
             let (_parent, mut core) = test_supervisor_core_after_host_reboot(
@@ -6622,7 +7457,7 @@ mod tests {
                 Some(rollback.clone())
             );
             assert_eq!(recovered.state, StoredEnvironmentState::Stopped);
-            assert_eq!(recovered.generation, if checkpoint >= 4 { 2 } else { 1 });
+            assert_eq!(recovered.generation, if checkpoint >= 5 { 2 } else { 1 });
             recovered.validate("dev").unwrap();
             core.ensure_no_unowned_workspace_staging().unwrap();
             assert!(
@@ -6967,9 +7802,15 @@ mod tests {
 
     #[test]
     fn supervisor_state_serialization_contains_no_secret_field() {
-        let state = SupervisorState::default();
+        let environment = project_environment_with_access();
+        let state = SupervisorState {
+            schema_version: SUPERVISOR_STATE_SCHEMA,
+            current: Some(environment.name.clone()),
+            environments: [(environment.name.clone(), environment)].into(),
+        };
         state.validate().unwrap();
         let encoded = serde_json::to_string(&state).unwrap().to_ascii_lowercase();
+        assert!(encoded.contains("profile-work"));
         assert!(!encoded.contains("token"));
         assert!(!encoded.contains("credential"));
         assert!(!encoded.contains("capability"));
@@ -7046,6 +7887,9 @@ mod tests {
             label: "app".to_owned(),
             access: String::new(),
         }];
+        project.access = Some(codewire_project::AccessBinding {
+            profile: "user/work".parse().unwrap(),
+        });
         let project_spec_json = project.canonical_json().unwrap();
         let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         let request = v1::CreateEnvironmentRequest {
@@ -7070,8 +7914,16 @@ mod tests {
                 guest_ports: vec![3_000],
                 auth_source: v1::MeshEnrollmentAuthSource::StandaloneLocal as i32,
             }),
+            access_profile_id: "profile-work".to_owned(),
+            access_profile_revision: 7,
         };
         validate_create(&request).unwrap();
+        let mut incomplete = request.clone();
+        incomplete.access_profile_revision = 0;
+        assert!(matches!(
+            validate_create(&incomplete),
+            Err(SupervisorError::InvalidRequest)
+        ));
         let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
             source_path: PathBuf::from("/workspace/source"),
             commit: "a".repeat(40),
@@ -7092,9 +7944,73 @@ mod tests {
             updated_unix_ms: 1,
         };
 
+        let environment_id = operation.environment_id.unwrap();
         assert_eq!(
             create_request_from_operation(&operation).unwrap(),
             (request, workspace_plan)
+        );
+        let (binding, reference) = create_request_access_binding(
+            &create_request_from_operation(&operation).unwrap().0,
+            environment_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(binding.environment_id.as_str(), environment_id.to_string());
+        assert_eq!(binding.profile_id.as_str(), "profile-work");
+        assert_eq!(binding.profile_revision, 7);
+        assert_eq!(reference.to_string(), "user/work");
+    }
+
+    #[test]
+    fn access_apply_request_requires_one_exact_local_selection_or_clear() {
+        let environment_id = Uuid::new_v4();
+        let request = v1::ApplyEnvironmentAccessRequest {
+            name: "dev".to_owned(),
+            request_id: Uuid::new_v4().to_string(),
+            environment_id: environment_id.to_string(),
+            access_profile: "user/work".to_owned(),
+            access_profile_id: "profile-work".to_owned(),
+            access_profile_revision: 2,
+            clear: false,
+        };
+        let target = apply_environment_access_request_target(&request, environment_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.reference.to_string(), "user/work");
+        assert_eq!(target.binding.profile_revision, 2);
+
+        let mut invalid = request.clone();
+        invalid.access_profile_revision = 0;
+        assert!(matches!(
+            apply_environment_access_request_target(&invalid, environment_id),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        let mut invalid = request.clone();
+        invalid.access_profile = "organization/work".to_owned();
+        assert!(matches!(
+            apply_environment_access_request_target(&invalid, environment_id),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        let mut invalid = request.clone();
+        invalid.clear = true;
+        assert!(matches!(
+            apply_environment_access_request_target(&invalid, environment_id),
+            Err(SupervisorError::InvalidRequest)
+        ));
+
+        let cleared = v1::ApplyEnvironmentAccessRequest {
+            name: "dev".to_owned(),
+            request_id: Uuid::new_v4().to_string(),
+            environment_id: environment_id.to_string(),
+            access_profile: String::new(),
+            access_profile_id: String::new(),
+            access_profile_revision: 0,
+            clear: true,
+        };
+        assert!(
+            apply_environment_access_request_target(&cleared, environment_id)
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -7482,6 +8398,7 @@ mod tests {
                 artifact_lock: parent.path().join("artifacts.lock.json"),
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
+                credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -7564,6 +8481,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bound_environment_fails_closed_when_the_authority_is_unavailable() {
+        let environment = project_environment_with_access();
+        let public = environment.proto(true);
+        assert_eq!(public.access_profile, "user/work");
+        assert_eq!(public.access_profile_revision, 7);
+        assert!(!format!("{public:?}").contains("profile-work"));
+        let (_parent, mut core) = test_supervisor_core(environment);
+
+        assert!(matches!(
+            core.require_environment_access("dev").await,
+            Err(SupervisorError::CredentialAuthorityUnavailable)
+        ));
+        assert!(
+            core.revoke_environment_access_best_effort(Uuid::new_v4())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn access_apply_checkpoint_records_and_clears_exact_binding_without_workspace_rebuild() {
+        let environment = project_environment_with_access();
+        let environment_id = environment.id;
+        let project_spec_json = environment.project_spec_json.clone();
+        let project_spec_sha256 = environment.project_spec_sha256.clone();
+        let expected = environment_access_selection(&environment).unwrap().unwrap();
+        let target = ExactEnvironmentAccess {
+            reference: "user/personal".parse().unwrap(),
+            binding: EnvironmentAccessBinding {
+                environment_id: access_environment_id(environment_id).unwrap(),
+                profile_id: AccessProfileId::parse("profile-personal").unwrap(),
+                profile_revision: 3,
+            },
+        };
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let payload =
+            apply_environment_access_operation_payload("dev", Some(&expected), Some(&target));
+        let operation = begin_and_advance_test_operation(
+            &core.store,
+            environment_id,
+            OperationKind::ApplyEnvironmentAccess,
+            &payload,
+            1,
+        );
+
+        let operation = core
+            .apply_environment_access("dev", &operation)
+            .await
+            .unwrap();
+        assert_eq!(operation.checkpoint, 2);
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.access_profile.as_ref(), Some(&target.reference));
+        assert_eq!(environment.access_binding.as_ref(), Some(&target.binding));
+        assert_eq!(environment.project_spec_json, project_spec_json);
+        assert_eq!(environment.project_spec_sha256, project_spec_sha256);
+        environment.validate("dev").unwrap();
+
+        let payload = apply_environment_access_operation_payload("dev", Some(&target), None);
+        let operation = begin_and_advance_test_operation(
+            &core.store,
+            environment_id,
+            OperationKind::ApplyEnvironmentAccess,
+            &payload,
+            1,
+        );
+        core.apply_environment_access("dev", &operation)
+            .await
+            .unwrap();
+        let environment = core.environment("dev").unwrap();
+        assert!(environment.access_profile.is_none());
+        assert!(environment.access_binding.is_none());
+        assert_eq!(environment.project_spec_json, project_spec_json);
+        assert_eq!(environment.project_spec_sha256, project_spec_sha256);
+        environment.validate("dev").unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovering_access_apply_waits_for_the_owner_authority_without_losing_intent() {
+        let environment = project_environment_with_access();
+        let environment_id = environment.id;
+        let expected = environment_access_selection(&environment).unwrap().unwrap();
+        let target = ExactEnvironmentAccess {
+            reference: "user/personal".parse().unwrap(),
+            binding: EnvironmentAccessBinding {
+                environment_id: access_environment_id(environment_id).unwrap(),
+                profile_id: AccessProfileId::parse("profile-personal").unwrap(),
+                profile_revision: 3,
+            },
+        };
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let payload =
+            apply_environment_access_operation_payload("dev", Some(&expected), Some(&target));
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::ApplyEnvironmentAccess,
+                &payload,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            core.replay_pending_operations().await,
+            Err(SupervisorError::CredentialAuthorityUnavailable)
+        ));
+        let pending = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.phase, OperationPhase::Intent);
+        assert_eq!(pending.checkpoint, 0);
+        assert_eq!(
+            environment_access_selection(core.environment("dev").unwrap())
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
     async fn delete_replay_preserves_the_stable_environment_precondition() {
         let environment = project_environment();
         let environment_id = environment.id;
@@ -7574,7 +8612,7 @@ mod tests {
                 request_id,
                 Some(environment_id),
                 OperationKind::Delete,
-                &serde_json::json!({"name": "dev"}),
+                &serde_json::json!({"name": "dev", "revoke_access": false}),
             )
             .unwrap();
         let service = test_supervisor_service(core);
@@ -7690,7 +8728,7 @@ mod tests {
         assert_eq!(initial.checkpoint, 0);
         assert_eq!(
             v1::OperationStage::try_from(initial.stage).unwrap(),
-            v1::OperationStage::RecordStarting
+            v1::OperationStage::RequireEnvironmentAccess
         );
 
         assert!(
@@ -7974,6 +9012,8 @@ mod tests {
             implicit_path_mode: String::new(),
             host_ports: Vec::new(),
             mesh: None,
+            access_profile_id: String::new(),
+            access_profile_revision: 0,
         };
         let workspace_plan = WorkspacePlan {
             schema_version: 1,
@@ -8055,6 +9095,8 @@ mod tests {
             .unwrap(),
             project_spec_json: Some(project_spec_json),
             project_spec_sha256: Some(project_spec_sha256),
+            access_profile: None,
+            access_binding: None,
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,
@@ -8083,6 +9125,7 @@ mod tests {
                 artifact_lock: parent.path().join("artifacts.lock.json"),
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
+                credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -8148,6 +9191,7 @@ mod tests {
                 artifact_lock: parent.path().join("artifacts.lock.json"),
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
+                credential_authority_root: parent.path().join("credentials"),
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,

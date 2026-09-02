@@ -11,6 +11,7 @@ CW_BIN=''
 MESH_BIN=''
 DERP_BIN=''
 DATA_PLANE_SMOKE_BIN=''
+CREDENTIAL_BRIDGE_SMOKE_BIN=''
 STATE_PROBE_BIN=''
 ARTIFACT_ROOT=''
 ARTIFACT_LOCK=''
@@ -38,6 +39,7 @@ GITEA_COMMIT='bcbae548ab2f4f0e407068aa8717cec341084d7a'
 GITEA_README_SHA256='d4911db7bc817528fbcbaaf39e76851700084b65494dac1e29afb997867ac006'
 GITHUB_COMMIT='93f68ba4abc9f6e222481265b9b759e71d332575'
 GITHUB_README_SHA256='3661bce99f8eba5e48077eeddb4840f4404c1ceafbf200b9e8470bc7b4f22e50'
+WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:fa5d2fa61bb03b0e9181915b57ce5f2f8fa053eec8b7c6a950ecaadf93bc3645'
 SCRATCH_MOUNT_OPTIONS=''
 NAME='native-smoke'
 COMMAND_INDEX=0
@@ -47,6 +49,20 @@ ENV_CREATED=0
 MESH_STARTED=0
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
+MANAGED_CREDENTIAL_BROKER=0
+CREDENTIAL_ROOT=''
+CREDENTIAL_PROFILE_NAME='native-broker'
+CREDENTIAL_ID=''
+CREDENTIAL_CANARY=''
+KEYRING_ROOT=''
+KEYRING_RUNTIME=''
+KEYRING_CONFIG=''
+KEYRING_DATA=''
+KEYRING_CONTROL=''
+KEYRING_DBUS_ADDRESS=''
+KEYRING_DBUS_PID=''
+KEYRING_DAEMON_PID=''
+CREATE_ACCESS_ARGS=()
 
 usage() {
   cat <<'USAGE' >&2
@@ -55,9 +71,11 @@ usage: smoke-native-local-environment.sh \
   --mesh-bin ABSOLUTE_PATH \
   --derp-bin ABSOLUTE_PATH \
   --data-plane-smoke-bin ABSOLUTE_PATH \
+  --credential-bridge-smoke-bin ABSOLUTE_PATH \
   --state-probe-bin ABSOLUTE_PATH \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
+  [--managed-credential-broker] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
 Runs the built cw Linux/KVM native-environment product smoke with 2 vCPUs and
@@ -73,10 +91,16 @@ permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
 credential-free git.example.invalid/GitHub preparation, independent copy preparation,
 create/info, loopback-only host-port publication, bounded daemon diagnostics and
-repair, bare run and shell, PTY behavior, saved output and nonzero status,
+repair, stock Codex 0.149.0 over the synthetic credential bridge, bare run and
+shell, PTY behavior, saved output and nonzero status,
 cached-runtime restart after the installed artifact lock advances, offline
 disk/CPU/memory resize, supervisor crash recovery, Mesh attachment and typed
 transport-loss recovery, and journaled exact deletion cleanup.
+
+With --managed-credential-broker, it instead runs the focused protected-store
+product proof. That mode requires a specially featured cw binary named exactly
+cw-local-credential-broker-smoke and an isolated Secret Service implementation;
+it never contacts the provider or reads the desktop session keyring.
 USAGE
 }
 
@@ -135,6 +159,11 @@ while [[ $# -gt 0 ]]; do
       DATA_PLANE_SMOKE_BIN="$2"
       shift 2
       ;;
+    --credential-bridge-smoke-bin)
+      [[ $# -ge 2 && -z "$CREDENTIAL_BRIDGE_SMOKE_BIN" ]] || { usage; exit 2; }
+      CREDENTIAL_BRIDGE_SMOKE_BIN="$2"
+      shift 2
+      ;;
     --state-probe-bin)
       [[ $# -ge 2 && -z "$STATE_PROBE_BIN" ]] || { usage; exit 2; }
       STATE_PROBE_BIN="$2"
@@ -155,6 +184,11 @@ while [[ $# -gt 0 ]]; do
       SMOKE_PARENT="$2"
       shift 2
       ;;
+    --managed-credential-broker)
+      [[ "$MANAGED_CREDENTIAL_BROKER" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_CREDENTIAL_BROKER=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -166,7 +200,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$CW_BIN" && -n "$MESH_BIN" && -n "$DERP_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
+[[ -n "$CW_BIN" && -n "$MESH_BIN" && -n "$DERP_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$CREDENTIAL_BRIDGE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
   usage
   exit 2
 }
@@ -174,6 +208,11 @@ done
 for tool in awk cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
 done
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  for tool in busctl dbus-daemon gnome-keyring-daemon secret-tool; do
+    require_cmd "$tool"
+  done
+fi
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
 [[ "$(uname -m)" == x86_64 ]] || die 'the current native artifact set requires x86_64'
 [[ "$(id -u)" != 0 ]] || die 'the native local-environment smoke refuses root'
@@ -187,9 +226,15 @@ require_absolute_canonical_file 'Mesh binary' "$MESH_BIN"
 [[ -x "$MESH_BIN" ]] || die "Mesh binary is not executable: $MESH_BIN"
 require_absolute_canonical_file 'DERP binary' "$DERP_BIN"
 [[ -x "$DERP_BIN" ]] || die "DERP binary is not executable: $DERP_BIN"
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "${CW_BIN##*/}" != cw-local-credential-broker-smoke ]]; then
+  die 'managed credential-broker smoke requires cw-local-credential-broker-smoke'
+fi
 require_absolute_canonical_file 'public data-plane smoke binary' "$DATA_PLANE_SMOKE_BIN"
 [[ -x "$DATA_PLANE_SMOKE_BIN" ]] ||
   die "public data-plane smoke binary is not executable: $DATA_PLANE_SMOKE_BIN"
+require_absolute_canonical_file 'Codex credential-bridge smoke binary' "$CREDENTIAL_BRIDGE_SMOKE_BIN"
+[[ -x "$CREDENTIAL_BRIDGE_SMOKE_BIN" ]] ||
+  die "Codex credential-bridge smoke binary is not executable: $CREDENTIAL_BRIDGE_SMOKE_BIN"
 require_absolute_canonical_file 'native state probe binary' "$STATE_PROBE_BIN"
 [[ -x "$STATE_PROBE_BIN" ]] ||
   die "native state probe binary is not executable: $STATE_PROBE_BIN"
@@ -222,6 +267,13 @@ TRIPWIRE="$SMOKE_ROOT/fallback-invoked"
 TRANSCRIPT="$SMOKE_ROOT/transcript"
 SOURCE_HOOK_MARKER="$SMOKE_ROOT/source-hook-invoked"
 SOURCE_CREDENTIAL_MARKER="$SMOKE_ROOT/source-credential-helper-invoked"
+CREDENTIAL_ROOT="$SMOKE_HOME/.codewire/credentials-v1"
+KEYRING_ROOT="$SMOKE_ROOT/keyring"
+KEYRING_RUNTIME="$KEYRING_ROOT/runtime"
+KEYRING_CONFIG="$KEYRING_ROOT/config"
+KEYRING_DATA="$KEYRING_ROOT/data"
+KEYRING_CONTROL="$KEYRING_ROOT/control"
+KEYRING_DBUS_ADDRESS="unix:path=$KEYRING_RUNTIME/bus"
 mkdir -m 0700 "$SMOKE_HOME" "$STATE_ROOT" "$WORKSPACE" "$PLATFORM_CONFIG" "$SMOKE_ROOT/bin"
 touch "$TRANSCRIPT"
 chmod 0600 "$TRANSCRIPT"
@@ -306,6 +358,7 @@ for port in "$HOST_PORT" "$MESH_PORT" "$DERP_PORT"; do
 done
 cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
+image: $WORKSPACE_IMAGE
 repositories:
   - source: https://git.example.invalid/supplychain.git
     revision: $GITEA_COMMIT
@@ -321,6 +374,7 @@ EOF
 cw_isolated() {
   (
     local -a proxy_environment=()
+    local -a credential_environment=()
     if [[ "$ALLOW_REGISTRY_EGRESS" -eq 0 ]]; then
       proxy_environment=(
         HTTP_PROXY=http://127.0.0.1:1
@@ -328,6 +382,15 @@ cw_isolated() {
         ALL_PROXY=http://127.0.0.1:1
         'NO_PROXY=127.0.0.1,localhost'
       )
+    fi
+    if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+      credential_environment=(CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT")
+      if [[ -n "$KEYRING_DBUS_PID" && -n "$KEYRING_DAEMON_PID" ]]; then
+        credential_environment+=(
+          XDG_RUNTIME_DIR="$KEYRING_RUNTIME"
+          DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS"
+        )
+      fi
     fi
     cd "$WORKSPACE"
     env -i \
@@ -344,11 +407,29 @@ cw_isolated() {
       CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
       CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
       CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
+      "${credential_environment[@]}" \
       "${proxy_environment[@]}" \
       /usr/bin/timeout --foreground --signal=TERM --kill-after=5s \
       "${CW_COMMAND_TIMEOUT_SECONDS}s" \
       "$CW_BIN" "$@"
   )
+}
+
+run_cw_add_synthetic_credential() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! printf '%s' "$CREDENTIAL_CANARY" |
+    cw_isolated credentials --local add openai --kind api-key \
+      --name native-broker-openai >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'adding the synthetic local credential failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  LAST_STDOUT="$stdout_file"
+  LAST_STDERR="$stderr_file"
 }
 
 run_cw() {
@@ -437,6 +518,67 @@ run_public_data_smoke() {
     die 'public Exec/File data-plane smoke receipt drifted'
 }
 
+run_codex_credential_bridge_smoke() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! env -i \
+    PATH='/usr/bin:/bin' \
+    HOME="$SMOKE_HOME" \
+    USER="$(id -un)" \
+    LOGNAME="$(id -un)" \
+    SHELL='/bin/sh' \
+    TERM='xterm-256color' \
+    LC_ALL=C \
+    /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 180s \
+    "$CREDENTIAL_BRIDGE_SMOKE_BIN" \
+      --state-root "$STATE_ROOT" \
+      --artifact-root "$ARTIFACT_ROOT" \
+      --artifact-lock "$ARTIFACT_LOCK" \
+      --cw-bin "$CW_BIN" \
+      --target "$NAME" >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'stock Codex credential-bridge smoke failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  [[ "$(cat "$stdout_file")" == 'codewire-local-codex-bridge-smoke: PASS' ]] ||
+    die 'stock Codex credential-bridge smoke receipt drifted'
+}
+
+run_managed_credential_broker_smoke() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! env -i \
+    PATH='/usr/bin:/bin' \
+    HOME="$SMOKE_HOME" \
+    USER="$(id -un)" \
+    LOGNAME="$(id -un)" \
+    SHELL='/bin/sh' \
+    TERM='xterm-256color' \
+    LC_ALL=C \
+    /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 300s \
+    "$CREDENTIAL_BRIDGE_SMOKE_BIN" \
+      --state-root "$STATE_ROOT" \
+      --artifact-root "$ARTIFACT_ROOT" \
+      --artifact-lock "$ARTIFACT_LOCK" \
+      --cw-bin "$CW_BIN" \
+      --target "$NAME" \
+      --managed-broker \
+      --credential-authority-root "$CREDENTIAL_ROOT" \
+      --credential-id "$CREDENTIAL_ID" >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'managed local credential-broker product smoke failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  [[ "$(cat "$stdout_file")" == 'codewire-local-codex-bridge-smoke: PASS (managed broker)' ]] ||
+    die 'managed local credential-broker smoke receipt drifted'
+}
+
 wait_for_pid_exit() {
   local pid="$1"
   # Match the direct VMM gate's 15-second process-identity termination bound.
@@ -459,6 +601,241 @@ wait_for_pid_death() {
     sleep 0.05
   done
   return 1
+}
+
+exact_isolated_process() {
+  local pid="$1"
+  local executable="$2"
+  local marker="$3"
+  local argument
+  local -a argv=()
+  [[ "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] || return 1
+  [[ "$(stat -c '%u' "/proc/$pid" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
+  [[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)" == "$(readlink -f "$executable")" ]] ||
+    return 1
+  mapfile -d '' -t argv <"/proc/$pid/cmdline" 2>/dev/null || return 1
+  for argument in "${argv[@]}"; do
+    [[ "$argument" == "$marker" ]] && return 0
+  done
+  return 1
+}
+
+wait_for_exact_isolated_process() {
+  local pid="$1"
+  local executable="$2"
+  local marker="$3"
+  for _attempt in {1..100}; do
+    exact_isolated_process "$pid" "$executable" "$marker" && return 0
+    [[ -d "/proc/$pid" ]] || return 1
+    sleep 0.01
+  done
+  return 1
+}
+
+stop_exact_isolated_process() {
+  local pid="$1"
+  local executable="$2"
+  local marker="$3"
+  [[ -n "$pid" ]] || return 0
+  [[ -d "/proc/$pid" ]] || return 0
+  exact_isolated_process "$pid" "$executable" "$marker" || return 1
+  kill -TERM -- "$pid" 2>/dev/null || return 1
+  if ! wait_for_pid_death "$pid"; then
+    exact_isolated_process "$pid" "$executable" "$marker" || return 1
+    kill -KILL -- "$pid" 2>/dev/null || return 1
+    wait_for_pid_death "$pid" || return 1
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+keyring_service_ready() {
+  /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
+    status org.freedesktop.secrets >/dev/null 2>&1
+}
+
+start_isolated_keyring() {
+  mkdir -m 0700 \
+    "$KEYRING_ROOT" "$KEYRING_RUNTIME" "$KEYRING_CONFIG" \
+    "$KEYRING_DATA" "$KEYRING_CONTROL"
+  env -i PATH='/usr/bin:/bin' LC_ALL=C XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
+    /usr/bin/dbus-daemon --session --address="$KEYRING_DBUS_ADDRESS" \
+      --nofork --nopidfile >"$KEYRING_ROOT/dbus.stdout" 2>"$KEYRING_ROOT/dbus.stderr" &
+  KEYRING_DBUS_PID=$!
+  wait_for_exact_isolated_process \
+    "$KEYRING_DBUS_PID" /usr/bin/dbus-daemon "--address=$KEYRING_DBUS_ADDRESS" ||
+    die 'isolated D-Bus process identity drifted'
+  for _attempt in {1..200}; do
+    /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
+      status org.freedesktop.DBus >/dev/null 2>&1 && break
+    [[ -d "/proc/$KEYRING_DBUS_PID" ]] || break
+    sleep 0.05
+  done
+  if ! /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
+    status org.freedesktop.DBus >/dev/null 2>&1; then
+    tail -n 40 "$KEYRING_ROOT/dbus.stderr" >&2
+    die 'isolated D-Bus did not become ready'
+  fi
+
+  printf '%s' 'codewire-local-smoke-keyring-password' | env -i PATH='/usr/bin:/bin' LC_ALL=C \
+    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
+    XDG_CONFIG_HOME="$KEYRING_CONFIG" \
+    XDG_DATA_HOME="$KEYRING_DATA" \
+    DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
+    /usr/bin/gnome-keyring-daemon --foreground --unlock --components=secrets \
+      --control-directory="$KEYRING_CONTROL" \
+      >"$KEYRING_ROOT/keyring.stdout" 2>"$KEYRING_ROOT/keyring.stderr" &
+  KEYRING_DAEMON_PID=$!
+  wait_for_exact_isolated_process \
+    "$KEYRING_DAEMON_PID" /usr/bin/gnome-keyring-daemon \
+    "--control-directory=$KEYRING_CONTROL" ||
+    die 'isolated keyring process identity drifted'
+  for _attempt in {1..200}; do
+    keyring_service_ready && break
+    [[ -d "/proc/$KEYRING_DAEMON_PID" ]] || break
+    sleep 0.05
+  done
+  if ! keyring_service_ready; then
+    tail -n 40 "$KEYRING_ROOT/keyring.stderr" >&2
+    die 'isolated Secret Service did not become ready'
+  fi
+}
+
+stop_isolated_keyring() {
+  local failed=0
+  stop_exact_isolated_process \
+    "$KEYRING_DAEMON_PID" /usr/bin/gnome-keyring-daemon \
+    "--control-directory=$KEYRING_CONTROL" || failed=1
+  KEYRING_DAEMON_PID=''
+  stop_exact_isolated_process \
+    "$KEYRING_DBUS_PID" /usr/bin/dbus-daemon "--address=$KEYRING_DBUS_ADDRESS" || failed=1
+  KEYRING_DBUS_PID=''
+  [[ "$failed" -eq 0 ]]
+}
+
+secret_tool_isolated() {
+  env -i PATH='/usr/bin:/bin' LC_ALL=C \
+    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
+    DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
+    /usr/bin/secret-tool "$@"
+}
+
+find_exact_credential_authority_pid() {
+  local proc pid
+  local -a argv
+  for proc in /proc/[0-9]*; do
+    [[ "$(readlink -f "$proc/exe" 2>/dev/null || true)" == "$CW_BIN" ]] || continue
+    [[ "$(stat -c '%u' "$proc" 2>/dev/null || true)" == "$(id -u)" ]] || continue
+    argv=()
+    mapfile -d '' -t argv <"$proc/cmdline" 2>/dev/null || continue
+    [[ ${#argv[@]} -eq 4 ]] || continue
+    if [[ "${argv[1]}" == '__local-credential-authority' &&
+          "${argv[2]}" == '--root' && "${argv[3]}" == "$CREDENTIAL_ROOT" ]]; then
+      pid="${proc#/proc/}"
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done
+  return 1
+}
+
+shutdown_credential_authority() {
+  local pid
+  if ! pid="$(find_exact_credential_authority_pid)"; then
+    [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+    return
+  fi
+  if ! cw_isolated __local-credential-authority-probe \
+    --root "$CREDENTIAL_ROOT" --shutdown >/dev/null 2>&1; then
+    return 1
+  fi
+  wait_for_pid_death "$pid" || return 1
+  [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+}
+
+terminate_exact_credential_authority() {
+  local pid
+  shutdown_credential_authority && return 0
+  pid="$(find_exact_credential_authority_pid)" || return 1
+  kill -TERM -- "$pid" 2>/dev/null || return 1
+  if ! wait_for_pid_death "$pid"; then
+    [[ "$(find_exact_credential_authority_pid)" == "$pid" ]] || return 1
+    kill -KILL -- "$pid" 2>/dev/null || return 1
+    wait_for_pid_death "$pid" || return 1
+  fi
+  [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+}
+
+scan_for_credential_canary() {
+  local report="$SMOKE_ROOT/canary-scan.report"
+  if ! printf '%s' "$CREDENTIAL_CANARY" | /usr/bin/python3 -c '
+import errno
+import os
+import stat
+import sys
+
+needle = sys.stdin.buffer.read()
+root = os.fsencode(sys.argv[1])
+if len(needle) < 16 or not os.path.isabs(root):
+    raise SystemExit(2)
+
+def allocated_ranges(descriptor, size):
+    if not hasattr(os, "SEEK_DATA"):
+        yield 0, size
+        return
+    offset = 0
+    while offset < size:
+        try:
+            data = os.lseek(descriptor, offset, os.SEEK_DATA)
+        except OSError as error:
+            if error.errno == errno.ENXIO:
+                return
+            if error.errno in (errno.EINVAL, errno.ENOTSUP):
+                yield 0, size
+                return
+            raise
+        hole = os.lseek(descriptor, data, os.SEEK_HOLE)
+        yield data, min(hole, size)
+        offset = max(hole, data + 1)
+
+def contains(descriptor, start, end):
+    carry = b""
+    offset = start
+    while offset < end:
+        chunk = os.pread(descriptor, min(1024 * 1024, end - offset), offset)
+        if not chunk:
+            return False
+        combined = carry + chunk
+        if needle in combined:
+            return True
+        carry = combined[-(len(needle) - 1):]
+        offset += len(chunk)
+    return False
+
+found = []
+for directory, directories, files in os.walk(root, followlinks=False):
+    directories[:] = [
+        name for name in directories
+        if not os.path.islink(os.path.join(directory, name))
+    ]
+    for name in files:
+        path = os.path.join(directory, name)
+        metadata = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            if any(contains(descriptor, start, end) for start, end in allocated_ranges(descriptor, metadata.st_size)):
+                found.append(os.fsdecode(os.path.relpath(path, root)))
+        finally:
+            os.close(descriptor)
+for path in found:
+    print(path)
+raise SystemExit(1 if found else 0)
+' "$SMOKE_ROOT" >"$report"; then
+    tail -n 20 "$report" >&2
+    die 'synthetic credential canary entered durable smoke state'
+  fi
+  [[ ! -s "$report" ]] || die 'credential canary scanner emitted unexpected output'
 }
 
 wait_for_environment_state() {
@@ -571,13 +948,15 @@ find_exact_supervisor_pid() {
     [[ "$(readlink -f "$proc/exe" 2>/dev/null || true)" == "$CW_BIN" ]] || continue
     argv=()
     mapfile -d '' -t argv <"$proc/cmdline" 2>/dev/null || continue
-    [[ ${#argv[@]} -eq 12 ]] || continue
+    [[ ${#argv[@]} -eq 14 ]] || continue
     if [[ "${argv[1]}" == '__native-supervisor' &&
           "${argv[2]}" == '--root' && "${argv[3]}" == "$STATE_ROOT" &&
           "${argv[4]}" == '--artifact-root' && "${argv[5]}" == "$ARTIFACT_ROOT" &&
           "${argv[6]}" == '--artifact-lock' && "${argv[7]}" == "$ARTIFACT_LOCK" &&
           "${argv[8]}" == '--mesh-data-dir' && "${argv[9]}" == "$SMOKE_HOME/.codewire" &&
-          "${argv[10]}" == '--platform-config-dir' && "${argv[11]}" == "$PLATFORM_CONFIG" ]]; then
+          "${argv[10]}" == '--platform-config-dir' && "${argv[11]}" == "$PLATFORM_CONFIG" &&
+          "${argv[12]}" == '--credential-authority-root' &&
+          "${argv[13]}" == "$SMOKE_HOME/.codewire/credentials-v1" ]]; then
       pid="${proc#/proc/}"
       printf '%s\n' "$pid"
       return 0
@@ -601,7 +980,8 @@ owned_processes() {
   for proc in /proc/[0-9]*; do
     [[ -r "$proc/cmdline" ]] || continue
     cmdline="$(tr '\0' '\n' <"$proc/cmdline" 2>/dev/null || true)"
-    if [[ "$cmdline" == *"$STATE_ROOT"* ]]; then
+    if [[ "$cmdline" == *"$STATE_ROOT"* ||
+          ( "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "$cmdline" == *"$CREDENTIAL_ROOT"* ) ]]; then
       printf '%s\n' "${proc#/proc/}"
     fi
   done
@@ -729,7 +1109,13 @@ cleanup() {
       MESH_STARTED=0
     fi
   fi
+  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! terminate_exact_credential_authority; then
+    cleanup_status=1
+  fi
   if [[ "$status" -ne 0 ]] && ! terminate_remaining_owned_processes; then
+    cleanup_status=1
+  fi
+  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! stop_isolated_keyring; then
     cleanup_status=1
   fi
   if [[ "$status" -eq 0 && "$cleanup_status" -eq 0 ]]; then
@@ -747,12 +1133,12 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-log 'checking native and legacy local names cannot collide'
-run_cw_expect_failure env create --local --name legacy --cpu 2 --memory 16Gi --path "$WORKSPACE"
-rg -qF 'already exists in the legacy Docker/Lima state' "$LAST_STDERR" ||
-  die 'native creation did not report the legacy-name collision'
-[[ ! -e "$STATE_ROOT/state.json" && ! -e "$STATE_ROOT/supervisor.db" ]] ||
-  die 'rejected native creation wrote native state'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'checking the specially named synthetic-broker build before creating protected material'
+  run_cw __local-credential-broker-synthetic-smoke-check
+  [[ "$(cat "$LAST_STDOUT")" == 'codewire-local-credential-broker-synthetic-smoke:v1' ]] ||
+    die 'synthetic credential-broker build marker drifted'
+fi
 
 log 'starting isolated standalone Mesh and selecting the smoke network'
 start_smoke_mesh
@@ -794,11 +1180,63 @@ jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT"
   .local.derp.state == "running"
 ' "$LAST_STDOUT" >/dev/null || die 'standalone Mesh status drifted after default selection'
 
-log 'creating account-free Mesh-attached 2-vCPU, 16-GiB native environment'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'starting a private D-Bus and Secret Service instance'
+  start_isolated_keyring
+  CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/uuid)"
+  [[ ${#CREDENTIAL_CANARY} -ge 16 && ${#CREDENTIAL_CANARY} -le 256 &&
+     "$CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated credential canary is invalid'
+
+  log 'creating one synthetic protected OpenAI credential and access profile'
+  run_cw_add_synthetic_credential
+  run_cw credentials --local list --output json
+  jq -e '
+    length == 1 and
+    .[0].placement == "local" and
+    .[0].owner == "user/local-user" and
+    .[0].provider == "openai" and
+    .[0].authentication_kind == "api_key" and
+    .[0].name == "native-broker-openai" and
+    .[0].status == "active" and
+    .[0].revocation_generation == 1 and
+    .[0].protected_store_persistence == "operating_system" and
+    .[0].cleanup_pending == false
+  ' "$LAST_STDOUT" >/dev/null || die 'synthetic protected credential metadata drifted'
+  CREDENTIAL_ID="$(jq -er '.[0].id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+    die 'synthetic protected credential ID is invalid'
+  run_cw credentials --local profile create "$CREDENTIAL_PROFILE_NAME"
+  run_cw credentials --local profile set \
+    "$CREDENTIAL_PROFILE_NAME" codex "$CREDENTIAL_ID"
+  run_cw credentials --local profile get "$CREDENTIAL_PROFILE_NAME" --output json
+  jq -e --arg credential "$CREDENTIAL_ID" '
+    length == 1 and
+    .[0].placement == "local" and
+    .[0].owner == "user/local-user" and
+    .[0].name == "native-broker" and
+    .[0].revision == 2 and
+    (.[0].entries | length) == 1 and
+    .[0].entries.codex == $credential
+  ' "$LAST_STDOUT" >/dev/null || die 'synthetic access profile metadata drifted'
+  CREATE_ACCESS_ARGS=(--access-profile "user/$CREDENTIAL_PROFILE_NAME")
+else
+  log 'checking native and legacy local names cannot collide'
+  run_cw_expect_failure env create --local --name legacy --cpu 2 --memory 16Gi --path "$WORKSPACE"
+  rg -qF 'already exists in the legacy Docker/Lima state' "$LAST_STDERR" ||
+    die 'native creation did not report the legacy-name collision'
+  [[ ! -e "$STATE_ROOT/state.json" && ! -e "$STATE_ROOT/supervisor.db" ]] ||
+    die 'rejected native creation wrote native state'
+fi
+
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'creating a broker-bound 2-vCPU, 16-GiB native environment'
+else
+  log 'creating account-free 2-vCPU, 16-GiB native environment'
+fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
 run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi \
-  --path "$WORKSPACE" --output json
+  --path "$WORKSPACE" "${CREATE_ACCESS_ARGS[@]}" --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
@@ -816,6 +1254,12 @@ jq -e --arg listen "127.0.0.1:$HOST_PORT" --arg network "$MESH_NETWORK" '
   .ports == [{"listen": $listen, "guest_port": 3000}] and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  jq -e '
+    .access_profile == "user/native-broker" and
+    .access_profile_revision == 2
+  ' "$LAST_STDOUT" >/dev/null || die 'created native environment access profile drifted'
+fi
 [[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'
 [[ ! -e "$SOURCE_CREDENTIAL_MARKER" ]] ||
   die 'source Git credential helper ran during native clone preparation'
@@ -845,7 +1289,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:8:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:9:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
@@ -874,6 +1318,61 @@ RUNNER_PID="$(native_database_value runner_pid)"
   die 'one-boot guest seed remained after readiness'
 [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/generations" -name setup.raw -print -quit)" ]] ||
   die 'credential-free one-boot setup pack remained after readiness'
+
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
+  run_managed_credential_broker_smoke
+  run_cw credentials --local get "$CREDENTIAL_ID" --output json
+  jq -e '
+    length == 1 and
+    .[0].status == "revoked" and
+    .[0].revocation_generation == 2 and
+    .[0].protected_store_persistence == "operating_system" and
+    .[0].cleanup_pending == false
+  ' "$LAST_STDOUT" >/dev/null || die 'synthetic credential revocation metadata drifted'
+
+  log 'stopping the VM before scanning all durable test-owned state'
+  run_cw env stop --local "$NAME" --output json
+  jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
+    die 'broker-bound native environment did not stop'
+  wait_for_journal_complete ||
+    die 'broker-bound native stop returned before its lifecycle journal became terminal'
+  scan_for_credential_canary
+
+  log 'deleting the environment, profile, credential, and protected-store entry'
+  run_cw env rm --local "$NAME" --yes
+  ENV_CREATED=0
+  run_cw credentials --local profile delete "$CREDENTIAL_PROFILE_NAME" --yes
+  run_cw credentials --local delete "$CREDENTIAL_ID" --yes
+  run_cw credentials --local list --output json
+  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
+    die 'synthetic credential metadata remained after deletion'
+  run_cw credentials --local profile list --output json
+  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
+    die 'synthetic access profile remained after deletion'
+  keyring_service_ready || die 'isolated Secret Service exited before deletion proof'
+  if secret_tool_isolated lookup \
+    application codewire \
+    service sh.codewire.credentials \
+    entry "local/credentials/$CREDENTIAL_ID/material-v1" \
+    >/dev/null 2>"$SMOKE_ROOT/deleted-keyring-entry.stderr"; then
+    die 'synthetic protected-store entry remained after credential deletion'
+  fi
+  scan_for_credential_canary
+  unset CREDENTIAL_CANARY
+
+  [[ ! -e "$TRIPWIRE" ]] ||
+    die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
+  [[ "$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')" == "$LEGACY_SHA256" ]] ||
+    die 'pre-existing legacy local state changed'
+  terminate_exact_credential_authority || die 'bounded credential-authority teardown failed'
+  terminate_exact_supervisor || die 'bounded supervisor teardown failed'
+  [[ -z "$(owned_processes)" ]] ||
+    die 'a native runtime or credential process remained after bounded teardown'
+  stop_isolated_keyring || die 'bounded isolated keyring teardown failed'
+  log 'PASS (Linux/KVM isolated protected credential-broker product flow)'
+  exit 0
+fi
 
 log 'checking public Exec/File over the owner-only supervisor UDS'
 run_public_data_smoke
@@ -939,6 +1438,9 @@ done
 [[ "$HOST_PORT_SESSION_EXITED" -eq 1 ]] ||
   die 'host-port guest session did not exit successfully'
 
+log 'checking stock Codex 0.149.0 over the synthetic guest credential bridge'
+run_codex_credential_bridge_smoke
+
 log 'checking bounded public daemon status over the owner-only supervisor UDS'
 run_cw env --local daemon status "$NAME" --output json
 jq -e '
@@ -948,6 +1450,7 @@ jq -e '
   (.daemon_version | type == "string" and length > 0) and
   .capabilities == [
     "attach.v1",
+    "credential_bridge.v1",
     "exec.v1",
     "files.v1",
     "health.v1",
@@ -1254,8 +1757,8 @@ jq -e '
 ' "$LAST_STDOUT" >/dev/null || die 'native resize result drifted'
 [[ "$(stat -c '%s' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/state.raw")" == 22548578304 ]] ||
   die 'native state disk file did not grow to 21 GiB'
-[[ "$(native_database_value resize_operation)" == 'restart:completed:8' ]] ||
-  die 'native resize journal did not commit all eight effect checkpoints'
+[[ "$(native_database_value resize_operation)" == 'restart:completed:9' ]] ||
+  die 'native resize journal did not commit all nine effect checkpoints'
 run_cw run --no-tty -- /bin/sh -lc \
   'printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; cat /workspace/sentinel.txt'
 rg -qF 'guest-cpus=3' "$LAST_STDOUT" || die 'resized guest did not observe exactly 3 vCPUs'

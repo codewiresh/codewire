@@ -904,7 +904,7 @@ mounts:
     mode: direct
     readonly: true
 secrets:
-  org: false
+  organization: false
   user: true
   project: dev
 agents:

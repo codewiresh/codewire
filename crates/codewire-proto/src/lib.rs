@@ -45,7 +45,7 @@ mod tests {
         MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshNetwork, MeshNode, MeshNodeEnrollment,
         ORGANIZATION_SERVICE_SERVICE_NAME, OrgMember, OrgRole, Organization,
         OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME, PRESET_SERVICE_SERVICE_NAME, Port,
-        PortAccess, Preset, ProjectAgents, ProjectCredentialReference, ProjectResources,
+        PortAccess, Preset, ProjectAccessBinding, ProjectAgents, ProjectResources,
         ProjectSecretBindings, ProjectSkillSelection, ProjectSkillSource, ProjectSpec,
         RedeemMeshNodeEnrollmentResponse, RepoEntry, SECRET_SERVICE_SERVICE_NAME, SecretMetadata,
         SetProjectSecretRequest, SetSecretRequest, SetUserSecretRequest, SetupAgent, SetupConfig,
@@ -299,25 +299,21 @@ mod tests {
             .into(),
             secrets: Some(ProjectSecretBindings {
                 project: "development".into(),
+                user: true,
                 ..Default::default()
             })
             .into(),
-            credentials: [(
-                "work".into(),
-                ProjectCredentialReference {
-                    provider: "openai".into(),
-                    account: "acct-work".into(),
-                    ..Default::default()
-                },
-            )]
-            .into_iter()
-            .collect(),
+            access: Some(ProjectAccessBinding {
+                profile: "user/work".into(),
+                ..Default::default()
+            })
+            .into(),
             ..Default::default()
         };
         let json = serde_json::to_value(project).expect("portable project proto JSON");
         assert_eq!(json["schemaVersion"], 1);
         assert_eq!(json["repositories"][0]["revision"], "deadbeef");
-        assert_eq!(json["credentials"]["work"]["account"], "acct-work");
+        assert_eq!(json["access"]["profile"], "user/work");
         let encoded = json.to_string();
         for forbidden in [
             "hostPath",

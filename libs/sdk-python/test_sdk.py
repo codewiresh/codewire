@@ -671,9 +671,7 @@ class SDKTestCase(unittest.TestCase):
                     "agents": ["codex"],
                 }],
                 "resources": {"cpu_millicores": 2000, "memory_mib": 16384},
-                "credentials": {
-                    "work": {"provider": "openai", "account": "acct-work"}
-                },
+                "access": {"profile": "user/work"},
             },
         )
         project = ControlPlaneFixture.last_create_project_spec
@@ -683,7 +681,7 @@ class SDKTestCase(unittest.TestCase):
             ProjectSkillSource.PROJECT_SKILL_SOURCE_USER,
         )
         self.assertEqual(project.repositories[0].revision, "deadbeef")
-        self.assertEqual(project.credentials["work"].account, "acct-work")
+        self.assertEqual(project.access.profile, "user/work")
 
     def test_environment_get(self):
         env = self.cw.environments.get("env_123")

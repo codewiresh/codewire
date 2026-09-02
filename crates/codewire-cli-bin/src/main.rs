@@ -11,8 +11,24 @@ fn main() {
     let mesh_enrollment_broker = std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == "__native-mesh-enrollment-broker");
+    #[cfg(target_os = "linux")]
+    let broker = std::env::args_os().nth(1).is_some_and(|argument| {
+        matches!(
+            argument.to_str(),
+            Some("__local-credential-broker" | "__local-credential-broker-confinement-probe")
+        )
+    });
+    #[cfg(not(target_os = "linux"))]
+    let broker = false;
+
+    #[cfg(target_os = "linux")]
+    if broker && codewire_cli::prepare_local_credential_broker_process().is_err() {
+        eprintln!("prepare local credential broker process failed");
+        std::process::exit(1);
+    }
+
     let isolated_process =
-        network_worker || egress_broker || mesh_transport || mesh_enrollment_broker;
+        network_worker || egress_broker || mesh_transport || mesh_enrollment_broker || broker;
     let mut runtime = if isolated_process {
         tokio::runtime::Builder::new_current_thread()
     } else {
@@ -36,8 +52,10 @@ fn main() {
                 codewire_cli::native_egress_broker_exit_code(&err)
             } else if mesh_transport {
                 codewire_cli::native_mesh_transport_exit_code(&err)
-            } else {
+            } else if mesh_enrollment_broker {
                 codewire_cli::native_mesh_enrollment_broker_exit_code(&err)
+            } else {
+                None
             }
             .unwrap_or(1);
             #[cfg(not(target_os = "linux"))]

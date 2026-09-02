@@ -4,24 +4,26 @@ use std::time::Duration;
 use codewire_gateway_proto::daemon::v1;
 use codewire_gateway_proto::daemon::v1::daemon_service_server::DaemonService;
 use codewire_gateway_proto::{
-    DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITIES, DAEMON_MINIMUM_PROTOCOL_VERSION,
-    DAEMON_PROTOCOL_VERSION,
+    DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITIES, DAEMON_CAPABILITY_CREDENTIAL_BRIDGE,
+    DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION,
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::credential_bridge::CredentialBridge;
 use crate::durable_session::{SessionEngine, status_from_session_error};
 use crate::{Config, files, session};
 
 const ATTACH_SESSION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DaemonServiceImpl {
     config: Config,
     runtime_state: DaemonRuntimeState,
     session_engine: SessionEngine,
+    credential_bridge: CredentialBridge,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,6 +59,7 @@ impl DaemonServiceImpl {
     pub fn with_runtime_state(config: Config, runtime_state: DaemonRuntimeState) -> Self {
         Self {
             session_engine: SessionEngine::new(&config),
+            credential_bridge: CredentialBridge::new(config.credential_bridge.clone()),
             config,
             runtime_state,
         }
@@ -78,6 +81,10 @@ impl DaemonServiceImpl {
         }
         Ok(())
     }
+
+    pub(crate) fn credential_bridge(&self) -> CredentialBridge {
+        self.credential_bridge.clone()
+    }
 }
 
 #[tonic::async_trait]
@@ -85,6 +92,7 @@ impl DaemonService for DaemonServiceImpl {
     type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
     type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
     type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
+    type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
 
     async fn get_capabilities(
         &self,
@@ -104,6 +112,15 @@ impl DaemonService for DaemonServiceImpl {
             message: self.runtime_state.message.clone(),
             diagnostics: self.runtime_state.diagnostics.clone(),
         }))
+    }
+
+    async fn credential_bridge(
+        &self,
+        request: Request<Streaming<v1::CredentialBridgeHostMessage>>,
+    ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
+        self.authorize(&request)?;
+        let connection = self.credential_bridge.connect(request.into_inner()).await?;
+        Ok(Response::new(connection.output))
     }
 
     async fn launch_session(
@@ -591,7 +608,13 @@ impl DaemonServiceImpl {
     fn capabilities(&self, request: v1::GetCapabilitiesRequest) -> v1::GetCapabilitiesResponse {
         let supported = DAEMON_CAPABILITIES
             .iter()
-            .map(|capability| (*capability).to_string())
+            .copied()
+            .chain(
+                self.credential_bridge
+                    .is_enabled()
+                    .then_some(DAEMON_CAPABILITY_CREDENTIAL_BRIDGE),
+            )
+            .map(str::to_owned)
             .collect::<Vec<_>>();
 
         let (state, message) = if request.protocol_version > DAEMON_PROTOCOL_VERSION {
@@ -613,7 +636,10 @@ impl DaemonServiceImpl {
                 ),
             )
         } else {
-            let supported_set = DAEMON_CAPABILITIES.iter().copied().collect::<BTreeSet<_>>();
+            let supported_set = supported
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
             let missing = request
                 .required_capabilities
                 .iter()
@@ -1111,6 +1137,7 @@ mod tests {
             home_root,
             auth_token,
             process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {

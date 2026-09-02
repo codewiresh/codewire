@@ -24,7 +24,9 @@ use rustix::fs::{
 use rustix::io::Errno as RustixErrno;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tokio::net::{TcpListener, UnixStream as TokioUnixStream};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::Semaphore;
 use tokio::sync::watch;
 use tokio::{
     io::unix::AsyncFd,
@@ -94,11 +96,13 @@ const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
 const CONTAINER_MACHINE_ID_PATH: &str = "/run/codewire/container/machine-id";
 const CONTAINER_RESOLV_CONF_PATH: &str = "/run/codewire/container/resolv.conf";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
+const CREDENTIAL_INGRESS_SOCKET: &str = "/run/codewire/container/credential.sock";
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
 const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
 const CONTAINER_RESOLV_CONF_DESTINATION: &str = "/etc/resolv.conf";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
+const CONTAINER_CREDENTIAL_SOCKET: &str = "/run/codewire-host/credential.sock";
 const INSTALL_STATE_PATH: &str = "/state/codewire/workspace-install.state";
 const CONTAINER_INSTALL_STATE_PATH: &str = "/run/codewire-runtime/install.state";
 const PERSISTENT_PROBE_PATH: &str = "/state/probe";
@@ -165,7 +169,11 @@ const NETWORK_STATUS_VALUES: &[&str] = &[
     "network-session-failed",
     "network-authenticated",
 ];
+const CREDENTIAL_FORWARDER_READY_FD: RawFd = 4;
 const WORKSPACE_READY_LIMIT: usize = 96;
+const CREDENTIAL_FORWARDER_READY: &[u8] = b"CWCREDS1 ready\n";
+const CREDENTIAL_FORWARDER_START_TIMEOUT: Duration = Duration::from_secs(5);
+const CREDENTIAL_FORWARDER_CONNECTION_LIMIT: usize = 32;
 const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
     (
         b"CWFAIL1 workspace-identity-failed\n",
@@ -191,6 +199,10 @@ const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
         b"CWFAIL1 workspace-workload-failed\n",
         "workspace-workload-failed",
     ),
+    (
+        b"CWFAIL1 workspace-credential-forwarder-failed\n",
+        "workspace-credential-forwarder-failed",
+    ),
 ];
 
 const SYS_BLOCK_PATH: &str = "/sys/class/block";
@@ -205,6 +217,8 @@ const RUNC_PROCESS_SPEC_LIMIT: u64 = 1024 * 1024;
 const PERSISTENT_WORKSPACE_PATH: &str = "/state/workspace";
 const PERSISTENT_HOME_PATH: &str = "/state/home";
 const PERSISTENT_HOME_WORK_PATH: &str = "/state/home-work";
+const PERSISTENT_AGENT_HOMES_PATH: &str = "/state/agent-homes";
+const PERSISTENT_CODEX_HOME_PATH: &str = "/state/agent-homes/codex";
 
 static POWEROFF_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -329,6 +343,7 @@ pub fn run_init() -> Result<()> {
     };
     record_boot_stage("workspace-plan-ready")?;
     normalize_initial_persistent_ownership(&plan)?;
+    prepare_codex_projection(&plan)?;
     record_boot_stage("ownership-ready")?;
     prepare_install_state()?;
     let poweroff = prepare_container_control(&seed, &plan.identity)?;
@@ -400,6 +415,13 @@ pub async fn run_daemon() -> Result<()> {
                 additional_gids: plan.identity.additional_gids.clone(),
             },
         ),
+        credential_bridge: Some(codewire_daemon::CredentialBridgeConfig {
+            environment_id: seed.vm_id(),
+            environment_generation: seed.generation(),
+            ingress_socket: PathBuf::from(CREDENTIAL_INGRESS_SOCKET),
+            ingress_uid: plan.identity.uid,
+            ingress_gid: plan.identity.gid,
+        }),
     };
 
     codewire_daemon::serve_grpc_with_incoming(
@@ -1265,6 +1287,10 @@ pub fn run_workspace_init() -> Result<()> {
     if let Err(error) = run_workspace_install(&plan) {
         return fail_workspace_init("workspace-install-failed", error);
     }
+    let mut credential_forwarder = match spawn_credential_forwarder(&plan) {
+        Ok(forwarder) => forwarder,
+        Err(error) => return fail_workspace_init("workspace-credential-forwarder-failed", error),
+    };
     if !plan.workload_args.is_empty() {
         let _workload = match spawn_workspace_process(
             &plan,
@@ -1297,13 +1323,24 @@ pub fn run_workspace_init() -> Result<()> {
         if POWEROFF_REQUESTED.load(Ordering::Acquire) {
             return Ok(());
         }
+        if credential_forwarder
+            .try_wait()
+            .context("observe credential loopback forwarder")?
+            .is_some()
+        {
+            bail!("credential loopback forwarder exited");
+        }
         let mut status = 0;
         let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if reaped > 0
-            || (reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
-        {
+        if reaped == libc::pid_t::try_from(credential_forwarder.id()).unwrap_or(-1) {
+            bail!("credential loopback forwarder exited");
+        }
+        if reaped > 0 {
             thread::sleep(Duration::from_millis(20));
             continue;
+        }
+        if reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            bail!("workspace init lost its credential loopback forwarder");
         }
         if reaped == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
             thread::sleep(Duration::from_millis(20));
@@ -1455,6 +1492,158 @@ fn spawn_workspace_process(
         });
     }
     command.spawn().with_context(|| action)
+}
+
+fn spawn_credential_forwarder(plan: &WorkspacePlan) -> Result<std::process::Child> {
+    let (mut readiness, readiness_writer) =
+        UnixStream::pair().context("create credential forwarder readiness channel")?;
+    readiness
+        .set_read_timeout(Some(CREDENTIAL_FORWARDER_START_TIMEOUT))
+        .context("bound credential forwarder readiness wait")?;
+    let readiness_fd = readiness_writer.as_raw_fd();
+    let uid = plan.identity.uid;
+    let gid = plan.identity.gid;
+    let additional_gids = plan
+        .identity
+        .additional_gids
+        .iter()
+        .map(|gid| *gid as libc::gid_t)
+        .collect::<Vec<_>>();
+    let mut command = Command::new(CONTAINER_INIT_PATH);
+    command
+        .arg("credential-forwarder")
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if readiness_fd != CREDENTIAL_FORWARDER_READY_FD
+                && libc::dup2(readiness_fd, CREDENTIAL_FORWARDER_READY_FD) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(CREDENTIAL_FORWARDER_READY_FD, libc::F_SETFD, 0) == -1
+                || libc::setgroups(additional_gids.len(), additional_gids.as_ptr()) == -1
+                || libc::setgid(gid as libc::gid_t) == -1
+                || libc::setuid(uid as libc::uid_t) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            clear_process_capabilities()?;
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .spawn()
+        .context("start credential loopback forwarder")?;
+    drop(readiness_writer);
+    let mut actual = vec![0_u8; CREDENTIAL_FORWARDER_READY.len()];
+    if readiness.read_exact(&mut actual).is_err()
+        || actual != CREDENTIAL_FORWARDER_READY
+        || child
+            .try_wait()
+            .context("observe credential loopback forwarder readiness")?
+            .is_some()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("credential loopback forwarder did not become ready");
+    }
+    Ok(child)
+}
+
+pub async fn run_credential_forwarder() -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } != 1,
+        "credential forwarder must not be container PID 1"
+    );
+    ensure!(
+        std::env::vars_os().next().is_none(),
+        "credential forwarder refuses an ambient environment"
+    );
+    let _identity = read_guest_identity()?;
+    ensure_init_is_expected(true)?;
+    clear_process_capabilities().context("clear credential forwarder capabilities")?;
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1
+        || unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1
+    {
+        return Err(io::Error::last_os_error()).context("confine credential forwarder process");
+    }
+
+    let listener = TcpListener::bind((
+        std::net::Ipv4Addr::LOCALHOST,
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+    ))
+    .await
+    .context("bind credential forwarder IPv4 loopback")?;
+    let address = listener
+        .local_addr()
+        .context("inspect credential forwarder listener")?;
+    ensure!(
+        address.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            && address.port() == codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+        "credential forwarder listener identity is invalid"
+    );
+    publish_credential_forwarder_readiness()?;
+
+    let permits = Arc::new(Semaphore::new(CREDENTIAL_FORWARDER_CONNECTION_LIMIT));
+    loop {
+        let (mut client, _) = listener
+            .accept()
+            .await
+            .context("accept credential loopback connection")?;
+        let _ = client.set_nodelay(true);
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            write_credential_unavailable(&mut client).await;
+            continue;
+        };
+        tokio::spawn(async move {
+            let _permit = permit;
+            let upstream = tokio::time::timeout(
+                Duration::from_secs(1),
+                TokioUnixStream::connect(CONTAINER_CREDENTIAL_SOCKET),
+            )
+            .await;
+            let Ok(Ok(mut upstream)) = upstream else {
+                write_credential_unavailable(&mut client).await;
+                return;
+            };
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        });
+    }
+}
+
+fn publish_credential_forwarder_readiness() -> Result<()> {
+    ensure!(
+        unsafe { libc::fcntl(CREDENTIAL_FORWARDER_READY_FD, libc::F_GETFD) } != -1,
+        "credential forwarder readiness descriptor is absent"
+    );
+    let mut stream = unsafe { UnixStream::from_raw_fd(CREDENTIAL_FORWARDER_READY_FD) };
+    let stat = rustix::fs::fstat(&stream).context("inspect credential readiness descriptor")?;
+    ensure!(
+        RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Socket,
+        "credential readiness descriptor is not a socket"
+    );
+    stream
+        .write_all(CREDENTIAL_FORWARDER_READY)
+        .context("publish credential forwarder readiness")?;
+    stream
+        .flush()
+        .context("flush credential forwarder readiness")
+}
+
+async fn write_credential_unavailable(stream: &mut tokio::net::TcpStream) {
+    let _ = stream
+        .write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\nConnection: close\r\n\r\ncredential route unavailable\n",
+        )
+        .await;
+    let _ = stream.shutdown().await;
 }
 
 fn clear_process_capabilities() -> io::Result<()> {
@@ -2147,6 +2336,8 @@ fn create_state_layout() -> Result<()> {
         (PERSISTENT_WORKSPACE_PATH, 0o700),
         (PERSISTENT_HOME_PATH, 0o700),
         (PERSISTENT_HOME_WORK_PATH, 0o700),
+        (PERSISTENT_AGENT_HOMES_PATH, 0o700),
+        (PERSISTENT_CODEX_HOME_PATH, 0o700),
         (PERSISTENT_PROBE_PATH, 0o700),
     ] {
         create_dir(Path::new(path), mode)?;
@@ -2209,7 +2400,7 @@ fn publish_install_completion(plan: &WorkspacePlan) -> Result<()> {
 fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
     let identity = &plan.identity;
     let expected_marker = format!(
-        "codewire-workspace-owner-v3 oci {}:{}\n",
+        "codewire-workspace-owner-v4 oci {}:{}\n",
         identity.uid, identity.gid,
     );
     match fs::symlink_metadata(WORKSPACE_OWNER_VERSION_PATH) {
@@ -2240,6 +2431,7 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
     let mut pending = vec![
         PathBuf::from(PERSISTENT_WORKSPACE_PATH),
         PathBuf::from(PERSISTENT_HOME_PATH),
+        PathBuf::from(PERSISTENT_CODEX_HOME_PATH),
         PathBuf::from(PERSISTENT_PROBE_PATH),
     ];
     let mut visited = 0_usize;
@@ -2287,7 +2479,8 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
 
 fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
     let Some(body) = bytes
-        .strip_prefix(b"codewire-workspace-owner-v3 oci ")
+        .strip_prefix(b"codewire-workspace-owner-v4 oci ")
+        .or_else(|| bytes.strip_prefix(b"codewire-workspace-owner-v3 oci "))
         .and_then(|value| value.strip_suffix(b"\n"))
         .and_then(|value| std::str::from_utf8(value).ok())
     else {
@@ -2303,6 +2496,53 @@ fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
             && value.parse::<u32>().is_ok()
     };
     canonical_id(uid) && canonical_id(gid)
+}
+
+fn prepare_codex_projection(plan: &WorkspacePlan) -> Result<()> {
+    prepare_codex_projection_at(Path::new(PERSISTENT_CODEX_HOME_PATH), plan)
+}
+
+fn prepare_codex_projection_at(root: &Path, plan: &WorkspacePlan) -> Result<()> {
+    let metadata = fs::symlink_metadata(root).context("inspect persistent Codex home")?;
+    ensure!(
+        metadata.file_type().is_dir()
+            && metadata.uid() == plan.identity.uid
+            && metadata.gid() == plan.identity.gid
+            && metadata.permissions().mode() & 0o777 == 0o700,
+        "persistent Codex home is invalid"
+    );
+    let projection = codewire_access::CodexProviderProjection::for_loopback_port(
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+    )
+    .context("derive credential-free Codex provider projection")?;
+    let path = root.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+    write_durable(&path, projection.config_toml().as_bytes(), 0o600)
+        .context("publish credential-free Codex provider projection")?;
+    lchown(&path, plan.identity.uid, plan.identity.gid)?;
+    let metadata = fs::symlink_metadata(&path).context("inspect projected Codex config")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == plan.identity.uid
+            && metadata.gid() == plan.identity.gid
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1
+            && metadata.len() == projection.config_toml().len() as u64,
+        "projected Codex config metadata is invalid"
+    );
+    let actual = read_bounded(&path, projection.config_toml().len().saturating_add(1))
+        .context("verify projected Codex config")?;
+    ensure!(
+        actual == projection.config_toml().as_bytes(),
+        "projected Codex config changed"
+    );
+    File::open(&path)
+        .context("open projected Codex config for sync")?
+        .sync_all()
+        .context("sync projected Codex config ownership")?;
+    File::open(root)
+        .context("open persistent Codex home for sync")?
+        .sync_all()
+        .context("sync persistent Codex home")
 }
 
 fn lchown(path: &Path, uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
@@ -2768,6 +3008,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
             { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": plan.identity.home, "type": "none", "source": HOME_MERGED_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
+            { "destination": crate::CODEX_GUEST_HOME_PATH, "type": "none", "source": PERSISTENT_CODEX_HOME_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": CONTAINER_CONTROL_DESTINATION, "type": "none", "source": CONTAINER_CONTROL_PATH, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_PROBE_DESTINATION, "type": "none", "source": PERSISTENT_PROBE_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
         ],
@@ -3759,6 +4000,7 @@ mod tests {
                 additional_gids: Vec::new(),
             },
             environment: vec![
+                format!("CODEX_HOME={}", crate::CODEX_GUEST_HOME_PATH),
                 "HOME=/root".to_owned(),
                 "LANG=C.UTF-8".to_owned(),
                 "LOGNAME=root".to_owned(),
@@ -3824,6 +4066,50 @@ mod tests {
                 .to_string_lossy()
                 .contains(".tmp.")
         }));
+    }
+
+    #[test]
+    fn codex_projection_converges_without_following_guest_config_symlinks() {
+        let temporary = TempDir::new().unwrap();
+        let codex_home = temporary.path().join("codex");
+        fs::create_dir(&codex_home).unwrap();
+        fs::set_permissions(&codex_home, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut plan = test_workspace_plan();
+        plan.identity.uid = unsafe { libc::geteuid() };
+        plan.identity.gid = unsafe { libc::getegid() };
+        let config = codex_home.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+        let expected = codewire_access::CodexProviderProjection::for_loopback_port(
+            codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+        )
+        .unwrap()
+        .into_config_toml();
+
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+        let metadata = fs::symlink_metadata(&config).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), plan.identity.uid);
+        assert_eq!(metadata.gid(), plan.identity.gid);
+        assert_eq!(metadata.nlink(), 1);
+        assert!(!codex_home.join("auth.json").exists());
+
+        let outside = temporary.path().join("outside");
+        fs::write(&outside, b"outside-sentinel").unwrap();
+        fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(&outside, &config).unwrap();
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-sentinel");
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+        assert!(fs::symlink_metadata(&config).unwrap().file_type().is_file());
+
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+
+        fs::remove_file(&config).unwrap();
+        fs::create_dir(&config).unwrap();
+        assert!(prepare_codex_projection_at(&codex_home, &plan).is_err());
+        assert!(fs::symlink_metadata(&config).unwrap().file_type().is_dir());
     }
 
     #[test]
@@ -3950,6 +4236,15 @@ mod tests {
             .find(|mount| mount["destination"] == plan.identity.home)
             .unwrap();
         assert_eq!(home["source"], HOME_MERGED_PATH);
+        let codex_home = mounts
+            .iter()
+            .find(|mount| mount["destination"] == crate::CODEX_GUEST_HOME_PATH)
+            .unwrap();
+        assert_eq!(codex_home["source"], PERSISTENT_CODEX_HOME_PATH);
+        assert_eq!(
+            codex_home["options"],
+            serde_json::json!(["rbind", "rw", "nosuid", "nodev"])
+        );
         assert_eq!(
             config["process"]["capabilities"]["effective"],
             serde_json::json!(["CAP_SETGID", "CAP_SETUID"])
@@ -4056,10 +4351,13 @@ mod tests {
             b"codewire-workspace-install-v1 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
         ));
         assert!(valid_workspace_owner_marker(
+            b"codewire-workspace-owner-v4 oci 1000:998\n"
+        ));
+        assert!(valid_workspace_owner_marker(
             b"codewire-workspace-owner-v3 oci 1000:998\n"
         ));
         assert!(!valid_workspace_owner_marker(
-            b"codewire-workspace-owner-v3 oci 01000:998\n"
+            b"codewire-workspace-owner-v4 oci 01000:998\n"
         ));
         assert!(!valid_workspace_owner_marker(
             b"codewire-workspace-owner-v2 oci 1000:998\n"

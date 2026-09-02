@@ -136,14 +136,18 @@ class ProjectResources(_message.Message):
     def __init__(self, cpu_millicores: _Optional[int] = ..., memory_mib: _Optional[int] = ..., disk_gib: _Optional[int] = ...) -> None: ...
 
 class ProjectSecretBindings(_message.Message):
-    __slots__ = ("project", "include_org", "include_user")
+    __slots__ = ("project", "include_org", "include_user", "organization", "user")
     PROJECT_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_ORG_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_USER_FIELD_NUMBER: _ClassVar[int]
+    ORGANIZATION_FIELD_NUMBER: _ClassVar[int]
+    USER_FIELD_NUMBER: _ClassVar[int]
     project: str
     include_org: bool
     include_user: bool
-    def __init__(self, project: _Optional[str] = ..., include_org: _Optional[bool] = ..., include_user: _Optional[bool] = ...) -> None: ...
+    organization: bool
+    user: bool
+    def __init__(self, project: _Optional[str] = ..., include_org: _Optional[bool] = ..., include_user: _Optional[bool] = ..., organization: _Optional[bool] = ..., user: _Optional[bool] = ...) -> None: ...
 
 class ProjectCredentialReference(_message.Message):
     __slots__ = ("provider", "account")
@@ -153,8 +157,14 @@ class ProjectCredentialReference(_message.Message):
     account: str
     def __init__(self, provider: _Optional[str] = ..., account: _Optional[str] = ...) -> None: ...
 
+class ProjectAccessBinding(_message.Message):
+    __slots__ = ("profile",)
+    PROFILE_FIELD_NUMBER: _ClassVar[int]
+    profile: str
+    def __init__(self, profile: _Optional[str] = ...) -> None: ...
+
 class ProjectSpec(_message.Message):
-    __slots__ = ("schema_version", "preset", "image", "repositories", "working_directory", "install_command", "startup_script", "environment", "agents", "agent_environment", "skills", "application_ports", "resources", "secrets", "credentials", "workspace_mode")
+    __slots__ = ("schema_version", "preset", "image", "repositories", "working_directory", "install_command", "startup_script", "environment", "agents", "agent_environment", "skills", "application_ports", "resources", "secrets", "credentials", "workspace_mode", "access")
     class EnvironmentEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -192,6 +202,7 @@ class ProjectSpec(_message.Message):
     SECRETS_FIELD_NUMBER: _ClassVar[int]
     CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
     WORKSPACE_MODE_FIELD_NUMBER: _ClassVar[int]
+    ACCESS_FIELD_NUMBER: _ClassVar[int]
     schema_version: int
     preset: str
     image: str
@@ -208,4 +219,5 @@ class ProjectSpec(_message.Message):
     secrets: ProjectSecretBindings
     credentials: _containers.MessageMap[str, ProjectCredentialReference]
     workspace_mode: ProjectWorkspaceMode
-    def __init__(self, schema_version: _Optional[int] = ..., preset: _Optional[str] = ..., image: _Optional[str] = ..., repositories: _Optional[_Iterable[_Union[RepoEntry, _Mapping]]] = ..., working_directory: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., environment: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Union[ProjectAgents, _Mapping]] = ..., agent_environment: _Optional[_Mapping[str, str]] = ..., skills: _Optional[_Iterable[_Union[ProjectSkillSelection, _Mapping]]] = ..., application_ports: _Optional[_Iterable[_Union[AppPort, _Mapping]]] = ..., resources: _Optional[_Union[ProjectResources, _Mapping]] = ..., secrets: _Optional[_Union[ProjectSecretBindings, _Mapping]] = ..., credentials: _Optional[_Mapping[str, ProjectCredentialReference]] = ..., workspace_mode: _Optional[_Union[ProjectWorkspaceMode, str]] = ...) -> None: ...
+    access: ProjectAccessBinding
+    def __init__(self, schema_version: _Optional[int] = ..., preset: _Optional[str] = ..., image: _Optional[str] = ..., repositories: _Optional[_Iterable[_Union[RepoEntry, _Mapping]]] = ..., working_directory: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., environment: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Union[ProjectAgents, _Mapping]] = ..., agent_environment: _Optional[_Mapping[str, str]] = ..., skills: _Optional[_Iterable[_Union[ProjectSkillSelection, _Mapping]]] = ..., application_ports: _Optional[_Iterable[_Union[AppPort, _Mapping]]] = ..., resources: _Optional[_Union[ProjectResources, _Mapping]] = ..., secrets: _Optional[_Union[ProjectSecretBindings, _Mapping]] = ..., credentials: _Optional[_Mapping[str, ProjectCredentialReference]] = ..., workspace_mode: _Optional[_Union[ProjectWorkspaceMode, str]] = ..., access: _Optional[_Union[ProjectAccessBinding, _Mapping]] = ...) -> None: ...

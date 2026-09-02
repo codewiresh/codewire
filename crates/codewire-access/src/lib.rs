@@ -1,0 +1,86 @@
+#![forbid(unsafe_code)]
+
+//! Provider-neutral credential and environment-access policy.
+//!
+//! This crate is deliberately I/O-free and contains no protected values. It
+//! validates placement-local credential metadata, revisioned access profiles,
+//! and the derived grants consumed by a placement credential broker.
+
+mod catalog;
+mod grant;
+mod id;
+mod model;
+mod projection;
+
+pub use catalog::builtin_provider_catalog;
+pub use grant::{DerivedGrant, GrantContext, derive_grants, validate_profile_entries};
+pub use id::{
+    AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
+    BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialId, EnvironmentId, OwnerId,
+    ProviderId,
+};
+pub use model::{
+    AccessProfile, CapabilityPolicy, CredentialAuthKind, CredentialMetadata, CredentialStatus,
+    EnvironmentAccessBinding, GrantPermission, Owner, Placement, ProviderCatalog,
+    ProviderDefinition,
+};
+pub use projection::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection, ProjectionError};
+
+use thiserror::Error;
+
+/// Stable policy failures safe to return through local or platform adapters.
+///
+/// Error variants contain identifiers and metadata only. Provider responses,
+/// protected-store references, and credential material never enter this type.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum AccessError {
+    #[error("invalid {field}")]
+    InvalidIdentifier { field: &'static str },
+    #[error("invalid {field}")]
+    InvalidField { field: &'static str },
+    #[error("invalid access profile reference")]
+    InvalidProfileReference,
+    #[error("{field} must be greater than zero")]
+    ZeroGeneration { field: &'static str },
+    #[error("{field} must not be empty")]
+    EmptyCollection { field: &'static str },
+    #[error("provider {provider} is declared more than once")]
+    DuplicateProvider { provider: ProviderId },
+    #[error("environment access binding does not match the selected profile revision")]
+    BindingMismatch,
+    #[error("{subject} belongs to a different placement")]
+    PlacementMismatch { subject: &'static str },
+    #[error("organization credential access is not supported by local placement")]
+    LocalOrganizationUnsupported,
+    #[error("personal credentials require an explicitly confirmed shared-environment policy")]
+    PersonalCredentialsForbidden,
+    #[error("access profile owner is incompatible with the environment organization")]
+    ProfileOwnerMismatch,
+    #[error("credential {credential} is not authorized for this environment")]
+    CredentialNotAuthorized { credential: CredentialId },
+    #[error("credential {credential} has an incompatible owner")]
+    CredentialOwnerMismatch { credential: CredentialId },
+    #[error("credential {credential} does not exist")]
+    CredentialMissing { credential: CredentialId },
+    #[error("credential metadata identity does not match profile entry {credential}")]
+    CredentialIdentityMismatch { credential: CredentialId },
+    #[error("credential {credential} is not active")]
+    CredentialInactive { credential: CredentialId },
+    #[error("credential {credential} is expired")]
+    CredentialExpired { credential: CredentialId },
+    #[error("provider {provider} is not enabled")]
+    ProviderUnavailable { provider: ProviderId },
+    #[error("provider {provider} does not support authentication kind {kind:?}")]
+    UnsupportedAuthenticationKind {
+        provider: ProviderId,
+        kind: CredentialAuthKind,
+    },
+    #[error("provider {provider} does not support slot {slot} with this authentication kind")]
+    UnsupportedCapability {
+        provider: ProviderId,
+        slot: CapabilitySlot,
+    },
+}
+
+#[cfg(test)]
+mod tests;

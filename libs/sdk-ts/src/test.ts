@@ -613,14 +613,14 @@ async function runTests() {
       working_directory: "/workspace/platform",
       skills: [{ source: "repository", reference: ".agents/skills/rust", agents: ["codex"] }],
       resources: { cpu_millicores: 2000, memory_mib: 16384, disk_gib: 40 },
-      credentials: { work: { provider: "openai", account: "acct-work" } },
+      access: { profile: "user/work" },
     },
   });
   assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
   assert(createEnvironment.repos[0]?.mountPath === "/workspace/platform", "create environment preserves repository mount paths");
   assert(createEnvironment.repos[0]?.revision === "deadbeef", "create environment preserves repository revisions");
   assert(createEnvironment.projectSpec?.resources?.memoryMib === 16384n, "create environment preserves project resource units");
-  assert(createEnvironment.projectSpec?.credentials.work?.account === "acct-work", "create environment preserves opaque account references");
+  assert(createEnvironment.projectSpec?.access?.profile === "user/work", "create environment preserves access profile references");
   let rejectedUnknownIsolation = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {

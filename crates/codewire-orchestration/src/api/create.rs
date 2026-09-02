@@ -275,10 +275,10 @@ pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> A
         body.secret_project = spec.secrets.project.clone();
     }
     if body.include_org_secrets.is_none() {
-        body.include_org_secrets = spec.secrets.include_org;
+        body.include_org_secrets = Some(spec.secrets.organization);
     }
     if body.include_user_secrets.is_none() {
-        body.include_user_secrets = spec.secrets.include_user;
+        body.include_user_secrets = Some(spec.secrets.user);
     }
     Ok(())
 }
@@ -300,8 +300,8 @@ pub(crate) fn apply_detected_project_spec(
         if !current.skills.is_empty() {
             merged.skills = current.skills;
         }
-        if !current.credentials.is_empty() {
-            merged.credentials = current.credentials;
+        if current.access.is_some() {
+            merged.access = current.access;
         }
         if current.working_directory != default_project_working_directory(&current.repositories) {
             merged.working_directory = current.working_directory;
@@ -385,8 +385,8 @@ pub(crate) fn synchronize_project_spec(body: &mut CreateEnvironmentBody) -> AppR
     };
     spec.secrets = codewire_project::SecretBindings {
         project: body.secret_project.clone(),
-        include_org: body.include_org_secrets,
-        include_user: body.include_user_secrets,
+        organization: body.include_org_secrets.unwrap_or(false),
+        user: body.include_user_secrets.unwrap_or(false),
     };
     spec.validate().map_err(invalid_project_spec)?;
     body.project_spec = Some(spec);
@@ -491,8 +491,8 @@ fn ensure_current_platform_runtime_support(body: &CreateEnvironmentBody) -> AppR
         };
         if !spec.skills.is_empty() {
             Some("skills")
-        } else if !spec.credentials.is_empty() {
-            Some("credentials")
+        } else if spec.access.is_some() {
+            Some("access")
         } else {
             let destinations =
                 codewire_project::validate_repository_destinations(spec.repositories.iter().map(
@@ -1466,7 +1466,7 @@ ports: [{port: 8080, label: api, access: private}]
 cpu: 2
 memory: 4Gi
 disk: 40Gi
-secrets: {project: development, org: false, user: true}
+secrets: {project: development, organization: false, user: true}
 "#,
         )
         .unwrap()
@@ -1596,7 +1596,7 @@ memory: 16Gi
         for yaml in [
             "repositories: [{source: https://example.test/app.git, revision: deadbeef}]\n",
             "skills: [.agents/skills/rust]\n",
-            "credentials: {work: {provider: openai, account: acct-work}}\n",
+            "access: {profile: user/work}\n",
             "repositories: [{source: https://example.test/app.git}]\nworking_directory: /workspace/app/subdir\n",
         ] {
             let spec = codewire_project::parse_project_yaml(yaml).unwrap().spec;
@@ -1892,8 +1892,7 @@ memory: 16Gi
 repositories:
   - source: https://example.test/org/app.git
     revision: deadbeef
-credentials:
-  work: {provider: openai, account: acct-work}
+access: {profile: user/work}
 "#,
         )
         .unwrap()
@@ -1905,10 +1904,7 @@ credentials:
         .unwrap();
 
         assert_eq!(value["project_spec"]["schema_version"], 1);
-        assert_eq!(
-            value["project_spec"]["credentials"]["work"]["account"],
-            "acct-work"
-        );
+        assert_eq!(value["project_spec"]["access"]["profile"], "user/work");
         let encoded = value.to_string();
         for forbidden in ["host_path", "token", "secret_value", "backend_socket"] {
             assert!(!encoded.contains(forbidden), "unexpected {forbidden}");

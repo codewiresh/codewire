@@ -35,7 +35,7 @@ mod linux {
     use uuid::Uuid;
 
     const DATABASE_APPLICATION_ID: i64 = 0x4357_564d;
-    const DATABASE_SCHEMA_VERSION: i64 = 8;
+    const DATABASE_SCHEMA_VERSION: i64 = 9;
     const DATABASE_FILE: &str = "supervisor.db";
     const MAXIMUM_OPERATIONS: usize = 128;
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,6 +46,7 @@ mod linux {
     enum Field {
         EnvironmentId,
         RunnerPid,
+        RunnerErrorCode,
         ActiveArtifactGeneration,
         RunnerArtifactGeneration,
         Empty,
@@ -157,6 +158,7 @@ mod linux {
             match value {
                 "environment_id" => Ok(Self::EnvironmentId),
                 "runner_pid" => Ok(Self::RunnerPid),
+                "runner_error_code" => Ok(Self::RunnerErrorCode),
                 "active_artifact_generation" => Ok(Self::ActiveArtifactGeneration),
                 "runner_artifact_generation" => Ok(Self::RunnerArtifactGeneration),
                 "empty" => Ok(Self::Empty),
@@ -219,6 +221,7 @@ mod linux {
                     Ok(id)
                 }
                 Field::RunnerPid => Ok(self.runner(name)?.process.pid.to_string()),
+                Field::RunnerErrorCode => self.runner(name)?.error_code.ok_or_else(failed),
                 Field::ActiveArtifactGeneration => {
                     let generation: String =
                         self.environment_value(name, "active_artifact_generation")?;
@@ -397,13 +400,14 @@ mod linux {
 
     fn terminal_checkpoint(kind: &str) -> Option<u32> {
         match kind {
-            "create" => Some(8),
-            "start" => Some(6),
+            "create" => Some(9),
+            "start" => Some(7),
             "stop" => Some(3),
-            "restart" => Some(8),
+            "restart" => Some(9),
             "grow_disk" => Some(6),
-            "update_workspace" | "rollback_workspace" => Some(9),
-            "delete" => Some(5),
+            "update_workspace" | "rollback_workspace" => Some(10),
+            "apply_environment_access" => Some(3),
+            "delete" => Some(6),
             "reconcile" => Some(2),
             _ => None,
         }
@@ -530,7 +534,7 @@ mod linux {
                          );
                          INSERT INTO supervisor_settings VALUES (1, NULL);
                          PRAGMA application_id = 1129797197;
-                         PRAGMA user_version = 8;",
+                         PRAGMA user_version = 9;",
                     )
                     .unwrap();
                 fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
@@ -551,7 +555,7 @@ mod linux {
                     .unwrap();
                 writer
                     .execute(
-                        "INSERT INTO operations VALUES ('op-a', 'create', 'completed', 8, 1)",
+                        "INSERT INTO operations VALUES ('op-a', 'create', 'completed', 9, 1)",
                         [],
                     )
                     .unwrap();
@@ -597,6 +601,11 @@ mod linux {
                 database.value(Field::RunnerPid, "native-smoke").unwrap(),
                 first.pid.to_string()
             );
+            assert!(
+                database
+                    .value(Field::RunnerErrorCode, "native-smoke")
+                    .is_err()
+            );
             assert_eq!(
                 database
                     .value(Field::JournalComplete, "native-smoke")
@@ -626,6 +635,22 @@ mod linux {
                     .value(Field::RunnerPid, "native-smoke")
                     .unwrap(),
                 replacement.pid.to_string()
+            );
+            let mut failed = runner_record(replacement);
+            failed.error_code = Some("guest_ready_timeout".to_owned());
+            fixture
+                .writer
+                .execute(
+                    "UPDATE environments SET runner_json = ?1 WHERE name = 'native-smoke'",
+                    [serde_json::to_vec(&failed).unwrap()],
+                )
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::RunnerErrorCode, "native-smoke")
+                    .unwrap(),
+                "guest_ready_timeout"
             );
             assert!(fixture.root.join("supervisor.db-wal").is_file());
             assert!(fixture.root.join("supervisor.db-shm").is_file());

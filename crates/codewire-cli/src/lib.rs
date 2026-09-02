@@ -48,6 +48,18 @@ const CLI_VERSION: &str = match option_env!("CODEWIRE_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+
+/// Reassert the broker's non-dumpable state immediately after `execve`, which
+/// resets this flag for an ordinary executable. The hidden broker entrypoint
+/// performs the remaining parent, capability, session, and environment checks.
+#[cfg(target_os = "linux")]
+pub fn prepare_local_credential_broker_process() -> std::io::Result<()> {
+    // SAFETY: this scalar prctl affects only the current broker process.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
 const LOCAL_WORKSPACE_PATH: &str = "/workspace";
 const LIMA_CONTAINER_NAME: &str = "cw-workspace";
 const LIMA_DOCKER_SOCK_PATH: &str = "/var/run/docker.sock";
@@ -163,6 +175,9 @@ enum Command {
         #[command(subcommand)]
         command: SecretsCommand,
     },
+    #[cfg(target_os = "linux")]
+    #[command(about = "Manage protected credentials and access profiles")]
+    Credentials(CredentialsArgs),
     #[command(
         alias = "networks",
         about = "Manage Mesh networks for environments and nodes"
@@ -199,6 +214,21 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__native-mesh-enrollment-broker", hide = true)]
     NativeMeshEnrollmentBroker(NativeMeshEnrollmentBrokerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-authority", hide = true)]
+    LocalCredentialAuthority(LocalCredentialAuthorityArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-authority-probe", hide = true)]
+    LocalCredentialAuthorityProbe(LocalCredentialAuthorityProbeArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-broker", hide = true)]
+    LocalCredentialBroker(LocalCredentialBrokerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
+    LocalCredentialBrokerConfinementProbe,
+    #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+    #[command(name = "__local-credential-broker-synthetic-smoke-check", hide = true)]
+    LocalCredentialBrokerSyntheticSmokeCheck,
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -211,6 +241,8 @@ enum Command {
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+    require_local_broker_smoke_executable()?;
     let mut args = std::env::args().collect::<Vec<_>>();
     let invoked_as_daemon = args
         .first()
@@ -262,6 +294,18 @@ pub fn native_mesh_enrollment_broker_exit_code(error: &anyhow::Error) -> Option<
         .map(codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError::exit_code)
 }
 
+#[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
+    let executable =
+        std::env::current_exe().context("resolve synthetic broker smoke executable")?;
+    anyhow::ensure!(
+        executable.file_name().and_then(std::ffi::OsStr::to_str)
+            == Some("cw-local-credential-broker-smoke"),
+        "synthetic local credential broker build must be named cw-local-credential-broker-smoke"
+    );
+    Ok(())
+}
+
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -304,6 +348,8 @@ where
         Command::ApiKeys { command } => handle_api_keys_command(&globals, command).await,
         Command::Preset { command } => handle_preset_command(&globals, command).await,
         Command::Secrets { command } => handle_secrets_command(&globals, command).await,
+        #[cfg(target_os = "linux")]
+        Command::Credentials(args) => handle_credentials_command(args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         Command::Daemon => codewire_daemon::run_entrypoint().await,
@@ -319,6 +365,23 @@ where
         Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeMeshEnrollmentBroker(args) => run_native_mesh_enrollment_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialAuthority(args) => run_local_credential_authority(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialAuthorityProbe(args) => {
+            run_local_credential_authority_probe(args).await
+        }
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialBroker(args) => run_local_credential_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialBrokerConfinementProbe => {
+            run_local_credential_broker_confinement_probe().await
+        }
+        #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+        Command::LocalCredentialBrokerSyntheticSmokeCheck => {
+            println!("codewire-local-credential-broker-synthetic-smoke:v1");
+            Ok(())
+        }
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
         Command::Logs(args) => handle_logs_command(&globals, args).await,

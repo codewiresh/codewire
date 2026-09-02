@@ -427,6 +427,48 @@
             "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
         );
 
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--local",
+            "create",
+            "--name",
+            "dev",
+            "--access-profile",
+            "user/work",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            command: EnvCommand::Create(args),
+            ..
+        }) = cli.command
+        else {
+            panic!("expected native local environment create");
+        };
+        assert_eq!(args.access_profile.as_deref(), Some("user/work"));
+        assert!(native_create_selected(&args).unwrap());
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--platform",
+            "create",
+            "--access-profile",
+            "user/work",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            command: EnvCommand::Create(args),
+            ..
+        }) = cli.command
+        else {
+            panic!("expected platform environment create");
+        };
+        assert_eq!(
+            reject_local_create_options(&args).unwrap_err().to_string(),
+            "--access-profile is not yet available for platform environments"
+        );
+
         assert!(
             Cli::try_parse_from([
                 "cw",
@@ -751,7 +793,7 @@ agents: [claude-code]
 cpu: 2000m
 memory: 4096
 disk: 40
-secrets: {project: development, org: false, user: false}
+secrets: {project: development, organization: false, user: false}
 "#,
         )
         .unwrap()
@@ -1810,7 +1852,63 @@ secrets: {project: development, org: false, user: false}
     }
 
     #[test]
-    fn env_access_parsers_accept_targets_user_and_permission() {
+    fn env_access_parsers_accept_profile_inspection_apply_and_collaboration_commands() {
+        let cli = Cli::try_parse_from([
+            "cw", "env", "--local", "access", "builder", "--output", "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::Access(args) = command else {
+            panic!("expected env access command");
+        };
+        assert_eq!(args.environment.as_deref(), Some("builder"));
+        assert!(args.command.is_none());
+        assert!(matches!(args.output, OutputFormat::Json));
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--local",
+            "access",
+            "apply",
+            "builder",
+            "--profile",
+            "user/work",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::Access(args) = command else {
+            panic!("expected env access command");
+        };
+        let Some(EnvAccessCommand::Apply(args)) = args.command else {
+            panic!("expected env access apply command");
+        };
+        assert_eq!(args.environment, "builder");
+        assert_eq!(args.profile.as_deref(), Some("user/work"));
+        assert!(!args.clear);
+        assert!(matches!(args.output, OutputFormat::Json));
+
+        assert!(
+            Cli::try_parse_from([
+                "cw",
+                "env",
+                "--local",
+                "access",
+                "apply",
+                "builder",
+                "--profile",
+                "user/work",
+                "--clear",
+            ])
+            .is_err()
+        );
+
         let cli =
             Cli::try_parse_from(["cw", "env", "access", "list", "builder", "--output", "json"])
                 .unwrap();
@@ -1820,7 +1918,7 @@ secrets: {project: development, org: false, user: false}
         let EnvCommand::Access(args) = command else {
             panic!("expected env access command");
         };
-        let EnvAccessCommand::List(args) = args.command else {
+        let Some(EnvAccessCommand::List(args)) = args.command else {
             panic!("expected env access list command");
         };
         assert_eq!(args.environment, "builder");
@@ -1844,7 +1942,7 @@ secrets: {project: development, org: false, user: false}
         let EnvCommand::Access(args) = command else {
             panic!("expected env access command");
         };
-        let EnvAccessCommand::Grant(args) = args.command else {
+        let Some(EnvAccessCommand::Grant(args)) = args.command else {
             panic!("expected env access grant command");
         };
         assert_eq!(args.environment, "builder");
@@ -1861,7 +1959,7 @@ secrets: {project: development, org: false, user: false}
         let EnvCommand::Access(args) = command else {
             panic!("expected env access command");
         };
-        let EnvAccessCommand::Revoke(args) = args.command else {
+        let Some(EnvAccessCommand::Revoke(args)) = args.command else {
             panic!("expected env access revoke command");
         };
         assert_eq!(args.environment, "builder");

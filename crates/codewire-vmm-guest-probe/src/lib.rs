@@ -2,6 +2,12 @@
 //! the Codewire-owned microVM spike.
 
 mod network;
+
+/// Codewire-owned persistent Codex home projected into the workspace.
+///
+/// Provider credentials are never stored here. The directory contains only
+/// guest-visible configuration and Codex's own workspace-local state.
+pub const CODEX_GUEST_HOME_PATH: &str = "/run/codewire-agent/codex";
 mod newc;
 mod progress;
 mod seed;

@@ -10,6 +10,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use codewire_access::{
+    AccessProfileId, AccessProfileReference, EnvironmentAccessBinding, EnvironmentId,
+};
 use rusqlite::config::DbConfig;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, params,
@@ -29,7 +32,7 @@ const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
-const DATABASE_SCHEMA_VERSION: i64 = 8;
+const DATABASE_SCHEMA_VERSION: i64 = 9;
 // A create journal entry contains the exact canonical project JSON so replay
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
@@ -46,6 +49,7 @@ pub(crate) enum OperationKind {
     Restart,
     UpdateWorkspace,
     RollbackWorkspace,
+    ApplyEnvironmentAccess,
     Delete,
     GrowDisk,
     Reconcile,
@@ -60,6 +64,7 @@ impl OperationKind {
             Self::Restart => "restart",
             Self::UpdateWorkspace => "update_workspace",
             Self::RollbackWorkspace => "rollback_workspace",
+            Self::ApplyEnvironmentAccess => "apply_environment_access",
             Self::Delete => "delete",
             Self::GrowDisk => "grow_disk",
             Self::Reconcile => "reconcile",
@@ -74,6 +79,7 @@ impl OperationKind {
             "restart" => Some(Self::Restart),
             "update_workspace" => Some(Self::UpdateWorkspace),
             "rollback_workspace" => Some(Self::RollbackWorkspace),
+            "apply_environment_access" => Some(Self::ApplyEnvironmentAccess),
             "delete" => Some(Self::Delete),
             "grow_disk" => Some(Self::GrowDisk),
             "reconcile" => Some(Self::Reconcile),
@@ -444,6 +450,7 @@ impl SupervisorStore {
             "SELECT id, name, observed_state, vcpus, memory_mib, disk_bytes, generation, \
                     host_ports_json, mesh_attachment_json, workspace_plan_json, \
                     project_spec_json, project_spec_sha256, \
+                    access_profile_reference, access_profile_id, access_profile_revision, \
                     runner_json, active_artifact_generation, staging_artifact_generation, \
                     active_workspace_generation_json, staging_workspace_generation_json, \
                     rollback_workspace_generation_json \
@@ -463,12 +470,15 @@ impl SupervisorStore {
                 row.get::<_, Vec<u8>>(9)?,
                 row.get::<_, Vec<u8>>(10)?,
                 row.get::<_, String>(11)?,
-                row.get::<_, Option<Vec<u8>>>(12)?,
-                row.get::<_, String>(13)?,
-                row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<i64>>(14)?,
                 row.get::<_, Option<Vec<u8>>>(15)?,
-                row.get::<_, Option<Vec<u8>>>(16)?,
-                row.get::<_, Option<Vec<u8>>>(17)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, Option<String>>(17)?,
+                row.get::<_, Option<Vec<u8>>>(18)?,
+                row.get::<_, Option<Vec<u8>>>(19)?,
+                row.get::<_, Option<Vec<u8>>>(20)?,
             ))
         })?;
         let mut environments = BTreeMap::new();
@@ -487,6 +497,9 @@ impl SupervisorStore {
                 workspace_plan_json,
                 project_spec_json,
                 project_spec_sha256,
+                access_profile_reference,
+                access_profile_id,
+                access_profile_revision,
                 runner_json,
                 active_artifact_generation,
                 staging_artifact_generation,
@@ -529,6 +542,15 @@ impl SupervisorStore {
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
                 project_spec_json: Some(project_spec_json),
                 project_spec_sha256: Some(project_spec_sha256),
+                access_profile: access_profile_reference
+                    .map(|reference| reference.parse::<AccessProfileReference>())
+                    .transpose()
+                    .map_err(|_| SupervisorStoreError::InvalidState)?,
+                access_binding: decode_access_binding(
+                    &id_text,
+                    access_profile_id,
+                    access_profile_revision,
+                )?,
                 runner,
                 active_artifact_generation: Some(active_artifact_generation),
                 staging_artifact_generation,
@@ -799,12 +821,19 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            workspace_plan_json BLOB NOT NULL,
            project_spec_json BLOB NOT NULL,
            project_spec_sha256 TEXT NOT NULL,
+           access_profile_reference TEXT NULL,
+           access_profile_id TEXT NULL,
+           access_profile_revision INTEGER NULL,
            runner_json BLOB NULL,
            active_artifact_generation TEXT NOT NULL,
            staging_artifact_generation TEXT NULL,
            active_workspace_generation_json BLOB NULL,
            staging_workspace_generation_json BLOB NULL,
-           rollback_workspace_generation_json BLOB NULL
+           rollback_workspace_generation_json BLOB NULL,
+           CHECK (
+             (access_profile_reference IS NULL AND access_profile_id IS NULL AND access_profile_revision IS NULL) OR
+             (access_profile_reference IS NOT NULL AND access_profile_id IS NOT NULL AND access_profile_revision > 0)
+           )
          ) STRICT;
          CREATE TABLE supervisor_settings (
            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -835,7 +864,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            updated_unix_ms INTEGER NOT NULL
          ) STRICT;
          PRAGMA application_id = 1129797197;
-         PRAGMA user_version = 8;
+         PRAGMA user_version = 9;
          COMMIT;",
     )?;
     validate_schema(connection)
@@ -877,6 +906,9 @@ fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> 
         "mesh_attachment_json",
         "project_spec_json",
         "project_spec_sha256",
+        "access_profile_reference",
+        "access_profile_id",
+        "access_profile_revision",
         "active_workspace_generation_json",
         "staging_workspace_generation_json",
         "rollback_workspace_generation_json",
@@ -943,6 +975,7 @@ fn write_state(
             encode_workspace_generation(environment.staging_workspace_generation.as_ref())?;
         let rollback_workspace_generation_json =
             encode_workspace_generation(environment.rollback_workspace_generation.as_ref())?;
+        let encoded_access = encode_access_binding(environment)?;
         let disk_bytes = i64::try_from(environment.disk_bytes)
             .map_err(|_| SupervisorStoreError::InvalidState)?;
         let generation = i64::try_from(environment.generation)
@@ -957,10 +990,11 @@ fn write_state(
                disk_bytes, generation, host_ports_json, mesh_attachment_json,
                workspace_plan_json, runner_json,
                active_artifact_generation, staging_artifact_generation,
-               project_spec_json, project_spec_sha256,
+               project_spec_json, project_spec_sha256, access_profile_reference,
+               access_profile_id, access_profile_revision,
                active_workspace_generation_json, staging_workspace_generation_json,
                rollback_workspace_generation_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                desired_state = excluded.desired_state,
@@ -977,6 +1011,9 @@ fn write_state(
                staging_artifact_generation = excluded.staging_artifact_generation,
                project_spec_json = excluded.project_spec_json,
                project_spec_sha256 = excluded.project_spec_sha256,
+               access_profile_reference = excluded.access_profile_reference,
+               access_profile_id = excluded.access_profile_id,
+               access_profile_revision = excluded.access_profile_revision,
                active_workspace_generation_json = excluded.active_workspace_generation_json,
                staging_workspace_generation_json = excluded.staging_workspace_generation_json,
                rollback_workspace_generation_json = excluded.rollback_workspace_generation_json",
@@ -997,6 +1034,9 @@ fn write_state(
                 &environment.staging_artifact_generation,
                 &environment.project_spec_json,
                 &environment.project_spec_sha256,
+                encoded_access.reference,
+                encoded_access.profile_id,
+                encoded_access.profile_revision,
                 active_workspace_generation_json,
                 staging_workspace_generation_json,
                 rollback_workspace_generation_json,
@@ -1080,6 +1120,70 @@ fn desired_state(state: StoredEnvironmentState) -> &'static str {
         StoredEnvironmentState::Stopped
         | StoredEnvironmentState::Error
         | StoredEnvironmentState::Orphaned => "stopped",
+    }
+}
+
+struct EncodedAccessBinding {
+    reference: Option<String>,
+    profile_id: Option<String>,
+    profile_revision: Option<i64>,
+}
+
+fn encode_access_binding(
+    environment: &EnvironmentRecord,
+) -> Result<EncodedAccessBinding, SupervisorStoreError> {
+    let (Some(reference), Some(binding)) = (
+        environment.access_profile.as_ref(),
+        environment.access_binding.as_ref(),
+    ) else {
+        if environment.access_profile.is_none() && environment.access_binding.is_none() {
+            return Ok(EncodedAccessBinding {
+                reference: None,
+                profile_id: None,
+                profile_revision: None,
+            });
+        }
+        return Err(SupervisorStoreError::InvalidState);
+    };
+    binding
+        .validate()
+        .map_err(|_| SupervisorStoreError::InvalidState)?;
+    let environment_id = EnvironmentId::parse(environment.id.to_string())
+        .map_err(|_| SupervisorStoreError::InvalidState)?;
+    if binding.environment_id != environment_id {
+        return Err(SupervisorStoreError::InvalidState);
+    }
+    let revision =
+        i64::try_from(binding.profile_revision).map_err(|_| SupervisorStoreError::InvalidState)?;
+    Ok(EncodedAccessBinding {
+        reference: Some(reference.to_string()),
+        profile_id: Some(binding.profile_id.to_string()),
+        profile_revision: Some(revision),
+    })
+}
+
+fn decode_access_binding(
+    environment_id: &str,
+    profile_id: Option<String>,
+    profile_revision: Option<i64>,
+) -> Result<Option<EnvironmentAccessBinding>, SupervisorStoreError> {
+    match (profile_id, profile_revision) {
+        (None, None) => Ok(None),
+        (Some(profile_id), Some(profile_revision)) => {
+            let binding = EnvironmentAccessBinding {
+                environment_id: EnvironmentId::parse(environment_id.to_owned())
+                    .map_err(|_| SupervisorStoreError::InvalidState)?,
+                profile_id: AccessProfileId::parse(profile_id)
+                    .map_err(|_| SupervisorStoreError::InvalidState)?,
+                profile_revision: u64::try_from(profile_revision)
+                    .map_err(|_| SupervisorStoreError::InvalidState)?,
+            };
+            binding
+                .validate()
+                .map_err(|_| SupervisorStoreError::InvalidState)?;
+            Ok(Some(binding))
+        }
+        _ => Err(SupervisorStoreError::InvalidState),
     }
 }
 
@@ -1606,6 +1710,8 @@ mod tests {
             .unwrap(),
             project_spec_json: Some(project_spec_json),
             project_spec_sha256: Some(project_spec_sha256),
+            access_profile: None,
+            access_binding: None,
             runner,
             active_artifact_generation: Some("c".repeat(64)),
             staging_artifact_generation: None,
@@ -1839,7 +1945,7 @@ mod tests {
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
         store
             .connection
-            .pragma_update(None, "user_version", 3_i64)
+            .pragma_update(None, "user_version", 6_i64)
             .unwrap();
         drop(store);
         let database = root.path().join(DATABASE_FILE);
@@ -1849,7 +1955,7 @@ mod tests {
             SupervisorStore::open_for_boot(&root, "boot-a"),
             Err(SupervisorStoreError::UnsupportedSchema {
                 application_id: DATABASE_APPLICATION_ID,
-                schema_version: 3,
+                schema_version: 6,
             })
         ));
         assert_eq!(fs::read(database).unwrap(), before);
@@ -1881,6 +1987,58 @@ mod tests {
         assert_eq!(inspected, expected);
         drop(store);
         assert_eq!(fs::read(database).unwrap(), before);
+    }
+
+    #[test]
+    fn exact_access_binding_survives_reopen_and_invalid_metadata_fails_closed() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let mut environment = environment(StoredEnvironmentState::Stopped, None);
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        project.access = Some(codewire_project::AccessBinding {
+            profile: "user/work".parse().unwrap(),
+        });
+        let project_spec_json = project.canonical_json().unwrap();
+        environment.project_spec_sha256 = Some(format!(
+            "{:x}",
+            Sha256::digest(project_spec_json.as_slice())
+        ));
+        environment.project_spec_json = Some(project_spec_json);
+        let binding = EnvironmentAccessBinding {
+            environment_id: EnvironmentId::parse(environment.id.to_string()).unwrap(),
+            profile_id: AccessProfileId::parse("profile-work").unwrap(),
+            profile_revision: 7,
+        };
+        environment.access_profile = Some("user/work".parse().unwrap());
+        environment.access_binding = Some(binding.clone());
+        let expected = state(environment);
+        store.replace_state(&expected).unwrap();
+        drop(store);
+
+        let (reopened, loaded) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert_eq!(
+            loaded.environments["dev"]
+                .access_profile
+                .as_ref()
+                .unwrap()
+                .to_string(),
+            "user/work"
+        );
+        assert_eq!(loaded.environments["dev"].access_binding, Some(binding));
+        reopened
+            .connection
+            .execute(
+                "UPDATE environments SET access_profile_id = 'INVALID' WHERE name = 'dev'",
+                [],
+            )
+            .unwrap();
+        drop(reopened);
+
+        assert!(matches!(
+            SupervisorStore::open_for_boot(&root, "boot-a"),
+            Err(SupervisorStoreError::InvalidState)
+        ));
     }
 
     #[test]

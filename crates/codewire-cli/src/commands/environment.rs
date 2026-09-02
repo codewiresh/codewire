@@ -45,16 +45,42 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             )
             .await
         }
+        EnvCommand::Access(access) => {
+            handle_unified_environment_access(globals, placement, access).await
+        }
         EnvCommand::Daemon(args) => {
             handle_unified_environment_daemon_command(globals, placement, args.command).await
         }
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, list, info, start, stop, rm, and daemon diagnostics"
+                    "--local and --platform currently support only create, list, info, start, stop, rm, access, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
+        }
+    }
+}
+
+async fn handle_unified_environment_access(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvAccessArgs,
+) -> anyhow::Result<()> {
+    match placement {
+        Some(EnvironmentPlacement::Local) => {
+            #[cfg(target_os = "linux")]
+            {
+                handle_native_environment_access(args).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = args;
+                anyhow::bail!("native local environment access currently requires Linux")
+            }
+        }
+        Some(EnvironmentPlacement::Platform) | None => {
+            handle_platform_env_command(globals, EnvCommand::Access(args)).await
         }
     }
 }
@@ -341,7 +367,17 @@ pub(crate) async fn handle_platform_env_command(
             print_env_extend_status(&args.environment, &response, hours, args.output)?;
         }
         EnvCommand::Access(args) => {
-            handle_env_access_command(&environment_client, &org_id, args.command).await?;
+            let command = args.command.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "environment access-profile inspection is not yet available for platform environments"
+                )
+            })?;
+            if matches!(&command, EnvAccessCommand::Apply(_)) {
+                anyhow::bail!(
+                    "environment access-profile apply is not yet available for platform environments"
+                );
+            }
+            handle_env_access_command(&environment_client, &org_id, command).await?;
         }
         EnvCommand::Port(args) => {
             handle_env_port_command(
@@ -1807,6 +1843,9 @@ pub(crate) fn local_create_args_from_environment_args(
     {
         anyhow::bail!("the selected create option is only supported for --platform environments");
     }
+    if args.access_profile.is_some() {
+        anyhow::bail!("--access-profile requires the native local backend");
+    }
     let backend = args.backend.ok_or_else(|| {
         anyhow::anyhow!("legacy local creation requires --backend docker or --backend lima")
     })?;
@@ -1856,6 +1895,9 @@ pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Resul
         anyhow::bail!(
             "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
         );
+    }
+    if args.access_profile.is_some() {
+        anyhow::bail!("--access-profile is not yet available for platform environments");
     }
     Ok(())
 }
@@ -2267,8 +2309,8 @@ fn project_spec_from_create_request(
         },
         secrets: codewire_project::SecretBindings {
             project: request.secret_project.clone(),
-            include_org: request.include_org_secrets,
-            include_user: request.include_user_secrets,
+            organization: request.include_org_secrets.unwrap_or(false),
+            user: request.include_user_secrets.unwrap_or(false),
         },
         ..codewire_project::ProjectSpec::default()
     };
@@ -2387,7 +2429,7 @@ pub(crate) struct ResolvedCodewireAgentsYaml {
 
 #[derive(serde::Serialize)]
 pub(crate) struct ResolvedCodewireSecretsYaml {
-    pub(crate) org: bool,
+    pub(crate) organization: bool,
     pub(crate) user: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) project: String,
@@ -2416,7 +2458,7 @@ pub(crate) fn codewire_yaml_from_request(
         install: request.install_command.clone(),
         startup: request.startup_script.clone(),
         secrets: Some(ResolvedCodewireSecretsYaml {
-            org: request.include_org_secrets.unwrap_or(true),
+            organization: request.include_org_secrets.unwrap_or(true),
             user: request.include_user_secrets.unwrap_or(true),
             project: request.secret_project.clone(),
         }),
@@ -2590,6 +2632,11 @@ pub(crate) async fn handle_env_access_command(
     command: EnvAccessCommand,
 ) -> anyhow::Result<()> {
     match command {
+        EnvAccessCommand::Apply(_) => {
+            anyhow::bail!(
+                "environment access-profile apply is not yet available for platform environments"
+            )
+        }
         EnvAccessCommand::List(args) => {
             let environment_id = resolve_environment_id(client, org_id, &args.environment).await?;
             let grants = client

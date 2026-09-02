@@ -7,6 +7,11 @@ authors.workspace = true
 license.workspace = true
 description = "Rust landing zone for the Codewire cw CLI migration."
 
+[features]
+local-broker-synthetic-smoke = [
+  "codewire-credential-broker/local-broker-synthetic-smoke",
+]
+
 [lib]
 name = "codewire_cli"
 path = "src/lib.rs"
@@ -36,8 +41,14 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+codewire-access = { workspace = true }
+codewire-credential-broker = { workspace = true }
+codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
+codewire-protected-store = { workspace = true }
 libc = "0.2"
+rustix = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 buffa = { workspace = true }

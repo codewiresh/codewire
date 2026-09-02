@@ -1,6 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use uuid::Uuid;
+
 use crate::execution::ProcessExecution;
 
 pub const SHIM_ADDR_ENV: &str = "CODEWIRE_WORKSPACE_SHIM_ADDR";
@@ -19,6 +21,18 @@ pub struct Config {
     pub home_root: PathBuf,
     pub auth_token: Option<String>,
     pub process_execution: ProcessExecution,
+    /// Local/platform placement-specific guest endpoint for material-free
+    /// credential requests. Protected values never enter this configuration.
+    pub credential_bridge: Option<CredentialBridgeConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialBridgeConfig {
+    pub environment_id: Uuid,
+    pub environment_generation: u64,
+    pub ingress_socket: PathBuf,
+    pub ingress_uid: u32,
+    pub ingress_gid: u32,
 }
 
 impl Config {
@@ -29,6 +43,7 @@ impl Config {
             home_root: env_path(HOME_ROOT_ENV, DEFAULT_HOME_ROOT),
             auth_token: env_value(DAEMON_AUTH_TOKEN_ENV),
             process_execution: ProcessExecution::Native,
+            credential_bridge: None,
         }
     }
 

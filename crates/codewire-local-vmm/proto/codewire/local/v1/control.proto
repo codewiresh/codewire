@@ -13,9 +13,13 @@ service LocalSupervisorService {
   rpc StopEnvironment(EnvironmentSelector) returns (Operation);
   rpc RestartEnvironment(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
+  rpc ApplyEnvironmentAccess(ApplyEnvironmentAccessRequest) returns (Operation);
   rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
   rpc GetOperation(GetOperationRequest) returns (Operation);
   rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
+  // Starts or reuses the authority-owned broker for the exact running
+  // environment generation. The response and request are material-free.
+  rpc EnsureCredentialBroker(EnvironmentSelector) returns (CredentialBrokerRuntime);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
 }
 
@@ -52,6 +56,7 @@ enum OperationKind {
   OPERATION_KIND_DELETE = 7;
   OPERATION_KIND_GROW_DISK = 8;
   OPERATION_KIND_RECONCILE = 9;
+  OPERATION_KIND_APPLY_ENVIRONMENT_ACCESS = 10;
 }
 
 enum OperationPhase {
@@ -92,6 +97,11 @@ enum OperationStage {
   OPERATION_STAGE_COMPLETED = 23;
   OPERATION_STAGE_FAILED = 24;
   OPERATION_STAGE_INTERRUPTED = 25;
+  OPERATION_STAGE_BIND_ENVIRONMENT_ACCESS = 26;
+  OPERATION_STAGE_REVOKE_ENVIRONMENT_ACCESS = 27;
+  OPERATION_STAGE_REQUIRE_ENVIRONMENT_ACCESS = 28;
+  OPERATION_STAGE_APPLY_ENVIRONMENT_ACCESS = 29;
+  OPERATION_STAGE_RECORD_ENVIRONMENT_ACCESS = 30;
 }
 
 message Operation {
@@ -159,6 +169,10 @@ message CreateEnvironmentRequest {
   // persists only this status-visible metadata; setup authority remains in an
   // isolated host process and never enters this API.
   MeshAttachment mesh = 11;
+  // Material-free exact revision resolved from project_spec_json.access.profile.
+  // Both fields are empty/zero when the project selects no credential access.
+  string access_profile_id = 12;
+  uint64 access_profile_revision = 13;
 }
 
 message HostPortBinding {
@@ -209,6 +223,20 @@ message ResizeEnvironmentRequest {
   string public_disruption_policy = 8;
 }
 
+message ApplyEnvironmentAccessRequest {
+  string name = 1;
+  string request_id = 2;
+  // Stable identity precondition so delete-and-recreate cannot redirect an
+  // access mutation by name.
+  string environment_id = 3;
+  // Material-free exact target resolved by the local credential authority.
+  // Set all three target fields, or set clear=true with all three empty/zero.
+  string access_profile = 4;
+  string access_profile_id = 5;
+  uint64 access_profile_revision = 6;
+  bool clear = 7;
+}
+
 message Environment {
   string id = 1;
   string name = 2;
@@ -231,6 +259,12 @@ message Environment {
   // Bounded machine-readable cause reported by the current runner. Empty
   // unless state is ENVIRONMENT_STATE_ERROR and the runner remains owned.
   string error_code = 17;
+  // Logical scope-qualified profile reference selected for this environment.
+  // The placement-private profile ID remains supervisor/authority metadata.
+  string access_profile = 18;
+  // Exact bound revision safe to display. The placement-private profile ID is
+  // deliberately omitted.
+  uint64 access_profile_revision = 19;
 }
 
 message ListEnvironmentsRequest {}
@@ -268,6 +302,12 @@ message DaemonAccess {
   string hybrid_socket = 1;
   uint32 guest_port = 2;
   string generation_capability = 3;
+}
+
+message CredentialBrokerRuntime {
+  string environment_id = 1;
+  uint64 environment_generation = 2;
+  bool running = 3;
 }
 
 message AdoptRunnerRequest {

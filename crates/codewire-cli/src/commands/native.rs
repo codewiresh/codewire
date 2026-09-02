@@ -5,8 +5,11 @@ use std::pin::Pin;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 use anyhow::Context as _;
+use codewire_access::{AccessProfileReference, EnvironmentId};
 use codewire_client::TokenProvider as _;
+use codewire_local_credentials::LocalCredentialClient;
 use codewire_local_vmm::control::v1;
+use codewire_local_vmm::oci::RegistryReference;
 use codewire_local_vmm::runner_service::{RunnerEntrypointConfig, serve_runner};
 use codewire_local_vmm::supervisor::{
     NativeRuntimeConfig, NativeSupervisorClient, inspect_orphans, serve_supervisor,
@@ -35,6 +38,7 @@ pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow:
         artifact_lock: args.artifact_lock,
         mesh_data_dir: args.mesh_data_dir,
         platform_config_dir: args.platform_config_dir,
+        credential_authority_root: args.credential_authority_root,
         executable,
     })
     .await
@@ -344,7 +348,19 @@ pub(crate) async fn create_native_environment(
     let requested_path = args.path.as_deref().unwrap_or_else(|| Path::new("."));
     let source_path = std::fs::canonicalize(requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
-    let project = native_codewire_yaml(&source_path, args.file.as_deref())?;
+    let mut project = native_codewire_yaml(&source_path, args.file.as_deref())?;
+    if let Some(image) = args.image.as_deref().and_then(trimmed_str) {
+        project.spec.image = image.to_owned();
+    }
+    if let Some(reference) = args.access_profile.as_deref() {
+        let reference = trimmed_str(reference)
+            .ok_or_else(|| anyhow::anyhow!("--access-profile cannot be empty"))?;
+        project.spec.access = Some(codewire_project::AccessBinding {
+            profile: reference
+                .parse()
+                .context("parse local access profile reference")?,
+        });
+    }
     let (request_source_path, implicit_path_mode) =
         native_workspace_request(&source_path, &project.spec, args.path_mode)?;
     let vcpus = match args.cpu.as_deref() {
@@ -376,6 +392,17 @@ pub(crate) async fn create_native_environment(
         args.no_network,
         args.yes,
     )?;
+    let access_selection = match project.spec.access.as_ref() {
+        Some(access) => {
+            let mut credentials = connect_local_credential_authority().await?;
+            let profile = credentials
+                .resolve_profile(&access.profile)
+                .await
+                .context("resolve local access profile")?;
+            Some((profile.profile.id.to_string(), profile.profile.revision))
+        }
+        None => None,
+    };
     let (project_spec_json, project_spec_sha256) =
         canonical_native_project_intent(project.spec, vcpus, memory_mib, disk_bytes)?;
     let mut client = native_client().await?;
@@ -392,6 +419,13 @@ pub(crate) async fn create_native_environment(
             implicit_path_mode,
             host_ports,
             mesh,
+            access_profile_id: access_selection
+                .as_ref()
+                .map(|selection| selection.0.clone())
+                .unwrap_or_default(),
+            access_profile_revision: access_selection
+                .map(|selection| selection.1)
+                .unwrap_or_default(),
         })
         .await
         .map_err(native_status)
@@ -495,11 +529,10 @@ pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Env
 }
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
-    native_client()
-        .await?
-        .start(name)
-        .await
-        .map_err(native_status)
+    let mut client = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    ensure_native_access_authority(&environment).await?;
+    client.start(name).await.map_err(native_status)
 }
 
 pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
@@ -516,26 +549,228 @@ pub(crate) async fn resize_native_environment(
     memory_mib: u32,
     disk_bytes: u64,
 ) -> anyhow::Result<v1::Environment> {
-    native_client()
-        .await?
+    let mut client = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    ensure_native_access_authority(&environment).await?;
+    client
         .resize(name, vcpus, memory_mib, disk_bytes)
         .await
         .map_err(native_status)
 }
 
+async fn get_native_environment_with_authority_recovery(
+    client: &mut NativeSupervisorClient,
+    name: &str,
+) -> anyhow::Result<v1::Environment> {
+    match client.get(name).await {
+        Ok(environment) => Ok(environment),
+        Err(status) if status.code() == tonic::Code::Unavailable => {
+            drop(connect_local_credential_authority().await?);
+            client.get(name).await.map_err(native_status)
+        }
+        Err(status) => Err(native_status(status)),
+    }
+}
+
 pub(crate) async fn delete_native_environment(
     name: &str,
 ) -> anyhow::Result<v1::DeleteEnvironmentResponse> {
-    native_client()
-        .await?
-        .delete(name)
+    let mut client = native_client().await?;
+    let environment = client.get(name).await.map_err(native_status)?;
+    if !environment.access_profile.is_empty() {
+        let _ = connect_local_credential_authority().await;
+    }
+    client.delete(name).await.map_err(native_status)
+}
+
+pub(crate) async fn handle_native_environment_access(args: EnvAccessArgs) -> anyhow::Result<()> {
+    match args.command {
+        None => {
+            let name = args
+                .environment
+                .as_deref()
+                .and_then(trimmed_str)
+                .ok_or_else(|| anyhow::anyhow!("environment name is required"))?;
+            let mut credentials = connect_local_credential_authority().await?;
+            let environment = native_client()
+                .await?
+                .get(name)
+                .await
+                .map_err(native_status)?;
+            let view = inspect_native_environment_access(&environment, &mut credentials).await?;
+            print_native_environment_access(&view, args.output)
+        }
+        Some(EnvAccessCommand::Apply(apply)) => {
+            let mut credentials = connect_local_credential_authority().await?;
+            let mut supervisor = native_client().await?;
+            let environment = supervisor
+                .get(&apply.environment)
+                .await
+                .map_err(native_status)?;
+            let target = match apply.profile.as_deref() {
+                Some(reference) => {
+                    let reference = trimmed_str(reference)
+                        .ok_or_else(|| anyhow::anyhow!("--profile cannot be empty"))?
+                        .parse::<AccessProfileReference>()
+                        .context("parse local access profile reference")?;
+                    let profile = credentials
+                        .resolve_profile(&reference)
+                        .await
+                        .context("resolve local access profile")?;
+                    Some((
+                        reference.to_string(),
+                        profile.profile.id.to_string(),
+                        profile.profile.revision,
+                    ))
+                }
+                None if apply.clear => None,
+                None => anyhow::bail!("either --profile or --clear is required"),
+            };
+            let updated = supervisor
+                .apply_access(
+                    &environment.name,
+                    &environment.id,
+                    target.as_ref().map(|(reference, id, revision)| {
+                        (reference.as_str(), id.as_str(), *revision)
+                    }),
+                )
+                .await
+                .map_err(native_status)?;
+            let view = inspect_native_environment_access(&updated, &mut credentials).await?;
+            print_native_environment_access(&view, apply.output)
+        }
+        Some(
+            EnvAccessCommand::List(_) | EnvAccessCommand::Grant(_) | EnvAccessCommand::Revoke(_),
+        ) => {
+            anyhow::bail!("collaborator access commands require --platform")
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct NativeEnvironmentAccessView {
+    pub(crate) environment: String,
+    pub(crate) environment_id: String,
+    pub(crate) placement: String,
+    pub(crate) profile: Option<String>,
+    pub(crate) bound_revision: Option<u64>,
+    pub(crate) current_revision: Option<u64>,
+    pub(crate) update_available: bool,
+}
+
+async fn inspect_native_environment_access(
+    environment: &v1::Environment,
+    credentials: &mut LocalCredentialClient,
+) -> anyhow::Result<NativeEnvironmentAccessView> {
+    let environment_id = EnvironmentId::parse(environment.id.clone())
+        .map_err(|_| anyhow::anyhow!("native environment returned an invalid ID"))?;
+    if environment.access_profile.is_empty() {
+        if environment.access_profile_revision != 0 {
+            anyhow::bail!("native environment access metadata is inconsistent");
+        }
+        match credentials
+            .get_environment_access_binding(&environment_id)
+            .await
+        {
+            Err(status) if status.code() == tonic::Code::NotFound => {}
+            Ok(_) => anyhow::bail!("native environment access metadata is inconsistent"),
+            Err(status) => {
+                return Err(native_status(status)).context("read local environment access binding");
+            }
+        }
+        return Ok(NativeEnvironmentAccessView {
+            environment: environment.name.clone(),
+            environment_id: environment.id.clone(),
+            placement: "local".to_owned(),
+            profile: None,
+            bound_revision: None,
+            current_revision: None,
+            update_available: false,
+        });
+    }
+    if environment.access_profile_revision == 0 {
+        anyhow::bail!("native environment access metadata is inconsistent");
+    }
+    let reference = environment
+        .access_profile
+        .parse::<AccessProfileReference>()
+        .map_err(|_| anyhow::anyhow!("native environment access metadata is inconsistent"))?;
+    let current = credentials
+        .resolve_profile(&reference)
         .await
-        .map_err(native_status)
+        .context("resolve bound local access profile")?;
+    let binding = credentials
+        .get_environment_access_binding(&environment_id)
+        .await
+        .context("read local environment access binding")?;
+    if binding.binding.profile_id != current.profile.id
+        || binding.binding.profile_revision != environment.access_profile_revision
+    {
+        anyhow::bail!("native environment access binding does not match supervisor state");
+    }
+    let bound = credentials
+        .get_profile_revision(&current.profile.id, environment.access_profile_revision)
+        .await
+        .context("read bound local access profile revision")?;
+    if bound.profile.name != *reference.name()
+        || current.profile.revision < environment.access_profile_revision
+    {
+        anyhow::bail!("native environment access profile history is inconsistent");
+    }
+    Ok(NativeEnvironmentAccessView {
+        environment: environment.name.clone(),
+        environment_id: environment.id.clone(),
+        placement: "local".to_owned(),
+        profile: Some(reference.to_string()),
+        bound_revision: Some(environment.access_profile_revision),
+        current_revision: Some(current.profile.revision),
+        update_available: current.profile.revision > environment.access_profile_revision,
+    })
+}
+
+pub(crate) fn print_native_environment_access(
+    view: &NativeEnvironmentAccessView,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(view)?),
+        OutputFormat::Text => print!("{}", format_native_environment_access(view)),
+    }
+    Ok(())
+}
+
+pub(crate) fn format_native_environment_access(view: &NativeEnvironmentAccessView) -> String {
+    match (
+        view.profile.as_deref(),
+        view.bound_revision,
+        view.current_revision,
+    ) {
+        (Some(profile), Some(bound), Some(current)) => format!(
+            "Environment:      {}\nPlacement:        local\nAccess profile:   {profile}\nBound revision:   {bound}\nCurrent revision: {current}\nUpdate available: {}\n",
+            view.environment,
+            if view.update_available { "yes" } else { "no" }
+        ),
+        _ => format!(
+            "Environment:    {}\nPlacement:      local\nAccess profile: none\n",
+            view.environment
+        ),
+    }
+}
+
+async fn ensure_native_access_authority(environment: &v1::Environment) -> anyhow::Result<()> {
+    if !environment.access_profile.is_empty() {
+        drop(connect_local_credential_authority().await?);
+    }
+    Ok(())
 }
 
 pub(crate) async fn native_environment_session_client(
     name: &str,
 ) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicSessionClient> {
+    let mut supervisor = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut supervisor, name).await?;
+    ensure_native_access_authority(&environment).await?;
+    drop(supervisor);
     codewire_local_vmm::public_client::NativePublicSessionClient::connect_or_start(
         &native_runtime_config()?,
         name,
@@ -585,6 +820,10 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) network: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error_code: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) access_profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) access_profile_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -621,13 +860,23 @@ impl From<&v1::Environment> for NativeEnvironmentView {
                 .and_then(|mesh| trimmed_str(&mesh.network_id))
                 .map(str::to_owned),
             error_code: trimmed_str(&environment.error_code).map(str::to_owned),
+            access_profile: environment.access_profile.clone(),
+            access_profile_revision: (!environment.access_profile.is_empty()
+                && environment.access_profile_revision > 0)
+                .then_some(environment.access_profile_revision),
         }
     }
 }
 
 fn format_native_environment(view: &NativeEnvironmentView) -> String {
+    let access = match (&view.access_profile, view.access_profile_revision) {
+        (profile, Some(revision)) if !profile.is_empty() => {
+            format!("{profile} (revision {revision})")
+        }
+        _ => "none".to_owned(),
+    };
     let mut output = format!(
-        "Environment: {}\nBackend:     {}\nState:       {}\nCPU:         {}\nMemory:      {}\nDisk:        {}\nWorkspace:   {} input(s), plan {}\nWorking dir: {}\n",
+        "Environment: {}\nBackend:     {}\nState:       {}\nCPU:         {}\nMemory:      {}\nDisk:        {}\nWorkspace:   {} input(s), plan {}\nWorking dir: {}\nAccess:      {}\n",
         view.name,
         view.backend,
         view.state,
@@ -637,6 +886,7 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
         view.workspace_inputs,
         view.workspace_plan,
         view.working_directory,
+        access,
     );
     for port in &view.ports {
         output.push_str(&format!(
@@ -708,6 +958,7 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
         artifact_lock,
         mesh_data_dir: paths.mesh_data_dir,
         platform_config_dir: paths.platform_config_dir,
+        credential_authority_root: local_credential_root(&env)?,
         executable: canonical_current_executable()?,
     })
 }
@@ -812,9 +1063,6 @@ fn native_unsupported_project_fields(
     if !spec.preset.is_empty() {
         unsupported.push("preset");
     }
-    if !spec.image.is_empty() {
-        unsupported.push("image");
-    }
     if spec.repositories.is_empty() && spec.working_directory != "/workspace" {
         unsupported.push("working_directory");
     }
@@ -835,9 +1083,6 @@ fn native_unsupported_project_fields(
     }
     if !spec.secrets.is_empty() {
         unsupported.push("secrets");
-    }
-    if !spec.credentials.is_empty() {
-        unsupported.push("credentials");
     }
     if !document.local.mounts.is_empty() {
         unsupported.push("mounts");
@@ -866,7 +1111,7 @@ fn canonical_native_project_intent(
     memory_mib: u32,
     disk_bytes: u64,
 ) -> anyhow::Result<(Vec<u8>, String)> {
-    spec.image = CANONICAL_WORKSPACE_IMAGE.to_owned();
+    spec.image = canonical_native_workspace_image(&spec.image)?;
     spec.resources = codewire_project::ResourceSpec {
         cpu_millicores: Some(
             vcpus
@@ -881,6 +1126,14 @@ fn canonical_native_project_intent(
         .context("encode canonical native project intent")?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     Ok((bytes, digest))
+}
+
+fn canonical_native_workspace_image(image: &str) -> anyhow::Result<String> {
+    let image = trimmed_str(image)
+        .map(expand_image_ref)
+        .unwrap_or_else(|| CANONICAL_WORKSPACE_IMAGE.to_owned());
+    RegistryReference::parse(&image).context("parse native OCI workspace image")?;
+    Ok(image)
 }
 
 fn workspace_selection_from_arg(value: PathModeArg) -> WorkspaceSelection {
@@ -939,9 +1192,6 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
     }
     if args.branch.is_some() {
         unsupported.push("--branch");
-    }
-    if args.image.is_some() {
-        unsupported.push("--image");
     }
     if args.install.is_some() {
         unsupported.push("--install");
@@ -1298,11 +1548,11 @@ mod tests {
     }
 
     #[test]
-    fn native_yaml_rejects_unsupported_product_fields() {
+    fn native_yaml_accepts_the_shared_workspace_image_field() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("codewire.yaml"), "image: workspace\n").unwrap();
-        let error = native_codewire_yaml(temp.path(), None).unwrap_err();
-        assert!(error.to_string().contains("fields: image"));
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(project.spec.image, "workspace");
     }
 
     #[test]
@@ -1317,6 +1567,22 @@ mod tests {
         assert_eq!(resources.vcpus, Some(2));
         assert_eq!(resources.memory_mib, Some(16 * 1024));
         assert_eq!(resources.disk_bytes, Some(40 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn native_yaml_preserves_the_logical_access_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            "version: 1\naccess: {profile: user/work}\n",
+        )
+        .unwrap();
+
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(
+            project.spec.access.as_ref().unwrap().profile.to_string(),
+            "user/work"
+        );
     }
 
     #[test]
@@ -1421,6 +1687,31 @@ working_directory: /workspace/github
     }
 
     #[test]
+    fn native_project_intent_expands_and_validates_the_configured_image() {
+        let spec = codewire_project::ProjectSpec {
+            image: "ubuntu:24.04".to_owned(),
+            ..codewire_project::ProjectSpec::default()
+        };
+        let (bytes, _) =
+            canonical_native_project_intent(spec, 2, 4096, 20 * 1024 * 1024 * 1024).unwrap();
+        let spec: codewire_project::ProjectSpec = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(spec.image, "docker.io/library/ubuntu:24.04");
+
+        let invalid = codewire_project::ProjectSpec {
+            image: "https://registry.example/workspace:latest".to_owned(),
+            ..codewire_project::ProjectSpec::default()
+        };
+        let error =
+            canonical_native_project_intent(invalid, 2, 4096, 20 * 1024 * 1024 * 1024).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("parse native OCI workspace image"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn native_state_labels_are_stable() {
         assert_eq!(
             native_state_label(v1::EnvironmentState::Running as i32),
@@ -1466,10 +1757,47 @@ working_directory: /workspace/github
             }],
             network: Some("mesh-dev".to_owned()),
             error_code: None,
+            access_profile: "user/work".to_owned(),
+            access_profile_revision: Some(2),
         };
 
         let output = format_native_environment(&view);
         assert!(output.contains("Port:        127.0.0.1:18080 -> 8080\n"));
         assert!(output.contains("Network:     mesh-dev\n"));
+        assert!(output.contains("Access:      user/work (revision 2)\n"));
+    }
+
+    #[test]
+    fn native_access_view_locks_redacted_human_and_json_fields() {
+        let view = NativeEnvironmentAccessView {
+            environment: "dev".to_owned(),
+            environment_id: "env-dev".to_owned(),
+            placement: "local".to_owned(),
+            profile: Some("user/work".to_owned()),
+            bound_revision: Some(2),
+            current_revision: Some(3),
+            update_available: true,
+        };
+        assert_eq!(
+            format_native_environment_access(&view),
+            "Environment:      dev\nPlacement:        local\nAccess profile:   user/work\nBound revision:   2\nCurrent revision: 3\nUpdate available: yes\n"
+        );
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["profile"], "user/work");
+        assert_eq!(json["bound_revision"], 2);
+        assert_eq!(json["current_revision"], 3);
+        assert!(json.get("profile_id").is_none());
+
+        let none = NativeEnvironmentAccessView {
+            profile: None,
+            bound_revision: None,
+            current_revision: None,
+            update_available: false,
+            ..view
+        };
+        assert_eq!(
+            format_native_environment_access(&none),
+            "Environment:    dev\nPlacement:      local\nAccess profile: none\n"
+        );
     }
 }

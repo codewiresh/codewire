@@ -604,9 +604,9 @@ fn legacy_codewire_config(
             detail: "skill snapshots require the native workspace runtime".to_string(),
         });
     }
-    if !spec.credentials.is_empty() {
+    if spec.access.is_some() {
         return Err(codewire_project::ProjectError::InvalidField {
-            field: "credentials",
+            field: "access",
             detail: "credential grants require the native workspace runtime".to_string(),
         });
     }
@@ -668,8 +668,8 @@ fn legacy_codewire_config(
         tools: spec.agents.tools,
     });
     let secrets = (!spec.secrets.is_empty()).then_some(CodewireSecretsConfig {
-        org: spec.secrets.include_org,
-        user: spec.secrets.include_user,
+        org: Some(spec.secrets.organization),
+        user: Some(spec.secrets.user),
         project: spec.secrets.project,
     });
 
@@ -1776,7 +1776,7 @@ image: ghcr.io/codewire/dev:latest
 install: npm install
 startup: npm test
 secrets:
-  org: false
+  organization: false
   user: true
   project: dev
 agents:
@@ -1839,14 +1839,14 @@ mounts:
     }
 
     #[test]
-    fn load_codewire_config_parses_scalar_agents_and_secrets() {
+    fn load_codewire_config_parses_scalar_agents_and_canonical_secrets() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("codewire.yaml");
         fs::write(
             &path,
             r#"
 agents: codex
-secrets: project-dev
+secrets: {project: project-dev}
 "#,
         )
         .unwrap();
@@ -1863,8 +1863,9 @@ secrets: project-dev
         assert_eq!(
             config.secrets,
             Some(CodewireSecretsConfig {
+                org: Some(false),
+                user: Some(false),
                 project: "project-dev".to_string(),
-                ..CodewireSecretsConfig::default()
             })
         );
     }

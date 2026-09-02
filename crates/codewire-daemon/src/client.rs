@@ -9,7 +9,8 @@ use std::time::Duration;
 
 pub use codewire_gateway_proto::daemon::v1;
 use codewire_gateway_proto::{
-    DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH, DAEMON_CAPABILITY_SESSIONS,
+    CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH,
+    DAEMON_CAPABILITY_SESSIONS,
 };
 pub use codewire_gateway_proto::{DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION};
 use tokio::sync::mpsc;
@@ -17,6 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Streaming};
+use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionClientError {
@@ -56,6 +58,23 @@ pub struct SessionAttachmentInput {
     session_id: String,
 }
 
+/// Authenticated host side of one generation-bound credential bridge.
+///
+/// Both directions carry only guest request bytes and broker-redacted response
+/// bytes. This API has no credential field; callers must redact all protected
+/// material before constructing response headers or body frames.
+pub struct CredentialBridgeConnection {
+    input: mpsc::Sender<v1::CredentialBridgeHostMessage>,
+    output: Streaming<v1::CredentialBridgeGuestMessage>,
+}
+
+/// Cloneable response-only half of an authenticated credential bridge.
+/// Callers must send only provider-filtered, already-redacted bytes.
+#[derive(Clone)]
+pub struct CredentialBridgeResponseSender {
+    input: mpsc::Sender<v1::CredentialBridgeHostMessage>,
+}
+
 impl SessionClient {
     /// Build a daemon client over a caller-provided transport channel.
     ///
@@ -69,7 +88,9 @@ impl SessionClient {
     ) -> Result<Self, SessionClientError> {
         let auth_token = Self::parse_auth_token(daemon_token)?;
         Ok(Self {
-            inner: v1::daemon_service_client::DaemonServiceClient::new(channel),
+            inner: v1::daemon_service_client::DaemonServiceClient::new(channel)
+                .max_decoding_message_size(CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES),
             auth_token,
         })
     }
@@ -151,6 +172,36 @@ impl SessionClient {
             .get_health(self.authorized(v1::GetHealthRequest {}))
             .await?
             .into_inner())
+    }
+
+    pub async fn open_credential_bridge(
+        &self,
+        environment_id: Uuid,
+        environment_generation: u64,
+    ) -> Result<CredentialBridgeConnection, SessionClientError> {
+        if environment_id.is_nil() || environment_generation == 0 {
+            return Err(SessionClientError::InvalidCredential);
+        }
+        let (input, receiver) = mpsc::channel(32);
+        input
+            .send(v1::CredentialBridgeHostMessage {
+                payload: Some(v1::credential_bridge_host_message::Payload::Open(
+                    v1::CredentialBridgeOpen {
+                        protocol_version:
+                            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        environment_id: environment_id.to_string(),
+                        environment_generation,
+                    },
+                )),
+            })
+            .await
+            .map_err(|_| SessionClientError::RequestClosed)?;
+        let mut client = self.inner.clone();
+        let output = client
+            .credential_bridge(self.authorized(ReceiverStream::new(receiver)))
+            .await?
+            .into_inner();
+        Ok(CredentialBridgeConnection { input, output })
     }
 
     pub async fn launch(
@@ -293,6 +344,103 @@ impl SessionClient {
             .metadata_mut()
             .insert(DAEMON_AUTH_TOKEN_HEADER, self.auth_token.clone());
         request
+    }
+}
+
+impl CredentialBridgeConnection {
+    pub fn response_sender(&self) -> CredentialBridgeResponseSender {
+        CredentialBridgeResponseSender {
+            input: self.input.clone(),
+        }
+    }
+
+    pub async fn receive(
+        &mut self,
+    ) -> Result<Option<v1::CredentialBridgeGuestMessage>, SessionClientError> {
+        self.output
+            .message()
+            .await
+            .map_err(SessionClientError::from)
+    }
+
+    pub async fn send_response_start(
+        &self,
+        response: v1::CredentialBridgeResponseStart,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_response_start(response).await
+    }
+
+    pub async fn send_response_body(
+        &self,
+        response: v1::CredentialBridgeResponseBody,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_response_body(response).await
+    }
+
+    pub async fn send_response_end(
+        &self,
+        response: v1::CredentialBridgeResponseEnd,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_response_end(response).await
+    }
+
+    pub async fn send_response_failure(
+        &self,
+        response: v1::CredentialBridgeResponseFailure,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_response_failure(response).await
+    }
+}
+
+impl CredentialBridgeResponseSender {
+    pub async fn send_response_start(
+        &self,
+        response: v1::CredentialBridgeResponseStart,
+    ) -> Result<(), SessionClientError> {
+        self.send(v1::credential_bridge_host_message::Payload::ResponseStart(
+            response,
+        ))
+        .await
+    }
+
+    pub async fn send_response_body(
+        &self,
+        response: v1::CredentialBridgeResponseBody,
+    ) -> Result<(), SessionClientError> {
+        self.send(v1::credential_bridge_host_message::Payload::ResponseBody(
+            response,
+        ))
+        .await
+    }
+
+    pub async fn send_response_end(
+        &self,
+        response: v1::CredentialBridgeResponseEnd,
+    ) -> Result<(), SessionClientError> {
+        self.send(v1::credential_bridge_host_message::Payload::ResponseEnd(
+            response,
+        ))
+        .await
+    }
+
+    pub async fn send_response_failure(
+        &self,
+        response: v1::CredentialBridgeResponseFailure,
+    ) -> Result<(), SessionClientError> {
+        self.send(v1::credential_bridge_host_message::Payload::ResponseFailure(response))
+            .await
+    }
+
+    async fn send(
+        &self,
+        payload: v1::credential_bridge_host_message::Payload,
+    ) -> Result<(), SessionClientError> {
+        self.input
+            .send(v1::CredentialBridgeHostMessage {
+                payload: Some(payload),
+            })
+            .await
+            .map_err(|_| SessionClientError::RequestClosed)
     }
 }
 

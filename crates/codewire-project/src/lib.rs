@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use codewire_access::AccessProfileReference;
+
 mod normalize;
 
 pub const PROJECT_SCHEMA_VERSION: u32 = 1;
@@ -18,7 +20,6 @@ pub const MAX_ENVIRONMENT_VALUES: usize = 256;
 pub const MAX_APPLICATION_PORTS: usize = 128;
 pub const MAX_AGENTS: usize = 32;
 pub const MAX_SKILLS: usize = 256;
-pub const MAX_CREDENTIALS: usize = 128;
 pub const MAX_LOCAL_MOUNTS: usize = 64;
 
 const WORKSPACE_ROOT: &str = "/workspace";
@@ -99,8 +100,8 @@ pub struct ProjectSpec {
     pub resources: ResourceSpec,
     #[serde(default, skip_serializing_if = "SecretBindings::is_empty")]
     pub secrets: SecretBindings,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub credentials: BTreeMap<String, CredentialReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<AccessBinding>,
 }
 
 impl Default for ProjectSpec {
@@ -120,7 +121,7 @@ impl Default for ProjectSpec {
             application_ports: Vec::new(),
             resources: ResourceSpec::default(),
             secrets: SecretBindings::default(),
-            credentials: BTreeMap::new(),
+            access: None,
         }
     }
 }
@@ -214,24 +215,26 @@ impl ResourceSpec {
 pub struct SecretBindings {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_org: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_user: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub organization: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub user: bool,
 }
 
 impl SecretBindings {
     pub fn is_empty(&self) -> bool {
-        self.project.is_empty() && self.include_org.is_none() && self.include_user.is_none()
+        self.project.is_empty() && !self.organization && !self.user
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CredentialReference {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub provider: String,
-    pub account: String,
+pub struct AccessBinding {
+    pub profile: AccessProfileReference,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -300,15 +303,9 @@ struct RawProject {
     #[serde(default)]
     disk: Option<RawQuantity>,
     #[serde(default)]
-    secrets: Option<RawSecrets>,
+    secrets: Option<RawSecretsBlock>,
     #[serde(default)]
-    secret_project: String,
-    #[serde(default)]
-    include_org_secrets: Option<bool>,
-    #[serde(default)]
-    include_user_secrets: Option<bool>,
-    #[serde(default)]
-    credentials: BTreeMap<String, RawCredential>,
+    access: Option<RawAccessBlock>,
     #[serde(default)]
     mounts: Vec<RawMountBlock>,
 }
@@ -397,38 +394,21 @@ enum RawQuantity {
     String(String),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawSecrets {
-    String(String),
-    Mapping(RawSecretsBlock),
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSecretsBlock {
     #[serde(default)]
-    org: Option<bool>,
+    organization: bool,
     #[serde(default)]
-    user: Option<bool>,
+    user: bool,
     #[serde(default)]
     project: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawCredential {
-    String(String),
-    Mapping(RawCredentialBlock),
-}
-
-#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawCredentialBlock {
-    #[serde(default)]
-    provider: String,
-    #[serde(default, alias = "account_ref")]
-    account: String,
+struct RawAccessBlock {
+    profile: AccessProfileReference,
 }
 
 #[derive(Debug, Default, Deserialize)]

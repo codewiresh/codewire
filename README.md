@@ -92,9 +92,10 @@ environment-owned point-in-time copy. Use `--path-mode clone` or
 never inferred from `--path`. The primary workspace runs directly in the
 canonical Codewire OCI workspace image beneath trusted guest init and runc;
 Docker does not own it. Multi-repository `repositories` entries use the same
-normalized project model as the platform. A bare `ports` entry declares a guest
-application port; an explicit `HOST:GUEST` entry also publishes it for the VM
-lifetime on `127.0.0.1:HOST` only:
+normalized project model as the platform. `image` in `codewire.yaml` and
+`--image` select any valid OCI workspace image. A bare `ports` entry declares
+a guest application port; an explicit `HOST:GUEST` entry also publishes it for
+the VM lifetime on `127.0.0.1:HOST` only:
 
 ```yaml
 ports:
@@ -112,14 +113,15 @@ native local and platform creation fail instead of silently creating a
 disconnected environment when enrollment cannot be completed.
 `cw mesh up` provides the standalone offline/self-hosted coordinator used by
 the product smoke. The host owns Mesh identity and transport, and the VM sees
-only admitted TCP streams for its declared application ports. Custom image,
-preset, install/startup, environment, agent/skill, secret/credential, and
-explicit mount options still fail explicitly while the remaining Forgejo #1910
-slices are completed. An owner-only SQLite WAL is the authoritative supervisor
-state; preview JSON state is imported exactly once. Lifecycle effects are
-journaled, disk shrink is rejected, and delete moves the environment tree to
-an operation-specific trash generation before removing only known runtime
-files.
+only admitted TCP streams for its declared application ports. Access profiles
+select material-free credential grants whose protected values remain in the
+isolated host broker. Preset, install/startup, environment, agent/skill, secret,
+and explicit mount options still fail explicitly while the remaining Forgejo
+#1910 slices are completed. An owner-only SQLite WAL is the authoritative
+supervisor state; preview JSON state is imported exactly once. Lifecycle
+effects are journaled, disk shrink is rejected, and delete moves the
+environment tree to an operation-specific trash generation before removing
+only known runtime files.
 
 Developers with artifacts staged outside the default cache can point the CLI
 at them and run the complete product smoke:
@@ -131,6 +133,7 @@ cargo build -p codewire-cli-bin --bin cw \
   -p codewire-mesh --bin codewire-mesh \
   -p codewire-derp --bin codewire-derp
 cargo build -p codewire-local-vmm \
+  --bin codewire-local-codex-bridge-smoke \
   --bin codewire-local-public-data-smoke \
   --bin codewire-local-state-probe
 mkdir -p .tmp
@@ -141,6 +144,7 @@ scripts/ci/verify/smoke-native-local-environment.sh \
   --mesh-bin "$PWD/target/debug/codewire-mesh" \
   --derp-bin "$PWD/target/debug/codewire-derp" \
   --data-plane-smoke-bin "$PWD/target/debug/codewire-local-public-data-smoke" \
+  --credential-bridge-smoke-bin "$PWD/target/debug/codewire-local-codex-bridge-smoke" \
   --state-probe-bin "$PWD/target/debug/codewire-local-state-probe" \
   --artifact-root "$CODEWIRE_NATIVE_ARTIFACT_ROOT" \
   --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK" \

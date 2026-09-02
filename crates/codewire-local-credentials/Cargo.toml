@@ -1,0 +1,32 @@
+[package]
+name = "codewire-local-credentials"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "Private local credential metadata and protected-store journal"
+build = "build.rs"
+
+[dependencies]
+codewire-access = { workspace = true }
+codewire-protected-store = { workspace = true }
+http = { workspace = true }
+hyper-util = { workspace = true }
+prost = { workspace = true }
+rusqlite = { workspace = true }
+rustix = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tower = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

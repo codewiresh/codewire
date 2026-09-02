@@ -7,6 +7,9 @@ authors.workspace = true
 license.workspace = true
 description = "Codewire cw CLI binary wrapper."
 
+[features]
+local-broker-synthetic-smoke = ["codewire-cli/local-broker-synthetic-smoke"]
+
 [[bin]]
 name = "cw"
 path = "src/main.rs"

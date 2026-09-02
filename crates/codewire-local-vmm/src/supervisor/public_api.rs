@@ -43,6 +43,7 @@ const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(180);
 const MAXIMUM_DAEMON_LOG_BYTES: usize = 64 * 1024;
 const REQUIRED_LOCAL_DAEMON_CAPABILITIES: &[&str] = &[
     "attach.v1",
+    "credential_bridge.v1",
     "exec.v1",
     "files.v1",
     "health.v1",
@@ -592,7 +593,7 @@ impl SupervisorRpc {
         environment_id: &str,
     ) -> Result<v1::DaemonAccess, connectrpc::ConnectError> {
         let environment_id = parse_coordinate(environment_id, "environment_id")?;
-        let access = {
+        let (access, broker_request) = {
             let mut core = self.core.lock().await;
             let namespace = core.store.namespace_id().map_err(|_| local_internal())?;
             require_namespace(namespace, org_id, false)?;
@@ -620,11 +621,23 @@ impl SupervisorRpc {
                     "local environment was not found",
                 ));
             }
-            core.daemon_access(&name)
+            let access = core
+                .daemon_access(&name)
                 .await
                 .map_err(Status::from)
-                .map_err(local_status)?
+                .map_err(local_status)?;
+            let broker_request = core
+                .credential_broker_ensure_request(&name)
+                .map_err(Status::from)
+                .map_err(local_status)?;
+            (access, broker_request)
         };
+        // Credential brokerage is auxiliary to daemon/session transport.
+        // Start its authority-owned retry lifecycle, but never make an offline
+        // shell depend on remote provider DNS or inference availability.
+        drop(tokio::spawn(async move {
+            let _ = ensure_credential_broker(broker_request).await;
+        }));
         if access.generation_capability.is_empty() {
             return Err(local_internal());
         }

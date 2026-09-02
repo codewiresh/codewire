@@ -313,7 +313,6 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 	cpu := uint32(2000)
 	memory := uint64(16384)
 	disk := uint64(40)
-	includeOrg := false
 	project := &ProjectSpec{
 		SchemaVersion: 1,
 		Image:         "ghcr.io/example/workspace@sha256:abc",
@@ -326,10 +325,8 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 		Skills:           []ProjectSkillSelection{{Source: "repository", Reference: ".agents/skills/rust", Agents: []string{"codex"}}},
 		ApplicationPorts: []AppPort{{Port: 8080, Label: "api"}},
 		Resources:        &ProjectResources{CpuMillicores: &cpu, MemoryMib: &memory, DiskGib: &disk},
-		Secrets:          &ProjectSecretBindings{Project: "development", IncludeOrg: &includeOrg},
-		Credentials: map[string]ProjectCredentialReference{
-			"work": {Provider: "openai", Account: "acct-work"},
-		},
+		Secrets:          &ProjectSecretBindings{Project: "development", User: true},
+		Access:           &ProjectAccessBinding{Profile: "user/work"},
 	}
 	protoProject, err := toProtoProjectSpec(project)
 	if err != nil {
@@ -340,8 +337,8 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 		t.Errorf("project round trip mismatch (-want +got):\nwant: %#v\n got: %#v", project, got)
 	}
 	project.Environment["RUST_LOG"] = "changed"
-	project.Credentials["work"] = ProjectCredentialReference{Provider: "openai", Account: "changed"}
-	if protoProject.GetEnvironment()["RUST_LOG"] != "info" || protoProject.GetCredentials()["work"].GetAccount() != "acct-work" {
+	project.Access.Profile = "user/changed"
+	if protoProject.GetEnvironment()["RUST_LOG"] != "info" || protoProject.GetAccess().GetProfile() != "user/work" {
 		t.Errorf("protobuf request aliases caller-owned project values: %#v", protoProject)
 	}
 }

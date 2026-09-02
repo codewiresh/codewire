@@ -49,6 +49,7 @@ mod linux {
                 artifact_lock: args.artifact_lock,
                 mesh_data_dir: args.state_root.join("unused-mesh-auth"),
                 platform_config_dir: args.state_root.join("unused-platform-auth"),
+                credential_authority_root: args.state_root.join("credential-authority"),
                 executable: args.cw_bin,
             },
             &args.target,

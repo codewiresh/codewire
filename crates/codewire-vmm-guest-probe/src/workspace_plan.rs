@@ -24,7 +24,7 @@ use crate::{SetupArchitecture, SetupHeader, Sha256Value};
 pub(crate) const WORKSPACE_PLAN_PATH: &str = "/generation/workspace-plan.json";
 pub(crate) const CONTAINER_PLAN_PATH: &str = "/run/codewire-runtime/plan.json";
 
-pub(crate) const PLAN_SCHEMA_VERSION: u32 = 2;
+pub(crate) const PLAN_SCHEMA_VERSION: u32 = 3;
 pub(crate) const MAX_PLAN_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_ENTRIES: usize = 65_536;
@@ -142,6 +142,13 @@ impl WorkspacePlan {
         environment
             .entry("LANG".to_owned())
             .or_insert_with(|| "C.UTF-8".to_owned());
+        // This is a credential-free Codewire route, not inherited image or
+        // project authority. Reserve the variable so every daemon exec and
+        // image workload uses the same fail-closed protected-provider path.
+        environment.insert(
+            "CODEX_HOME".to_owned(),
+            crate::CODEX_GUEST_HOME_PATH.to_owned(),
+        );
         if let Some(shell) = environment.get("SHELL") {
             validate_absolute_path(shell)?;
             identity.shell.clone_from(shell);
@@ -248,13 +255,16 @@ impl WorkspacePlan {
                 .checked_add(entry.len())
                 .filter(|value| *value <= MAX_PLAN_BYTES)
                 .ok_or(WorkspacePlanError::Plan)?;
-            let (key, _) = entry.split_once('=').ok_or(WorkspacePlanError::Plan)?;
+            let (key, value) = entry.split_once('=').ok_or(WorkspacePlanError::Plan)?;
             validate_environment_key(key)?;
+            if key == "CODEX_HOME" && value != crate::CODEX_GUEST_HOME_PATH {
+                return Err(WorkspacePlanError::Plan);
+            }
             if !keys.insert(key) {
                 return Err(WorkspacePlanError::Plan);
             }
         }
-        for required in ["HOME", "USER", "LOGNAME", "PATH", "SHELL"] {
+        for required in ["CODEX_HOME", "HOME", "USER", "LOGNAME", "PATH", "SHELL"] {
             if !keys.contains(required) {
                 return Err(WorkspacePlanError::Plan);
             }
@@ -764,7 +774,7 @@ mod tests {
             "os": "linux",
             "config": {
                 "User": "codewire",
-                "Env": ["PATH=/image/bin:/bin", "SHELL=/bin/bash", "IMAGE=yes"],
+                "Env": ["PATH=/image/bin:/bin", "SHELL=/bin/bash", "IMAGE=yes", "CODEX_HOME=/image/codex"],
                 "Entrypoint": ["/entrypoint.sh"],
                 "Cmd": ["sleep", "infinity"],
                 "WorkingDir": "/home/codewire"
@@ -807,6 +817,15 @@ mod tests {
         assert_eq!(plan.workload_args, ["/entrypoint.sh", "sleep", "infinity"]);
         assert!(plan.environment.contains(&"IMAGE=yes".to_owned()));
         assert!(plan.environment.contains(&"PROJECT=yes".to_owned()));
+        assert!(
+            plan.environment
+                .contains(&format!("CODEX_HOME={}", crate::CODEX_GUEST_HOME_PATH))
+        );
+        assert!(
+            !plan
+                .environment
+                .contains(&"CODEX_HOME=/image/codex".to_owned())
+        );
         assert_eq!(
             WorkspacePlan::decode(&plan.encode().unwrap()).unwrap(),
             plan
@@ -877,6 +896,15 @@ mod tests {
         value["schema_version"] = 1.into();
         assert!(WorkspacePlan::decode(&serde_json::to_vec(&value).unwrap()).is_err());
         assert!(WorkspacePlan::decode(&serde_json::to_vec_pretty(&plan).unwrap()).is_err());
+
+        let mut wrong_codex_home = plan.clone();
+        let entry = wrong_codex_home
+            .environment
+            .iter_mut()
+            .find(|entry| entry.starts_with("CODEX_HOME="))
+            .unwrap();
+        *entry = "CODEX_HOME=/tmp/attacker".to_owned();
+        assert!(wrong_codex_home.encode().is_err());
 
         plan.identity.username = "attacker-user-canary".into();
         plan.workload_args = vec!["attacker-command-canary".into()];

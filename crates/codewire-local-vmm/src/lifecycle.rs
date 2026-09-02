@@ -12,6 +12,8 @@ use crate::supervisor_store::OperationKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LifecycleEffect {
     RecordEnvironment,
+    BindEnvironmentAccess,
+    RequireEnvironmentAccess,
     ProvisionWorkspace,
     StageWorkspaceGeneration,
     RecordStarting,
@@ -27,8 +29,11 @@ pub(crate) enum LifecycleEffect {
     StageRollbackGeneration,
     RestoreDesiredPower,
     RecordWorkspaceTransition,
+    ApplyEnvironmentAccess,
+    RecordEnvironmentAccess,
     PrepareDelete,
     MoveToTrash,
+    RevokeEnvironmentAccess,
     RemoveEnvironment,
     CleanupTrash,
     RecordObservation,
@@ -52,17 +57,22 @@ impl LifecycleEffect {
             | Self::RecordResizeOutcome
             | Self::StageRollbackGeneration
             | Self::RecordWorkspaceTransition
+            | Self::RecordEnvironmentAccess
             | Self::RemoveEnvironment
             | Self::RecordObservation => EffectDurability::Transactional,
             Self::ProvisionWorkspace
+            | Self::BindEnvironmentAccess
+            | Self::RequireEnvironmentAccess
             | Self::EnsureRunner
             | Self::StartVm
             | Self::StopVm
             | Self::GrowDisk
             | Self::RestartVm
             | Self::RestoreDesiredPower
+            | Self::ApplyEnvironmentAccess
             | Self::PrepareDelete
             | Self::MoveToTrash
+            | Self::RevokeEnvironmentAccess
             | Self::CleanupTrash => EffectDurability::ExternalIdempotent,
         }
     }
@@ -70,6 +80,7 @@ impl LifecycleEffect {
 
 const CREATE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordEnvironment,
+    LifecycleEffect::BindEnvironmentAccess,
     LifecycleEffect::ProvisionWorkspace,
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::RecordStarting,
@@ -78,6 +89,7 @@ const CREATE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordRunning,
 ];
 const START: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::RecordStarting,
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::EnsureRunner,
@@ -86,6 +98,7 @@ const START: &[LifecycleEffect] = &[
 ];
 const STOP: &[LifecycleEffect] = &[LifecycleEffect::StopVm, LifecycleEffect::RecordStopped];
 const RESTART: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
     LifecycleEffect::GrowDisk,
@@ -102,6 +115,7 @@ const GROW_DISK: &[LifecycleEffect] = &[
     LifecycleEffect::RecordResizeOutcome,
 ];
 const UPDATE_WORKSPACE: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
@@ -112,6 +126,7 @@ const UPDATE_WORKSPACE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordWorkspaceTransition,
 ];
 const ROLLBACK_WORKSPACE: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StageRollbackGeneration,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
@@ -124,8 +139,13 @@ const ROLLBACK_WORKSPACE: &[LifecycleEffect] = &[
 const DELETE: &[LifecycleEffect] = &[
     LifecycleEffect::PrepareDelete,
     LifecycleEffect::MoveToTrash,
+    LifecycleEffect::RevokeEnvironmentAccess,
     LifecycleEffect::RemoveEnvironment,
     LifecycleEffect::CleanupTrash,
+];
+const APPLY_ENVIRONMENT_ACCESS: &[LifecycleEffect] = &[
+    LifecycleEffect::ApplyEnvironmentAccess,
+    LifecycleEffect::RecordEnvironmentAccess,
 ];
 const RECONCILE: &[LifecycleEffect] = &[LifecycleEffect::RecordObservation];
 
@@ -138,6 +158,7 @@ pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
         OperationKind::GrowDisk => GROW_DISK,
         OperationKind::UpdateWorkspace => UPDATE_WORKSPACE,
         OperationKind::RollbackWorkspace => ROLLBACK_WORKSPACE,
+        OperationKind::ApplyEnvironmentAccess => APPLY_ENVIRONMENT_ACCESS,
         OperationKind::Delete => DELETE,
         OperationKind::Reconcile => RECONCILE,
     }
@@ -181,6 +202,7 @@ mod tests {
         OperationKind::Restart,
         OperationKind::UpdateWorkspace,
         OperationKind::RollbackWorkspace,
+        OperationKind::ApplyEnvironmentAccess,
         OperationKind::GrowDisk,
         OperationKind::Delete,
         OperationKind::Reconcile,
@@ -338,6 +360,7 @@ mod tests {
                         | LifecycleEffect::RecordResizeOutcome
                         | LifecycleEffect::StageRollbackGeneration
                         | LifecycleEffect::RecordWorkspaceTransition
+                        | LifecycleEffect::RecordEnvironmentAccess
                         | LifecycleEffect::RemoveEnvironment
                         | LifecycleEffect::RecordObservation
                 );

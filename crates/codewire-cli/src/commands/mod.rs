@@ -18,6 +18,22 @@ use super::*;
 mod native;
 #[cfg(target_os = "linux")]
 pub(crate) use native::*;
+#[cfg(target_os = "linux")]
+mod credential_authority;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_authority::*;
+#[cfg(target_os = "linux")]
+mod credential_broker;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_broker::*;
+#[cfg(target_os = "linux")]
+mod credential_broker_confinement;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_broker_confinement::run_local_credential_broker_confinement_probe;
+#[cfg(target_os = "linux")]
+mod credentials;
+#[cfg(target_os = "linux")]
+pub(crate) use credentials::*;
 
 const LOCAL_DAEMON_READY_ATTEMPTS: usize = 25;
 const LOCAL_DAEMON_READY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
@@ -202,6 +218,8 @@ pub(crate) struct NativeSupervisorArgs {
     pub(crate) mesh_data_dir: PathBuf,
     #[arg(long)]
     pub(crate) platform_config_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) credential_authority_root: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -259,6 +277,205 @@ pub(crate) struct NativeMeshEnrollmentBrokerArgs {
     pub(crate) mesh_data_dir: PathBuf,
     #[arg(long)]
     pub(crate) platform_config_dir: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialAuthorityArgs {
+    #[arg(long)]
+    pub(crate) root: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialAuthorityProbeArgs {
+    #[arg(long)]
+    pub(crate) root: PathBuf,
+    #[arg(long)]
+    pub(crate) shutdown: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialBrokerArgs {
+    #[arg(long)]
+    pub(crate) authority_fd: i32,
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) environment_generation: u64,
+    #[arg(long)]
+    pub(crate) environment_name: String,
+    #[arg(long)]
+    pub(crate) supervisor_socket: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialsArgs {
+    #[arg(long, conflicts_with = "platform")]
+    pub(crate) local: bool,
+    #[arg(long, conflicts_with = "local")]
+    pub(crate) platform: bool,
+    #[command(subcommand)]
+    pub(crate) command: CredentialsCommand,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub(crate) enum CredentialsCommand {
+    #[command(about = "Add an explicitly supplied credential")]
+    Add(CredentialAddArgs),
+    #[command(about = "List credential metadata")]
+    List(CredentialListArgs),
+    #[command(about = "Show credential metadata")]
+    Get(CredentialSelectorArgs),
+    #[command(about = "Rename a credential")]
+    Rename(CredentialRenameArgs),
+    #[command(about = "Replace credential material")]
+    Rotate(CredentialRotateArgs),
+    #[command(about = "Revoke a credential immediately")]
+    Revoke(CredentialSelectorArgs),
+    #[command(alias = "rm", about = "Delete a credential")]
+    Delete(CredentialDeleteArgs),
+    #[command(about = "Manage access profiles")]
+    Profile {
+        #[command(subcommand)]
+        command: CredentialProfileCommand,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum CredentialAuthenticationKindArg {
+    Oauth,
+    ApiKey,
+    AccessToken,
+    GithubApp,
+    SshPrivateKey,
+    SshAgent,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialAddArgs {
+    #[arg(value_name = "PROVIDER")]
+    pub(crate) provider: String,
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub(crate) kind: CredentialAuthenticationKindArg,
+    #[arg(long, value_name = "NAME")]
+    pub(crate) name: String,
+    #[arg(long, value_name = "HINT")]
+    pub(crate) account_hint: Option<String>,
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub(crate) expires_at: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialListArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialSelectorArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialRenameArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(value_name = "NEW_NAME")]
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialRotateArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub(crate) expires_at: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialDeleteArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long)]
+    pub(crate) yes: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub(crate) enum CredentialProfileCommand {
+    #[command(about = "Create an empty access profile")]
+    Create(CredentialProfileNameArgs),
+    #[command(about = "List access profiles")]
+    List(CredentialListArgs),
+    #[command(about = "Show an access profile")]
+    Get(CredentialProfileSelectorArgs),
+    #[command(about = "Select a credential for one capability slot")]
+    Set(CredentialProfileSetArgs),
+    #[command(about = "Remove one capability slot from a profile")]
+    Unset(CredentialProfileSlotArgs),
+    #[command(about = "List immutable profile revisions")]
+    Revisions(CredentialProfileSelectorArgs),
+    #[command(alias = "rm", about = "Delete an access profile")]
+    Delete(CredentialProfileDeleteArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileNameArgs {
+    #[arg(value_name = "NAME")]
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSelectorArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) profile: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSetArgs {
+    #[arg(value_name = "PROFILE")]
+    pub(crate) profile: String,
+    #[arg(value_name = "SLOT")]
+    pub(crate) slot: String,
+    #[arg(value_name = "CREDENTIAL")]
+    pub(crate) credential: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSlotArgs {
+    #[arg(value_name = "PROFILE")]
+    pub(crate) profile: String,
+    #[arg(value_name = "SLOT")]
+    pub(crate) slot: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileDeleteArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) profile: String,
+    #[arg(long)]
+    pub(crate) yes: bool,
 }
 
 impl EnvArgs {
@@ -675,6 +892,12 @@ pub(crate) struct EnvCreateArgs {
     env: Vec<String>,
     #[arg(long = "secrets", help = "Secret project to bind")]
     secret_project: Option<String>,
+    #[arg(
+        long,
+        value_name = "SCOPE/NAME",
+        help = "Local access profile, for example user/work"
+    )]
+    access_profile: Option<String>,
     #[arg(long, help = "Do not inject org-level secrets")]
     no_org_secrets: bool,
     #[arg(long, help = "Do not inject user-level secrets")]
@@ -829,19 +1052,49 @@ pub(crate) struct EnvExtendArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct EnvAccessArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    environment: Option<String>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    output: OutputFormat,
     #[command(subcommand)]
-    command: EnvAccessCommand,
+    command: Option<EnvAccessCommand>,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvAccessCommand {
+    #[command(about = "Apply an access-profile revision to an environment")]
+    Apply(EnvAccessApplyArgs),
     #[command(about = "List access grants for an environment")]
     List(EnvAccessTargetArgs),
     #[command(about = "Grant a user access to an environment")]
     Grant(EnvAccessGrantArgs),
     #[command(about = "Revoke a user's access to an environment")]
     Revoke(EnvAccessRevokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvAccessApplyArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    environment: String,
+    #[arg(
+        long,
+        value_name = "SCOPE/NAME",
+        required_unless_present = "clear",
+        conflicts_with = "clear",
+        help = "Access profile to bind, for example user/work"
+    )]
+    profile: Option<String>,
+    #[arg(
+        long,
+        required_unless_present = "profile",
+        conflicts_with = "profile",
+        help = "Remove the environment access profile"
+    )]
+    clear: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    output: OutputFormat,
 }
 
 #[derive(Debug, Args)]

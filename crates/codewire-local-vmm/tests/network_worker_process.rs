@@ -174,6 +174,12 @@ fn confined_fixture_worker_completes_the_two_phase_authenticated_bootstrap() {
         read_status_frame(&mut bootstrap_parent),
         WORKER_READY_MESSAGE
     );
+    let mut trailing = [0_u8; 1];
+    assert_eq!(
+        bootstrap_parent.read(&mut trailing).unwrap(),
+        0,
+        "fixture worker retained its bootstrap capability after readiness"
+    );
     let descriptors = std::fs::read_dir(format!("/proc/{}/fd", child.0.id()))
         .unwrap()
         .map(|entry| {
