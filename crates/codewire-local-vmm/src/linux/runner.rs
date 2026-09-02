@@ -39,13 +39,16 @@ use crate::host_port::{
     validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
-use crate::mesh_ingress::{MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment};
+use crate::mesh_ingress::{
+    AcceptedMeshIngress, MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment, MeshIngressControlFrame,
+    MeshIngressPublisher, mesh_ingress_channel,
+};
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
     WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES,
     decode_worker_startup_status, encode_product_worker_bootstrap, encode_worker_bootstrap,
     send_worker_broker_descriptor, send_worker_host_port_descriptor,
-    send_worker_network_descriptor,
+    send_worker_mesh_ingress_descriptor, send_worker_network_descriptor,
 };
 
 use super::confinement::lock_process_privileges;
@@ -915,10 +918,17 @@ impl RunningVm {
                 Ok(mut worker) => {
                     if mode == NetworkWorkerMode::Product {
                         let listeners = std::mem::take(&mut self.host_port_listeners);
-                        if let Err(error) = start_host_port_forwarder(
+                        let mesh_ports = self
+                            .request
+                            .mesh
+                            .as_ref()
+                            .map(|attachment| attachment.guest_ports.as_slice())
+                            .unwrap_or_default();
+                        if let Err(error) = start_ingress_forwarder(
                             &self.process,
                             &mut worker,
                             listeners,
+                            mesh_ports,
                             self.request.vm_id,
                             self.request.generation,
                         ) {
@@ -1057,10 +1067,16 @@ impl RunningVm {
                 Err(_) => return Err(RunnerError::EgressBrokerWait),
             }
         }
-        if take_host_port_forwarder_failure(&mut worker.host_port_forwarder) {
-            return Ok(ExitClass::HostPortForwarderFailure);
+        if take_ingress_forwarder_failure(&mut worker.ingress_forwarder) {
+            return Ok(ExitClass::IngressForwarderFailure);
         }
         Ok(ExitClass::StillRunning)
+    }
+
+    pub fn mesh_ingress_publisher(&self) -> Option<MeshIngressPublisher> {
+        self.network_worker
+            .as_ref()
+            .and_then(|worker| worker.mesh_ingress_publisher.clone())
     }
 
     pub async fn observe_exit(&mut self) -> Result<ExitClass, RunnerError> {
@@ -1296,12 +1312,14 @@ struct NetworkWorkerProcess {
     child: tokio::process::Child,
     process: LiveProcess,
     broker: Option<EgressBrokerProcess>,
-    host_port_control: Option<tokio::net::UnixStream>,
+    ingress_control: Option<tokio::net::UnixStream>,
     host_port_key: Option<Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>>,
-    host_port_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
+    mesh_ingress_key: Option<Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>>,
+    mesh_ingress_publisher: Option<MeshIngressPublisher>,
+    ingress_forwarder: Option<JoinHandle<Result<(), RunnerError>>>,
 }
 
-fn take_host_port_forwarder_failure(
+fn take_ingress_forwarder_failure(
     forwarder: &mut Option<JoinHandle<Result<(), RunnerError>>>,
 ) -> bool {
     let outcome = {
@@ -1345,8 +1363,9 @@ impl NetworkWorkerStartup {
 
     fn disarm(
         mut self,
-        host_port_control: Option<tokio::net::UnixStream>,
+        ingress_control: Option<tokio::net::UnixStream>,
         host_port_key: Option<Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>>,
+        mesh_ingress_key: Option<Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>>,
     ) -> NetworkWorkerProcess {
         NetworkWorkerProcess {
             child: self
@@ -1358,9 +1377,11 @@ impl NetworkWorkerStartup {
                 .take()
                 .expect("admitted network worker owns its process identity"),
             broker: None,
-            host_port_control,
+            ingress_control,
             host_port_key,
-            host_port_forwarder: None,
+            mesh_ingress_key,
+            mesh_ingress_publisher: None,
+            ingress_forwarder: None,
         }
     }
 }
@@ -1463,12 +1484,14 @@ async fn reap_failed_egress_broker_startup(
 }
 
 async fn stop_network_worker_process(worker: &mut NetworkWorkerProcess) -> Result<(), RunnerError> {
-    if let Some(forwarder) = worker.host_port_forwarder.take() {
+    drop(worker.mesh_ingress_publisher.take());
+    if let Some(forwarder) = worker.ingress_forwarder.take() {
         forwarder.abort();
         let _ = forwarder.await;
     }
-    drop(worker.host_port_control.take());
+    drop(worker.ingress_control.take());
     drop(worker.host_port_key.take());
+    drop(worker.mesh_ingress_key.take());
     if worker
         .child
         .try_wait()
@@ -1544,37 +1567,49 @@ enum HostPortDependency {
     EgressBroker,
 }
 
-fn start_host_port_forwarder(
+struct IngressControlKeys {
+    host_port: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    mesh: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+}
+
+fn start_ingress_forwarder(
     vmm: &LiveProcess,
     worker: &mut NetworkWorkerProcess,
     listeners: Vec<ReservedHostPort>,
+    mesh_ports: &[u16],
     vm_id: Uuid,
     generation: u64,
 ) -> Result<(), RunnerError> {
-    if listeners.is_empty() {
+    if listeners.is_empty() && mesh_ports.is_empty() {
         return Ok(());
     }
     let control = worker
-        .host_port_control
+        .ingress_control
         .take()
-        .ok_or(RunnerError::HostPortControl)?;
-    let key = worker
+        .ok_or(RunnerError::IngressControl)?;
+    let host_port_key = worker
         .host_port_key
         .take()
-        .ok_or(RunnerError::HostPortControl)?;
+        .ok_or(RunnerError::IngressControl)?;
+    let mesh_ingress_key = worker
+        .mesh_ingress_key
+        .take()
+        .ok_or(RunnerError::IngressControl)?;
     let mut async_listeners = Vec::with_capacity(listeners.len());
     for reserved in listeners {
         let binding = reserved.binding;
         let listener = tokio::net::TcpListener::from_std(reserved.listener)
-            .map_err(|_| RunnerError::HostPortControl)?;
+            .map_err(|_| RunnerError::IngressControl)?;
         let address = listener
             .local_addr()
-            .map_err(|_| RunnerError::HostPortControl)?;
+            .map_err(|_| RunnerError::IngressControl)?;
         if address.ip() != Ipv4Addr::LOCALHOST || address.port() != binding.host_port {
-            return Err(RunnerError::HostPortControl);
+            return Err(RunnerError::IngressControl);
         }
         async_listeners.push((listener, binding));
     }
+    let (mesh_ingress_publisher, mesh_ingress_receiver) =
+        mesh_ingress_channel(mesh_ports).map_err(|_| RunnerError::IngressControl)?;
     let mut process_wait_descriptors = vec![
         (HostPortDependency::Vmm, vmm.duplicate_wait_descriptor()?),
         (
@@ -1588,10 +1623,15 @@ fn start_host_port_forwarder(
             broker.process.duplicate_wait_descriptor()?,
         ));
     }
-    worker.host_port_forwarder = Some(tokio::spawn(run_host_port_forwarder(
+    worker.mesh_ingress_publisher = (!mesh_ports.is_empty()).then_some(mesh_ingress_publisher);
+    worker.ingress_forwarder = Some(tokio::spawn(run_ingress_forwarder(
         control,
-        key,
+        IngressControlKeys {
+            host_port: host_port_key,
+            mesh: mesh_ingress_key,
+        },
         async_listeners,
+        mesh_ingress_receiver,
         process_wait_descriptors,
         vm_id,
         generation,
@@ -1599,10 +1639,11 @@ fn start_host_port_forwarder(
     Ok(())
 }
 
-async fn run_host_port_forwarder(
+async fn run_ingress_forwarder(
     mut control: tokio::net::UnixStream,
-    key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    keys: IngressControlKeys,
     listeners: Vec<(tokio::net::TcpListener, HostPortBinding)>,
+    mut mesh_ingress: tokio::sync::mpsc::Receiver<AcceptedMeshIngress>,
     process_wait_descriptors: Vec<(HostPortDependency, OwnedFd)>,
     vm_id: Uuid,
     generation: u64,
@@ -1617,47 +1658,68 @@ async fn run_host_port_forwarder(
     let mut monitors = JoinSet::new();
     for (dependency, descriptor) in process_wait_descriptors {
         monitors.spawn(async move {
-            let descriptor = AsyncFd::new(descriptor).map_err(|_| RunnerError::HostPortControl)?;
+            let descriptor = AsyncFd::new(descriptor).map_err(|_| RunnerError::IngressControl)?;
             let _ready = descriptor
                 .readable()
                 .await
-                .map_err(|_| RunnerError::HostPortControl)?;
+                .map_err(|_| RunnerError::IngressControl)?;
             Ok::<HostPortDependency, RunnerError>(dependency)
         });
     }
-    let mut sequence = 1_u64;
-    let mut accepting = true;
+    let mut host_sequence = 1_u64;
+    let mut mesh_sequence = 1_u64;
+    let mut accepting_host_ports = !acceptors.is_empty();
+    let mut accepting_mesh = true;
     loop {
         tokio::select! {
-            accepted = accepted_rx.recv(), if accepting => {
-                let accepted = accepted.ok_or(RunnerError::HostPortControl)?;
+            accepted = accepted_rx.recv(), if accepting_host_ports => {
+                let accepted = accepted.ok_or(RunnerError::IngressControl)?;
                 transfer_host_port_connection(
                     &mut control,
-                    &key,
+                    &keys.host_port,
                     vm_id,
                     generation,
-                    sequence,
+                    host_sequence,
                     accepted,
                 ).await?;
-                sequence = sequence.checked_add(1).ok_or(RunnerError::HostPortControl)?;
+                host_sequence = host_sequence
+                    .checked_add(1)
+                    .ok_or(RunnerError::IngressControl)?;
+            }
+            accepted = mesh_ingress.recv(), if accepting_mesh => {
+                let Some(accepted) = accepted else {
+                    accepting_mesh = false;
+                    continue;
+                };
+                transfer_mesh_ingress_connection(
+                    &mut control,
+                    &keys.mesh,
+                    vm_id,
+                    generation,
+                    mesh_sequence,
+                    accepted,
+                ).await?;
+                mesh_sequence = mesh_sequence
+                    .checked_add(1)
+                    .ok_or(RunnerError::IngressControl)?;
             }
             readable = control.readable() => {
-                readable.map_err(|_| RunnerError::HostPortControl)?;
+                readable.map_err(|_| RunnerError::IngressControl)?;
                 let mut unexpected = [0_u8; 1];
                 match control.try_read(&mut unexpected) {
-                    Ok(0) | Ok(_) => return Err(RunnerError::HostPortControl),
+                    Ok(0) | Ok(_) => return Err(RunnerError::IngressControl),
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(_) => return Err(RunnerError::HostPortControl),
+                    Err(_) => return Err(RunnerError::IngressControl),
                 }
             }
             completed = acceptors.join_next(), if !acceptors.is_empty() => {
                 let _ = completed;
-                return Err(RunnerError::HostPortControl);
+                return Err(RunnerError::IngressControl);
             }
             completed = monitors.join_next(), if !monitors.is_empty() => {
                 let dependency = completed
-                    .ok_or(RunnerError::HostPortControl)?
-                    .map_err(|_| RunnerError::HostPortControl)??;
+                    .ok_or(RunnerError::IngressControl)?
+                    .map_err(|_| RunnerError::IngressControl)??;
                 match dependency {
                     HostPortDependency::Vmm | HostPortDependency::NetworkWorker => return Ok(()),
                     HostPortDependency::EgressBroker => {
@@ -1665,7 +1727,7 @@ async fn run_host_port_forwarder(
                         // loss must release every host listener, but closing the
                         // worker control stream here would turn the resulting
                         // fail-closed worker into a misleading worker failure.
-                        accepting = false;
+                        accepting_host_ports = false;
                         acceptors.abort_all();
                         while acceptors.join_next().await.is_some() {}
                         accepted_rx.close();
@@ -1686,7 +1748,7 @@ async fn accept_host_port(
         let (stream, peer) = listener
             .accept()
             .await
-            .map_err(|_| RunnerError::HostPortControl)?;
+            .map_err(|_| RunnerError::IngressControl)?;
         if !peer.ip().is_loopback()
             || stream.local_addr().ok().is_none_or(|address| {
                 address.ip() != Ipv4Addr::LOCALHOST || address.port() != binding.host_port
@@ -1697,7 +1759,7 @@ async fn accept_host_port(
         accepted
             .send(AcceptedHostPort { binding, stream })
             .await
-            .map_err(|_| RunnerError::HostPortControl)?;
+            .map_err(|_| RunnerError::IngressControl)?;
     }
 }
 
@@ -1710,15 +1772,15 @@ async fn transfer_host_port_connection(
     accepted: AcceptedHostPort,
 ) -> Result<(), RunnerError> {
     let frame = HostPortControlFrame::encode(vm_id, generation, sequence, accepted.binding, key)
-        .map_err(|_| RunnerError::HostPortControl)?;
+        .map_err(|_| RunnerError::IngressControl)?;
     let deadline = tokio::time::Instant::now() + HOST_PORT_CONTROL_TIMEOUT;
     tokio::time::timeout_at(deadline, async {
         control.write_all(&frame).await?;
         control.flush().await
     })
     .await
-    .map_err(|_| RunnerError::HostPortControl)?
-    .map_err(|_| RunnerError::HostPortControl)?;
+    .map_err(|_| RunnerError::IngressControl)?
+    .map_err(|_| RunnerError::IngressControl)?;
     transfer_worker_descriptor(
         control,
         accepted.stream.as_raw_fd(),
@@ -1726,7 +1788,35 @@ async fn transfer_host_port_connection(
         send_worker_host_port_descriptor,
     )
     .await
-    .map_err(|_| RunnerError::HostPortControl)
+    .map_err(|_| RunnerError::IngressControl)
+}
+
+async fn transfer_mesh_ingress_connection(
+    control: &mut tokio::net::UnixStream,
+    key: &[u8; MESH_INGRESS_CONTROL_KEY_LEN],
+    vm_id: Uuid,
+    generation: u64,
+    sequence: u64,
+    accepted: AcceptedMeshIngress,
+) -> Result<(), RunnerError> {
+    let frame = MeshIngressControlFrame::encode(vm_id, generation, sequence, accepted.binding, key)
+        .map_err(|_| RunnerError::IngressControl)?;
+    let deadline = tokio::time::Instant::now() + HOST_PORT_CONTROL_TIMEOUT;
+    tokio::time::timeout_at(deadline, async {
+        control.write_all(&frame).await?;
+        control.flush().await
+    })
+    .await
+    .map_err(|_| RunnerError::IngressControl)?
+    .map_err(|_| RunnerError::IngressControl)?;
+    transfer_worker_descriptor(
+        control,
+        accepted.stream.as_raw_fd(),
+        deadline,
+        send_worker_mesh_ingress_descriptor,
+    )
+    .await
+    .map_err(|_| RunnerError::IngressControl)
 }
 
 async fn spawn_network_stack_processes(
@@ -2148,8 +2238,8 @@ async fn spawn_network_worker_process(
             return Err(RunnerError::NetworkWorkerBootstrap);
         }
     }
-    let host_port_control = product_worker.then_some(bootstrap);
-    Ok(startup.disarm(host_port_control, host_port_key))
+    let ingress_control = product_worker.then_some(bootstrap);
+    Ok(startup.disarm(ingress_control, host_port_key, mesh_ingress_key))
 }
 
 async fn transfer_worker_descriptor(
@@ -2333,7 +2423,7 @@ pub enum ExitClass {
     VmmFailure(Option<i32>),
     NetworkWorkerFailure(Option<i32>),
     EgressBrokerFailure(Option<i32>),
-    HostPortForwarderFailure,
+    IngressForwarderFailure,
 }
 
 async fn kill_and_reap(
@@ -2375,7 +2465,7 @@ async fn prioritize_exited_vmm(
     let exited = match observed {
         ExitClass::NetworkWorkerFailure(_)
         | ExitClass::EgressBrokerFailure(_)
-        | ExitClass::HostPortForwarderFailure => {
+        | ExitClass::IngressForwarderFailure => {
             process.wait_exited(VMM_CASCADE_EXIT_TIMEOUT).await?
         }
         ExitClass::StillRunning => process.is_exited()?,
@@ -2925,8 +3015,8 @@ pub enum RunnerError {
     NetworkWorkerKillTimeout,
     #[error("local loopback host port {0} is unavailable")]
     HostPortUnavailable(u16),
-    #[error("host-port forwarding control failed")]
-    HostPortControl,
+    #[error("ingress forwarding control failed")]
+    IngressControl,
     #[error("egress broker process spawn failed")]
     EgressBrokerSpawn,
     #[error("egress broker did not become ready before the startup deadline")]
@@ -2957,7 +3047,7 @@ pub enum RunnerError {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Read as _, Seek, SeekFrom, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -2966,6 +3056,8 @@ mod tests {
     use crate::linux::path::{FileIdentity, current_uid};
     use crate::linux::process::ProcessIdentity;
     use crate::linux::state::RootGenerationPaths;
+    use crate::mesh_ingress::{MESH_INGRESS_CONTROL_FRAME_LEN, MeshIngressControlReceiver};
+    use crate::network_worker::receive_worker_mesh_ingress_descriptor;
 
     fn test_runner() -> (tempfile::TempDir, CloudHypervisorRunner) {
         let parent = tempfile::tempdir().unwrap();
@@ -3314,9 +3406,11 @@ mod tests {
                 child: broker_child,
                 process: broker_process,
             }),
-            host_port_control: None,
+            ingress_control: None,
             host_port_key: None,
-            host_port_forwarder: None,
+            mesh_ingress_key: None,
+            mesh_ingress_publisher: None,
+            ingress_forwarder: None,
         };
 
         stop_network_worker_process(&mut stack).await.unwrap();
@@ -3463,7 +3557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expected_host_port_forwarder_completion_defers_to_process_exit() {
+    async fn expected_ingress_forwarder_completion_defers_to_process_exit() {
         let mut forwarder = Some(tokio::spawn(async { Ok::<(), RunnerError>(()) }));
         tokio::time::timeout(Duration::from_secs(1), async {
             while !forwarder.as_ref().unwrap().is_finished() {
@@ -3473,14 +3567,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!take_host_port_forwarder_failure(&mut forwarder));
+        assert!(!take_ingress_forwarder_failure(&mut forwarder));
         assert!(forwarder.is_none());
     }
 
     #[tokio::test]
-    async fn failed_host_port_forwarder_is_reported() {
+    async fn failed_ingress_forwarder_is_reported() {
         let mut forwarder = Some(tokio::spawn(async {
-            Err::<(), RunnerError>(RunnerError::HostPortControl)
+            Err::<(), RunnerError>(RunnerError::IngressControl)
         }));
         tokio::time::timeout(Duration::from_secs(1), async {
             while !forwarder.as_ref().unwrap().is_finished() {
@@ -3490,12 +3584,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(take_host_port_forwarder_failure(&mut forwarder));
+        assert!(take_ingress_forwarder_failure(&mut forwarder));
         assert!(forwarder.is_none());
     }
 
     #[tokio::test]
-    async fn broker_loss_releases_host_ports_without_closing_worker_control() {
+    async fn broker_loss_releases_host_ports_without_closing_mesh_ingress() {
         let (mut vmm_child, vmm) = spawn_admitted_sleep("30").await;
         let (mut worker_child, worker) = spawn_admitted_sleep("30").await;
         let (mut broker_child, broker) = spawn_admitted_sleep("30").await;
@@ -3503,13 +3597,22 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let host_port = listener.local_addr().unwrap().port();
         let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-        let (control, _worker_control) = StdUnixStream::pair().unwrap();
+        let (control, worker_control) = StdUnixStream::pair().unwrap();
         control.set_nonblocking(true).unwrap();
+        worker_control.set_nonblocking(true).unwrap();
         let control = tokio::net::UnixStream::from_std(control).unwrap();
-        let mut forwarder = tokio::spawn(run_host_port_forwarder(
+        let mut worker_control = tokio::net::UnixStream::from_std(worker_control).unwrap();
+        let (mesh_publisher, mesh_receiver) = mesh_ingress_channel(&[4_000]).unwrap();
+        let vm_id = Uuid::new_v4();
+        let mesh_key = [8_u8; MESH_INGRESS_CONTROL_KEY_LEN];
+        let mut forwarder = tokio::spawn(run_ingress_forwarder(
             control,
-            Zeroizing::new([7_u8; HOST_PORT_CONTROL_KEY_LEN]),
+            IngressControlKeys {
+                host_port: Zeroizing::new([7_u8; HOST_PORT_CONTROL_KEY_LEN]),
+                mesh: Zeroizing::new(mesh_key),
+            },
             vec![(listener, HostPortBinding::new(host_port, 3_000).unwrap())],
+            mesh_receiver,
             vec![
                 (
                     HostPortDependency::Vmm,
@@ -3524,7 +3627,7 @@ mod tests {
                     broker.duplicate_wait_descriptor().unwrap(),
                 ),
             ],
-            Uuid::new_v4(),
+            vm_id,
             1,
         ));
 
@@ -3543,11 +3646,39 @@ mod tests {
         drop(rebound);
         assert!(!forwarder.is_finished());
 
+        let (published_stream, mut transport_stream) = StdUnixStream::pair().unwrap();
+        mesh_publisher.publish(4_000, published_stream).unwrap();
+        let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            worker_control.read_exact(&mut frame),
+        )
+        .await
+        .expect("Mesh ingress control frame was not forwarded")
+        .unwrap();
+        let decoded = MeshIngressControlReceiver::new(vm_id, 1, &[4_000])
+            .unwrap()
+            .decode(&frame, &mesh_key)
+            .unwrap();
+        assert_eq!(decoded.binding.guest_port, 4_000);
+        let descriptor = tokio::time::timeout(
+            Duration::from_secs(1),
+            receive_worker_mesh_ingress_descriptor(&worker_control),
+        )
+        .await
+        .expect("Mesh ingress descriptor was not forwarded")
+        .unwrap();
+        transport_stream.write_all(b"still connected").unwrap();
+        let mut admitted_stream = StdUnixStream::from(descriptor);
+        let mut transferred = [0_u8; 15];
+        admitted_stream.read_exact(&mut transferred).unwrap();
+        assert_eq!(&transferred, b"still connected");
+
         worker.signal(Signal::KILL).unwrap();
         worker_child.wait().await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), &mut forwarder)
             .await
-            .expect("worker loss did not end the host-port forwarder")
+            .expect("worker loss did not end the ingress forwarder")
             .unwrap()
             .unwrap();
 
@@ -3953,7 +4084,7 @@ mod tests {
         });
 
         assert!(matches!(
-            prioritize_exited_vmm(&process, &mut child, ExitClass::HostPortForwarderFailure,)
+            prioritize_exited_vmm(&process, &mut child, ExitClass::IngressForwarderFailure,)
                 .await
                 .unwrap(),
             ExitClass::VmmFailure(_)

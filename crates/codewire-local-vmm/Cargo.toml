@@ -23,6 +23,7 @@ bytes = { workspace = true }
 codewire-client = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-project = { workspace = true }
+codewire-tailnet = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
 codewire-egress-broker = { workspace = true }

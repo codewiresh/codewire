@@ -343,7 +343,7 @@ impl RunnerState {
                 self.state = v1::EnvironmentState::Error;
                 Ok(error_code)
             }
-            ExitClass::HostPortForwarderFailure => {
+            ExitClass::IngressForwarderFailure => {
                 self.state = v1::EnvironmentState::Error;
                 Ok(error_code)
             }
@@ -357,7 +357,7 @@ fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
         ExitClass::VmmFailure(_) => Some("vmm_exit"),
         ExitClass::NetworkWorkerFailure(_) => Some("network_worker_exit"),
         ExitClass::EgressBrokerFailure(_) => Some("egress_broker_exit"),
-        ExitClass::HostPortForwarderFailure => Some("host_port_forwarder_exit"),
+        ExitClass::IngressForwarderFailure => Some("ingress_forwarder_exit"),
     }
 }
 
@@ -663,7 +663,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 | ExitClass::VmmFailure(_)
                 | ExitClass::NetworkWorkerFailure(_)
                 | ExitClass::EgressBrokerFailure(_)
-                | ExitClass::HostPortForwarderFailure => {}
+                | ExitClass::IngressForwarderFailure => {}
             }
         }
         state.running = None;
@@ -1102,9 +1102,9 @@ async fn wait_for_guest_daemon(
                                 "isolated egress broker exited before guest daemon readiness with status {code:?}"
                             )));
                         }
-                        ExitClass::HostPortForwarderFailure => {
+                        ExitClass::IngressForwarderFailure => {
                             return Err(Status::unavailable(
-                                "host-port forwarder exited before guest daemon readiness",
+                                "ingress forwarder exited before guest daemon readiness",
                             ));
                         }
                     }
@@ -1416,6 +1416,10 @@ mod tests {
         assert_eq!(
             runner_exit_error_code(ExitClass::EgressBrokerFailure(Some(3))),
             Some("egress_broker_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::IngressForwarderFailure),
+            Some("ingress_forwarder_exit")
         );
     }
 }

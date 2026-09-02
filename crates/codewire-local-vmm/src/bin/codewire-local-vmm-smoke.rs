@@ -528,7 +528,7 @@ mod linux {
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("OCI provisioning egress broker failed"));
             }
-            ExitClass::HostPortForwarderFailure => {
+            ExitClass::IngressForwarderFailure => {
                 return Err(failure("OCI provisioning host-port forwarder failed"));
             }
         }
@@ -645,7 +645,7 @@ mod linux {
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("egress broker failed during guest poweroff"));
             }
-            ExitClass::HostPortForwarderFailure => {
+            ExitClass::IngressForwarderFailure => {
                 return Err(failure("host-port forwarder failed during guest poweroff"));
             }
         }
@@ -693,7 +693,7 @@ mod linux {
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("egress broker failed before hard VMM kill"));
             }
-            ExitClass::HostPortForwarderFailure => {
+            ExitClass::IngressForwarderFailure => {
                 return Err(failure("host-port forwarder failed before hard VMM kill"));
             }
         }
@@ -856,7 +856,7 @@ mod linux {
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("final egress broker failed during stop"));
             }
-            ExitClass::HostPortForwarderFailure => {
+            ExitClass::IngressForwarderFailure => {
                 return Err(failure("final host-port forwarder failed during stop"));
             }
         }
@@ -912,7 +912,7 @@ mod linux {
             ExitClass::EgressBrokerFailure(_) => {
                 return Err(failure("restarted egress broker failed during stop"));
             }
-            ExitClass::HostPortForwarderFailure => {
+            ExitClass::IngressForwarderFailure => {
                 return Err(failure("restarted host-port forwarder failed during stop"));
             }
         }
@@ -1048,7 +1048,7 @@ mod linux {
             RunnerError::NetworkWorkerWait => "network-worker-wait",
             RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",
             RunnerError::HostPortUnavailable(_) => "host-port-unavailable",
-            RunnerError::HostPortControl => "host-port-control",
+            RunnerError::IngressControl => "ingress-control",
             RunnerError::EgressBrokerSpawn => "egress-broker-spawn",
             RunnerError::EgressBrokerStartTimeout => "egress-broker-start-timeout",
             RunnerError::EgressBrokerBootstrap => "egress-broker-bootstrap",
@@ -1074,7 +1074,7 @@ mod linux {
             Ok(ExitClass::VmmFailure(_)) => "vmm-failure",
             Ok(ExitClass::NetworkWorkerFailure(_)) => "network-worker-failure",
             Ok(ExitClass::EgressBrokerFailure(_)) => "egress-broker-failure",
-            Ok(ExitClass::HostPortForwarderFailure) => "host-port-forwarder-failure",
+            Ok(ExitClass::IngressForwarderFailure) => "ingress-forwarder-failure",
             Err(_) => "unavailable",
         }
     }
@@ -1661,7 +1661,7 @@ mod linux {
                             "egress broker exited while proving isolated network worker loss",
                         ));
                     }
-                    ExitClass::HostPortForwarderFailure => {
+                    ExitClass::IngressForwarderFailure => {
                         return Err(failure(
                             "host-port forwarder exited while proving isolated network worker loss",
                         ));
@@ -1694,7 +1694,7 @@ mod linux {
                             "network worker exited before egress broker loss was observed",
                         ));
                     }
-                    ExitClass::HostPortForwarderFailure => {
+                    ExitClass::IngressForwarderFailure => {
                         observation("vm.egress_broker_loss_exit", "host-port-forwarder");
                         return Err(failure(
                             "host-port forwarder exited before egress broker loss was observed",
@@ -1953,7 +1953,7 @@ mod linux {
                         "egress broker exited before guest daemon readiness",
                     ));
                 }
-                ExitClass::HostPortForwarderFailure => {
+                ExitClass::IngressForwarderFailure => {
                     return Err(failure(
                         "host-port forwarder exited before guest daemon readiness",
                     ));

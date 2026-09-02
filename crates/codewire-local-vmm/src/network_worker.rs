@@ -289,7 +289,6 @@ pub(crate) fn send_worker_host_port_descriptor(bootstrap: RawFd, stream: RawFd) 
     send_worker_descriptor(bootstrap, stream, WORKER_HOST_PORT_DESCRIPTOR_MARKER)
 }
 
-#[cfg(test)]
 pub(crate) fn send_worker_mesh_ingress_descriptor(
     bootstrap: RawFd,
     stream: RawFd,
@@ -369,7 +368,7 @@ fn receive_worker_broker_descriptor(bootstrap: RawFd) -> Result<OwnedFd, Network
     Ok(descriptor)
 }
 
-async fn receive_worker_mesh_ingress_descriptor(
+pub(crate) async fn receive_worker_mesh_ingress_descriptor(
     control: &tokio::net::UnixStream,
 ) -> Result<OwnedFd, NetworkWorkerError> {
     loop {

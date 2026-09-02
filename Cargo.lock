@@ -1493,6 +1493,7 @@ dependencies = [
  "codewire-netstack",
  "codewire-project",
  "codewire-proto",
+ "codewire-tailnet",
  "codewire-vmm-guest-probe",
  "connectrpc",
  "futures",

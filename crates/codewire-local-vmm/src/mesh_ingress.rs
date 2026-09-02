@@ -6,10 +6,13 @@
 //! worker admits the stream only for an immutable guest-port allowlist.
 
 use std::collections::BTreeSet;
+use std::os::unix::net::UnixStream as StdUnixStream;
+use std::sync::Arc;
 
 use hmac::{Hmac, Mac as _};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use tokio::sync::mpsc;
 use url::{Host, Url};
 use uuid::Uuid;
 
@@ -18,6 +21,7 @@ use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
 pub const MESH_INGRESS_CONTROL_KEY_LEN: usize = 32;
 pub const MESH_INGRESS_CONTROL_FRAME_LEN: usize = 80;
 pub const MAX_MESH_INGRESS_PORTS: usize = 64;
+pub(crate) const MESH_INGRESS_QUEUE_CAPACITY: usize = 64;
 const MAX_MESH_URL_BYTES: usize = 2_048;
 const MAX_MESH_ID_BYTES: usize = 255;
 
@@ -25,6 +29,49 @@ const MESH_INGRESS_CONTROL_MAGIC: &[u8; 8] = b"CWMESHI1";
 const MESH_INGRESS_CONTROL_TAG_OFFSET: usize = 48;
 
 type HmacSha256 = Hmac<Sha256>;
+
+pub(crate) struct AcceptedMeshIngress {
+    pub(crate) binding: MeshIngressBinding,
+    pub(crate) stream: StdUnixStream,
+}
+
+/// Bounded, non-secret capability used by the host Mesh owner to submit one
+/// already-connected stream for a pre-admitted guest port. The runner remains
+/// the only owner of the worker control key and re-authenticates every stream.
+#[derive(Clone)]
+pub struct MeshIngressPublisher {
+    allowed_ports: Arc<[u16]>,
+    sender: mpsc::Sender<AcceptedMeshIngress>,
+}
+
+impl MeshIngressPublisher {
+    pub fn publish(&self, guest_port: u16, stream: StdUnixStream) -> Result<(), MeshIngressError> {
+        let binding = MeshIngressBinding::new(guest_port)?;
+        if self.allowed_ports.binary_search(&guest_port).is_err() {
+            return Err(MeshIngressError::PortDenied);
+        }
+        self.sender
+            .try_send(AcceptedMeshIngress { binding, stream })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => MeshIngressError::PublisherFull,
+                mpsc::error::TrySendError::Closed(_) => MeshIngressError::PublisherClosed,
+            })
+    }
+}
+
+pub(crate) fn mesh_ingress_channel(
+    allowed_ports: &[u16],
+) -> Result<(MeshIngressPublisher, mpsc::Receiver<AcceptedMeshIngress>), MeshIngressError> {
+    validate_canonical_mesh_ingress_ports(allowed_ports)?;
+    let (sender, receiver) = mpsc::channel(MESH_INGRESS_QUEUE_CAPACITY);
+    Ok((
+        MeshIngressPublisher {
+            allowed_ports: Arc::from(allowed_ports),
+            sender,
+        },
+        receiver,
+    ))
+}
 
 /// Non-secret durable intent for attaching one local environment to one exact
 /// Mesh network. Every field may appear in local status output. The endpoint
@@ -330,6 +377,10 @@ pub enum MeshIngressError {
     Authentication,
     #[error("Mesh ingress guest port is not allowed")]
     PortDenied,
+    #[error("Mesh ingress publisher is closed")]
+    PublisherClosed,
+    #[error("Mesh ingress publisher queue is full")]
+    PublisherFull,
     #[error("Mesh ingress control sequence overflowed")]
     SequenceOverflow,
 }
@@ -463,6 +514,21 @@ mod tests {
         assert_eq!(
             receiver.decode(&forged_port, &key()),
             Err(MeshIngressError::Authentication)
+        );
+    }
+
+    #[test]
+    fn publisher_is_bounded_and_never_waits_for_a_stalled_runner() {
+        let (publisher, _receiver) = mesh_ingress_channel(&[3_000]).unwrap();
+        for _ in 0..MESH_INGRESS_QUEUE_CAPACITY {
+            let (stream, peer) = StdUnixStream::pair().unwrap();
+            publisher.publish(3_000, stream).unwrap();
+            drop(peer);
+        }
+        let (stream, _peer) = StdUnixStream::pair().unwrap();
+        assert_eq!(
+            publisher.publish(3_000, stream),
+            Err(MeshIngressError::PublisherFull)
         );
     }
 }
