@@ -1686,6 +1686,23 @@ mod tests {
         assert_eq!(manifests.len(), 2);
         assert_eq!(manifests[0], manifests[1], "retry changed the manifest");
         let (uri, manifest_bytes) = &manifests[0];
+        let documented_fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/codewire-cpv-manifest-v3.fixture.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            manifest_bytes.as_slice(),
+            documented_fixture["canonicalManifest"]
+                .as_str()
+                .unwrap()
+                .as_bytes(),
+            "serialized manifest drifted from the documented exact bytes"
+        );
+        assert_eq!(
+            uri,
+            documented_fixture["manifestUri"].as_str().unwrap(),
+            "manifest URI drifted from the documented content address"
+        );
         assert_eq!(
             uri,
             &manifest_uri(&hex_sha256(manifest_bytes)).unwrap(),
