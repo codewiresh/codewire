@@ -16,6 +16,8 @@ use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::future::Future;
 #[cfg(target_os = "linux")]
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -281,6 +283,67 @@ impl ProtectedStore for OsProtectedStore {
     }
 }
 
+/// Linux operating-system store bound to one already-negotiated encrypted
+/// Secret Service session. Isolated broker processes construct this before
+/// denying new Unix-socket creation, then reuse only that exact connection.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub struct ConnectedOsProtectedStore {
+    service: Arc<Mutex<SecretService<'static>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl ConnectedOsProtectedStore {
+    pub fn connect() -> Result<Self, ProtectedStoreError> {
+        let service = linux_run(linux_secret_service())?;
+        Ok(Self {
+            service: Arc::new(Mutex::new(service)),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl fmt::Debug for ConnectedOsProtectedStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ConnectedOsProtectedStore([REDACTED])")
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ProtectedStore for ConnectedOsProtectedStore {
+    fn persistence(&self) -> ProtectedStorePersistence {
+        ProtectedStorePersistence::OperatingSystem
+    }
+
+    fn get(&self, id: &ProtectedEntryId) -> Result<Option<ProtectedValue>, ProtectedStoreError> {
+        let service = self
+            .service
+            .lock()
+            .map_err(|_| ProtectedStoreError::Unavailable)?;
+        linux_run(linux_get_with_service(&service, id))
+    }
+
+    fn put(
+        &self,
+        id: &ProtectedEntryId,
+        value: &ProtectedValue,
+    ) -> Result<(), ProtectedStoreError> {
+        let service = self
+            .service
+            .lock()
+            .map_err(|_| ProtectedStoreError::Unavailable)?;
+        linux_run(linux_put_with_service(&service, id, value))
+    }
+
+    fn delete(&self, id: &ProtectedEntryId) -> Result<(), ProtectedStoreError> {
+        let service = self
+            .service
+            .lock()
+            .map_err(|_| ProtectedStoreError::Unavailable)?;
+        linux_run(linux_delete_with_service(&service, id))
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_get(id: &ProtectedEntryId) -> Result<Option<ProtectedValue>, ProtectedStoreError> {
     linux_run(linux_get_async(id))
@@ -291,6 +354,14 @@ async fn linux_get_async(
     id: &ProtectedEntryId,
 ) -> Result<Option<ProtectedValue>, ProtectedStoreError> {
     let service = linux_secret_service().await?;
+    linux_get_with_service(&service, id).await
+}
+
+#[cfg(target_os = "linux")]
+async fn linux_get_with_service(
+    service: &SecretService<'_>,
+    id: &ProtectedEntryId,
+) -> Result<Option<ProtectedValue>, ProtectedStoreError> {
     let search = service
         .search_items(linux_attributes(id))
         .await
@@ -330,6 +401,15 @@ async fn linux_put_async(
     value: &ProtectedValue,
 ) -> Result<(), ProtectedStoreError> {
     let service = linux_secret_service().await?;
+    linux_put_with_service(&service, id, value).await
+}
+
+#[cfg(target_os = "linux")]
+async fn linux_put_with_service(
+    service: &SecretService<'_>,
+    id: &ProtectedEntryId,
+    value: &ProtectedValue,
+) -> Result<(), ProtectedStoreError> {
     let search = service
         .search_items(linux_attributes(id))
         .await
@@ -381,6 +461,14 @@ fn linux_delete(id: &ProtectedEntryId) -> Result<(), ProtectedStoreError> {
 #[cfg(target_os = "linux")]
 async fn linux_delete_async(id: &ProtectedEntryId) -> Result<(), ProtectedStoreError> {
     let service = linux_secret_service().await?;
+    linux_delete_with_service(&service, id).await
+}
+
+#[cfg(target_os = "linux")]
+async fn linux_delete_with_service(
+    service: &SecretService<'_>,
+    id: &ProtectedEntryId,
+) -> Result<(), ProtectedStoreError> {
     let search = service
         .search_items(linux_attributes(id))
         .await

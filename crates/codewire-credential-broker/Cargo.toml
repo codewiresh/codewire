@@ -9,15 +9,25 @@ description = "Isolated provider credential brokerage for Codewire environments"
 
 [features]
 default = ["local"]
-local = ["dep:codewire-local-credentials"]
+local = ["dep:codewire-local-credentials", "dep:codewire-protected-store"]
 
 [dependencies]
+async-trait = { workspace = true }
 av-credential-proxy = { workspace = true }
+bytes = { workspace = true }
 codewire-access = { workspace = true }
+codewire-daemon = { workspace = true }
+codewire-gateway-proto = { workspace = true }
 codewire-local-credentials = { workspace = true, optional = true }
+codewire-protected-store = { workspace = true, optional = true }
+futures = { workspace = true }
 http = { workspace = true }
+reqwest = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 codewire-local-credentials = { workspace = true }

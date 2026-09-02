@@ -1,15 +1,18 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::fd::AsRawFd as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 
 use crate::config::{Env, OsEnv, ResolvePaths};
 use anyhow::Context as _;
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, AuthorityRuntimeConfig, AuthorityRuntimeError,
-    LocalCredentialClient, serve_os_local_credential_authority,
+    LocalBrokerProcessConfig, LocalBrokerProcessSpawner, LocalBrokerSpawnError,
+    LocalCredentialClient, serve_os_local_credential_authority_with_broker_spawner,
 };
 
 use super::{LocalCredentialAuthorityArgs, LocalCredentialAuthorityProbeArgs};
@@ -34,7 +37,12 @@ struct LinuxCapabilityData {
 pub(crate) async fn run_local_credential_authority(
     args: LocalCredentialAuthorityArgs,
 ) -> anyhow::Result<()> {
-    serve_os_local_credential_authority(authority_config(args.root)?)
+    let config = authority_config(args.root)?;
+    let spawner = Arc::new(CwLocalBrokerSpawner {
+        executable: config.executable.clone(),
+        authority_root: config.root.clone(),
+    });
+    serve_os_local_credential_authority_with_broker_spawner(config, spawner)
         .await
         .context("run local credential authority")
 }
@@ -131,15 +139,111 @@ fn spawn_authority(config: &AuthorityRuntimeConfig) -> Result<Child, AuthorityRu
     command.spawn().map_err(|_| AuthorityRuntimeError::Spawn)
 }
 
+struct CwLocalBrokerSpawner {
+    executable: PathBuf,
+    authority_root: PathBuf,
+}
+
+impl LocalBrokerProcessSpawner for CwLocalBrokerSpawner {
+    fn spawn(
+        &self,
+        config: &LocalBrokerProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
+        let authority_fd = authority_peer.as_raw_fd();
+        if authority_fd < 3 {
+            return Err(LocalBrokerSpawnError::InvalidConfiguration);
+        }
+        let parent_pid = unsafe { libc::getpid() };
+        let allowed_environment = authority_environment(|name| env::var_os(name));
+        let mut command = tokio::process::Command::new(&self.executable);
+        command
+            .arg("__local-credential-broker")
+            .arg("--authority-fd")
+            .arg("3")
+            .arg("--environment-id")
+            .arg(config.environment_id.to_string())
+            .arg("--environment-generation")
+            .arg(config.environment_generation.to_string())
+            .arg("--environment-name")
+            .arg(&config.environment_name)
+            .arg("--supervisor-socket")
+            .arg(&config.supervisor_socket)
+            .env_clear()
+            .envs(allowed_environment)
+            .current_dir(&self.authority_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        // SAFETY: this post-fork hook uses scalar libc operations only. It
+        // transfers one authority-created socket to fixed FD 3, marks every
+        // other inherited descriptor close-on-exec, removes capabilities,
+        // disables dumps, and binds child death to the exact authority parent.
+        unsafe {
+            command.pre_exec(move || {
+                confine_spawned_process()?;
+                if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0
+                    || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
+                    || libc::setsid() < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() != parent_pid {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                if authority_fd == 3 {
+                    if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                } else if libc::dup3(authority_fd, 3, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::syscall(
+                    libc::SYS_close_range,
+                    4_u32,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::umask(0o077);
+                Ok(())
+            });
+        }
+        command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn)
+    }
+}
+
 fn authority_environment(read: impl Fn(&str) -> Option<OsString>) -> Vec<(OsString, OsString)> {
-    AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES
-        .into_iter()
-        .filter_map(|name| {
-            read(name)
-                .filter(|value| !value.is_empty())
-                .map(|value| (OsString::from(name), value))
+    let runtime_dir = read("XDG_RUNTIME_DIR").filter(|value| valid_runtime_dir(value));
+    let bus_address = runtime_dir.as_ref().and_then(|runtime_dir| {
+        let expected = OsString::from(format!(
+            "unix:path={}",
+            PathBuf::from(runtime_dir).join("bus").display()
+        ));
+        read("DBUS_SESSION_BUS_ADDRESS").filter(|value| *value == expected)
+    });
+    let mut environment = Vec::with_capacity(AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES.len());
+    if let Some(bus_address) = bus_address {
+        environment.push((OsString::from("DBUS_SESSION_BUS_ADDRESS"), bus_address));
+    }
+    if let Some(runtime_dir) = runtime_dir {
+        environment.push((OsString::from("XDG_RUNTIME_DIR"), runtime_dir));
+    }
+    environment
+}
+
+fn valid_runtime_dir(value: &OsStr) -> bool {
+    let path = std::path::Path::new(value);
+    path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
         })
-        .collect()
 }
 
 fn confine_spawned_process() -> io::Result<()> {
@@ -210,6 +314,28 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn authority_rejects_remote_or_noncanonical_session_bus_discovery() {
+        for (runtime, bus) in [
+            ("relative", "unix:path=relative/bus"),
+            ("/run/user/1000/../1001", "unix:path=/run/user/1001/bus"),
+            ("/run/user/1000", "tcp:host=127.0.0.1,port=5555"),
+            ("/run/user/1000", "unix:path=/tmp/other-bus"),
+        ] {
+            let ambient = BTreeMap::from([
+                ("XDG_RUNTIME_DIR", runtime),
+                ("DBUS_SESSION_BUS_ADDRESS", bus),
+            ]);
+            let inherited = authority_environment(|name| ambient.get(name).map(OsString::from));
+            assert!(
+                inherited
+                    .iter()
+                    .all(|(name, _)| name != "DBUS_SESSION_BUS_ADDRESS"),
+                "{runtime} {bus}"
+            );
+        }
     }
 
     #[test]

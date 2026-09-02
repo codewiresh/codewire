@@ -48,15 +48,48 @@ impl OpenAiApiKeyAdapter {
         headers: &HeaderMap,
         body: &[u8],
     ) -> Result<PreparedOpenAiRequest, CredentialBrokerError> {
-        validate_lease(&lease)?;
-        if is_websocket_attempt(headers) {
+        let request = self.validate_request(method, path, query, headers.clone(), body.to_vec())?;
+        self.prepare_validated(lease, request)
+    }
+
+    /// Validate every guest-controlled field before asking a placement for a
+    /// credential lease or reading protected storage.
+    pub fn validate_request(
+        &self,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<ValidatedOpenAiRequest, CredentialBrokerError> {
+        if is_websocket_attempt(&headers) {
             return Err(CredentialBrokerError::RequestDenied);
         }
-        let request = validate_proxy_request(&self.route, path, query, method, headers, body.len())
-            .map_err(|_| CredentialBrokerError::RequestDenied)?;
+        let request =
+            validate_proxy_request(&self.route, path, query, method, &headers, body.len())
+                .map_err(|_| CredentialBrokerError::RequestDenied)?;
         let target = build_target_url(&self.route, &request)
             .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
+        Ok(ValidatedOpenAiRequest {
+            target,
+            headers,
+            body,
+        })
+    }
 
+    /// Consume one already validated request and one exact authority lease.
+    /// Protected material is borrowed only inside this method.
+    pub fn prepare_validated<L: BrokerCredentialLease>(
+        &self,
+        lease: L,
+        request: ValidatedOpenAiRequest,
+    ) -> Result<PreparedOpenAiRequest, CredentialBrokerError> {
+        validate_lease(&lease)?;
+        let ValidatedOpenAiRequest {
+            target,
+            headers,
+            body,
+        } = request;
         lease.with_material(|material| {
             if !valid_openai_api_key(material) {
                 return Err(CredentialBrokerError::InvalidCredentialMaterial);
@@ -64,9 +97,9 @@ impl OpenAiApiKeyAdapter {
             let material = std::str::from_utf8(material)
                 .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
             let source = OpenAiApiKey { material };
-            let prepared = prepare_credentials(&self.route, &source, body)
+            let prepared = prepare_credentials(&self.route, &source, &body)
                 .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
-            let headers = prepare_outbound_headers(&self.route, headers, &prepared)
+            let headers = prepare_outbound_headers(&self.route, &headers, &prepared)
                 .map_err(|_| CredentialBrokerError::RequestDenied)?;
             let (body, redaction) = prepared.into_body_and_redaction();
             let response = PreparedOpenAiResponse {
@@ -89,6 +122,14 @@ impl OpenAiApiKeyAdapter {
             })
         })
     }
+}
+
+/// Credential-free request that has passed the immutable OpenAI route policy.
+/// It deliberately carries no authority lease or prepared authorization.
+pub struct ValidatedOpenAiRequest {
+    target: Url,
+    headers: HeaderMap,
+    body: Vec<u8>,
 }
 
 impl Default for OpenAiApiKeyAdapter {

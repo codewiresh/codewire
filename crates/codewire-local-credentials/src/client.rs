@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::path::Path;
 use std::process::Child;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use codewire_protected_store::{
 };
 use tonic::Status;
 
+use crate::broker_channel::MAX_BROKER_LEASE_AUDIT_LIST_LIMIT;
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
 use crate::service::auth_kind_to_proto;
@@ -21,8 +23,9 @@ use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
 };
 use crate::{
-    AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord,
-    EnvironmentAccessBindingRecord, LOCAL_OWNER_ID, NewCredential,
+    AccessProfileRecord, AccessProfileRevisionRecord, BrokerLeaseAuditDecision,
+    BrokerLeaseAuditEvent, CredentialRecord, EnvironmentAccessBindingRecord,
+    EnvironmentBrokerRuntime, LOCAL_OWNER_ID, NewCredential,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -118,6 +121,38 @@ impl LocalCredentialClient {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    /// Return newest-first, process-lifetime broker lease decisions. The
+    /// bounded local ring contains identifiers and policy metadata only.
+    pub async fn list_recent_broker_lease_audit_events(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<BrokerLeaseAuditEvent>, Status> {
+        if !(1..=MAX_BROKER_LEASE_AUDIT_LIST_LIMIT).contains(&limit) {
+            return Err(Status::invalid_argument("invalid broker audit list limit"));
+        }
+        let response = self
+            .inner
+            .list_recent_broker_lease_audit_events(v1::ListRecentBrokerLeaseAuditEventsRequest {
+                limit: limit as u32,
+            })
+            .await?
+            .into_inner();
+        let events = response
+            .events
+            .into_iter()
+            .map(broker_lease_audit_event_from_proto)
+            .collect::<Result<Vec<_>, _>>()?;
+        if events
+            .windows(2)
+            .any(|pair| pair[0].sequence <= pair[1].sequence)
+        {
+            return Err(Status::data_loss(
+                "local credential authority returned invalid broker audit ordering",
+            ));
+        }
+        Ok(events)
     }
 
     pub async fn connect(config: &AuthorityRuntimeConfig) -> Result<Self, AuthorityRuntimeError> {
@@ -673,6 +708,135 @@ impl LocalCredentialControlClient {
             .await?;
         Ok(())
     }
+
+    pub async fn ensure_environment_broker(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        environment_name: &str,
+        supervisor_socket: &Path,
+    ) -> Result<EnvironmentBrokerRuntime, Status> {
+        if environment_generation == 0 {
+            return Err(Status::invalid_argument(
+                "invalid local credential broker request",
+            ));
+        }
+        let supervisor_socket = broker_supervisor_socket(supervisor_socket)?;
+        let response = self
+            .inner
+            .ensure_environment_broker(v1::EnsureEnvironmentBrokerRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+                environment_name: environment_name.to_owned(),
+                supervisor_socket: supervisor_socket.to_owned(),
+            })
+            .await?
+            .into_inner();
+        let runtime = EnvironmentBrokerRuntime {
+            environment_id: EnvironmentId::parse(response.environment_id).map_err(data_loss)?,
+            environment_generation: response.environment_generation,
+            running: response.running,
+        };
+        if runtime.environment_id != *environment_id
+            || runtime.environment_generation != environment_generation
+        {
+            return Err(Status::data_loss(
+                "local credential authority returned invalid broker state",
+            ));
+        }
+        Ok(runtime)
+    }
+
+    pub async fn stop_environment_broker(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: Option<u64>,
+    ) -> Result<(), Status> {
+        if environment_generation == Some(0) {
+            return Err(Status::invalid_argument("invalid environment generation"));
+        }
+        self.inner
+            .stop_environment_broker(v1::StopEnvironmentBrokerRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+            })
+            .await?;
+        Ok(())
+    }
+}
+
+fn broker_supervisor_socket(path: &Path) -> Result<&str, Status> {
+    if !path.is_absolute() {
+        return Err(Status::invalid_argument(
+            "invalid local credential broker request",
+        ));
+    }
+    path.to_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Status::invalid_argument("invalid local credential broker request"))
+}
+
+fn broker_lease_audit_event_from_proto(
+    event: v1::BrokerLeaseAuditEvent,
+) -> Result<BrokerLeaseAuditEvent, Status> {
+    let environment_id = EnvironmentId::parse(event.environment_id).map_err(data_loss)?;
+    let request_id = uuid::Uuid::parse_str(&event.request_id).map_err(data_loss)?;
+    let capability_slot = CapabilitySlot::parse(event.capability_slot).map_err(data_loss)?;
+    let operation = BrokerOperationId::parse(event.operation).map_err(data_loss)?;
+    let route = BrokerRouteId::parse(event.route).map_err(data_loss)?;
+    let decision = match v1::BrokerLeaseAuditDecision::try_from(event.decision) {
+        Ok(v1::BrokerLeaseAuditDecision::Admitted) => BrokerLeaseAuditDecision::Admitted,
+        Ok(v1::BrokerLeaseAuditDecision::Denied) => BrokerLeaseAuditDecision::Denied,
+        Ok(v1::BrokerLeaseAuditDecision::Unavailable) => BrokerLeaseAuditDecision::Unavailable,
+        Ok(v1::BrokerLeaseAuditDecision::Unspecified) | Err(_) => return Err(data_loss(())),
+    };
+    let credential_id = event
+        .credential_id
+        .map(CredentialId::parse)
+        .transpose()
+        .map_err(data_loss)?;
+    let profile_id = event
+        .profile_id
+        .map(AccessProfileId::parse)
+        .transpose()
+        .map_err(data_loss)?;
+    let metadata_complete = credential_id.is_some()
+        && profile_id.is_some()
+        && event.profile_revision.is_some_and(|revision| revision > 0)
+        && event
+            .credential_revocation_generation
+            .is_some_and(|generation| generation > 0);
+    let metadata_absent = credential_id.is_none()
+        && profile_id.is_none()
+        && event.profile_revision.is_none()
+        && event.credential_revocation_generation.is_none();
+    if event.sequence == 0
+        || event.environment_generation == 0
+        || request_id.is_nil()
+        || match decision {
+            BrokerLeaseAuditDecision::Admitted => !metadata_complete,
+            BrokerLeaseAuditDecision::Denied | BrokerLeaseAuditDecision::Unavailable => {
+                !metadata_absent
+            }
+        }
+    {
+        return Err(data_loss(()));
+    }
+    Ok(BrokerLeaseAuditEvent {
+        sequence: event.sequence,
+        observed_at_unix_ms: event.observed_at_unix_ms,
+        environment_id,
+        environment_generation: event.environment_generation,
+        request_id,
+        capability_slot,
+        operation,
+        route,
+        decision,
+        credential_id,
+        profile_id,
+        profile_revision: event.profile_revision,
+        credential_revocation_generation: event.credential_revocation_generation,
+    })
 }
 
 fn terminate_unadmitted_child(child: &mut Child) {
@@ -735,7 +899,7 @@ fn profile_entries_to_proto(
         .collect()
 }
 
-fn credential_from_proto(value: v1::Credential) -> Result<CredentialRecord, Status> {
+pub(crate) fn credential_from_proto(value: v1::Credential) -> Result<CredentialRecord, Status> {
     let metadata = CredentialMetadata {
         id: CredentialId::parse(value.id).map_err(data_loss)?,
         placement: Placement::Local,
@@ -826,7 +990,7 @@ fn environment_binding_from_proto(
     })
 }
 
-fn derived_grant_from_proto(value: v1::DerivedGrant) -> Result<DerivedGrant, Status> {
+pub(crate) fn derived_grant_from_proto(value: v1::DerivedGrant) -> Result<DerivedGrant, Status> {
     let mut permissions = BTreeSet::new();
     for permission in value.permissions {
         let permission = GrantPermission {
@@ -903,4 +1067,29 @@ fn persistence_from_proto(value: i32) -> Result<ProtectedStorePersistence, Statu
 
 fn data_loss<T>(_error: T) -> Status {
     Status::data_loss("local credential authority returned invalid metadata")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn broker_supervisor_socket_never_uses_a_lossy_wire_identity() {
+        assert_eq!(
+            broker_supervisor_socket(Path::new("/run/user/1000/codewire/supervisor.sock")).unwrap(),
+            "/run/user/1000/codewire/supervisor.sock"
+        );
+        let non_utf8 = PathBuf::from(OsString::from_vec(
+            b"/run/user/1000/codewire/supervisor.sock".to_vec(),
+        ));
+        let mut bytes = non_utf8.into_os_string().into_vec();
+        bytes.insert(1, 0xff);
+        let non_utf8 = PathBuf::from(OsString::from_vec(bytes));
+        assert!(broker_supervisor_socket(&non_utf8).is_err());
+        assert!(broker_supervisor_socket(Path::new("relative/supervisor.sock")).is_err());
+    }
 }

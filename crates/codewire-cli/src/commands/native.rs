@@ -481,6 +481,10 @@ async fn ensure_native_access_authority(environment: &v1::Environment) -> anyhow
 pub(crate) async fn native_environment_session_client(
     name: &str,
 ) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicSessionClient> {
+    let mut supervisor = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut supervisor, name).await?;
+    ensure_native_access_authority(&environment).await?;
+    drop(supervisor);
     codewire_local_vmm::public_client::NativePublicSessionClient::connect_or_start(
         &native_runtime_config()?,
         name,

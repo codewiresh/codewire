@@ -20,7 +20,10 @@ use codewire_access::{
     AccessProfileId, AccessProfileReference, AccessProfileScope, EnvironmentAccessBinding,
     EnvironmentId,
 };
-use codewire_local_credentials::{AuthorityRuntimeConfig, LocalCredentialControlClient};
+use codewire_local_credentials::{
+    AuthorityRuntimeConfig, EnvironmentBrokerRuntime as AuthorityBrokerRuntime,
+    LocalCredentialControlClient,
+};
 use futures::Stream;
 use rustix::fs::{FlockOperation, flock};
 use rustix::process::Signal;
@@ -86,6 +89,16 @@ struct PreparedWorkspaceBoot {
     setup_root_generation: String,
     setup_total_bytes: u64,
     setup_header_sha256: String,
+}
+
+#[derive(Clone)]
+struct CredentialBrokerEnsureRequest {
+    authority: AuthorityRuntimeConfig,
+    environment_id: EnvironmentId,
+    environment_generation: u64,
+    environment_name: String,
+    supervisor_socket: PathBuf,
+    enabled: bool,
 }
 
 #[derive(Clone)]
@@ -352,6 +365,17 @@ impl NativeSupervisorClient {
         Ok(self
             .inner
             .get_daemon_access(read_selector(name))
+            .await?
+            .into_inner())
+    }
+
+    pub async fn ensure_credential_broker(
+        &mut self,
+        name: &str,
+    ) -> Result<v1::CredentialBrokerRuntime, Status> {
+        Ok(self
+            .inner
+            .ensure_credential_broker(read_selector(name))
             .await?
             .into_inner())
     }
@@ -1154,6 +1178,30 @@ impl SupervisorCore {
             return Err(SupervisorError::EnvironmentAccessUnavailable);
         }
         Ok(())
+    }
+
+    async fn stop_environment_broker_if_present(
+        &mut self,
+        environment: &EnvironmentRecord,
+    ) -> Result<(), SupervisorError> {
+        if environment.generation == 0 {
+            return Ok(());
+        }
+        let Ok(environment_id) = access_environment_id(environment.id) else {
+            return Err(SupervisorError::InvalidState);
+        };
+        let mut client = match self.access_control_client().await {
+            Ok(client) => client,
+            // The authority owns every broker as a child with a parent-death
+            // signal. If the authority itself is unavailable, no surviving
+            // managed broker can keep serving this environment.
+            Err(SupervisorError::CredentialAuthorityUnavailable) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        client
+            .stop_environment_broker(&environment_id, Some(environment.generation))
+            .await
+            .map_err(credential_control_error)
     }
 
     async fn revoke_environment_access_best_effort(&mut self, environment_id: Uuid) -> bool {
@@ -2485,6 +2533,8 @@ impl SupervisorCore {
             return Err(SupervisorError::Orphaned);
         }
         let environment = self.environment(name)?.clone();
+        self.stop_environment_broker_if_present(&environment)
+            .await?;
         if environment.runner.is_none() {
             return Ok(());
         }
@@ -3200,6 +3250,56 @@ impl SupervisorCore {
             .await
             .map_err(|_| SupervisorError::RunnerUnavailable)
     }
+
+    fn credential_broker_ensure_request(
+        &self,
+        name: &str,
+    ) -> Result<CredentialBrokerEnsureRequest, SupervisorError> {
+        let environment = self.environment(name)?;
+        if environment.state != StoredEnvironmentState::Running || environment.generation == 0 {
+            return Err(SupervisorError::NotRunning);
+        }
+        Ok(CredentialBrokerEnsureRequest {
+            authority: self.config.credential_authority_config(),
+            environment_id: access_environment_id(environment.id)?,
+            environment_generation: environment.generation,
+            environment_name: environment.name.clone(),
+            supervisor_socket: self.config.supervisor_socket(),
+            enabled: environment.access_binding.is_some(),
+        })
+    }
+}
+
+async fn ensure_credential_broker(
+    request: CredentialBrokerEnsureRequest,
+) -> Result<AuthorityBrokerRuntime, SupervisorError> {
+    if !request.enabled {
+        return Ok(AuthorityBrokerRuntime {
+            environment_id: request.environment_id,
+            environment_generation: request.environment_generation,
+            running: false,
+        });
+    }
+    let mut client = LocalCredentialControlClient::connect(&request.authority)
+        .await
+        .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)?;
+    client
+        .ensure_environment_broker(
+            &request.environment_id,
+            request.environment_generation,
+            &request.environment_name,
+            &request.supervisor_socket,
+        )
+        .await
+        .map_err(credential_control_error)
+}
+
+fn credential_broker_runtime_proto(runtime: AuthorityBrokerRuntime) -> v1::CredentialBrokerRuntime {
+    v1::CredentialBrokerRuntime {
+        environment_id: runtime.environment_id.to_string(),
+        environment_generation: runtime.environment_generation,
+        running: runtime.running,
+    }
 }
 
 #[derive(Clone)]
@@ -3868,6 +3968,26 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(Status::from)?;
         core.daemon_access(&name)
             .await
+            .map(Response::new)
+            .map_err(Status::from)
+    }
+
+    async fn ensure_credential_broker(
+        &self,
+        request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::CredentialBrokerRuntime>, Status> {
+        let name = selected_name(request.into_inner())?;
+        let broker_request = {
+            let mut core = self.core.lock().await;
+            core.replay_pending_operations()
+                .await
+                .map_err(Status::from)?;
+            core.credential_broker_ensure_request(&name)
+                .map_err(Status::from)?
+        };
+        ensure_credential_broker(broker_request)
+            .await
+            .map(credential_broker_runtime_proto)
             .map(Response::new)
             .map_err(Status::from)
     }

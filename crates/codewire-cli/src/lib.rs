@@ -48,6 +48,18 @@ const CLI_VERSION: &str = match option_env!("CODEWIRE_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+
+/// Reassert the broker's non-dumpable state immediately after `execve`, which
+/// resets this flag for an ordinary executable. The hidden broker entrypoint
+/// performs the remaining parent, capability, session, and environment checks.
+#[cfg(target_os = "linux")]
+pub fn prepare_local_credential_broker_process() -> std::io::Result<()> {
+    // SAFETY: this scalar prctl affects only the current broker process.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
 const LOCAL_WORKSPACE_PATH: &str = "/workspace";
 const LIMA_CONTAINER_NAME: &str = "cw-workspace";
 const LIMA_DOCKER_SOCK_PATH: &str = "/var/run/docker.sock";
@@ -195,6 +207,12 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__local-credential-authority-probe", hide = true)]
     LocalCredentialAuthorityProbe(LocalCredentialAuthorityProbeArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-broker", hide = true)]
+    LocalCredentialBroker(LocalCredentialBrokerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
+    LocalCredentialBrokerConfinementProbe,
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -278,6 +296,12 @@ where
         #[cfg(target_os = "linux")]
         Command::LocalCredentialAuthorityProbe(args) => {
             run_local_credential_authority_probe(args).await
+        }
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialBroker(args) => run_local_credential_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialBrokerConfinementProbe => {
+            run_local_credential_broker_confinement_probe().await
         }
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,

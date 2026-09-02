@@ -23,6 +23,14 @@ mod credential_authority;
 #[cfg(target_os = "linux")]
 pub(crate) use credential_authority::*;
 #[cfg(target_os = "linux")]
+mod credential_broker;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_broker::*;
+#[cfg(target_os = "linux")]
+mod credential_broker_confinement;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_broker_confinement::run_local_credential_broker_confinement_probe;
+#[cfg(target_os = "linux")]
 mod credentials;
 #[cfg(target_os = "linux")]
 pub(crate) use credentials::*;
@@ -237,6 +245,21 @@ pub(crate) struct LocalCredentialAuthorityProbeArgs {
     pub(crate) root: PathBuf,
     #[arg(long)]
     pub(crate) shutdown: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialBrokerArgs {
+    #[arg(long)]
+    pub(crate) authority_fd: i32,
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) environment_generation: u64,
+    #[arg(long)]
+    pub(crate) environment_name: String,
+    #[arg(long)]
+    pub(crate) supervisor_socket: PathBuf,
 }
 
 #[cfg(target_os = "linux")]

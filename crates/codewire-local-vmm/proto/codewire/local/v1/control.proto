@@ -17,6 +17,9 @@ service LocalSupervisorService {
   rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
   rpc GetOperation(GetOperationRequest) returns (Operation);
   rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
+  // Starts or reuses the authority-owned broker for the exact running
+  // environment generation. The response and request are material-free.
+  rpc EnsureCredentialBroker(EnvironmentSelector) returns (CredentialBrokerRuntime);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
 }
 
@@ -264,6 +267,12 @@ message DaemonAccess {
   string hybrid_socket = 1;
   uint32 guest_port = 2;
   string generation_capability = 3;
+}
+
+message CredentialBrokerRuntime {
+  string environment_id = 1;
+  uint64 environment_generation = 2;
+  bool running = 3;
 }
 
 message AdoptRunnerRequest {

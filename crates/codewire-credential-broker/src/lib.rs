@@ -3,18 +3,27 @@
 //! Credential-bearing provider request preparation for the isolated Codewire
 //! broker process.
 //!
-//! This crate has no listener, guest transport, DNS resolver, socket dialer,
-//! or persistent state. It consumes one authority-admitted operation lease,
-//! validates one credential-free provider request, and creates an upstream
-//! request plus response redaction state. Those values must remain inside the
-//! broker process.
+//! The crate owns the authenticated guest stream plus provider-specific DNS,
+//! socket, TLS, mutation, and streaming-redaction code used inside the isolated
+//! broker process. It has no public listener or persistent state. Secret-bearing
+//! values must remain inside that process.
 
+mod bridge;
 mod codex;
+mod network;
 mod openai;
+mod runtime;
 
 pub use codex::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
+pub use network::OpenAiHttpsTransport;
 pub use openai::{
     OpenAiApiKeyAdapter, OpenAiStreamingResponse, PreparedOpenAiRequest, PreparedOpenAiResponse,
+    ValidatedOpenAiRequest,
+};
+pub use runtime::{
+    BrokerHttpResponse, BrokerLeaseError, BrokerLeaseProvider, BrokerRequestError,
+    BrokerResponseBody, BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
+    BrokerUpstreamTransport, OpenAiBroker,
 };
 
 use codewire_access::{CredentialMetadata, DerivedGrant, GrantPermission};
@@ -84,3 +93,7 @@ pub enum CredentialBrokerError {
     #[error("credential broker guest endpoint is invalid")]
     InvalidGuestEndpoint,
 }
+pub use bridge::{
+    AdmittedCredentialBridge, BrokerBridgeError, admit_credential_bridge,
+    run_admitted_credential_bridge, run_credential_bridge,
+};

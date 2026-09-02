@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use codewire_access::{
     AccessProfileName, AccessProfileReference, BrokerOperationId, BrokerRouteId, CapabilityPolicy,
-    CapabilitySlot, CredentialAuthKind, CredentialStatus, GrantPermission, ProviderDefinition,
-    ProviderId,
+    CapabilitySlot, CredentialAuthKind, CredentialStatus, EnvironmentAccessBinding, EnvironmentId,
+    GrantPermission, ProviderDefinition, ProviderId,
 };
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedStorePersistence,
@@ -24,7 +24,7 @@ use tower::ServiceExt as _;
 
 use super::*;
 use crate::control::v1;
-use crate::service::serve_until;
+use crate::service::{serve_until, serve_until_with_spawner};
 use crate::transport::{
     bind_owner_only, bind_owner_only_for_uid, current_uid, owner_only_connector,
     remove_bound_socket,
@@ -133,6 +133,104 @@ async fn start_server(
     (shutdown_tx, task)
 }
 
+#[derive(Clone)]
+struct TestBrokerSpawner {
+    store: TestProtectedStore,
+    launches: Arc<Mutex<Vec<LocalBrokerProcessConfig>>>,
+    child_pids: Arc<Mutex<Vec<u32>>>,
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    leased_material: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl LocalBrokerProcessSpawner for TestBrokerSpawner {
+    fn spawn(
+        &self,
+        config: &LocalBrokerProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
+        self.launches
+            .lock()
+            .map_err(|_| LocalBrokerSpawnError::Spawn)?
+            .push(config.clone());
+        authority_peer
+            .set_nonblocking(true)
+            .map_err(|_| LocalBrokerSpawnError::Spawn)?;
+        let stream =
+            UnixStream::from_std(authority_peer).map_err(|_| LocalBrokerSpawnError::Spawn)?;
+        let store = self.store.clone();
+        let environment_id = config.environment_id.clone();
+        let environment_generation = config.environment_generation;
+        let leased_material = self.leased_material.clone();
+        let task = tokio::spawn(async move {
+            let Ok(mut client) = LocalCredentialBrokerLeaseClient::connect(
+                stream,
+                store,
+                environment_id,
+                environment_generation,
+            )
+            .await
+            else {
+                return;
+            };
+            if client.report_ready().await.is_err() {
+                return;
+            }
+            let Ok(lease) = client
+                .lease_operation(
+                    uuid::Uuid::new_v4(),
+                    CapabilitySlot::codex(),
+                    BrokerOperationId::parse("responses").unwrap(),
+                    BrokerRouteId::parse("openai-api").unwrap(),
+                )
+                .await
+            else {
+                return;
+            };
+            let _ = leased_material.send(lease.with_material(|value| value.to_vec()));
+            std::future::pending::<()>().await;
+            drop(client);
+        });
+        self.tasks
+            .lock()
+            .map_err(|_| LocalBrokerSpawnError::Spawn)?
+            .push(task);
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| LocalBrokerSpawnError::Spawn)?;
+        self.child_pids
+            .lock()
+            .map_err(|_| LocalBrokerSpawnError::Spawn)?
+            .push(child.id().ok_or(LocalBrokerSpawnError::Spawn)?);
+        Ok(child)
+    }
+}
+
+async fn start_server_with_spawner(
+    config: AuthorityRuntimeConfig,
+    store: TestProtectedStore,
+    spawner: Arc<dyn LocalBrokerProcessSpawner>,
+) -> (
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), AuthorityRuntimeError>>,
+) {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        serve_until_with_spawner(
+            config,
+            store,
+            catalog(),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            Some(spawner),
+        )
+        .await
+    });
+    (shutdown_tx, task)
+}
+
 async fn connect_when_ready(config: &AuthorityRuntimeConfig) -> LocalCredentialClient {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
@@ -156,7 +254,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
     assert_eq!(
         client.info(),
         AuthorityInfo {
-            protocol_version: 3,
+            protocol_version: 4,
             protected_store_persistence: ProtectedStorePersistence::ProcessLifetime,
         }
     );
@@ -542,7 +640,7 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 3);
+    assert_eq!(client.info().protocol_version, 4);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     drop(shutdown);
@@ -573,10 +671,157 @@ async fn losing_launcher_waits_for_the_admitted_authority() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 3);
+    assert_eq!(client.info().protocol_version, 4);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     assert!(!config.socket().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let launches = Arc::new(Mutex::new(Vec::new()));
+    let child_pids = Arc::new(Mutex::new(Vec::new()));
+    let tasks = Arc::new(Mutex::new(Vec::new()));
+    let (material_tx, mut material_rx) = tokio::sync::mpsc::unbounded_channel();
+    let spawner = Arc::new(TestBrokerSpawner {
+        store: store.clone(),
+        launches: Arc::clone(&launches),
+        child_pids: Arc::clone(&child_pids),
+        tasks: Arc::clone(&tasks),
+        leased_material: material_tx,
+    });
+    let (shutdown, server) = start_server_with_spawner(
+        config.clone(),
+        store,
+        spawner as Arc<dyn LocalBrokerProcessSpawner>,
+    )
+    .await;
+    let mut owner = connect_when_ready(&config).await;
+    let credential = owner
+        .add_credential(
+            NewCredential {
+                provider: provider("openai"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "synthetic-broker".into(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            ProtectedValue::from_slice(FIRST_MATERIAL).unwrap(),
+        )
+        .await
+        .unwrap();
+    let profile = owner
+        .create_profile(
+            &AccessProfileName::parse("broker").unwrap(),
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+        )
+        .await
+        .unwrap();
+    let environment_id = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
+    owner
+        .create_environment_access_binding(&EnvironmentAccessBinding {
+            environment_id: environment_id.clone(),
+            profile_id: profile.profile.id,
+            profile_revision: profile.profile.revision,
+        })
+        .await
+        .unwrap();
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    let runtime = control
+        .ensure_environment_broker(
+            &environment_id,
+            23,
+            "dev",
+            &temp.path().join("runtime/supervisor.sock"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime,
+        EnvironmentBrokerRuntime {
+            environment_id: environment_id.clone(),
+            environment_generation: 23,
+            running: true,
+        }
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), material_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        FIRST_MATERIAL
+    );
+    let audit = owner
+        .list_recent_broker_lease_audit_events(8)
+        .await
+        .unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].decision, BrokerLeaseAuditDecision::Admitted);
+    assert_eq!(audit[0].environment_id, environment_id);
+    assert_eq!(audit[0].environment_generation, 23);
+    assert_eq!(
+        audit[0].credential_id.as_ref(),
+        Some(&credential.metadata.id)
+    );
+    assert!(!format!("{audit:?}").contains("synthetic-oauth-material"));
+    {
+        let launched = launches.lock().unwrap();
+        assert_eq!(launched.len(), 1);
+        assert_eq!(launched[0].environment_id, environment_id);
+        assert_eq!(launched[0].environment_generation, 23);
+        assert!(!format!("{:?}", launched[0]).contains("synthetic-oauth-material"));
+    }
+
+    let first_pid = child_pids.lock().unwrap()[0];
+    let first_pid = rustix::process::Pid::from_raw(first_pid as i32).unwrap();
+    rustix::process::kill_process(first_pid, rustix::process::Signal::KILL).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if launches.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(child_pids.lock().unwrap().len(), 2);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), material_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        FIRST_MATERIAL
+    );
+    let audit = owner
+        .list_recent_broker_lease_audit_events(8)
+        .await
+        .unwrap();
+    assert_eq!(audit.len(), 2);
+    assert!(audit[0].sequence > audit[1].sequence);
+
+    assert_eq!(
+        control
+            .stop_environment_broker(&environment_id, Some(22))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    control
+        .stop_environment_broker(&environment_id, Some(23))
+        .await
+        .unwrap();
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+    for task in tasks.lock().unwrap().drain(..) {
+        task.abort();
+    }
 }
 
 #[tokio::test]

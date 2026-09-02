@@ -10,13 +10,26 @@
 //! RPC process on bounded blocking workers. The VM supervisor does not link or
 //! own that material-bearing authority.
 
+mod broker_channel;
+mod broker_process;
 mod client;
 mod control;
 mod service;
 mod transport;
 
+pub use broker_channel::{
+    BrokerLeaseAuditDecision, BrokerLeaseAuditEvent, BrokerLeaseChannelError,
+    LocalCredentialBrokerLeaseClient, serve_broker_lease_channel,
+};
+pub use broker_process::{
+    EnvironmentBrokerRuntime, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
+    LocalBrokerSpawnError,
+};
 pub use client::{AuthorityInfo, LocalCredentialClient, LocalCredentialControlClient};
-pub use service::{serve_local_credential_authority, serve_os_local_credential_authority};
+pub use service::{
+    serve_local_credential_authority, serve_os_local_credential_authority,
+    serve_os_local_credential_authority_with_broker_spawner,
+};
 pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -113,6 +126,16 @@ pub struct CredentialOperationLease {
     pub grant: DerivedGrant,
     pub permission: GrantPermission,
     value: ProtectedValue,
+}
+
+/// Authority-private admission descriptor sent only over the inherited
+/// authority-to-broker channel. It deliberately contains an integer material
+/// generation rather than protected material or a protected-store reference.
+pub(crate) struct CredentialOperationAdmission {
+    credential: CredentialRecord,
+    grant: DerivedGrant,
+    permission: GrantPermission,
+    material_generation: u64,
 }
 
 impl CredentialOperationLease {
@@ -632,6 +655,27 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         &self,
         request: &CredentialOperationLeaseRequest,
     ) -> Result<CredentialOperationLease, LocalCredentialError> {
+        let admission = self.admit_environment_credential_operation(request)?;
+        let entry_id = protected_entry_id(
+            &admission.credential.metadata.id,
+            admission.material_generation,
+        )?;
+        let value = self
+            .protected_store
+            .get(&entry_id)?
+            .ok_or(LocalCredentialError::CredentialMaterialMissing)?;
+        Ok(CredentialOperationLease {
+            credential: admission.credential,
+            grant: admission.grant,
+            permission: admission.permission,
+            value,
+        })
+    }
+
+    pub(crate) fn admit_environment_credential_operation(
+        &self,
+        request: &CredentialOperationLeaseRequest,
+    ) -> Result<CredentialOperationAdmission, LocalCredentialError> {
         let connection = self.connection()?;
         let binding =
             load_environment_access_binding(&connection, &request.environment_id)?.binding;
@@ -668,15 +712,11 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         {
             return Err(LocalCredentialError::CredentialInactive);
         }
-        let value = self
-            .protected_store
-            .get(&record.protected_entry_id)?
-            .ok_or(LocalCredentialError::CredentialMaterialMissing)?;
-        Ok(CredentialOperationLease {
+        Ok(CredentialOperationAdmission {
             credential: record.public,
             grant,
             permission,
-            value,
+            material_generation: record.material_generation,
         })
     }
 
@@ -1445,7 +1485,7 @@ fn ensure_authority_identity(
     transaction.commit().map_err(database_error)
 }
 
-fn protected_entry_id(
+pub(crate) fn protected_entry_id(
     id: &CredentialId,
     generation: u64,
 ) -> Result<ProtectedEntryId, LocalCredentialError> {

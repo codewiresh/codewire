@@ -68,6 +68,13 @@ pub struct CredentialBridgeConnection {
     output: Streaming<v1::CredentialBridgeGuestMessage>,
 }
 
+/// Cloneable response-only half of an authenticated credential bridge.
+/// Callers must send only provider-filtered, already-redacted bytes.
+#[derive(Clone)]
+pub struct CredentialBridgeResponseSender {
+    input: mpsc::Sender<v1::CredentialBridgeHostMessage>,
+}
+
 impl SessionClient {
     /// Build a daemon client over a caller-provided transport channel.
     ///
@@ -341,6 +348,12 @@ impl SessionClient {
 }
 
 impl CredentialBridgeConnection {
+    pub fn response_sender(&self) -> CredentialBridgeResponseSender {
+        CredentialBridgeResponseSender {
+            input: self.input.clone(),
+        }
+    }
+
     pub async fn receive(
         &mut self,
     ) -> Result<Option<v1::CredentialBridgeGuestMessage>, SessionClientError> {
@@ -350,6 +363,36 @@ impl CredentialBridgeConnection {
             .map_err(SessionClientError::from)
     }
 
+    pub async fn send_response_start(
+        &self,
+        response: v1::CredentialBridgeResponseStart,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_response_start(response).await
+    }
+
+    pub async fn send_response_body(
+        &self,
+        response: v1::CredentialBridgeResponseBody,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_response_body(response).await
+    }
+
+    pub async fn send_response_end(
+        &self,
+        response: v1::CredentialBridgeResponseEnd,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_response_end(response).await
+    }
+
+    pub async fn send_response_failure(
+        &self,
+        response: v1::CredentialBridgeResponseFailure,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_response_failure(response).await
+    }
+}
+
+impl CredentialBridgeResponseSender {
     pub async fn send_response_start(
         &self,
         response: v1::CredentialBridgeResponseStart,
