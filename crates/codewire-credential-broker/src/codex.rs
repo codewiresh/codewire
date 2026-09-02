@@ -36,6 +36,9 @@ impl CodexProviderProjection {
                     "wire_api = \"responses\"\n",
                     "requires_openai_auth = false\n",
                     "supports_websockets = false\n",
+                    "\n",
+                    "[features]\n",
+                    "enable_request_compression = false\n",
                 ),
                 provider = CODEX_PROVIDER_ID,
                 port = port,
@@ -77,6 +80,9 @@ mod tests {
                 "wire_api = \"responses\"\n",
                 "requires_openai_auth = false\n",
                 "supports_websockets = false\n",
+                "\n",
+                "[features]\n",
+                "enable_request_compression = false\n",
             )
         );
         let parsed = toml::from_str::<Value>(config).expect("valid TOML projection");
@@ -112,6 +118,14 @@ mod tests {
         );
         assert_eq!(
             provider.get("supports_websockets").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            parsed
+                .get("features")
+                .and_then(Value::as_table)
+                .and_then(|features| features.get("enable_request_compression"))
+                .and_then(Value::as_bool),
             Some(false)
         );
         for forbidden in [

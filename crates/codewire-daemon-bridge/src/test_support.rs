@@ -59,6 +59,7 @@ impl DaemonHarness {
             home_root,
             auth_token: Some(TEST_DAEMON_TOKEN.to_owned()),
             process_execution: ProcessExecution::Native,
+            credential_bridge: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(async move {

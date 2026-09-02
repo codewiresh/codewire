@@ -92,6 +92,17 @@ fn entrypoint() -> anyhow::Result<()> {
             );
             guest::run_workspace_init()
         }
+        Some("credential-forwarder") => {
+            ensure!(
+                arguments.next().is_none(),
+                "credential-forwarder accepts no arguments"
+            );
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("create credential forwarder Tokio runtime")?;
+            runtime.block_on(guest::run_credential_forwarder())
+        }
         Some("workspace-exec") => guest::run_workspace_exec(arguments.collect()),
         Some("newc") => build_newc(arguments),
         Some("newc-root") => build_guest_root_newc(arguments),

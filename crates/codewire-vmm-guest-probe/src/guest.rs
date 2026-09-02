@@ -10,9 +10,9 @@ use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,7 +24,10 @@ use rustix::fs::{
 use rustix::io::Errno as RustixErrno;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tokio::io::AsyncWriteExt as _;
+use tokio::net::{TcpListener, UnixStream as TokioUnixStream};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::Semaphore;
 use tokio::sync::watch;
 use tokio_stream::Stream;
 use tokio_vsock::{
@@ -82,10 +85,12 @@ const CONTAINER_CONTROL_PATH: &str = "/run/codewire/container";
 const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
 const CONTAINER_MACHINE_ID_PATH: &str = "/run/codewire/container/machine-id";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
+const CREDENTIAL_INGRESS_SOCKET: &str = "/run/codewire/container/credential.sock";
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
 const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
+const CONTAINER_CREDENTIAL_SOCKET: &str = "/run/codewire-host/credential.sock";
 const INSTALL_STATE_PATH: &str = "/state/codewire/workspace-install.state";
 const CONTAINER_INSTALL_STATE_PATH: &str = "/run/codewire-runtime/install.state";
 const PERSISTENT_PROBE_PATH: &str = "/state/probe";
@@ -100,7 +105,11 @@ const WORKSPACE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNC_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTROL_MESSAGE_LIMIT: usize = 32;
 const WORKSPACE_READY_FD: RawFd = 3;
+const CREDENTIAL_FORWARDER_READY_FD: RawFd = 4;
 const WORKSPACE_READY_LIMIT: usize = 96;
+const CREDENTIAL_FORWARDER_READY: &[u8] = b"CWCREDS1 ready\n";
+const CREDENTIAL_FORWARDER_START_TIMEOUT: Duration = Duration::from_secs(5);
+const CREDENTIAL_FORWARDER_CONNECTION_LIMIT: usize = 32;
 const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
     (
         b"CWFAIL1 workspace-identity-failed\n",
@@ -125,6 +134,10 @@ const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
     (
         b"CWFAIL1 workspace-workload-failed\n",
         "workspace-workload-failed",
+    ),
+    (
+        b"CWFAIL1 workspace-credential-forwarder-failed\n",
+        "workspace-credential-forwarder-failed",
     ),
 ];
 
@@ -324,6 +337,13 @@ pub async fn run_daemon() -> Result<()> {
                 additional_gids: plan.identity.additional_gids.clone(),
             },
         ),
+        credential_bridge: Some(codewire_daemon::CredentialBridgeConfig {
+            environment_id: seed.vm_id(),
+            environment_generation: seed.generation(),
+            ingress_socket: PathBuf::from(CREDENTIAL_INGRESS_SOCKET),
+            ingress_uid: plan.identity.uid,
+            ingress_gid: plan.identity.gid,
+        }),
     };
 
     codewire_daemon::serve_grpc_with_incoming(
@@ -652,6 +672,10 @@ pub fn run_workspace_init() -> Result<()> {
     if let Err(error) = run_workspace_install(&plan) {
         return fail_workspace_init("workspace-install-failed", error);
     }
+    let mut credential_forwarder = match spawn_credential_forwarder(&plan) {
+        Ok(forwarder) => forwarder,
+        Err(error) => return fail_workspace_init("workspace-credential-forwarder-failed", error),
+    };
     if !plan.workload_args.is_empty() {
         let _workload = match spawn_workspace_process(
             &plan,
@@ -684,13 +708,24 @@ pub fn run_workspace_init() -> Result<()> {
         if POWEROFF_REQUESTED.load(Ordering::Acquire) {
             return Ok(());
         }
+        if credential_forwarder
+            .try_wait()
+            .context("observe credential loopback forwarder")?
+            .is_some()
+        {
+            bail!("credential loopback forwarder exited");
+        }
         let mut status = 0;
         let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if reaped > 0
-            || (reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
-        {
+        if reaped == libc::pid_t::try_from(credential_forwarder.id()).unwrap_or(-1) {
+            bail!("credential loopback forwarder exited");
+        }
+        if reaped > 0 {
             thread::sleep(Duration::from_millis(20));
             continue;
+        }
+        if reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            bail!("workspace init lost its credential loopback forwarder");
         }
         if reaped == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
             thread::sleep(Duration::from_millis(20));
@@ -842,6 +877,158 @@ fn spawn_workspace_process(
         });
     }
     command.spawn().with_context(|| action)
+}
+
+fn spawn_credential_forwarder(plan: &WorkspacePlan) -> Result<std::process::Child> {
+    let (mut readiness, readiness_writer) =
+        UnixStream::pair().context("create credential forwarder readiness channel")?;
+    readiness
+        .set_read_timeout(Some(CREDENTIAL_FORWARDER_START_TIMEOUT))
+        .context("bound credential forwarder readiness wait")?;
+    let readiness_fd = readiness_writer.as_raw_fd();
+    let uid = plan.identity.uid;
+    let gid = plan.identity.gid;
+    let additional_gids = plan
+        .identity
+        .additional_gids
+        .iter()
+        .map(|gid| *gid as libc::gid_t)
+        .collect::<Vec<_>>();
+    let mut command = Command::new(CONTAINER_INIT_PATH);
+    command
+        .arg("credential-forwarder")
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if readiness_fd != CREDENTIAL_FORWARDER_READY_FD
+                && libc::dup2(readiness_fd, CREDENTIAL_FORWARDER_READY_FD) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(CREDENTIAL_FORWARDER_READY_FD, libc::F_SETFD, 0) == -1
+                || libc::setgroups(additional_gids.len(), additional_gids.as_ptr()) == -1
+                || libc::setgid(gid as libc::gid_t) == -1
+                || libc::setuid(uid as libc::uid_t) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            clear_process_capabilities()?;
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .spawn()
+        .context("start credential loopback forwarder")?;
+    drop(readiness_writer);
+    let mut actual = vec![0_u8; CREDENTIAL_FORWARDER_READY.len()];
+    if readiness.read_exact(&mut actual).is_err()
+        || actual != CREDENTIAL_FORWARDER_READY
+        || child
+            .try_wait()
+            .context("observe credential loopback forwarder readiness")?
+            .is_some()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("credential loopback forwarder did not become ready");
+    }
+    Ok(child)
+}
+
+pub async fn run_credential_forwarder() -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } != 1,
+        "credential forwarder must not be container PID 1"
+    );
+    ensure!(
+        std::env::vars_os().next().is_none(),
+        "credential forwarder refuses an ambient environment"
+    );
+    let _identity = read_guest_identity()?;
+    ensure_init_is_expected(true)?;
+    clear_process_capabilities().context("clear credential forwarder capabilities")?;
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1
+        || unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1
+    {
+        return Err(io::Error::last_os_error()).context("confine credential forwarder process");
+    }
+
+    let listener = TcpListener::bind((
+        std::net::Ipv4Addr::LOCALHOST,
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+    ))
+    .await
+    .context("bind credential forwarder IPv4 loopback")?;
+    let address = listener
+        .local_addr()
+        .context("inspect credential forwarder listener")?;
+    ensure!(
+        address.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            && address.port() == codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+        "credential forwarder listener identity is invalid"
+    );
+    publish_credential_forwarder_readiness()?;
+
+    let permits = Arc::new(Semaphore::new(CREDENTIAL_FORWARDER_CONNECTION_LIMIT));
+    loop {
+        let (mut client, _) = listener
+            .accept()
+            .await
+            .context("accept credential loopback connection")?;
+        let _ = client.set_nodelay(true);
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            write_credential_unavailable(&mut client).await;
+            continue;
+        };
+        tokio::spawn(async move {
+            let _permit = permit;
+            let upstream = tokio::time::timeout(
+                Duration::from_secs(1),
+                TokioUnixStream::connect(CONTAINER_CREDENTIAL_SOCKET),
+            )
+            .await;
+            let Ok(Ok(mut upstream)) = upstream else {
+                write_credential_unavailable(&mut client).await;
+                return;
+            };
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        });
+    }
+}
+
+fn publish_credential_forwarder_readiness() -> Result<()> {
+    ensure!(
+        unsafe { libc::fcntl(CREDENTIAL_FORWARDER_READY_FD, libc::F_GETFD) } != -1,
+        "credential forwarder readiness descriptor is absent"
+    );
+    let mut stream = unsafe { UnixStream::from_raw_fd(CREDENTIAL_FORWARDER_READY_FD) };
+    let stat = rustix::fs::fstat(&stream).context("inspect credential readiness descriptor")?;
+    ensure!(
+        RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Socket,
+        "credential readiness descriptor is not a socket"
+    );
+    stream
+        .write_all(CREDENTIAL_FORWARDER_READY)
+        .context("publish credential forwarder readiness")?;
+    stream
+        .flush()
+        .context("flush credential forwarder readiness")
+}
+
+async fn write_credential_unavailable(stream: &mut tokio::net::TcpStream) {
+    let _ = stream
+        .write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\nConnection: close\r\n\r\ncredential route unavailable\n",
+        )
+        .await;
+    let _ = stream.shutdown().await;
 }
 
 fn clear_process_capabilities() -> io::Result<()> {

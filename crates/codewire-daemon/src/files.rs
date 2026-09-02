@@ -385,6 +385,7 @@ mod tests {
             home_root,
             auth_token: None,
             process_execution: crate::execution::ProcessExecution::Native,
+            credential_bridge: None,
         }
     }
 

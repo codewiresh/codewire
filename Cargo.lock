@@ -1456,6 +1456,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
+ "bytes",
  "codewire-gateway-proto",
  "filetime",
  "libc",
@@ -1658,6 +1659,7 @@ dependencies = [
  "codewire-client",
  "codewire-daemon",
  "codewire-daemon-bridge",
+ "codewire-gateway-proto",
  "codewire-local-credentials",
  "codewire-project",
  "codewire-proto",
@@ -1949,6 +1951,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "codewire-daemon",
+ "codewire-gateway-proto",
  "codewire-project",
  "flate2",
  "hmac 0.12.1",

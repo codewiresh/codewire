@@ -207,6 +207,7 @@ async fn injected_transport_requires_an_auth_token_at_startup() {
             home_root,
             auth_token: None,
             process_execution: codewire_daemon::execution::ProcessExecution::Native,
+            credential_bridge: None,
         },
         tokio_stream::wrappers::TcpListenerStream::new(listener),
         std::future::pending(),

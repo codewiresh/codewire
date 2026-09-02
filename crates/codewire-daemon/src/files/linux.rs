@@ -463,6 +463,7 @@ mod tests {
             home_root: home,
             auth_token: None,
             process_execution: ProcessExecution::Native,
+            credential_bridge: None,
         };
         (temp, config, workspace)
     }

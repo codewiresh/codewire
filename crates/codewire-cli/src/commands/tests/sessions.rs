@@ -70,6 +70,7 @@
             home_root,
             auth_token: Some(token.to_string()),
             process_execution: codewire_daemon::execution::ProcessExecution::Native,
+            credential_bridge: None,
         };
         let instance = config::LocalInstanceConfig {
             daemon_host_port: port,

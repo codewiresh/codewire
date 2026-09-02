@@ -4,6 +4,7 @@ use anyhow::Context as _;
 use codewire_access::{AccessProfileReference, EnvironmentId};
 use codewire_local_credentials::LocalCredentialClient;
 use codewire_local_vmm::control::v1;
+use codewire_local_vmm::oci::RegistryReference;
 use codewire_local_vmm::runner_service::{RunnerEntrypointConfig, serve_runner};
 use codewire_local_vmm::supervisor::{
     NativeRuntimeConfig, NativeSupervisorClient, inspect_orphans, serve_supervisor,
@@ -81,6 +82,9 @@ pub(crate) async fn create_native_environment(
     let source_path = std::fs::canonicalize(requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
     let mut project = native_codewire_yaml(&source_path, args.file.as_deref())?;
+    if let Some(image) = args.image.as_deref().and_then(trimmed_str) {
+        project.spec.image = image.to_owned();
+    }
     if let Some(reference) = args.access_profile.as_deref() {
         let reference = trimmed_str(reference)
             .ok_or_else(|| anyhow::anyhow!("--access-profile cannot be empty"))?;
@@ -727,9 +731,6 @@ fn native_unsupported_project_fields(
     if !spec.preset.is_empty() {
         unsupported.push("preset");
     }
-    if !spec.image.is_empty() {
-        unsupported.push("image");
-    }
     if spec.repositories.is_empty() && spec.working_directory != "/workspace" {
         unsupported.push("working_directory");
     }
@@ -781,7 +782,7 @@ fn canonical_native_project_intent(
     memory_mib: u32,
     disk_bytes: u64,
 ) -> anyhow::Result<(Vec<u8>, String)> {
-    spec.image = CANONICAL_WORKSPACE_IMAGE.to_owned();
+    spec.image = canonical_native_workspace_image(&spec.image)?;
     spec.resources = codewire_project::ResourceSpec {
         cpu_millicores: Some(
             vcpus
@@ -796,6 +797,14 @@ fn canonical_native_project_intent(
         .context("encode canonical native project intent")?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     Ok((bytes, digest))
+}
+
+fn canonical_native_workspace_image(image: &str) -> anyhow::Result<String> {
+    let image = trimmed_str(image)
+        .map(expand_image_ref)
+        .unwrap_or_else(|| CANONICAL_WORKSPACE_IMAGE.to_owned());
+    RegistryReference::parse(&image).context("parse native OCI workspace image")?;
+    Ok(image)
 }
 
 fn workspace_selection_from_arg(value: PathModeArg) -> WorkspaceSelection {
@@ -854,9 +863,6 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
     }
     if args.branch.is_some() {
         unsupported.push("--branch");
-    }
-    if args.image.is_some() {
-        unsupported.push("--image");
     }
     if args.install.is_some() {
         unsupported.push("--install");
@@ -960,11 +966,11 @@ mod tests {
     }
 
     #[test]
-    fn native_yaml_rejects_unsupported_product_fields() {
+    fn native_yaml_accepts_the_shared_workspace_image_field() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("codewire.yaml"), "image: workspace\n").unwrap();
-        let error = native_codewire_yaml(temp.path(), None).unwrap_err();
-        assert!(error.to_string().contains("fields: image"));
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(project.spec.image, "workspace");
     }
 
     #[test]
@@ -1072,6 +1078,31 @@ working_directory: /workspace/github
         assert_eq!(spec.resources.memory_mib, Some(16 * 1024));
         assert_eq!(spec.resources.disk_gib, Some(40));
         assert_eq!(spec.canonical_json().unwrap(), bytes);
+    }
+
+    #[test]
+    fn native_project_intent_expands_and_validates_the_configured_image() {
+        let spec = codewire_project::ProjectSpec {
+            image: "ubuntu:24.04".to_owned(),
+            ..codewire_project::ProjectSpec::default()
+        };
+        let (bytes, _) =
+            canonical_native_project_intent(spec, 2, 4096, 20 * 1024 * 1024 * 1024).unwrap();
+        let spec: codewire_project::ProjectSpec = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(spec.image, "docker.io/library/ubuntu:24.04");
+
+        let invalid = codewire_project::ProjectSpec {
+            image: "https://registry.example/workspace:latest".to_owned(),
+            ..codewire_project::ProjectSpec::default()
+        };
+        let error =
+            canonical_native_project_intent(invalid, 2, 4096, 20 * 1024 * 1024 * 1024).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("parse native OCI workspace image"),
+            "{error}"
+        );
     }
 
     #[test]

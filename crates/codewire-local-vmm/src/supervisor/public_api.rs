@@ -43,6 +43,7 @@ const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(180);
 const MAXIMUM_DAEMON_LOG_BYTES: usize = 64 * 1024;
 const REQUIRED_LOCAL_DAEMON_CAPABILITIES: &[&str] = &[
     "attach.v1",
+    "credential_bridge.v1",
     "exec.v1",
     "files.v1",
     "health.v1",

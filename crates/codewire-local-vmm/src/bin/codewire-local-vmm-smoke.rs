@@ -33,6 +33,7 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
+    use codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT;
     use codewire_local_vmm::ch_api::VmInfo;
     use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
     use codewire_local_vmm::linux::runner::ExitClass;
@@ -404,6 +405,8 @@ mod linux {
         )
         .await?;
         observation("guest.wrong_token_rejected", true);
+        require_credential_bridge(&first_client, arguments.vm_id, 2).await?;
+        observation("guest.credential_bridge_verified", true);
         require_pty_identity(&first_client, arguments.vm_id, 2).await?;
         observation("guest.identity_verified", true);
         observation("guest.pty_verified", true);
@@ -763,7 +766,7 @@ mod linux {
             None,
             busybox,
         )?;
-        for applet in ["grep", "sh", "sleep", "tr"] {
+        for applet in ["grep", "sh", "sleep", "tr", "wget"] {
             append_smoke_tar_entry(
                 &mut builder,
                 &format!("bin/{applet}"),
@@ -1232,6 +1235,111 @@ mod linux {
             )),
             Ok(()) => Err(failure("wrong daemon token was accepted")),
         }
+    }
+
+    async fn require_credential_bridge(
+        client: &SessionClient,
+        vm_id: Uuid,
+        generation: u64,
+    ) -> SmokeResult<()> {
+        let mut bridge = client.open_credential_bridge(vm_id, generation).await?;
+        let ready = tokio::time::timeout(SESSION_TIMEOUT, bridge.receive())
+            .await
+            .map_err(|_| failure("credential bridge readiness timed out"))??
+            .ok_or_else(|| failure("credential bridge ended before readiness"))?;
+        let Some(v1::credential_bridge_guest_message::Payload::Ready(ready)) = ready.payload else {
+            return Err(failure("credential bridge did not begin with readiness"));
+        };
+        if ready.protocol_version != codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+            || ready.environment_id != vm_id.to_string()
+            || ready.environment_generation != generation
+        {
+            return Err(failure("credential bridge readiness identity drifted"));
+        }
+
+        let body = r#"{"model":"codewire-synthetic"}"#;
+        let command = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "exec /bin/wget -qO- --header='Content-Type: application/json' --post-data='{body}' http://127.0.0.1:{CREDENTIAL_BRIDGE_LOOPBACK_PORT}/v1/responses"
+            ),
+        ];
+        let admitted = client
+            .launch(v1::LaunchSessionRequest {
+                command: command.clone(),
+                working_dir: "/workspace".to_owned(),
+                env: Vec::new(),
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await?;
+        if admitted.command != command || admitted.session_id.is_empty() {
+            return Err(failure("credential bridge probe was not admitted"));
+        }
+
+        let request = tokio::time::timeout(SESSION_TIMEOUT, bridge.receive())
+            .await
+            .map_err(|_| failure("credential bridge request timed out"))??
+            .ok_or_else(|| failure("credential bridge ended before request"))?;
+        let Some(v1::credential_bridge_guest_message::Payload::Request(request)) = request.payload
+        else {
+            return Err(failure(
+                "credential bridge emitted an unexpected request frame",
+            ));
+        };
+        if Uuid::parse_str(&request.request_id).is_err()
+            || request.method != "POST"
+            || request.path != "/responses"
+            || !request.query.is_empty()
+            || request.body != body.as_bytes()
+            || !request
+                .headers
+                .iter()
+                .any(|header| header.name == "content-type" && header.value == b"application/json")
+            || request.headers.iter().any(|header| {
+                matches!(
+                    header.name.as_str(),
+                    "authorization" | "proxy-authorization" | "cookie"
+                )
+            })
+        {
+            return Err(failure("credential bridge request boundary drifted"));
+        }
+
+        bridge
+            .send_response_start(v1::CredentialBridgeResponseStart {
+                request_id: request.request_id.clone(),
+                status_code: 200,
+                headers: vec![v1::CredentialHttpHeader {
+                    name: "content-type".to_owned(),
+                    value: b"text/plain".to_vec(),
+                }],
+            })
+            .await?;
+        bridge
+            .send_response_body(v1::CredentialBridgeResponseBody {
+                request_id: request.request_id.clone(),
+                data: b"CWCREDS1 synthetic\n".to_vec(),
+            })
+            .await?;
+        bridge
+            .send_response_end(v1::CredentialBridgeResponseEnd {
+                request_id: request.request_id,
+            })
+            .await?;
+
+        let record = wait_for_terminal_session(client, &admitted.session_id).await?;
+        if record.command != command
+            || record.state != v1::SessionLifecycleState::Exited as i32
+            || record.exit_code != Some(0)
+            || read_session_stdout(client, &record.session_id).await? != "CWCREDS1 synthetic\n"
+        {
+            return Err(failure("credential bridge probe did not complete exactly"));
+        }
+        Ok(())
     }
 
     fn launch_request(command: Vec<String>) -> v1::LaunchSessionRequest {
@@ -2169,7 +2277,7 @@ mod linux {
                 assert!(entries.insert(path, (kind, mode, link, contents)).is_none());
             }
 
-            assert_eq!(entries.len(), 13);
+            assert_eq!(entries.len(), 14);
             assert_eq!(
                 entries.get(Path::new("bin/busybox")),
                 Some(&(
@@ -2179,7 +2287,7 @@ mod linux {
                     b"sealed-busybox".to_vec()
                 ))
             );
-            for applet in ["grep", "sh", "sleep", "tr"] {
+            for applet in ["grep", "sh", "sleep", "tr", "wget"] {
                 assert_eq!(
                     entries.get(Path::new(&format!("bin/{applet}"))),
                     Some(&(

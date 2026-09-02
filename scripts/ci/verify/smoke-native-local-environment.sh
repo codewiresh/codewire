@@ -9,6 +9,7 @@ readonly LONGEST_SOCKET_SUFFIX='/engine/vms/00000000-0000-4000-8000-000000000000
 
 CW_BIN=''
 DATA_PLANE_SMOKE_BIN=''
+CREDENTIAL_BRIDGE_SMOKE_BIN=''
 STATE_PROBE_BIN=''
 ARTIFACT_ROOT=''
 ARTIFACT_LOCK=''
@@ -31,6 +32,7 @@ GITEA_COMMIT='bcbae548ab2f4f0e407068aa8717cec341084d7a'
 GITEA_README_SHA256='d4911db7bc817528fbcbaaf39e76851700084b65494dac1e29afb997867ac006'
 GITHUB_COMMIT='93f68ba4abc9f6e222481265b9b759e71d332575'
 GITHUB_README_SHA256='3661bce99f8eba5e48077eeddb4840f4404c1ceafbf200b9e8470bc7b4f22e50'
+WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:fa5d2fa61bb03b0e9181915b57ce5f2f8fa053eec8b7c6a950ecaadf93bc3645'
 SCRATCH_MOUNT_OPTIONS=''
 NAME='native-smoke'
 COMMAND_INDEX=0
@@ -45,6 +47,7 @@ usage() {
 usage: smoke-native-local-environment.sh \
   --cw-bin ABSOLUTE_PATH \
   --data-plane-smoke-bin ABSOLUTE_PATH \
+  --credential-bridge-smoke-bin ABSOLUTE_PATH \
   --state-probe-bin ABSOLUTE_PATH \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
@@ -61,7 +64,8 @@ disposable multi-repository and filesystem-copy fixtures. Initial create
 permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
 credential-free git.example.invalid/GitHub preparation, independent copy preparation,
-create/info, bounded daemon diagnostics and repair, bare run and shell, PTY
+create/info, stock Codex 0.149.0 over the synthetic credential bridge, bounded
+daemon diagnostics and repair, bare run and shell, PTY
 behavior, saved output and nonzero status, cached-runtime restart after the
 installed artifact lock advances, offline disk/CPU/memory resize, supervisor
 crash recovery, and journaled exact deletion cleanup.
@@ -113,6 +117,11 @@ while [[ $# -gt 0 ]]; do
       DATA_PLANE_SMOKE_BIN="$2"
       shift 2
       ;;
+    --credential-bridge-smoke-bin)
+      [[ $# -ge 2 && -z "$CREDENTIAL_BRIDGE_SMOKE_BIN" ]] || { usage; exit 2; }
+      CREDENTIAL_BRIDGE_SMOKE_BIN="$2"
+      shift 2
+      ;;
     --state-probe-bin)
       [[ $# -ge 2 && -z "$STATE_PROBE_BIN" ]] || { usage; exit 2; }
       STATE_PROBE_BIN="$2"
@@ -144,7 +153,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$CW_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
+[[ -n "$CW_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$CREDENTIAL_BRIDGE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
   usage
   exit 2
 }
@@ -164,6 +173,9 @@ require_absolute_canonical_file 'cw binary' "$CW_BIN"
 require_absolute_canonical_file 'public data-plane smoke binary' "$DATA_PLANE_SMOKE_BIN"
 [[ -x "$DATA_PLANE_SMOKE_BIN" ]] ||
   die "public data-plane smoke binary is not executable: $DATA_PLANE_SMOKE_BIN"
+require_absolute_canonical_file 'Codex credential-bridge smoke binary' "$CREDENTIAL_BRIDGE_SMOKE_BIN"
+[[ -x "$CREDENTIAL_BRIDGE_SMOKE_BIN" ]] ||
+  die "Codex credential-bridge smoke binary is not executable: $CREDENTIAL_BRIDGE_SMOKE_BIN"
 require_absolute_canonical_file 'native state probe binary' "$STATE_PROBE_BIN"
 [[ -x "$STATE_PROBE_BIN" ]] ||
   die "native state probe binary is not executable: $STATE_PROBE_BIN"
@@ -244,6 +256,7 @@ chmod 0700 "$WORKSPACE/.git/hooks/post-checkout"
 SOURCE_CONFIG_SHA256="$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')"
 cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
+image: $WORKSPACE_IMAGE
 repositories:
   - source: https://git.example.invalid/supplychain.git
     revision: $GITEA_COMMIT
@@ -343,6 +356,35 @@ run_public_data_smoke() {
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   [[ "$(cat "$stdout_file")" == 'codewire-local-public-data-smoke: PASS' ]] ||
     die 'public Exec/File data-plane smoke receipt drifted'
+}
+
+run_codex_credential_bridge_smoke() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! env -i \
+    PATH='/usr/bin:/bin' \
+    HOME="$SMOKE_HOME" \
+    USER="$(id -un)" \
+    LOGNAME="$(id -un)" \
+    SHELL='/bin/sh' \
+    TERM='xterm-256color' \
+    LC_ALL=C \
+    /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 180s \
+    "$CREDENTIAL_BRIDGE_SMOKE_BIN" \
+      --state-root "$STATE_ROOT" \
+      --artifact-root "$ARTIFACT_ROOT" \
+      --artifact-lock "$ARTIFACT_LOCK" \
+      --cw-bin "$CW_BIN" \
+      --target "$NAME" >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'stock Codex credential-bridge smoke failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  [[ "$(cat "$stdout_file")" == 'codewire-local-codex-bridge-smoke: PASS' ]] ||
+    die 'stock Codex credential-bridge smoke receipt drifted'
 }
 
 wait_for_pid_exit() {
@@ -478,11 +520,13 @@ find_exact_supervisor_pid() {
     [[ "$(readlink -f "$proc/exe" 2>/dev/null || true)" == "$CW_BIN" ]] || continue
     argv=()
     mapfile -d '' -t argv <"$proc/cmdline" 2>/dev/null || continue
-    [[ ${#argv[@]} -eq 8 ]] || continue
+    [[ ${#argv[@]} -eq 10 ]] || continue
     if [[ "${argv[1]}" == '__native-supervisor' &&
           "${argv[2]}" == '--root' && "${argv[3]}" == "$STATE_ROOT" &&
           "${argv[4]}" == '--artifact-root' && "${argv[5]}" == "$ARTIFACT_ROOT" &&
-          "${argv[6]}" == '--artifact-lock' && "${argv[7]}" == "$ARTIFACT_LOCK" ]]; then
+          "${argv[6]}" == '--artifact-lock' && "${argv[7]}" == "$ARTIFACT_LOCK" &&
+          "${argv[8]}" == '--credential-authority-root' &&
+          "${argv[9]}" == "$SMOKE_HOME/.codewire/credentials-v1" ]]; then
       pid="${proc#/proc/}"
       printf '%s\n' "$pid"
       return 0
@@ -732,6 +776,9 @@ RUNNER_PID="$(native_database_value runner_pid)"
 log 'checking public Exec/File over the owner-only supervisor UDS'
 run_public_data_smoke
 
+log 'checking stock Codex 0.149.0 over the synthetic guest credential bridge'
+run_codex_credential_bridge_smoke
+
 log 'checking bounded public daemon status over the owner-only supervisor UDS'
 run_cw env --local daemon status "$NAME" --output json
 jq -e '
@@ -741,6 +788,7 @@ jq -e '
   (.daemon_version | type == "string" and length > 0) and
   .capabilities == [
     "attach.v1",
+    "credential_bridge.v1",
     "exec.v1",
     "files.v1",
     "health.v1",
@@ -1014,8 +1062,8 @@ jq -e '
 ' "$LAST_STDOUT" >/dev/null || die 'native resize result drifted'
 [[ "$(stat -c '%s' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/state.raw")" == 22548578304 ]] ||
   die 'native state disk file did not grow to 21 GiB'
-[[ "$(native_database_value resize_operation)" == 'restart:completed:7' ]] ||
-  die 'native resize journal did not commit all six effect checkpoints'
+[[ "$(native_database_value resize_operation)" == 'restart:completed:8' ]] ||
+  die 'native resize journal did not commit all seven effect checkpoints'
 run_cw run --no-tty -- /bin/sh -lc \
   'printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; cat /workspace/sentinel.txt'
 rg -qF 'guest-cpus=3' "$LAST_STDOUT" || die 'resized guest did not observe exactly 3 vCPUs'

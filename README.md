@@ -91,7 +91,8 @@ environment-owned point-in-time copy. Use `--path-mode clone` or
 `--path-mode copy` to override automatic classification; direct host access is
 never inferred from `--path`. The primary workspace runs directly in the
 canonical Codewire OCI workspace image beneath trusted guest init and runc;
-Docker does not own it. Custom image, network, secret, explicit mount, port, and
+Docker does not own it. `image` in `codewire.yaml` and `--image` select any
+valid OCI workspace image; network, secret, explicit mount, port, and
 multi-repository options still fail explicitly while the remaining Forgejo
 #1910 slices are completed. An owner-only SQLite WAL is the authoritative
 supervisor state; preview JSON state is imported exactly once. Lifecycle
@@ -106,6 +107,7 @@ at them and run the complete product smoke:
 export CODEWIRE_NATIVE_ARTIFACT_ROOT=/absolute/path/to/artifacts
 export CODEWIRE_NATIVE_ARTIFACT_LOCK=/absolute/path/to/artifacts.lock.json
 cargo build -p codewire-local-vmm \
+  --bin codewire-local-codex-bridge-smoke \
   --bin codewire-local-public-data-smoke \
   --bin codewire-local-state-probe
 mkdir -p .tmp
@@ -114,6 +116,7 @@ chmod 0700 .tmp
 scripts/ci/verify/smoke-native-local-environment.sh \
   --cw-bin "$PWD/target/debug/cw" \
   --data-plane-smoke-bin "$PWD/target/debug/codewire-local-public-data-smoke" \
+  --credential-bridge-smoke-bin "$PWD/target/debug/codewire-local-codex-bridge-smoke" \
   --state-probe-bin "$PWD/target/debug/codewire-local-state-probe" \
   --artifact-root "$CODEWIRE_NATIVE_ARTIFACT_ROOT" \
   --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK" \
