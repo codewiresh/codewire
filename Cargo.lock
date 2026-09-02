@@ -1213,6 +1213,7 @@ dependencies = [
  "codewire-server-core",
  "codewire-tailnet",
  "connectrpc",
+ "futures",
  "libc",
  "rand 0.8.6",
  "tempfile",

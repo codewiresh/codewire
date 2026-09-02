@@ -33,11 +33,16 @@ use codewire_local_vmm::mesh_process::{
 use codewire_local_vmm::mesh_transport::receive_mesh_ingress_submissions;
 use codewire_mesh::mesh_authorization::hash_local_environment_token;
 use codewire_mesh::{Config as MeshConfig, LocalMeshAuthorizationConfig, StunServerConfig};
+use codewire_proto::codewire::internal::v1::{
+    CoordinateDerpMap, MeshCoordinatorService, MeshCoordinatorServiceCoordinateRequest,
+    MeshCoordinatorServiceCoordinateResponse, mesh_coordinator_service_coordinate_request,
+};
 use codewire_proto::codewire::v1::{
     CreateMeshNetworkRequest, CreateMeshNodeEnrollmentRequest, MeshNetworkServiceClient,
     MeshNodeServiceClient, RevokeMeshNodeRequest,
 };
 use codewire_server_core::auth::hash_api_key;
+use codewire_server_core::http::AppBuilder;
 use codewire_tailnet::conn::{Conn, Options as ConnOptions, PeerTransport};
 use codewire_tailnet::derp::NodePrivate as DerpPrivate;
 use codewire_tailnet::derp_transport::{
@@ -48,10 +53,12 @@ use codewire_tailnet::disco::DiscoPrivate;
 use codewire_tailnet::node::{Node, NodePublic, prefix_from_uuid};
 use codewire_tailnet::wg::{PublicKey, StaticSecret};
 use connectrpc::client::{ClientConfig, HttpClient};
+use connectrpc::{ConnectError, InboundStream, RequestContext, ServiceResult, ServiceStream};
+use futures::StreamExt as _;
 use rand::rngs::OsRng;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -91,6 +98,10 @@ impl ChildGuard {
     fn kill_and_wait(&mut self) -> ExitStatus {
         self.0.as_mut().unwrap().kill().unwrap();
         self.wait_bounded()
+    }
+
+    fn is_running(&mut self) -> bool {
+        self.0.as_mut().unwrap().try_wait().unwrap().is_none()
     }
 }
 
@@ -179,6 +190,124 @@ async fn start_fixture(with_stun: bool) -> Fixture {
         derp_task,
         stun_task,
     }
+}
+
+#[derive(Clone)]
+struct DynamicMeshCoordinator {
+    initial_derp_map: Vec<u8>,
+    updates: broadcast::Sender<Vec<u8>>,
+}
+
+#[allow(refining_impl_trait)]
+impl MeshCoordinatorService for DynamicMeshCoordinator {
+    async fn coordinate(
+        &self,
+        _ctx: RequestContext,
+        mut requests: InboundStream<MeshCoordinatorServiceCoordinateRequest>,
+    ) -> ServiceResult<ServiceStream<MeshCoordinatorServiceCoordinateResponse>> {
+        let first = requests
+            .next()
+            .await
+            .ok_or_else(|| ConnectError::invalid_argument("hello is required"))??
+            .to_owned_message();
+        if !matches!(
+            first.msg,
+            Some(mesh_coordinator_service_coordinate_request::Msg::Hello(_))
+        ) {
+            return Err(ConnectError::invalid_argument(
+                "hello must be the first message",
+            ));
+        }
+
+        let (responses_tx, responses_rx) = mpsc::channel(4);
+        responses_tx
+            .send(Ok(coordinator_derp_map(self.initial_derp_map.clone())))
+            .await
+            .map_err(|_| ConnectError::internal("response stream closed"))?;
+        let mut updates = self.updates.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    request = requests.next() => match request {
+                        Some(Ok(_)) => {}
+                        Some(Err(_)) | None => return,
+                    },
+                    update = updates.recv() => match update {
+                        Ok(bytes) => {
+                            if responses_tx
+                                .send(Ok(coordinator_derp_map(bytes)))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => return,
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        });
+        connectrpc::Response::stream_ok(futures::stream::unfold(
+            responses_rx,
+            |mut receiver| async move { receiver.recv().await.map(|item| (item, receiver)) },
+        ))
+    }
+}
+
+fn coordinator_derp_map(bytes: Vec<u8>) -> MeshCoordinatorServiceCoordinateResponse {
+    MeshCoordinatorServiceCoordinateResponse {
+        msg: CoordinateDerpMap {
+            derp_map_json: bytes,
+            ..Default::default()
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
+fn test_derp_map(derp_address: SocketAddr) -> Vec<u8> {
+    format!(
+        r#"{{"Regions":{{"1":{{"RegionID":1,"RegionCode":"cw","RegionName":"Codewire Embedded","Nodes":[{{"Name":"1a","RegionID":1,"HostName":"{}","DERPPort":{},"STUNPort":-1,"InsecureForTests":true}}]}}}}}}"#,
+        derp_address.ip(),
+        derp_address.port()
+    )
+    .into_bytes()
+}
+
+async fn start_dynamic_coordinator_fixture() -> (Fixture, broadcast::Sender<Vec<u8>>) {
+    let derp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let derp_address = derp_listener.local_addr().unwrap();
+    let relay = Relay::new(DerpPrivate::generate(&mut OsRng));
+    let tls = self_signed_tls_config(&[]).unwrap();
+    let derp_task = tokio::spawn(async move {
+        serve_tls(derp_listener, relay, tls).await.unwrap();
+    });
+
+    let mesh_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mesh_address = mesh_listener.local_addr().unwrap();
+    let (updates, _) = broadcast::channel(4);
+    let connect = connectrpc::Router::new().add_service(Arc::new(DynamicMeshCoordinator {
+        initial_derp_map: test_derp_map(derp_address),
+        updates: updates.clone(),
+    }));
+    let app = AppBuilder::new("dynamic-mesh-coordinator-test")
+        .with_connect_routes(connect)
+        .into_router();
+    let mesh_task = tokio::spawn(async move {
+        axum::serve(mesh_listener, app).await.unwrap();
+    });
+    (
+        Fixture {
+            mesh_address,
+            derp_address,
+            stun_address: None,
+            mesh_task,
+            derp_task,
+            stun_task: None,
+        },
+        updates,
+    )
 }
 
 fn client_config(address: SocketAddr) -> ClientConfig {
@@ -540,7 +669,7 @@ async fn connect_dial_tailnet(fixture: &Fixture, target_address: IpAddr) -> Dial
                 node_rx,
                 CoordinatorHandlers {
                     on_peers: move |nodes| {
-                        update_conn.update_peers(nodes).unwrap();
+                        let _ = update_conn.update_peers(nodes);
                         if let Some(node) = nodes.iter().find(|node| {
                             node.addresses
                                 .iter()
@@ -588,6 +717,106 @@ async fn wait_for_direct_path(dial: &DialTailnet, target: &Node) {
     .await
     .expect("isolated Mesh peer did not establish direct UDP");
     assert!(direct_udp.has_verified_endpoint(&target.key));
+}
+
+async fn assert_peer_transport_loss_fails_closed(
+    with_stun: bool,
+    expected_transport: PeerTransport,
+    generation: u64,
+) {
+    let fixture = start_fixture(with_stun).await;
+    seed_network(fixture.mesh_address).await;
+    let environment_id = Uuid::new_v4();
+    let enrollment = create_enrollment(fixture.mesh_address).await;
+    let (mut control, mut child) = start_transport(
+        fixture.mesh_address,
+        &enrollment,
+        environment_id,
+        generation,
+    );
+    admit_transport(&mut control);
+
+    control.set_nonblocking(true).unwrap();
+    let (publisher, mut accepted) = mesh_ingress_channel(&[GUEST_PORT]).unwrap();
+    let receiver = tokio::spawn(receive_mesh_ingress_submissions(
+        tokio::net::UnixStream::from_std(control).unwrap(),
+        publisher,
+        environment_id,
+        generation,
+        vec![GUEST_PORT],
+        Zeroizing::new(TEST_KEY),
+    ));
+    let target_address = prefix_from_uuid(&environment_id).addr();
+    let mut dial = connect_dial_tailnet(&fixture, target_address).await;
+    let target = wait_for_target(&mut dial.target).await;
+    if expected_transport == PeerTransport::DirectUdp {
+        wait_for_direct_path(&dial, &target).await;
+    }
+    assert_eq!(
+        dial.conn.probe_peer_path(&target).unwrap().transport,
+        expected_transport
+    );
+
+    let mut remote = tokio::time::timeout(
+        Duration::from_secs(10),
+        dial.conn
+            .dial_context_tcp(SocketAddr::new(target_address, GUEST_PORT)),
+    )
+    .await
+    .expect("pre-loss Mesh TCP dial timed out")
+    .unwrap();
+    remote.write_all(b"before-loss").await.unwrap();
+    let admitted = tokio::time::timeout(Duration::from_secs(10), accepted.recv())
+        .await
+        .expect("pre-loss Mesh stream was not admitted")
+        .unwrap();
+    admitted.stream.set_nonblocking(true).unwrap();
+    let mut worker = tokio::net::UnixStream::from_std(admitted.stream).unwrap();
+    let mut before = [0_u8; 11];
+    worker.read_exact(&mut before).await.unwrap();
+    assert_eq!(&before, b"before-loss");
+
+    // Keep the coordinate stream alive while killing the peer's selected
+    // packet owner. This distinguishes transport loss from peer revocation.
+    dial.conn.close();
+    assert!(dial.conn.probe_peer_path(&target).is_err());
+    let _ = remote.write_all(b"after-loss").await;
+    let mut after = [0_u8; 10];
+    match tokio::time::timeout(Duration::from_millis(300), worker.read(&mut after)).await {
+        Ok(Ok(0)) | Ok(Err(_)) | Err(_) => {}
+        Ok(Ok(read)) => {
+            panic!("{expected_transport:?} loss delivered {read} post-loss application bytes")
+        }
+    }
+
+    let post_loss_conn = Arc::clone(&dial.conn);
+    let post_loss = tokio::spawn(async move {
+        if let Ok(mut stream) = post_loss_conn
+            .dial_context_tcp(SocketAddr::new(target_address, GUEST_PORT))
+            .await
+        {
+            let _ = stream.write_all(b"new-after-loss").await;
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), accepted.recv())
+            .await
+            .is_err(),
+        "{expected_transport:?} loss admitted a new runner stream"
+    );
+    post_loss.abort();
+    let _ = post_loss.await;
+    assert!(child.is_running(), "peer transport loss killed Mesh owner");
+
+    revoke_node(fixture.mesh_address).await;
+    assert!(child.wait_bounded().success());
+    receiver.await.unwrap().unwrap();
+    assert!(accepted.recv().await.is_none());
+    match tokio::time::timeout(Duration::from_secs(2), worker.read(&mut after)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        Ok(Ok(read)) => panic!("Mesh cleanup delivered {read} unexpected bytes"),
+        Err(_) => panic!("Mesh cleanup retained a transferred runner stream"),
+    }
 }
 
 #[test]
@@ -866,6 +1095,161 @@ async fn confined_mesh_process_relays_only_admitted_ports_and_requires_fresh_enr
     let mut eof = [0_u8; 1];
     assert_eq!(fresh_control.read(&mut eof).unwrap(), 0);
     revoke_node(fixture.mesh_address).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confined_mesh_process_fails_closed_on_malformed_dynamic_coordinator_input() {
+    let (fixture, updates) = start_dynamic_coordinator_fixture().await;
+    let environment_id = Uuid::new_v4();
+    let generation = 10;
+    let (mut control, mut child) = start_transport(
+        fixture.mesh_address,
+        "cw_enr_dynamic-malformed",
+        environment_id,
+        generation,
+    );
+    admit_transport(&mut control);
+
+    control.set_nonblocking(true).unwrap();
+    let (publisher, mut accepted) = mesh_ingress_channel(&[GUEST_PORT]).unwrap();
+    let receiver = tokio::spawn(receive_mesh_ingress_submissions(
+        tokio::net::UnixStream::from_std(control).unwrap(),
+        publisher,
+        environment_id,
+        generation,
+        vec![GUEST_PORT],
+        Zeroizing::new(TEST_KEY),
+    ));
+
+    updates.send(b"{not-json".to_vec()).unwrap();
+    let status = child.wait_bounded();
+    assert_eq!(
+        status.code(),
+        Some(MeshTransportStartupFailure::Protocol.exit_code())
+    );
+    receiver.await.unwrap().unwrap();
+    assert!(accepted.recv().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confined_mesh_process_fails_closed_on_derp_relay_peer_transport_loss() {
+    assert_peer_transport_loss_fails_closed(false, PeerTransport::DerpRelay, 11).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confined_mesh_process_fails_closed_on_direct_udp_peer_transport_loss() {
+    assert_peer_transport_loss_fails_closed(true, PeerTransport::DirectUdp, 12).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confined_mesh_process_drops_queue_overflow_without_exiting() {
+    let fixture = start_fixture(false).await;
+    seed_network(fixture.mesh_address).await;
+    let environment_id = Uuid::new_v4();
+    let generation = 10;
+    let enrollment = create_enrollment(fixture.mesh_address).await;
+    let (mut control, mut child) = start_transport(
+        fixture.mesh_address,
+        &enrollment,
+        environment_id,
+        generation,
+    );
+    admit_transport(&mut control);
+
+    control.set_nonblocking(true).unwrap();
+    let (publisher, mut accepted) = mesh_ingress_channel(&[GUEST_PORT]).unwrap();
+    let queue_capacity = accepted.max_capacity();
+    assert!(queue_capacity > 0 && queue_capacity <= 256);
+    let receiver = tokio::spawn(receive_mesh_ingress_submissions(
+        tokio::net::UnixStream::from_std(control).unwrap(),
+        publisher,
+        environment_id,
+        generation,
+        vec![GUEST_PORT],
+        Zeroizing::new(TEST_KEY),
+    ));
+    let target_address = prefix_from_uuid(&environment_id).addr();
+    let mut dial = connect_dial_tailnet(&fixture, target_address).await;
+    let _target = wait_for_target(&mut dial.target).await;
+
+    let mut held = Vec::with_capacity(queue_capacity);
+    for index in 0..queue_capacity {
+        let mut remote = tokio::time::timeout(
+            Duration::from_secs(10),
+            dial.conn
+                .dial_context_tcp(SocketAddr::new(target_address, GUEST_PORT)),
+        )
+        .await
+        .expect("Mesh saturation dial timed out")
+        .unwrap();
+        remote.write_all(b"q").await.unwrap();
+        held.push(remote);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while accepted.len() != index + 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "runner-owned Mesh queue reached {} of {} entries",
+                accepted.len(),
+                index + 1
+            )
+        });
+    }
+    assert_eq!(accepted.len(), queue_capacity);
+
+    let mut overflow = tokio::time::timeout(
+        Duration::from_secs(10),
+        dial.conn
+            .dial_context_tcp(SocketAddr::new(target_address, GUEST_PORT)),
+    )
+    .await
+    .expect("Mesh overflow dial timed out")
+    .unwrap();
+    let _ = overflow.write_all(b"overflow").await;
+    let mut byte = [0_u8; 1];
+    match tokio::time::timeout(Duration::from_secs(2), overflow.read(&mut byte)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        Ok(Ok(_)) => panic!("queue overflow returned unexpected guest data"),
+        Err(_) => panic!("queue overflow retained a live unowned stream"),
+    }
+    assert!(child.is_running(), "queue saturation killed Mesh transport");
+
+    for _ in 0..queue_capacity {
+        drop(
+            tokio::time::timeout(Duration::from_secs(2), accepted.recv())
+                .await
+                .expect("saturated Mesh queue did not drain")
+                .expect("saturated Mesh queue closed"),
+        );
+    }
+    drop(held);
+
+    let mut recovered = tokio::time::timeout(
+        Duration::from_secs(10),
+        dial.conn
+            .dial_context_tcp(SocketAddr::new(target_address, GUEST_PORT)),
+    )
+    .await
+    .expect("post-saturation Mesh dial timed out")
+    .unwrap();
+    recovered.write_all(b"queue-recovered").await.unwrap();
+    let admitted = tokio::time::timeout(Duration::from_secs(10), accepted.recv())
+        .await
+        .expect("post-saturation Mesh stream was not admitted")
+        .unwrap();
+    admitted.stream.set_nonblocking(true).unwrap();
+    let mut worker = tokio::net::UnixStream::from_std(admitted.stream).unwrap();
+    let mut request = [0_u8; 15];
+    worker.read_exact(&mut request).await.unwrap();
+    assert_eq!(&request, b"queue-recovered");
+    assert!(child.is_running(), "recovered Mesh transport exited");
+
+    revoke_node(fixture.mesh_address).await;
+    assert!(child.wait_bounded().success());
+    receiver.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
