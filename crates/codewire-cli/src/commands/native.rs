@@ -131,6 +131,7 @@ pub(crate) async fn create_native_environment(
             project_spec_sha256,
             implicit_path_mode,
             host_ports,
+            mesh: None,
         })
         .await
         .map_err(native_status)

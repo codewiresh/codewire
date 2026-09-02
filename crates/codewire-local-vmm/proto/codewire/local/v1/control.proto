@@ -155,11 +155,24 @@ message CreateEnvironmentRequest {
   // Canonical creation-time loopback TCP publications. These are local-only
   // host resources and are not part of the placement-neutral ProjectSpec.
   repeated HostPortBinding host_ports = 10;
+  // Optional non-secret binding to one exact Mesh network. The supervisor
+  // persists only this status-visible metadata; setup authority remains in an
+  // isolated host process and never enters this API.
+  MeshAttachment mesh = 11;
 }
 
 message HostPortBinding {
   uint32 host_port = 1;
   uint32 guest_port = 2;
+}
+
+message MeshAttachment {
+  string mesh_url = 1;
+  string organization_id = 2;
+  string network_id = 3;
+  string node_name = 4;
+  // Canonical immutable application-port set admitted for Mesh TCP ingress.
+  repeated uint32 guest_ports = 5;
 }
 
 message EnvironmentSelector {
@@ -205,6 +218,7 @@ message Environment {
   // Canonical session default from the recorded portable project intent.
   string working_directory = 14;
   repeated HostPortBinding host_ports = 15;
+  MeshAttachment mesh = 16;
 }
 
 message ListEnvironmentsRequest {}
@@ -334,6 +348,9 @@ message StartVmRequest {
   // Exact durable loopback TCP bindings selected by the supervisor for this
   // boot. The runner atomically reserves them before starting the VMM.
   repeated HostPortBinding host_ports = 13;
+  // Non-secret network identity and immutable guest-port admission for this
+  // generation. No enrollment or steady-state credential is allowed.
+  MeshAttachment mesh = 14;
 }
 
 message StopVmRequest {}

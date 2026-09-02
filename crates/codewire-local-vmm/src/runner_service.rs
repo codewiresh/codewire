@@ -32,6 +32,7 @@ use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use crate::linux::path::PrivateRoot;
 use crate::linux::runner::ExitClass;
+use crate::mesh_ingress::MeshAttachment;
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
 
@@ -472,6 +473,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             .map_err(|_| Status::invalid_argument("invalid vCPU count"))?;
         let setup = parse_setup_binding(&request)?;
         let host_ports = parse_host_ports(&request)?;
+        let mesh = parse_mesh_attachment(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
@@ -509,6 +511,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 memory_mib: request.memory_mib,
                 setup,
                 host_ports,
+                mesh,
             })
             .await
         {
@@ -835,6 +838,39 @@ fn parse_host_ports(request: &v1::StartVmRequest) -> Result<Vec<HostPortBinding>
         ));
     }
     Ok(canonical)
+}
+
+fn parse_mesh_attachment(request: &v1::StartVmRequest) -> Result<Option<MeshAttachment>, Status> {
+    let Some(raw) = request.mesh.as_ref() else {
+        return Ok(None);
+    };
+    let guest_ports = raw
+        .guest_ports
+        .iter()
+        .map(|port| u16::try_from(*port).map_err(|_| Status::invalid_argument("invalid Mesh port")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let attachment = MeshAttachment::new(
+        &raw.mesh_url,
+        &raw.organization_id,
+        &raw.network_id,
+        &raw.node_name,
+        guest_ports,
+    )
+    .map_err(|_| Status::invalid_argument("invalid Mesh attachment"))?;
+    if attachment.mesh_url != raw.mesh_url
+        || attachment.organization_id != raw.organization_id
+        || attachment.network_id != raw.network_id
+        || attachment.node_name != raw.node_name
+        || attachment
+            .guest_ports
+            .iter()
+            .copied()
+            .map(u32::from)
+            .ne(raw.guest_ports.iter().copied())
+    {
+        return Err(Status::invalid_argument("noncanonical Mesh attachment"));
+    }
+    Ok(Some(attachment))
 }
 
 fn map_start_error(error: RunnerError) -> Status {
@@ -1185,6 +1221,42 @@ mod tests {
         );
         assert!(
             parse_setup_binding(&v1::StartVmRequest::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn private_start_requires_an_exact_non_secret_mesh_attachment() {
+        let request = v1::StartVmRequest {
+            mesh: Some(v1::MeshAttachment {
+                mesh_url: "https://mesh.example.test/base".to_owned(),
+                organization_id: "org-test".to_owned(),
+                network_id: "network-test".to_owned(),
+                node_name: "dev".to_owned(),
+                guest_ports: vec![3_000, 8_080],
+            }),
+            ..Default::default()
+        };
+        let attachment = parse_mesh_attachment(&request).unwrap().unwrap();
+        assert_eq!(attachment.network_id, "network-test");
+        assert_eq!(attachment.guest_ports, vec![3_000, 8_080]);
+
+        let mut noncanonical = request.clone();
+        noncanonical.mesh.as_mut().unwrap().guest_ports.reverse();
+        assert_eq!(
+            parse_mesh_attachment(&noncanonical).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut credential_url = request;
+        credential_url.mesh.as_mut().unwrap().mesh_url =
+            "https://user:secret@mesh.example.test".to_owned();
+        assert_eq!(
+            parse_mesh_attachment(&credential_url).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        assert!(
+            parse_mesh_attachment(&v1::StartVmRequest::default())
                 .unwrap()
                 .is_none()
         );

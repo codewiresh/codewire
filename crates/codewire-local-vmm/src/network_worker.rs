@@ -697,6 +697,13 @@ struct ProductWorkerBootstrap {
     mesh_ingress_ports: Vec<u16>,
 }
 
+struct ProductWorkerSession {
+    network_key: NetworkKey,
+    host_port_key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
+    mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
+    mesh_ingress_ports: Vec<u16>,
+}
+
 /// Entrypoint used only by the hidden product `cw` worker command.
 pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), NetworkWorkerError> {
     validate_identity(vm_id, generation)?;
@@ -763,10 +770,12 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
         .map_err(|_| NetworkWorkerError::PreparedIo)?;
     run_prepared_product_worker(
         bootstrap,
-        prepared.network_key,
-        prepared.host_port_key,
-        prepared.mesh_ingress_key,
-        prepared.mesh_ingress_ports,
+        ProductWorkerSession {
+            network_key: prepared.network_key,
+            host_port_key: prepared.host_port_key,
+            mesh_ingress_key: prepared.mesh_ingress_key,
+            mesh_ingress_ports: prepared.mesh_ingress_ports,
+        },
         vm_id,
         generation,
         broker,
@@ -827,10 +836,7 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
 
 async fn run_prepared_product_worker<B: EgressBroker>(
     bootstrap: StdUnixStream,
-    key: NetworkKey,
-    host_port_key: Zeroizing<[u8; HOST_PORT_CONTROL_KEY_LEN]>,
-    mesh_ingress_key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
-    mesh_ingress_ports: Vec<u16>,
+    session: ProductWorkerSession,
     vm_id: Uuid,
     generation: u64,
     broker: Arc<B>,
@@ -864,16 +870,16 @@ async fn run_prepared_product_worker<B: EgressBroker>(
         status_rx,
         inbound_tx,
         IngressControlKeys {
-            host_port: host_port_key,
-            mesh: mesh_ingress_key,
+            host_port: session.host_port_key,
+            mesh: session.mesh_ingress_key,
         },
-        mesh_ingress_ports,
+        session.mesh_ingress_ports,
         vm_id,
         generation,
     ));
     let session = run_host_session_with_ingress(
         network,
-        key,
+        session.network_key,
         vm_id,
         generation,
         broker,

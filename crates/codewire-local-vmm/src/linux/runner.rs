@@ -39,7 +39,7 @@ use crate::host_port::{
     validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
-use crate::mesh_ingress::MESH_INGRESS_CONTROL_KEY_LEN;
+use crate::mesh_ingress::{MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment};
 use crate::network_worker::{
     NETWORK_BOOTSTRAP_FD, NetworkWorkerStartupFailure, NetworkWorkerStartupStatus,
     WORKER_BROKER_READY_MESSAGE, WORKER_PREPARED_MESSAGE, WORKER_STATUS_MAX_BYTES,
@@ -95,6 +95,7 @@ pub struct CreateVmRequest {
     pub memory_mib: u32,
     pub setup: Option<SetupBinding>,
     pub host_ports: Vec<HostPortBinding>,
+    pub mesh: Option<MeshAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -868,6 +869,7 @@ impl RunningVm {
             || !executable.is_absolute()
             || std::fs::canonicalize(executable).ok().as_deref() != Some(executable)
             || !std::fs::metadata(executable).is_ok_and(|metadata| metadata.is_file())
+            || (mode == NetworkWorkerMode::InjectedVerification && self.request.mesh.is_some())
         {
             return Err(RunnerError::InvalidNetworkWorker);
         }
@@ -907,6 +909,7 @@ impl RunningVm {
                 vm_id: self.request.vm_id,
                 generation: self.request.generation,
                 deadline,
+                mesh: self.request.mesh.as_ref(),
             };
             match spawn_network_stack_processes(&launch, key, mode).await {
                 Ok(mut worker) => {
@@ -1286,6 +1289,7 @@ struct NetworkStackLaunch<'a> {
     vm_id: Uuid,
     generation: u64,
     deadline: tokio::time::Instant,
+    mesh: Option<&'a MeshAttachment>,
 }
 
 struct NetworkWorkerProcess {
@@ -1936,7 +1940,10 @@ async fn spawn_network_worker_process(
                 mesh_ingress_key
                     .as_deref()
                     .expect("product worker has a Mesh ingress control key"),
-                &[],
+                context
+                    .mesh
+                    .map(|attachment| attachment.guest_ports.as_slice())
+                    .unwrap_or_default(),
             )
             .map(|bytes| Zeroizing::new(bytes.to_vec())),
             Some(endpoint),
@@ -2469,6 +2476,10 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
         || request.vcpus > 32
         || !(128..=65_536).contains(&request.memory_mib)
         || validate_canonical_host_port_bindings(&request.host_ports).is_err()
+        || request
+            .mesh
+            .as_ref()
+            .is_some_and(|attachment| attachment.validate().is_err())
     {
         return Err(RunnerError::InvalidRequest);
     }
@@ -3030,6 +3041,7 @@ mod tests {
             memory_mib,
             setup: None,
             host_ports: Vec::new(),
+            mesh: None,
         }
     }
 
@@ -3380,6 +3392,31 @@ mod tests {
         }];
         assert!(matches!(
             validate_request(&daemon_port),
+            Err(RunnerError::InvalidRequest)
+        ));
+
+        let mut valid_mesh = request(2, 16_384);
+        valid_mesh.mesh = Some(
+            MeshAttachment::new(
+                "https://mesh.example.test",
+                "org",
+                "network",
+                "environment",
+                [3_000, 8_080],
+            )
+            .unwrap(),
+        );
+        assert!(validate_request(&valid_mesh).is_ok());
+
+        let mut noncanonical_mesh = valid_mesh;
+        noncanonical_mesh
+            .mesh
+            .as_mut()
+            .unwrap()
+            .guest_ports
+            .reverse();
+        assert!(matches!(
+            validate_request(&noncanonical_mesh),
             Err(RunnerError::InvalidRequest)
         ));
     }

@@ -8,7 +8,9 @@
 use std::collections::BTreeSet;
 
 use hmac::{Hmac, Mac as _};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use url::{Host, Url};
 use uuid::Uuid;
 
 use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
@@ -16,11 +18,118 @@ use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
 pub const MESH_INGRESS_CONTROL_KEY_LEN: usize = 32;
 pub const MESH_INGRESS_CONTROL_FRAME_LEN: usize = 80;
 pub const MAX_MESH_INGRESS_PORTS: usize = 64;
+const MAX_MESH_URL_BYTES: usize = 2_048;
+const MAX_MESH_ID_BYTES: usize = 255;
 
 const MESH_INGRESS_CONTROL_MAGIC: &[u8; 8] = b"CWMESHI1";
 const MESH_INGRESS_CONTROL_TAG_OFFSET: usize = 48;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Non-secret durable intent for attaching one local environment to one exact
+/// Mesh network. Every field may appear in local status output. The endpoint
+/// may identify a deployment, but this contract has no bearer/auth field and
+/// rejects URL userinfo, query parameters, fragments, and cleartext remote
+/// transport.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MeshAttachment {
+    pub mesh_url: String,
+    pub organization_id: String,
+    pub network_id: String,
+    pub node_name: String,
+    pub guest_ports: Vec<u16>,
+}
+
+impl MeshAttachment {
+    pub fn new(
+        mesh_url: &str,
+        organization_id: &str,
+        network_id: &str,
+        node_name: &str,
+        guest_ports: impl IntoIterator<Item = u16>,
+    ) -> Result<Self, MeshIngressError> {
+        Ok(Self {
+            mesh_url: canonical_mesh_url(mesh_url)?,
+            organization_id: canonical_mesh_identifier(organization_id, MAX_MESH_ID_BYTES)
+                .ok_or(MeshIngressError::InvalidAttachment)?,
+            network_id: canonical_mesh_identifier(network_id, MAX_MESH_ID_BYTES)
+                .ok_or(MeshIngressError::InvalidAttachment)?,
+            node_name: canonical_mesh_node_name(node_name)
+                .ok_or(MeshIngressError::InvalidAttachment)?,
+            guest_ports: canonical_mesh_ingress_ports(guest_ports)?,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), MeshIngressError> {
+        let canonical = Self::new(
+            &self.mesh_url,
+            &self.organization_id,
+            &self.network_id,
+            &self.node_name,
+            self.guest_ports.iter().copied(),
+        )?;
+        if canonical != *self {
+            return Err(MeshIngressError::InvalidAttachment);
+        }
+        Ok(())
+    }
+}
+
+fn canonical_mesh_url(raw: &str) -> Result<String, MeshIngressError> {
+    let raw = raw.trim().trim_end_matches('/');
+    if raw.is_empty() || raw.len() > MAX_MESH_URL_BYTES {
+        return Err(MeshIngressError::InvalidAttachment);
+    }
+    let parsed = Url::parse(raw).map_err(|_| MeshIngressError::InvalidAttachment)?;
+    if parsed.cannot_be_a_base()
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.scheme(), "http" | "https")
+    {
+        return Err(MeshIngressError::InvalidAttachment);
+    }
+    if parsed.scheme() == "http" && !mesh_host_is_loopback(parsed.host()) {
+        return Err(MeshIngressError::InsecureAttachment);
+    }
+    let canonical = parsed.as_str().trim_end_matches('/').to_owned();
+    if canonical.is_empty() || canonical.len() > MAX_MESH_URL_BYTES {
+        return Err(MeshIngressError::InvalidAttachment);
+    }
+    Ok(canonical)
+}
+
+fn mesh_host_is_loopback(host: Option<Host<&str>>) -> bool {
+    match host {
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
+fn canonical_mesh_identifier(raw: &str, maximum: usize) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()
+        && value.len() <= maximum
+        && value.chars().all(|character| !character.is_control()))
+    .then(|| value.to_owned())
+}
+
+fn canonical_mesh_node_name(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    let bytes = value.as_bytes();
+    (!bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    .then(|| value.to_owned())
+}
 
 pub(crate) fn is_mesh_ingress_control_frame(frame: &[u8; MESH_INGRESS_CONTROL_FRAME_LEN]) -> bool {
     &frame[..MESH_INGRESS_CONTROL_MAGIC.len()] == MESH_INGRESS_CONTROL_MAGIC
@@ -201,6 +310,10 @@ fn authenticate(
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MeshIngressError {
+    #[error("Mesh attachment is invalid")]
+    InvalidAttachment,
+    #[error("remote Mesh attachment requires HTTPS")]
+    InsecureAttachment,
     #[error("Mesh ingress binding is invalid")]
     InvalidBinding,
     #[error("too many Mesh ingress ports")]
@@ -254,6 +367,49 @@ mod tests {
             canonical_mesh_ingress_ports(1..=(MAX_MESH_INGRESS_PORTS as u16 + 1)),
             Err(MeshIngressError::TooManyPorts)
         );
+    }
+
+    #[test]
+    fn attachment_is_canonical_bounded_and_has_no_auth_field() {
+        let attachment = MeshAttachment::new(
+            " https://MESH.example.test/base/ ",
+            "org-test",
+            "network_test",
+            "dev.local",
+            [8_080, 3_000],
+        )
+        .unwrap();
+        assert_eq!(attachment.mesh_url, "https://mesh.example.test/base");
+        assert_eq!(attachment.guest_ports, vec![3_000, 8_080]);
+        attachment.validate().unwrap();
+        assert_eq!(
+            MeshAttachment::new(
+                "https://mesh.example.test",
+                "organization / β",
+                "project network",
+                "dev",
+                [],
+            )
+            .unwrap()
+            .network_id,
+            "project network"
+        );
+
+        let mut noncanonical = attachment.clone();
+        noncanonical.guest_ports.reverse();
+        assert_eq!(
+            noncanonical.validate(),
+            Err(MeshIngressError::InvalidAttachment)
+        );
+        for denied in [
+            "http://mesh.example.test",
+            "https://user:secret@mesh.example.test",
+            "https://mesh.example.test?token=secret",
+            "file:///tmp/mesh",
+        ] {
+            assert!(MeshAttachment::new(denied, "org", "network", "node", []).is_err());
+        }
+        MeshAttachment::new("http://127.0.0.1:18090", "org", "network", "node", []).unwrap();
     }
 
     #[test]

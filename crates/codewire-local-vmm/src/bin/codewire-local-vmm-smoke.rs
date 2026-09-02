@@ -1139,6 +1139,7 @@ mod linux {
             memory_mib: resources.memory_mib,
             setup: None,
             host_ports: Vec::new(),
+            mesh: None,
         }
     }
 

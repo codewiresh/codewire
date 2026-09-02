@@ -45,6 +45,9 @@ use crate::linux::state::{
     deletion_tree_location, move_stopped_vm_to_trash,
 };
 use crate::linux::{LiveProcess, ProcessIdentity, RecoveryError, VmPaths};
+use crate::mesh_ingress::{
+    MeshAttachment, canonical_mesh_ingress_ports, validate_canonical_mesh_ingress_ports,
+};
 use crate::oci::{
     ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
     RegistryResolverError, ResolvedDescriptor, Sha256Digest,
@@ -586,6 +589,8 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) generation: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) host_ports: Vec<HostPortBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mesh: Option<MeshAttachment>,
     pub(crate) workspace_plan: WorkspacePlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) project_spec_json: Option<Vec<u8>>,
@@ -628,6 +633,7 @@ impl EnvironmentRecord {
                 .map(|project| project.working_directory)
                 .unwrap_or_default(),
             host_ports: host_ports_to_proto(&self.host_ports),
+            mesh: mesh_attachment_to_proto(self.mesh.as_ref()),
         }
     }
 
@@ -880,6 +886,17 @@ impl EnvironmentRecord {
             || !self.disk_bytes.is_multiple_of(1024 * 1024)
             || self.workspace_plan.validate().is_err()
             || validate_canonical_host_port_bindings(&self.host_ports).is_err()
+            || self.mesh.as_ref().is_some_and(|mesh| {
+                mesh.validate().is_err()
+                    || mesh.node_name != self.name
+                    || self
+                        .project_spec_json
+                        .as_deref()
+                        .and_then(|bytes| serde_json::from_slice(bytes).ok())
+                        .is_none_or(|project: codewire_project::ProjectSpec| {
+                            validate_mesh_for_project(mesh, &project).is_err()
+                        })
+            })
             || match (&self.project_spec_json, &self.project_spec_sha256) {
                 (None, None) => true,
                 (Some(bytes), Some(digest)) => {
@@ -1354,6 +1371,8 @@ impl SupervisorCore {
                             || environment.memory_mib != request.memory_mib
                             || environment.disk_bytes != request.disk_bytes
                             || environment.host_ports != host_ports_from_proto(&request.host_ports)?
+                            || environment.mesh
+                                != mesh_attachment_from_proto(request.mesh.as_ref())?
                             || environment.project_spec_json.as_deref()
                                 != Some(request.project_spec_json.as_slice())
                             || environment.project_spec_sha256.as_deref()
@@ -1377,6 +1396,7 @@ impl SupervisorCore {
                                 disk_bytes: request.disk_bytes,
                                 generation: 0,
                                 host_ports: host_ports_from_proto(&request.host_ports)?,
+                                mesh: mesh_attachment_from_proto(request.mesh.as_ref())?,
                                 workspace_plan: workspace_plan.clone(),
                                 project_spec_json: Some(request.project_spec_json.clone()),
                                 project_spec_sha256: Some(request.project_spec_sha256.clone()),
@@ -2300,6 +2320,7 @@ impl SupervisorCore {
                 setup_header_sha256: workspace.setup_header_sha256,
                 setup_root_generation: workspace.setup_root_generation,
                 host_ports: host_ports_to_proto(&environment.host_ports),
+                mesh: mesh_attachment_to_proto(environment.mesh.as_ref()),
             })
             .await;
         let relay_result = match tokio::time::timeout(RUNNER_EVENT_DRAIN_TIMEOUT, &mut relay).await
@@ -3015,6 +3036,8 @@ impl LocalSupervisorService for SupervisorRpc {
         let mut request = request.into_inner();
         request.host_ports =
             canonicalize_host_ports_proto(&request.host_ports).map_err(Status::from)?;
+        request.mesh =
+            canonicalize_mesh_attachment_proto(request.mesh.as_ref()).map_err(Status::from)?;
         let request_id = validate_create(&request).map_err(Status::from)?;
         let mut core = self.core.lock().await;
         let operation = match core
@@ -4003,6 +4026,66 @@ fn host_ports_to_proto(bindings: &[HostPortBinding]) -> Vec<v1::HostPortBinding>
         .collect()
 }
 
+fn canonicalize_mesh_attachment_proto(
+    attachment: Option<&v1::MeshAttachment>,
+) -> Result<Option<v1::MeshAttachment>, SupervisorError> {
+    let Some(attachment) = attachment else {
+        return Ok(None);
+    };
+    let guest_ports = attachment
+        .guest_ports
+        .iter()
+        .map(|port| u16::try_from(*port).map_err(|_| SupervisorError::InvalidRequest))
+        .collect::<Result<Vec<_>, _>>()?;
+    let attachment = MeshAttachment::new(
+        &attachment.mesh_url,
+        &attachment.organization_id,
+        &attachment.network_id,
+        &attachment.node_name,
+        guest_ports,
+    )
+    .map_err(|_| SupervisorError::InvalidRequest)?;
+    Ok(mesh_attachment_to_proto(Some(&attachment)))
+}
+
+fn mesh_attachment_from_proto(
+    attachment: Option<&v1::MeshAttachment>,
+) -> Result<Option<MeshAttachment>, SupervisorError> {
+    let canonical = canonicalize_mesh_attachment_proto(attachment)?;
+    if canonical.as_ref() != attachment {
+        return Err(SupervisorError::InvalidRequest);
+    }
+    canonical
+        .map(|attachment| {
+            MeshAttachment::new(
+                &attachment.mesh_url,
+                &attachment.organization_id,
+                &attachment.network_id,
+                &attachment.node_name,
+                attachment
+                    .guest_ports
+                    .into_iter()
+                    .map(|port| u16::try_from(port).expect("canonical Mesh port fits u16")),
+            )
+            .map_err(|_| SupervisorError::InvalidRequest)
+        })
+        .transpose()
+}
+
+fn mesh_attachment_to_proto(attachment: Option<&MeshAttachment>) -> Option<v1::MeshAttachment> {
+    attachment.map(|attachment| v1::MeshAttachment {
+        mesh_url: attachment.mesh_url.clone(),
+        organization_id: attachment.organization_id.clone(),
+        network_id: attachment.network_id.clone(),
+        node_name: attachment.node_name.clone(),
+        guest_ports: attachment
+            .guest_ports
+            .iter()
+            .map(|port| u32::from(*port))
+            .collect(),
+    })
+}
+
 fn validate_host_ports_for_project(
     bindings: &[HostPortBinding],
     project: &codewire_project::ProjectSpec,
@@ -4020,6 +4103,23 @@ fn validate_host_ports_for_project(
         return Err(SupervisorError::InvalidRequest);
     }
     Ok(())
+}
+
+fn validate_mesh_for_project(
+    attachment: &MeshAttachment,
+    project: &codewire_project::ProjectSpec,
+) -> Result<(), SupervisorError> {
+    attachment
+        .validate()
+        .map_err(|_| SupervisorError::InvalidRequest)?;
+    let guest_ports =
+        canonical_mesh_ingress_ports(project.application_ports.iter().map(|port| port.port))
+            .map_err(|_| SupervisorError::InvalidRequest)?;
+    if attachment.guest_ports != guest_ports {
+        return Err(SupervisorError::InvalidRequest);
+    }
+    validate_canonical_mesh_ingress_ports(&attachment.guest_ports)
+        .map_err(|_| SupervisorError::InvalidRequest)
 }
 
 fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, SupervisorError> {
@@ -4041,6 +4141,12 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
     let project: codewire_project::ProjectSpec = serde_json::from_slice(&request.project_spec_json)
         .map_err(|_| SupervisorError::InvalidRequest)?;
     validate_host_ports_for_project(&host_ports_from_proto(&request.host_ports)?, &project)?;
+    if let Some(mesh) = mesh_attachment_from_proto(request.mesh.as_ref())?.as_ref() {
+        if mesh.node_name != request.name {
+            return Err(SupervisorError::InvalidRequest);
+        }
+        validate_mesh_for_project(mesh, &project)?;
+    }
     if project.repositories.is_empty() {
         parse_implicit_path_mode(&request.implicit_path_mode)?;
         if request.source_path.is_empty() || !Path::new(&request.source_path).is_absolute() {
@@ -4161,6 +4267,7 @@ fn create_operation_payload(
     let project_spec_json = std::str::from_utf8(&request.project_spec_json)
         .expect("validated canonical project JSON is UTF-8");
     let host_ports = host_ports_from_proto(&request.host_ports)?;
+    let mesh = mesh_attachment_from_proto(request.mesh.as_ref())?;
     workspace_plan.validate()?;
     Ok(serde_json::json!({
         "name": request.name,
@@ -4172,6 +4279,7 @@ fn create_operation_payload(
         "project_spec_sha256": request.project_spec_sha256,
         "implicit_path_mode": request.implicit_path_mode,
         "host_ports": host_ports,
+        "mesh": mesh,
         "workspace_plan": workspace_plan,
     }))
 }
@@ -4185,7 +4293,7 @@ fn create_request_from_operation(
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 10)
+        .filter(|fields| fields.len() == 11)
         .ok_or(SupervisorError::InvalidState)?;
     let name = fields
         .get("name")
@@ -4236,6 +4344,16 @@ fn create_request_from_operation(
     .map_err(|_| SupervisorError::InvalidState)?;
     validate_canonical_host_port_bindings(&host_ports)
         .map_err(|_| SupervisorError::InvalidState)?;
+    let mesh = serde_json::from_value::<Option<MeshAttachment>>(
+        fields
+            .get("mesh")
+            .cloned()
+            .ok_or(SupervisorError::InvalidState)?,
+    )
+    .map_err(|_| SupervisorError::InvalidState)?;
+    if mesh.as_ref().is_some_and(|mesh| mesh.validate().is_err()) {
+        return Err(SupervisorError::InvalidState);
+    }
     let workspace_plan: WorkspacePlan = serde_json::from_value(
         fields
             .get("workspace_plan")
@@ -4257,6 +4375,7 @@ fn create_request_from_operation(
         project_spec_sha256,
         implicit_path_mode,
         host_ports: host_ports_to_proto(&host_ports),
+        mesh: mesh_attachment_to_proto(mesh.as_ref()),
     };
     validate_create(&request)?;
     Ok((request, workspace_plan))
@@ -5297,6 +5416,7 @@ mod tests {
             disk_bytes: 20 * 1024 * 1024 * 1024,
             generation: 1,
             host_ports: Vec::new(),
+            mesh: None,
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "a".repeat(40),
@@ -6705,6 +6825,13 @@ mod tests {
                 host_port: 18_080,
                 guest_port: 3_000,
             }],
+            mesh: Some(v1::MeshAttachment {
+                mesh_url: "https://mesh.example.test/base".to_owned(),
+                organization_id: "org-test".to_owned(),
+                network_id: "network-test".to_owned(),
+                node_name: "dev".to_owned(),
+                guest_ports: vec![3_000],
+            }),
         };
         validate_create(&request).unwrap();
         let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
@@ -6771,6 +6898,44 @@ mod tests {
             ),
             Err(SupervisorError::InvalidRequest)
         ));
+    }
+
+    #[test]
+    fn local_mesh_attachment_is_exact_environment_and_project_port_intent() {
+        let project = codewire_project::ProjectSpec {
+            application_ports: vec![
+                codewire_project::ApplicationPort {
+                    port: 8_080,
+                    ..Default::default()
+                },
+                codewire_project::ApplicationPort {
+                    port: 3_000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let raw = v1::MeshAttachment {
+            mesh_url: " https://MESH.example.test/base/ ".to_owned(),
+            organization_id: " org-test ".to_owned(),
+            network_id: " network-test ".to_owned(),
+            node_name: " dev ".to_owned(),
+            guest_ports: vec![8_080, 3_000],
+        };
+        let canonical = canonicalize_mesh_attachment_proto(Some(&raw))
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical.mesh_url, "https://mesh.example.test/base");
+        assert_eq!(canonical.node_name, "dev");
+        assert_eq!(canonical.guest_ports, vec![3_000, 8_080]);
+        let attachment = mesh_attachment_from_proto(Some(&canonical))
+            .unwrap()
+            .unwrap();
+        validate_mesh_for_project(&attachment, &project).unwrap();
+
+        let mut wrong_ports = attachment.clone();
+        wrong_ports.guest_ports = vec![3_000];
+        assert!(validate_mesh_for_project(&wrong_ports, &project).is_err());
     }
 
     #[test]
@@ -7534,6 +7699,7 @@ mod tests {
             project_spec_json,
             implicit_path_mode: String::new(),
             host_ports: Vec::new(),
+            mesh: None,
         };
         let workspace_plan = WorkspacePlan {
             schema_version: 1,
@@ -7606,6 +7772,7 @@ mod tests {
             disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
             generation: 1,
             host_ports: Vec::new(),
+            mesh: None,
             workspace_plan: WorkspacePlan::local(&crate::workspace::WorkspaceSource {
                 source_path: PathBuf::from("/workspace/source"),
                 commit: "a".repeat(40),
