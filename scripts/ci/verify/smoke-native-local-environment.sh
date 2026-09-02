@@ -54,8 +54,10 @@ CREDENTIAL_ROOT=''
 CREDENTIAL_PROFILE_NAME='native-broker'
 CREDENTIAL_ID=''
 CREDENTIAL_CANARY=''
+CREDENTIAL_REFRESH_CANARY=''
 KEYRING_ROOT=''
 KEYRING_RUNTIME=''
+KEYRING_RUNTIME_PARENT=''
 KEYRING_CONFIG=''
 KEYRING_DATA=''
 KEYRING_CONTROL=''
@@ -99,8 +101,10 @@ transport-loss recovery, and journaled exact deletion cleanup.
 
 With --managed-credential-broker, it instead runs the focused protected-store
 product proof. That mode requires a specially featured cw binary named exactly
-cw-local-credential-broker-smoke and an isolated Secret Service implementation;
-it never contacts the provider or reads the desktop session keyring.
+cw-local-credential-broker-smoke, an isolated Secret Service implementation,
+and a private tmpfs-backed XDG runtime. It enrolls a synthetic Codex OAuth
+identity through the public command; it never contacts the provider or reads
+the desktop session keyring.
 USAGE
 }
 
@@ -205,7 +209,7 @@ done
   exit 2
 }
 
-for tool in awk cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
+for tool in awk base64 cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
 done
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
@@ -269,11 +273,22 @@ SOURCE_HOOK_MARKER="$SMOKE_ROOT/source-hook-invoked"
 SOURCE_CREDENTIAL_MARKER="$SMOKE_ROOT/source-credential-helper-invoked"
 CREDENTIAL_ROOT="$SMOKE_HOME/.codewire/credentials-v1"
 KEYRING_ROOT="$SMOKE_ROOT/keyring"
-KEYRING_RUNTIME="$KEYRING_ROOT/runtime"
 KEYRING_CONFIG="$KEYRING_ROOT/config"
 KEYRING_DATA="$KEYRING_ROOT/data"
 KEYRING_CONTROL="$KEYRING_ROOT/control"
-KEYRING_DBUS_ADDRESS="unix:path=$KEYRING_RUNTIME/bus"
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  KEYRING_RUNTIME_PARENT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  require_absolute_canonical_dir 'XDG runtime parent' "$KEYRING_RUNTIME_PARENT"
+  [[ "$(stat -c '%u' "$KEYRING_RUNTIME_PARENT")" == "$(id -u)" &&
+     "$(stat -c '%a' "$KEYRING_RUNTIME_PARENT")" == 700 ]] ||
+    die 'XDG runtime parent must be private and owned by the smoke user'
+  [[ "$(findmnt -nro FSTYPE -T "$KEYRING_RUNTIME_PARENT")" == tmpfs ]] ||
+    die 'XDG runtime parent must be backed by tmpfs'
+  KEYRING_RUNTIME="$(mktemp -d "$KEYRING_RUNTIME_PARENT/.codewire-native-smoke-runtime.XXXXXX")"
+  chmod 0700 "$KEYRING_RUNTIME"
+  KEYRING_RUNTIME="$(realpath -e -- "$KEYRING_RUNTIME")"
+  KEYRING_DBUS_ADDRESS="unix:path=$KEYRING_RUNTIME/bus"
+fi
 mkdir -m 0700 "$SMOKE_HOME" "$STATE_ROOT" "$WORKSPACE" "$PLATFORM_CONFIG" "$SMOKE_ROOT/bin"
 touch "$TRANSCRIPT"
 chmod 0600 "$TRANSCRIPT"
@@ -415,17 +430,16 @@ cw_isolated() {
   )
 }
 
-run_cw_add_synthetic_credential() {
+run_cw_connect_synthetic_codex() {
   local stdout_file stderr_file
   COMMAND_INDEX=$((COMMAND_INDEX + 1))
   stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
   stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
-  if ! printf '%s' "$CREDENTIAL_CANARY" |
-    cw_isolated credentials --local add openai --kind api-key \
-      --name native-broker-openai >"$stdout_file" 2>"$stderr_file"; then
+  if ! cw_isolated credentials --local connect codex \
+    --name native-broker-codex >"$stdout_file" 2>"$stderr_file"; then
     cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
     tail -n 80 "$stderr_file" >&2
-    die 'adding the synthetic local credential failed'
+    die 'connecting the synthetic local Codex credential failed'
   fi
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   LAST_STDOUT="$stdout_file"
@@ -655,8 +669,12 @@ keyring_service_ready() {
 
 start_isolated_keyring() {
   mkdir -m 0700 \
-    "$KEYRING_ROOT" "$KEYRING_RUNTIME" "$KEYRING_CONFIG" \
-    "$KEYRING_DATA" "$KEYRING_CONTROL"
+    "$KEYRING_ROOT" "$KEYRING_CONFIG" "$KEYRING_DATA" "$KEYRING_CONTROL"
+  [[ -d "$KEYRING_RUNTIME" && ! -L "$KEYRING_RUNTIME" &&
+     "$(stat -c '%u' "$KEYRING_RUNTIME")" == "$(id -u)" &&
+     "$(stat -c '%a' "$KEYRING_RUNTIME")" == 700 &&
+     "$(findmnt -nro FSTYPE -T "$KEYRING_RUNTIME")" == tmpfs ]] ||
+    die 'isolated keyring runtime is not a private tmpfs directory'
   env -i PATH='/usr/bin:/bin' LC_ALL=C XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
     /usr/bin/dbus-daemon --session --address="$KEYRING_DBUS_ADDRESS" \
       --nofork --nopidfile >"$KEYRING_ROOT/dbus.stdout" 2>"$KEYRING_ROOT/dbus.stderr" &
@@ -710,6 +728,66 @@ stop_isolated_keyring() {
     "$KEYRING_DBUS_PID" /usr/bin/dbus-daemon "--address=$KEYRING_DBUS_ADDRESS" || failed=1
   KEYRING_DBUS_PID=''
   [[ "$failed" -eq 0 ]]
+}
+
+remove_isolated_keyring_runtime() {
+  local expected_prefix
+  [[ -n "$KEYRING_RUNTIME" ]] || return 0
+  expected_prefix="$KEYRING_RUNTIME_PARENT/.codewire-native-smoke-runtime."
+  [[ -n "$KEYRING_RUNTIME_PARENT" && "$KEYRING_RUNTIME" == "$expected_prefix"* &&
+     -d "$KEYRING_RUNTIME" && ! -L "$KEYRING_RUNTIME" &&
+     "$(stat -c '%u' "$KEYRING_RUNTIME")" == "$(id -u)" ]] || return 1
+  rm -rf -- "$KEYRING_RUNTIME"
+  KEYRING_RUNTIME=''
+  KEYRING_DBUS_ADDRESS=''
+}
+
+install_synthetic_codex() {
+  cat >"$SMOKE_ROOT/bin/codex" <<'EOF'
+#!/bin/sh
+set -eu
+
+case "${1-}" in
+  login)
+    [ "$#" -eq 4 ]
+    [ "$2" = '--device-auth' ]
+    [ "$3" = '-c' ]
+    [ "$4" = 'cli_auth_credentials_store="file"' ]
+    [ "$HOME" = "$CODEX_HOME" ]
+    [ "$XDG_CONFIG_HOME" = "$CODEX_HOME" ]
+    [ "$XDG_CACHE_HOME" = "$CODEX_HOME" ]
+    [ "$TMPDIR" = "$CODEX_HOME" ]
+    [ -z "${XDG_RUNTIME_DIR+x}" ]
+    [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
+    [ -z "${OPENAI_API_KEY+x}" ]
+    login_parent=${CODEX_HOME%/*}
+    [ -f "$login_parent/.codewire-synthetic-login-root" ]
+    [ "$(findmnt -nro FSTYPE -T "$CODEX_HOME")" = tmpfs ]
+    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
+    [ "${#boot_id}" -eq 32 ]
+    access_token="cwlocalbroker$boot_id"
+    refresh_token="cwlocalrefresh$boot_id"
+    jwt_header=$(printf '%s' '{"alg":"none"}' | /usr/bin/base64 -w 0 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=')
+    jwt_payload=$(printf '%s' '{"email":"native-smoke@example.test","https://api.openai.com/auth":{"chatgpt_account_id":"account-native-broker","chatgpt_account_is_fedramp":false}}' | /usr/bin/base64 -w 0 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=')
+    id_token="$jwt_header.$jwt_payload.synthetic-signature"
+    umask 077
+    printf '%s' "{\"auth_mode\":\"chatgpt\",\"OPENAI_API_KEY\":null,\"tokens\":{\"id_token\":\"$id_token\",\"access_token\":\"$access_token\",\"refresh_token\":\"$refresh_token\",\"account_id\":\"account-native-broker\"}}" >"$CODEX_HOME/auth.json"
+    chmod 0600 "$CODEX_HOME/auth.json"
+    ;;
+  logout)
+    [ "$#" -eq 3 ]
+    [ "$2" = '-c' ]
+    [ "$3" = 'cli_auth_credentials_store="file"' ]
+    rm -f -- "$CODEX_HOME/auth.json"
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+EOF
+  chmod 0700 "$SMOKE_ROOT/bin/codex"
+  touch "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
+  chmod 0600 "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
 }
 
 secret_tool_isolated() {
@@ -766,8 +844,10 @@ terminate_exact_credential_authority() {
 }
 
 scan_for_credential_canary() {
-  local report="$SMOKE_ROOT/canary-scan.report"
-  if ! printf '%s' "$CREDENTIAL_CANARY" | /usr/bin/python3 -c '
+  local label="$1"
+  local canary="$2"
+  local report="$SMOKE_ROOT/canary-scan-$label.report"
+  if ! printf '%s' "$canary" | /usr/bin/python3 -c '
 import errno
 import os
 import stat
@@ -833,9 +913,9 @@ for path in found:
 raise SystemExit(1 if found else 0)
 ' "$SMOKE_ROOT" >"$report"; then
     tail -n 20 "$report" >&2
-    die 'synthetic credential canary entered durable smoke state'
+    die "synthetic $label canary entered durable smoke state"
   fi
-  [[ ! -s "$report" ]] || die 'credential canary scanner emitted unexpected output'
+  [[ ! -s "$report" ]] || die "$label canary scanner emitted unexpected output"
 }
 
 wait_for_environment_state() {
@@ -1118,6 +1198,9 @@ cleanup() {
   if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! stop_isolated_keyring; then
     cleanup_status=1
   fi
+  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! remove_isolated_keyring_runtime; then
+    cleanup_status=1
+  fi
   if [[ "$status" -eq 0 && "$cleanup_status" -eq 0 ]]; then
     rm -rf -- "$SMOKE_ROOT"
   else
@@ -1183,21 +1266,35 @@ jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT"
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'starting a private D-Bus and Secret Service instance'
   start_isolated_keyring
-  CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/uuid)"
+  CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  CREDENTIAL_REFRESH_CANARY="cwlocalrefresh$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   [[ ${#CREDENTIAL_CANARY} -ge 16 && ${#CREDENTIAL_CANARY} -le 256 &&
      "$CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated credential canary is invalid'
+  [[ ${#CREDENTIAL_REFRESH_CANARY} -ge 16 && ${#CREDENTIAL_REFRESH_CANARY} -le 256 &&
+     "$CREDENTIAL_REFRESH_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated credential refresh canary is invalid'
+  install_synthetic_codex
+  for canary in "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY"; do
+    if rg -qF "$canary" "$SMOKE_ROOT/bin/codex"; then
+      die 'synthetic Codex executable contains a generated credential canary'
+    fi
+  done
 
-  log 'creating one synthetic protected OpenAI credential and access profile'
-  run_cw_add_synthetic_credential
+  log 'enrolling one synthetic protected Codex OAuth credential through the public command'
+  run_cw_connect_synthetic_codex
+  [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
+    -name '.codewire-codex-login-*' -print -quit)" ]] ||
+    die 'transient Codex login directory remained after enrollment'
   run_cw credentials --local list --output json
   jq -e '
     length == 1 and
     .[0].placement == "local" and
     .[0].owner == "user/local-user" and
     .[0].provider == "openai" and
-    .[0].authentication_kind == "api_key" and
-    .[0].name == "native-broker-openai" and
+    .[0].authentication_kind == "oauth" and
+    .[0].name == "native-broker-codex" and
+    .[0].account_hint == "native-smoke@example.test" and
     .[0].status == "active" and
     .[0].revocation_generation == 1 and
     .[0].protected_store_persistence == "operating_system" and
@@ -1337,7 +1434,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     die 'broker-bound native environment did not stop'
   wait_for_journal_complete ||
     die 'broker-bound native stop returned before its lifecycle journal became terminal'
-  scan_for_credential_canary
+  scan_for_credential_canary before-delete-access-token "$CREDENTIAL_CANARY"
+  scan_for_credential_canary before-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
 
   log 'deleting the environment, profile, credential, and protected-store entry'
   run_cw env rm --local "$NAME" --yes
@@ -1358,8 +1456,10 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     >/dev/null 2>"$SMOKE_ROOT/deleted-keyring-entry.stderr"; then
     die 'synthetic protected-store entry remained after credential deletion'
   fi
-  scan_for_credential_canary
+  scan_for_credential_canary after-delete-access-token "$CREDENTIAL_CANARY"
+  scan_for_credential_canary after-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
   unset CREDENTIAL_CANARY
+  unset CREDENTIAL_REFRESH_CANARY
 
   [[ ! -e "$TRIPWIRE" ]] ||
     die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"

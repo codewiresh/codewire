@@ -483,6 +483,162 @@ fn broker_operation_lease_tracks_rotation_and_fails_closed_on_revocation_or_stor
 }
 
 #[test]
+fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+            .expect("open authority");
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"first-oauth-bundle"))
+        .expect("add credential");
+    let environment_id = environment("env-refresh");
+    bind_credential(&authority, &environment_id, &credential.metadata.id);
+    let request = operation_lease_request(&environment_id);
+    let lease = authority
+        .lease_environment_credential_operation(&request)
+        .expect("lease first generation");
+    let material_generation = lease.material_generation();
+    let revocation_generation = lease.credential.metadata.revocation_generation;
+    let channel_id = Uuid::new_v4();
+    let refresh_id = Uuid::new_v4();
+    let permit = authority
+        .begin_environment_credential_refresh(
+            channel_id,
+            refresh_id,
+            &request,
+            &credential.metadata.id,
+            revocation_generation,
+            material_generation,
+        )
+        .expect("begin refresh");
+    assert_eq!(permit.current_material_generation, 1);
+    assert_eq!(permit.next_material_generation, 2);
+    assert_eq!(
+        authority.begin_environment_credential_refresh(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &request,
+            &credential.metadata.id,
+            revocation_generation,
+            material_generation,
+        ),
+        Err(LocalCredentialError::CredentialRefreshInProgress)
+    );
+    assert_eq!(
+        authority.rotate_credential_material(
+            &credential.metadata.id,
+            material(b"manual-rotation"),
+            None,
+        ),
+        Err(LocalCredentialError::CredentialRefreshInProgress)
+    );
+    assert_eq!(
+        authority.delete_credential(&credential.metadata.id),
+        Err(LocalCredentialError::CredentialRefreshInProgress)
+    );
+
+    let next_entry = protected_entry_id(&credential.metadata.id, 2).expect("next entry");
+    store
+        .put(&next_entry, &material(b"refreshed-oauth-bundle"))
+        .expect("write refreshed bundle");
+    let (refreshed, committed_material_generation) = authority
+        .commit_environment_credential_refresh(channel_id, refresh_id)
+        .expect("commit refresh");
+    assert_eq!(refreshed.metadata.revocation_generation, 2);
+    assert_eq!(committed_material_generation, 2);
+    let lease = authority
+        .lease_environment_credential_operation(&request)
+        .expect("lease refreshed generation");
+    assert_eq!(lease.material_generation(), 2);
+    assert_eq!(
+        lease.with_material(<[u8]>::to_vec),
+        b"refreshed-oauth-bundle"
+    );
+    assert_eq!(store.entry_count(), 1);
+}
+
+#[test]
+fn oauth_refresh_recovers_a_rotated_provider_token_after_authority_crash() {
+    for persistence in [
+        ProtectedStorePersistence::OperatingSystem,
+        ProtectedStorePersistence::ProcessLifetime,
+    ] {
+        let temp = TempDir::new().expect("temporary directory");
+        let root = authority_root(&temp);
+        let store = TestProtectedStore::new(persistence);
+        let credential_id;
+        let environment_id = environment("env-refresh-recovery");
+        {
+            let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog())
+                .expect("open authority");
+            let credential = authority
+                .add_credential(new_credential("work"), material(b"first-oauth-bundle"))
+                .expect("add credential");
+            credential_id = credential.metadata.id.clone();
+            bind_credential(&authority, &environment_id, &credential_id);
+            authority
+                .begin_environment_credential_refresh(
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    &operation_lease_request(&environment_id),
+                    &credential_id,
+                    1,
+                    1,
+                )
+                .expect("begin refresh");
+            store
+                .put(
+                    &protected_entry_id(&credential_id, 2).expect("next entry"),
+                    &material(b"durable-refreshed-bundle"),
+                )
+                .expect("write next bundle");
+            // Dropping the authority models a crash after the provider rotated
+            // its refresh token and the broker durably wrote the new bundle,
+            // but before the metadata-only commit reply.
+        }
+
+        let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog())
+            .expect("recover authority");
+        let lease = authority
+            .lease_environment_credential_operation(&operation_lease_request(&environment_id))
+            .expect("lease recovered refresh");
+        assert_eq!(lease.material_generation(), 2);
+        assert_eq!(lease.credential.metadata.revocation_generation, 2);
+        assert_eq!(lease.credential.metadata.status, CredentialStatus::Active);
+        assert_eq!(
+            lease.with_material(<[u8]>::to_vec),
+            b"durable-refreshed-bundle"
+        );
+        assert_eq!(store.entry_count(), 1);
+    }
+}
+
+#[test]
+fn orphaned_oauth_refresh_marker_fails_authority_restart() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("open authority");
+    drop(authority);
+    let connection = Connection::open(root.join(DATABASE_FILE)).expect("open metadata database");
+    connection
+        .execute(
+            "INSERT INTO authority_metadata(key, value)
+             VALUES ('credential_refresh/orphaned', '2')",
+            [],
+        )
+        .expect("insert orphaned refresh marker");
+    drop(connection);
+
+    assert!(matches!(
+        LocalCredentialAuthority::open(&root, store, catalog()),
+        Err(LocalCredentialError::CorruptMetadata)
+    ));
+}
+
+#[test]
 fn unsupported_authentication_kind_is_rejected_before_protected_store_access() {
     let temp = TempDir::new().expect("temporary directory");
     let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);

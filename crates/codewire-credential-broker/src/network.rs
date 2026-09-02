@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use av_credential_proxy::tunnel_ip_allowed;
+use codewire_access::CredentialAuthKind;
 use futures::StreamExt as _;
 use http::HeaderMap;
 use reqwest::redirect::Policy;
@@ -13,10 +14,15 @@ use crate::{
 };
 
 const OPENAI_HOST: &str = "api.openai.com";
+const CHATGPT_HOST: &str = "chatgpt.com";
+const OPENAI_AUTH_HOST: &str = "auth.openai.com";
 const OPENAI_PORT: u16 = 443;
 const OPENAI_PATH: &str = "/v1/responses";
+const CHATGPT_CODEX_PATH: &str = "/backend-api/codex/responses";
+const OPENAI_REFRESH_PATH: &str = "/oauth/token";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESOLVED_ADDRESSES: usize = 16;
 const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
 
@@ -26,6 +32,7 @@ const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
 #[derive(Clone)]
 pub struct OpenAiHttpsTransport {
     client: reqwest::Client,
+    authentication_kind: CredentialAuthKind,
     resolved_address_count: usize,
 }
 
@@ -33,7 +40,7 @@ impl std::fmt::Debug for OpenAiHttpsTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("OpenAiHttpsTransport")
-            .field("destination", &OPENAI_HOST)
+            .field("authentication_kind", &self.authentication_kind)
             .field("resolved_address_count", &self.resolved_address_count)
             .finish_non_exhaustive()
     }
@@ -43,17 +50,20 @@ impl OpenAiHttpsTransport {
     /// Resolve and classify the fixed provider destination before any
     /// credential lease is requested. The admitted addresses remain pinned for
     /// this broker process, so post-confinement requests perform no DNS I/O.
-    pub async fn resolve() -> Result<Self, BrokerUpstreamError> {
+    pub async fn resolve(
+        authentication_kind: CredentialAuthKind,
+    ) -> Result<Self, BrokerUpstreamError> {
         // This deliberately uses the calling thread instead of Tokio's
         // blocking resolver pool. Broker launch is bounded by the authority's
         // readiness timeout, and retaining a resolver worker here would leave
         // an already-running thread outside older Landlock thread domains.
-        let addresses = (OPENAI_HOST, OPENAI_PORT)
-            .to_socket_addrs()
-            .map_err(|_| BrokerUpstreamError::Connect)?;
-        let addresses = admit_resolved_addresses(addresses)?;
-        let resolved_address_count = addresses.len();
-        let client = reqwest::Client::builder()
+        let hosts: &[&str] = match authentication_kind {
+            CredentialAuthKind::ApiKey => &[OPENAI_HOST],
+            CredentialAuthKind::OAuth => &[CHATGPT_HOST, OPENAI_AUTH_HOST],
+            _ => return Err(BrokerUpstreamError::DestinationDenied),
+        };
+        let mut resolved_address_count = 0_usize;
+        let mut builder = reqwest::Client::builder()
             .https_only(true)
             .no_proxy()
             .redirect(Policy::none())
@@ -61,12 +71,22 @@ impl OpenAiHttpsTransport {
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .http2_max_header_list_size(MAX_RESPONSE_HEADER_BYTES as u32)
-            .pool_max_idle_per_host(0)
-            .resolve_to_addrs(OPENAI_HOST, &addresses)
-            .build()
-            .map_err(|_| BrokerUpstreamError::Protocol)?;
+            .pool_max_idle_per_host(0);
+        for host in hosts {
+            let addresses = (*host, OPENAI_PORT)
+                .to_socket_addrs()
+                .map_err(|_| BrokerUpstreamError::Connect)?;
+            let addresses = admit_resolved_addresses(addresses)?;
+            resolved_address_count = resolved_address_count
+                .checked_add(addresses.len())
+                .filter(|count| *count <= MAX_RESOLVED_ADDRESSES.saturating_mul(hosts.len()))
+                .ok_or(BrokerUpstreamError::ResourceLimit)?;
+            builder = builder.resolve_to_addrs(host, &addresses);
+        }
+        let client = builder.build().map_err(|_| BrokerUpstreamError::Protocol)?;
         Ok(Self {
             client,
+            authentication_kind,
             resolved_address_count,
         })
     }
@@ -79,23 +99,19 @@ impl BrokerUpstreamTransport for OpenAiHttpsTransport {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (method, target, headers, body) = request.into_parts();
-        validate_target(&target)?;
-        let response = self
+        validate_target(&target, self.authentication_kind)?;
+        let is_refresh =
+            target.host_str() == Some(OPENAI_AUTH_HOST) && target.path() == OPENAI_REFRESH_PATH;
+        let mut request = self
             .client
             .request(method, target.as_str())
             .headers(headers)
-            .body(body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
-        if response.url().scheme() != "https"
-            || response.url().host_str() != Some(OPENAI_HOST)
-            || response.url().port_or_known_default() != Some(OPENAI_PORT)
-            || response.url().path() != OPENAI_PATH
-            || response.url().query().is_some()
-        {
-            return Err(BrokerUpstreamError::DestinationDenied);
+            .body(body);
+        if is_refresh {
+            request = request.timeout(REFRESH_REQUEST_TIMEOUT);
         }
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        validate_target(response.url(), self.authentication_kind)?;
         let status = response.status();
         let headers = response.headers().clone();
         validate_response_headers(&headers)?;
@@ -106,11 +122,24 @@ impl BrokerUpstreamTransport for OpenAiHttpsTransport {
     }
 }
 
-fn validate_target(target: &url::Url) -> Result<(), BrokerUpstreamError> {
+fn validate_target(
+    target: &url::Url,
+    authentication_kind: CredentialAuthKind,
+) -> Result<(), BrokerUpstreamError> {
+    let allowed = match authentication_kind {
+        CredentialAuthKind::ApiKey => {
+            target.host_str() == Some(OPENAI_HOST) && target.path() == OPENAI_PATH
+        }
+        CredentialAuthKind::OAuth => {
+            (target.host_str() == Some(CHATGPT_HOST) && target.path() == CHATGPT_CODEX_PATH)
+                || (target.host_str() == Some(OPENAI_AUTH_HOST)
+                    && target.path() == OPENAI_REFRESH_PATH)
+        }
+        _ => false,
+    };
     if target.scheme() != "https"
-        || target.host_str() != Some(OPENAI_HOST)
+        || !allowed
         || target.port_or_known_default() != Some(OPENAI_PORT)
-        || target.path() != OPENAI_PATH
         || target.query().is_some()
         || target.fragment().is_some()
         || !target.username().is_empty()
@@ -234,8 +263,25 @@ mod tests {
     #[test]
     fn destination_is_exact_and_never_redirectable() {
         assert!(
-            validate_target(&url::Url::parse("https://api.openai.com/v1/responses").unwrap())
-                .is_ok()
+            validate_target(
+                &url::Url::parse("https://api.openai.com/v1/responses").unwrap(),
+                CredentialAuthKind::ApiKey,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_target(
+                &url::Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap(),
+                CredentialAuthKind::OAuth,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_target(
+                &url::Url::parse("https://auth.openai.com/oauth/token").unwrap(),
+                CredentialAuthKind::OAuth,
+            )
+            .is_ok()
         );
         for denied in [
             "http://api.openai.com/v1/responses",
@@ -246,7 +292,23 @@ mod tests {
             "https://api.openai.com:444/v1/responses",
         ] {
             assert_eq!(
-                validate_target(&url::Url::parse(denied).unwrap()),
+                validate_target(
+                    &url::Url::parse(denied).unwrap(),
+                    CredentialAuthKind::ApiKey,
+                ),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{denied}"
+            );
+        }
+        for denied in [
+            "https://api.openai.com/v1/responses",
+            "https://chatgpt.com/backend-api/codex/responses?next=evil",
+            "https://chatgpt.com/backend-api/codex/other",
+            "https://auth.openai.com/oauth/revoke",
+            "https://user@auth.openai.com/oauth/token",
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(denied).unwrap(), CredentialAuthKind::OAuth,),
                 Err(BrokerUpstreamError::DestinationDenied),
                 "{denied}"
             );

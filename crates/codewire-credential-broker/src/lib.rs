@@ -9,11 +9,15 @@
 //! values must remain inside that process.
 
 mod bridge;
+mod codex_oauth;
 mod network;
 mod openai;
 mod runtime;
 
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
+pub use codex_oauth::{
+    CanonicalCodexOAuthBundle, CodexOAuthImport, CodexOAuthMaterialError, import_codex_auth_json,
+};
 pub use network::OpenAiHttpsTransport;
 pub use openai::{
     OpenAiApiKeyAdapter, OpenAiStreamingResponse, PreparedOpenAiRequest, PreparedOpenAiResponse,
@@ -22,9 +26,9 @@ pub use openai::{
 #[cfg(feature = "local-broker-synthetic-smoke")]
 pub use runtime::SyntheticOpenAiSmokeTransport;
 pub use runtime::{
-    BrokerHttpResponse, BrokerLeaseError, BrokerLeaseProvider, BrokerRequestError,
-    BrokerResponseBody, BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
-    BrokerUpstreamTransport, OpenAiBroker,
+    BrokerCredentialRefreshRequest, BrokerHttpResponse, BrokerLeaseError, BrokerLeaseProvider,
+    BrokerRefreshError, BrokerRequestError, BrokerResponseBody, BrokerUpstreamError,
+    BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
 };
 
 use codewire_access::{CredentialMetadata, DerivedGrant, GrantPermission};
@@ -43,6 +47,8 @@ pub trait BrokerCredentialLease: Sized {
     fn grant(&self) -> &DerivedGrant;
     /// Return the exact provider operation and route admitted by the authority.
     fn permission(&self) -> &GrantPermission;
+    /// Return the exact protected-value generation admitted by the authority.
+    fn material_generation(&self) -> u64;
     /// Consume the lease while the provider adapter prepares one request.
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T;
 }
@@ -59,6 +65,10 @@ impl BrokerCredentialLease for codewire_local_credentials::CredentialOperationLe
 
     fn permission(&self) -> &GrantPermission {
         &self.permission
+    }
+
+    fn material_generation(&self) -> u64 {
+        self.material_generation()
     }
 
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {

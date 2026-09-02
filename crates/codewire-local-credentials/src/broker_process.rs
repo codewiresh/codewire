@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use codewire_access::EnvironmentId;
+use codewire_access::{CredentialAuthKind, EnvironmentId};
 use thiserror::Error;
 
 /// Material-free launch description for one environment generation. Provider
@@ -11,12 +11,17 @@ pub struct LocalBrokerProcessConfig {
     pub environment_generation: u64,
     pub environment_name: String,
     pub supervisor_socket: PathBuf,
+    pub credential_authentication_kind: CredentialAuthKind,
 }
 
 impl LocalBrokerProcessConfig {
     pub(crate) fn validate(&self) -> Result<(), LocalBrokerSpawnError> {
         if self.environment_generation == 0
             || !valid_environment_name(&self.environment_name)
+            || !matches!(
+                self.credential_authentication_kind,
+                CredentialAuthKind::ApiKey | CredentialAuthKind::OAuth
+            )
             || !self.supervisor_socket.is_absolute()
             || self
                 .supervisor_socket
@@ -77,6 +82,7 @@ mod tests {
             environment_generation: 1,
             environment_name: name.to_owned(),
             supervisor_socket: PathBuf::from("/run/user/1000/codewire/supervisor.sock"),
+            credential_authentication_kind: CredentialAuthKind::ApiKey,
         }
     }
 
@@ -99,5 +105,15 @@ mod tests {
                 "{denied}"
             );
         }
+    }
+
+    #[test]
+    fn launch_rejects_unimplemented_authentication_kinds() {
+        let mut config = config("project");
+        config.credential_authentication_kind = CredentialAuthKind::AccessToken;
+        assert_eq!(
+            config.validate(),
+            Err(LocalBrokerSpawnError::InvalidConfiguration)
+        );
     }
 }

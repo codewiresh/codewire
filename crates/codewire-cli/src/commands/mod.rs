@@ -308,6 +308,8 @@ pub(crate) struct LocalCredentialBrokerArgs {
     pub(crate) environment_name: String,
     #[arg(long)]
     pub(crate) supervisor_socket: PathBuf,
+    #[arg(long)]
+    pub(crate) credential_authentication_kind: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -324,6 +326,8 @@ pub(crate) struct CredentialsArgs {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialsCommand {
+    #[command(about = "Connect an explicitly selected provider identity")]
+    Connect(CredentialConnectArgs),
     #[command(about = "Add an explicitly supplied credential")]
     Add(CredentialAddArgs),
     #[command(about = "List credential metadata")]
@@ -343,6 +347,21 @@ pub(crate) enum CredentialsCommand {
         #[command(subcommand)]
         command: CredentialProfileCommand,
     },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialConnectArgs {
+    #[arg(value_enum, value_name = "PROVIDER")]
+    pub(crate) provider: CredentialConnectProviderArg,
+    #[arg(long, value_name = "NAME")]
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum CredentialConnectProviderArg {
+    Codex,
 }
 
 #[cfg(target_os = "linux")]

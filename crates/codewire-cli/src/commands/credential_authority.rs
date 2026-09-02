@@ -169,6 +169,12 @@ impl LocalBrokerProcessSpawner for CwLocalBrokerSpawner {
             .arg(&config.environment_name)
             .arg("--supervisor-socket")
             .arg(&config.supervisor_socket)
+            .arg("--credential-authentication-kind")
+            .arg(match config.credential_authentication_kind {
+                codewire_access::CredentialAuthKind::ApiKey => "api-key",
+                codewire_access::CredentialAuthKind::OAuth => "oauth",
+                _ => return Err(LocalBrokerSpawnError::InvalidConfiguration),
+            })
             .env_clear()
             .envs(allowed_environment)
             .current_dir(&self.authority_root)

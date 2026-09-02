@@ -18,8 +18,8 @@ mod service;
 mod transport;
 
 pub use broker_channel::{
-    BrokerLeaseAuditDecision, BrokerLeaseAuditEvent, BrokerLeaseChannelError,
-    LocalCredentialBrokerLeaseClient, serve_broker_lease_channel,
+    BrokerCredentialRefreshPermit, BrokerLeaseAuditDecision, BrokerLeaseAuditEvent,
+    BrokerLeaseChannelError, LocalCredentialBrokerLeaseClient, serve_broker_lease_channel,
 };
 pub use broker_process::{
     EnvironmentBrokerRuntime, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
@@ -125,6 +125,7 @@ pub struct CredentialOperationLease {
     pub credential: CredentialRecord,
     pub grant: DerivedGrant,
     pub permission: GrantPermission,
+    material_generation: u64,
     value: ProtectedValue,
 }
 
@@ -145,6 +146,13 @@ impl CredentialOperationLease {
     pub fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
         operation(self.value.expose_secret())
     }
+
+    /// Return the exact protected-value generation admitted for this operation.
+    /// The generation is metadata only and never identifies a store entry on
+    /// its own.
+    pub fn material_generation(&self) -> u64 {
+        self.material_generation
+    }
 }
 
 impl fmt::Debug for CredentialOperationLease {
@@ -154,6 +162,7 @@ impl fmt::Debug for CredentialOperationLease {
             .field("credential", &self.credential)
             .field("grant", &self.grant)
             .field("permission", &self.permission)
+            .field("material_generation", &self.material_generation)
             .field("value", &"[REDACTED]")
             .finish()
     }
@@ -244,6 +253,24 @@ struct InternalCredentialRecord {
     material_state: MaterialState,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActiveCredentialRefresh {
+    channel_id: Uuid,
+    refresh_id: Uuid,
+    expected_revocation_generation: u64,
+    current_material_generation: u64,
+    next_material_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CredentialRefreshPermit {
+    credential_id: CredentialId,
+    refresh_id: Uuid,
+    expected_revocation_generation: u64,
+    current_material_generation: u64,
+    next_material_generation: u64,
+}
+
 impl fmt::Debug for InternalCredentialRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -265,6 +292,7 @@ pub struct LocalCredentialAuthority<S: ProtectedStore> {
     protected_store: S,
     catalog: ProviderCatalog,
     owner_id: OwnerId,
+    active_refreshes: Mutex<BTreeMap<CredentialId, ActiveCredentialRefresh>>,
 }
 
 impl<S: ProtectedStore> fmt::Debug for LocalCredentialAuthority<S> {
@@ -295,6 +323,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             protected_store,
             catalog,
             owner_id,
+            active_refreshes: Mutex::new(BTreeMap::new()),
         };
         authority.reconcile()?;
         Ok(authority)
@@ -495,6 +524,17 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         material: ProtectedValue,
         expires_at_unix: Option<u64>,
     ) -> Result<CredentialRecord, LocalCredentialError> {
+        // Hold the refresh-owner lock through every journal and protected-store
+        // mutation. A check-then-unlock here would let a broker begin a refresh
+        // against the same next material generation while a manual rotation is
+        // still in flight.
+        let active_refreshes = self
+            .active_refreshes
+            .lock()
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
+        if active_refreshes.contains_key(id) {
+            return Err(LocalCredentialError::CredentialRefreshInProgress);
+        }
         let mut connection = self.connection()?;
         let mut current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
         reconcile_ready_journal(&connection, &self.protected_store, &current)?;
@@ -580,6 +620,327 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .map(|record| record.public)
     }
 
+    pub(crate) fn begin_environment_credential_refresh(
+        &self,
+        channel_id: Uuid,
+        refresh_id: Uuid,
+        request: &CredentialOperationLeaseRequest,
+        expected_credential_id: &CredentialId,
+        expected_revocation_generation: u64,
+        expected_material_generation: u64,
+    ) -> Result<CredentialRefreshPermit, LocalCredentialError> {
+        if channel_id.is_nil()
+            || refresh_id.is_nil()
+            || expected_revocation_generation == 0
+            || expected_material_generation == 0
+        {
+            return Err(LocalCredentialError::StaleCredentialRefresh);
+        }
+        let admission = self.admit_environment_credential_operation(request)?;
+        if admission.credential.metadata.id != *expected_credential_id
+            || admission.credential.metadata.authentication_kind != CredentialAuthKind::OAuth
+            || admission.credential.metadata.revocation_generation != expected_revocation_generation
+            || admission.material_generation != expected_material_generation
+        {
+            return Err(LocalCredentialError::StaleCredentialRefresh);
+        }
+
+        {
+            let mut active = self
+                .active_refreshes
+                .lock()
+                .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
+            if active.contains_key(expected_credential_id) {
+                return Err(LocalCredentialError::CredentialRefreshInProgress);
+            }
+            active.insert(
+                expected_credential_id.clone(),
+                ActiveCredentialRefresh {
+                    channel_id,
+                    refresh_id,
+                    expected_revocation_generation,
+                    current_material_generation: expected_material_generation,
+                    next_material_generation: expected_material_generation
+                        .checked_add(1)
+                        .ok_or(LocalCredentialError::CorruptMetadata)?,
+                },
+            );
+        }
+
+        let result = self.prepare_credential_refresh(
+            expected_credential_id,
+            refresh_id,
+            expected_revocation_generation,
+            expected_material_generation,
+        );
+        if result.is_err() {
+            self.release_credential_refresh(expected_credential_id, channel_id, refresh_id)?;
+        }
+        result
+    }
+
+    pub(crate) fn commit_environment_credential_refresh(
+        &self,
+        channel_id: Uuid,
+        refresh_id: Uuid,
+    ) -> Result<(CredentialRecord, u64), LocalCredentialError> {
+        let permit = self.active_refresh_permit(channel_id, refresh_id)?;
+        let connection = self.connection()?;
+        let current = load_internal_credential(
+            &connection,
+            &permit.credential_id,
+            Some(MaterialState::Ready),
+        )?;
+        if current.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+            || current.public.metadata.status != CredentialStatus::Active
+            || current.public.metadata.revocation_generation
+                != permit.expected_revocation_generation
+            || current.material_generation != permit.current_material_generation
+        {
+            return Err(LocalCredentialError::StaleCredentialRefresh);
+        }
+        let journal = load_validated_protected_entry_journal(&connection, &current)?
+            .filter(|journal| journal.operation == JournalOperation::RollbackWrite)
+            .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
+        if journal.protected_entry_id
+            != protected_entry_id(&permit.credential_id, permit.next_material_generation)?
+            || load_credential_refresh_marker(&connection, &permit.credential_id)?
+                != Some(permit.next_material_generation)
+        {
+            return Err(LocalCredentialError::CorruptMetadata);
+        }
+        if self
+            .protected_store
+            .get(&journal.protected_entry_id)?
+            .is_none()
+        {
+            return Err(LocalCredentialError::CredentialMaterialMissing);
+        }
+        promote_oauth_refresh(&connection, &self.protected_store, &current, &journal)?;
+        let record = load_internal_credential(
+            &connection,
+            &permit.credential_id,
+            Some(MaterialState::Ready),
+        )?
+        .public;
+        drop(connection);
+        self.release_credential_refresh(&permit.credential_id, channel_id, refresh_id)?;
+        Ok((record, permit.next_material_generation))
+    }
+
+    pub(crate) fn abort_environment_credential_refresh(
+        &self,
+        channel_id: Uuid,
+        refresh_id: Uuid,
+    ) -> Result<(), LocalCredentialError> {
+        let permit = self.active_refresh_permit(channel_id, refresh_id)?;
+        let connection = self.connection()?;
+        let current = load_internal_credential(
+            &connection,
+            &permit.credential_id,
+            Some(MaterialState::Ready),
+        )?;
+        if current.material_generation != permit.current_material_generation {
+            return Err(LocalCredentialError::StaleCredentialRefresh);
+        }
+        let journal = load_validated_protected_entry_journal(&connection, &current)?
+            .filter(|journal| journal.operation == JournalOperation::RollbackWrite)
+            .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
+        if journal.protected_entry_id
+            != protected_entry_id(&permit.credential_id, permit.next_material_generation)?
+            || load_credential_refresh_marker(&connection, &permit.credential_id)?
+                != Some(permit.next_material_generation)
+        {
+            return Err(LocalCredentialError::CorruptMetadata);
+        }
+        self.protected_store.delete(&journal.protected_entry_id)?;
+        delete_credential_refresh_journal(&connection, &permit.credential_id)?;
+        drop(connection);
+        self.release_credential_refresh(&permit.credential_id, channel_id, refresh_id)
+    }
+
+    /// Mark a provider-rejected OAuth refresh as failed and invalidate every
+    /// lease for the old generation. No provider response detail is retained.
+    pub(crate) fn fail_environment_credential_refresh(
+        &self,
+        channel_id: Uuid,
+        refresh_id: Uuid,
+    ) -> Result<CredentialRecord, LocalCredentialError> {
+        let permit = self.active_refresh_permit(channel_id, refresh_id)?;
+        let connection = self.connection()?;
+        let current = load_internal_credential(
+            &connection,
+            &permit.credential_id,
+            Some(MaterialState::Ready),
+        )?;
+        if current.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+            || current.public.metadata.status != CredentialStatus::Active
+            || current.public.metadata.revocation_generation
+                != permit.expected_revocation_generation
+            || current.material_generation != permit.current_material_generation
+        {
+            return Err(LocalCredentialError::StaleCredentialRefresh);
+        }
+        let journal = load_validated_protected_entry_journal(&connection, &current)?
+            .filter(|journal| journal.operation == JournalOperation::RollbackWrite)
+            .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
+        if journal.protected_entry_id
+            != protected_entry_id(&permit.credential_id, permit.next_material_generation)?
+            || load_credential_refresh_marker(&connection, &permit.credential_id)?
+                != Some(permit.next_material_generation)
+            || self
+                .protected_store
+                .get(&journal.protected_entry_id)?
+                .is_some()
+        {
+            return Err(LocalCredentialError::CorruptMetadata);
+        }
+        let revocation_generation = current
+            .public
+            .metadata
+            .revocation_generation
+            .checked_add(1)
+            .ok_or(LocalCredentialError::CorruptMetadata)?;
+        let transaction = connection.unchecked_transaction().map_err(database_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE credentials
+                 SET status = 'refresh_failed', revocation_generation = ?2,
+                     updated_at_unix_ms = ?3
+                 WHERE id = ?1 AND authentication_kind = 'oauth' AND status = 'active'
+                   AND material_state = 'ready' AND revocation_generation = ?4
+                   AND material_generation = ?5 AND protected_entry_id = ?6",
+                params![
+                    permit.credential_id.as_str(),
+                    i64::try_from(revocation_generation)
+                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                    i64::try_from(unix_millis()?).map_err(|_| LocalCredentialError::InvalidTime)?,
+                    i64::try_from(permit.expected_revocation_generation)
+                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                    i64::try_from(permit.current_material_generation)
+                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                    current.protected_entry_id.expose_reference(),
+                ],
+            )
+            .map_err(database_error)?;
+        let journal_changed = transaction
+            .execute(
+                "DELETE FROM protected_entry_journal WHERE credential_id = ?1",
+                [permit.credential_id.as_str()],
+            )
+            .map_err(database_error)?;
+        let marker_changed = transaction
+            .execute(
+                "DELETE FROM authority_metadata WHERE key = ?1",
+                [credential_refresh_marker_key(&permit.credential_id)],
+            )
+            .map_err(database_error)?;
+        if changed != 1 || journal_changed != 1 || marker_changed != 1 {
+            return Err(LocalCredentialError::CorruptMetadata);
+        }
+        transaction.commit().map_err(database_error)?;
+        drop(connection);
+        self.release_credential_refresh(&permit.credential_id, channel_id, refresh_id)?;
+        self.get_credential(&permit.credential_id)
+    }
+
+    pub(crate) fn release_channel_credential_refreshes(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<(), LocalCredentialError> {
+        let mut active = self
+            .active_refreshes
+            .lock()
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
+        active.retain(|_, owner| owner.channel_id != channel_id);
+        Ok(())
+    }
+
+    fn prepare_credential_refresh(
+        &self,
+        id: &CredentialId,
+        refresh_id: Uuid,
+        expected_revocation_generation: u64,
+        expected_material_generation: u64,
+    ) -> Result<CredentialRefreshPermit, LocalCredentialError> {
+        let connection = self.connection()?;
+        let mut current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
+        reconcile_ready_journal(&connection, &self.protected_store, &current)?;
+        current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
+        if current.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+            || current.public.metadata.status != CredentialStatus::Active
+            || current.public.metadata.revocation_generation != expected_revocation_generation
+            || current.material_generation != expected_material_generation
+        {
+            return Err(LocalCredentialError::StaleCredentialRefresh);
+        }
+        let next_material_generation = current
+            .material_generation
+            .checked_add(1)
+            .ok_or(LocalCredentialError::CorruptMetadata)?;
+        let next_entry_id = protected_entry_id(id, next_material_generation)?;
+        match self.protected_store.get(&next_entry_id) {
+            Ok(None) => {}
+            Ok(Some(_)) => return Err(LocalCredentialError::ProtectedEntryCollision),
+            Err(error) => return Err(error.into()),
+        }
+        insert_credential_refresh_journal(
+            &connection,
+            id,
+            &next_entry_id,
+            next_material_generation,
+            unix_millis()?,
+        )?;
+        Ok(CredentialRefreshPermit {
+            credential_id: id.clone(),
+            refresh_id,
+            expected_revocation_generation,
+            current_material_generation: expected_material_generation,
+            next_material_generation,
+        })
+    }
+
+    fn active_refresh_permit(
+        &self,
+        channel_id: Uuid,
+        refresh_id: Uuid,
+    ) -> Result<CredentialRefreshPermit, LocalCredentialError> {
+        let active = self
+            .active_refreshes
+            .lock()
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
+        let (credential_id, owner) = active
+            .iter()
+            .find(|(_, owner)| owner.channel_id == channel_id && owner.refresh_id == refresh_id)
+            .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
+        Ok(CredentialRefreshPermit {
+            credential_id: credential_id.clone(),
+            refresh_id,
+            expected_revocation_generation: owner.expected_revocation_generation,
+            current_material_generation: owner.current_material_generation,
+            next_material_generation: owner.next_material_generation,
+        })
+    }
+
+    fn release_credential_refresh(
+        &self,
+        id: &CredentialId,
+        channel_id: Uuid,
+        refresh_id: Uuid,
+    ) -> Result<(), LocalCredentialError> {
+        let mut active = self
+            .active_refreshes
+            .lock()
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
+        match active.get(id) {
+            Some(owner) if owner.channel_id == channel_id && owner.refresh_id == refresh_id => {
+                active.remove(id);
+                Ok(())
+            }
+            _ => Err(LocalCredentialError::StaleCredentialRefresh),
+        }
+    }
+
     pub fn revoke_credential(
         &self,
         id: &CredentialId,
@@ -615,13 +976,27 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     }
 
     pub fn delete_credential(&self, id: &CredentialId) -> Result<(), LocalCredentialError> {
+        // Keep refresh admission excluded until both metadata and protected
+        // entries have reached the delete outcome. Otherwise a refresh could
+        // install its rollback journal after this initial check.
+        let active_refreshes = self
+            .active_refreshes
+            .lock()
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
+        if active_refreshes.contains_key(id) {
+            return Err(LocalCredentialError::CredentialRefreshInProgress);
+        }
         let connection = self.connection()?;
         if profile_or_binding_references_credential(&connection, id)? {
             return Err(LocalCredentialError::CredentialInUse);
         }
-        let record = load_internal_credential(&connection, id, None)?;
+        let mut record = load_internal_credential(&connection, id, None)?;
         if record.material_state == MaterialState::PendingWrite {
             return Err(LocalCredentialError::CredentialUnavailable);
+        }
+        if record.material_state == MaterialState::Ready {
+            reconcile_ready_journal(&connection, &self.protected_store, &record)?;
+            record = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
         }
         let journal = load_validated_protected_entry_journal(&connection, &record)?;
         if record.material_state == MaterialState::Ready {
@@ -668,6 +1043,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             credential: admission.credential,
             grant: admission.grant,
             permission: admission.permission,
+            material_generation: admission.material_generation,
             value,
         })
     }
@@ -1119,26 +1495,49 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 }
                 MaterialState::Ready => {
                     reconcile_ready_journal(&connection, &self.protected_store, &record)?;
-                    if expected_persistence == ProtectedStorePersistence::ProcessLifetime
-                        && self
+                    if expected_persistence == ProtectedStorePersistence::ProcessLifetime {
+                        // Refresh recovery can atomically promote the staged
+                        // generation and retire the entry held by `record`.
+                        // Check the reloaded active entry rather than that
+                        // intentionally deleted predecessor.
+                        let current = load_internal_credential(
+                            &connection,
+                            &record.public.metadata.id,
+                            Some(MaterialState::Ready),
+                        )?;
+                        if self
                             .protected_store
-                            .get(&record.protected_entry_id)?
+                            .get(&current.protected_entry_id)?
                             .is_none()
-                    {
-                        connection
-                            .execute(
-                                "UPDATE credentials SET status = 'expired', updated_at_unix_ms = ?2
-                                 WHERE id = ?1 AND material_state = 'ready'",
-                                params![
-                                    record.public.metadata.id.as_str(),
-                                    i64::try_from(unix_millis()?)
-                                        .map_err(|_| LocalCredentialError::InvalidTime)?
-                                ],
-                            )
-                            .map_err(database_error)?;
+                        {
+                            connection
+                                .execute(
+                                    "UPDATE credentials SET status = 'expired', updated_at_unix_ms = ?2
+                                     WHERE id = ?1 AND material_state = 'ready'",
+                                    params![
+                                        record.public.metadata.id.as_str(),
+                                        i64::try_from(unix_millis()?)
+                                            .map_err(|_| LocalCredentialError::InvalidTime)?
+                                    ],
+                                )
+                                .map_err(database_error)?;
+                        }
                     }
                 }
             }
+        }
+        let orphaned_refresh_marker = connection
+            .query_row(
+                "SELECT 1 FROM authority_metadata
+                 WHERE key GLOB 'credential_refresh/*' LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(database_error)?
+            .is_some();
+        if orphaned_refresh_marker {
+            return Err(LocalCredentialError::CorruptMetadata);
         }
         validate_environment_access_bindings(&connection)?;
         validate_database(&connection)
@@ -1519,6 +1918,90 @@ fn insert_protected_entry_journal(
     Ok(())
 }
 
+fn credential_refresh_marker_key(credential_id: &CredentialId) -> String {
+    format!("credential_refresh/{}", credential_id.as_str())
+}
+
+fn insert_credential_refresh_journal(
+    connection: &Connection,
+    credential_id: &CredentialId,
+    protected_entry_id: &ProtectedEntryId,
+    next_material_generation: u64,
+    now: u64,
+) -> Result<(), LocalCredentialError> {
+    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let journal_changed = transaction
+        .execute(
+            "INSERT INTO protected_entry_journal(
+               credential_id, operation, protected_entry_id, created_at_unix_ms
+             ) VALUES (?1, 'rollback_write', ?2, ?3)",
+            params![
+                credential_id.as_str(),
+                protected_entry_id.expose_reference(),
+                i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?
+            ],
+        )
+        .map_err(database_error)?;
+    let marker_changed = transaction
+        .execute(
+            "INSERT INTO authority_metadata(key, value) VALUES (?1, ?2)",
+            params![
+                credential_refresh_marker_key(credential_id),
+                next_material_generation.to_string()
+            ],
+        )
+        .map_err(database_error)?;
+    if journal_changed != 1 || marker_changed != 1 {
+        return Err(LocalCredentialError::CorruptMetadata);
+    }
+    transaction.commit().map_err(database_error)
+}
+
+fn load_credential_refresh_marker(
+    connection: &Connection,
+    credential_id: &CredentialId,
+) -> Result<Option<u64>, LocalCredentialError> {
+    connection
+        .query_row(
+            "SELECT value FROM authority_metadata WHERE key = ?1",
+            [credential_refresh_marker_key(credential_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(database_error)?
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|generation| *generation > 0 && generation.to_string() == value)
+                .ok_or(LocalCredentialError::CorruptMetadata)
+        })
+        .transpose()
+}
+
+fn delete_credential_refresh_journal(
+    connection: &Connection,
+    credential_id: &CredentialId,
+) -> Result<(), LocalCredentialError> {
+    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let journal_changed = transaction
+        .execute(
+            "DELETE FROM protected_entry_journal WHERE credential_id = ?1",
+            [credential_id.as_str()],
+        )
+        .map_err(database_error)?;
+    let marker_changed = transaction
+        .execute(
+            "DELETE FROM authority_metadata WHERE key = ?1",
+            [credential_refresh_marker_key(credential_id)],
+        )
+        .map_err(database_error)?;
+    if journal_changed != 1 || marker_changed != 1 {
+        return Err(LocalCredentialError::CorruptMetadata);
+    }
+    transaction.commit().map_err(database_error)
+}
+
 fn load_protected_entry_journal(
     connection: &Connection,
     credential_id: &CredentialId,
@@ -1591,14 +2074,141 @@ fn reconcile_ready_journal<S: ProtectedStore>(
     credential: &InternalCredentialRecord,
 ) -> Result<(), LocalCredentialError> {
     let Some(journal) = load_validated_protected_entry_journal(connection, credential)? else {
+        if load_credential_refresh_marker(connection, &credential.public.metadata.id)?.is_some() {
+            return Err(LocalCredentialError::CorruptMetadata);
+        }
         return Ok(());
     };
+    let refresh_generation =
+        load_credential_refresh_marker(connection, &credential.public.metadata.id)?;
     match journal.operation {
-        JournalOperation::RollbackWrite | JournalOperation::DeleteRetired => {
+        JournalOperation::RollbackWrite => {
+            if let Some(refresh_generation) = refresh_generation {
+                let expected_generation = credential
+                    .material_generation
+                    .checked_add(1)
+                    .ok_or(LocalCredentialError::CorruptMetadata)?;
+                if credential.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+                    || refresh_generation != expected_generation
+                {
+                    return Err(LocalCredentialError::CorruptMetadata);
+                }
+                if credential.public.metadata.status == CredentialStatus::Active
+                    && protected_store.get(&journal.protected_entry_id)?.is_some()
+                {
+                    return promote_oauth_refresh(
+                        connection,
+                        protected_store,
+                        credential,
+                        &journal,
+                    );
+                }
+                protected_store.delete(&journal.protected_entry_id)?;
+                return delete_credential_refresh_journal(
+                    connection,
+                    &credential.public.metadata.id,
+                );
+            }
+            protected_store.delete(&journal.protected_entry_id)?;
+        }
+        JournalOperation::DeleteRetired => {
+            if refresh_generation.is_some() {
+                return Err(LocalCredentialError::CorruptMetadata);
+            }
             protected_store.delete(&journal.protected_entry_id)?;
         }
     }
     delete_protected_entry_journal(connection, &credential.public.metadata.id)
+}
+
+fn promote_oauth_refresh<S: ProtectedStore>(
+    connection: &Connection,
+    protected_store: &S,
+    current: &InternalCredentialRecord,
+    journal: &ProtectedEntryJournal,
+) -> Result<(), LocalCredentialError> {
+    if current.public.metadata.authentication_kind != CredentialAuthKind::OAuth
+        || current.public.metadata.status != CredentialStatus::Active
+        || journal.operation != JournalOperation::RollbackWrite
+    {
+        return Err(LocalCredentialError::StaleCredentialRefresh);
+    }
+    let material_generation = current
+        .material_generation
+        .checked_add(1)
+        .ok_or(LocalCredentialError::CorruptMetadata)?;
+    if journal.protected_entry_id
+        != protected_entry_id(&current.public.metadata.id, material_generation)?
+        || load_credential_refresh_marker(connection, &current.public.metadata.id)?
+            != Some(material_generation)
+        || protected_store.get(&journal.protected_entry_id)?.is_none()
+    {
+        return Err(LocalCredentialError::CredentialMaterialMissing);
+    }
+    let revocation_generation = current
+        .public
+        .metadata
+        .revocation_generation
+        .checked_add(1)
+        .ok_or(LocalCredentialError::CorruptMetadata)?;
+    let now = unix_millis()?;
+    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let changed = transaction
+        .execute(
+            "UPDATE credentials
+             SET protected_entry_id = ?2, revocation_generation = ?3,
+                 material_generation = ?4, updated_at_unix_ms = ?5
+             WHERE id = ?1 AND authentication_kind = 'oauth' AND status = 'active'
+               AND material_state = 'ready' AND revocation_generation = ?6
+               AND material_generation = ?7 AND protected_entry_id = ?8",
+            params![
+                current.public.metadata.id.as_str(),
+                journal.protected_entry_id.expose_reference(),
+                i64::try_from(revocation_generation)
+                    .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                i64::try_from(material_generation)
+                    .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?,
+                i64::try_from(current.public.metadata.revocation_generation)
+                    .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                i64::try_from(current.material_generation)
+                    .map_err(|_| LocalCredentialError::CorruptMetadata)?,
+                current.protected_entry_id.expose_reference(),
+            ],
+        )
+        .map_err(database_error)?;
+    if changed != 1 {
+        return Err(LocalCredentialError::StaleCredentialRefresh);
+    }
+    let journal_changed = transaction
+        .execute(
+            "UPDATE protected_entry_journal
+             SET operation = 'delete_retired', protected_entry_id = ?2
+             WHERE credential_id = ?1 AND operation = 'rollback_write'",
+            params![
+                current.public.metadata.id.as_str(),
+                current.protected_entry_id.expose_reference()
+            ],
+        )
+        .map_err(database_error)?;
+    if journal_changed != 1 {
+        return Err(LocalCredentialError::CorruptMetadata);
+    }
+    let marker_changed = transaction
+        .execute(
+            "DELETE FROM authority_metadata WHERE key = ?1",
+            [credential_refresh_marker_key(&current.public.metadata.id)],
+        )
+        .map_err(database_error)?;
+    if marker_changed != 1 {
+        return Err(LocalCredentialError::CorruptMetadata);
+    }
+    transaction.commit().map_err(database_error)?;
+
+    if protected_store.delete(&current.protected_entry_id).is_ok() {
+        delete_protected_entry_journal(connection, &current.public.metadata.id)?;
+    }
+    Ok(())
 }
 
 fn load_internal_credential(
@@ -2214,6 +2824,10 @@ pub enum LocalCredentialError {
     CredentialMaterialMissing,
     #[error("local credential operation lease is unavailable")]
     CredentialOperationLeaseDenied,
+    #[error("local credential refresh is already in progress")]
+    CredentialRefreshInProgress,
+    #[error("local credential refresh is stale or invalid")]
+    StaleCredentialRefresh,
     #[error("local credential protected entry unexpectedly already exists")]
     ProtectedEntryCollision,
     #[error("local credential is selected by an access profile or environment")]

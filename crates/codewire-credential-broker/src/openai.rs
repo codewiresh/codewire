@@ -2,20 +2,23 @@ use std::collections::BTreeMap;
 
 use av_credential_proxy::{
     CredentialSource, ProxyInjectionConfig, ProxyResponseMode, ProxyRouteConfig, RedactionSet,
-    StreamingRedactor, build_target_url, is_websocket_attempt, prepare_credentials,
-    prepare_outbound_headers, validate_proxy_request, validate_proxy_route,
+    StreamingRedactor, ValidatedProxyRequest, build_target_url, is_websocket_attempt,
+    prepare_credentials, prepare_outbound_headers, validate_proxy_request, validate_proxy_route,
 };
 use codewire_access::{CapabilitySlot, CredentialAuthKind};
-use http::{HeaderMap, HeaderName, Method};
+use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use url::Url;
 
+use crate::codex_oauth::CodexOAuthCredential;
 use crate::{BrokerCredentialLease, CredentialBrokerError};
 
 const ROUTE_NAME: &str = "openai-api";
 const OPERATION_NAME: &str = "responses";
 const PROVIDER_NAME: &str = "openai";
 const CREDENTIAL_KEY: &str = "OPENAI_API_KEY";
+const CODEX_OAUTH_ACCESS_TOKEN_KEY: &str = "CODEX_OAUTH_ACCESS_TOKEN";
 const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
+const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const MAX_OPENAI_API_KEY_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
@@ -68,10 +71,8 @@ impl OpenAiApiKeyAdapter {
         let request =
             validate_proxy_request(&self.route, path, query, method, &headers, body.len())
                 .map_err(|_| CredentialBrokerError::RequestDenied)?;
-        let target = build_target_url(&self.route, &request)
-            .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
         Ok(ValidatedOpenAiRequest {
-            target,
+            request,
             headers,
             body,
         })
@@ -86,10 +87,12 @@ impl OpenAiApiKeyAdapter {
     ) -> Result<PreparedOpenAiRequest, CredentialBrokerError> {
         validate_lease(&lease)?;
         let ValidatedOpenAiRequest {
-            target,
+            request,
             headers,
             body,
         } = request;
+        let target = build_target_url(&self.route, &request)
+            .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
         lease.with_material(|material| {
             if !valid_openai_api_key(material) {
                 return Err(CredentialBrokerError::InvalidCredentialMaterial);
@@ -124,10 +127,86 @@ impl OpenAiApiKeyAdapter {
     }
 }
 
+/// Immutable ChatGPT-backed Codex OAuth route used by the broker process.
+///
+/// The guest remains credential-free. Only the isolated broker parses the
+/// protected OAuth bundle and constructs provider authorization headers.
+pub(crate) struct OpenAiChatGptOAuthAdapter {
+    route: ProxyRouteConfig,
+}
+
+impl OpenAiChatGptOAuthAdapter {
+    pub(crate) fn new() -> Result<Self, CredentialBrokerError> {
+        let route = chatgpt_codex_responses_route();
+        validate_proxy_route(ROUTE_NAME, &route, false, false)
+            .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
+        Ok(Self { route })
+    }
+
+    /// Validate the authority lease before protected material is parsed.
+    pub(crate) fn credential_from_lease<L: BrokerCredentialLease>(
+        &self,
+        lease: L,
+    ) -> Result<CodexOAuthCredential, CredentialBrokerError> {
+        validate_oauth_lease(&lease)?;
+        lease.with_material(|material| {
+            CodexOAuthCredential::parse(material)
+                .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)
+        })
+    }
+
+    pub(crate) fn prepare_credential(
+        &self,
+        credential: CodexOAuthCredential,
+        request: ValidatedOpenAiRequest,
+    ) -> Result<PreparedOpenAiRequest, CredentialBrokerError> {
+        let ValidatedOpenAiRequest {
+            request,
+            headers,
+            body,
+        } = request;
+        let target = build_target_url(&self.route, &request)
+            .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)?;
+        let source = CodexOAuthAccessToken {
+            material: credential.access_token(),
+        };
+        let prepared = prepare_credentials(&self.route, &source, &body)
+            .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
+        let mut headers = prepare_outbound_headers(&self.route, &headers, &prepared)
+            .map_err(|_| CredentialBrokerError::RequestDenied)?;
+        let mut account_id = HeaderValue::from_str(credential.account_id())
+            .map_err(|_| CredentialBrokerError::InvalidCredentialMaterial)?;
+        account_id.set_sensitive(true);
+        headers.insert("chatgpt-account-id", account_id);
+        if credential.is_fedramp() {
+            headers.insert("x-openai-fedramp", HeaderValue::from_static("true"));
+        }
+        let (body, prepared_redaction) = prepared.into_body_and_redaction();
+        drop(prepared_redaction);
+        let redaction = RedactionSet::new([
+            credential.access_token().as_bytes(),
+            credential.account_id().as_bytes(),
+        ]);
+        let response = PreparedOpenAiResponse {
+            allowed_headers: response_header_names(&self.route)?,
+            max_body_bytes: self.route.max_response_bytes,
+            redaction,
+        };
+        Ok(PreparedOpenAiRequest {
+            method: Method::POST,
+            target,
+            headers,
+            body,
+            response,
+        })
+    }
+}
+
 /// Credential-free request that has passed the immutable OpenAI route policy.
 /// It deliberately carries no authority lease or prepared authorization.
+#[derive(Clone)]
 pub struct ValidatedOpenAiRequest {
-    target: Url,
+    request: ValidatedProxyRequest,
     headers: HeaderMap,
     body: Vec<u8>,
 }
@@ -246,6 +325,16 @@ struct OpenAiApiKey<'a> {
     material: &'a str,
 }
 
+struct CodexOAuthAccessToken<'a> {
+    material: &'a str,
+}
+
+impl CredentialSource for CodexOAuthAccessToken<'_> {
+    fn credential(&self, key: &str) -> Option<&str> {
+        (key == CODEX_OAUTH_ACCESS_TOKEN_KEY).then_some(self.material)
+    }
+}
+
 impl CredentialSource for OpenAiApiKey<'_> {
     fn credential(&self, key: &str) -> Option<&str> {
         (key == CREDENTIAL_KEY).then_some(self.material)
@@ -267,6 +356,34 @@ fn validate_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBr
         return Err(CredentialBrokerError::UnsupportedLease);
     }
     Ok(())
+}
+
+fn validate_oauth_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBrokerError> {
+    let metadata = lease.credential_metadata();
+    let grant = lease.grant();
+    let permission = lease.permission();
+    if metadata.provider.as_str() != PROVIDER_NAME
+        || metadata.authentication_kind != CredentialAuthKind::OAuth
+        || grant.capability_slot != CapabilitySlot::codex()
+        || grant.credential_id != metadata.id
+        || permission.operation.as_str() != OPERATION_NAME
+        || permission.route.as_str() != ROUTE_NAME
+        || !grant.permissions.contains(permission)
+    {
+        return Err(CredentialBrokerError::UnsupportedLease);
+    }
+    Ok(())
+}
+
+fn response_header_names(
+    route: &ProxyRouteConfig,
+) -> Result<Vec<HeaderName>, CredentialBrokerError> {
+    route
+        .allowed_response_headers
+        .iter()
+        .map(|name| HeaderName::from_bytes(name.as_bytes()))
+        .collect::<Result<_, _>>()
+        .map_err(|_| CredentialBrokerError::InvalidProviderPolicy)
 }
 
 fn valid_openai_api_key(material: &[u8]) -> bool {
@@ -310,16 +427,46 @@ fn openai_responses_route() -> ProxyRouteConfig {
             "x-codex-inference-call-id".to_owned(),
             "x-codex-installation-id".to_owned(),
             "x-codex-parent-thread-id".to_owned(),
+            "x-codex-routing-hint".to_owned(),
             "x-codex-sandbox".to_owned(),
+            "x-codex-turn-state".to_owned(),
             "x-codex-turn-metadata".to_owned(),
             "x-codex-window-id".to_owned(),
             "x-oai-attestation".to_owned(),
+            "x-openai-internal-codex-responses-lite".to_owned(),
+            "x-openai-memgen-request".to_owned(),
             "x-openai-subagent".to_owned(),
         ],
         allowed_response_headers: vec![
+            "cf-ray".to_owned(),
             "content-type".to_owned(),
             "openai-processing-ms".to_owned(),
             "openai-version".to_owned(),
+            "openai-model".to_owned(),
+            "retry-after".to_owned(),
+            "x-codex-active-limit".to_owned(),
+            "x-codex-credits-balance".to_owned(),
+            "x-codex-credits-has-credits".to_owned(),
+            "x-codex-credits-unlimited".to_owned(),
+            "x-codex-primary-reset-at".to_owned(),
+            "x-codex-primary-used-percent".to_owned(),
+            "x-codex-primary-window-minutes".to_owned(),
+            "x-codex-promo-message".to_owned(),
+            "x-codex-rate-limit-reached-type".to_owned(),
+            "x-codex-safety-buffering-enabled".to_owned(),
+            "x-codex-safety-buffering-faster-model".to_owned(),
+            "x-codex-secondary-primary-reset-at".to_owned(),
+            "x-codex-secondary-primary-used-percent".to_owned(),
+            "x-codex-secondary-primary-window-minutes".to_owned(),
+            "x-codex-secondary-reset-at".to_owned(),
+            "x-codex-secondary-used-percent".to_owned(),
+            "x-codex-secondary-window-minutes".to_owned(),
+            "x-codex-turn-state".to_owned(),
+            "x-models-etag".to_owned(),
+            "x-oai-request-id".to_owned(),
+            "x-openai-authorization-error".to_owned(),
+            "x-openai-model".to_owned(),
+            "x-reasoning-included".to_owned(),
             "x-request-id".to_owned(),
         ],
         allowed_query_parameters: Vec::new(),
@@ -329,6 +476,16 @@ fn openai_responses_route() -> ProxyRouteConfig {
         max_response_bytes: MAX_RESPONSE_BYTES,
         websocket: None,
     }
+}
+
+fn chatgpt_codex_responses_route() -> ProxyRouteConfig {
+    let mut route = openai_responses_route();
+    route.profile = "codewire-codex-chatgpt-oauth".to_owned();
+    route.base_url = CHATGPT_CODEX_BASE_URL.to_owned();
+    route.injection = Some(ProxyInjectionConfig::Bearer {
+        secret_key: CODEX_OAUTH_ACCESS_TOKEN_KEY.to_owned(),
+    });
+    route
 }
 
 #[cfg(test)]
@@ -350,11 +507,44 @@ mod tests {
     };
     use codewire_protected_store::{EphemeralProtectedStore, ProtectedValue};
     use http::{HeaderValue, header};
+    use serde_json::json;
     use tempfile::TempDir;
 
     use super::*;
+    use crate::CanonicalCodexOAuthBundle;
 
     const SYNTHETIC_KEY: &str = "CW_TEST_OPENAI_VALUE_123";
+
+    fn jwt(payload: serde_json::Value) -> String {
+        use base64::Engine as _;
+
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).expect("JWT payload"));
+        format!("{header}.{payload}.synthetic-signature")
+    }
+
+    fn oauth_bundle(fedramp: bool) -> CanonicalCodexOAuthBundle {
+        let source = serde_json::to_vec(&json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": jwt(json!({
+                    "email": "developer@example.test",
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "account-work",
+                        "chatgpt_account_is_fedramp": fedramp
+                    }
+                })),
+                "access_token": "synthetic.oauth.access-token",
+                "refresh_token": "synthetic-oauth-refresh-token",
+                "account_id": "account-work"
+            }
+        }))
+        .expect("Codex auth JSON");
+        let imported = crate::import_codex_auth_json(&source).expect("Codex OAuth import");
+        imported.into_parts().0
+    }
 
     fn provider(value: &str) -> ProviderId {
         ProviderId::parse(value).expect("provider ID")
@@ -450,6 +640,19 @@ mod tests {
         );
         headers.insert("session-id", HeaderValue::from_static("synthetic-session"));
         headers.insert("thread-id", HeaderValue::from_static("synthetic-thread"));
+        headers.insert(
+            "x-codex-turn-state",
+            HeaderValue::from_static("synthetic-turn-state"),
+        );
+        headers.insert(
+            "x-codex-routing-hint",
+            HeaderValue::from_static("synthetic-routing-hint"),
+        );
+        headers.insert(
+            "x-openai-internal-codex-responses-lite",
+            HeaderValue::from_static("true"),
+        );
+        headers.insert("x-openai-memgen-request", HeaderValue::from_static("true"));
         headers
     }
 
@@ -469,6 +672,10 @@ mod tests {
 
         fn permission(&self) -> &GrantPermission {
             &self.inner.permission
+        }
+
+        fn material_generation(&self) -> u64 {
+            self.inner.material_generation()
         }
 
         fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
@@ -552,6 +759,10 @@ mod tests {
             ("x-client-request-id", "synthetic-request"),
             ("session-id", "synthetic-session"),
             ("thread-id", "synthetic-thread"),
+            ("x-codex-turn-state", "synthetic-turn-state"),
+            ("x-codex-routing-hint", "synthetic-routing-hint"),
+            ("x-openai-internal-codex-responses-lite", "true"),
+            ("x-openai-memgen-request", "true"),
         ] {
             assert_eq!(
                 headers.get(name).and_then(|value| value.to_str().ok()),
@@ -589,6 +800,118 @@ mod tests {
         );
         output.extend(response.finish().expect("finish response"));
         assert_eq!(output, b"upstream reflected [REDACTED] and [REDACTED]");
+    }
+
+    #[test]
+    fn prepares_chatgpt_codex_oauth_without_trusting_guest_auth_headers() {
+        let bundle = oauth_bundle(true);
+        let mut headers = request_headers();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer guest-controlled"),
+        );
+        headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static("guest-account"),
+        );
+        headers.insert("x-openai-fedramp", HeaderValue::from_static("false"));
+        let request = OpenAiApiKeyAdapter::new()
+            .expect("request validator")
+            .validate_request(
+                &Method::POST,
+                "/responses",
+                None,
+                headers,
+                br#"{"input":"hello"}"#.to_vec(),
+            )
+            .expect("validated request");
+        let adapter = OpenAiChatGptOAuthAdapter::new().expect("OAuth adapter");
+        let credential = adapter
+            .credential_from_lease(lease(
+                "openai",
+                CredentialAuthKind::OAuth,
+                bundle.as_bytes(),
+            ))
+            .expect("OAuth lease");
+        let prepared = adapter
+            .prepare_credential(credential, request)
+            .expect("prepared OAuth request");
+        let (method, target, headers, body, response) = prepared.into_parts();
+
+        assert_eq!(method, Method::POST);
+        assert_eq!(
+            target.as_str(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(body, br#"{"input":"hello"}"#);
+        let authorization = headers
+            .get(header::AUTHORIZATION)
+            .expect("broker authorization");
+        assert_eq!(
+            authorization,
+            HeaderValue::from_static("Bearer synthetic.oauth.access-token")
+        );
+        assert!(authorization.is_sensitive());
+        let account = headers
+            .get("chatgpt-account-id")
+            .expect("broker account header");
+        assert_eq!(account, HeaderValue::from_static("account-work"));
+        assert!(account.is_sensitive());
+        assert_eq!(
+            headers.get("x-openai-fedramp"),
+            Some(&HeaderValue::from_static("true"))
+        );
+
+        let mut upstream_headers = HeaderMap::new();
+        upstream_headers.insert(
+            "x-request-id",
+            HeaderValue::from_static("synthetic.oauth.access-token"),
+        );
+        upstream_headers.insert(
+            "x-codex-turn-state",
+            HeaderValue::from_static("state-for-account-work"),
+        );
+        upstream_headers.insert(
+            "x-openai-authorization-error",
+            HeaderValue::from_static("token_expired"),
+        );
+        upstream_headers.insert(
+            "x-oai-request-id",
+            HeaderValue::from_static("request-for-account-work"),
+        );
+        upstream_headers.insert("cf-ray", HeaderValue::from_static("ray-for-account-work"));
+        upstream_headers.insert(
+            "x-error-json",
+            HeaderValue::from_static("ZXJyb3ItZm9yLWFjY291bnQtd29yaw=="),
+        );
+        upstream_headers.insert("x-codex-active-limit", HeaderValue::from_static("codex"));
+        let (headers, mut response) = response.begin(&upstream_headers).expect("OAuth response");
+        assert_eq!(
+            headers.get("x-request-id"),
+            Some(&HeaderValue::from_static("[REDACTED]"))
+        );
+        assert_eq!(
+            headers.get("x-codex-turn-state"),
+            Some(&HeaderValue::from_static("state-for-[REDACTED]"))
+        );
+        for (name, value) in [
+            ("x-openai-authorization-error", "token_expired"),
+            ("x-oai-request-id", "request-for-[REDACTED]"),
+            ("cf-ray", "ray-for-[REDACTED]"),
+            ("x-codex-active-limit", "codex"),
+        ] {
+            assert_eq!(
+                headers.get(name).and_then(|value| value.to_str().ok()),
+                Some(value)
+            );
+        }
+        assert!(!headers.contains_key("x-error-json"));
+        let mut output = response
+            .push(b"reflected account-work and synthetic.oauth.")
+            .expect("first chunk");
+        output.extend(response.push(b"access-token").expect("second chunk"));
+        output.extend(response.finish().expect("finish response"));
+        assert_eq!(output, b"reflected [REDACTED] and [REDACTED]");
     }
 
     #[test]

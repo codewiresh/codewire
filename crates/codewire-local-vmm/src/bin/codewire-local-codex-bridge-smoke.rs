@@ -637,6 +637,8 @@ socket.on('error',()=>process.exit(1));"#;
             environment.name.clone().into(),
             "--supervisor-socket".into(),
             args.state_root.join("supervisor.sock").into_os_string(),
+            "--credential-authentication-kind".into(),
+            "oauth".into(),
         ]
     }
 

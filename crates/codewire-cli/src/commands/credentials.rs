@@ -1,5 +1,12 @@
 use std::collections::BTreeMap;
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{BufRead as _, IsTerminal as _, Read as _, Write as _};
+use std::os::unix::fs::{
+    DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use codewire_access::{
@@ -14,15 +21,20 @@ use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
 };
 use serde::Serialize;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{
-    CredentialAddArgs, CredentialAuthenticationKindArg, CredentialDeleteArgs, CredentialListArgs,
+    CredentialAddArgs, CredentialAuthenticationKindArg, CredentialConnectArgs,
+    CredentialConnectProviderArg, CredentialDeleteArgs, CredentialListArgs,
     CredentialProfileCommand, CredentialProfileDeleteArgs, CredentialProfileSetArgs,
     CredentialProfileSlotArgs, CredentialRenameArgs, CredentialRotateArgs, CredentialSelectorArgs,
     CredentialsArgs, CredentialsCommand, EchoGuard, OutputFormat,
     connect_local_credential_authority, prompt_confirm_default_no, trimmed_required,
 };
+
+const CODEX_AUTH_FILE_NAME: &str = "auth.json";
+const TMPFS_MAGIC: rustix::fs::FsWord = 0x0102_1994;
+const CODEX_LOGOUT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CredentialPlacement {
@@ -40,6 +52,7 @@ pub(crate) async fn handle_credentials_command(args: CredentialsArgs) -> anyhow:
 
     let mut client = connect_local_credential_authority().await?;
     match args.command {
+        CredentialsCommand::Connect(args) => connect_credential(&mut client, args).await,
         CredentialsCommand::Add(args) => add_credential(&mut client, args).await,
         CredentialsCommand::List(args) => list_credentials(&mut client, args).await,
         CredentialsCommand::Get(args) => get_credential(&mut client, args).await,
@@ -49,6 +62,318 @@ pub(crate) async fn handle_credentials_command(args: CredentialsArgs) -> anyhow:
         CredentialsCommand::Delete(args) => delete_credential(&mut client, args).await,
         CredentialsCommand::Profile { command } => profile_command(&mut client, command).await,
     }
+}
+
+async fn connect_credential(
+    client: &mut LocalCredentialClient,
+    args: CredentialConnectArgs,
+) -> anyhow::Result<()> {
+    match args.provider {
+        CredentialConnectProviderArg::Codex => connect_codex(client, args).await,
+    }
+}
+
+async fn connect_codex(
+    client: &mut LocalCredentialClient,
+    args: CredentialConnectArgs,
+) -> anyhow::Result<()> {
+    let display_name = trimmed_required(&args.name, "credential name")?.to_owned();
+    if client
+        .list_credentials()
+        .await
+        .context("check local credential name")?
+        .iter()
+        .any(|record| {
+            record
+                .metadata
+                .display_name
+                .eq_ignore_ascii_case(&display_name)
+        })
+    {
+        anyhow::bail!(
+            "local credential {display_name:?} already exists; use a distinct name for another Codex identity"
+        );
+    }
+    let CompletedCodexLogin {
+        imported,
+        login_home,
+        executable,
+        path,
+    } = run_isolated_codex_login().await?;
+    let (bundle, account_hint) = imported.into_parts();
+    let mut bytes = bundle.into_bytes();
+    let material = match ProtectedValue::new(std::mem::take(&mut *bytes)) {
+        Ok(material) => material,
+        Err(error) => {
+            revoke_isolated_codex_login(&executable, &path, &login_home).await;
+            return Err(error).context("prepare protected Codex credential");
+        }
+    };
+    let record = match client
+        .add_credential(
+            NewCredential {
+                provider: ProviderId::parse("openai").expect("built-in OpenAI provider ID"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name,
+                account_hint,
+                expires_at_unix: None,
+            },
+            material,
+        )
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            revoke_isolated_codex_login(&executable, &path, &login_home).await;
+            return Err(error).context("store local Codex credential");
+        }
+    };
+    if let Err(error) = login_home.remove_auth_file() {
+        let _ = client.revoke_credential(&record.metadata.id).await;
+        let _ = client.delete_credential(&record.metadata.id).await;
+        revoke_isolated_codex_login(&executable, &path, &login_home).await;
+        return Err(error).context("finish protected Codex credential import");
+    }
+    eprintln!(
+        "Local Codex credential {:?} connected ({}).",
+        record.metadata.display_name, record.metadata.id
+    );
+    Ok(())
+}
+
+struct CompletedCodexLogin {
+    imported: codewire_credential_broker::CodexOAuthImport,
+    login_home: CodexLoginHome,
+    executable: PathBuf,
+    path: std::ffi::OsString,
+}
+
+async fn run_isolated_codex_login() -> anyhow::Result<CompletedCodexLogin> {
+    let login_home = CodexLoginHome::create()?;
+    let executable = resolve_codex_executable()?;
+    let path = std::env::var_os("PATH").ok_or_else(|| {
+        anyhow::anyhow!("PATH is unavailable; install the official Codex CLI and retry")
+    })?;
+    run_isolated_codex_login_with(login_home, executable, path, true).await
+}
+
+async fn run_isolated_codex_login_with(
+    login_home: CodexLoginHome,
+    executable: PathBuf,
+    path: std::ffi::OsString,
+    interactive: bool,
+) -> anyhow::Result<CompletedCodexLogin> {
+    if interactive {
+        eprintln!("Starting an isolated Codex device login. No ambient Codex login will be read.");
+    }
+    let mut command = isolated_codex_command(&executable, &path, &login_home);
+    command
+        .arg("login")
+        .arg("--device-auth")
+        .arg("-c")
+        .arg("cli_auth_credentials_store=\"file\"");
+    if interactive {
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    } else {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
+    let status = match command.status().await {
+        Ok(status) => status,
+        Err(error) => {
+            revoke_isolated_codex_login(&executable, &path, &login_home).await;
+            return Err(error).context("run isolated Codex login");
+        }
+    };
+    if !status.success() {
+        revoke_isolated_codex_login(&executable, &path, &login_home).await;
+        anyhow::bail!("Codex device login did not complete; no credential was stored");
+    }
+    let mut source = match read_private_codex_auth_file(login_home.path()) {
+        Ok(source) => source,
+        Err(error) => {
+            revoke_isolated_codex_login(&executable, &path, &login_home).await;
+            return Err(error);
+        }
+    };
+    let imported = match codewire_credential_broker::import_codex_auth_json(&source) {
+        Ok(imported) => imported,
+        Err(error) => {
+            source.zeroize();
+            revoke_isolated_codex_login(&executable, &path, &login_home).await;
+            return Err(error).context("validate isolated Codex login");
+        }
+    };
+    source.zeroize();
+    Ok(CompletedCodexLogin {
+        imported,
+        login_home,
+        executable,
+        path,
+    })
+}
+
+fn isolated_codex_command(
+    executable: &Path,
+    path: &std::ffi::OsStr,
+    login_home: &CodexLoginHome,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", login_home.path())
+        .env("CODEX_HOME", login_home.path())
+        .env("XDG_CONFIG_HOME", login_home.path())
+        .env("XDG_CACHE_HOME", login_home.path())
+        .env("TMPDIR", login_home.path())
+        .kill_on_drop(true);
+    command
+}
+
+async fn revoke_isolated_codex_login(
+    executable: &Path,
+    path: &std::ffi::OsStr,
+    login_home: &CodexLoginHome,
+) {
+    if !login_home.path().join(CODEX_AUTH_FILE_NAME).is_file() {
+        return;
+    }
+    let mut command = isolated_codex_command(executable, path, login_home);
+    command
+        .arg("logout")
+        .arg("-c")
+        .arg("cli_auth_credentials_store=\"file\"")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = tokio::time::timeout(CODEX_LOGOUT_TIMEOUT, command.status()).await;
+}
+
+struct CodexLoginHome {
+    path: PathBuf,
+}
+
+impl CodexLoginHome {
+    fn create() -> anyhow::Result<Self> {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!("XDG_RUNTIME_DIR is required for protected Codex login staging")
+            })?;
+        Self::create_in(&runtime)
+    }
+
+    fn create_in(runtime: &Path) -> anyhow::Result<Self> {
+        validate_private_tmpfs_runtime(runtime)?;
+        let path = runtime.join(format!(".codewire-codex-login-{}", uuid::Uuid::new_v4()));
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .context("create private Codex login staging directory")?;
+        validate_private_directory(&path)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn remove_auth_file(&self) -> anyhow::Result<()> {
+        std::fs::remove_file(self.path.join(CODEX_AUTH_FILE_NAME))
+            .context("remove transient Codex login material")
+    }
+}
+
+impl Drop for CodexLoginHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn validate_private_tmpfs_runtime(path: &Path) -> anyhow::Result<()> {
+    validate_private_directory(path)?;
+    let directory = File::open(path).context("open private runtime directory")?;
+    let statistics = rustix::fs::fstatfs(&directory).context("inspect runtime filesystem")?;
+    if statistics.f_type != TMPFS_MAGIC {
+        anyhow::bail!("XDG_RUNTIME_DIR must be backed by tmpfs for Codex login staging");
+    }
+    Ok(())
+}
+
+fn validate_private_directory(path: &Path) -> anyhow::Result<()> {
+    if !path.is_absolute() {
+        anyhow::bail!("private Codex login directory must be absolute");
+    }
+    let metadata =
+        std::fs::symlink_metadata(path).context("inspect private Codex login directory")?;
+    let canonical = std::fs::canonicalize(path).context("resolve private Codex login directory")?;
+    if canonical != path
+        || !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        anyhow::bail!("private Codex login directory failed ownership or mode validation");
+    }
+    Ok(())
+}
+
+fn read_private_codex_auth_file(root: &Path) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let path = root.join(CODEX_AUTH_FILE_NAME);
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&path)
+        .context("open isolated Codex login result")?;
+    let metadata = file
+        .metadata()
+        .context("inspect isolated Codex login result")?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o7777 != 0o600
+        || metadata.len() == 0
+        || metadata.len() > MAX_PROTECTED_VALUE_BYTES as u64
+    {
+        anyhow::bail!("isolated Codex login result failed ownership, mode, or size validation");
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(metadata.len()).context("validate Codex login result size")?,
+    ));
+    file.take((MAX_PROTECTED_VALUE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .context("read isolated Codex login result")?;
+    if bytes.len() != metadata.len() as usize || bytes.len() > MAX_PROTECTED_VALUE_BYTES {
+        anyhow::bail!("isolated Codex login result changed while it was read");
+    }
+    Ok(bytes)
+}
+
+fn resolve_codex_executable() -> anyhow::Result<PathBuf> {
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| anyhow::anyhow!("PATH is unavailable; install the official Codex CLI"))?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join("codex");
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            continue;
+        }
+        let executable =
+            std::fs::canonicalize(&candidate).context("resolve the Codex CLI executable")?;
+        let metadata =
+            std::fs::metadata(&executable).context("inspect the Codex CLI executable")?;
+        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+            return Ok(executable);
+        }
+    }
+    anyhow::bail!("official Codex CLI was not found on PATH; install it and retry")
 }
 
 fn credential_placement(local: bool, platform: bool) -> anyhow::Result<CredentialPlacement> {
@@ -71,6 +396,12 @@ async fn add_credential(
     let provider = ProviderId::parse(trimmed_required(&args.provider, "provider")?)
         .context("invalid credential provider")?;
     let authentication_kind = authentication_kind(args.kind);
+    if !manually_supplied_credential_kind(authentication_kind) {
+        anyhow::bail!(
+            "{} credentials require a provider-specific connect command",
+            authentication_kind_label(authentication_kind)
+        );
+    }
     let catalog = builtin_provider_catalog();
     let definition = catalog
         .get(&provider)
@@ -146,6 +477,12 @@ async fn rotate_credential(
     args: CredentialRotateArgs,
 ) -> anyhow::Result<()> {
     let record = resolve_credential(client, &args.credential).await?;
+    if !manually_supplied_credential_kind(record.metadata.authentication_kind) {
+        anyhow::bail!(
+            "{} credential material cannot be entered manually; connect a new provider identity and update the access profile",
+            authentication_kind_label(record.metadata.authentication_kind)
+        );
+    }
     let material = prompt_credential_material()?;
     let rotated = client
         .rotate_credential_material(&record.metadata.id, material, args.expires_at)
@@ -418,6 +755,15 @@ fn authentication_kind(value: CredentialAuthenticationKindArg) -> CredentialAuth
     }
 }
 
+fn manually_supplied_credential_kind(value: CredentialAuthKind) -> bool {
+    matches!(
+        value,
+        CredentialAuthKind::ApiKey
+            | CredentialAuthKind::AccessToken
+            | CredentialAuthKind::SshPrivateKey
+    )
+}
+
 fn authentication_kind_label(value: CredentialAuthKind) -> &'static str {
     match value {
         CredentialAuthKind::OAuth => "oauth",
@@ -624,6 +970,7 @@ fn format_profiles_text(records: &[AccessProfileView]) -> String {
 mod tests {
     use std::io::Cursor;
 
+    use base64::Engine as _;
     use clap::Parser as _;
     use codewire_access::{CredentialId, CredentialMetadata, OwnerId, Placement};
 
@@ -651,6 +998,13 @@ mod tests {
         }
     }
 
+    fn synthetic_jwt(payload: serde_json::Value) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        format!("{header}.{payload}.synthetic-signature")
+    }
+
     #[test]
     fn credential_mutations_require_one_explicit_placement() {
         assert_eq!(
@@ -667,6 +1021,28 @@ mod tests {
 
     #[test]
     fn parser_accepts_material_free_local_credential_and_profile_grammar() {
+        let connect = Cli::try_parse_from([
+            "cw",
+            "credentials",
+            "--local",
+            "connect",
+            "codex",
+            "--name",
+            "work-codex",
+        ])
+        .unwrap();
+        assert!(matches!(
+            connect.command,
+            Command::Credentials(CredentialsArgs {
+                local: true,
+                platform: false,
+                command: CredentialsCommand::Connect(CredentialConnectArgs {
+                    provider: CredentialConnectProviderArg::Codex,
+                    ..
+                }),
+            })
+        ));
+
         let add = Cli::try_parse_from([
             "cw",
             "credentials",
@@ -739,6 +1115,122 @@ mod tests {
                 false
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn oauth_and_runtime_references_cannot_use_the_opaque_material_prompt() {
+        for kind in [
+            CredentialAuthKind::OAuth,
+            CredentialAuthKind::GitHubApp,
+            CredentialAuthKind::SshAgent,
+        ] {
+            assert!(!manually_supplied_credential_kind(kind));
+        }
+        for kind in [
+            CredentialAuthKind::ApiKey,
+            CredentialAuthKind::AccessToken,
+            CredentialAuthKind::SshPrivateKey,
+        ] {
+            assert!(manually_supplied_credential_kind(kind));
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_codex_login_uses_only_its_private_tmpfs_home() {
+        let root = tempfile::Builder::new()
+            .prefix("codewire-codex-login-test-")
+            .tempdir_in("/dev/shm")
+            .expect("private tmpfs test root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("make tmpfs test root private");
+        let executable_root = tempfile::Builder::new()
+            .prefix("codewire-codex-executable-test-")
+            .tempdir_in(
+                std::env::current_exe()
+                    .expect("current executable")
+                    .parent()
+                    .expect("test executable directory"),
+            )
+            .expect("synthetic executable root");
+        let executable = executable_root.path().join("synthetic-codex");
+        let auth = serde_json::to_string(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": synthetic_jwt(serde_json::json!({
+                    "email": "developer@example.test",
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "account-work",
+                        "chatgpt_account_is_fedramp": false
+                    }
+                })),
+                "access_token": "synthetic.access.token",
+                "refresh_token": "synthetic-refresh-token",
+                "account_id": "account-work"
+            }
+        }))
+        .unwrap();
+        assert!(!auth.contains('\''));
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "case \"$1\" in\n",
+                "login)\n",
+                "  [ \"$2\" = \"--device-auth\" ] || exit 20\n",
+                "  [ \"$3\" = \"-c\" ] || exit 21\n",
+                "  [ \"$4\" = 'cli_auth_credentials_store=\"file\"' ] || exit 22\n",
+                "  [ \"$HOME\" = \"$CODEX_HOME\" ] || exit 23\n",
+                "  [ \"$XDG_CONFIG_HOME\" = \"$CODEX_HOME\" ] || exit 24\n",
+                "  [ \"$XDG_CACHE_HOME\" = \"$CODEX_HOME\" ] || exit 25\n",
+                "  [ \"$TMPDIR\" = \"$CODEX_HOME\" ] || exit 26\n",
+                "  [ -z \"${{OPENAI_API_KEY+x}}\" ] || exit 27\n",
+                "  umask 077\n",
+                "  printf '%s' '{auth}' > \"$CODEX_HOME/auth.json\"\n",
+                "  ;;\n",
+                "logout)\n",
+                "  rm -f \"$CODEX_HOME/auth.json\"\n",
+                "  ;;\n",
+                "*) exit 28 ;;\n",
+                "esac\n"
+            ),
+            auth = auth,
+        );
+        std::fs::write(&executable, script).expect("write synthetic Codex executable");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .expect("make synthetic Codex executable private");
+        let login_home = CodexLoginHome::create_in(root.path()).expect("isolated login home");
+        let completed = run_isolated_codex_login_with(
+            login_home,
+            executable,
+            std::ffi::OsString::from("/usr/bin:/bin"),
+            false,
+        )
+        .await
+        .expect("synthetic isolated login");
+        assert_eq!(
+            completed.imported.account_hint(),
+            Some("developer@example.test")
+        );
+        assert!(
+            completed
+                .login_home
+                .path()
+                .join(CODEX_AUTH_FILE_NAME)
+                .is_file()
+        );
+        revoke_isolated_codex_login(
+            &completed.executable,
+            &completed.path,
+            &completed.login_home,
+        )
+        .await;
+        assert!(
+            !completed
+                .login_home
+                .path()
+                .join(CODEX_AUTH_FILE_NAME)
+                .exists()
         );
     }
 

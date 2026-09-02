@@ -212,6 +212,13 @@ struct BrokerProcessEntry {
     task: tokio::task::JoinHandle<()>,
 }
 
+struct BrokerEnsureRequest {
+    environment_id: EnvironmentId,
+    environment_generation: u64,
+    environment_name: String,
+    supervisor_socket: PathBuf,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BrokerProcessState {
     Starting,
@@ -241,40 +248,62 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
 
     async fn ensure(
         &self,
-        config: LocalBrokerProcessConfig,
+        request: BrokerEnsureRequest,
     ) -> Result<EnvironmentBrokerRuntime, Status> {
-        config
-            .validate()
-            .map_err(|_| Status::invalid_argument("invalid local credential broker request"))?;
         // Serialize grant evaluation with entry insertion/removal. Binding
         // mutation commits before calling `stop`, so either this evaluation
         // observes the new binding or that stop observes the inserted entry.
         let mut entries = self.entries.lock().await;
         let authority = Arc::clone(&self.authority);
         let audit = Arc::clone(&self.audit);
-        let environment_id = config.environment_id.clone();
-        let generation = config.environment_generation;
-        let grants = run_blocking(move || {
-            authority.evaluate_environment_grants(&environment_id, generation)
+        let environment_id = request.environment_id.clone();
+        let generation = request.environment_generation;
+        let authentication_kind = run_blocking(move || {
+            let grant = authority
+                .evaluate_environment_grants(&environment_id, generation)?
+                .into_iter()
+                .find(|grant| {
+                    grant.capability_slot == CapabilitySlot::codex()
+                        && grant.permissions.iter().any(|permission| {
+                            permission.operation.as_str() == "responses"
+                                && permission.route.as_str() == "openai-api"
+                        })
+                });
+            let Some(grant) = grant else {
+                return Ok(None);
+            };
+            let credential = authority.get_credential(&grant.credential_id)?;
+            if credential.metadata.provider.as_str() != "openai"
+                || !matches!(
+                    credential.metadata.authentication_kind,
+                    CredentialAuthKind::ApiKey | CredentialAuthKind::OAuth
+                )
+            {
+                return Ok(None);
+            }
+            Ok(Some(credential.metadata.authentication_kind))
         })
         .await?;
-        let supported = grants.iter().any(|grant| {
-            grant.capability_slot == CapabilitySlot::codex()
-                && grant.permissions.iter().any(|permission| {
-                    permission.operation.as_str() == "responses"
-                        && permission.route.as_str() == "openai-api"
-                })
-        });
-        if !supported {
-            if let Some(existing) = entries.remove(&config.environment_id) {
+        let Some(authentication_kind) = authentication_kind else {
+            if let Some(existing) = entries.remove(&request.environment_id) {
                 stop_broker_entry(existing).await;
             }
             return Ok(EnvironmentBrokerRuntime {
-                environment_id: config.environment_id,
-                environment_generation: config.environment_generation,
+                environment_id: request.environment_id,
+                environment_generation: request.environment_generation,
                 running: false,
             });
-        }
+        };
+        let config = LocalBrokerProcessConfig {
+            environment_id: request.environment_id,
+            environment_generation: request.environment_generation,
+            environment_name: request.environment_name,
+            supervisor_socket: request.supervisor_socket,
+            credential_authentication_kind: authentication_kind,
+        };
+        config
+            .validate()
+            .map_err(|_| Status::invalid_argument("invalid local credential broker request"))?;
         let spawner = self.spawner.as_ref().cloned().ok_or_else(|| {
             Status::unavailable("local credential broker launcher is unavailable")
         })?;
@@ -867,7 +896,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         let request = request.into_inner();
         let runtime = self
             .brokers
-            .ensure(LocalBrokerProcessConfig {
+            .ensure(BrokerEnsureRequest {
                 environment_id: environment_id(request.environment_id)?,
                 environment_generation: request.environment_generation,
                 environment_name: request.environment_name,
@@ -1147,6 +1176,8 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         | LocalCredentialError::CredentialInactive
         | LocalCredentialError::CredentialMaterialMissing
         | LocalCredentialError::CredentialOperationLeaseDenied
+        | LocalCredentialError::CredentialRefreshInProgress
+        | LocalCredentialError::StaleCredentialRefresh
         | LocalCredentialError::CredentialInUse
         | LocalCredentialError::StaleProfileRevision
         | LocalCredentialError::ProfileInUse

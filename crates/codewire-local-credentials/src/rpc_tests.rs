@@ -774,6 +774,10 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
         assert_eq!(launched.len(), 1);
         assert_eq!(launched[0].environment_id, environment_id);
         assert_eq!(launched[0].environment_generation, 23);
+        assert_eq!(
+            launched[0].credential_authentication_kind,
+            CredentialAuthKind::OAuth
+        );
         assert!(!format!("{:?}", launched[0]).contains("synthetic-oauth-material"));
     }
 

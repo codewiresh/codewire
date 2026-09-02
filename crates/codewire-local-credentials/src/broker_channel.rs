@@ -10,13 +10,14 @@ use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use codewire_access::{
     AccessProfileId, BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialId, EnvironmentId,
     GrantPermission,
 };
-use codewire_protected_store::ProtectedStore;
+use codewire_protected_store::{ProtectedStore, ProtectedValue};
 use hyper_util::rt::TokioIo;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -46,7 +47,18 @@ const MAX_BROKER_LEASE_RPC_CONCURRENCY: usize = 16;
 const MAX_BROKER_PROTECTED_STORE_OPERATIONS: usize = 1;
 pub(crate) const MAX_RECENT_BROKER_LEASE_AUDIT_EVENTS: usize = 4_096;
 pub(crate) const MAX_BROKER_LEASE_AUDIT_LIST_LIMIT: usize = 256;
-pub const BROKER_LEASE_PROTOCOL_VERSION: u32 = 2;
+pub const BROKER_LEASE_PROTOCOL_VERSION: u32 = 3;
+
+/// Metadata-only permit for one serialized OAuth refresh. The protected-store
+/// destination is derived inside this crate and is never serialized.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrokerCredentialRefreshPermit {
+    refresh_id: Uuid,
+    credential_id: CredentialId,
+    expected_revocation_generation: u64,
+    current_material_generation: u64,
+    next_material_generation: u64,
+}
 
 /// Material-free result of one exact authority lease decision. This recent
 /// local ring is intentionally bounded and process-lifetime; #1922 owns the
@@ -123,6 +135,10 @@ pub enum BrokerLeaseChannelError {
     Unavailable,
     #[error("credential broker lease authority returned invalid metadata")]
     InvalidResponse,
+    #[error("credential refresh is already in progress")]
+    RefreshInProgress,
+    #[error("credential refresh generation changed")]
+    StaleRefresh,
 }
 
 /// Client for one authority-created, environment-generation-bound channel.
@@ -281,8 +297,153 @@ where
             credential,
             grant,
             permission,
+            material_generation: response.material_generation,
             value,
         })
+    }
+
+    /// Acquire the sole refresh permit for the exact OAuth credential backing
+    /// one already-admitted operation. No provider value crosses this RPC.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn begin_credential_refresh(
+        &mut self,
+        refresh_id: Uuid,
+        capability_slot: CapabilitySlot,
+        operation: BrokerOperationId,
+        route: BrokerRouteId,
+        expected_credential_id: CredentialId,
+        expected_revocation_generation: u64,
+        expected_material_generation: u64,
+    ) -> Result<BrokerCredentialRefreshPermit, BrokerLeaseChannelError> {
+        if refresh_id.is_nil()
+            || expected_revocation_generation == 0
+            || expected_material_generation == 0
+        {
+            return Err(BrokerLeaseChannelError::InvalidRequest);
+        }
+        let response = self
+            .inner
+            .begin_credential_refresh(v1::BrokerCredentialRefreshRequest {
+                refresh_id: refresh_id.to_string(),
+                capability_slot: capability_slot.to_string(),
+                operation: operation.to_string(),
+                route: route.to_string(),
+                expected_credential_id: expected_credential_id.to_string(),
+                expected_revocation_generation,
+                expected_material_generation,
+            })
+            .await
+            .map_err(map_client_status)?
+            .into_inner();
+        let response_refresh_id = Uuid::parse_str(&response.refresh_id)
+            .map_err(|_| BrokerLeaseChannelError::InvalidResponse)?;
+        let response_credential_id = CredentialId::parse(response.credential_id)
+            .map_err(|_| BrokerLeaseChannelError::InvalidResponse)?;
+        let expected_next = expected_material_generation
+            .checked_add(1)
+            .ok_or(BrokerLeaseChannelError::InvalidRequest)?;
+        if response_refresh_id != refresh_id
+            || response_credential_id != expected_credential_id
+            || response.current_material_generation != expected_material_generation
+            || response.next_material_generation != expected_next
+        {
+            return Err(BrokerLeaseChannelError::InvalidResponse);
+        }
+        Ok(BrokerCredentialRefreshPermit {
+            refresh_id,
+            credential_id: expected_credential_id,
+            expected_revocation_generation,
+            current_material_generation: expected_material_generation,
+            next_material_generation: expected_next,
+        })
+    }
+
+    /// Persist a validated refreshed bundle directly into the next exact OS
+    /// protected-store generation, then ask the authority to promote metadata.
+    /// An ambiguous commit is deliberately not rolled back: recovery promotes
+    /// the durable next entry so a rotated refresh token cannot be lost.
+    pub async fn commit_credential_refresh(
+        &mut self,
+        permit: BrokerCredentialRefreshPermit,
+        material: ProtectedValue,
+    ) -> Result<(), BrokerLeaseChannelError> {
+        if permit.next_material_generation != permit.current_material_generation.saturating_add(1) {
+            return Err(BrokerLeaseChannelError::InvalidResponse);
+        }
+        let entry_id = protected_entry_id(&permit.credential_id, permit.next_material_generation)
+            .map_err(|_| BrokerLeaseChannelError::InvalidResponse)?;
+        let operation_permit = Arc::clone(&self.protected_store_operations)
+            .acquire_owned()
+            .await
+            .map_err(|_| BrokerLeaseChannelError::Unavailable)?;
+        let store = self.protected_store.clone();
+        let stored = tokio::task::spawn_blocking(move || {
+            let _operation_permit = operation_permit;
+            if store.get(&entry_id)?.is_some() {
+                return Err(codewire_protected_store::ProtectedStoreError::AmbiguousEntry);
+            }
+            store.put(&entry_id, &material)
+        })
+        .await
+        .map_err(|_| BrokerLeaseChannelError::Unavailable)?;
+        if stored.is_err() {
+            // The provider has already returned a replacement refresh token.
+            // A protected-store error may be reported after the write took
+            // effect, so retain the journal and force this broker epoch to
+            // end. The next broker reconciles an exact present generation by
+            // promoting it, or removes the journal when no value was written.
+            return Err(BrokerLeaseChannelError::Unavailable);
+        }
+        let response = self
+            .inner
+            .commit_credential_refresh(v1::BrokerCredentialRefreshCommitRequest {
+                refresh_id: permit.refresh_id.to_string(),
+            })
+            .await
+            .map_err(map_client_status)?
+            .into_inner();
+        if response.revocation_generation != permit.expected_revocation_generation.saturating_add(1)
+            || response.material_generation != permit.next_material_generation
+        {
+            return Err(BrokerLeaseChannelError::InvalidResponse);
+        }
+        Ok(())
+    }
+
+    /// Release a refresh permit after a provider failure before any new bundle
+    /// is committed. The authority removes only the exact pending generation.
+    pub async fn abort_credential_refresh(
+        &mut self,
+        permit: BrokerCredentialRefreshPermit,
+    ) -> Result<(), BrokerLeaseChannelError> {
+        self.inner
+            .abort_credential_refresh(v1::BrokerCredentialRefreshAbortRequest {
+                refresh_id: permit.refresh_id.to_string(),
+            })
+            .await
+            .map_err(map_client_status)?;
+        Ok(())
+    }
+
+    /// Invalidate the old generation after a terminal provider rejection. The
+    /// failure RPC contains no provider response body or credential value.
+    pub async fn fail_credential_refresh(
+        &mut self,
+        permit: BrokerCredentialRefreshPermit,
+    ) -> Result<(), BrokerLeaseChannelError> {
+        let response = self
+            .inner
+            .fail_credential_refresh(v1::BrokerCredentialRefreshFailureRequest {
+                refresh_id: permit.refresh_id.to_string(),
+            })
+            .await
+            .map_err(map_client_status)?
+            .into_inner();
+        if response.revocation_generation != permit.expected_revocation_generation.saturating_add(1)
+        {
+            return Err(BrokerLeaseChannelError::InvalidResponse);
+        }
+        Ok(())
     }
 
     /// Complete the authority-owned launch handshake only after the broker has
@@ -335,8 +496,20 @@ where
     if environment_generation == 0 {
         return Err(BrokerLeaseChannelError::InvalidRequest);
     }
+    let channel_id = Uuid::new_v4();
+    let refresh_lifetime = Arc::new(BrokerChannelRefreshLifetime {
+        authority: Arc::clone(&authority),
+        channel_id,
+        closed: AtomicBool::new(false),
+        active_operations: AtomicUsize::new(0),
+    });
+    let _refresh_guard = BrokerChannelRefreshGuard {
+        lifetime: Arc::clone(&refresh_lifetime),
+    };
     let service = BrokerLeaseRpc {
         authority,
+        channel_id,
+        refresh_lifetime,
         environment_id,
         environment_generation,
         audit,
@@ -363,6 +536,75 @@ where
         })
         .await
         .map_err(|_| BrokerLeaseChannelError::Unavailable)
+}
+
+struct BrokerChannelRefreshGuard<S: ProtectedStore> {
+    lifetime: Arc<BrokerChannelRefreshLifetime<S>>,
+}
+
+impl<S: ProtectedStore> Drop for BrokerChannelRefreshGuard<S> {
+    fn drop(&mut self) {
+        self.lifetime.close();
+    }
+}
+
+struct BrokerChannelRefreshLifetime<S: ProtectedStore> {
+    authority: Arc<LocalCredentialAuthority<S>>,
+    channel_id: Uuid,
+    closed: AtomicBool,
+    active_operations: AtomicUsize,
+}
+
+impl<S: ProtectedStore> BrokerChannelRefreshLifetime<S> {
+    fn acquire(self: &Arc<Self>) -> Option<BrokerChannelRefreshOperation<S>> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        self.active_operations
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .ok()?;
+        if self.closed.load(Ordering::Acquire) {
+            self.release_operation();
+            return None;
+        }
+        Some(BrokerChannelRefreshOperation {
+            lifetime: Arc::clone(self),
+        })
+    }
+
+    fn close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel)
+            && self.active_operations.load(Ordering::Acquire) == 0
+        {
+            self.release_refreshes();
+        }
+    }
+
+    fn release_operation(&self) {
+        let previous = self.active_operations.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+        if previous == 1 && self.closed.load(Ordering::Acquire) {
+            self.release_refreshes();
+        }
+    }
+
+    fn release_refreshes(&self) {
+        let _ = self
+            .authority
+            .release_channel_credential_refreshes(self.channel_id);
+    }
+}
+
+struct BrokerChannelRefreshOperation<S: ProtectedStore> {
+    lifetime: Arc<BrokerChannelRefreshLifetime<S>>,
+}
+
+impl<S: ProtectedStore> Drop for BrokerChannelRefreshOperation<S> {
+    fn drop(&mut self) {
+        self.lifetime.release_operation();
+    }
 }
 
 struct ObservedBrokerStream {
@@ -420,6 +662,8 @@ impl Connected for ObservedBrokerStream {
 
 struct BrokerLeaseRpc<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
+    channel_id: Uuid,
+    refresh_lifetime: Arc<BrokerChannelRefreshLifetime<S>>,
     environment_id: EnvironmentId,
     environment_generation: u64,
     audit: Arc<BrokerLeaseAuditLog>,
@@ -559,6 +803,147 @@ where
             material_generation: admission.material_generation,
         }))
     }
+
+    async fn begin_credential_refresh(
+        &self,
+        request: Request<v1::BrokerCredentialRefreshRequest>,
+    ) -> Result<Response<v1::BrokerCredentialRefreshPermit>, Status> {
+        let request = request.into_inner();
+        let refresh_id = parse_canonical_uuid(&request.refresh_id, "credential refresh")?;
+        let capability_slot = CapabilitySlot::parse(request.capability_slot)
+            .map_err(|_| Status::invalid_argument("invalid credential refresh request"))?;
+        let operation = BrokerOperationId::parse(request.operation)
+            .map_err(|_| Status::invalid_argument("invalid credential refresh request"))?;
+        let route = BrokerRouteId::parse(request.route)
+            .map_err(|_| Status::invalid_argument("invalid credential refresh request"))?;
+        let expected_credential_id = CredentialId::parse(request.expected_credential_id)
+            .map_err(|_| Status::invalid_argument("invalid credential refresh request"))?;
+        if request.expected_revocation_generation == 0 || request.expected_material_generation == 0
+        {
+            return Err(Status::invalid_argument(
+                "invalid credential refresh request",
+            ));
+        }
+        let admission_request = CredentialOperationLeaseRequest {
+            environment_id: self.environment_id.clone(),
+            environment_generation: self.environment_generation,
+            capability_slot,
+            operation,
+            route,
+        };
+        let authority = Arc::clone(&self.authority);
+        let channel_id = self.channel_id;
+        let operation = self
+            .refresh_lifetime
+            .acquire()
+            .ok_or_else(|| Status::unavailable("credential broker lease channel is unavailable"))?;
+        let permit = tokio::task::spawn_blocking(move || {
+            let _operation = operation;
+            authority.begin_environment_credential_refresh(
+                channel_id,
+                refresh_id,
+                &admission_request,
+                &expected_credential_id,
+                request.expected_revocation_generation,
+                request.expected_material_generation,
+            )
+        })
+        .await
+        .map_err(|_| Status::unavailable("credential refresh authority is unavailable"))?
+        .map_err(map_server_error)?;
+        Ok(Response::new(v1::BrokerCredentialRefreshPermit {
+            refresh_id: permit.refresh_id.to_string(),
+            credential_id: permit.credential_id.to_string(),
+            current_material_generation: permit.current_material_generation,
+            next_material_generation: permit.next_material_generation,
+        }))
+    }
+
+    async fn commit_credential_refresh(
+        &self,
+        request: Request<v1::BrokerCredentialRefreshCommitRequest>,
+    ) -> Result<Response<v1::BrokerCredentialRefreshCommitResponse>, Status> {
+        let refresh_id = parse_canonical_uuid(
+            &request.into_inner().refresh_id,
+            "credential refresh commit",
+        )?;
+        let authority = Arc::clone(&self.authority);
+        let channel_id = self.channel_id;
+        let operation = self
+            .refresh_lifetime
+            .acquire()
+            .ok_or_else(|| Status::unavailable("credential broker lease channel is unavailable"))?;
+        let (record, material_generation) = tokio::task::spawn_blocking(move || {
+            let _operation = operation;
+            authority.commit_environment_credential_refresh(channel_id, refresh_id)
+        })
+        .await
+        .map_err(|_| Status::unavailable("credential refresh authority is unavailable"))?
+        .map_err(map_server_error)?;
+        Ok(Response::new(v1::BrokerCredentialRefreshCommitResponse {
+            revocation_generation: record.metadata.revocation_generation,
+            material_generation,
+        }))
+    }
+
+    async fn abort_credential_refresh(
+        &self,
+        request: Request<v1::BrokerCredentialRefreshAbortRequest>,
+    ) -> Result<Response<v1::BrokerCredentialRefreshAbortResponse>, Status> {
+        let refresh_id =
+            parse_canonical_uuid(&request.into_inner().refresh_id, "credential refresh abort")?;
+        let authority = Arc::clone(&self.authority);
+        let channel_id = self.channel_id;
+        let operation = self
+            .refresh_lifetime
+            .acquire()
+            .ok_or_else(|| Status::unavailable("credential broker lease channel is unavailable"))?;
+        tokio::task::spawn_blocking(move || {
+            let _operation = operation;
+            authority.abort_environment_credential_refresh(channel_id, refresh_id)
+        })
+        .await
+        .map_err(|_| Status::unavailable("credential refresh authority is unavailable"))?
+        .map_err(map_server_error)?;
+        Ok(Response::new(v1::BrokerCredentialRefreshAbortResponse {}))
+    }
+
+    async fn fail_credential_refresh(
+        &self,
+        request: Request<v1::BrokerCredentialRefreshFailureRequest>,
+    ) -> Result<Response<v1::BrokerCredentialRefreshFailureResponse>, Status> {
+        let refresh_id = parse_canonical_uuid(
+            &request.into_inner().refresh_id,
+            "credential refresh failure",
+        )?;
+        let authority = Arc::clone(&self.authority);
+        let channel_id = self.channel_id;
+        let operation = self
+            .refresh_lifetime
+            .acquire()
+            .ok_or_else(|| Status::unavailable("credential broker lease channel is unavailable"))?;
+        let record = tokio::task::spawn_blocking(move || {
+            let _operation = operation;
+            authority.fail_environment_credential_refresh(channel_id, refresh_id)
+        })
+        .await
+        .map_err(|_| Status::unavailable("credential refresh authority is unavailable"))?
+        .map_err(map_server_error)?;
+        Ok(Response::new(v1::BrokerCredentialRefreshFailureResponse {
+            revocation_generation: record.metadata.revocation_generation,
+        }))
+    }
+}
+
+fn parse_canonical_uuid(value: &str, operation: &'static str) -> Result<Uuid, Status> {
+    let parsed = Uuid::parse_str(value)
+        .map_err(|_| Status::invalid_argument(format!("invalid {operation} request")))?;
+    if parsed.is_nil() || parsed.to_string() != value {
+        return Err(Status::invalid_argument(format!(
+            "invalid {operation} request"
+        )));
+    }
+    Ok(parsed)
 }
 
 fn audit_decision_for_error(error: &LocalCredentialError) -> BrokerLeaseAuditDecision {
@@ -590,6 +975,8 @@ fn permission_from_proto(
 fn map_client_status(status: Status) -> BrokerLeaseChannelError {
     match status.code() {
         tonic::Code::InvalidArgument => BrokerLeaseChannelError::InvalidRequest,
+        tonic::Code::Aborted => BrokerLeaseChannelError::RefreshInProgress,
+        tonic::Code::OutOfRange => BrokerLeaseChannelError::StaleRefresh,
         tonic::Code::FailedPrecondition | tonic::Code::PermissionDenied => {
             BrokerLeaseChannelError::Denied
         }
@@ -599,6 +986,9 @@ fn map_client_status(status: Status) -> BrokerLeaseChannelError {
 
 fn map_server_error(error: LocalCredentialError) -> Status {
     match error {
+        LocalCredentialError::StaleCredentialRefresh => {
+            Status::out_of_range("credential refresh generation changed")
+        }
         LocalCredentialError::CredentialOperationLeaseDenied
         | LocalCredentialError::CredentialInactive
         | LocalCredentialError::CredentialUnavailable
@@ -611,6 +1001,9 @@ fn map_server_error(error: LocalCredentialError) -> Status {
         | LocalCredentialError::Access(_) => {
             Status::failed_precondition("credential broker lease was denied")
         }
+        LocalCredentialError::CredentialRefreshInProgress => {
+            Status::aborted("credential refresh is already in progress")
+        }
         _ => Status::unavailable("credential broker lease authority is unavailable"),
     }
 }
@@ -618,6 +1011,7 @@ fn map_server_error(error: LocalCredentialError) -> Status {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
 
     use codewire_access::{
@@ -635,6 +1029,7 @@ mod tests {
     struct TestProtectedStore {
         entries: Arc<StdMutex<BTreeMap<ProtectedEntryId, Vec<u8>>>>,
         get_control: Option<Arc<BlockingGetControl>>,
+        fail_next_put_after_effect: Arc<AtomicBool>,
     }
 
     #[derive(Default)]
@@ -689,6 +1084,11 @@ mod tests {
             (state.active, state.maximum_active)
         }
 
+        fn block(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.blocked = true;
+        }
+
         fn release(&self) {
             let mut state = self.state.lock().unwrap();
             state.blocked = false;
@@ -708,7 +1108,13 @@ mod tests {
             Self {
                 entries: Arc::clone(&self.entries),
                 get_control: Some(control),
+                fail_next_put_after_effect: Arc::clone(&self.fail_next_put_after_effect),
             }
+        }
+
+        fn fail_next_put_after_effect(&self) {
+            self.fail_next_put_after_effect
+                .store(true, Ordering::Release);
         }
     }
 
@@ -743,7 +1149,14 @@ mod tests {
                 .lock()
                 .map_err(|_| ProtectedStoreError::Unavailable)?
                 .insert(id.clone(), value.expose_secret().to_vec());
-            Ok(())
+            if self
+                .fail_next_put_after_effect
+                .swap(false, Ordering::AcqRel)
+            {
+                Err(ProtectedStoreError::Unavailable)
+            } else {
+                Ok(())
+            }
         }
 
         fn delete(&self, id: &ProtectedEntryId) -> Result<(), ProtectedStoreError> {
@@ -756,12 +1169,16 @@ mod tests {
     }
 
     fn catalog() -> ProviderCatalog {
+        catalog_with_authentication(CredentialAuthKind::ApiKey)
+    }
+
+    fn catalog_with_authentication(authentication_kind: CredentialAuthKind) -> ProviderCatalog {
         ProviderCatalog::from_definitions([ProviderDefinition {
             id: ProviderId::parse("openai").unwrap(),
             capabilities: BTreeMap::from([(
                 CapabilitySlot::codex(),
                 CapabilityPolicy {
-                    authentication_kinds: BTreeSet::from([CredentialAuthKind::ApiKey]),
+                    authentication_kinds: BTreeSet::from([authentication_kind]),
                     permissions: BTreeSet::from([GrantPermission {
                         operation: BrokerOperationId::parse("responses").unwrap(),
                         route: BrokerRouteId::parse("openai-api").unwrap(),
@@ -821,10 +1238,14 @@ mod tests {
             Arc::clone(&audit),
             None,
         ));
-        let mut client =
-            LocalCredentialBrokerLeaseClient::connect(client_stream, store, environment_id, 7)
-                .await
-                .unwrap();
+        let mut client = LocalCredentialBrokerLeaseClient::connect(
+            client_stream,
+            store.clone(),
+            environment_id.clone(),
+            7,
+        )
+        .await
+        .unwrap();
         let lease = client
             .lease_operation(
                 Uuid::new_v4(),
@@ -873,6 +1294,461 @@ mod tests {
         assert!(!format!("{events:?}").contains("synthetic-openai-material"));
         drop(client);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn channel_commits_or_invalidates_serialized_oauth_refresh_without_material_on_wire() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TestProtectedStore::default();
+        let authority = Arc::new(
+            LocalCredentialAuthority::open(
+                &temp.path().join("authority"),
+                store.clone(),
+                catalog_with_authentication(CredentialAuthKind::OAuth),
+            )
+            .unwrap(),
+        );
+        let credential = authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse("openai").unwrap(),
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "synthetic-oauth".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(b"synthetic-old-oauth-bundle").unwrap(),
+            )
+            .unwrap();
+        let profile = authority
+            .create_profile(
+                AccessProfileName::parse("synthetic-oauth").unwrap(),
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            )
+            .unwrap();
+        let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+        authority
+            .create_environment_access_binding(EnvironmentAccessBinding {
+                environment_id: environment_id.clone(),
+                profile_id: profile.profile.id,
+                profile_revision: profile.profile.revision,
+            })
+            .unwrap();
+
+        let (server_stream, client_stream) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(serve_broker_lease_channel(
+            Arc::clone(&authority),
+            server_stream,
+            environment_id.clone(),
+            7,
+        ));
+        let mut client = LocalCredentialBrokerLeaseClient::connect(
+            client_stream,
+            store.clone(),
+            environment_id.clone(),
+            7,
+        )
+        .await
+        .unwrap();
+        let lease = client
+            .lease_operation(
+                Uuid::new_v4(),
+                CapabilitySlot::codex(),
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+            )
+            .await
+            .unwrap();
+        let credential_id = lease.credential.metadata.id.clone();
+        let revocation_generation = lease.credential.metadata.revocation_generation;
+        let material_generation = lease.material_generation();
+        assert_eq!(
+            lease.with_material(|value| value.to_vec()),
+            b"synthetic-old-oauth-bundle"
+        );
+
+        let refresh_id = Uuid::new_v4();
+        let permit = client
+            .begin_credential_refresh(
+                refresh_id,
+                CapabilitySlot::codex(),
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+                credential_id.clone(),
+                revocation_generation,
+                material_generation,
+            )
+            .await
+            .unwrap();
+        let mut concurrent = client.clone();
+        assert_eq!(
+            concurrent
+                .begin_credential_refresh(
+                    Uuid::new_v4(),
+                    CapabilitySlot::codex(),
+                    BrokerOperationId::parse("responses").unwrap(),
+                    BrokerRouteId::parse("openai-api").unwrap(),
+                    credential_id.clone(),
+                    revocation_generation,
+                    material_generation,
+                )
+                .await,
+            Err(BrokerLeaseChannelError::RefreshInProgress)
+        );
+        client
+            .commit_credential_refresh(
+                permit,
+                ProtectedValue::from_slice(b"synthetic-new-oauth-bundle").unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let refreshed = client
+            .lease_operation(
+                Uuid::new_v4(),
+                CapabilitySlot::codex(),
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.material_generation(), material_generation + 1);
+        assert_eq!(
+            refreshed.credential.metadata.revocation_generation,
+            revocation_generation + 1
+        );
+        let refreshed_revocation_generation = refreshed.credential.metadata.revocation_generation;
+        let refreshed_material_generation = refreshed.material_generation();
+        assert_eq!(
+            refreshed.with_material(|value| value.to_vec()),
+            b"synthetic-new-oauth-bundle"
+        );
+
+        let interrupted_permit = client
+            .begin_credential_refresh(
+                Uuid::new_v4(),
+                CapabilitySlot::codex(),
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+                credential_id.clone(),
+                refreshed_revocation_generation,
+                refreshed_material_generation,
+            )
+            .await
+            .unwrap();
+        store.fail_next_put_after_effect();
+        assert_eq!(
+            client
+                .commit_credential_refresh(
+                    interrupted_permit,
+                    ProtectedValue::from_slice(b"synthetic-recovered-oauth-bundle").unwrap(),
+                )
+                .await,
+            Err(BrokerLeaseChannelError::Unavailable)
+        );
+        drop(client);
+        drop(concurrent);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let (server_stream, client_stream) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(serve_broker_lease_channel(
+            Arc::clone(&authority),
+            server_stream,
+            environment_id.clone(),
+            7,
+        ));
+        let mut client = LocalCredentialBrokerLeaseClient::connect(
+            client_stream,
+            store.clone(),
+            environment_id,
+            7,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            client
+                .begin_credential_refresh(
+                    Uuid::new_v4(),
+                    CapabilitySlot::codex(),
+                    BrokerOperationId::parse("responses").unwrap(),
+                    BrokerRouteId::parse("openai-api").unwrap(),
+                    credential_id.clone(),
+                    refreshed_revocation_generation,
+                    refreshed_material_generation,
+                )
+                .await,
+            Err(BrokerLeaseChannelError::StaleRefresh)
+        );
+        let recovered = client
+            .lease_operation(
+                Uuid::new_v4(),
+                CapabilitySlot::codex(),
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.material_generation(),
+            refreshed_material_generation + 1
+        );
+        assert_eq!(
+            recovered.credential.metadata.revocation_generation,
+            refreshed_revocation_generation + 1
+        );
+        let recovered_revocation_generation = recovered.credential.metadata.revocation_generation;
+        let recovered_material_generation = recovered.material_generation();
+        assert_eq!(
+            recovered.with_material(|value| value.to_vec()),
+            b"synthetic-recovered-oauth-bundle"
+        );
+        let failed_permit = client
+            .begin_credential_refresh(
+                Uuid::new_v4(),
+                CapabilitySlot::codex(),
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+                credential_id.clone(),
+                recovered_revocation_generation,
+                recovered_material_generation,
+            )
+            .await
+            .unwrap();
+        client.fail_credential_refresh(failed_permit).await.unwrap();
+        let failed = authority.get_credential(&credential_id).unwrap();
+        assert_eq!(
+            failed.metadata.status,
+            codewire_access::CredentialStatus::RefreshFailed
+        );
+        assert_eq!(
+            failed.metadata.revocation_generation,
+            recovered_revocation_generation + 1
+        );
+        assert!(matches!(
+            client
+                .lease_operation(
+                    Uuid::new_v4(),
+                    CapabilitySlot::codex(),
+                    BrokerOperationId::parse("responses").unwrap(),
+                    BrokerRouteId::parse("openai-api").unwrap(),
+                )
+                .await,
+            Err(BrokerLeaseChannelError::Denied)
+        ));
+        let recovered = authority
+            .rotate_credential_material(
+                &credential_id,
+                ProtectedValue::from_slice(b"synthetic-reconnected-oauth-bundle").unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            recovered.metadata.status,
+            codewire_access::CredentialStatus::Active
+        );
+        assert_eq!(
+            recovered.metadata.revocation_generation,
+            recovered_revocation_generation + 2
+        );
+        drop(client);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn manual_rotation_excludes_refresh_until_its_store_mutation_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TestProtectedStore::default();
+        let get_control = Arc::new(BlockingGetControl::default());
+        let authority = Arc::new(
+            LocalCredentialAuthority::open(
+                &temp.path().join("authority"),
+                store.with_blocked_gets(Arc::clone(&get_control)),
+                catalog_with_authentication(CredentialAuthKind::OAuth),
+            )
+            .unwrap(),
+        );
+        let credential = authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse("openai").unwrap(),
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "synthetic-oauth".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(b"synthetic-old-oauth-bundle").unwrap(),
+            )
+            .unwrap();
+        let profile = authority
+            .create_profile(
+                AccessProfileName::parse("synthetic-oauth").unwrap(),
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            )
+            .unwrap();
+        let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+        authority
+            .create_environment_access_binding(EnvironmentAccessBinding {
+                environment_id: environment_id.clone(),
+                profile_id: profile.profile.id,
+                profile_revision: profile.profile.revision,
+            })
+            .unwrap();
+        let request = CredentialOperationLeaseRequest {
+            environment_id,
+            environment_generation: 7,
+            capability_slot: CapabilitySlot::codex(),
+            operation: BrokerOperationId::parse("responses").unwrap(),
+            route: BrokerRouteId::parse("openai-api").unwrap(),
+        };
+
+        get_control.block();
+        let rotating_authority = Arc::clone(&authority);
+        let rotating_id = credential.metadata.id.clone();
+        let rotation = tokio::task::spawn_blocking(move || {
+            rotating_authority.rotate_credential_material(
+                &rotating_id,
+                ProtectedValue::from_slice(b"synthetic-manual-rotation").unwrap(),
+                None,
+            )
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while get_control.counts().0 != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let refreshing_authority = Arc::clone(&authority);
+        let refreshing_id = credential.metadata.id.clone();
+        let mut refresh = tokio::task::spawn_blocking(move || {
+            refreshing_authority.begin_environment_credential_refresh(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &request,
+                &refreshing_id,
+                1,
+                1,
+            )
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut refresh)
+                .await
+                .is_err()
+        );
+
+        get_control.release();
+        let rotated = rotation.await.unwrap().unwrap();
+        assert_eq!(rotated.metadata.revocation_generation, 2);
+        assert_eq!(
+            refresh.await.unwrap(),
+            Err(LocalCredentialError::StaleCredentialRefresh)
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_close_defers_refresh_release_until_blocking_operation_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TestProtectedStore::default();
+        let get_control = Arc::new(BlockingGetControl::default());
+        let authority = Arc::new(
+            LocalCredentialAuthority::open(
+                &temp.path().join("authority"),
+                store.with_blocked_gets(Arc::clone(&get_control)),
+                catalog_with_authentication(CredentialAuthKind::OAuth),
+            )
+            .unwrap(),
+        );
+        let credential = authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse("openai").unwrap(),
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "synthetic-oauth".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(b"synthetic-old-oauth-bundle").unwrap(),
+            )
+            .unwrap();
+        let profile = authority
+            .create_profile(
+                AccessProfileName::parse("synthetic-oauth").unwrap(),
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            )
+            .unwrap();
+        let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+        authority
+            .create_environment_access_binding(EnvironmentAccessBinding {
+                environment_id: environment_id.clone(),
+                profile_id: profile.profile.id,
+                profile_revision: profile.profile.revision,
+            })
+            .unwrap();
+        get_control.block();
+        let request = CredentialOperationLeaseRequest {
+            environment_id,
+            environment_generation: 7,
+            capability_slot: CapabilitySlot::codex(),
+            operation: BrokerOperationId::parse("responses").unwrap(),
+            route: BrokerRouteId::parse("openai-api").unwrap(),
+        };
+        let channel_id = Uuid::new_v4();
+        let refresh_id = Uuid::new_v4();
+        let lifetime = Arc::new(BrokerChannelRefreshLifetime {
+            authority: Arc::clone(&authority),
+            channel_id,
+            closed: AtomicBool::new(false),
+            active_operations: AtomicUsize::new(0),
+        });
+        let operation = lifetime.acquire().unwrap();
+        let blocking_authority = Arc::clone(&authority);
+        let credential_id = credential.metadata.id.clone();
+        let blocking_credential_id = credential_id.clone();
+        let refresh = tokio::task::spawn_blocking(move || {
+            let _operation = operation;
+            blocking_authority.begin_environment_credential_refresh(
+                channel_id,
+                refresh_id,
+                &request,
+                &blocking_credential_id,
+                credential.metadata.revocation_generation,
+                1,
+            )
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while get_control.counts().0 != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        lifetime.close();
+        assert!(lifetime.acquire().is_none());
+        assert!(matches!(
+            authority.rotate_credential_material(
+                &credential_id,
+                ProtectedValue::from_slice(b"must-not-win").unwrap(),
+                None,
+            ),
+            Err(LocalCredentialError::CredentialRefreshInProgress)
+        ));
+
+        get_control.release();
+        refresh.await.unwrap().unwrap();
+        let rotated = authority
+            .rotate_credential_material(
+                &credential_id,
+                ProtectedValue::from_slice(b"synthetic-reconnected-oauth-bundle").unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(rotated.metadata.revocation_generation, 2);
     }
 
     #[tokio::test]

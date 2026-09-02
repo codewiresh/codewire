@@ -3,7 +3,7 @@ use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::path::Path;
 
 use anyhow::Context as _;
-use codewire_access::EnvironmentId;
+use codewire_access::{CredentialAuthKind, EnvironmentId};
 #[cfg(not(feature = "local-broker-synthetic-smoke"))]
 use codewire_credential_broker::OpenAiHttpsTransport;
 #[cfg(feature = "local-broker-synthetic-smoke")]
@@ -38,6 +38,11 @@ pub(crate) async fn run_local_credential_broker(
         !environment_uuid.is_nil() && args.environment_generation > 0,
         "invalid broker environment identity"
     );
+    let _credential_authentication_kind = match args.credential_authentication_kind.as_str() {
+        "api-key" => CredentialAuthKind::ApiKey,
+        "oauth" => CredentialAuthKind::OAuth,
+        _ => anyhow::bail!("invalid broker credential authentication kind"),
+    };
     anyhow::ensure!(
         args.supervisor_socket.is_absolute()
             && args.supervisor_socket.file_name().and_then(OsStr::to_str)
@@ -92,7 +97,7 @@ pub(crate) async fn run_local_credential_broker(
     drop(daemon);
     drop(supervisor);
     #[cfg(not(feature = "local-broker-synthetic-smoke"))]
-    let upstream = OpenAiHttpsTransport::resolve()
+    let upstream = OpenAiHttpsTransport::resolve(_credential_authentication_kind)
         .await
         .context("resolve credential broker provider endpoint")?;
     #[cfg(feature = "local-broker-synthetic-smoke")]
