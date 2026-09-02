@@ -47,6 +47,7 @@ bash -n "$PROBE_POLICY_GENERATOR"
   exit 1
 }
 
+mkdir -p "$ROOT/.tmp"
 validation_dir="$(mktemp -d "$ROOT/.tmp/confidential-smoke-validation.XXXXXX")"
 if "$SMOKE" --existing-env not-a-uuid >"$validation_dir/uuid.out" 2>"$validation_dir/uuid.err"; then
   printf 'confidential smoke accepted a malformed retained environment ID\n' >&2
@@ -76,6 +77,8 @@ rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
 rg -F 'SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"' "$SMOKE" >/dev/null
 rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
 rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
+rg -F 'confidential profile isolation passed: shared_fs=none host-share-overrides=denied' \
+  "$SMOKE" >/dev/null
 if rg -q 'check-node1|node1-codewire-dev|node1\.codewire-dev\.sh|ssh_host\(' "$SMOKE"; then
   printf 'confidential smoke contains a nonexistent Ubuntu/SSH host gate\n' >&2
   exit 1
@@ -544,7 +547,6 @@ mapfile -t rendered_probe_images < <(
 rm -rf "$activation_dir"
 trap - EXIT
 
-mkdir -p "$ROOT/.tmp"
 bootstrap_dir="$(mktemp -d "$ROOT/.tmp/codewire-confidential-bootstrap-contract.XXXXXX")"
 trap 'rm -rf "$bootstrap_dir"' EXIT
 mkdir -p "$bootstrap_dir/bin" "$bootstrap_dir/evidence"
@@ -611,7 +613,23 @@ cat >"$bootstrap_dir/bin/skopeo" <<EOF
 touch '$bootstrap_dir/skopeo-was-called'
 exit 88
 EOF
-chmod +x "$bootstrap_dir/bin/kubectl" "$bootstrap_dir/bin/skopeo"
+mkdir -p "$bootstrap_dir/infra/scripts"
+cat >"$bootstrap_dir/infra/scripts/talos-external-worker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == 'verify dev-cluster cw-dev-prod-node-1 1500' ]]
+if [[ "${HOST_PROFILE_FIXTURE:-none}" == "none" ]]; then
+  printf '%s\n' \
+    'check-talos-runtime-artifacts: confidential profile isolation passed: shared_fs=none host-share-overrides=denied'
+else
+  printf 'check-talos-runtime-artifacts: unsafe fixture shared_fs=%s\n' \
+    "$HOST_PROFILE_FIXTURE"
+fi
+EOF
+chmod +x \
+  "$bootstrap_dir/bin/kubectl" \
+  "$bootstrap_dir/bin/skopeo" \
+  "$bootstrap_dir/infra/scripts/talos-external-worker"
 PATH="$bootstrap_dir/bin:$PATH" \
   KUBECTL_BIN="$bootstrap_dir/bin/kubectl" \
   KUBE_CONTEXT=mock \
@@ -627,6 +645,47 @@ PATH="$bootstrap_dir/bin:$PATH" \
   exit 1
 }
 rg -F 'skipping product release image resolution' "$bootstrap_dir/stderr" >/dev/null
+
+mkdir -p "$bootstrap_dir/host-gate-evidence"
+PATH="$bootstrap_dir/bin:$PATH" \
+  KUBECTL_BIN="$bootstrap_dir/bin/kubectl" \
+  KUBE_CONTEXT=mock \
+  INFRA_ROOT="$bootstrap_dir/infra" \
+  EVIDENCE_DIR="$bootstrap_dir/host-gate-evidence" \
+  "$SMOKE" --skip-raw-jobs --skip-guest-attestation --skip-coco \
+  >"$bootstrap_dir/host-gate.stdout" 2>"$bootstrap_dir/host-gate.stderr" || {
+    sed -n '1,120p' "$bootstrap_dir/host-gate.stderr" >&2
+    printf 'host-profile receipt fixture failed\n' >&2
+    exit 1
+  }
+rg -Fx \
+  'check-talos-runtime-artifacts: confidential profile isolation passed: shared_fs=none host-share-overrides=denied' \
+  "$bootstrap_dir/host-gate-evidence/host-runtime-gate.log" >/dev/null
+
+for unsafe_shared_fs in \
+  missing \
+  virtio-fs \
+  inline-virtio-fs \
+  virtio-fs-nydus \
+  9p \
+  passthrough; do
+  mkdir -p "$bootstrap_dir/unsafe-$unsafe_shared_fs-evidence"
+  if PATH="$bootstrap_dir/bin:$PATH" \
+    KUBECTL_BIN="$bootstrap_dir/bin/kubectl" \
+    KUBE_CONTEXT=mock \
+    INFRA_ROOT="$bootstrap_dir/infra" \
+    EVIDENCE_DIR="$bootstrap_dir/unsafe-$unsafe_shared_fs-evidence" \
+    HOST_PROFILE_FIXTURE="$unsafe_shared_fs" \
+    "$SMOKE" --skip-raw-jobs --skip-guest-attestation --skip-coco \
+    >"$bootstrap_dir/unsafe-$unsafe_shared_fs.stdout" \
+    2>"$bootstrap_dir/unsafe-$unsafe_shared_fs.stderr"; then
+    printf 'host gate accepted unsafe shared_fs fixture: %s\n' "$unsafe_shared_fs" >&2
+    exit 1
+  fi
+  rg -F \
+    'Infra host gate did not prove the rendered QEMU-SNP shared_fs=none isolation contract' \
+    "$bootstrap_dir/unsafe-$unsafe_shared_fs.stderr" >/dev/null
+done
 
 mkdir -p "$bootstrap_dir/missing-overhead-evidence"
 if PATH="$bootstrap_dir/bin:$PATH" \
