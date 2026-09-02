@@ -7,6 +7,11 @@ authors.workspace = true
 license.workspace = true
 description = "Rust landing zone for the Codewire cw CLI migration."
 
+[features]
+local-broker-synthetic-smoke = [
+  "codewire-credential-broker/local-broker-synthetic-smoke",
+]
+
 [lib]
 name = "codewire_cli"
 path = "src/lib.rs"

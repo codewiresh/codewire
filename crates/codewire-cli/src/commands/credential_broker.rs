@@ -4,8 +4,12 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use codewire_access::EnvironmentId;
+#[cfg(not(feature = "local-broker-synthetic-smoke"))]
+use codewire_credential_broker::OpenAiHttpsTransport;
+#[cfg(feature = "local-broker-synthetic-smoke")]
+use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
 use codewire_credential_broker::{
-    OpenAiBroker, OpenAiHttpsTransport, admit_credential_bridge, run_admitted_credential_bridge,
+    OpenAiBroker, admit_credential_bridge, run_admitted_credential_bridge,
 };
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalCredentialBrokerLeaseClient,
@@ -87,9 +91,12 @@ pub(crate) async fn run_local_credential_broker(
     // runtime domain.
     drop(daemon);
     drop(supervisor);
+    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
     let upstream = OpenAiHttpsTransport::resolve()
         .await
         .context("resolve credential broker provider endpoint")?;
+    #[cfg(feature = "local-broker-synthetic-smoke")]
+    let upstream = SyntheticOpenAiSmokeTransport;
     apply_broker_landlock_confinement().context("confine credential broker filesystem")?;
     let protected_store =
         ConnectedOsProtectedStore::connect().context("connect broker protected store")?;

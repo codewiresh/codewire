@@ -22,22 +22,34 @@ async fn main() {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::error::Error;
+    use std::ffi::OsString;
+    use std::fs;
     use std::future::Future;
     use std::io;
-    use std::path::PathBuf;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+    use std::path::{Path, PathBuf};
     use std::pin::Pin;
     use std::time::Duration;
 
-    use codewire_access::CodexProviderProjection;
+    use codewire_access::{
+        BrokerOperationId, BrokerRouteId, CapabilitySlot, CodexProviderProjection, CredentialId,
+        EnvironmentId,
+    };
     use codewire_daemon::client::{CredentialBridgeConnection, SessionClient, v1};
     use codewire_gateway_proto::{
         CREDENTIAL_BRIDGE_LOOPBACK_PORT, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
         DAEMON_CAPABILITY_CREDENTIAL_BRIDGE,
     };
+    use codewire_local_credentials::{
+        AuthorityRuntimeConfig, BrokerLeaseAuditDecision, LocalCredentialClient,
+    };
     use codewire_local_vmm::control::v1 as local_v1;
     use codewire_local_vmm::hybrid_vsock;
     use codewire_local_vmm::supervisor::{NativeRuntimeConfig, NativeSupervisorClient};
     use codewire_vmm_guest_probe::CODEX_GUEST_HOME_PATH;
+    use serde::Deserialize;
     use serde_json::Value;
     use tokio::time::Instant;
     use tonic::Streaming;
@@ -50,8 +62,11 @@ mod linux {
     const CODEX_MODEL: &str = "codewire-synthetic";
     const CODEX_PROMPT: &str = "Return the synthetic marker.";
     const CODEX_MARKER: &str = "CWCODEX149 synthetic";
+    const MANAGED_CODEX_MARKER: &str = "CWCODEX149 broker [REDACTED]";
+    const GUEST_CALLER_BEARER: &str = "guest-supplied-bearer-must-not-pass";
     const EXEC_TIMEOUT: Duration = Duration::from_secs(90);
     const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
+    const MAX_PROC_CMDLINE: usize = 64 * 1024;
 
     const SYNTHETIC_RESPONSE: &[u8] = concat!(
         "event: response.created\n",
@@ -69,6 +84,9 @@ mod linux {
         artifact_lock: PathBuf,
         cw_bin: PathBuf,
         target: String,
+        managed_broker: bool,
+        credential_authority_root: Option<PathBuf>,
+        credential_id: Option<String>,
     }
 
     struct ExecOutput {
@@ -77,15 +95,27 @@ mod linux {
         exit_code: i32,
     }
 
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct HttpProbeOutput {
+        status: u16,
+        request_id: Option<String>,
+        body: String,
+    }
+
     pub(super) async fn run() -> SmokeResult<()> {
         let args = Args::parse(std::env::args().skip(1))?;
+        let credential_authority_root = args
+            .credential_authority_root
+            .clone()
+            .unwrap_or_else(|| args.state_root.join("credential-authority"));
         stage("supervisor-connect");
         let mut supervisor = NativeSupervisorClient::connect_or_start(&NativeRuntimeConfig {
             root: args.state_root.clone(),
-            artifact_root: args.artifact_root,
-            artifact_lock: args.artifact_lock,
-            credential_authority_root: args.state_root.join("credential-authority"),
-            executable: args.cw_bin,
+            artifact_root: args.artifact_root.clone(),
+            artifact_lock: args.artifact_lock.clone(),
+            credential_authority_root,
+            executable: args.cw_bin.clone(),
         })
         .await?;
         let environment = supervisor.get(&args.target).await?;
@@ -113,6 +143,12 @@ mod linux {
         stage("version-check");
         require_codex_version(&daemon, &environment.working_directory).await?;
 
+        if args.managed_broker {
+            run_managed_broker_smoke(&args, &mut supervisor, &daemon, &environment).await?;
+            println!("codewire-local-codex-bridge-smoke: PASS (managed broker)");
+            return Ok(());
+        }
+
         stage("bridge-open");
         let mut bridge = daemon
             .open_credential_bridge(environment_id, environment.generation)
@@ -120,21 +156,7 @@ mod linux {
         require_bridge_ready(&mut bridge, environment_id, environment.generation).await?;
 
         stage("codex-exec");
-        let command = vec![
-            CODEX_BIN.to_owned(),
-            "exec".to_owned(),
-            "--config".to_owned(),
-            "model_context_window=100000".to_owned(),
-            "--ephemeral".to_owned(),
-            "--skip-git-repo-check".to_owned(),
-            "--dangerously-bypass-approvals-and-sandbox".to_owned(),
-            "--ignore-rules".to_owned(),
-            "--color".to_owned(),
-            "never".to_owned(),
-            "--model".to_owned(),
-            CODEX_MODEL.to_owned(),
-            CODEX_PROMPT.to_owned(),
-        ];
+        let command = codex_command();
         let stream = daemon
             .exec_transient(v1::ExecStartRequest {
                 command,
@@ -161,6 +183,422 @@ mod linux {
         )?;
 
         println!("codewire-local-codex-bridge-smoke: PASS");
+        Ok(())
+    }
+
+    async fn run_managed_broker_smoke(
+        args: &Args,
+        supervisor: &mut NativeSupervisorClient,
+        daemon: &SessionClient,
+        environment: &local_v1::Environment,
+    ) -> SmokeResult<()> {
+        let credential_root = args.credential_authority_root.as_ref().ok_or_else(failed)?;
+        let credential_id =
+            CredentialId::parse(args.credential_id.as_ref().ok_or_else(failed)?.clone())?;
+        let environment_id = EnvironmentId::parse(environment.id.clone())?;
+        require(!environment.access_profile.is_empty() && environment.access_profile_revision > 0)?;
+
+        stage("managed-broker-ready");
+        let runtime = supervisor.ensure_credential_broker(&args.target).await?;
+        require(
+            runtime.environment_id == environment.id
+                && runtime.environment_generation == environment.generation
+                && runtime.running,
+        )?;
+        let mut credentials = LocalCredentialClient::connect(&AuthorityRuntimeConfig {
+            root: credential_root.clone(),
+            executable: args.cw_bin.clone(),
+        })
+        .await?;
+        require_audit(
+            &mut credentials,
+            &environment_id,
+            environment.generation,
+            &credential_id,
+            &[],
+        )
+        .await?;
+
+        stage("managed-policy-denial");
+        let denied = run_http_probe(
+            daemon,
+            &environment.working_directory,
+            "/v1/responses?exfiltrate=true",
+        )
+        .await?;
+        require(denied.status == 403)?;
+        require(!denied.body.contains(GUEST_CALLER_BEARER))?;
+        require_audit(
+            &mut credentials,
+            &environment_id,
+            environment.generation,
+            &credential_id,
+            &[],
+        )
+        .await?;
+
+        stage("managed-injection-redaction");
+        let admitted =
+            run_http_probe(daemon, &environment.working_directory, "/v1/responses").await?;
+        require(
+            admitted.status == 200
+                && admitted.request_id.as_deref() == Some("[REDACTED]")
+                && admitted.body.contains(MANAGED_CODEX_MARKER)
+                && !admitted.body.contains(GUEST_CALLER_BEARER),
+        )?;
+        require_audit(
+            &mut credentials,
+            &environment_id,
+            environment.generation,
+            &credential_id,
+            &[BrokerLeaseAuditDecision::Admitted],
+        )
+        .await?;
+
+        stage("managed-codex-exec");
+        require_managed_codex(daemon, &environment.working_directory).await?;
+        require_audit(
+            &mut credentials,
+            &environment_id,
+            environment.generation,
+            &credential_id,
+            &[
+                BrokerLeaseAuditDecision::Admitted,
+                BrokerLeaseAuditDecision::Admitted,
+            ],
+        )
+        .await?;
+
+        stage("managed-broker-crash");
+        let broker_pid = wait_for_exact_broker(args, environment, None).await?;
+        stage("managed-broker-identified");
+        kill_exact_broker(broker_pid, args, environment)?;
+        stage("managed-broker-killed");
+        let replacement_pid = wait_for_exact_broker(args, environment, Some(broker_pid)).await?;
+        stage("managed-broker-replaced");
+        require(replacement_pid != broker_pid)?;
+        wait_for_broker_ready(
+            supervisor,
+            &args.target,
+            &environment.id,
+            environment.generation,
+        )
+        .await?;
+
+        stage("managed-codex-after-restart");
+        require_managed_codex(daemon, &environment.working_directory).await?;
+        require_audit(
+            &mut credentials,
+            &environment_id,
+            environment.generation,
+            &credential_id,
+            &[
+                BrokerLeaseAuditDecision::Admitted,
+                BrokerLeaseAuditDecision::Admitted,
+                BrokerLeaseAuditDecision::Admitted,
+            ],
+        )
+        .await?;
+
+        stage("managed-revocation");
+        credentials.revoke_credential(&credential_id).await?;
+        let revoked =
+            run_http_probe(daemon, &environment.working_directory, "/v1/responses").await?;
+        require(revoked.status == 403 && !revoked.body.contains(GUEST_CALLER_BEARER))?;
+        require_audit(
+            &mut credentials,
+            &environment_id,
+            environment.generation,
+            &credential_id,
+            &[
+                BrokerLeaseAuditDecision::Denied,
+                BrokerLeaseAuditDecision::Admitted,
+                BrokerLeaseAuditDecision::Admitted,
+                BrokerLeaseAuditDecision::Admitted,
+            ],
+        )
+        .await
+    }
+
+    async fn require_audit(
+        client: &mut LocalCredentialClient,
+        environment_id: &EnvironmentId,
+        generation: u64,
+        credential_id: &CredentialId,
+        decisions: &[BrokerLeaseAuditDecision],
+    ) -> SmokeResult<()> {
+        let events = client.list_recent_broker_lease_audit_events(16).await?;
+        require(events.len() == decisions.len())?;
+        for (event, decision) in events.iter().zip(decisions) {
+            require(
+                event.environment_id == *environment_id
+                    && event.environment_generation == generation
+                    && event.capability_slot == CapabilitySlot::codex()
+                    && event.operation == BrokerOperationId::parse("responses")?
+                    && event.route == BrokerRouteId::parse("openai-api")?
+                    && event.decision == *decision,
+            )?;
+            match decision {
+                BrokerLeaseAuditDecision::Admitted => {
+                    require(event.credential_id.as_ref() == Some(credential_id))?;
+                    require(
+                        event.profile_id.is_some()
+                            && event.profile_revision.is_some_and(|value| value > 0)
+                            && event
+                                .credential_revocation_generation
+                                .is_some_and(|value| value > 0),
+                    )?;
+                }
+                BrokerLeaseAuditDecision::Denied | BrokerLeaseAuditDecision::Unavailable => {
+                    require(
+                        event.credential_id.is_none()
+                            && event.profile_id.is_none()
+                            && event.profile_revision.is_none()
+                            && event.credential_revocation_generation.is_none(),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_http_probe(
+        client: &SessionClient,
+        working_directory: &str,
+        path: &str,
+    ) -> SmokeResult<HttpProbeOutput> {
+        const SCRIPT: &str = r#"const http=require('http');
+const body=JSON.stringify({model:'codewire-synthetic',input:'hello',stream:true});
+const request=http.request({host:'127.0.0.1',port:38081,path:process.argv[1],method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(body),'authorization':'Bearer guest-supplied-bearer-must-not-pass'}},response=>{const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('end',()=>process.stdout.write(JSON.stringify({status:response.statusCode,request_id:response.headers['x-request-id']??null,body:Buffer.concat(chunks).toString('utf8')})));});
+request.setTimeout(10000,()=>request.destroy(new Error('timeout')));request.on('error',()=>process.exit(1));request.end(body);"#;
+        let output = run_transient(
+            client,
+            vec!["node".into(), "-e".into(), SCRIPT.into(), path.into()],
+            working_directory,
+            Vec::new(),
+        )
+        .await?;
+        require(output.exit_code == 0 && output.stderr.is_empty())?;
+        serde_json::from_slice(&output.stdout).map_err(Into::into)
+    }
+
+    async fn require_managed_codex(
+        client: &SessionClient,
+        working_directory: &str,
+    ) -> SmokeResult<()> {
+        let output = run_transient(
+            client,
+            codex_command(),
+            working_directory,
+            smoke_environment(),
+        )
+        .await?;
+        require(
+            output.exit_code == 0
+                && output.stdout == format!("{MANAGED_CODEX_MARKER}\n").as_bytes()
+                && output
+                    .stderr
+                    .windows(b"OpenAI Codex v0.149.0".len())
+                    .any(|window| window == b"OpenAI Codex v0.149.0"),
+        )
+    }
+
+    fn codex_command() -> Vec<String> {
+        vec![
+            CODEX_BIN.to_owned(),
+            "exec".to_owned(),
+            "--config".to_owned(),
+            "model_context_window=100000".to_owned(),
+            "--ephemeral".to_owned(),
+            "--skip-git-repo-check".to_owned(),
+            "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+            "--ignore-rules".to_owned(),
+            "--color".to_owned(),
+            "never".to_owned(),
+            "--model".to_owned(),
+            CODEX_MODEL.to_owned(),
+            CODEX_PROMPT.to_owned(),
+        ]
+    }
+
+    async fn wait_for_broker_ready(
+        supervisor: &mut NativeSupervisorClient,
+        target: &str,
+        environment_id: &str,
+        generation: u64,
+    ) -> SmokeResult<()> {
+        let deadline = Instant::now() + EXEC_TIMEOUT;
+        loop {
+            let runtime = supervisor.ensure_credential_broker(target).await?;
+            require(
+                runtime.environment_id == environment_id
+                    && runtime.environment_generation == generation,
+            )?;
+            if runtime.running {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(failed());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_for_exact_broker(
+        args: &Args,
+        environment: &local_v1::Environment,
+        excluded_pid: Option<i32>,
+    ) -> SmokeResult<i32> {
+        let deadline = Instant::now() + EXEC_TIMEOUT;
+        loop {
+            let mut pids = exact_broker_pids(args, environment)?;
+            pids.retain(|pid| Some(*pid) != excluded_pid);
+            if pids.len() == 1 {
+                return Ok(pids[0]);
+            }
+            require(pids.is_empty())?;
+            if Instant::now() >= deadline {
+                return Err(failed());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn exact_broker_pids(
+        args: &Args,
+        environment: &local_v1::Environment,
+    ) -> SmokeResult<Vec<i32>> {
+        let mut pids = Vec::new();
+        for entry in fs::read_dir("/proc")? {
+            let entry = entry?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|value| value.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if exact_broker_process(pid, args, environment) {
+                pids.push(pid);
+            }
+        }
+        pids.sort_unstable();
+        Ok(pids)
+    }
+
+    fn exact_broker_process(pid: i32, args: &Args, environment: &local_v1::Environment) -> bool {
+        let process = PathBuf::from(format!("/proc/{pid}"));
+        let Ok(metadata) = fs::metadata(&process) else {
+            return false;
+        };
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return false;
+        }
+        let Some(parent_pid) = process_parent_pid(&process) else {
+            return false;
+        };
+        exact_process_argv(&process, &expected_broker_argv(args, environment))
+            && exact_authority_process(parent_pid, args)
+    }
+
+    fn exact_authority_process(pid: i32, args: &Args) -> bool {
+        let process = PathBuf::from(format!("/proc/{pid}"));
+        let Ok(metadata) = fs::metadata(&process) else {
+            return false;
+        };
+        let Some(expected_argv) = expected_authority_argv(args) else {
+            return false;
+        };
+        metadata.uid() == unsafe { libc::geteuid() }
+            && fs::read_link(process.join("exe")).ok().as_deref() == Some(args.cw_bin.as_path())
+            && exact_process_argv(&process, &expected_argv)
+    }
+
+    fn exact_process_argv(process: &Path, expected: &[OsString]) -> bool {
+        let Ok(command) = fs::read(process.join("cmdline")) else {
+            return false;
+        };
+        if command.is_empty() || command.len() > MAX_PROC_CMDLINE || command.last() != Some(&0) {
+            return false;
+        }
+        let actual = command[..command.len() - 1]
+            .split(|byte| *byte == 0)
+            .collect::<Vec<_>>();
+        actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected.iter())
+                .all(|(actual, expected)| *actual == expected.as_os_str().as_bytes())
+    }
+
+    fn process_parent_pid(process: &Path) -> Option<i32> {
+        let status = fs::read_to_string(process.join("status")).ok()?;
+        let mut parents = status.lines().filter_map(|line| {
+            line.strip_prefix("PPid:")
+                .map(str::trim)
+                .and_then(|value| value.parse::<i32>().ok())
+                .filter(|value| *value > 0)
+        });
+        let parent = parents.next()?;
+        parents.next().is_none().then_some(parent)
+    }
+
+    fn expected_authority_argv(args: &Args) -> Option<Vec<OsString>> {
+        Some(vec![
+            args.cw_bin.as_os_str().to_owned(),
+            "__local-credential-authority".into(),
+            "--root".into(),
+            args.credential_authority_root
+                .as_ref()?
+                .as_os_str()
+                .to_owned(),
+        ])
+    }
+
+    fn expected_broker_argv(args: &Args, environment: &local_v1::Environment) -> Vec<OsString> {
+        vec![
+            args.cw_bin.as_os_str().to_owned(),
+            "__local-credential-broker".into(),
+            "--authority-fd".into(),
+            "3".into(),
+            "--environment-id".into(),
+            environment.id.clone().into(),
+            "--environment-generation".into(),
+            environment.generation.to_string().into(),
+            "--environment-name".into(),
+            environment.name.clone().into(),
+            "--supervisor-socket".into(),
+            args.state_root.join("supervisor.sock").into_os_string(),
+        ]
+    }
+
+    fn kill_exact_broker(
+        pid: i32,
+        args: &Args,
+        environment: &local_v1::Environment,
+    ) -> SmokeResult<()> {
+        // SAFETY: pidfd_open returns a new descriptor for the numeric process.
+        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) };
+        if descriptor < 0 || descriptor > i32::MAX as libc::c_long {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: ownership of the newly returned descriptor is transferred once.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor as i32) };
+        require(exact_broker_process(pid, args, environment))?;
+        // SAFETY: the pidfd still identifies the revalidated broker process and
+        // the null siginfo pointer requests an ordinary SIGKILL delivery.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                descriptor.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0_u32,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
         Ok(())
     }
 
@@ -403,7 +841,17 @@ mod linux {
             let mut artifact_lock = None;
             let mut cw_bin = None;
             let mut target = None;
+            let mut managed_broker = false;
+            let mut credential_authority_root = None;
+            let mut credential_id = None;
             while let Some(flag) = arguments.next() {
+                if flag == "--managed-broker" {
+                    if managed_broker {
+                        return Err(failed());
+                    }
+                    managed_broker = true;
+                    continue;
+                }
                 let value = arguments.next().ok_or_else(failed)?;
                 let slot = match flag.as_str() {
                     "--state-root" => &mut state_root,
@@ -411,12 +859,22 @@ mod linux {
                     "--artifact-lock" => &mut artifact_lock,
                     "--cw-bin" => &mut cw_bin,
                     "--target" => &mut target,
+                    "--credential-authority-root" => &mut credential_authority_root,
+                    "--credential-id" => &mut credential_id,
                     _ => return Err(failed()),
                 };
                 if slot.replace(value).is_some() {
                     return Err(failed());
                 }
             }
+            let credential_authority_root = credential_authority_root
+                .map(|value| absolute_path(Some(value)))
+                .transpose()?;
+            let credential_id = credential_id.filter(|value| !value.is_empty());
+            require(match managed_broker {
+                true => credential_authority_root.is_some() && credential_id.is_some(),
+                false => credential_authority_root.is_none() && credential_id.is_none(),
+            })?;
             Ok(Self {
                 state_root: absolute_path(state_root)?,
                 artifact_root: absolute_path(artifact_root)?,
@@ -425,6 +883,9 @@ mod linux {
                 target: target
                     .filter(|value| !value.is_empty())
                     .ok_or_else(failed)?,
+                managed_broker,
+                credential_authority_root,
+                credential_id,
             })
         }
     }
@@ -477,6 +938,78 @@ mod linux {
                     "response.completed",
                 ]
             );
+        }
+
+        fn required_arguments() -> Vec<String> {
+            [
+                "--state-root",
+                "/state",
+                "--artifact-root",
+                "/artifacts",
+                "--artifact-lock",
+                "/artifacts.lock.json",
+                "--cw-bin",
+                "/bin/cw",
+                "--target",
+                "environment",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        }
+
+        #[test]
+        fn direct_mode_rejects_managed_arguments() {
+            let direct = Args::parse(required_arguments()).unwrap();
+            assert!(!direct.managed_broker);
+            assert!(direct.credential_authority_root.is_none());
+            assert!(direct.credential_id.is_none());
+
+            let mut incomplete = required_arguments();
+            incomplete.extend([
+                "--credential-authority-root".to_owned(),
+                "/credentials".to_owned(),
+            ]);
+            assert!(Args::parse(incomplete).is_err());
+        }
+
+        #[test]
+        fn managed_mode_requires_one_complete_selection() {
+            let mut managed = required_arguments();
+            managed.extend([
+                "--managed-broker".to_owned(),
+                "--credential-authority-root".to_owned(),
+                "/credentials".to_owned(),
+                "--credential-id".to_owned(),
+                "credential-id".to_owned(),
+            ]);
+            let parsed = Args::parse(managed.clone()).unwrap();
+            assert!(parsed.managed_broker);
+            assert_eq!(
+                parsed.credential_authority_root.as_deref(),
+                Some(std::path::Path::new("/credentials"))
+            );
+            assert_eq!(parsed.credential_id.as_deref(), Some("credential-id"));
+
+            managed.push("--managed-broker".to_owned());
+            assert!(Args::parse(managed).is_err());
+        }
+
+        #[test]
+        fn parent_pid_parser_requires_one_positive_kernel_status_field() {
+            let temp = tempfile::tempdir().unwrap();
+            fs::write(temp.path().join("status"), "Name:\ttest\nPPid:\t42\n").unwrap();
+            assert_eq!(process_parent_pid(temp.path()), Some(42));
+
+            for invalid in [
+                "Name:\ttest\n",
+                "PPid:\t0\n",
+                "PPid:\tinvalid\n",
+                "PPid:\t42\nPPid:\t43\n",
+            ] {
+                fs::write(temp.path().join("status"), invalid).unwrap();
+                assert_eq!(process_parent_pid(temp.path()), None);
+            }
         }
     }
 }

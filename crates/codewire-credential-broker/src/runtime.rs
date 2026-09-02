@@ -6,6 +6,8 @@ use bytes::Bytes;
 use codewire_access::{BrokerOperationId, BrokerRouteId, CapabilitySlot};
 use codewire_gateway_proto::daemon::v1;
 use futures::Stream;
+#[cfg(feature = "local-broker-synthetic-smoke")]
+use futures::stream;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use thiserror::Error;
 use url::Url;
@@ -147,6 +149,75 @@ impl BrokerUpstreamResponse {
 
     fn into_parts(self) -> (StatusCode, HeaderMap, BrokerUpstreamBody) {
         (self.status, self.headers, self.body)
+    }
+}
+
+/// Non-shipping upstream used only by the checked-in local broker product
+/// smoke. It proves that the isolated broker injected protected material and
+/// that response filtering removes a reflection before bytes return to the
+/// guest, without contacting a provider.
+#[cfg(feature = "local-broker-synthetic-smoke")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SyntheticOpenAiSmokeTransport;
+
+#[cfg(feature = "local-broker-synthetic-smoke")]
+#[async_trait]
+impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
+    async fn execute(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let (method, target, headers, body) = request.into_parts();
+        if method != Method::POST
+            || target.as_str() != "https://api.openai.com/v1/responses"
+            || body.is_empty()
+            || headers.contains_key("proxy-authorization")
+            || headers.contains_key("cookie")
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let protected_value = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .filter(|value| {
+                (16..=256).contains(&value.len())
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            })
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        let response = format!(
+            concat!(
+                "event: response.created\n",
+                "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_codewire_broker_smoke\"}}}}\n\n",
+                "event: response.output_item.done\n",
+                "data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_codewire_broker_smoke\",\"content\":[{{\"type\":\"output_text\",\"text\":\"CWCODEX149 broker {protected_value}\"}}]}}}}\n\n",
+                "event: response.completed\n",
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_codewire_broker_smoke\",\"usage\":{{\"input_tokens\":0,\"input_tokens_details\":null,\"output_tokens\":0,\"output_tokens_details\":null,\"total_tokens\":0}}}}}}\n\n",
+            ),
+            protected_value = protected_value,
+        );
+        let reflected_at = response
+            .find(protected_value)
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        let split_at = reflected_at + protected_value.len() / 2;
+        let first = Bytes::copy_from_slice(&response.as_bytes()[..split_at]);
+        let second = Bytes::copy_from_slice(&response.as_bytes()[split_at..]);
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert(
+            "content-type",
+            HeaderValue::from_static("text/event-stream"),
+        );
+        response_headers.insert(
+            "x-request-id",
+            HeaderValue::from_str(protected_value).map_err(|_| BrokerUpstreamError::Protocol)?,
+        );
+        Ok(BrokerUpstreamResponse::new(
+            StatusCode::OK,
+            response_headers,
+            Box::pin(stream::iter([Ok(first), Ok(second)])),
+        ))
     }
 }
 

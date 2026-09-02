@@ -213,6 +213,9 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
     LocalCredentialBrokerConfinementProbe,
+    #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+    #[command(name = "__local-credential-broker-synthetic-smoke-check", hide = true)]
+    LocalCredentialBrokerSyntheticSmokeCheck,
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -225,6 +228,8 @@ enum Command {
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+    require_local_broker_smoke_executable()?;
     let mut args = std::env::args().collect::<Vec<_>>();
     let invoked_as_daemon = args
         .first()
@@ -238,6 +243,18 @@ pub async fn run() -> anyhow::Result<()> {
         *program = "cw".to_string();
     }
     run_from(args).await
+}
+
+#[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
+    let executable =
+        std::env::current_exe().context("resolve synthetic broker smoke executable")?;
+    anyhow::ensure!(
+        executable.file_name().and_then(std::ffi::OsStr::to_str)
+            == Some("cw-local-credential-broker-smoke"),
+        "synthetic local credential broker build must be named cw-local-credential-broker-smoke"
+    );
+    Ok(())
 }
 
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
@@ -302,6 +319,11 @@ where
         #[cfg(target_os = "linux")]
         Command::LocalCredentialBrokerConfinementProbe => {
             run_local_credential_broker_confinement_probe().await
+        }
+        #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+        Command::LocalCredentialBrokerSyntheticSmokeCheck => {
+            println!("codewire-local-credential-broker-synthetic-smoke:v1");
+            Ok(())
         }
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,

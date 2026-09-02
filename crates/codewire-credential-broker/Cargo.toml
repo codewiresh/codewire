@@ -10,6 +10,7 @@ description = "Isolated provider credential brokerage for Codewire environments"
 [features]
 default = ["local"]
 local = ["dep:codewire-local-credentials", "dep:codewire-protected-store"]
+local-broker-synthetic-smoke = []
 
 [dependencies]
 async-trait = { workspace = true }

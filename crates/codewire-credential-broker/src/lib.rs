@@ -19,6 +19,8 @@ pub use openai::{
     OpenAiApiKeyAdapter, OpenAiStreamingResponse, PreparedOpenAiRequest, PreparedOpenAiResponse,
     ValidatedOpenAiRequest,
 };
+#[cfg(feature = "local-broker-synthetic-smoke")]
+pub use runtime::SyntheticOpenAiSmokeTransport;
 pub use runtime::{
     BrokerHttpResponse, BrokerLeaseError, BrokerLeaseProvider, BrokerRequestError,
     BrokerResponseBody, BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
