@@ -624,16 +624,21 @@ pub trait MeshStore: Send + Sync + 'static {
     ) -> Result<Option<NodeRecord>, StoreError>;
     async fn node_list(&self, network_id: &str) -> Result<Vec<NodeRecord>, StoreError>;
     async fn node_list_all(&self) -> Result<Vec<NodeRecord>, StoreError>;
+    /// Delete a node and invalidate every unconsumed enrollment fixed to its
+    /// name as one atomic store operation.
     async fn node_delete(&self, network_id: &str, name: &str) -> Result<(), StoreError>;
     async fn node_enrollment_create(&self, enrollment: NodeEnrollment) -> Result<(), StoreError>;
     async fn node_enrollment_get_by_token_hash(
         &self,
         token_hash: &str,
     ) -> Result<Option<NodeEnrollment>, StoreError>;
-    async fn node_enrollment_consume(
+    /// Atomically consume an enrollment and register its exact node. Ownership
+    /// collisions roll back the capability consumption.
+    async fn node_enrollment_consume_and_register(
         &self,
         token_hash: &str,
         redeemed_at: DateTime<Utc>,
+        node: NodeRecord,
     ) -> Result<Option<NodeEnrollment>, StoreError>;
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError>;
     async fn access_grant_get(
@@ -1184,9 +1189,11 @@ impl MeshStore for MemoryStore {
         }
         let key = (node.network_id.clone(), node.name.clone());
         if let Some(existing) = state.nodes.get_mut(&key) {
+            if existing.owner_subject != node.owner_subject {
+                return Err(StoreError::AlreadyExists);
+            }
             existing.peer_url = node.peer_url;
             existing.github_id = node.github_id;
-            existing.owner_subject = node.owner_subject;
             existing.authorized_by = node.authorized_by;
             existing.enrollment_id = node.enrollment_id;
             existing.last_seen_at = node.last_seen_at;
@@ -1233,6 +1240,14 @@ impl MeshStore for MemoryStore {
 
     async fn node_delete(&self, network_id: &str, name: &str) -> Result<(), StoreError> {
         let mut state = self.state.lock().await;
+        for enrollment in state.node_enrollments.values_mut() {
+            if enrollment.network_id == network_id
+                && enrollment.node_name == name
+                && enrollment.uses_remaining > 0
+            {
+                enrollment.uses_remaining = 0;
+            }
+        }
         state
             .nodes
             .remove(&(network_id.to_string(), name.to_string()));
@@ -1258,23 +1273,49 @@ impl MeshStore for MemoryStore {
         Ok(state.node_enrollments.get(token_hash).cloned())
     }
 
-    async fn node_enrollment_consume(
+    async fn node_enrollment_consume_and_register(
         &self,
         token_hash: &str,
         redeemed_at: DateTime<Utc>,
+        node: NodeRecord,
     ) -> Result<Option<NodeEnrollment>, StoreError> {
         let mut state = self.state.lock().await;
-        let Some(enrollment) = state.node_enrollments.get_mut(token_hash) else {
+        let Some(enrollment) = state.node_enrollments.get(token_hash).cloned() else {
             return Ok(None);
         };
         if enrollment.uses_remaining <= 0 || enrollment.expires_at <= redeemed_at {
             return Ok(None);
         }
+        validate_enrollment_node_binding(&enrollment, &node)?;
+        let node_key = (node.network_id.clone(), node.name.clone());
+        if state
+            .nodes
+            .get(&node_key)
+            .is_some_and(|existing| existing.owner_subject != node.owner_subject)
+        {
+            return Err(StoreError::AlreadyExists);
+        }
+
+        let enrollment = state
+            .node_enrollments
+            .get_mut(token_hash)
+            .expect("enrollment remains present while the memory store lock is held");
         enrollment.uses_remaining -= 1;
         if enrollment.uses_remaining == 0 {
             enrollment.redeemed_at = Some(redeemed_at);
         }
-        Ok(Some(enrollment.clone()))
+        let redeemed = enrollment.clone();
+
+        if let Some(existing) = state.nodes.get_mut(&node_key) {
+            existing.peer_url = node.peer_url;
+            existing.github_id = node.github_id;
+            existing.authorized_by = node.authorized_by;
+            existing.enrollment_id = node.enrollment_id;
+            existing.last_seen_at = node.last_seen_at;
+        } else {
+            state.nodes.insert(node_key, node);
+        }
+        Ok(Some(redeemed))
     }
 
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
@@ -2259,7 +2300,7 @@ impl MeshStore for PostgresMeshStore {
 
     async fn node_register(&self, node: NodeRecord) -> Result<(), StoreError> {
         self.network_ensure(&node.network_id).await?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO nodes
                 (network_id, name, peer_url, github_id, owner_subject, authorized_by,
@@ -2268,10 +2309,10 @@ impl MeshStore for PostgresMeshStore {
             ON CONFLICT (network_id, name) DO UPDATE SET
                 peer_url = EXCLUDED.peer_url,
                 github_id = EXCLUDED.github_id,
-                owner_subject = EXCLUDED.owner_subject,
                 authorized_by = EXCLUDED.authorized_by,
                 enrollment_id = EXCLUDED.enrollment_id,
                 last_seen_at = EXCLUDED.last_seen_at
+            WHERE nodes.owner_subject = EXCLUDED.owner_subject
             "#,
         )
         .bind(&node.network_id)
@@ -2285,6 +2326,9 @@ impl MeshStore for PostgresMeshStore {
         .bind(node.last_seen_at)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::AlreadyExists);
+        }
         Ok(())
     }
 
@@ -2346,11 +2390,36 @@ impl MeshStore for PostgresMeshStore {
     }
 
     async fn node_delete(&self, network_id: &str, name: &str) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            SELECT owner_subject
+            FROM nodes
+            WHERE network_id = $1 AND name = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(network_id)
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE node_enrollments
+            SET uses_remaining = 0
+            WHERE network_id = $1 AND node_name = $2 AND uses_remaining > 0
+            "#,
+        )
+        .bind(network_id)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(r#"DELETE FROM nodes WHERE network_id = $1 AND name = $2"#)
             .bind(network_id)
             .bind(name)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2402,11 +2471,55 @@ impl MeshStore for PostgresMeshStore {
         }
     }
 
-    async fn node_enrollment_consume(
+    async fn node_enrollment_consume_and_register(
         &self,
         token_hash: &str,
         redeemed_at: DateTime<Utc>,
+        node: NodeRecord,
     ) -> Result<Option<NodeEnrollment>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let existing_owner: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT owner_subject
+            FROM nodes
+            WHERE network_id = $1 AND name = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(&node.network_id)
+        .bind(&node.name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing_owner
+            .as_ref()
+            .is_some_and(|owner| owner != &node.owner_subject)
+        {
+            return Err(StoreError::AlreadyExists);
+        }
+
+        let row = sqlx::query(
+            r#"
+            SELECT id, network_id, owner_subject, issued_by, node_name, token_hash,
+                   uses_remaining, expires_at, created_at, redeemed_at
+            FROM node_enrollments
+            WHERE token_hash = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let enrollment = row_to_node_enrollment(row)?;
+        if enrollment.uses_remaining <= 0 || enrollment.expires_at <= redeemed_at {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        validate_enrollment_node_binding(&enrollment, &node)?;
+
         let row = sqlx::query(
             r#"
             UPDATE node_enrollments
@@ -2419,14 +2532,44 @@ impl MeshStore for PostgresMeshStore {
         )
         .bind(redeemed_at)
         .bind(token_hash)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        let redeemed = row
+            .map(row_to_node_enrollment)
+            .transpose()?
+            .ok_or_else(|| StoreError::Invalid("locked enrollment changed".to_owned()))?;
 
-        if let Some(row) = row {
-            Ok(Some(row_to_node_enrollment(row)?))
-        } else {
-            Ok(None)
+        let result = sqlx::query(
+            r#"
+            INSERT INTO nodes
+                (network_id, name, peer_url, github_id, owner_subject, authorized_by,
+                 enrollment_id, authorized_at, last_seen_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (network_id, name) DO UPDATE SET
+                peer_url = EXCLUDED.peer_url,
+                github_id = EXCLUDED.github_id,
+                authorized_by = EXCLUDED.authorized_by,
+                enrollment_id = EXCLUDED.enrollment_id,
+                last_seen_at = EXCLUDED.last_seen_at
+            WHERE nodes.owner_subject = EXCLUDED.owner_subject
+            "#,
+        )
+        .bind(&node.network_id)
+        .bind(&node.name)
+        .bind(&node.peer_url)
+        .bind(node.github_id)
+        .bind(&node.owner_subject)
+        .bind(&node.authorized_by)
+        .bind(&node.enrollment_id)
+        .bind(node.authorized_at)
+        .bind(node.last_seen_at)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::AlreadyExists);
         }
+        tx.commit().await?;
+        Ok(Some(redeemed))
     }
 
     async fn access_grant_create(&self, grant: AccessGrant) -> Result<(), StoreError> {
@@ -2743,6 +2886,25 @@ fn required_identifier(value: &str, field: &str) -> Result<String, StoreError> {
     (!value.is_empty())
         .then(|| value.to_owned())
         .ok_or_else(|| StoreError::Invalid(format!("{field} required")))
+}
+
+fn validate_enrollment_node_binding(
+    enrollment: &NodeEnrollment,
+    node: &NodeRecord,
+) -> Result<(), StoreError> {
+    let fixed_name = enrollment.node_name.trim();
+    if node.network_id != enrollment.network_id
+        || node.owner_subject != enrollment.owner_subject
+        || node.authorized_by != enrollment.issued_by
+        || node.enrollment_id != enrollment.id
+        || node.name.trim().is_empty()
+        || (!fixed_name.is_empty() && node.name != fixed_name)
+    {
+        return Err(StoreError::Invalid(
+            "node does not match enrollment authority".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn row_to_kv_entry(row: sqlx::postgres::PgRow) -> Result<KVEntry, StoreError> {

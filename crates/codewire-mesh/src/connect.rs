@@ -295,6 +295,9 @@ async fn revoke_mesh_node(
         )
         .await
         .map_err(|e| rpc_app_error(&e, &ctx))?;
+    state
+        .mesh_coordinate
+        .revoke_node(request.network_id.trim(), request.node_name.trim());
     connectrpc::Response::ok(RevokeMeshNodeResponse::default())
 }
 

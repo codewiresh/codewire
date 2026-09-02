@@ -374,6 +374,46 @@ impl MeshProductService {
         requested_node_name: &str,
         peer_url: &str,
     ) -> AppResult<RedeemedNodeEnrollment> {
+        self.redeem_node_enrollment_scoped(
+            enrollment_code,
+            requested_node_name,
+            peer_url,
+            None,
+            false,
+        )
+        .await
+    }
+
+    /// Consume one fixed-name enrollment directly as setup authority for one
+    /// exact peer coordinate stream. The capability is resolved by Mesh and
+    /// never forwarded to the platform authorization adapter.
+    pub(crate) async fn redeem_coordinate_enrollment(
+        &self,
+        organization_id: &str,
+        network_id: &str,
+        credential: &ForwardedMeshCredential,
+    ) -> AppResult<RedeemedNodeEnrollment> {
+        let enrollment_code = credential
+            .node_enrollment_code()
+            .ok_or(AppError::Unauthorized)?;
+        self.redeem_node_enrollment_scoped(
+            enrollment_code,
+            "",
+            "",
+            Some((organization_id, network_id)),
+            true,
+        )
+        .await
+    }
+
+    async fn redeem_node_enrollment_scoped(
+        &self,
+        enrollment_code: &str,
+        requested_node_name: &str,
+        peer_url: &str,
+        expected_scope: Option<(&str, &str)>,
+        require_fixed_name: bool,
+    ) -> AppResult<RedeemedNodeEnrollment> {
         let enrollment_code = required_identifier(enrollment_code, "enrollment_code")?;
         let token_hash = hash_capability(&enrollment_code);
         let now = Utc::now();
@@ -387,6 +427,24 @@ impl MeshProductService {
             return Err(AppError::Forbidden);
         }
 
+        let expected_scope = expected_scope
+            .map(|(organization_id, network_id)| -> AppResult<_> {
+                Ok((
+                    required_identifier(organization_id, "org_id")?,
+                    validate_network_id(network_id)?,
+                ))
+            })
+            .transpose()?;
+        if expected_scope
+            .as_ref()
+            .is_some_and(|(_, network_id)| enrollment.network_id != network_id.as_str())
+        {
+            return Err(AppError::Forbidden);
+        }
+
+        if require_fixed_name && enrollment.node_name.trim().is_empty() {
+            return Err(AppError::Forbidden);
+        }
         let node_name = match (enrollment.node_name.trim(), requested_node_name.trim()) {
             (fixed, "") if !fixed.is_empty() => fixed.to_owned(),
             (fixed, requested) if !fixed.is_empty() && fixed != requested => {
@@ -398,12 +456,12 @@ impl MeshProductService {
         let organization_id = self
             .organization_for_network(&enrollment.network_id)
             .await?;
-        let enrollment = self
-            .store
-            .node_enrollment_consume(&token_hash, now)
-            .await
-            .map_err(store_error)?
-            .ok_or(AppError::Forbidden)?;
+        if expected_scope
+            .as_ref()
+            .is_some_and(|(expected, _)| organization_id != expected.as_str())
+        {
+            return Err(AppError::Forbidden);
+        }
         let node = NodeRecord {
             network_id: enrollment.network_id.clone(),
             name: node_name,
@@ -415,10 +473,12 @@ impl MeshProductService {
             authorized_at: now,
             last_seen_at: now,
         };
-        self.store
-            .node_register(node.clone())
+        let enrollment = self
+            .store
+            .node_enrollment_consume_and_register(&token_hash, now, node.clone())
             .await
-            .map_err(store_error)?;
+            .map_err(store_error)?
+            .ok_or(AppError::Forbidden)?;
 
         Ok(RedeemedNodeEnrollment {
             organization_id,
