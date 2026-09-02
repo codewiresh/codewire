@@ -153,6 +153,8 @@ const RUNC_PROCESS_SPEC_LIMIT: u64 = 1024 * 1024;
 const PERSISTENT_WORKSPACE_PATH: &str = "/state/workspace";
 const PERSISTENT_HOME_PATH: &str = "/state/home";
 const PERSISTENT_HOME_WORK_PATH: &str = "/state/home-work";
+const PERSISTENT_AGENT_HOMES_PATH: &str = "/state/agent-homes";
+const PERSISTENT_CODEX_HOME_PATH: &str = "/state/agent-homes/codex";
 
 static POWEROFF_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -277,6 +279,7 @@ pub fn run_init() -> Result<()> {
     };
     record_boot_stage("workspace-plan-ready")?;
     normalize_initial_persistent_ownership(&plan)?;
+    prepare_codex_projection(&plan)?;
     record_boot_stage("ownership-ready")?;
     prepare_install_state()?;
     let poweroff = prepare_container_control(&seed, &plan.identity)?;
@@ -1691,6 +1694,8 @@ fn create_state_layout() -> Result<()> {
         (PERSISTENT_WORKSPACE_PATH, 0o700),
         (PERSISTENT_HOME_PATH, 0o700),
         (PERSISTENT_HOME_WORK_PATH, 0o700),
+        (PERSISTENT_AGENT_HOMES_PATH, 0o700),
+        (PERSISTENT_CODEX_HOME_PATH, 0o700),
         (PERSISTENT_PROBE_PATH, 0o700),
     ] {
         create_dir(Path::new(path), mode)?;
@@ -1753,7 +1758,7 @@ fn publish_install_completion(plan: &WorkspacePlan) -> Result<()> {
 fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
     let identity = &plan.identity;
     let expected_marker = format!(
-        "codewire-workspace-owner-v3 oci {}:{}\n",
+        "codewire-workspace-owner-v4 oci {}:{}\n",
         identity.uid, identity.gid,
     );
     match fs::symlink_metadata(WORKSPACE_OWNER_VERSION_PATH) {
@@ -1784,6 +1789,7 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
     let mut pending = vec![
         PathBuf::from(PERSISTENT_WORKSPACE_PATH),
         PathBuf::from(PERSISTENT_HOME_PATH),
+        PathBuf::from(PERSISTENT_CODEX_HOME_PATH),
         PathBuf::from(PERSISTENT_PROBE_PATH),
     ];
     let mut visited = 0_usize;
@@ -1831,7 +1837,8 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
 
 fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
     let Some(body) = bytes
-        .strip_prefix(b"codewire-workspace-owner-v3 oci ")
+        .strip_prefix(b"codewire-workspace-owner-v4 oci ")
+        .or_else(|| bytes.strip_prefix(b"codewire-workspace-owner-v3 oci "))
         .and_then(|value| value.strip_suffix(b"\n"))
         .and_then(|value| std::str::from_utf8(value).ok())
     else {
@@ -1847,6 +1854,53 @@ fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
             && value.parse::<u32>().is_ok()
     };
     canonical_id(uid) && canonical_id(gid)
+}
+
+fn prepare_codex_projection(plan: &WorkspacePlan) -> Result<()> {
+    prepare_codex_projection_at(Path::new(PERSISTENT_CODEX_HOME_PATH), plan)
+}
+
+fn prepare_codex_projection_at(root: &Path, plan: &WorkspacePlan) -> Result<()> {
+    let metadata = fs::symlink_metadata(root).context("inspect persistent Codex home")?;
+    ensure!(
+        metadata.file_type().is_dir()
+            && metadata.uid() == plan.identity.uid
+            && metadata.gid() == plan.identity.gid
+            && metadata.permissions().mode() & 0o777 == 0o700,
+        "persistent Codex home is invalid"
+    );
+    let projection = codewire_access::CodexProviderProjection::for_loopback_port(
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+    )
+    .context("derive credential-free Codex provider projection")?;
+    let path = root.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+    write_durable(&path, projection.config_toml().as_bytes(), 0o600)
+        .context("publish credential-free Codex provider projection")?;
+    lchown(&path, plan.identity.uid, plan.identity.gid)?;
+    let metadata = fs::symlink_metadata(&path).context("inspect projected Codex config")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == plan.identity.uid
+            && metadata.gid() == plan.identity.gid
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1
+            && metadata.len() == projection.config_toml().len() as u64,
+        "projected Codex config metadata is invalid"
+    );
+    let actual = read_bounded(&path, projection.config_toml().len().saturating_add(1))
+        .context("verify projected Codex config")?;
+    ensure!(
+        actual == projection.config_toml().as_bytes(),
+        "projected Codex config changed"
+    );
+    File::open(&path)
+        .context("open projected Codex config for sync")?
+        .sync_all()
+        .context("sync projected Codex config ownership")?;
+    File::open(root)
+        .context("open persistent Codex home for sync")?
+        .sync_all()
+        .context("sync persistent Codex home")
 }
 
 fn lchown(path: &Path, uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
@@ -2139,6 +2193,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
             { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": plan.identity.home, "type": "none", "source": HOME_MERGED_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
+            { "destination": crate::CODEX_GUEST_HOME_PATH, "type": "none", "source": PERSISTENT_CODEX_HOME_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": CONTAINER_CONTROL_DESTINATION, "type": "none", "source": CONTAINER_CONTROL_PATH, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_PROBE_DESTINATION, "type": "none", "source": PERSISTENT_PROBE_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
         ],
@@ -3156,6 +3211,7 @@ mod tests {
                 additional_gids: Vec::new(),
             },
             environment: vec![
+                format!("CODEX_HOME={}", crate::CODEX_GUEST_HOME_PATH),
                 "HOME=/root".to_owned(),
                 "LANG=C.UTF-8".to_owned(),
                 "LOGNAME=root".to_owned(),
@@ -3221,6 +3277,50 @@ mod tests {
                 .to_string_lossy()
                 .contains(".tmp.")
         }));
+    }
+
+    #[test]
+    fn codex_projection_converges_without_following_guest_config_symlinks() {
+        let temporary = TempDir::new().unwrap();
+        let codex_home = temporary.path().join("codex");
+        fs::create_dir(&codex_home).unwrap();
+        fs::set_permissions(&codex_home, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut plan = test_workspace_plan();
+        plan.identity.uid = unsafe { libc::geteuid() };
+        plan.identity.gid = unsafe { libc::getegid() };
+        let config = codex_home.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+        let expected = codewire_access::CodexProviderProjection::for_loopback_port(
+            codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+        )
+        .unwrap()
+        .into_config_toml();
+
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+        let metadata = fs::symlink_metadata(&config).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), plan.identity.uid);
+        assert_eq!(metadata.gid(), plan.identity.gid);
+        assert_eq!(metadata.nlink(), 1);
+        assert!(!codex_home.join("auth.json").exists());
+
+        let outside = temporary.path().join("outside");
+        fs::write(&outside, b"outside-sentinel").unwrap();
+        fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(&outside, &config).unwrap();
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-sentinel");
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+        assert!(fs::symlink_metadata(&config).unwrap().file_type().is_file());
+
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+
+        fs::remove_file(&config).unwrap();
+        fs::create_dir(&config).unwrap();
+        assert!(prepare_codex_projection_at(&codex_home, &plan).is_err());
+        assert!(fs::symlink_metadata(&config).unwrap().file_type().is_dir());
     }
 
     #[test]
@@ -3338,6 +3438,15 @@ mod tests {
             .find(|mount| mount["destination"] == plan.identity.home)
             .unwrap();
         assert_eq!(home["source"], HOME_MERGED_PATH);
+        let codex_home = mounts
+            .iter()
+            .find(|mount| mount["destination"] == crate::CODEX_GUEST_HOME_PATH)
+            .unwrap();
+        assert_eq!(codex_home["source"], PERSISTENT_CODEX_HOME_PATH);
+        assert_eq!(
+            codex_home["options"],
+            serde_json::json!(["rbind", "rw", "nosuid", "nodev"])
+        );
         assert_eq!(
             config["process"]["capabilities"]["effective"],
             serde_json::json!(["CAP_SETGID", "CAP_SETUID"])
@@ -3425,10 +3534,13 @@ mod tests {
             b"codewire-workspace-install-v1 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
         ));
         assert!(valid_workspace_owner_marker(
+            b"codewire-workspace-owner-v4 oci 1000:998\n"
+        ));
+        assert!(valid_workspace_owner_marker(
             b"codewire-workspace-owner-v3 oci 1000:998\n"
         ));
         assert!(!valid_workspace_owner_marker(
-            b"codewire-workspace-owner-v3 oci 01000:998\n"
+            b"codewire-workspace-owner-v4 oci 01000:998\n"
         ));
         assert!(!valid_workspace_owner_marker(
             b"codewire-workspace-owner-v2 oci 1000:998\n"

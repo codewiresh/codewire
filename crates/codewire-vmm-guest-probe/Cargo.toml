@@ -24,6 +24,7 @@ zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 anyhow = { workspace = true }
+codewire-access = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-project = { workspace = true }

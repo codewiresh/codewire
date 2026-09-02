@@ -28,6 +28,7 @@ mod linux {
     use std::pin::Pin;
     use std::time::Duration;
 
+    use codewire_access::CodexProviderProjection;
     use codewire_daemon::client::{CredentialBridgeConnection, SessionClient, v1};
     use codewire_gateway_proto::{
         CREDENTIAL_BRIDGE_LOOPBACK_PORT, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
@@ -36,6 +37,7 @@ mod linux {
     use codewire_local_vmm::control::v1 as local_v1;
     use codewire_local_vmm::hybrid_vsock;
     use codewire_local_vmm::supervisor::{NativeRuntimeConfig, NativeSupervisorClient};
+    use codewire_vmm_guest_probe::CODEX_GUEST_HOME_PATH;
     use serde_json::Value;
     use tokio::time::Instant;
     use tonic::Streaming;
@@ -106,11 +108,10 @@ mod linux {
             .await?;
         require(capabilities.state == v1::DaemonState::Ready as i32)?;
 
-        let codex_home = format!("/tmp/codewire-codex-bridge-{}", Uuid::new_v4());
-        stage("config-install");
-        install_codex_config(&daemon, &codex_home).await?;
+        stage("config-check");
+        require_codex_projection(&daemon).await?;
         stage("version-check");
-        require_codex_version(&daemon, &codex_home, &environment.working_directory).await?;
+        require_codex_version(&daemon, &environment.working_directory).await?;
 
         stage("bridge-open");
         let mut bridge = daemon
@@ -122,6 +123,8 @@ mod linux {
         let command = vec![
             CODEX_BIN.to_owned(),
             "exec".to_owned(),
+            "--config".to_owned(),
+            "model_context_window=100000".to_owned(),
             "--ephemeral".to_owned(),
             "--skip-git-repo-check".to_owned(),
             "--dangerously-bypass-approvals-and-sandbox".to_owned(),
@@ -136,7 +139,7 @@ mod linux {
             .exec_transient(v1::ExecStartRequest {
                 command,
                 working_dir: environment.working_directory.clone(),
-                env: codex_environment(&codex_home),
+                env: smoke_environment(),
             })
             .await?;
         let mut output: Pin<Box<dyn Future<Output = SmokeResult<ExecOutput>> + Send>> =
@@ -157,8 +160,6 @@ mod linux {
                 .any(|window| window == b"OpenAI Codex v0.149.0"),
         )?;
 
-        stage("cleanup");
-        cleanup_codex_home(&daemon, &codex_home).await?;
         println!("codewire-local-codex-bridge-smoke: PASS");
         Ok(())
     }
@@ -191,11 +192,11 @@ mod linux {
         }
     }
 
-    async fn install_codex_config(client: &SessionClient, codex_home: &str) -> SmokeResult<()> {
-        require(codex_home.starts_with("/tmp/codewire-codex-bridge-"))?;
-        let config = codex_config();
+    async fn require_codex_projection(client: &SessionClient) -> SmokeResult<()> {
+        let expected = CodexProviderProjection::for_loopback_port(CREDENTIAL_BRIDGE_LOOPBACK_PORT)?
+            .into_config_toml();
         let command = format!(
-            "umask 077; mkdir -- '{codex_home}'; printf '%s' '{config}' > '{codex_home}/config.toml'"
+            "test \"$CODEX_HOME\" = '{CODEX_GUEST_HOME_PATH}' && test -f \"$CODEX_HOME/config.toml\" && test ! -e \"$CODEX_HOME/auth.json\" && cat -- \"$CODEX_HOME/config.toml\""
         );
         let output = run_transient(
             client,
@@ -204,19 +205,22 @@ mod linux {
             Vec::new(),
         )
         .await?;
-        require(output.exit_code == 0 && output.stdout.is_empty() && output.stderr.is_empty())
+        require(
+            output.exit_code == 0
+                && output.stdout == expected.as_bytes()
+                && output.stderr.is_empty(),
+        )
     }
 
     async fn require_codex_version(
         client: &SessionClient,
-        codex_home: &str,
         working_directory: &str,
     ) -> SmokeResult<()> {
         let output = run_transient(
             client,
             vec![CODEX_BIN.into(), "--version".into()],
             working_directory,
-            codex_environment(codex_home),
+            Vec::new(),
         )
         .await?;
         if output.exit_code != 0 {
@@ -230,23 +234,8 @@ mod linux {
         Ok(())
     }
 
-    async fn cleanup_codex_home(client: &SessionClient, codex_home: &str) -> SmokeResult<()> {
-        require(codex_home.starts_with("/tmp/codewire-codex-bridge-"))?;
-        let command = format!("rm -rf -- '{codex_home}'");
-        let output = run_transient(
-            client,
-            vec!["/bin/sh".into(), "-c".into(), command],
-            "/",
-            Vec::new(),
-        )
-        .await?;
-        require(output.exit_code == 0 && output.stdout.is_empty() && output.stderr.is_empty())
-    }
-
-    fn codex_environment(codex_home: &str) -> Vec<String> {
+    fn smoke_environment() -> Vec<String> {
         vec![
-            format!("HOME={codex_home}"),
-            format!("CODEX_HOME={codex_home}"),
             "TERM=xterm-256color".into(),
             "LC_ALL=C".into(),
             "HTTP_PROXY=http://127.0.0.1:1".into(),
@@ -254,26 +243,6 @@ mod linux {
             "ALL_PROXY=http://127.0.0.1:1".into(),
             "NO_PROXY=127.0.0.1,localhost".into(),
         ]
-    }
-
-    fn codex_config() -> String {
-        format!(
-            concat!(
-                "model_provider = \"codewire_openai\"\n",
-                "model_context_window = 100000\n",
-                "\n",
-                "[model_providers.codewire_openai]\n",
-                "name = \"Codewire OpenAI\"\n",
-                "base_url = \"http://127.0.0.1:{port}/v1\"\n",
-                "wire_api = \"responses\"\n",
-                "requires_openai_auth = false\n",
-                "supports_websockets = false\n",
-                "\n",
-                "[features]\n",
-                "enable_request_compression = false\n",
-            ),
-            port = CREDENTIAL_BRIDGE_LOOPBACK_PORT,
-        )
     }
 
     async fn require_bridge_ready(

@@ -378,9 +378,9 @@ fn map_adapter_error(error: CredentialBrokerError) -> BrokerRequestError {
         | CredentialBrokerError::UnsupportedLease
         | CredentialBrokerError::InvalidCredentialMaterial => BrokerRequestError::Denied,
         CredentialBrokerError::ResponseTooLarge => BrokerRequestError::ResponseTooLarge,
-        CredentialBrokerError::InvalidProviderPolicy
-        | CredentialBrokerError::ResponseDenied
-        | CredentialBrokerError::InvalidGuestEndpoint => BrokerRequestError::UpstreamFailed,
+        CredentialBrokerError::InvalidProviderPolicy | CredentialBrokerError::ResponseDenied => {
+            BrokerRequestError::UpstreamFailed
+        }
     }
 }
 

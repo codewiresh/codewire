@@ -10,6 +10,7 @@ mod catalog;
 mod grant;
 mod id;
 mod model;
+mod projection;
 
 pub use catalog::builtin_provider_catalog;
 pub use grant::{DerivedGrant, GrantContext, derive_grants, validate_profile_entries};
@@ -23,6 +24,7 @@ pub use model::{
     EnvironmentAccessBinding, GrantPermission, Owner, Placement, ProviderCatalog,
     ProviderDefinition,
 };
+pub use projection::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection, ProjectionError};
 
 use thiserror::Error;
 

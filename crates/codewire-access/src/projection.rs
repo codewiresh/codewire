@@ -1,4 +1,4 @@
-use crate::CredentialBrokerError;
+use thiserror::Error;
 
 const CODEX_PROVIDER_ID: &str = "codewire_openai";
 const MIN_UNPRIVILEGED_PORT: u16 = 1024;
@@ -6,13 +6,13 @@ const MIN_UNPRIVILEGED_PORT: u16 = 1024;
 /// Relative path for the generated credential-free Codex provider config.
 pub const CODEX_CONFIG_FILE_NAME: &str = "config.toml";
 
-/// Deterministic machine-owned Codex configuration for the guest loopback
-/// endpoint.
+/// Deterministic machine-owned Codex configuration for a protected provider
+/// route.
 ///
 /// The projection contains no provider credential, environment-key lookup,
-/// token command, or reusable authorization value. The loopback HTTP leg is
-/// credential-free; the isolated host broker terminates provider TLS and
-/// injects authorization only after authenticating the environment operation.
+/// token command, or reusable authorization value. Placement runtimes may
+/// install the same bytes locally or on the platform while keeping provider
+/// material in their own broker boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexProviderProjection {
     config_toml: String,
@@ -21,9 +21,9 @@ pub struct CodexProviderProjection {
 impl CodexProviderProjection {
     /// Create a Responses-only provider projection for one unprivileged IPv4
     /// loopback port owned by the guest-side Codewire listener.
-    pub fn for_loopback_port(port: u16) -> Result<Self, CredentialBrokerError> {
+    pub fn for_loopback_port(port: u16) -> Result<Self, ProjectionError> {
         if port < MIN_UNPRIVILEGED_PORT {
-            return Err(CredentialBrokerError::InvalidGuestEndpoint);
+            return Err(ProjectionError::InvalidGuestEndpoint);
         }
         Ok(Self {
             config_toml: format!(
@@ -56,6 +56,13 @@ impl CodexProviderProjection {
     pub fn into_config_toml(self) -> String {
         self.config_toml
     }
+}
+
+/// Stable material-free projection validation errors.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum ProjectionError {
+    #[error("credential broker guest endpoint is invalid")]
+    InvalidGuestEndpoint,
 }
 
 #[cfg(test)]
@@ -146,7 +153,7 @@ mod tests {
         for port in [0, 1, MIN_UNPRIVILEGED_PORT - 1] {
             assert_eq!(
                 CodexProviderProjection::for_loopback_port(port),
-                Err(CredentialBrokerError::InvalidGuestEndpoint)
+                Err(ProjectionError::InvalidGuestEndpoint)
             );
         }
         for port in [MIN_UNPRIVILEGED_PORT, u16::MAX] {
