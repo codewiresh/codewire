@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs as _};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use av_credential_proxy::tunnel_ip_allowed;
 use futures::StreamExt as _;
 use http::HeaderMap;
 use reqwest::redirect::Policy;
@@ -140,6 +141,13 @@ fn admit_resolved_addresses(
 }
 
 fn public_provider_ip(address: IpAddr) -> bool {
+    // Keep the shared AV classification as the minimum policy, then apply the
+    // provider transport's narrower special-purpose exclusions below. In
+    // particular, an IPv6 transition address is not admitted merely because
+    // it embeds a public IPv4 address.
+    if !tunnel_ip_allowed(address, false) {
+        return false;
+    }
     match address {
         IpAddr::V4(address) => public_ipv4(address),
         IpAddr::V6(address) => match address.to_ipv4() {
@@ -285,12 +293,7 @@ mod tests {
                 "{denied}"
             );
         }
-        for admitted in [
-            "1.1.1.1",
-            "8.8.8.8",
-            "64:ff9b::8.8.8.8",
-            "2606:4700:4700::1111",
-        ] {
+        for admitted in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
             assert!(public_provider_ip(admitted.parse().unwrap()), "{admitted}");
         }
         let too_many = (1..=17)
