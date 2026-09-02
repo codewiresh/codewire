@@ -1,6 +1,11 @@
+use std::future::Future;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 use anyhow::Context as _;
+use codewire_client::TokenProvider as _;
 use codewire_local_vmm::control::v1;
 use codewire_local_vmm::runner_service::{RunnerEntrypointConfig, serve_runner};
 use codewire_local_vmm::supervisor::{
@@ -69,6 +74,131 @@ pub(crate) async fn run_native_mesh_transport(args: NativeMeshTransportArgs) -> 
     codewire_local_vmm::mesh_process::run_inherited_mesh_transport(environment_id, args.generation)
         .await
         .context("run native environment Mesh transport")
+}
+
+struct NativeMeshEnrollmentCredentials {
+    paths: ResolvePaths,
+}
+
+impl codewire_local_vmm::mesh_enrollment::MeshEnrollmentCredentialResolver
+    for NativeMeshEnrollmentCredentials
+{
+    fn resolve<'a>(
+        &'a self,
+        source: codewire_local_vmm::mesh_enrollment::MeshEnrollmentAuthSource,
+        attachment: &'a codewire_local_vmm::mesh_ingress::MeshAttachment,
+    ) -> Pin<Box<dyn Future<Output = Result<codewire_client::BearerToken, ()>> + Send + 'a>> {
+        Box::pin(async move {
+            match source {
+                codewire_local_vmm::mesh_enrollment::MeshEnrollmentAuthSource::StandaloneLocal => {
+                    let mesh_data_dir =
+                        canonical_private_auth_root(self.paths.mesh_data_dir.clone())?;
+                    let path = mesh_data_dir.join("config.toml");
+                    validate_private_auth_file(&path)?;
+                    let mut mesh = config::load_mesh_config(&mesh_data_dir).map_err(|_| ())?;
+                    let identity = mesh.local_identity.take().ok_or(())?;
+                    let token = mesh.mesh_auth_token.take().ok_or(())?;
+                    let saved_url = mesh.mesh_url.take().ok_or(())?;
+                    if !config::same_mesh_url(&saved_url, &attachment.mesh_url)
+                        || identity.organization_id != attachment.organization_id
+                        || identity.api_key != token
+                        || !identity.api_key.starts_with("cw_")
+                        || identity.environment_id.trim().is_empty()
+                        || identity.environment_token.trim().is_empty()
+                    {
+                        return Err(());
+                    }
+                    codewire_client::BearerToken::new(token).map_err(|_| ())
+                }
+                codewire_local_vmm::mesh_enrollment::MeshEnrollmentAuthSource::HostedCurrent => {
+                    let platform_config_dir =
+                        canonical_private_auth_root(self.paths.platform_config_dir.clone())?;
+                    let config_path = platform_config_dir.join("config.json");
+                    let credentials_path = config::oauth_credentials_path(&platform_config_dir);
+                    validate_private_auth_file(&config_path)?;
+                    validate_private_auth_file(&credentials_path)?;
+                    let platform =
+                        config::load_platform_config(&platform_config_dir).map_err(|_| ())?;
+                    let hosted =
+                        config::derive_hosted_mesh_url_for_server(&platform.server_url).ok_or(())?;
+                    if !config::same_mesh_url(&hosted, &attachment.mesh_url) {
+                        return Err(());
+                    }
+                    let http = reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .no_proxy()
+                        .build()
+                        .map_err(|_| ())?;
+                    let oauth = codewire_client::OAuthClient::for_server_url_with_http(
+                        &platform.server_url,
+                        http,
+                    )
+                    .map_err(|_| ())?;
+                    let provider = codewire_client::RefreshingTokenProvider::from_store(
+                        oauth,
+                        codewire_client::FileCredentialStore::at(credentials_path),
+                    )
+                    .map_err(|_| ())?;
+                    provider.token().await.map_err(|_| ())
+                }
+            }
+        })
+    }
+}
+
+pub(crate) async fn run_native_mesh_enrollment_broker(
+    args: NativeMeshEnrollmentBrokerArgs,
+) -> anyhow::Result<()> {
+    let environment_id = Uuid::parse_str(&args.environment_id)
+        .context("native Mesh enrollment environment ID is invalid")?;
+    let paths = ResolvePaths {
+        mesh_data_dir: absolute_auth_root_argument(args.mesh_data_dir)?,
+        platform_config_dir: absolute_auth_root_argument(args.platform_config_dir)?,
+    };
+    let credentials = NativeMeshEnrollmentCredentials { paths };
+    codewire_local_vmm::mesh_enrollment::run_inherited_mesh_enrollment_broker(
+        environment_id,
+        args.generation,
+        &credentials,
+    )
+    .await
+    .context("run native Mesh enrollment issuer")
+}
+
+fn absolute_auth_root_argument(path: PathBuf) -> anyhow::Result<PathBuf> {
+    if !path.is_absolute() {
+        anyhow::bail!("native Mesh enrollment auth root must be absolute");
+    }
+    Ok(path)
+}
+
+fn canonical_private_auth_root(path: PathBuf) -> Result<PathBuf, ()> {
+    if !path.is_absolute() {
+        return Err(());
+    }
+    let canonical = std::fs::canonicalize(&path).map_err(|_| ())?;
+    let metadata = std::fs::symlink_metadata(&path).map_err(|_| ())?;
+    if canonical != path
+        || !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(());
+    }
+    Ok(canonical)
+}
+
+fn validate_private_auth_file(path: &Path) -> Result<(), ()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| ())?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+        || std::fs::canonicalize(path).map_err(|_| ())? != path
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 pub(crate) fn native_create_selected(args: &EnvCreateArgs) -> anyhow::Result<bool> {
@@ -772,6 +902,76 @@ mod tests {
         assert_eq!(parse_native_cpu("2").unwrap(), 2);
         assert_eq!(parse_native_memory("16Gi").unwrap(), 16 * 1024);
         assert_eq!(parse_native_disk("20Gi").unwrap(), 20 * 1024 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn hosted_mesh_enrollment_uses_only_matching_fresh_saved_oauth() {
+        use codewire_client::{CredentialStore as _, OAuthCredentials};
+        use codewire_local_vmm::mesh_enrollment::{
+            MeshEnrollmentAuthSource, MeshEnrollmentCredentialResolver as _,
+        };
+        use codewire_local_vmm::mesh_ingress::MeshAttachment;
+
+        let root = tempfile::tempdir().unwrap();
+        let mesh_data_dir = root.path().join("unused-missing-mesh-root");
+        let platform_config_dir = root.path().join("platform");
+        config::save_platform_config(
+            &platform_config_dir,
+            &config::PlatformConfig {
+                server_url: "https://api.codewire-dev.sh".to_owned(),
+                session_token: String::new(),
+                default_org: "org-hosted".to_owned(),
+            },
+        )
+        .unwrap();
+        let credentials = OAuthCredentials::new(
+            "https://api.codewire-dev.sh",
+            codewire_client::CODEWIRE_CLI_OAUTH_CLIENT_ID,
+            "synthetic-hosted-access",
+            "synthetic-hosted-refresh",
+            u64::MAX,
+            codewire_client::CODEWIRE_CLI_OAUTH_SCOPES,
+        )
+        .unwrap();
+        codewire_client::FileCredentialStore::at(config::oauth_credentials_path(
+            &platform_config_dir,
+        ))
+        .save(&credentials)
+        .unwrap();
+        let resolver = NativeMeshEnrollmentCredentials {
+            paths: ResolvePaths {
+                mesh_data_dir,
+                platform_config_dir,
+            },
+        };
+        let attachment = MeshAttachment::new(
+            "https://mesh.codewire-dev.sh",
+            "org-hosted",
+            "network-hosted",
+            "node-hosted",
+            [3_000],
+        )
+        .unwrap();
+        let token = resolver
+            .resolve(MeshEnrollmentAuthSource::HostedCurrent, &attachment)
+            .await
+            .unwrap();
+        assert_eq!(token.expose_secret(), "synthetic-hosted-access");
+
+        let wrong_origin = MeshAttachment::new(
+            "https://mesh.codewire.sh",
+            "org-hosted",
+            "network-hosted",
+            "node-hosted",
+            [3_000],
+        )
+        .unwrap();
+        assert!(
+            resolver
+                .resolve(MeshEnrollmentAuthSource::HostedCurrent, &wrong_origin)
+                .await
+                .is_err()
+        );
     }
 
     #[test]

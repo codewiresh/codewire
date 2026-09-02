@@ -178,6 +178,37 @@ pub(crate) fn install_inet_socket_only_syscalls(
     install_inet_socket_syscalls(denied, architecture_denied, false)
 }
 
+/// Install a deny list while allowing newly created sockets only for IPv4 or
+/// IPv6 TCP. This is used by one-shot HTTPS control-plane workers which finish
+/// DNS resolution before confinement and have no reason to retain UDP or Unix
+/// socket creation authority.
+pub(crate) fn install_inet_stream_only_syscalls(
+    denied: &[libc::c_long],
+    architecture_denied: &[libc::c_long],
+) -> io::Result<()> {
+    let mut filter = base_filter();
+    append_denials(&mut filter, denied.iter().chain(architecture_denied));
+    filter.extend([
+        bpf_equal(libc::SYS_socket as u32, 0, 11),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_0_OFFSET),
+        bpf_equal(libc::AF_INET as u32, 1, 0),
+        bpf_equal(libc::AF_INET6 as u32, 0, 7),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_1_OFFSET),
+        bpf_statement(
+            BPF_ALU_AND_K,
+            !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
+        ),
+        bpf_equal(libc::SOCK_STREAM as u32, 0, 4),
+        bpf_statement(BPF_LD_W_ABS, SECCOMP_DATA_ARGUMENT_2_OFFSET),
+        bpf_equal(0, 1, 0),
+        bpf_equal(libc::IPPROTO_TCP as u32, 0, 1),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+    ]);
+    install_filter(&mut filter)
+}
+
 /// Install the same INET socket filter while also permitting only
 /// `socketpair(AF_UNIX, SOCK_STREAM, 0)`. This gives an isolated transport a
 /// way to hand an accepted stream to its parent without admitting arbitrary

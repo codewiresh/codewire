@@ -29,6 +29,7 @@ codewire-tailnet = { workspace = true }
 connectrpc = { workspace = true, features = ["client"] }
 libc = "0.2"
 rand = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
 zeroize = { workspace = true }

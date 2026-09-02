@@ -88,6 +88,12 @@ impl StaticTokenProvider {
             token: BearerToken::new(token)?,
         })
     }
+
+    /// Move an already validated credential into a static provider without
+    /// manufacturing another plaintext copy.
+    pub fn from_token(token: BearerToken) -> Self {
+        Self { token }
+    }
 }
 
 #[async_trait]
@@ -562,6 +568,16 @@ impl OAuthClient {
     /// logins always use discovery; this constructor avoids a second network
     /// round-trip before a provider can refresh an expired token on restart.
     pub fn for_server_url(server_url: impl AsRef<str>) -> Result<Self, ClientError> {
+        Self::for_server_url_with_http(server_url, reqwest::Client::new())
+    }
+
+    /// Build the standard endpoint set with an explicitly confined transport.
+    /// Credential-owning processes use this to disable ambient proxies and
+    /// redirects before a refresh token can enter an outbound request.
+    pub fn for_server_url_with_http(
+        server_url: impl AsRef<str>,
+        http: reqwest::Client,
+    ) -> Result<Self, ClientError> {
         let config = ClientConfig::new(server_url)?;
         let issuer = config
             .server_url()
@@ -580,7 +596,7 @@ impl OAuthClient {
                 endpoint_from_config(&config, "api/oauth/device_authorization").to_string(),
             ),
         };
-        Self::from_discovery(config.server_url(), discovery, reqwest::Client::new())
+        Self::from_discovery(config.server_url(), discovery, http)
             .map_err(AuthClientError::into_client_error)
     }
 

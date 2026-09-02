@@ -1,17 +1,25 @@
 #![cfg(target_os = "linux")]
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::os::unix::process::CommandExt as _;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use codewire_client::{CoordinatorHandlers, MeshCoordinateIdentity, MeshCoordinatorPeerSession};
 use codewire_derp::{Relay, self_signed_tls_config, serve_stun, serve_tls};
+use codewire_local_vmm::mesh_enrollment::{
+    MESH_ENROLLMENT_BOOTSTRAP_FD, MESH_ENROLLMENT_CONFINE_MESSAGE,
+    MESH_ENROLLMENT_PREPARED_MESSAGE, MESH_ENROLLMENT_READY_MESSAGE,
+    MESH_ENROLLMENT_STATUS_MAX_BYTES, MESH_ENROLLMENT_TRANSFER_FD, MeshEnrollmentAuthSource,
+    encode_mesh_enrollment_bootstrap,
+};
 use codewire_local_vmm::mesh_ingress::{
     MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment, mesh_ingress_channel,
 };
@@ -40,6 +48,7 @@ use codewire_tailnet::node::{Node, NodePublic, prefix_from_uuid};
 use codewire_tailnet::wg::{PublicKey, StaticSecret};
 use connectrpc::client::{ClientConfig, HttpClient};
 use rand::rngs::OsRng;
+use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
@@ -224,20 +233,117 @@ fn attachment(mesh_address: SocketAddr) -> MeshAttachment {
     .unwrap()
 }
 
-fn spawn_transport(
+fn private_auth_roots(mesh_url: &str) -> (TempDir, PathBuf, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let mesh = root.path().join("mesh");
+    let platform = root.path().join("unused-missing-platform-root");
+    fs::create_dir(&mesh).unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&mesh, fs::Permissions::from_mode(0o700)).unwrap();
+    let config = format!(
+        "mesh_url = {mesh_url:?}\nmesh_auth_token = {API_KEY:?}\n\n[local_identity]\norganization_id = {ORGANIZATION_ID:?}\napi_key = {API_KEY:?}\nenvironment_id = {OWNER_ENVIRONMENT_ID:?}\nenvironment_token = {OWNER_ENVIRONMENT_TOKEN:?}\n"
+    );
+    let config_path = mesh.join("config.toml");
+    fs::write(&config_path, config).unwrap();
+    fs::set_permissions(config_path, fs::Permissions::from_mode(0o600)).unwrap();
+    (root, mesh, platform)
+}
+
+fn spawn_enrollment_broker(
     environment_id: Uuid,
     generation: u64,
-) -> (StdUnixStream, StdUnixStream, ChildGuard) {
+    mesh_data_dir: &Path,
+    platform_config_dir: &Path,
+    transfer_child: StdUnixStream,
+) -> (StdUnixStream, ChildGuard) {
     let (control_parent, control_child) = StdUnixStream::pair().unwrap();
-    let (enrollment_parent, enrollment_child) = StdUnixStream::pair().unwrap();
     control_parent
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
     control_parent
         .set_write_timeout(Some(Duration::from_secs(20)))
         .unwrap();
+    let control_source = control_child.as_raw_fd();
+    let transfer_source = transfer_child.as_raw_fd();
+    let expected_parent = unsafe { libc::getpid() };
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cw"));
+    command
+        .arg("__native-mesh-enrollment-broker")
+        .arg("--environment-id")
+        .arg(environment_id.to_string())
+        .arg("--generation")
+        .arg(generation.to_string())
+        .arg("--mesh-data-dir")
+        .arg(mesh_data_dir)
+        .arg("--platform-config-dir")
+        .arg(platform_config_dir)
+        .env_clear()
+        .current_dir(mesh_data_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the hook performs only async-signal-safe descriptor/prctl
+    // syscalls and installs exactly the two private connected capabilities.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1
+                || libc::getppid() != expected_parent
+                || libc::syscall(
+                    libc::SYS_close_range,
+                    3_u32,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            let control_copy = libc::fcntl(control_source, libc::F_DUPFD_CLOEXEC, 6);
+            let transfer_copy = libc::fcntl(transfer_source, libc::F_DUPFD_CLOEXEC, 6);
+            if control_copy == -1 || transfer_copy == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::dup2(control_copy, MESH_ENROLLMENT_BOOTSTRAP_FD) == -1
+                || libc::dup2(transfer_copy, MESH_ENROLLMENT_TRANSFER_FD) == -1
+                || libc::fcntl(MESH_ENROLLMENT_BOOTSTRAP_FD, libc::F_SETFD, 0) == -1
+                || libc::fcntl(MESH_ENROLLMENT_TRANSFER_FD, libc::F_SETFD, 0) == -1
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::close(control_copy);
+            libc::close(transfer_copy);
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    drop(control_child);
+    drop(transfer_child);
+    (control_parent, ChildGuard(Some(child)))
+}
+
+fn spawn_transport(
+    environment_id: Uuid,
+    generation: u64,
+) -> (StdUnixStream, StdUnixStream, ChildGuard) {
+    let (enrollment_parent, enrollment_child) = StdUnixStream::pair().unwrap();
     enrollment_parent
         .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (control, child) =
+        spawn_transport_with_enrollment(environment_id, generation, enrollment_child);
+    (control, enrollment_parent, child)
+}
+
+fn spawn_transport_with_enrollment(
+    environment_id: Uuid,
+    generation: u64,
+    enrollment_child: StdUnixStream,
+) -> (StdUnixStream, ChildGuard) {
+    let (control_parent, control_child) = StdUnixStream::pair().unwrap();
+    control_parent
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    control_parent
+        .set_write_timeout(Some(Duration::from_secs(20)))
         .unwrap();
     let control_source = control_child.as_raw_fd();
     let enrollment_source = enrollment_child.as_raw_fd();
@@ -288,7 +394,7 @@ fn spawn_transport(
     let child = command.spawn().unwrap();
     drop(control_child);
     drop(enrollment_child);
-    (control_parent, enrollment_parent, ChildGuard(Some(child)))
+    (control_parent, ChildGuard(Some(child)))
 }
 
 fn start_transport(
@@ -322,12 +428,20 @@ fn admit_transport(control: &mut StdUnixStream) {
 }
 
 fn read_status_frame(stream: &StdUnixStream) -> Vec<u8> {
+    read_bounded_status_frame(stream, MESH_TRANSPORT_STATUS_MAX_BYTES)
+}
+
+fn read_enrollment_status_frame(stream: &StdUnixStream) -> Vec<u8> {
+    read_bounded_status_frame(stream, MESH_ENROLLMENT_STATUS_MAX_BYTES)
+}
+
+fn read_bounded_status_frame(stream: &StdUnixStream, maximum_bytes: usize) -> Vec<u8> {
     let mut stream = stream;
     let mut frame = Vec::new();
     loop {
         assert!(
-            frame.len() < MESH_TRANSPORT_STATUS_MAX_BYTES,
-            "Mesh transport status exceeded its bound"
+            frame.len() < maximum_bytes,
+            "native Mesh process status exceeded its bound"
         );
         let mut byte = [0_u8; 1];
         stream.read_exact(&mut byte).unwrap();
@@ -511,6 +625,74 @@ fn cw_hidden_mesh_transport_preserves_its_typed_failure_exit() {
         status.code(),
         Some(MeshTransportStartupFailure::InheritedDescriptor.exit_code())
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enrollment_broker_transfers_directly_to_the_confined_mesh_process() {
+    let fixture = start_fixture(false).await;
+    seed_network(fixture.mesh_address).await;
+    let (_auth_root, mesh_data_dir, platform_config_dir) =
+        private_auth_roots(&format!("http://{}", fixture.mesh_address));
+    let environment_id = Uuid::new_v4();
+    let generation = 6;
+    let attachment = attachment(fixture.mesh_address);
+    let transport_bootstrap =
+        encode_mesh_transport_bootstrap(environment_id, generation, &attachment, &TEST_KEY)
+            .unwrap();
+    let enrollment_bootstrap = encode_mesh_enrollment_bootstrap(
+        environment_id,
+        generation,
+        MeshEnrollmentAuthSource::StandaloneLocal,
+        &attachment,
+    )
+    .unwrap();
+
+    // The runner-shaped parent creates this capability channel and gives one
+    // end to each child. It never reads or writes the enrollment payload.
+    let (broker_transfer, transport_enrollment) = StdUnixStream::pair().unwrap();
+    let (mut transport_control, mut transport_child) =
+        spawn_transport_with_enrollment(environment_id, generation, transport_enrollment);
+    let (mut enrollment_control, mut enrollment_child) = spawn_enrollment_broker(
+        environment_id,
+        generation,
+        &mesh_data_dir,
+        &platform_config_dir,
+        broker_transfer,
+    );
+    transport_control.write_all(&transport_bootstrap).unwrap();
+    transport_control.flush().unwrap();
+    enrollment_control.write_all(&enrollment_bootstrap).unwrap();
+    enrollment_control.flush().unwrap();
+
+    assert_eq!(
+        read_enrollment_status_frame(&enrollment_control),
+        MESH_ENROLLMENT_PREPARED_MESSAGE
+    );
+    enrollment_control
+        .write_all(MESH_ENROLLMENT_CONFINE_MESSAGE)
+        .unwrap();
+    enrollment_control.flush().unwrap();
+    assert_eq!(
+        read_enrollment_status_frame(&enrollment_control),
+        MESH_ENROLLMENT_READY_MESSAGE
+    );
+    assert!(enrollment_child.wait_bounded().success());
+
+    assert_eq!(
+        read_status_frame(&transport_control),
+        MESH_TRANSPORT_PREPARED_MESSAGE
+    );
+    transport_control
+        .write_all(MESH_TRANSPORT_CONFINE_MESSAGE)
+        .unwrap();
+    transport_control.flush().unwrap();
+    assert_eq!(
+        read_status_frame(&transport_control),
+        MESH_TRANSPORT_READY_MESSAGE
+    );
+
+    revoke_node(fixture.mesh_address).await;
+    assert!(transport_child.wait_bounded().success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

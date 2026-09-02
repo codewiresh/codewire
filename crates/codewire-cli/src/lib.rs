@@ -195,6 +195,9 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__native-mesh-transport", hide = true)]
     NativeMeshTransport(NativeMeshTransportArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-mesh-enrollment-broker", hide = true)]
+    NativeMeshEnrollmentBroker(NativeMeshEnrollmentBrokerArgs),
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -247,6 +250,15 @@ pub fn native_mesh_transport_exit_code(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<codewire_local_vmm::mesh_process::MeshTransportProcessError>()
         .map(codewire_local_vmm::mesh_process::MeshTransportProcessError::exit_code)
+}
+
+/// Preserve the fixed one-shot enrollment-issuer failure taxonomy without
+/// exposing credential-adjacent detail on ambient stderr.
+#[cfg(target_os = "linux")]
+pub fn native_mesh_enrollment_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError>()
+        .map(codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError::exit_code)
 }
 
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
@@ -304,6 +316,8 @@ where
         Command::NativeEgressBroker(args) => run_native_egress_broker(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeMeshEnrollmentBroker(args) => run_native_mesh_enrollment_broker(args).await,
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
         Command::Logs(args) => handle_logs_command(&globals, args).await,
