@@ -880,6 +880,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             base_url: "https://mesh.codewire.sh".to_string(),
             derp_url: None,
+            stun_servers: Vec::new(),
             database_url: None,
             mesh_authorization: None,
             local_authorization: Some(LocalMeshAuthorizationConfig {

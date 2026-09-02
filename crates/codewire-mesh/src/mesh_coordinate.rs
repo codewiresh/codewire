@@ -68,6 +68,7 @@ impl MeshCoordinatorService for MeshCoordinateService {
                 .derp_url
                 .as_deref()
                 .unwrap_or(&self.state.config.base_url),
+            &self.state.config.stun_servers,
         )
         .map_err(ConnectError::internal)?;
 
@@ -527,7 +528,10 @@ fn tailnet_node_to_proto(node: Node) -> Result<CoordinateNode, ConnectError> {
     .map_err(|_| ConnectError::internal("encode node"))
 }
 
-fn derp_map_from_base_url(base_url: &str) -> Result<JsonValue, String> {
+fn derp_map_from_base_url(
+    base_url: &str,
+    stun_servers: &[crate::config::StunServerConfig],
+) -> Result<JsonValue, String> {
     let url = Url::parse(base_url.trim()).map_err(|error| error.to_string())?;
     let hostname = url
         .host_str()
@@ -553,13 +557,23 @@ fn derp_map_from_base_url(base_url: &str) -> Result<JsonValue, String> {
     if url.scheme() == "http" {
         node.insert("InsecureForTests".to_owned(), JsonValue::Bool(true));
     }
+    let mut nodes = vec![JsonValue::Object(node)];
+    for (index, server) in stun_servers.iter().enumerate() {
+        nodes.push(serde_json::json!({
+            "Name": if index == 0 { "1s".to_owned() } else { format!("1s{}", index + 1) },
+            "RegionID": 1,
+            "HostName": server.host,
+            "STUNOnly": true,
+            "STUNPort": server.port,
+        }));
+    }
     Ok(serde_json::json!({
         "Regions": {
             "1": {
                 "RegionID": 1,
                 "RegionCode": "cw",
                 "RegionName": "Codewire Embedded",
-                "Nodes": [JsonValue::Object(node)],
+                "Nodes": nodes,
             }
         }
     }))
@@ -585,6 +599,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             base_url: "http://mesh.test".to_owned(),
             derp_url: None,
+            stun_servers: Vec::new(),
             database_url: None,
             mesh_authorization: None,
             local_authorization: Some(LocalMeshAuthorizationConfig {

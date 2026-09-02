@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use codewire_client::{CoordinatorHandlers, MeshCoordinateIdentity, MeshCoordinatorPeerSession};
-use codewire_derp::{Relay, self_signed_tls_config, serve_tls};
+use codewire_derp::{Relay, self_signed_tls_config, serve_stun, serve_tls};
 use codewire_local_vmm::mesh_ingress::{
     MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment, mesh_ingress_channel,
 };
@@ -23,7 +23,7 @@ use codewire_local_vmm::mesh_process::{
 };
 use codewire_local_vmm::mesh_transport::receive_mesh_ingress_submissions;
 use codewire_mesh::mesh_authorization::hash_local_environment_token;
-use codewire_mesh::{Config as MeshConfig, LocalMeshAuthorizationConfig};
+use codewire_mesh::{Config as MeshConfig, LocalMeshAuthorizationConfig, StunServerConfig};
 use codewire_proto::codewire::v1::{
     CreateMeshNetworkRequest, CreateMeshNodeEnrollmentRequest, MeshNetworkServiceClient,
     MeshNodeServiceClient, RevokeMeshNodeRequest,
@@ -34,9 +34,10 @@ use codewire_tailnet::derp::NodePrivate as DerpPrivate;
 use codewire_tailnet::derp_transport::{
     DerpTarget, DerpTransport, connect_derp_transport_resolved,
 };
+use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::DiscoPrivate;
-use codewire_tailnet::node::{Node, prefix_from_uuid};
-use codewire_tailnet::wg::StaticSecret;
+use codewire_tailnet::node::{Node, NodePublic, prefix_from_uuid};
+use codewire_tailnet::wg::{PublicKey, StaticSecret};
 use connectrpc::client::{ClientConfig, HttpClient};
 use rand::rngs::OsRng;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -95,18 +96,23 @@ impl Drop for ChildGuard {
 struct Fixture {
     mesh_address: SocketAddr,
     derp_address: SocketAddr,
+    stun_address: Option<SocketAddr>,
     mesh_task: tokio::task::JoinHandle<()>,
     derp_task: tokio::task::JoinHandle<()>,
+    stun_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.mesh_task.abort();
         self.derp_task.abort();
+        if let Some(task) = &self.stun_task {
+            task.abort();
+        }
     }
 }
 
-async fn start_fixture() -> Fixture {
+async fn start_fixture(with_stun: bool) -> Fixture {
     let derp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let derp_address = derp_listener.local_addr().unwrap();
     let relay = Relay::new(DerpPrivate::generate(&mut OsRng));
@@ -114,6 +120,17 @@ async fn start_fixture() -> Fixture {
     let derp_task = tokio::spawn(async move {
         serve_tls(derp_listener, relay, tls).await.unwrap();
     });
+
+    let (stun_address, stun_task) = if with_stun {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            serve_stun(socket).await.unwrap();
+        });
+        (Some(address), Some(task))
+    } else {
+        (None, None)
+    };
 
     let mesh_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mesh_address = mesh_listener.local_addr().unwrap();
@@ -123,6 +140,14 @@ async fn start_fixture() -> Fixture {
         // The map's test-only marker selects TLS with certificate validation
         // disabled. The actual relay listener above still uses encrypted TLS.
         derp_url: Some(format!("http://{derp_address}")),
+        stun_servers: stun_address
+            .map(|address| {
+                vec![StunServerConfig {
+                    host: address.ip().to_string(),
+                    port: address.port(),
+                }]
+            })
+            .unwrap_or_default(),
         database_url: None,
         mesh_authorization: None,
         local_authorization: Some(LocalMeshAuthorizationConfig {
@@ -139,8 +164,10 @@ async fn start_fixture() -> Fixture {
     Fixture {
         mesh_address,
         derp_address,
+        stun_address,
         mesh_task,
         derp_task,
+        stun_task,
     }
 }
 
@@ -315,6 +342,7 @@ struct DialTailnet {
     conn: Arc<Conn>,
     target: watch::Receiver<Option<Node>>,
     coordinator_task: tokio::task::JoinHandle<()>,
+    direct_udp: Option<direct_udp::Handle>,
 }
 
 impl Drop for DialTailnet {
@@ -351,12 +379,37 @@ async fn connect_dial_tailnet(fixture: &Fixture, target_address: IpAddr) -> Dial
     )
     .await
     .unwrap();
+    let disco_private = DiscoPrivate::generate(&mut OsRng);
+    let (transport, direct_udp) = match fixture.stun_address {
+        Some(stun_address) => {
+            let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
+            let (transport, handle) = direct_udp::wrap_transport(
+                fallback,
+                direct_udp::Options::new(
+                    "0.0.0.0:0".parse().unwrap(),
+                    Vec::new(),
+                    local_node_key,
+                    disco_private.clone(),
+                )
+                .with_stun_servers(vec![stun_address]),
+            )
+            .await
+            .unwrap();
+            (transport, Some(handle))
+        }
+        None => (fallback, None),
+    };
+    let endpoints = direct_udp
+        .as_ref()
+        .map(|handle| handle.advertised_endpoints())
+        .unwrap_or_default();
     let dial_id = Uuid::new_v4();
     let mut options = ConnOptions::new(dial_id);
     options.addresses = vec![prefix_from_uuid(&dial_id)];
+    options.endpoints = endpoints;
     options.private_key = Some(secret);
-    options.disco_private = Some(DiscoPrivate::generate(&mut OsRng));
-    let conn = Arc::new(Conn::new(options, fallback).unwrap());
+    options.disco_private = Some(disco_private);
+    let conn = Arc::new(Conn::new(options, transport).unwrap());
     conn.set_preferred_derp(1);
     coordinator.subscribe(NODE_NAME).await.unwrap();
     let (node_tx, node_rx) = mpsc::unbounded_channel();
@@ -389,6 +442,7 @@ async fn connect_dial_tailnet(fixture: &Fixture, target_address: IpAddr) -> Dial
         conn,
         target,
         coordinator_task,
+        direct_udp,
     }
 }
 
@@ -403,6 +457,21 @@ async fn wait_for_target(target: &mut watch::Receiver<Option<Node>>) -> Node {
     })
     .await
     .expect("dial coordinator did not publish the isolated Mesh peer")
+}
+
+async fn wait_for_direct_path(dial: &DialTailnet, target: &Node) {
+    let direct_udp = dial.direct_udp.as_ref().expect("direct UDP fixture handle");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if dial.conn.probe_peer_path(target).unwrap().transport == PeerTransport::DirectUdp {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("isolated Mesh peer did not establish direct UDP");
+    assert!(direct_udp.has_verified_endpoint(&target.key));
 }
 
 #[test]
@@ -446,7 +515,7 @@ fn cw_hidden_mesh_transport_preserves_its_typed_failure_exit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn confined_mesh_process_relays_only_admitted_ports_and_requires_fresh_enrollment() {
-    let fixture = start_fixture().await;
+    let fixture = start_fixture(false).await;
     seed_network(fixture.mesh_address).await;
     let environment_id = Uuid::new_v4();
     let generation = 7;
@@ -568,4 +637,76 @@ async fn confined_mesh_process_relays_only_admitted_ports_and_requires_fresh_enr
     let mut eof = [0_u8; 1];
     assert_eq!(fresh_control.read(&mut eof).unwrap(), 0);
     revoke_node(fixture.mesh_address).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confined_mesh_process_establishes_a_stun_discovered_direct_udp_path() {
+    let fixture = start_fixture(true).await;
+    seed_network(fixture.mesh_address).await;
+    let environment_id = Uuid::new_v4();
+    let generation = 11;
+    let enrollment = create_enrollment(fixture.mesh_address).await;
+    let (mut control, mut child) = start_transport(
+        fixture.mesh_address,
+        &enrollment,
+        environment_id,
+        generation,
+    );
+    admit_transport(&mut control);
+
+    control.set_nonblocking(true).unwrap();
+    let (publisher, mut accepted) = mesh_ingress_channel(&[GUEST_PORT]).unwrap();
+    let receiver = tokio::spawn(receive_mesh_ingress_submissions(
+        tokio::net::UnixStream::from_std(control).unwrap(),
+        publisher,
+        environment_id,
+        generation,
+        vec![GUEST_PORT],
+        Zeroizing::new(TEST_KEY),
+    ));
+    let target_address = prefix_from_uuid(&environment_id).addr();
+    let mut dial = connect_dial_tailnet(&fixture, target_address).await;
+    let target = wait_for_target(&mut dial.target).await;
+    assert!(!target.endpoints.is_empty());
+    assert!(
+        !dial
+            .direct_udp
+            .as_ref()
+            .unwrap()
+            .advertised_endpoints()
+            .is_empty()
+    );
+    wait_for_direct_path(&dial, &target).await;
+
+    let mut remote = tokio::time::timeout(
+        Duration::from_secs(10),
+        dial.conn
+            .dial_context_tcp(SocketAddr::new(target_address, GUEST_PORT)),
+    )
+    .await
+    .expect("direct-UDP Mesh TCP dial timed out")
+    .unwrap();
+    remote.write_all(b"direct mesh request").await.unwrap();
+    remote.shutdown().await.unwrap();
+    let admitted = tokio::time::timeout(Duration::from_secs(10), accepted.recv())
+        .await
+        .expect("direct Mesh process did not submit the stream")
+        .unwrap();
+    admitted.stream.set_nonblocking(true).unwrap();
+    let mut worker = tokio::net::UnixStream::from_std(admitted.stream).unwrap();
+    let mut request = [0_u8; 19];
+    worker.read_exact(&mut request).await.unwrap();
+    assert_eq!(&request, b"direct mesh request");
+    worker.write_all(b"direct mesh response").await.unwrap();
+    worker.shutdown().await.unwrap();
+    let mut response = [0_u8; 20];
+    remote.read_exact(&mut response).await.unwrap();
+    assert_eq!(&response, b"direct mesh response");
+    let stats = dial.direct_udp.as_ref().unwrap().stats();
+    assert!(stats.direct_wg_sent > 0);
+    assert!(stats.direct_wg_received > 0);
+
+    revoke_node(fixture.mesh_address).await;
+    assert!(child.wait_bounded().success());
+    receiver.await.unwrap().unwrap();
 }

@@ -954,9 +954,11 @@ fn canonical_endpoint_host(raw: &str) -> Result<String, MeshTransportProcessErro
     if raw.is_empty() || !raw.is_ascii() || raw.len() > MAX_ENDPOINT_HOST_BYTES {
         return Err(MeshTransportProcessError::DerpMap);
     }
+    if let Ok(address) = raw.parse::<IpAddr>() {
+        return Ok(address.to_string());
+    }
     match Host::parse(raw).map_err(|_| MeshTransportProcessError::DerpMap)? {
-        Host::Ipv4(address) => Ok(address.to_string()),
-        Host::Ipv6(address) => Ok(address.to_string()),
+        Host::Ipv4(_) | Host::Ipv6(_) => unreachable!("IP literals were parsed above"),
         Host::Domain(domain)
             if domain.is_ascii()
                 && domain.split('.').all(|label| {

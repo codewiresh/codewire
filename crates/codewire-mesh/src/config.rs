@@ -1,10 +1,13 @@
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+
+use url::Host;
 
 pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
 pub const MESH_URL_ENV: &str = "CODEWIRE_MESH_URL";
 pub const LISTEN_ADDR_ENV: &str = "CODEWIRE_MESH_LISTEN_ADDR";
 pub const DERP_URL_ENV: &str = "CODEWIRE_MESH_DERP_URL";
+pub const STUN_SERVERS_ENV: &str = "CODEWIRE_MESH_STUN_SERVERS";
 pub const DATABASE_URL_ENV: &str = "DATABASE_URL";
 pub const MESH_AUTHORIZATION_URL_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_URL";
 pub const MESH_AUTHORIZATION_HMAC_SECRET_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET";
@@ -12,6 +15,10 @@ pub const LOCAL_ORGANIZATION_ID_ENV: &str = "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID
 pub const LOCAL_API_KEY_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_API_KEY_HASH";
 pub const LOCAL_ENVIRONMENT_ID_ENV: &str = "CODEWIRE_MESH_LOCAL_ENVIRONMENT_ID";
 pub const LOCAL_ENVIRONMENT_TOKEN_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH";
+
+const DEFAULT_STUN_PORT: u16 = 3478;
+const MAX_STUN_SERVERS: usize = 8;
+const MAX_STUN_HOST_BYTES: usize = 253;
 
 /// Configuration for the one cluster-local Mesh-to-primary authorization hop.
 ///
@@ -62,11 +69,19 @@ impl fmt::Debug for LocalMeshAuthorizationConfig {
     }
 }
 
+/// One STUN-only node advertised beside the configured DERP relay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StunServerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub bind_addr: SocketAddr,
     pub base_url: String,
     pub derp_url: Option<String>,
+    pub stun_servers: Vec<StunServerConfig>,
     pub database_url: Option<String>,
     /// Present for the hosted deployment. It is mandatory whenever Mesh owns
     /// a PostgreSQL database, so a hosted request can never fall back to
@@ -105,6 +120,7 @@ impl Config {
         if let Some(url) = derp_url.as_deref() {
             validate_base_url(url)?;
         }
+        let stun_servers = stun_server_config(args.stun_servers, getenv(STUN_SERVERS_ENV))?;
         let database_url = first_non_empty([args.database_url, getenv(DATABASE_URL_ENV), None]);
         let mesh_authorization = mesh_authorization_config(
             getenv(MESH_AUTHORIZATION_URL_ENV),
@@ -127,6 +143,7 @@ impl Config {
             bind_addr,
             base_url,
             derp_url,
+            stun_servers,
             database_url,
             mesh_authorization,
             local_authorization,
@@ -148,6 +165,10 @@ pub enum ConfigError {
     InvalidListenAddr { value: String, message: String },
     #[error("invalid PORT {value:?}: {message}")]
     InvalidPort { value: String, message: String },
+    #[error("invalid STUN server {0:?}")]
+    InvalidStunServer(String),
+    #[error("at most {MAX_STUN_SERVERS} STUN servers may be configured")]
+    TooManyStunServers,
     #[error(
         "{MESH_AUTHORIZATION_URL_ENV} and {MESH_AUTHORIZATION_HMAC_SECRET_ENV} must be set together"
     )]
@@ -169,6 +190,7 @@ struct Args {
     base_url: Option<String>,
     listen: Option<String>,
     derp_url: Option<String>,
+    stun_servers: Vec<String>,
     database_url: Option<String>,
 }
 
@@ -198,6 +220,13 @@ impl Args {
             match flag_value(&arg, "--derp-url", &mut iter)? {
                 FlagValue::Matched(value) => {
                     parsed.derp_url = Some(value);
+                    continue;
+                }
+                FlagValue::NotMatched => {}
+            }
+            match flag_value(&arg, "--stun-server", &mut iter)? {
+                FlagValue::Matched(value) => {
+                    parsed.stun_servers.push(value);
                     continue;
                 }
                 FlagValue::NotMatched => {}
@@ -288,6 +317,102 @@ fn local_authorization_config(
     }
 }
 
+fn stun_server_config(
+    args: Vec<String>,
+    environment: Option<String>,
+) -> Result<Vec<StunServerConfig>, ConfigError> {
+    let values = if args.is_empty() {
+        trim(environment)
+            .map(|value| value.split(',').map(str::to_owned).collect())
+            .unwrap_or_default()
+    } else {
+        args
+    };
+    let mut servers = Vec::new();
+    for value in values {
+        let server = parse_stun_server(&value)?;
+        if servers.iter().any(|existing: &StunServerConfig| {
+            existing.host == server.host && existing.port == server.port
+        }) {
+            continue;
+        }
+        if servers.len() >= MAX_STUN_SERVERS {
+            return Err(ConfigError::TooManyStunServers);
+        }
+        servers.push(server);
+    }
+    Ok(servers)
+}
+
+fn parse_stun_server(value: &str) -> Result<StunServerConfig, ConfigError> {
+    let original = value.trim();
+    let value = original
+        .strip_prefix("stun://")
+        .or_else(|| original.strip_prefix("stun:"))
+        .unwrap_or(original)
+        .trim();
+    if value.is_empty() {
+        return Err(ConfigError::InvalidStunServer(original.to_owned()));
+    }
+    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+        let (host, suffix) = rest
+            .split_once(']')
+            .ok_or_else(|| ConfigError::InvalidStunServer(original.to_owned()))?;
+        let port = match suffix.strip_prefix(':') {
+            Some(port) => parse_stun_port(port, original)?,
+            None if suffix.is_empty() => DEFAULT_STUN_PORT,
+            _ => return Err(ConfigError::InvalidStunServer(original.to_owned())),
+        };
+        (host, port)
+    } else if value.matches(':').count() > 1 {
+        (value, DEFAULT_STUN_PORT)
+    } else {
+        match value.rsplit_once(':') {
+            Some((host, port)) => (host, parse_stun_port(port, original)?),
+            None => (value, DEFAULT_STUN_PORT),
+        }
+    };
+    Ok(StunServerConfig {
+        host: canonical_stun_host(host, original)?,
+        port,
+    })
+}
+
+fn parse_stun_port(value: &str, original: &str) -> Result<u16, ConfigError> {
+    value
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::InvalidStunServer(original.to_owned()))
+}
+
+fn canonical_stun_host(value: &str, original: &str) -> Result<String, ConfigError> {
+    let value = value.trim().trim_end_matches('.');
+    if value.is_empty() || !value.is_ascii() || value.len() > MAX_STUN_HOST_BYTES {
+        return Err(ConfigError::InvalidStunServer(original.to_owned()));
+    }
+    if let Ok(address) = value.parse::<IpAddr>() {
+        return Ok(address.to_string());
+    }
+    match Host::parse(value).map_err(|_| ConfigError::InvalidStunServer(original.to_owned()))? {
+        Host::Ipv4(_) | Host::Ipv6(_) => unreachable!("IP literals were parsed above"),
+        Host::Domain(domain)
+            if domain.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label.as_bytes()[0].is_ascii_alphanumeric()
+                    && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            }) =>
+        {
+            Ok(domain.to_ascii_lowercase())
+        }
+        Host::Domain(_) => Err(ConfigError::InvalidStunServer(original.to_owned())),
+    }
+}
+
 fn validate_base_url(value: &str) -> Result<(), ConfigError> {
     url::Url::parse(value)
         .map(|_| ())
@@ -353,6 +478,7 @@ mod tests {
                 ":18080",
                 "--derp-url",
                 "https://derp.flag",
+                "--stun-server=stun://STUN.FLAG.:19302",
                 "--database-url",
                 "postgres://flag/db",
             ],
@@ -360,6 +486,7 @@ mod tests {
                 (MESH_URL_ENV, "https://mesh.codewire.sh"),
                 (LISTEN_ADDR_ENV, "127.0.0.1:1"),
                 (DERP_URL_ENV, "https://derp.env"),
+                (STUN_SERVERS_ENV, "stun.env:3478"),
                 (DATABASE_URL_ENV, "postgres://env/db"),
                 (
                     MESH_AUTHORIZATION_URL_ENV,
@@ -373,6 +500,13 @@ mod tests {
         assert_eq!(cfg.base_url, "https://flag.example");
         assert_eq!(cfg.bind_addr, "0.0.0.0:18080".parse().unwrap());
         assert_eq!(cfg.derp_url.as_deref(), Some("https://derp.flag"));
+        assert_eq!(
+            cfg.stun_servers,
+            vec![StunServerConfig {
+                host: "stun.flag".to_owned(),
+                port: 19_302,
+            }]
+        );
         assert_eq!(cfg.database_url.as_deref(), Some("postgres://flag/db"));
         assert_eq!(
             cfg.mesh_authorization
@@ -413,6 +547,64 @@ mod tests {
                 value: "not a url".to_string(),
                 message: "relative URL without a base".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn reads_bounded_canonical_stun_servers() {
+        let cfg = Config::from_sources(
+            Vec::<String>::new(),
+            env(&[
+                (MESH_URL_ENV, "https://mesh.codewire.sh"),
+                (
+                    STUN_SERVERS_ENV,
+                    "stun://STUN.EXAMPLE.COM.:19302, [2001:db8::1]:3478, stun.example.com:19302",
+                ),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.stun_servers,
+            vec![
+                StunServerConfig {
+                    host: "stun.example.com".to_owned(),
+                    port: 19_302,
+                },
+                StunServerConfig {
+                    host: "2001:db8::1".to_owned(),
+                    port: 3_478,
+                },
+            ]
+        );
+
+        for invalid in ["https://stun.example.com/path", "stün.example.com", ":0"] {
+            assert!(matches!(
+                Config::from_sources(
+                    Vec::<String>::new(),
+                    env(&[
+                        (MESH_URL_ENV, "https://mesh.codewire.sh"),
+                        (STUN_SERVERS_ENV, invalid)
+                    ])
+                ),
+                Err(ConfigError::InvalidStunServer(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_more_than_the_stun_server_bound() {
+        let value = (0..=MAX_STUN_SERVERS)
+            .map(|index| format!("stun-{index}.example.com"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            Config::from_sources(Vec::<String>::new(), move |key| match key {
+                MESH_URL_ENV => Some("https://mesh.codewire.sh".to_owned()),
+                STUN_SERVERS_ENV => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_err(),
+            ConfigError::TooManyStunServers
         );
     }
 
