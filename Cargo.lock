@@ -559,6 +559,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "av-credential-proxy"
+version = "0.1.0"
+source = "git+https://github.com/noeljackson/av.git?rev=32ef60cbbe58dfb00a3ffda76f7b2e3b8900baaa#32ef60cbbe58dfb00a3ffda76f7b2e3b8900baaa"
+dependencies = [
+ "anyhow",
+ "base64",
+ "http",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1417,6 +1433,20 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "codewire-credential-broker"
+version = "0.1.0"
+dependencies = [
+ "av-credential-proxy",
+ "codewire-access",
+ "codewire-local-credentials",
+ "codewire-protected-store",
+ "http",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]

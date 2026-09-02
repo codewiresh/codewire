@@ -17,6 +17,7 @@ members = [
     "crates/codewire-idp",
     "crates/codewire-cli",
     "crates/codewire-cli-bin",
+    "crates/codewire-credential-broker",
     "crates/codewire-local-credentials",
     "crates/codewire-local-vmm",
     "crates/codewire-project",
@@ -70,12 +71,14 @@ codewire-vmm-guest-probe = { path = "crates/codewire-vmm-guest-probe" }
 codewire-project = { path = "crates/codewire-project" }
 codewire-project-proto = { path = "crates/codewire-project-proto" }
 codewire-protected-store = { path = "crates/codewire-protected-store" }
+codewire-credential-broker = { path = "crates/codewire-credential-broker" }
 codewire-local-credentials = { path = "crates/codewire-local-credentials" }
 
 # FFI
 uniffi = "0.31"
 
 # AI/HTTP
+av-credential-proxy = { git = "https://github.com/noeljackson/av.git", rev = "32ef60cbbe58dfb00a3ffda76f7b2e3b8900baaa", default-features = false }
 oci-spec = { version = "=0.10.0", default-features = false, features = ["image"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "stream", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
