@@ -147,14 +147,22 @@ pub(crate) async fn list_secret_projects_core(
     let mut projects: Vec<SecretProject> = Vec::with_capacity(rows.len());
     for r in &rows {
         let mut p = row_to_project(r)?;
-        // Enrich with the secret count (best-effort, like Go).
-        if let Ok(secrets) = state
+        let secrets = state
             .secrets
-            .get_secrets_raw_at_path(&secret_project_path(org_id, &p.id))
+            .get_secret_metadata_at_path(&secret_project_path(org_id, &p.id))
             .await
-        {
-            p.secret_count = secrets.len() as i64;
-        }
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    project_id = p.id,
+                    "secret-projects: count failed"
+                );
+                AppError::InternalMsg("failed to list secret projects".into())
+            })?;
+        p.secret_count = i64::try_from(secrets.len()).map_err(|error| {
+            tracing::error!(error = %error, project_id = p.id, "secret-projects: count overflow");
+            AppError::InternalMsg("failed to list secret projects".into())
+        })?;
         projects.push(p);
     }
     Ok(projects)
@@ -229,7 +237,7 @@ pub(crate) async fn list_project_secrets_core(
 
     let secrets = state
         .secrets
-        .get_secrets_raw_at_path(&secret_project_path(org_id, &project.id))
+        .get_secret_metadata_at_path(&secret_project_path(org_id, &project.id))
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "secret-projects: list secrets failed");

@@ -90,7 +90,7 @@ pub(super) async fn log_audit(
 }
 
 pub(super) fn to_metadata(
-    secrets: Vec<crate::worker::secrets::StoredSecret>,
+    secrets: Vec<crate::worker::secrets::StoredSecretMetadata>,
 ) -> Vec<SecretMetadata> {
     secrets
         .into_iter()
@@ -140,7 +140,7 @@ pub(crate) async fn list_secrets_core(
     org_role(state, user, org_id).await?;
     let secrets = state
         .secrets
-        .get_secrets_raw_at_path(&org_secret_path(org_id))
+        .get_secret_metadata_at_path(&org_secret_path(org_id))
         .await
         .map_err(|e| {
             tracing::error!(error = %e, org_id, "secrets: list failed");
@@ -265,7 +265,7 @@ pub(crate) async fn list_user_secrets_core(
 ) -> AppResult<ListSecretsResponse> {
     let secrets = state
         .secrets
-        .get_secrets_raw_at_path(&user_secret_path(&user.user_id))
+        .get_secret_metadata_at_path(&user_secret_path(&user.user_id))
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "user-secrets: list failed");

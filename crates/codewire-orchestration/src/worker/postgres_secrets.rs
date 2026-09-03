@@ -20,7 +20,7 @@ use super::secret_envelope::{
     OpenBaoTransitConfig, OpenBaoTransitProvider, SecretCoordinates, WrappedDek, decrypt_secret,
     encrypt_secret, verify_dek_fingerprint,
 };
-use super::secrets::{StoredSecret, is_valid_secret_key};
+use super::secrets::{StoredSecret, StoredSecretMetadata, is_valid_secret_key};
 
 const MAX_CACHED_DEKS: usize = 4096;
 const CANARY_LOCK_KEY: i64 = 0x4357_5453_4341_4e31;
@@ -52,6 +52,15 @@ struct SecretRow {
     ciphertext: Vec<u8>,
     nonce: Vec<u8>,
     format: i16,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SecretMetadataRow {
+    key: String,
+    scope: String,
+    scope_id: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -327,6 +336,36 @@ impl PostgresSecretStore {
                 Ok(StoredSecret {
                     key: row.key,
                     value,
+                    created_at: row.created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+                    updated_at: row.updated_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn get_secret_metadata_at_path(
+        &self,
+        secret_path: &str,
+    ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
+        let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
+        let rows: Vec<SecretMetadataRow> = sqlx::query_as(
+            "SELECT key, scope, scope_id, created_at, updated_at \
+             FROM tenant_secrets WHERE path = $1 ORDER BY key",
+        )
+        .bind(secret_path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| store_error("secret-metadata-query-failed"))?;
+        rows.into_iter()
+            .map(|row| {
+                if row.scope != context.scope.as_str() || row.scope_id != context.scope_id {
+                    return Err(store_error("secret-metadata-scope-mismatch"));
+                }
+                if !is_valid_secret_key(&row.key) || row.key.len() > 255 {
+                    return Err(store_error("invalid-persisted-secret-key"));
+                }
+                Ok(StoredSecretMetadata {
+                    key: row.key,
                     created_at: row.created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
                     updated_at: row.updated_at.to_rfc3339_opts(SecondsFormat::Secs, true),
                 })
@@ -755,6 +794,21 @@ mod tests {
         store
             .set_secret_at_path(&org_path, "ORG_KEY", "org-private-value")
             .await?;
+
+        let metadata_store = PostgresSecretStore::new(pool.clone(), Arc::new(TestKekProvider));
+        assert_eq!(metadata_store.cached_dek_count().await, 0);
+        let metadata = metadata_store
+            .get_secret_metadata_at_path(&project_path)
+            .await?;
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].key, "OLD_KEY");
+        assert!(!metadata[0].created_at.is_empty());
+        assert!(!metadata[0].updated_at.is_empty());
+        assert_eq!(
+            metadata_store.cached_dek_count().await,
+            0,
+            "metadata listing must not unwrap or cache a DEK"
+        );
         let before: Vec<u8> = sqlx::query_scalar(
             "SELECT ciphertext FROM tenant_secrets WHERE path = $1 AND key = 'OLD_KEY'",
         )

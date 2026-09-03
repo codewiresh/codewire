@@ -601,8 +601,8 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
     };
 
     input.has_setup = true;
-    input.include_org_secrets = sc.include_org_secrets.unwrap_or(true);
-    input.include_user_secrets = sc.include_user_secrets.unwrap_or(true);
+    input.include_org_secrets = sc.include_org_secrets.unwrap_or(false);
+    input.include_user_secrets = sc.include_user_secrets.unwrap_or(false);
     input.install_command = sc.install_command.clone();
     input.startup_script = sc.startup_script.clone();
     for repo in sc.normalized_repos() {
@@ -1273,102 +1273,122 @@ impl WorkerSetupOps<'_> {
         Ok(())
     }
 
-    /// Mirrors `injectSecretProjectVars` (warn-only).
-    async fn inject_secret_project_vars(&mut self) {
+    /// Resolves the selected secret project. An admitted source must not be
+    /// silently omitted when its protected storage is unavailable.
+    async fn inject_secret_project_vars(&mut self) -> anyhow::Result<()> {
         let Some(project_id) = self.env.secret_project_id.clone() else {
-            return;
+            return Ok(());
         };
-        let sc = self
-            .env
-            .setup_config
-            .get_or_insert_with(SetupConfig::default);
         let path = format!("/projects/{}/{}", self.env.org_id, project_id);
-        match self.ctx.secrets.get_secrets_raw_at_path(&path).await {
-            Ok(secrets) => {
-                let count = secrets.len();
-                merge_secrets(&mut sc.env_vars, secrets, &[]);
-                tracing::info!(
-                    environment_id = self.env.id,
-                    count,
-                    "post-boot: injected secret project vars"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
+        let secrets = self
+            .ctx
+            .secrets
+            .get_secrets_raw_at_path(&path)
+            .await
+            .map_err(|error| {
+                tracing::error!(
                     environment_id = self.env.id,
                     secret_project_id = project_id,
-                    error = %e,
-                    "post-boot: failed to fetch secret project secrets"
+                    error = %error,
+                    "post-boot: selected secret project resolution failed"
                 );
-            }
-        }
-    }
-
-    /// Mirrors `injectOrgSecrets` (debug-only on failure).
-    async fn inject_org_secrets(&mut self) {
-        let path = format!("/org-secrets/{}", self.env.org_id);
+                anyhow::anyhow!("selected project workload secrets are unavailable")
+            })?;
         let sc = self
             .env
             .setup_config
             .get_or_insert_with(SetupConfig::default);
-        match self.ctx.secrets.get_secrets_raw_at_path(&path).await {
-            Ok(secrets) => {
-                let injected = merge_secrets(&mut sc.env_vars, secrets, &[]);
-                if injected > 0 {
-                    tracing::info!(
-                        environment_id = self.env.id,
-                        count = injected,
-                        "post-boot: injected org secrets as fallback"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::debug!(environment_id = self.env.id, error = %e, "post-boot: no org secrets or error");
-            }
-        }
+        let count = merge_secrets(&mut sc.env_vars, secrets, &[]);
+        tracing::info!(
+            environment_id = self.env.id,
+            count,
+            "post-boot: injected secret project vars"
+        );
+        Ok(())
     }
 
-    /// Mirrors `injectUserSecrets` (debug-only on failure; never
-    /// injects SSH_PRIVATE_KEY into env vars).
-    async fn inject_user_secrets(&mut self) {
+    /// Resolves selected organization secrets without weakening setup when
+    /// the protected store cannot prove the requested result.
+    async fn inject_org_secrets(&mut self) -> anyhow::Result<()> {
+        let path = format!("/org-secrets/{}", self.env.org_id);
+        let secrets = self
+            .ctx
+            .secrets
+            .get_secrets_raw_at_path(&path)
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    environment_id = self.env.id,
+                    error = %error,
+                    "post-boot: selected organization-secret resolution failed"
+                );
+                anyhow::anyhow!("selected organization workload secrets are unavailable")
+            })?;
+        let sc = self
+            .env
+            .setup_config
+            .get_or_insert_with(SetupConfig::default);
+        let injected = merge_secrets(&mut sc.env_vars, secrets, &[]);
+        if injected > 0 {
+            tracing::info!(
+                environment_id = self.env.id,
+                count = injected,
+                "post-boot: injected org secrets as fallback"
+            );
+        }
+        Ok(())
+    }
+
+    /// Resolves selected user secrets; `SSH_PRIVATE_KEY` remains outside the
+    /// workload environment and is handled by the legacy SSH path below.
+    async fn inject_user_secrets(&mut self) -> anyhow::Result<()> {
         let created_by: Option<(String,)> =
             sqlx::query_as("SELECT created_by FROM environments WHERE id = $1")
                 .bind(&self.env.id)
                 .fetch_optional(&self.ctx.pool)
                 .await
-                .unwrap_or(None);
+                .map_err(|error| {
+                    tracing::error!(
+                        environment_id = self.env.id,
+                        error = %error,
+                        "post-boot: environment creator lookup failed"
+                    );
+                    anyhow::anyhow!("selected user workload secrets are unavailable")
+                })?;
         let Some((created_by,)) = created_by else {
-            tracing::debug!(
+            tracing::error!(
                 environment_id = self.env.id,
-                "post-boot: could not resolve environment creator"
+                "post-boot: environment creator is unavailable"
             );
-            return;
+            anyhow::bail!("selected user workload secrets are unavailable");
         };
-        let sc = self
-            .env
-            .setup_config
-            .get_or_insert_with(SetupConfig::default);
-        match self
+        let secrets = self
             .ctx
             .secrets
             .get_secrets_raw_at_path(&format!("/users/{created_by}"))
             .await
-        {
-            Ok(secrets) => {
-                let injected = merge_secrets(&mut sc.env_vars, secrets, &["SSH_PRIVATE_KEY"]);
-                if injected > 0 {
-                    tracing::info!(
-                        environment_id = self.env.id,
-                        user_id = created_by,
-                        count = injected,
-                        "post-boot: injected user secrets as fallback"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::debug!(environment_id = self.env.id, error = %e, "post-boot: no user secrets or error");
-            }
+            .map_err(|error| {
+                tracing::error!(
+                    environment_id = self.env.id,
+                    error = %error,
+                    "post-boot: selected user-secret resolution failed"
+                );
+                anyhow::anyhow!("selected user workload secrets are unavailable")
+            })?;
+        let sc = self
+            .env
+            .setup_config
+            .get_or_insert_with(SetupConfig::default);
+        let injected = merge_secrets(&mut sc.env_vars, secrets, &["SSH_PRIVATE_KEY"]);
+        if injected > 0 {
+            tracing::info!(
+                environment_id = self.env.id,
+                user_id = created_by,
+                count = injected,
+                "post-boot: injected user secrets as fallback"
+            );
         }
+        Ok(())
     }
 
     /// Mirrors `syncWorkspaceEnv` (warn-only).
@@ -1639,12 +1659,12 @@ impl SetupOps for WorkerSetupOps<'_> {
         }
         let activity_ctx = self.activity_ctx.clone();
         await_setup_or_cancel(&activity_ctx, async {
-            self.inject_secret_project_vars().await;
-            if input.include_org_secrets {
-                self.inject_org_secrets().await;
-            }
             if input.include_user_secrets {
-                self.inject_user_secrets().await;
+                self.inject_user_secrets().await?;
+            }
+            self.inject_secret_project_vars().await?;
+            if input.include_org_secrets {
+                self.inject_org_secrets().await?;
             }
             Ok(())
         })
@@ -2618,7 +2638,7 @@ mod tests {
     }
 
     #[test]
-    fn to_setup_inputs_mirrors_go_defaults() {
+    fn to_setup_inputs_defaults_secret_sources_off() {
         let env = EnvironmentRow {
             id: "env-1".into(),
             org_id: "org-1".into(),
@@ -2659,10 +2679,13 @@ mod tests {
         let input = to_setup_inputs(&env, &backend);
         assert!(input.has_setup);
         assert!(
-            input.include_org_secrets,
-            "nil include_org_secrets defaults true"
+            !input.include_org_secrets,
+            "absent include_org_secrets must default off"
         );
-        assert!(input.include_user_secrets);
+        assert!(
+            !input.include_user_secrets,
+            "absent include_user_secrets must default off"
+        );
         assert!(input.has_mesh);
         assert_eq!(input.repos.len(), 1);
         assert_eq!(input.repos[0].branch, "dev");

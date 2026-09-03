@@ -26,6 +26,15 @@ pub struct StoredSecret {
     pub updated_at: String,
 }
 
+/// Key-only platform metadata. Listing secrets must not unwrap a DEK or
+/// materialize plaintext merely to discard it at the public boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredSecretMetadata {
+    pub key: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 impl fmt::Debug for StoredSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StoredSecret")
@@ -92,6 +101,15 @@ impl SecretStore {
         secret_path: &str,
     ) -> anyhow::Result<Vec<StoredSecret>> {
         self.0.get_secrets_raw_at_path(secret_path).await
+    }
+
+    /// Lists keys and timestamps without unwrapping the scope DEK or reading
+    /// encrypted values.
+    pub async fn get_secret_metadata_at_path(
+        &self,
+        secret_path: &str,
+    ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
+        self.0.get_secret_metadata_at_path(secret_path).await
     }
 
     /// Mirrors `GetAllSecretsAtPath`.
@@ -252,6 +270,47 @@ mod tests {
         assert_eq!(dst.get("EXPLICIT").map(String::as_str), Some("keep"));
         assert_eq!(dst.get("NEW").map(String::as_str), Some("v"));
         assert!(!dst.contains_key("SSH_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn first_writer_order_encodes_canonical_secret_precedence() {
+        fn secret(key: &str, value: &str) -> StoredSecret {
+            StoredSecret {
+                key: key.into(),
+                value: value.into(),
+                ..Default::default()
+            }
+        }
+
+        let mut resolved = BTreeMap::from([("EXPLICIT".into(), "explicit".into())]);
+        merge_secrets(
+            &mut resolved,
+            vec![secret("SHARED", "user"), secret("USER_ONLY", "user")],
+            &[],
+        );
+        merge_secrets(
+            &mut resolved,
+            vec![
+                secret("SHARED", "project"),
+                secret("PROJECT_ONLY", "project"),
+            ],
+            &[],
+        );
+        merge_secrets(
+            &mut resolved,
+            vec![
+                secret("SHARED", "organization"),
+                secret("EXPLICIT", "organization"),
+                secret("ORG_ONLY", "organization"),
+            ],
+            &[],
+        );
+
+        assert_eq!(resolved["EXPLICIT"], "explicit");
+        assert_eq!(resolved["SHARED"], "user");
+        assert_eq!(resolved["USER_ONLY"], "user");
+        assert_eq!(resolved["PROJECT_ONLY"], "project");
+        assert_eq!(resolved["ORG_ONLY"], "organization");
     }
 
     #[test]

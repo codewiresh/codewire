@@ -1125,19 +1125,7 @@ pub(crate) async fn create_environment_core(
             }
 
             // Build setup_config if any smart fields are present.
-            let needs_setup_cfg = !body.repo_url.is_empty()
-                || !body.repos.is_empty()
-                || !body.install_command.is_empty()
-                || !body.startup_script.is_empty()
-                || !body.env_vars.is_empty()
-                || !body.agents.is_empty()
-                || body.install_agents.is_some()
-                || !body.agent.is_empty()
-                || !body.agent_env.is_empty()
-                || !body.app_ports.is_empty()
-                || body.include_org_secrets == Some(false)
-                || body.include_user_secrets == Some(false)
-                || body.project_spec.is_some();
+            let needs_setup_cfg = create_needs_setup_config(&body);
             let setup_cfg = needs_setup_cfg.then(|| SetupConfig {
                 repo_url: body.repo_url.clone(),
                 branch: body.branch.clone(),
@@ -1222,6 +1210,22 @@ pub(crate) async fn create_environment_core(
         }
     })
     .await
+}
+
+fn create_needs_setup_config(body: &CreateEnvironmentBody) -> bool {
+    !body.repo_url.is_empty()
+        || !body.repos.is_empty()
+        || !body.install_command.is_empty()
+        || !body.startup_script.is_empty()
+        || !body.env_vars.is_empty()
+        || !body.agents.is_empty()
+        || body.install_agents.is_some()
+        || !body.agent.is_empty()
+        || !body.agent_env.is_empty()
+        || !body.app_ports.is_empty()
+        || body.include_org_secrets.is_some()
+        || body.include_user_secrets.is_some()
+        || body.project_spec.is_some()
 }
 
 /// The repo-detection arm of `createEnvironment` (no saved config):
@@ -1492,6 +1496,19 @@ secrets: {project: development, organization: false, user: true}
         assert_eq!(body.secret_project, "development");
         assert_eq!(body.include_org_secrets, Some(false));
         assert_eq!(body.include_user_secrets, Some(true));
+    }
+
+    #[test]
+    fn explicit_secret_selection_always_persists_setup_config() {
+        let mut body = CreateEnvironmentBody::default();
+        assert!(!create_needs_setup_config(&body));
+
+        body.include_user_secrets = Some(true);
+        assert!(create_needs_setup_config(&body));
+
+        body.include_user_secrets = None;
+        body.include_org_secrets = Some(false);
+        assert!(create_needs_setup_config(&body));
     }
 
     #[test]
