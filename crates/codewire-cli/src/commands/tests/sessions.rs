@@ -52,77 +52,6 @@
         );
     }
 
-    #[tokio::test]
-    async fn local_session_client_waits_for_managed_daemon_readiness() {
-        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-
-        let temp = tempfile::tempdir().unwrap();
-        let workspace_root = temp.path().join("workspace");
-        let home_root = temp.path().join("home");
-        std::fs::create_dir_all(&workspace_root).unwrap();
-        std::fs::create_dir_all(&home_root).unwrap();
-        let token = "managed-daemon-test-token";
-        let config = codewire_daemon::Config {
-            listen_addr: format!("127.0.0.1:{port}"),
-            workspace_root,
-            home_root,
-            auth_token: Some(token.to_string()),
-            process_execution: codewire_daemon::execution::ProcessExecution::Native,
-            credential_bridge: None,
-        };
-        let instance = config::LocalInstanceConfig {
-            daemon_host_port: port,
-            daemon_auth_token: token.to_string(),
-            ..Default::default()
-        };
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            codewire_daemon::run(config, async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-        });
-
-        let client = local_environment_session_client(&instance)
-            .await
-            .expect("client retries until the managed daemon is ready");
-        assert_eq!(
-            client.get_health().await.unwrap().state,
-            codewire_daemon::client::v1::DaemonState::Ready as i32
-        );
-
-        shutdown_tx.send(()).ok();
-        server.await.unwrap().unwrap();
-    }
-
-    #[test]
-    fn local_session_default_working_dir_uses_the_backend_mount() {
-        let lima = config::LocalInstanceConfig {
-            workdir: "/home/user/src/project".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            local_environment_session_working_dir(&lima),
-            "/home/user/src/project"
-        );
-
-        let docker = config::LocalInstanceConfig {
-            workdir: LOCAL_WORKSPACE_PATH.to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            local_environment_session_working_dir(&docker),
-            LOCAL_WORKSPACE_PATH
-        );
-        assert_eq!(
-            local_environment_session_working_dir(&config::LocalInstanceConfig::default()),
-            LOCAL_WORKSPACE_PATH
-        );
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn native_session_default_working_dir_uses_the_recorded_project_intent() {
@@ -144,6 +73,23 @@
             native_environment_session_working_dir(&fallback),
             LOCAL_WORKSPACE_PATH
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn selected_native_session_target_accepts_only_its_name_or_exact_id() {
+        let environment = codewire_local_vmm::control::v1::Environment {
+            id: "8fc6e44a-047a-4e65-8e56-26df709fee44".to_owned(),
+            name: "native".to_owned(),
+            ..Default::default()
+        };
+        assert!(native_session_request_matches(&environment, "native"));
+        assert!(native_session_request_matches(
+            &environment,
+            "8fc6e44a-047a-4e65-8e56-26df709fee44"
+        ));
+        assert!(!native_session_request_matches(&environment, "nat"));
+        assert!(!native_session_request_matches(&environment, "platform"));
     }
 
     #[test]

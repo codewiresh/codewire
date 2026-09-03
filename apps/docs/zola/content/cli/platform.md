@@ -135,8 +135,8 @@ cw run --detach fix-auth -- codex
 ```
 
 {% aside(kind="note") %}
-  Local Docker/Lima environments use the same session grammar after creation
-  with `cw env create --local`. See [Sessions](@/cli/sessions.md).
+  Native local environments use the same session grammar after creation with
+  `cw env create --local`. See [Sessions](@/cli/sessions.md).
 {% end %}
 
 ## Secrets

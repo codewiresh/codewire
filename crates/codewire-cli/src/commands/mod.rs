@@ -2,7 +2,7 @@
 //!
 //! - `core`: hook, gateway, target selection, init, VS Code, shell, and CLI utilities.
 //! - `environment`: environment lifecycle, files, access, ports, logs, and list views.
-//! - `local`: local Docker/Lima environment lifecycle behind `cw env COMMAND --local`.
+//! - `native`: Codewire-owned native local environment lifecycle and public clients.
 //! - `platform_commands`: doctor, billing, login/setup, GitHub, organizations, API keys,
 //!   presets, and secrets.
 //! - `mesh_commands`: network, node, and local Mesh management.
@@ -38,9 +38,6 @@ pub(crate) use credential_repository::*;
 mod credentials;
 #[cfg(target_os = "linux")]
 pub(crate) use credentials::*;
-
-const LOCAL_DAEMON_READY_ATTEMPTS: usize = 25;
-const LOCAL_DAEMON_READY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Args)]
 pub(crate) struct CompletionArgs {
@@ -644,161 +641,6 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) command: Vec<String>,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct LocalArgs {
-    #[arg(
-        short,
-        long,
-        global = true,
-        value_enum,
-        default_value_t = OutputFormat::Text,
-        help = "Output format"
-    )]
-    output: OutputFormat,
-    #[command(subcommand)]
-    command: LocalCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum LocalCommand {
-    #[command(about = "Create a local runtime instance from codewire.yaml")]
-    Create(Box<LocalCreateArgs>),
-    #[command(alias = "ls", about = "List local runtime instances")]
-    List,
-    #[command(about = "Show local runtime instance details")]
-    Info(LocalInfoArgs),
-    #[command(about = "Start an existing local runtime instance")]
-    Start(LocalInfoArgs),
-    #[command(about = "Stop an existing local runtime instance")]
-    Stop(LocalInfoArgs),
-    #[command(alias = "delete", about = "Delete an existing local runtime instance")]
-    Rm(LocalInfoArgs),
-    #[command(about = "Resize CPU, memory, or disk for a local runtime instance")]
-    Resize(LocalResizeArgs),
-    #[command(about = "Show configured local runtime ports")]
-    Ports(LocalPortsArgs),
-    #[command(about = "Upload, download, and list files inside a local runtime instance")]
-    Files(LocalFilesArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalInfoArgs {
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalResizeArgs {
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-    #[arg(long, default_value_t = 0, help = "CPU in millicores")]
-    cpu: i32,
-    #[arg(long, default_value_t = 0, help = "Memory in MB")]
-    memory: i32,
-    #[arg(long, default_value_t = 0, help = "Disk in GB")]
-    disk: i32,
-    #[arg(
-        long,
-        help = "Stop and restart a running Lima instance to apply VM-size changes"
-    )]
-    restart: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalPortsArgs {
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-    #[arg(
-        short = 'p',
-        long = "publish",
-        value_name = "HOST:GUEST",
-        help = "Port mapping host:guest (e.g. 8080:3000)"
-    )]
-    publish: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalCreateArgs {
-    #[arg(
-        long,
-        value_name = "BACKEND",
-        help = "Local runtime backend (docker or lima)"
-    )]
-    backend: String,
-    #[arg(long, value_name = "NAME", help = "Instance name")]
-    name: Option<String>,
-    #[arg(
-        long,
-        value_name = "PATH",
-        default_value = ".",
-        help = "Project directory to associate with the local instance"
-    )]
-    path: PathBuf,
-    #[arg(
-        long,
-        value_name = "FILE",
-        default_value = "codewire.yaml",
-        help = "Preset file path, relative to --path when not absolute"
-    )]
-    file: PathBuf,
-    #[arg(
-        long,
-        value_name = "SPEC",
-        help = "JSON spec file or '-' for stdin; overrides codewire.yaml"
-    )]
-    spec: Option<String>,
-    #[arg(long, value_name = "PRESET", help = "Preset slug override")]
-    preset: Option<String>,
-    #[arg(long, value_name = "IMAGE", help = "Container image override")]
-    image: Option<String>,
-    #[arg(long, value_name = "COMMAND", help = "Install command override")]
-    install: Option<String>,
-    #[arg(long, value_name = "COMMAND", help = "Startup script override")]
-    startup: Option<String>,
-    #[arg(long, value_name = "AGENT", help = "AI agent override")]
-    agent: Option<String>,
-    #[arg(long, value_name = "PROJECT", help = "Secret project override")]
-    secrets: Option<String>,
-    #[arg(long = "env", value_name = "KEY=VALUE", help = "Env vars")]
-    env: Vec<String>,
-    #[arg(long, default_value_t = 0, help = "CPU in millicores override")]
-    cpu: i32,
-    #[arg(long, default_value_t = 0, help = "Memory in MB override")]
-    memory: i32,
-    #[arg(long, default_value_t = 0, help = "Disk in GB override")]
-    disk: i32,
-    #[arg(long, help = "Don't inject org-level secrets")]
-    no_org_secrets: bool,
-    #[arg(long, help = "Don't inject user-level secrets")]
-    no_user_secrets: bool,
-    #[arg(
-        long,
-        value_name = "NETWORK",
-        help = "Join a specific mesh network on boot"
-    )]
-    network: Option<String>,
-    #[arg(long, help = "Don't join the selected private mesh network")]
-    no_network: bool,
-    #[arg(short = 'y', long, help = "Skip interactive prompts")]
-    yes: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalFilesArgs {
-    #[command(subcommand)]
-    command: LocalFilesCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum LocalFilesCommand {
-    #[command(about = "Upload bytes from stdin to a path inside a local runtime instance")]
-    Upload(LocalFilesUploadArgs),
-    #[command(about = "Download a file from a local runtime instance to stdout")]
-    Download(LocalFilesPathArgs),
-    #[command(about = "List directory entries at a path inside a local runtime instance")]
-    List(LocalFilesListArgs),
-}
-
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvCommand {
     #[command(
@@ -877,7 +719,8 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "BACKEND",
-        help = "Local runtime backend (native by default; docker or lima for legacy); requires --local"
+        value_parser = ["native", "cloud-hypervisor"],
+        help = "Local runtime backend (native by default); requires --local"
     )]
     backend: Option<String>,
     #[arg(
@@ -1839,7 +1682,6 @@ pub(crate) enum OutputFormat {
 mod collaboration;
 mod core;
 mod environment;
-mod local;
 mod mesh_commands;
 mod platform_commands;
 mod sessions;
@@ -1847,7 +1689,6 @@ mod sessions;
 pub(crate) use collaboration::*;
 pub(crate) use core::*;
 pub(crate) use environment::*;
-pub(crate) use local::*;
 pub(crate) use mesh_commands::*;
 pub(crate) use platform_commands::*;
 pub(crate) use sessions::*;
@@ -1856,7 +1697,6 @@ pub(crate) use sessions::*;
 mod tests {
     use super::*;
     include!("tests/core.rs");
-    include!("tests/local.rs");
     include!("tests/environment.rs");
     include!("tests/run.rs");
     include!("tests/platform.rs");

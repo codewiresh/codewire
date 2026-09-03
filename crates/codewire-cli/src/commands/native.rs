@@ -1,9 +1,10 @@
 use std::future::Future;
+use std::io::{BufRead as _, Read as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
 use anyhow::Context as _;
 use codewire_access::{AccessProfileReference, EnvironmentId};
@@ -32,6 +33,76 @@ const DEFAULT_NATIVE_MEMORY_MIB: u32 = 4 * 1024;
 const DEFAULT_NATIVE_DISK_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_NATIVE_DOCKER_DISK_BYTES: u64 =
     codewire_local_vmm::linux::state::DEFAULT_DOCKER_DISK_BYTES;
+const MAX_LEGACY_LOCAL_NAME_INDEX_BYTES: u64 = 1024 * 1024;
+
+fn legacy_local_name_collides(data_dir: &Path, name: &str) -> anyhow::Result<bool> {
+    let state_path = data_dir.join("local_instances.toml");
+    let before = match std::fs::symlink_metadata(&state_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read legacy local name index {}", state_path.display()));
+        }
+    };
+    if !before.is_file()
+        || before.file_type().is_symlink()
+        || before.uid() != unsafe { libc::geteuid() }
+        || before.permissions().mode() & 0o022 != 0
+        || before.len() > MAX_LEGACY_LOCAL_NAME_INDEX_BYTES
+    {
+        anyhow::bail!(
+            "legacy local name index is not an owner-controlled bounded regular file: {}",
+            state_path.display()
+        );
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&state_path)
+        .with_context(|| format!("open legacy local name index {}", state_path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect legacy local name index {}", state_path.display()))?;
+    if opened.dev() != before.dev()
+        || opened.ino() != before.ino()
+        || opened.uid() != before.uid()
+        || opened.permissions().mode() & 0o022 != 0
+        || opened.len() > MAX_LEGACY_LOCAL_NAME_INDEX_BYTES
+    {
+        anyhow::bail!(
+            "legacy local name index changed while opening: {}",
+            state_path.display()
+        );
+    }
+
+    let unquoted = format!("[instances.{name}]");
+    let double_quoted = format!("[instances.\"{name}\"]");
+    let single_quoted = format!("[instances.'{name}']");
+    let mut reader = std::io::BufReader::new(file).take(MAX_LEGACY_LOCAL_NAME_INDEX_BYTES + 1);
+    let mut line = String::new();
+    let mut total = 0_u64;
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .with_context(|| format!("read legacy local name index {}", state_path.display()))?;
+        if read == 0 {
+            return Ok(false);
+        }
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        if total > MAX_LEGACY_LOCAL_NAME_INDEX_BYTES {
+            anyhow::bail!(
+                "legacy local name index exceeds the supported size: {}",
+                state_path.display()
+            );
+        }
+        let line = line.trim();
+        if line == unquoted || line == double_quoted || line == single_quoted {
+            return Ok(true);
+        }
+    }
+}
 
 pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow::Result<()> {
     let executable = canonical_current_executable()?;
@@ -216,10 +287,7 @@ fn validate_private_auth_file(path: &Path) -> Result<(), ()> {
 pub(crate) fn native_create_selected(args: &EnvCreateArgs) -> anyhow::Result<bool> {
     match args.backend.as_deref().map(str::trim) {
         None | Some("") | Some("native") | Some("cloud-hypervisor") => Ok(true),
-        Some("docker" | "lima") => Ok(false),
-        Some(other) => anyhow::bail!(
-            "unsupported local backend {other:?}; use native, cloud-hypervisor, docker, or lima"
-        ),
+        Some(other) => anyhow::bail!("unsupported local backend {other:?}; use native"),
     }
 }
 
@@ -343,7 +411,7 @@ pub(crate) async fn create_native_environment(
         .to_owned();
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
-    if resolve_local_instance_target(&paths.mesh_data_dir, &name).is_some() {
+    if legacy_local_name_collides(&paths.mesh_data_dir, &name)? {
         anyhow::bail!(
             "local environment {name:?} already exists in the legacy Docker/Lima state; choose a different name or remove it explicitly"
         );
@@ -571,6 +639,15 @@ pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Env
     native_client()
         .await?
         .get(name)
+        .await
+        .map_err(native_status)
+}
+
+pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
+    let mut client = native_client().await?;
+    let environment = client.get(name).await.map_err(native_status)?;
+    client
+        .select(&environment.name, &environment.id)
         .await
         .map_err(native_status)
 }
@@ -829,6 +906,21 @@ pub(crate) async fn native_environment_session_client(
     ensure_native_access_authority(&environment).await?;
     drop(supervisor);
     codewire_local_vmm::public_client::NativePublicSessionClient::connect_or_start(
+        &native_runtime_config()?,
+        name,
+    )
+    .await
+    .map_err(anyhow::Error::from)
+}
+
+pub(crate) async fn native_environment_data_client(
+    name: &str,
+) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicDataClient> {
+    let mut supervisor = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut supervisor, name).await?;
+    ensure_native_access_authority(&environment).await?;
+    drop(supervisor);
+    codewire_local_vmm::public_client::NativePublicDataClient::connect_or_start(
         &native_runtime_config()?,
         name,
     )
@@ -1432,6 +1524,41 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_local_state_is_used_only_as_a_read_only_name_collision_index() {
+        let root = tempfile::tempdir().unwrap();
+        let state_path = root.path().join("local_instances.toml");
+        let state = concat!(
+            "[instances.workspace]\n",
+            "backend = \"lima\"\n",
+            "runtime_name = \"cw-workspace\"\n",
+            "daemon_auth_token = \"synthetic-do-not-read\"\n",
+        );
+        std::fs::write(&state_path, state).unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(legacy_local_name_collides(root.path(), "workspace").unwrap());
+        assert!(!legacy_local_name_collides(root.path(), "cw-workspace").unwrap());
+        assert!(!legacy_local_name_collides(root.path(), "other").unwrap());
+        assert_eq!(std::fs::read_to_string(&state_path).unwrap(), state);
+    }
+
+    #[test]
+    fn legacy_local_name_index_rejects_symlinks_and_unbounded_files() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, "[instances.workspace]\n").unwrap();
+        std::os::unix::fs::symlink(&target, root.path().join("local_instances.toml")).unwrap();
+        assert!(legacy_local_name_collides(root.path(), "workspace").is_err());
+
+        std::fs::remove_file(root.path().join("local_instances.toml")).unwrap();
+        let state_path = root.path().join("local_instances.toml");
+        let file = std::fs::File::create(&state_path).unwrap();
+        file.set_len(MAX_LEGACY_LOCAL_NAME_INDEX_BYTES + 1).unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(legacy_local_name_collides(root.path(), "workspace").is_err());
+    }
 
     #[test]
     fn native_resource_quantities_match_the_canonical_command() {

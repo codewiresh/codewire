@@ -299,6 +299,22 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    pub async fn select(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+    ) -> Result<v1::Environment, Status> {
+        Ok(self
+            .inner
+            .select_environment(v1::EnvironmentSelector {
+                name: name.to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: environment_id.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
     pub async fn list_orphans(&mut self) -> Result<v1::ListOrphansResponse, Status> {
         Ok(self
             .inner
@@ -3805,6 +3821,26 @@ impl LocalSupervisorService for SupervisorRpc {
                 .map_err(Status::from)?
                 .proto(core.selected(&name)),
         ))
+    }
+
+    async fn select_environment(
+        &self,
+        request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::Environment>, Status> {
+        let (name, _request_id, expected_environment_id) =
+            mutation_selection(request.into_inner())?;
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
+        core.reconcile(&name).await.map_err(Status::from)?;
+        let environment = core.environment(&name).map_err(Status::from)?.clone();
+        require_expected_environment(&environment, expected_environment_id)?;
+        if core.state.current.as_deref() != Some(name.as_str()) {
+            core.state.current = Some(name);
+            core.save().map_err(Status::from)?;
+        }
+        Ok(Response::new(environment.proto(true)))
     }
 
     async fn list_orphans(
@@ -9272,6 +9308,55 @@ mod tests {
                 .exists()
         );
         assert!(!artifact_blobs.join(format!("r-{stale_kernel}")).exists());
+    }
+
+    #[tokio::test]
+    async fn select_environment_persists_the_new_current_environment() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let mut selected = project_environment();
+        selected.name = "selected".to_owned();
+        let selected_id = selected.id;
+        core.state
+            .environments
+            .insert(selected.name.clone(), selected);
+        core.save().unwrap();
+        let service = test_supervisor_service(core);
+
+        let response = service
+            .select_environment(Request::new(v1::EnvironmentSelector {
+                name: "selected".to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: selected_id.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.id, selected_id.to_string());
+        assert!(response.selected);
+
+        let core = service.core.lock().await;
+        assert_eq!(core.state.current.as_deref(), Some("selected"));
+        let (_, persisted) = SupervisorStore::inspect(&core.root).unwrap();
+        assert_eq!(persisted.current.as_deref(), Some("selected"));
+    }
+
+    #[tokio::test]
+    async fn select_environment_rejects_a_recreated_identity_without_changing_current() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let service = test_supervisor_service(core);
+
+        let error = service
+            .select_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: Uuid::new_v4().to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+
+        let core = service.core.lock().await;
+        assert_eq!(core.state.current.as_deref(), Some("dev"));
     }
 
     #[tokio::test]

@@ -12,16 +12,6 @@
         assert!(!stopped.to_ascii_lowercase().contains("deleted"));
     }
 
-    fn named_local_instance(backend: &str) -> config::LocalInstanceConfig {
-        config::LocalInstanceConfig {
-            name: "repo".to_string(),
-            backend: backend.to_string(),
-            runtime_name: "cw-repo".to_string(),
-            workdir: LOCAL_WORKSPACE_PATH.to_string(),
-            ..config::LocalInstanceConfig::default()
-        }
-    }
-
     #[test]
     fn replace_managed_ssh_section_appends_go_compatible_block() {
         let rendered =
@@ -800,11 +790,11 @@
         let target = config::default_current_target();
 
         assert_eq!(
-            format_current_target_text(&target, None, None, Some("project-alpha"), false),
+            format_current_target_text(&target, None, Some("project-alpha"), false),
             "local  network: project-alpha\n"
         );
         assert_eq!(
-            format_current_target_text(&target, None, None, Some("project-alpha"), true),
+            format_current_target_text(&target, None, Some("project-alpha"), true),
             concat!(
                 "Kind:      local\n",
                 "Network:   project-alpha\n",

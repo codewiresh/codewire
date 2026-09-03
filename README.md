@@ -164,29 +164,26 @@ The native smoke verifies that repository, copy-mount, and direct-mount skill
 inputs remain immutable until an explicit refresh, are projected read-only in
 the guest, and preserve executable helper modes.
 
-The legacy Docker and Lima local backends remain available explicitly during
-the migration:
+The native local supervisor is the only supported local environment owner:
 
 ```bash
 ./target/debug/cw env create --local \
-  --backend lima \
-  --name legacy-local \
+  --name native-local \
   --image workspace \
   --path .
 
-# Resize a Lima environment. A terminal shows the current-to-desired plan,
+# Resize a native environment. A terminal shows the current-to-desired plan,
 # active-session warning, and a default-no confirmation before the restart.
-./target/debug/cw env resize --local legacy-local --cpu 6 --memory 12Gi --disk 120Gi
+./target/debug/cw env resize --local native-local --cpu 6 --memory 12Gi --disk 120Gi
 
 # Automation must provide explicit resources and --yes.
-./target/debug/cw env resize --local legacy-local --cpu 6 --yes --output json
+./target/debug/cw env resize --local native-local --cpu 6 --yes --output json
 ```
 
 `cw env resize ENV` resolves the placement when it is unambiguous. Native and
-Lima local resize both restore a running VM after applying changes without
+platform resize both restore a running VM after applying changes without
 recreating the environment, and disk growth cannot be reversed. Native VMs use
-whole CPU cores and perform ext4 growth while stopped. Platform resize is
-tracked separately in #860.
+whole CPU cores and perform ext4 growth while stopped.
 
 ### Local database and dashboard loop
 

@@ -756,7 +756,6 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   crates/codewire-cli/src/commands/collaboration.rs \
   crates/codewire-cli/src/commands/core.rs \
   crates/codewire-cli/src/commands/environment.rs \
-  crates/codewire-cli/src/commands/local.rs \
   crates/codewire-cli/src/commands/mesh_commands.rs \
   crates/codewire-cli/src/commands/mod.rs \
   crates/codewire-cli/src/commands/platform_commands.rs \
@@ -764,7 +763,6 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   crates/codewire-cli/src/commands/tests/collaboration.rs \
   crates/codewire-cli/src/commands/tests/core.rs \
   crates/codewire-cli/src/commands/tests/environment.rs \
-  crates/codewire-cli/src/commands/tests/local.rs \
   crates/codewire-cli/src/commands/tests/run.rs \
   crates/codewire-cli/src/commands/tests/sessions.rs \
   crates/codewire-cli/src/environment_client.rs \
@@ -808,7 +806,6 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   libs/sdk-ts/src/index.ts \
   libs/sdk-ts/src/local.ts \
   scripts/ci/tests/test-sdk-local-cli-contract.sh \
-  scripts/ci/verify/smoke-local-environment.sh \
   scripts/ci/verify/smoke-prod.sh \
   scripts/runtime/dev/measure-dev-commodity-overhead.sh \
   scripts/runtime/dev/smoke-dev-commodity.sh

@@ -1719,21 +1719,20 @@ printf '%s\n' 'user skill generation two' >"$USER_SKILL_SOURCE/SKILL.md"
 printf 'direct read-only host changed after creation\n' >"$DIRECT_RO_SOURCE/data.txt"
 run_cw env list --local --output json
 jq -e '
-  length == 2 and
-  any(.[];
+  length == 1 and
+  (.[0] |
     .name == "native-smoke" and
     .placement == "local" and
     .selected == true and
     .state == "running" and
-    .daemon_health == "ready"
-  ) and
-  any(.[];
-    .name == "legacy" and
-    .placement == "local" and
-    .selected == false and
-    .id == "cw-legacy"
-  )
+    .daemon_health == "ready")
 ' "$LAST_STDOUT" >/dev/null || die 'native environment list metadata drifted'
+run_cw use --local "$NAME"
+rg -qxF 'Current target set to native-smoke.' "$LAST_STDERR" ||
+  die 'native environment selection output drifted'
+run_cw current
+rg -qxF 'native-smoke  network: native-smoke-network' "$LAST_STDOUT" ||
+  die 'native current-target output drifted'
 [[ "$(stat -c '%a' "$STATE_ROOT")" == 700 ]] || die 'native state root is not mode 0700'
 [[ "$(stat -c '%a' "$STATE_ROOT/supervisor.db")" == 600 ]] ||
   die 'native supervisor database is not mode 0600'
@@ -1876,6 +1875,22 @@ fi
 
 log 'checking public Exec/File over the owner-only supervisor UDS'
 run_public_data_smoke
+
+log 'checking binary file transfer through cw and the public supervisor FileService'
+CW_UPLOAD="$SMOKE_ROOT/cw-upload.bin"
+CW_DOWNLOAD="$SMOKE_ROOT/cw-download.bin"
+/usr/bin/env python3 - "$CW_UPLOAD" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_bytes(bytes(range(256)) * 257 + b"\x00codewire-cp\xff")
+PY
+CW_UPLOAD_SHA256="$(sha256sum "$CW_UPLOAD" | cut -d' ' -f1)"
+run_cw env cp --local "$CW_UPLOAD" "$NAME:/workspace/cw-upload.bin"
+run_cw run --no-tty -- /bin/sh -lc \
+  "test \"\$(sha256sum /workspace/cw-upload.bin | cut -d' ' -f1)\" = '$CW_UPLOAD_SHA256'"
+run_cw env cp --local "$NAME:/workspace/cw-upload.bin" "$CW_DOWNLOAD"
+cmp "$CW_UPLOAD" "$CW_DOWNLOAD" || die 'cw binary file transfer changed content'
 
 log 'checking codewire.yaml loopback host-port publication through the native VM'
 HOST_PORT_SERVER='const net=require("node:net");const server=net.createServer((socket)=>{const chunks=[];socket.on("data",(chunk)=>chunks.push(chunk));socket.on("end",()=>{const request=Buffer.concat(chunks).toString("utf8");socket.end(request==="codewire-host-port-request"?"codewire-host-port-response":"unexpected-request",()=>server.close());});});server.listen(3000,"0.0.0.0",()=>process.stdout.write("codewire-host-port-ready\n"));'

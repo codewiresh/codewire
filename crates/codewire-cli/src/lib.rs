@@ -13,13 +13,12 @@ mod update;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
-use std::io::{IsTerminal as _, Read as _, Write as _};
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use base64::Engine as _;
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
@@ -36,12 +35,11 @@ use organization_client::{
     OrganizationClient, OrganizationDeletionOutcome, OrganizationDeletionStart, Preset,
 };
 use presentation::{
-    CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonDiagnostic,
-    EnvironmentDaemonRepair, EnvironmentDaemonStatus, EnvironmentLog, EnvironmentResizeResources,
-    EnvironmentTrustReport, ExtendTtlRequest, GrantEnvironmentAccessRequest,
-    PrepareEnvironmentRequest, RepoEntry, SetupAgent, StatusResponse,
+    CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonRepair,
+    EnvironmentDaemonStatus, EnvironmentLog, EnvironmentResizeResources, EnvironmentTrustReport,
+    ExtendTtlRequest, GrantEnvironmentAccessRequest, PrepareEnvironmentRequest, RepoEntry,
+    SetupAgent, StatusResponse,
 };
-use rand::{RngCore, rngs::OsRng};
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};
 
 const CLI_VERSION: &str = match option_env!("CODEWIRE_VERSION") {
@@ -61,17 +59,10 @@ pub fn prepare_local_credential_broker_process() -> std::io::Result<()> {
     Ok(())
 }
 const LOCAL_WORKSPACE_PATH: &str = "/workspace";
-const LIMA_CONTAINER_NAME: &str = "cw-workspace";
-const LIMA_DOCKER_SOCK_PATH: &str = "/var/run/docker.sock";
-const LIMA_DOCKER_HOST_VALUE: &str = "unix:///var/run/docker.sock";
 const DEFAULT_LOCAL_MESH_URL: &str = "http://127.0.0.1:18090";
 const DEFAULT_LOCAL_MESH_LISTEN_ADDR: &str = "127.0.0.1:18090";
 const DEFAULT_LOCAL_DERP_URL: &str = "http://127.0.0.1:18091";
 const DEFAULT_LOCAL_DERP_LISTEN_ADDR: &str = "127.0.0.1:18091";
-const LOCAL_RUNTIME_CLI_PATH: &str = "/usr/local/bin/cw";
-const LIMA_RUNTIME_CLI_COPY_PATH: &str = "/tmp/codewire-cw-stage";
-const LIMA_RUNTIME_CLI_STAGE_DIR: &str = "/var/lib/codewire";
-const LIMA_RUNTIME_CLI_STAGE_PATH: &str = "/var/lib/codewire/cw";
 const LOCAL_MESH_RUNTIME_FILE: &str = "mesh_runtime.json";
 const LOCAL_MESH_OWNER_CONTEXT_FILE: &str = "mesh_owner.json";
 const LOCAL_MESH_LOG_FILE: &str = "codewire-mesh.log";

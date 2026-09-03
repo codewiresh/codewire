@@ -38,29 +38,39 @@ pub(crate) async fn resolve_named_execution_target(
     placement: Option<EnvironmentPlacement>,
 ) -> anyhow::Result<config::CurrentTargetConfig> {
     let target_ref = trimmed_required(target_ref, "target")?;
-    if target_ref == "local" && placement.is_none() {
-        return Ok(config::default_current_target());
-    }
-    let local = resolve_local_instance_target(&paths.mesh_data_dir, target_ref);
+    #[cfg(target_os = "linux")]
+    let local = if placement != Some(EnvironmentPlacement::Platform) {
+        native_environment(target_ref).await?
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let local: Option<()> = None;
     if placement == Some(EnvironmentPlacement::Local) {
-        let Some((key, instance)) = local else {
+        #[cfg(target_os = "linux")]
+        if let Some(environment) = local.as_ref() {
+            return Ok(config::CurrentTargetConfig {
+                kind: "local".to_string(),
+                target_ref: environment.name.clone(),
+                name: environment.name.clone(),
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = local;
+        {
             anyhow::bail!("local environment {target_ref:?} not found");
-        };
-        return Ok(config::CurrentTargetConfig {
-            kind: "local".to_string(),
-            target_ref: key.clone(),
-            name: local_instance_display_name(&key, &instance).to_string(),
-        });
+        }
     }
 
     let platform = match resolve_platform(globals, paths, env) {
         Ok(platform) => platform,
         Err(error) if placement.is_none() => {
-            if let Some((key, instance)) = local {
+            #[cfg(target_os = "linux")]
+            if let Some(environment) = local.as_ref() {
                 return Ok(config::CurrentTargetConfig {
                     kind: "local".to_string(),
-                    target_ref: key.clone(),
-                    name: local_instance_display_name(&key, &instance).to_string(),
+                    target_ref: environment.name.clone(),
+                    name: environment.name.clone(),
                 });
             }
             return Err(error);
@@ -88,6 +98,7 @@ pub(crate) async fn resolve_named_execution_target(
         return Ok(current_target_from_environment(&environment));
     }
 
+    #[cfg(target_os = "linux")]
     match (local, platform_match) {
         (_, Some((environment_id, EnvironmentMatchKind::ExactId))) => {
             let environment = environment_client
@@ -96,16 +107,17 @@ pub(crate) async fn resolve_named_execution_target(
                 .context("get environment")?;
             Ok(current_target_from_environment(&environment))
         }
-        (Some((_key, _)), Some((_environment_id, EnvironmentMatchKind::ExactName))) => {
+        (Some(environment), Some((_environment_id, EnvironmentMatchKind::ExactName)))
+            if environment.name == target_ref =>
+        {
             anyhow::bail!(
                 "environment {target_ref:?} exists in both placements; use `cw use --local {target_ref}` or `cw use --platform {target_ref}`"
             )
         }
-        (Some((key, instance)), Some((_, EnvironmentMatchKind::IdPrefix)))
-        | (Some((key, instance)), None) => Ok(config::CurrentTargetConfig {
+        (Some(environment), _) => Ok(config::CurrentTargetConfig {
             kind: "local".to_string(),
-            target_ref: key.clone(),
-            name: local_instance_display_name(&key, &instance).to_string(),
+            target_ref: environment.name.clone(),
+            name: environment.name,
         }),
         (None, Some((environment_id, _))) => {
             let environment = environment_client
@@ -115,6 +127,17 @@ pub(crate) async fn resolve_named_execution_target(
             Ok(current_target_from_environment(&environment))
         }
         (None, None) => anyhow::bail!("environment {target_ref:?} not found"),
+    }
+    #[cfg(not(target_os = "linux"))]
+    match platform_match {
+        Some((environment_id, _)) => {
+            let environment = environment_client
+                .get_environment(&org_id, &environment_id)
+                .await
+                .context("get environment")?;
+            Ok(current_target_from_environment(&environment))
+        }
+        None => anyhow::bail!("environment {target_ref:?} not found"),
     }
 }
 
@@ -144,35 +167,6 @@ pub(crate) async fn lookup_environment_for_target(
         .get_environment(&org_id, &target.target_ref)
         .await
         .ok()
-}
-
-pub(crate) fn resolve_local_instance_target(
-    data_dir: &Path,
-    target_ref: &str,
-) -> Option<(String, config::LocalInstanceConfig)> {
-    let target_ref = trimmed_str(target_ref)?;
-    let config = config::load_local_instances_config(data_dir).ok()?;
-    if let Some(instance) = config.instances.get(target_ref) {
-        return Some((target_ref.to_string(), instance.clone()));
-    }
-    config
-        .instances
-        .into_iter()
-        .find(|(_, instance)| trimmed_str(&instance.runtime_name) == Some(target_ref))
-}
-
-pub(crate) fn lookup_local_instance_for_target(
-    data_dir: &Path,
-    target: &config::CurrentTargetConfig,
-) -> Option<config::LocalInstanceConfig> {
-    if target.kind != "local" || target.target_ref.trim().is_empty() || target.target_ref == "local"
-    {
-        return None;
-    }
-    config::load_local_instances_config(data_dir)
-        .ok()?
-        .instances
-        .remove(&target.target_ref)
 }
 
 pub(crate) async fn resolve_environment_id(
@@ -279,13 +273,12 @@ pub(crate) fn resolve_environment_id_from_list(
 pub(crate) fn format_current_target_text(
     target: &config::CurrentTargetConfig,
     environment: Option<&Environment>,
-    local_instance: Option<&config::LocalInstanceConfig>,
     network: Option<&str>,
     verbose: bool,
 ) -> String {
     let network = network.and_then(trimmed_str);
     if !verbose {
-        let mut summary = target_summary_line(target, environment, local_instance);
+        let mut summary = target_summary_line(target, environment);
         if let Some(network) = network {
             summary.push_str("  network: ");
             summary.push_str(network);
@@ -307,22 +300,14 @@ pub(crate) fn format_current_target_text(
             output.push_str(&format!(
                 "{:<10} {}\n",
                 "Target:",
-                target_display_name(target, None, local_instance)
+                target_display_name(target, None)
             ));
-            if let Some(instance) = local_instance {
-                if let Some(backend) = trimmed_str(&instance.backend) {
-                    output.push_str(&format!("{:<10} {}\n", "Backend:", backend));
-                }
-                if let Some(runtime) = trimmed_str(&instance.runtime_name) {
-                    output.push_str(&format!("{:<10} {}\n", "Runtime:", runtime));
-                }
-            }
         }
         "env" => {
             output.push_str(&format!(
                 "{:<10} {}\n",
                 "Target:",
-                target_display_name(target, environment, None)
+                target_display_name(target, environment)
             ));
             output.push_str(&format!("{:<10} {}\n", "ID:", target.target_ref));
             output.push_str(&format!(
@@ -348,7 +333,7 @@ pub(crate) fn format_current_target_text(
             output.push_str(&format!(
                 "{:<10} {}\n",
                 "Target:",
-                target_display_name(target, environment, local_instance)
+                target_display_name(target, environment)
             ));
         }
     }
@@ -358,26 +343,17 @@ pub(crate) fn format_current_target_text(
 pub(crate) fn target_summary_line(
     target: &config::CurrentTargetConfig,
     environment: Option<&Environment>,
-    local_instance: Option<&config::LocalInstanceConfig>,
 ) -> String {
     if target.kind == "local" && target.target_ref == "local" {
         return "local".to_string();
     }
     if target.kind == "local" {
-        let mut summary = target_display_name(target, None, local_instance).to_string();
-        if let Some(instance) = local_instance
-            && let Some(backend) = trimmed_str(&instance.backend)
-        {
-            summary.push_str(" [");
-            summary.push_str(backend);
-            summary.push(']');
-        }
-        return summary;
+        return target_display_name(target, None).to_string();
     }
     if target.kind == "env" {
         let mut summary = format!(
             "{} [{}]",
-            target_display_name(target, environment, None),
+            target_display_name(target, environment),
             short_env_id(&target.target_ref)
         );
         if let Some(environment) = environment
@@ -388,18 +364,15 @@ pub(crate) fn target_summary_line(
         }
         return summary;
     }
-    target_display_name(target, environment, local_instance).to_string()
+    target_display_name(target, environment).to_string()
 }
 
 pub(crate) fn target_display_name<'a>(
     target: &'a config::CurrentTargetConfig,
     environment: Option<&'a Environment>,
-    local_instance: Option<&'a config::LocalInstanceConfig>,
 ) -> &'a str {
     if target.kind == "local" {
-        return local_instance
-            .and_then(|instance| trimmed_str(&instance.name))
-            .or_else(|| trimmed_str(&target.name))
+        return trimmed_str(&target.name)
             .or_else(|| trimmed_str(&target.target_ref))
             .unwrap_or("local");
     }
@@ -407,15 +380,6 @@ pub(crate) fn target_display_name<'a>(
         .map(environment_display_name)
         .or_else(|| trimmed_str(&target.name))
         .or_else(|| trimmed_str(&target.target_ref))
-        .unwrap_or("local")
-}
-
-pub(crate) fn local_instance_display_name<'a>(
-    key: &'a str,
-    instance: &'a config::LocalInstanceConfig,
-) -> &'a str {
-    trimmed_str(&instance.name)
-        .or_else(|| trimmed_str(key))
         .unwrap_or("local")
 }
 
