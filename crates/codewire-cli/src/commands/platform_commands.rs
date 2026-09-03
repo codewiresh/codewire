@@ -1243,7 +1243,7 @@ pub(crate) async fn handle_platform_secrets_command(
                     let key = trimmed_required(&args.key, "secret key")?;
                     let project =
                         load_secret_project_by_name(&client, &org_id, project_name).await?;
-                    let value = prompt_secret_value()?;
+                    let value = prompt_platform_workload_secret_value()?;
                     client
                         .set_project_secret(&org_id, &project.id, key, &value)
                         .await
@@ -1368,7 +1368,7 @@ pub(crate) async fn handle_user_secret_command(
         }
         ScopedSecretCommand::Set(args) => {
             let key = trimmed_required(&args.key, "secret key")?;
-            let value = prompt_secret_value()?;
+            let value = prompt_platform_workload_secret_value()?;
             client
                 .set_user_secret(key, &value)
                 .await
@@ -1412,7 +1412,7 @@ pub(crate) async fn handle_org_secret_command(
         }
         ScopedSecretCommand::Set(args) => {
             let key = trimmed_required(&args.key, "secret key")?;
-            let value = prompt_secret_value()?;
+            let value = prompt_platform_workload_secret_value()?;
             client
                 .set_org_secret(org_id, key, &value)
                 .await

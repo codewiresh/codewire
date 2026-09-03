@@ -13,6 +13,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
+use codewire_workload_secrets::validate_workload_secret_value;
+
 use crate::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
 
 use super::secret_envelope::{
@@ -383,6 +385,8 @@ impl PostgresSecretStore {
         if !is_valid_secret_key(key) || key.len() > 255 {
             return Err(store_error("invalid-secret-key"));
         }
+        validate_workload_secret_value(value.as_bytes())
+            .map_err(|_| store_error("invalid-secret-value"))?;
         let mut tx = self
             .pool
             .begin()
@@ -743,6 +747,7 @@ impl PostgresSecretStore {
 mod tests {
     use super::super::secret_envelope::TestKekProvider;
     use super::*;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn dek_cache_is_bounded_and_evicts_the_least_recently_used_entry() {
@@ -758,6 +763,32 @@ mod tests {
         assert_eq!(cache.entries.len(), MAX_CACHED_DEKS);
         assert!(cache.get("dek-0").is_some());
         assert!(cache.get("dek-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_workload_secret_values_fail_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy test pool");
+        let store = PostgresSecretStore::new(pool, Arc::new(TestKekProvider));
+        for invalid in [
+            String::new(),
+            "synthetic\0value".to_string(),
+            "x".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_VALUE_BYTES + 1),
+        ] {
+            let error = store
+                .set_secret_at_path("/users/synthetic", "SAFE_KEY", &invalid)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("failure_class=invalid-secret-value")
+            );
+            if !invalid.is_empty() {
+                assert!(!error.to_string().contains(&invalid));
+            }
+        }
     }
 
     #[tokio::test]

@@ -1846,6 +1846,7 @@ dependencies = [
  "codewire-project-proto",
  "codewire-proto",
  "codewire-server-core",
+ "codewire-workload-secrets",
  "connectrpc",
  "crc32fast",
  "flate2",

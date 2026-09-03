@@ -24,6 +24,7 @@ use codewire_proto::codewire::v1::{
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
+use codewire_workload_secrets::{MAX_WORKLOAD_SECRET_VALUE_BYTES, validate_workload_secret_value};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
@@ -87,7 +88,7 @@ impl SecretService for SecretConnectService {
         )
         .await
         .map_err(|error| {
-            let error = secret_key_validation(error, request.key);
+            let error = secret_write_validation(error, request.key, request.value);
             rpc_app_error(&error, &ctx)
         })?;
         connectrpc::Response::ok(SetSecretResponse::default())
@@ -156,7 +157,10 @@ impl SecretService for SecretConnectService {
         let request = request.view();
         set_user_secret_core(&self.state, &user, request.key, request.value)
             .await
-            .map_err(|error| rpc_app_error(&error, &ctx))?;
+            .map_err(|error| {
+                let error = secret_write_validation(error, request.key, request.value);
+                rpc_app_error(&error, &ctx)
+            })?;
         connectrpc::Response::ok(SetUserSecretResponse::default())
     }
 
@@ -288,7 +292,10 @@ impl SecretService for SecretConnectService {
             request.value,
         )
         .await
-        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        .map_err(|error| {
+            let error = secret_write_validation(error, request.key, request.value);
+            rpc_app_error(&error, &ctx)
+        })?;
         connectrpc::Response::ok(SetProjectSecretResponse::default())
     }
 
@@ -349,6 +356,24 @@ fn secret_key_validation(error: AppError, key: &str) -> AppError {
                 message: Cow::Borrowed(
                     "secret key must contain only ASCII letters, digits, or underscores",
                 ),
+            }],
+        }
+    } else {
+        error
+    }
+}
+
+fn secret_write_validation(error: AppError, key: &str, value: &str) -> AppError {
+    let error = secret_key_validation(error, key);
+    if matches!(error, AppError::BadRequest(_))
+        && validate_workload_secret_value(value.as_bytes()).is_err()
+    {
+        AppError::Validation {
+            errors: vec![ValidationIssue {
+                path: Cow::Borrowed("/value"),
+                message: Cow::Owned(format!(
+                    "secret value must be non-empty UTF-8 without NUL bytes and at most {MAX_WORKLOAD_SECRET_VALUE_BYTES} bytes"
+                )),
             }],
         }
     } else {
@@ -467,5 +492,23 @@ mod tests {
         };
         assert_eq!(detail.field_violations[0].field, "key");
         assert!(!detail.field_violations[0].description.is_empty());
+    }
+
+    #[test]
+    fn invalid_secret_value_names_the_value_proto_field_without_rendering_it() {
+        let marker = "synthetic-value-must-not-render\0";
+        let error = secret_write_validation(
+            AppError::BadRequest("invalid secret value".into()),
+            "SAFE_KEY",
+            marker,
+        );
+        let rendered = ConnectError::from_app_error(&error, None);
+        assert_eq!(rendered.code, ConnectCode::InvalidArgument);
+        let ConnectErrorDetail::BadRequest(detail) = &rendered.details[0] else {
+            panic!("missing BadRequest detail");
+        };
+        assert_eq!(detail.field_violations[0].field, "value");
+        assert!(!detail.field_violations[0].description.contains(marker));
+        assert!(!format!("{error:?}").contains(marker));
     }
 }

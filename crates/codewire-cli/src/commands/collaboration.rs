@@ -470,14 +470,6 @@ pub(crate) fn stdin_is_interactive() -> bool {
     std::io::stdin().is_terminal()
 }
 
-pub(crate) fn prompt_secret_value() -> anyhow::Result<String> {
-    let value = prompt_password("Value: ")?;
-    if value.is_empty() {
-        anyhow::bail!("value cannot be empty");
-    }
-    Ok(value)
-}
-
 pub(crate) fn prompt_text(label: &str) -> anyhow::Result<String> {
     eprint!("{label}");
     std::io::stderr().flush().context("flush prompt")?;
@@ -485,18 +477,6 @@ pub(crate) fn prompt_text(label: &str) -> anyhow::Result<String> {
     std::io::stdin()
         .read_line(&mut input)
         .context("read prompt")?;
-    Ok(input.trim().to_string())
-}
-
-pub(crate) fn prompt_password(label: &str) -> anyhow::Result<String> {
-    eprint!("{label}");
-    std::io::stderr().flush().context("flush prompt")?;
-    let guard = EchoGuard::disable_if_tty()?;
-    let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
-        .context("read secret value")?;
-    drop(guard);
     Ok(input.trim().to_string())
 }
 

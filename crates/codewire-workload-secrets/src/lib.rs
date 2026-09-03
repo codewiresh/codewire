@@ -157,7 +157,7 @@ pub fn encode_workload_secrets<'a>(
     let mut payload_len = 0_usize;
     for (key, value) in &entries {
         validate_key(key)?;
-        validate_value(value)?;
+        validate_workload_secret_value(value)?;
         if previous.is_some_and(|previous| previous >= *key) {
             return Err(WorkloadSecretCodecError::NonCanonicalOrdering);
         }
@@ -284,7 +284,7 @@ pub fn decode_workload_secrets(
             .filter(|end| *end <= payload_end)
             .ok_or(WorkloadSecretCodecError::InvalidFraming)?;
         let value = Zeroizing::new(bytes[offset..value_end].to_vec());
-        validate_value(&value)?;
+        validate_workload_secret_value(&value)?;
         offset = value_end;
         if entries.insert(key, value).is_some() {
             return Err(WorkloadSecretCodecError::NonCanonicalOrdering);
@@ -312,7 +312,8 @@ fn validate_key(key: &str) -> Result<(), WorkloadSecretCodecError> {
     Ok(())
 }
 
-fn validate_value(value: &[u8]) -> Result<(), WorkloadSecretCodecError> {
+/// Validates one workload-secret value without rendering or retaining it.
+pub fn validate_workload_secret_value(value: &[u8]) -> Result<(), WorkloadSecretCodecError> {
     if value.is_empty()
         || value.len() > MAX_WORKLOAD_SECRET_VALUE_BYTES
         || value.contains(&0)
@@ -426,5 +427,20 @@ mod tests {
         let mut corrupt = encoded.bytes().to_vec();
         corrupt[HEADER_LEN] ^= 1;
         assert!(decode_workload_secrets(&corrupt, encoded.binding()).is_err());
+    }
+
+    #[test]
+    fn shared_value_validation_is_bounded_and_content_preserving() {
+        assert!(validate_workload_secret_value(b" leading and trailing \n").is_ok());
+        assert!(validate_workload_secret_value(b"").is_err());
+        assert!(validate_workload_secret_value(b"contains\0nul").is_err());
+        assert!(validate_workload_secret_value(&[0xff]).is_err());
+        assert!(
+            validate_workload_secret_value(&vec![b'x'; MAX_WORKLOAD_SECRET_VALUE_BYTES]).is_ok()
+        );
+        assert!(
+            validate_workload_secret_value(&vec![b'x'; MAX_WORKLOAD_SECRET_VALUE_BYTES + 1])
+                .is_err()
+        );
     }
 }

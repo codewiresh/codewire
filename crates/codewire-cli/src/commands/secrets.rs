@@ -8,11 +8,8 @@ use codewire_local_credentials::{
 };
 #[cfg(target_os = "linux")]
 use codewire_protected_store::ProtectedValue;
-#[cfg(target_os = "linux")]
-use codewire_workload_secrets::MAX_WORKLOAD_SECRET_VALUE_BYTES;
-#[cfg(target_os = "linux")]
+use codewire_workload_secrets::{MAX_WORKLOAD_SECRET_VALUE_BYTES, validate_workload_secret_value};
 use std::io::{BufRead as _, Read as _};
-#[cfg(target_os = "linux")]
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -399,6 +396,22 @@ fn format_unix_millis(value: u64) -> String {
 
 #[cfg(target_os = "linux")]
 fn prompt_workload_secret_value() -> anyhow::Result<ProtectedValue> {
+    let mut value = prompt_workload_secret_bytes()?;
+    ProtectedValue::new(std::mem::take(&mut *value)).context("invalid workload-secret value")
+}
+
+pub(crate) fn prompt_platform_workload_secret_value() -> anyhow::Result<Zeroizing<String>> {
+    let mut bytes = prompt_workload_secret_bytes()?;
+    match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(value) => Ok(Zeroizing::new(value)),
+        Err(error) => {
+            let _bytes = Zeroizing::new(error.into_bytes());
+            anyhow::bail!("workload-secret value must be valid UTF-8")
+        }
+    }
+}
+
+fn prompt_workload_secret_bytes() -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let interactive = std::io::stdin().is_terminal();
     if interactive {
         eprint!("Value: ");
@@ -410,16 +423,15 @@ fn prompt_workload_secret_value() -> anyhow::Result<ProtectedValue> {
         None
     };
     let stdin = std::io::stdin();
-    let value = read_workload_secret_value(stdin.lock(), interactive);
+    let value = read_workload_secret_bytes(stdin.lock(), interactive);
     drop(echo_guard);
     value
 }
 
-#[cfg(target_os = "linux")]
-fn read_workload_secret_value<R: std::io::BufRead>(
+fn read_workload_secret_bytes<R: std::io::BufRead>(
     reader: R,
     single_line: bool,
-) -> anyhow::Result<ProtectedValue> {
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let mut bytes = Zeroizing::new(Vec::new());
     let limit =
         u64::try_from(MAX_WORKLOAD_SECRET_VALUE_BYTES + 2).expect("workload-secret value limit");
@@ -439,13 +451,12 @@ fn read_workload_secret_value<R: std::io::BufRead>(
             bytes.pop();
         }
     }
-    if bytes.len() > MAX_WORKLOAD_SECRET_VALUE_BYTES {
-        anyhow::bail!("workload-secret value is too large");
-    }
-    if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
-        anyhow::bail!("workload-secret value must be UTF-8 without NUL bytes");
-    }
-    ProtectedValue::new(std::mem::take(&mut *bytes)).context("invalid workload-secret value")
+    validate_workload_secret_value(&bytes).map_err(|_| {
+        anyhow::anyhow!(
+            "workload-secret value must be non-empty UTF-8 without NUL bytes and at most {MAX_WORKLOAD_SECRET_VALUE_BYTES} bytes"
+        )
+    })?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -501,23 +512,36 @@ mod tests {
         assert!(!json.contains("value"));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn secret_stdin_is_bounded_and_strips_only_one_line_ending() {
         assert_eq!(
-            read_workload_secret_value(&b"synthetic\r\n"[..], false)
+            read_workload_secret_bytes(&b"synthetic\r\n"[..], false)
                 .unwrap()
-                .expose_secret(),
+                .as_slice(),
             b"synthetic"
         );
-        assert!(read_workload_secret_value(&b""[..], false).is_err());
-        assert!(read_workload_secret_value(&b"a\0b"[..], false).is_err());
+        assert_eq!(
+            read_workload_secret_bytes(&b" leading \nline 2 \n\n"[..], false)
+                .unwrap()
+                .as_slice(),
+            b" leading \nline 2 \n"
+        );
+        assert!(read_workload_secret_bytes(&b""[..], false).is_err());
+        assert!(read_workload_secret_bytes(&b"a\0b"[..], false).is_err());
         assert!(
-            read_workload_secret_value(
+            read_workload_secret_bytes(
                 vec![b'a'; MAX_WORKLOAD_SECRET_VALUE_BYTES + 1].as_slice(),
                 false,
             )
             .is_err()
+        );
+        let mut maximum = vec![b'a'; MAX_WORKLOAD_SECRET_VALUE_BYTES];
+        maximum.push(b'\n');
+        assert_eq!(
+            read_workload_secret_bytes(maximum.as_slice(), false)
+                .unwrap()
+                .len(),
+            MAX_WORKLOAD_SECRET_VALUE_BYTES
         );
     }
 }

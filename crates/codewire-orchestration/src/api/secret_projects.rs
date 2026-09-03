@@ -12,7 +12,7 @@ use super::ApiState;
 use super::environments::format_time;
 use super::secrets::{
     ListSecretsResponse, ambiguous_secret_provider_error, forbidden, log_audit, org_role,
-    rename_provider_error, to_metadata, validate_secret_key,
+    rename_provider_error, to_metadata, validate_secret_key, validate_secret_value,
 };
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -264,6 +264,7 @@ pub(crate) async fn set_project_secret_core(
     )
     .await?;
     validate_secret_key(key)?;
+    validate_secret_value(value)?;
     let project = get_project(state, project_id, org_id).await?;
 
     run_organization_tenant_secret_mutation(&state.pool, org_id, async {

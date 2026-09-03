@@ -6,6 +6,7 @@ use codewire_server_core::org_deletion::{
     OrganizationTenantSecretMutationError, run_organization_tenant_secret_mutation,
 };
 use codewire_server_core::{AppError, AppResult};
+use codewire_workload_secrets::{MAX_WORKLOAD_SECRET_VALUE_BYTES, validate_workload_secret_value};
 
 use super::ApiState;
 
@@ -48,6 +49,16 @@ pub(super) fn validate_secret_key(key: &str) -> AppResult<()> {
     }
     Ok(())
 }
+
+pub(super) fn validate_secret_value(value: &str) -> AppResult<()> {
+    validate_workload_secret_value(value.as_bytes()).map_err(|_| {
+        AppError::BadRequest(format!(
+            "secret value must be non-empty UTF-8 without NUL bytes and at most {MAX_WORKLOAD_SECRET_VALUE_BYTES} bytes"
+        )
+        .into())
+    })
+}
+
 /// Shared existence-hiding organization gate for Connect services.
 pub(super) async fn org_role(state: &ApiState, user: &AuthUser, org_id: &str) -> AppResult<String> {
     user_org_role(&state.pool, user, org_id)
@@ -161,6 +172,7 @@ pub(crate) async fn set_secret_core(
     let role = org_role(state, user, org_id).await?;
     require_manage_role(&role)?;
     validate_secret_key(key)?;
+    validate_secret_value(value)?;
 
     run_organization_tenant_secret_mutation(&state.pool, org_id, async {
         state
@@ -283,6 +295,7 @@ pub(crate) async fn set_user_secret_core(
     value: &str,
 ) -> AppResult<()> {
     validate_secret_key(key)?;
+    validate_secret_value(value)?;
     state
         .secrets
         .create_folder_at_path("/users", &user.user_id)
@@ -309,6 +322,26 @@ pub(crate) async fn set_user_secret_core(
     )
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workload_secret_values_use_the_shared_bounds_without_rendering_material() {
+        assert!(validate_secret_value(" leading and trailing \n").is_ok());
+        for invalid in [
+            String::new(),
+            "contains\0nul".to_string(),
+            "x".repeat(MAX_WORKLOAD_SECRET_VALUE_BYTES + 1),
+        ] {
+            let error = validate_secret_value(&invalid).unwrap_err();
+            if !invalid.is_empty() {
+                assert!(!format!("{error:?}").contains(&invalid));
+            }
+        }
+    }
 }
 
 pub(crate) async fn delete_user_secret_core(

@@ -17,8 +17,8 @@ use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
 };
 use codewire_workload_secrets::{
-    MAX_WORKLOAD_SECRET_VALUE_BYTES, MAX_WORKLOAD_SECRETS, WorkloadSecretBinding,
-    encode_workload_secrets, workload_secret_delivery_relative_path,
+    MAX_WORKLOAD_SECRETS, WorkloadSecretBinding, encode_workload_secrets,
+    validate_workload_secret_value, workload_secret_delivery_relative_path,
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
@@ -1062,14 +1062,7 @@ fn validate_secret_key(key: &str) -> Result<(), LocalCredentialError> {
 }
 
 fn validate_secret_value(value: &[u8]) -> Result<(), LocalCredentialError> {
-    if value.is_empty()
-        || value.len() > MAX_WORKLOAD_SECRET_VALUE_BYTES
-        || value.contains(&0)
-        || std::str::from_utf8(value).is_err()
-    {
-        return Err(LocalCredentialError::InvalidWorkloadSecret);
-    }
-    Ok(())
+    validate_workload_secret_value(value).map_err(|_| LocalCredentialError::InvalidWorkloadSecret)
 }
 
 fn parse_uuid(value: &str) -> Result<Uuid, LocalCredentialError> {

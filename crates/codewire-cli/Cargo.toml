@@ -26,6 +26,7 @@ codewire-client = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
+codewire-workload-secrets = { workspace = true }
 portable-pty = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
@@ -39,6 +40,7 @@ toml = { workspace = true }
 tonic = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 codewire-access = { workspace = true }
@@ -46,10 +48,8 @@ codewire-credential-broker = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
 codewire-protected-store = { workspace = true }
-codewire-workload-secrets = { workspace = true }
 libc = "0.2"
 rustix = { workspace = true }
-zeroize = { workspace = true }
 
 [dev-dependencies]
 buffa = { workspace = true }
