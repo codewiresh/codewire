@@ -48,6 +48,7 @@ cw env list --local
 cw env info --local my-app
 cw env stop --local my-app
 cw env start --local my-app
+cw env restart --local my-app
 cw env daemon status --local my-app
 cw env daemon repair --local my-app
 cw env rm --local my-app

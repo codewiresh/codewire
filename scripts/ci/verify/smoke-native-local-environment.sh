@@ -2106,6 +2106,29 @@ done
 [[ "$(stat -c '%s' "$DOCKER_DISK_PATH")" == 1073741824 ]] ||
   die 'Docker exhaustion changed the dedicated data disk boundary'
 
+log 'checking explicit native restart and persistent workspace identity'
+PRE_RESTART_VMM_PID="$(recorded_vmm_pid)"
+PRE_RESTART_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")"
+run_cw env restart --local "$NAME" --output json
+jq -e '.name == "native-smoke" and .state == "running"' "$LAST_STDOUT" >/dev/null ||
+  die 'explicit native restart did not return the running environment'
+wait_for_journal_complete ||
+  die 'explicit native restart returned before its lifecycle journal became terminal'
+POST_RESTART_VMM_PID="$(recorded_vmm_pid)"
+POST_RESTART_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")"
+[[ "$POST_RESTART_VMM_PID" != "$PRE_RESTART_VMM_PID" &&
+   -d "/proc/$POST_RESTART_VMM_PID" ]] ||
+  die 'explicit native restart did not replace the VMM process'
+[[ "$POST_RESTART_GENERATION" -eq "$((PRE_RESTART_GENERATION + 1))" ]] ||
+  die 'explicit native restart did not advance exactly one VM generation'
+run_cw run --no-tty -- /bin/sh -lc \
+  'printf "sentinel="; cat /workspace/sentinel.txt; printf "\nmachine-id="; cat /etc/machine-id'
+rg -qxF 'sentinel=persistence-ok' "$LAST_STDOUT" ||
+  die 'workspace sentinel did not survive explicit native restart'
+rg -qxF "machine-id=$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
+  die 'environment identity did not survive explicit native restart'
+run_docker_persistence_smoke docker-explicit-restart-persistence-ok
+
 log 'checking explicit offline immutable skill refresh and read-only reprojection'
 # Refreshing the snapshot can materialize a new OCI root generation. Retain the
 # same bounded budget as the preceding guest storage workloads for that rebuild.

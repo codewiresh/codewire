@@ -1590,6 +1590,26 @@ secrets: {project: development, organization: false, user: false}
         let cli = Cli::try_parse_from([
             "cw",
             "env",
+            "restart",
+            "--local",
+            "builder",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, local, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::Restart(args) = command else {
+            panic!("expected env restart command");
+        };
+        assert!(local);
+        assert_eq!(args.environment, "builder");
+        assert!(matches!(args.output, OutputFormat::Json));
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
             "refresh-skills",
             "--local",
             "builder",

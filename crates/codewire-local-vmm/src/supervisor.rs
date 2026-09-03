@@ -341,6 +341,23 @@ impl NativeSupervisorClient {
         self.follow_environment_operation(operation, name).await
     }
 
+    pub async fn restart(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+    ) -> Result<v1::Environment, Status> {
+        let operation = self
+            .inner
+            .restart_environment(v1::EnvironmentSelector {
+                name: name.to_owned(),
+                request_id: Uuid::new_v4().to_string(),
+                environment_id: environment_id.to_owned(),
+            })
+            .await?
+            .into_inner();
+        self.follow_environment_operation(operation, name).await
+    }
+
     pub async fn refresh_skills(&mut self, name: &str) -> Result<v1::Environment, Status> {
         let operation = self
             .inner

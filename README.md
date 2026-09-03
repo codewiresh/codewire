@@ -74,6 +74,7 @@ cargo build -p codewire-cli-bin --bin cw
 ./target/debug/cw env info --local codewire-dev
 ./target/debug/cw env stop --local codewire-dev
 ./target/debug/cw env start --local codewire-dev
+./target/debug/cw env restart --local codewire-dev
 
 # CPU and memory apply on restart; the persistent ext4 disk grows offline.
 ./target/debug/cw env resize --local codewire-dev \

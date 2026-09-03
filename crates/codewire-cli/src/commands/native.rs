@@ -667,6 +667,16 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
         .map_err(native_status)
 }
 
+pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
+    let mut client = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    ensure_native_access_authority(&environment).await?;
+    client
+        .restart(name, &environment.id)
+        .await
+        .map_err(native_status)
+}
+
 pub(crate) async fn refresh_native_environment_skills(
     name: &str,
 ) -> anyhow::Result<v1::Environment> {

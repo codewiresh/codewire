@@ -145,6 +145,14 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             )
             .await
         }
+        EnvCommand::Restart(target) => {
+            handle_unified_environment_lifecycle(
+                globals,
+                placement,
+                UnifiedEnvironmentLifecycle::Restart(target),
+            )
+            .await
+        }
         EnvCommand::RefreshSkills(target) => {
             handle_unified_environment_refresh_skills(globals, placement, target).await
         }
@@ -166,7 +174,7 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, list, info, start, stop, refresh-skills, rm, cp, access, and daemon diagnostics"
+                    "--local and --platform currently support only create, list, info, start, stop, restart, refresh-skills, rm, cp, access, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
@@ -405,6 +413,9 @@ pub(crate) async fn handle_platform_env_command(
             .context("wait for environment daemon readiness")?;
             print_env_status(&args.environment, &response, args.output)?;
         }
+        EnvCommand::Restart(_) => {
+            anyhow::bail!("restart is supported only for native local environments");
+        }
         EnvCommand::RefreshSkills(_) => {
             anyhow::bail!("refresh-skills is supported only for native local environments");
         }
@@ -591,13 +602,14 @@ pub(crate) async fn handle_platform_env_command(
 enum UnifiedEnvironmentLifecycle {
     Start(EnvTargetArgs),
     Stop(EnvTargetArgs),
+    Restart(EnvTargetArgs),
     Remove(EnvDeleteArgs),
 }
 
 impl UnifiedEnvironmentLifecycle {
     fn environment(&self) -> &str {
         match self {
-            Self::Start(args) | Self::Stop(args) => &args.environment,
+            Self::Start(args) | Self::Stop(args) | Self::Restart(args) => &args.environment,
             Self::Remove(args) => &args.environment,
         }
     }
@@ -606,6 +618,7 @@ impl UnifiedEnvironmentLifecycle {
         match self {
             Self::Start(_) => "start",
             Self::Stop(_) => "stop",
+            Self::Restart(_) => "restart",
             Self::Remove(_) => "rm",
         }
     }
@@ -1520,6 +1533,14 @@ async fn handle_unified_environment_lifecycle(
         #[cfg(target_os = "linux")]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
+            UnifiedEnvironmentLifecycle::Restart(args),
+        ) => {
+            let environment = restart_native_environment(&name).await?;
+            print_native_environment(&environment, args.output)
+        }
+        #[cfg(target_os = "linux")]
+        (
+            UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Remove(args),
         ) => {
             let removed = delete_native_environment(&name).await?;
@@ -1563,6 +1584,9 @@ async fn handle_unified_environment_lifecycle(
                 }),
             )
             .await
+        }
+        (UnifiedEnvironmentTarget::Platform(_), UnifiedEnvironmentLifecycle::Restart(_)) => {
+            anyhow::bail!("restart is supported only for native local environments")
         }
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Remove(args)) => {
             handle_platform_env_command(
