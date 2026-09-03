@@ -24,7 +24,7 @@ use codewire_access::{
 };
 use codewire_local_credentials::{
     AuthorityRuntimeConfig, EnvironmentBrokerRuntime as AuthorityBrokerRuntime,
-    LocalCredentialControlClient,
+    LocalCredentialControlClient, WorkloadSecretSelection,
 };
 use futures::Stream;
 use rustix::fs::{FlockOperation, flock};
@@ -106,6 +106,7 @@ struct PreparedWorkspaceBoot {
     setup_total_bytes: u64,
     setup_header_sha256: String,
     skill_snapshot_sha256: String,
+    workload_secret_selection: WorkloadSecretSelection,
 }
 
 #[derive(Clone)]
@@ -146,6 +147,7 @@ pub struct NativeRuntimeConfig {
     pub mesh_data_dir: PathBuf,
     pub platform_config_dir: PathBuf,
     pub credential_authority_root: PathBuf,
+    pub workload_secret_runtime_root: Option<PathBuf>,
     pub executable: PathBuf,
 }
 
@@ -177,6 +179,13 @@ impl NativeRuntimeConfig {
             if !path.is_absolute() {
                 return Err(SupervisorError::InvalidConfiguration);
             }
+        }
+        if self
+            .workload_secret_runtime_root
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(SupervisorError::InvalidConfiguration);
         }
         if self.artifact_root.parent() != self.artifact_lock.parent() {
             return Err(SupervisorError::InvalidConfiguration);
@@ -2665,7 +2674,13 @@ impl SupervisorCore {
             .arg(&self.config.mesh_data_dir)
             .arg("--platform-config-dir")
             .arg(&self.config.platform_config_dir)
-            .env_clear()
+            .env_clear();
+        if let Some(runtime_root) = &self.config.workload_secret_runtime_root {
+            command
+                .arg("--workload-secret-runtime-root")
+                .arg(runtime_root);
+        }
+        command
             .current_dir(&self.config.root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -2807,6 +2822,36 @@ impl SupervisorCore {
         })
         .await
         .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
+        let workload_secret_binding = if workspace.workload_secret_selection.organization
+            || workspace.workload_secret_selection.user
+            || workspace.workload_secret_selection.project.is_some()
+        {
+            let runtime_root = self
+                .config
+                .workload_secret_runtime_root
+                .clone()
+                .ok_or_else(|| {
+                    SupervisorError::WorkloadSecretResolution(
+                        "XDG_RUNTIME_DIR is unavailable".to_owned(),
+                    )
+                })?;
+            let environment_id = access_environment_id(environment.id)?;
+            self.access_control_client()
+                .await?
+                .prepare_environment_workload_secrets(
+                    &environment_id,
+                    generation,
+                    &workspace.workload_secret_selection,
+                    &runtime_root,
+                )
+                .await
+                .map_err(|status| {
+                    SupervisorError::WorkloadSecretResolution(status.message().to_owned())
+                })?
+                .binding
+        } else {
+            None
+        };
         let runner_events = client
             .watch(environment.id)
             .await
@@ -2844,6 +2889,15 @@ impl SupervisorCore {
                 mesh: mesh_attachment_to_proto(environment.mesh.as_ref()),
                 direct_shares: direct_share_attachments_to_proto(&environment.workspace_plan)?,
                 skill_snapshot_sha256: workspace.skill_snapshot_sha256,
+                workload_secret_total_bytes: workload_secret_binding
+                    .map(|binding| binding.total_bytes())
+                    .unwrap_or_default(),
+                workload_secret_sha256: workload_secret_binding
+                    .map(|binding| binding.sha256().to_vec())
+                    .unwrap_or_default(),
+                workload_secret_entry_count: workload_secret_binding
+                    .map(|binding| binding.entry_count())
+                    .unwrap_or_default(),
             })
             .await;
         let relay_result = match tokio::time::timeout(RUNNER_EVENT_DRAIN_TIMEOUT, &mut relay).await
@@ -5239,10 +5293,8 @@ fn validate_project_intent(
         || !spec.preset.is_empty()
         || !spec.install_command.is_empty()
         || !spec.startup_script.is_empty()
-        || !spec.environment.is_empty()
         || spec.agents.install == Some(true)
         || !spec.agent_environment.is_empty()
-        || !spec.secrets.is_empty()
     {
         return Err(());
     }
@@ -5903,6 +5955,15 @@ fn prepare_workspace_boot(
         .transpose()
         .map_err(|_| SupervisorError::WorkspaceGeneration)?
         .unwrap_or_default();
+    let project: codewire_project::ProjectSpec =
+        serde_json::from_slice(workspace.project_spec_json()?)
+            .map_err(|_| SupervisorError::InvalidState)?;
+    let workload_secret_selection = WorkloadSecretSelection {
+        organization: project.secrets.organization,
+        project: (!project.secrets.project.is_empty()).then_some(project.secrets.project),
+        user: project.secrets.user,
+        explicit_environment_keys: project.environment.keys().cloned().collect(),
+    };
 
     // Provision at the replayable start boundary, not only during create.
     // An active generation normally reuses its admitted root without needing
@@ -5978,6 +6039,7 @@ fn prepare_workspace_boot(
             .map(|pack| pack.header_sha256.to_string())
             .unwrap_or_default(),
         skill_snapshot_sha256,
+        workload_secret_selection,
     })
 }
 
@@ -6656,7 +6718,13 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
         .arg(&config.platform_config_dir)
         .arg("--credential-authority-root")
         .arg(&config.credential_authority_root)
-        .env_clear()
+        .env_clear();
+    if let Some(runtime_root) = &config.workload_secret_runtime_root {
+        command
+            .arg("--workload-secret-runtime-root")
+            .arg(runtime_root);
+    }
+    command
         .current_dir(&config.root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -6743,6 +6811,9 @@ impl From<SupervisorError> for Status {
             SupervisorError::CredentialAuthorityUnavailable => {
                 Status::unavailable(error.to_string())
             }
+            SupervisorError::WorkloadSecretResolution(_) => {
+                Status::failed_precondition(error.to_string())
+            }
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
             }
@@ -6781,6 +6852,8 @@ pub enum SupervisorError {
     SecretInState,
     #[error("local credential authority is unavailable")]
     CredentialAuthorityUnavailable,
+    #[error("local workload-secret resolution failed: {0}")]
+    WorkloadSecretResolution(String),
     #[error("local environment access binding is unavailable")]
     EnvironmentAccessUnavailable,
     #[error("local environment {0:?} was not found")]
@@ -7205,6 +7278,7 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
+                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -7284,6 +7358,7 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
+                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -8504,6 +8579,20 @@ mod tests {
         let disk_bytes = 20 * 1024 * 1024 * 1024;
         validate_project_intent(&bytes, &digest, Some((2, 16 * 1024, disk_bytes))).unwrap();
 
+        let mut selected: codewire_project::ProjectSpec = serde_json::from_slice(&bytes).unwrap();
+        selected.secrets.user = true;
+        selected
+            .environment
+            .insert("EXPLICIT".into(), "wins".into());
+        let selected = selected.canonical_json().unwrap();
+        let selected_digest = format!("{:x}", Sha256::digest(&selected));
+        validate_project_intent(
+            &selected,
+            &selected_digest,
+            Some((2, 16 * 1024, disk_bytes)),
+        )
+        .unwrap();
+
         let mut wrong_digest = digest.clone();
         wrong_digest.replace_range(0..1, "f");
         if wrong_digest == digest {
@@ -9290,6 +9379,7 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
+                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -10069,6 +10159,7 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
+                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -10135,6 +10226,7 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
+                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,

@@ -24,6 +24,7 @@ use codewire_vmm_guest_probe::{
     PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressError, ProgressFrame, ProgressRequest,
     SetupBinding, Sha256Value,
 };
+use codewire_workload_secrets::{WorkloadSecretBinding, workload_secret_delivery_relative_path};
 
 use crate::artifact_store::RuntimeArtifactStore;
 use crate::control::v1;
@@ -38,7 +39,9 @@ use crate::linux::path::PrivateRoot;
 use crate::linux::runner::ExitClass;
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
-use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
+use crate::{
+    CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm, WorkloadSecretDiskRequest,
+};
 
 // A cached restart still cold-boots the kernel, trusted init, the OCI
 // workspace, and its daemon. Keep that path bounded, but give authenticated
@@ -58,6 +61,7 @@ pub struct RunnerEntrypointConfig {
     pub artifact_generation: String,
     pub mesh_data_dir: PathBuf,
     pub platform_config_dir: PathBuf,
+    pub workload_secret_runtime_root: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -249,7 +253,13 @@ fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
 }
 
 pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerServiceError> {
-    if !config.mesh_data_dir.is_absolute() || !config.platform_config_dir.is_absolute() {
+    if !config.mesh_data_dir.is_absolute()
+        || !config.platform_config_dir.is_absolute()
+        || config
+            .workload_secret_runtime_root
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
         return Err(RunnerServiceError::Configuration);
     }
     let engine = PrivateRoot::open(&config.engine_state_root).map_err(RunnerError::from)?;
@@ -284,6 +294,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             adopted: false,
             mesh_data_dir: config.mesh_data_dir,
             platform_config_dir: config.platform_config_dir,
+            workload_secret_runtime_root: config.workload_secret_runtime_root,
         })),
         adoption: adoption_tx,
         events,
@@ -317,6 +328,7 @@ struct RunnerState {
     adopted: bool,
     mesh_data_dir: PathBuf,
     platform_config_dir: PathBuf,
+    workload_secret_runtime_root: Option<PathBuf>,
 }
 
 impl RunnerState {
@@ -524,6 +536,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mesh = parse_mesh_attachment(&request)?;
         let direct_shares = parse_direct_shares(&request)?;
         let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
+        let workload_secret_binding = parse_workload_secret_binding(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
@@ -541,6 +554,23 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state.state = v1::EnvironmentState::Starting;
         state.error_code = None;
+        let workload_secrets = workload_secret_binding
+            .map(|binding| {
+                let runtime_root =
+                    state.workload_secret_runtime_root.as_ref().ok_or_else(|| {
+                        Status::failed_precondition(
+                            "workload-secret runtime directory is unavailable",
+                        )
+                    })?;
+                let relative =
+                    workload_secret_delivery_relative_path(environment_id, request.generation)
+                        .map_err(|_| Status::invalid_argument("invalid workload-secret binding"))?;
+                Ok::<_, Status>(WorkloadSecretDiskRequest {
+                    path: runtime_root.join(relative),
+                    binding,
+                })
+            })
+            .transpose()?;
         self.events.publish(
             v1::EnvironmentState::Starting,
             request.generation,
@@ -567,6 +597,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 mesh,
                 direct_shares,
                 skill_snapshot_sha256,
+                workload_secrets,
             })
             .await
         {
@@ -1005,6 +1036,29 @@ fn parse_skill_snapshot(request: &v1::StartVmRequest) -> Result<Option<Sha256Val
             .map(Some)
             .map_err(|_| Status::invalid_argument("invalid skill snapshot digest"))
     }
+}
+
+fn parse_workload_secret_binding(
+    request: &v1::StartVmRequest,
+) -> Result<Option<WorkloadSecretBinding>, Status> {
+    let absent = request.workload_secret_total_bytes == 0
+        && request.workload_secret_sha256.is_empty()
+        && request.workload_secret_entry_count == 0;
+    if absent {
+        return Ok(None);
+    }
+    let sha256: [u8; 32] = request
+        .workload_secret_sha256
+        .as_slice()
+        .try_into()
+        .map_err(|_| Status::invalid_argument("invalid workload-secret binding"))?;
+    WorkloadSecretBinding::new(
+        request.workload_secret_total_bytes,
+        sha256,
+        request.workload_secret_entry_count,
+    )
+    .map(Some)
+    .map_err(|_| Status::invalid_argument("invalid workload-secret binding"))
 }
 
 fn map_start_error(error: RunnerError) -> Status {
@@ -1546,6 +1600,43 @@ mod tests {
             parse_skill_snapshot(&invalid).unwrap_err().code(),
             tonic::Code::InvalidArgument
         );
+    }
+
+    #[test]
+    fn workload_secret_binding_is_exact_and_optional() {
+        let request = v1::StartVmRequest {
+            workload_secret_total_bytes: 4096,
+            workload_secret_sha256: vec![0x4a; 32],
+            workload_secret_entry_count: 2,
+            ..Default::default()
+        };
+        let binding = parse_workload_secret_binding(&request).unwrap().unwrap();
+        assert_eq!(binding.total_bytes(), 4096);
+        assert_eq!(binding.sha256(), [0x4a; 32]);
+        assert_eq!(binding.entry_count(), 2);
+        assert!(
+            parse_workload_secret_binding(&v1::StartVmRequest::default())
+                .unwrap()
+                .is_none()
+        );
+
+        for invalid in [
+            v1::StartVmRequest {
+                workload_secret_total_bytes: 4096,
+                ..Default::default()
+            },
+            v1::StartVmRequest {
+                workload_secret_total_bytes: 4096,
+                workload_secret_sha256: vec![0; 31],
+                workload_secret_entry_count: 1,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                parse_workload_secret_binding(&invalid).unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+        }
     }
 
     #[test]

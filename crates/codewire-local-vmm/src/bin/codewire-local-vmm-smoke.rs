@@ -1159,7 +1159,15 @@ mod linux {
             RunnerError::Seed(_) => "seed",
             RunnerError::MissingSeedAfterReadiness => "missing-seed-after-readiness",
             RunnerError::MissingSetupAfterReadiness => "missing-setup-after-readiness",
+            RunnerError::MissingWorkloadSecretDiskAfterReadiness => {
+                "missing-workload-secret-after-readiness"
+            }
             RunnerError::SetupDiskIdentityChanged => "setup-disk-identity-changed",
+            RunnerError::InvalidWorkloadSecretDisk => "invalid-workload-secret-disk",
+            RunnerError::WorkloadSecretDiskIdentityChanged => {
+                "workload-secret-disk-identity-changed"
+            }
+            RunnerError::WorkloadSecretDiskDigestMismatch => "workload-secret-disk-digest-mismatch",
             RunnerError::MissingPreformattedStateDisk => "missing-state-disk",
             RunnerError::MissingPreformattedDockerDisk => "missing-docker-disk",
             RunnerError::UnexpectedDockerDisk => "unexpected-docker-disk",
@@ -1310,6 +1318,7 @@ mod linux {
             mesh: None,
             direct_shares: Vec::new(),
             skill_snapshot_sha256: None,
+            workload_secrets: None,
         }
     }
 

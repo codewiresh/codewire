@@ -1342,6 +1342,7 @@ dependencies = [
  "codewire-project",
  "codewire-project-proto",
  "codewire-protected-store",
+ "codewire-workload-secrets",
  "libc",
  "portable-pty",
  "rand 0.8.6",
@@ -1689,8 +1690,10 @@ version = "0.1.0"
 dependencies = [
  "codewire-access",
  "codewire-protected-store",
+ "codewire-workload-secrets",
  "http",
  "hyper-util",
+ "libc",
  "prost 0.14.4",
  "rusqlite",
  "rustix",
@@ -1729,6 +1732,7 @@ dependencies = [
  "codewire-proto",
  "codewire-tailnet",
  "codewire-vmm-guest-probe",
+ "codewire-workload-secrets",
  "connectrpc",
  "futures",
  "hmac 0.12.1",
@@ -2030,6 +2034,7 @@ dependencies = [
  "codewire-daemon",
  "codewire-gateway-proto",
  "codewire-project",
+ "codewire-workload-secrets",
  "flate2",
  "hmac 0.12.1",
  "libc",
@@ -2044,6 +2049,16 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-vsock",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "codewire-workload-secrets"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
  "uuid",
  "zeroize",
 ]

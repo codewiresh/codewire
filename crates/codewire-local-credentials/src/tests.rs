@@ -1580,3 +1580,132 @@ fn unsupported_database_schema_fails_closed() {
         Err(LocalCredentialError::UnsupportedSchema)
     ));
 }
+
+#[test]
+fn adjacent_schema_migration_preserves_existing_metadata_and_adds_workload_secrets() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("open authority");
+    let credential = authority
+        .add_credential(new_credential("existing"), material(b"synthetic-existing"))
+        .expect("add credential");
+    drop(authority);
+
+    let connection = Connection::open(root.join(DATABASE_FILE)).expect("open metadata database");
+    connection
+        .execute_batch(
+            "DROP TABLE workload_secret_journal;
+             DROP INDEX workload_secrets_scope;
+             DROP TABLE workload_secrets;
+             DROP TABLE secret_projects;
+             PRAGMA user_version = 1;",
+        )
+        .expect("construct adjacent schema fixture");
+    drop(connection);
+
+    let migrated =
+        LocalCredentialAuthority::open(&root, store, catalog()).expect("migrate adjacent schema");
+    assert_eq!(
+        migrated.list_credentials().unwrap()[0].metadata.id,
+        credential.metadata.id
+    );
+    assert!(migrated.list_secret_projects().unwrap().is_empty());
+    migrated
+        .set_user_workload_secret("MIGRATED", material(b"synthetic-workload"))
+        .expect("write through migrated schema");
+}
+
+#[test]
+fn failed_adjacent_schema_migration_rolls_back_atomically() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    drop(LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("open authority"));
+    let database = root.join(DATABASE_FILE);
+    let connection = Connection::open(&database).expect("open metadata database");
+    connection
+        .execute_batch(
+            "DROP TABLE workload_secret_journal;
+             DROP INDEX workload_secrets_scope;
+             DROP TABLE workload_secrets;
+             DROP TABLE secret_projects;
+             PRAGMA user_version = 1;
+             CREATE TABLE workload_secrets(collision TEXT) STRICT;",
+        )
+        .expect("construct migration collision");
+    drop(connection);
+
+    assert!(LocalCredentialAuthority::open(&root, store.clone(), catalog()).is_err());
+    let connection = Connection::open(&database).expect("reopen metadata database");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read rolled-back schema version");
+    assert_eq!(version, 1);
+    let secret_projects: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'secret_projects'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("inspect rolled-back schema");
+    assert_eq!(secret_projects, 0);
+    connection
+        .execute("DROP TABLE workload_secrets", [])
+        .expect("remove collision");
+    drop(connection);
+    assert!(LocalCredentialAuthority::open(&root, store, catalog()).is_ok());
+}
+
+#[test]
+fn workload_secret_write_rotation_and_delete_reconcile_exact_effects() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+
+    store.set_put_fault(Fault::AfterEffect);
+    assert!(
+        authority
+            .set_user_workload_secret("ROLLED_BACK", material(b"synthetic-pending"))
+            .is_err()
+    );
+    store.clear_faults();
+    drop(authority);
+    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+    assert!(authority.list_user_workload_secrets().unwrap().is_empty());
+    assert_eq!(store.entry_count(), 0);
+
+    authority
+        .set_user_workload_secret("ROTATED", material(b"synthetic-old"))
+        .unwrap();
+    store.set_put_fault(Fault::AfterEffect);
+    assert!(
+        authority
+            .set_user_workload_secret("ROTATED", material(b"synthetic-new"))
+            .is_err()
+    );
+    store.clear_faults();
+    drop(authority);
+    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+    let resolved = authority
+        .resolve_workload_secrets(
+            &WorkloadSecretSelection {
+                user: true,
+                ..WorkloadSecretSelection::default()
+            },
+            true,
+        )
+        .unwrap();
+    assert_eq!(resolved.values["ROTATED"].expose_secret(), b"synthetic-old");
+    assert_eq!(store.entry_count(), 1);
+
+    store.set_delete_fault(Fault::AfterEffect);
+    assert!(authority.delete_user_workload_secret("ROTATED").is_err());
+    store.clear_faults();
+    drop(authority);
+    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+    assert!(authority.list_user_workload_secrets().unwrap().is_empty());
+    assert_eq!(store.entry_count(), 0);
+}

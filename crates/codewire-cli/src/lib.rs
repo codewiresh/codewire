@@ -162,10 +162,7 @@ enum Command {
         command: PresetCommand,
     },
     #[command(about = "Manage secrets and secret projects")]
-    Secrets {
-        #[command(subcommand)]
-        command: SecretsCommand,
-    },
+    Secrets(SecretsArgs),
     #[cfg(target_os = "linux")]
     #[command(about = "Manage protected credentials and access profiles")]
     Credentials(CredentialsArgs),
@@ -344,7 +341,7 @@ where
         Command::Org { command } => handle_org_command(&globals, command).await,
         Command::ApiKeys { command } => handle_api_keys_command(&globals, command).await,
         Command::Preset { command } => handle_preset_command(&globals, command).await,
-        Command::Secrets { command } => handle_secrets_command(&globals, command).await,
+        Command::Secrets(args) => handle_secrets_command(&globals, args).await,
         #[cfg(target_os = "linux")]
         Command::Credentials(args) => handle_credentials_command(args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,

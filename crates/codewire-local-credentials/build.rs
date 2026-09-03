@@ -11,6 +11,8 @@ fn main() {
         .skip_debug([
             ".codewire.local.credentials.v1.AddCredentialRequest",
             ".codewire.local.credentials.v1.RotateCredentialMaterialRequest",
+            ".codewire.local.credentials.v1.SetUserWorkloadSecretRequest",
+            ".codewire.local.credentials.v1.SetProjectWorkloadSecretRequest",
         ])
         .compile_protos(&[authority_proto], &[proto_root])
         .expect("compile private local credential-authority protobuf types");

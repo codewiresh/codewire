@@ -67,6 +67,8 @@ CREDENTIAL_CANARY=''
 CREDENTIAL_REFRESH_CANARY=''
 GITHUB_CREDENTIAL_ID=''
 GITHUB_CREDENTIAL_CANARY=''
+WORKLOAD_SECRET_CANARY=''
+WORKLOAD_SECRET_SHA256=''
 KEYRING_ROOT=''
 KEYRING_RUNTIME=''
 KEYRING_RUNTIME_PARENT=''
@@ -520,6 +522,12 @@ skills:
 ports:
   - $HOST_PORT:3000
 EOF
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  cat >>"$WORKSPACE/codewire.yaml" <<'EOF'
+secrets:
+  user: true
+EOF
+fi
 
 cw_isolated() {
   (
@@ -606,6 +614,23 @@ run_cw() {
     cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
     tail -n 80 "$stderr_file" >&2
     die "cw command $COMMAND_INDEX failed: $*"
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  LAST_STDOUT="$stdout_file"
+  LAST_STDERR="$stderr_file"
+}
+
+run_cw_with_secret_stdin() {
+  local secret_value="$1"
+  shift
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! printf '%s\n' "$secret_value" | cw_isolated "$@" >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die "cw secret-stdin command $COMMAND_INDEX failed: $*"
   fi
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   LAST_STDOUT="$stdout_file"
@@ -1264,7 +1289,13 @@ find_exact_supervisor_pid() {
     [[ "$(readlink -f "$proc/exe" 2>/dev/null || true)" == "$CW_BIN" ]] || continue
     argv=()
     mapfile -d '' -t argv <"$proc/cmdline" 2>/dev/null || continue
-    [[ ${#argv[@]} -eq 14 ]] || continue
+    if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+      [[ ${#argv[@]} -eq 16 &&
+         "${argv[14]}" == '--workload-secret-runtime-root' &&
+         "${argv[15]}" == "$KEYRING_RUNTIME" ]] || continue
+    else
+      [[ ${#argv[@]} -eq 14 ]] || continue
+    fi
     if [[ "${argv[1]}" == '__native-supervisor' &&
           "${argv[2]}" == '--root' && "${argv[3]}" == "$STATE_ROOT" &&
           "${argv[4]}" == '--artifact-root' && "${argv[5]}" == "$ARTIFACT_ROOT" &&
@@ -1569,6 +1600,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   CREDENTIAL_REFRESH_CANARY="cwlocalrefresh$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   GITHUB_CREDENTIAL_CANARY="cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  WORKLOAD_SECRET_CANARY="cwworkload$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  WORKLOAD_SECRET_SHA256="$(printf '%s' "$WORKLOAD_SECRET_CANARY" | sha256sum | awk '{print $1}')"
   [[ ${#CREDENTIAL_CANARY} -ge 16 && ${#CREDENTIAL_CANARY} -le 256 &&
      "$CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated credential canary is invalid'
@@ -1578,6 +1611,10 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ ${#GITHUB_CREDENTIAL_CANARY} -ge 16 && ${#GITHUB_CREDENTIAL_CANARY} -le 256 &&
      "$GITHUB_CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated GitHub credential canary is invalid'
+  [[ ${#WORKLOAD_SECRET_CANARY} -ge 16 && ${#WORKLOAD_SECRET_CANARY} -le 256 &&
+     "$WORKLOAD_SECRET_CANARY" =~ ^[A-Za-z0-9._-]+$ &&
+     "$WORKLOAD_SECRET_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+    die 'generated workload-secret canary is invalid'
   install_synthetic_codex
   install_synthetic_github
   for canary in "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY" \
@@ -1590,6 +1627,16 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'enrolling synthetic protected Codex and GitHub OAuth credentials through public commands'
   run_cw_connect_synthetic_codex
   run_cw_connect_synthetic_github
+  run_cw_with_secret_stdin "$WORKLOAD_SECRET_CANARY" \
+    secrets --local user set CW_NATIVE_SMOKE_SECRET
+  run_cw secrets --local list --output json
+  jq -e '
+    length == 1 and
+    .[0].placement == "local" and
+    .[0].scope == "user" and
+    .[0].key == "CW_NATIVE_SMOKE_SECRET" and
+    (tostring | contains("cwworkload") | not)
+  ' "$LAST_STDOUT" >/dev/null || die 'local workload-secret inventory was not key-only'
   [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
     -name '.codewire-codex-login-*' -print -quit)" ]] ||
     die 'transient Codex login directory remained after enrollment'
@@ -1769,6 +1816,14 @@ RUNNER_PID="$(native_database_value runner_pid)"
   die 'one-boot guest seed remained after readiness'
 [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/generations" -name setup.raw -print -quit)" ]] ||
   die 'credential-free one-boot setup pack remained after readiness'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  [[ -z "$(find "$KEYRING_RUNTIME/codewire/workload-secrets-v1" -type f -print -quit 2>/dev/null)" ]] ||
+    die 'one-boot workload-secret delivery remained after readiness'
+  run_cw run --no-tty -- /bin/sh -lc \
+    'printf %s "$CW_NATIVE_SMOKE_SECRET" | sha256sum | cut -d " " -f 1'
+  [[ "$(tr -d '\n' <"$LAST_STDOUT")" == "$WORKLOAD_SECRET_SHA256" ]] ||
+    die 'guest workload-secret injection digest drifted'
+fi
 
 log 'checking confined live read-only and acknowledged read-write direct shares'
 assert_direct_share_processes
@@ -1820,6 +1875,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   scan_for_credential_canary before-delete-access-token "$CREDENTIAL_CANARY"
   scan_for_credential_canary before-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
   scan_for_credential_canary before-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
+  scan_for_credential_canary before-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
 
   log 'deleting the environment, profile, credential, and protected-store entry'
   run_cw env rm --local "$NAME" --yes
@@ -1832,6 +1888,10 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw credentials --local profile delete "$CREDENTIAL_PROFILE_NAME" --yes
   run_cw credentials --local delete "$CREDENTIAL_ID" --yes
   run_cw credentials --local delete "$GITHUB_CREDENTIAL_ID" --yes
+  run_cw secrets --local user delete CW_NATIVE_SMOKE_SECRET
+  run_cw secrets --local list --output json
+  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
+    die 'synthetic workload-secret metadata remained after deletion'
   run_cw credentials --local list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'synthetic credential metadata remained after deletion'
@@ -1856,9 +1916,12 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   scan_for_credential_canary after-delete-access-token "$CREDENTIAL_CANARY"
   scan_for_credential_canary after-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
   scan_for_credential_canary after-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
+  scan_for_credential_canary after-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
   unset CREDENTIAL_CANARY
   unset CREDENTIAL_REFRESH_CANARY
   unset GITHUB_CREDENTIAL_CANARY
+  unset WORKLOAD_SECRET_CANARY
+  unset WORKLOAD_SECRET_SHA256
 
   [[ ! -e "$TRIPWIRE" ]] ||
     die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"

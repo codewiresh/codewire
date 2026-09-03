@@ -221,6 +221,8 @@ pub(crate) struct NativeSupervisorArgs {
     pub(crate) platform_config_dir: PathBuf,
     #[arg(long)]
     pub(crate) credential_authority_root: PathBuf,
+    #[arg(long)]
+    pub(crate) workload_secret_runtime_root: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
@@ -238,6 +240,8 @@ pub(crate) struct NativeRunnerArgs {
     pub(crate) mesh_data_dir: PathBuf,
     #[arg(long)]
     pub(crate) platform_config_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) workload_secret_runtime_root: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1315,68 +1319,97 @@ pub(crate) struct PresetRmArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretsCommand {
-    #[command(about = "Create a secret project")]
-    Create(SecretProjectCreateArgs),
-    #[command(about = "List secret projects, or secrets in a project")]
-    List(SecretsListArgs),
-    #[command(about = "Set a secret in a project")]
-    Set(ProjectSecretSetArgs),
-    #[command(alias = "rm", about = "Delete a secret or an entire project")]
-    Delete(ProjectSecretDeleteArgs),
-    #[command(about = "Rename a secret key in a project")]
-    Rename(ProjectSecretRenameArgs),
+    #[command(about = "List workload-secret metadata")]
+    List(SecretInventoryListArgs),
     #[command(about = "Manage user-scoped secrets")]
     User {
         #[command(subcommand)]
         command: ScopedSecretCommand,
     },
     #[command(about = "Manage organization-scoped secrets")]
-    Org {
+    Organization {
         #[command(subcommand)]
         command: ScopedSecretCommand,
     },
+    #[command(about = "Manage named secret projects")]
+    Project {
+        #[command(subcommand)]
+        command: SecretProjectCommand,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SecretsArgs {
+    #[arg(long, conflicts_with_all = ["platform", "all_placements"])]
+    pub(crate) local: bool,
+    #[arg(long, conflicts_with_all = ["local", "all_placements"])]
+    pub(crate) platform: bool,
+    #[arg(long, conflicts_with_all = ["local", "platform"])]
+    pub(crate) all_placements: bool,
+    #[command(subcommand)]
+    pub(crate) command: SecretsCommand,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SecretInventoryListArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SecretProjectCommand {
+    #[command(about = "Create a secret project")]
+    Create(SecretProjectCreateArgs),
+    #[command(about = "List secret projects, or keys in one project")]
+    List(SecretsListArgs),
+    #[command(about = "Set a secret in a project")]
+    Set(ProjectSecretSetArgs),
+    #[command(about = "Delete a secret or an entire project")]
+    Delete(ProjectSecretDeleteArgs),
+    #[command(about = "Rename a secret key in a project")]
+    Rename(ProjectSecretRenameArgs),
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SecretProjectCreateArgs {
     #[arg(value_name = "NAME")]
-    name: String,
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SecretsListArgs {
     #[arg(value_name = "PROJECT_NAME")]
-    project_name: Option<String>,
+    pub(crate) project_name: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ProjectSecretSetArgs {
     #[arg(value_name = "PROJECT")]
-    project: String,
+    pub(crate) project: String,
     #[arg(value_name = "KEY")]
-    key: String,
+    pub(crate) key: String,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ProjectSecretDeleteArgs {
     #[arg(value_name = "PROJECT")]
-    project: String,
+    pub(crate) project: String,
     #[arg(value_name = "KEY")]
-    key: Option<String>,
+    pub(crate) key: Option<String>,
     #[arg(long, help = "Skip project delete confirmation")]
-    yes: bool,
+    pub(crate) yes: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ProjectSecretRenameArgs {
     #[arg(value_name = "PROJECT")]
-    project: String,
+    pub(crate) project: String,
     #[arg(value_name = "OLD_KEY")]
-    old_key: String,
+    pub(crate) old_key: String,
     #[arg(value_name = "NEW_KEY")]
-    new_key: String,
+    pub(crate) new_key: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1394,21 +1427,21 @@ pub(crate) enum ScopedSecretCommand {
 #[derive(Debug, Args)]
 pub(crate) struct ScopedSecretListArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ScopedSecretKeyArgs {
     #[arg(value_name = "KEY")]
-    key: String,
+    pub(crate) key: String,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ScopedSecretRenameArgs {
     #[arg(value_name = "OLD_KEY")]
-    old_key: String,
+    pub(crate) old_key: String,
     #[arg(value_name = "NEW_KEY")]
-    new_key: String,
+    pub(crate) new_key: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1686,6 +1719,7 @@ mod core;
 mod environment;
 mod mesh_commands;
 mod platform_commands;
+mod secrets;
 mod sessions;
 
 pub(crate) use collaboration::*;
@@ -1693,6 +1727,7 @@ pub(crate) use core::*;
 pub(crate) use environment::*;
 pub(crate) use mesh_commands::*;
 pub(crate) use platform_commands::*;
+pub(crate) use secrets::*;
 pub(crate) use sessions::*;
 
 #[cfg(test)]

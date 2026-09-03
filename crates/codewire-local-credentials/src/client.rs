@@ -13,6 +13,7 @@ use codewire_access::{
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
 };
+use codewire_workload_secrets::WorkloadSecretBinding;
 use tonic::Status;
 use uuid::Uuid;
 
@@ -27,7 +28,9 @@ use crate::transport::{
 use crate::{
     AccessProfileRecord, AccessProfileRevisionRecord, BrokerLeaseAuditDecision,
     BrokerLeaseAuditEvent, CredentialRecord, EnvironmentAccessBindingRecord,
-    EnvironmentBrokerRuntime, LOCAL_OWNER_ID, NewCredential,
+    EnvironmentBrokerRuntime, LOCAL_OWNER_ID, LocalSecretProject, NewCredential,
+    ResolvedWorkloadSecretMetadata, WorkloadSecretDelivery, WorkloadSecretMetadata,
+    WorkloadSecretSelection, WorkloadSecretSource,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -353,6 +356,175 @@ impl LocalCredentialClient {
         Ok(())
     }
 
+    pub async fn create_secret_project(
+        &mut self,
+        name: String,
+    ) -> Result<LocalSecretProject, Status> {
+        secret_project_from_proto(
+            self.inner
+                .create_secret_project(v1::CreateLocalSecretProjectRequest { name })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn list_secret_projects(&mut self) -> Result<Vec<LocalSecretProject>, Status> {
+        self.inner
+            .list_secret_projects(v1::ListLocalSecretProjectsRequest {})
+            .await?
+            .into_inner()
+            .projects
+            .into_iter()
+            .map(secret_project_from_proto)
+            .collect()
+    }
+
+    pub async fn delete_secret_project(&mut self, id: Uuid) -> Result<(), Status> {
+        self.inner
+            .delete_secret_project(v1::LocalSecretProjectSelector {
+                project_id: id.to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_user_workload_secrets(
+        &mut self,
+    ) -> Result<Vec<WorkloadSecretMetadata>, Status> {
+        workload_secret_list_from_proto(
+            self.inner
+                .list_user_workload_secrets(v1::ListUserWorkloadSecretsRequest {})
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn set_user_workload_secret(
+        &mut self,
+        key: String,
+        value: ProtectedValue,
+    ) -> Result<WorkloadSecretMetadata, Status> {
+        workload_secret_from_proto(
+            self.inner
+                .set_user_workload_secret(v1::SetUserWorkloadSecretRequest {
+                    key,
+                    value: value.expose_secret().to_vec(),
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn delete_user_workload_secret(&mut self, key: String) -> Result<(), Status> {
+        self.inner
+            .delete_user_workload_secret(v1::DeleteUserWorkloadSecretRequest { key })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn rename_user_workload_secret(
+        &mut self,
+        key: String,
+        new_key: String,
+    ) -> Result<WorkloadSecretMetadata, Status> {
+        workload_secret_from_proto(
+            self.inner
+                .rename_user_workload_secret(v1::RenameUserWorkloadSecretRequest { key, new_key })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn list_project_workload_secrets(
+        &mut self,
+        project_id: Uuid,
+    ) -> Result<Vec<WorkloadSecretMetadata>, Status> {
+        workload_secret_list_from_proto(
+            self.inner
+                .list_project_workload_secrets(v1::ListProjectWorkloadSecretsRequest {
+                    project_id: project_id.to_string(),
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn set_project_workload_secret(
+        &mut self,
+        project_id: Uuid,
+        key: String,
+        value: ProtectedValue,
+    ) -> Result<WorkloadSecretMetadata, Status> {
+        workload_secret_from_proto(
+            self.inner
+                .set_project_workload_secret(v1::SetProjectWorkloadSecretRequest {
+                    project_id: project_id.to_string(),
+                    key,
+                    value: value.expose_secret().to_vec(),
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn delete_project_workload_secret(
+        &mut self,
+        project_id: Uuid,
+        key: String,
+    ) -> Result<(), Status> {
+        self.inner
+            .delete_project_workload_secret(v1::DeleteProjectWorkloadSecretRequest {
+                project_id: project_id.to_string(),
+                key,
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn rename_project_workload_secret(
+        &mut self,
+        project_id: Uuid,
+        key: String,
+        new_key: String,
+    ) -> Result<WorkloadSecretMetadata, Status> {
+        workload_secret_from_proto(
+            self.inner
+                .rename_project_workload_secret(v1::RenameProjectWorkloadSecretRequest {
+                    project_id: project_id.to_string(),
+                    key,
+                    new_key,
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn resolve_workload_secret_metadata(
+        &mut self,
+        selection: WorkloadSecretSelection,
+    ) -> Result<Vec<ResolvedWorkloadSecretMetadata>, Status> {
+        let response = self
+            .inner
+            .resolve_workload_secret_metadata(v1::ResolveWorkloadSecretMetadataRequest {
+                selection: Some(v1::WorkloadSecretSelection {
+                    organization: selection.organization,
+                    project: selection.project,
+                    user: selection.user,
+                    explicit_environment_keys: selection
+                        .explicit_environment_keys
+                        .into_iter()
+                        .collect(),
+                }),
+            })
+            .await?
+            .into_inner();
+        response
+            .secrets
+            .into_iter()
+            .map(resolved_workload_secret_from_proto)
+            .collect()
+    }
+
     pub async fn create_profile(
         &mut self,
         name: &AccessProfileName,
@@ -574,6 +746,57 @@ impl LocalCredentialControlClient {
 
     pub fn info(&self) -> AuthorityInfo {
         self.info
+    }
+
+    pub async fn prepare_environment_workload_secrets(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        selection: &WorkloadSecretSelection,
+        runtime_root: &Path,
+    ) -> Result<WorkloadSecretDelivery, Status> {
+        if environment_generation == 0 || !runtime_root.is_absolute() {
+            return Err(Status::invalid_argument(
+                "invalid local workload-secret preparation request",
+            ));
+        }
+        let runtime_root = runtime_root.to_str().ok_or_else(|| {
+            Status::invalid_argument("invalid local workload-secret runtime root")
+        })?;
+        let response = self
+            .inner
+            .prepare_environment_workload_secrets(v1::PrepareEnvironmentWorkloadSecretsRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+                selection: Some(v1::WorkloadSecretSelection {
+                    organization: selection.organization,
+                    project: selection.project.clone(),
+                    user: selection.user,
+                    explicit_environment_keys: selection
+                        .explicit_environment_keys
+                        .iter()
+                        .cloned()
+                        .collect(),
+                }),
+                runtime_root: runtime_root.to_owned(),
+            })
+            .await?
+            .into_inner();
+        let binding = response
+            .binding
+            .map(|binding| {
+                let sha256: [u8; 32] = binding.sha256.try_into().map_err(|_| data_loss(()))?;
+                WorkloadSecretBinding::new(binding.total_bytes, sha256, binding.entry_count)
+                    .map_err(data_loss)
+            })
+            .transpose()?;
+        let metadata = response
+            .secrets
+            .into_iter()
+            .map(resolved_workload_secret_from_proto)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_workload_secret_delivery(binding, &metadata)?;
+        Ok(WorkloadSecretDelivery { binding, metadata })
     }
 
     pub async fn prepare_git_repository(
@@ -1051,6 +1274,126 @@ pub(crate) fn credential_from_proto(value: v1::Credential) -> Result<CredentialR
     })
 }
 
+fn secret_project_from_proto(value: v1::LocalSecretProject) -> Result<LocalSecretProject, Status> {
+    let id = Uuid::parse_str(&value.id).map_err(data_loss)?;
+    if id.is_nil()
+        || id.to_string() != value.id
+        || !valid_secret_project_name(&value.name)
+        || value.updated_at_unix_ms < value.created_at_unix_ms
+    {
+        return Err(data_loss(()));
+    }
+    Ok(LocalSecretProject {
+        id,
+        name: value.name,
+        secret_count: value.secret_count,
+        created_at_unix_ms: value.created_at_unix_ms,
+        updated_at_unix_ms: value.updated_at_unix_ms,
+    })
+}
+
+fn workload_secret_list_from_proto(
+    value: v1::ListWorkloadSecretsResponse,
+) -> Result<Vec<WorkloadSecretMetadata>, Status> {
+    let secrets = value
+        .secrets
+        .into_iter()
+        .map(workload_secret_from_proto)
+        .collect::<Result<Vec<_>, _>>()?;
+    if secrets.windows(2).any(|pair| pair[0].key >= pair[1].key) {
+        return Err(data_loss(()));
+    }
+    Ok(secrets)
+}
+
+fn workload_secret_from_proto(
+    value: v1::WorkloadSecretMetadata,
+) -> Result<WorkloadSecretMetadata, Status> {
+    if !valid_workload_secret_key(&value.key) || value.updated_at_unix_ms < value.created_at_unix_ms
+    {
+        return Err(data_loss(()));
+    }
+    Ok(WorkloadSecretMetadata {
+        key: value.key,
+        created_at_unix_ms: value.created_at_unix_ms,
+        updated_at_unix_ms: value.updated_at_unix_ms,
+    })
+}
+
+fn resolved_workload_secret_from_proto(
+    value: v1::ResolvedWorkloadSecretMetadata,
+) -> Result<ResolvedWorkloadSecretMetadata, Status> {
+    let source = workload_secret_source_from_proto(value.source)?;
+    let overridden_sources = value
+        .overridden_sources
+        .into_iter()
+        .map(workload_secret_source_from_proto)
+        .collect::<Result<Vec<_>, _>>()?;
+    if !valid_workload_secret_key(&value.key)
+        || overridden_sources
+            .iter()
+            .any(|overridden| *overridden >= source)
+        || !overridden_sources.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        return Err(data_loss(()));
+    }
+    Ok(ResolvedWorkloadSecretMetadata {
+        key: value.key,
+        source,
+        overridden_sources,
+    })
+}
+
+fn workload_secret_source_from_proto(value: i32) -> Result<WorkloadSecretSource, Status> {
+    match v1::WorkloadSecretSource::try_from(value) {
+        Ok(v1::WorkloadSecretSource::Project) => Ok(WorkloadSecretSource::Project),
+        Ok(v1::WorkloadSecretSource::User) => Ok(WorkloadSecretSource::User),
+        Ok(v1::WorkloadSecretSource::ExplicitEnvironment) => {
+            Ok(WorkloadSecretSource::ExplicitEnvironment)
+        }
+        Ok(v1::WorkloadSecretSource::Unspecified) | Err(_) => Err(data_loss(())),
+    }
+}
+
+fn validate_workload_secret_delivery(
+    binding: Option<WorkloadSecretBinding>,
+    metadata: &[ResolvedWorkloadSecretMetadata],
+) -> Result<(), Status> {
+    let delivered_count = metadata
+        .iter()
+        .filter(|secret| secret.source != WorkloadSecretSource::ExplicitEnvironment)
+        .count();
+    if metadata.windows(2).any(|pair| pair[0].key >= pair[1].key)
+        || binding.is_some() != (delivered_count != 0)
+        || binding.is_some_and(|binding| {
+            usize::try_from(binding.entry_count()).ok() != Some(delivered_count)
+        })
+    {
+        return Err(data_loss(()));
+    }
+    Ok(())
+}
+
+fn valid_secret_project_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    !name.is_empty()
+        && name.len() <= 64
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn valid_workload_secret_key(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    !key.is_empty()
+        && key.len() <= 256
+        && bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 fn profile_record_from_proto(
     value: v1::AccessProfileRevision,
 ) -> Result<AccessProfileRecord, Status> {
@@ -1220,5 +1563,28 @@ mod tests {
         let non_utf8 = PathBuf::from(OsString::from_vec(bytes));
         assert!(broker_supervisor_socket(&non_utf8).is_err());
         assert!(broker_supervisor_socket(Path::new("relative/supervisor.sock")).is_err());
+    }
+
+    #[test]
+    fn workload_secret_delivery_requires_a_binding_for_every_material_source() {
+        let project = ResolvedWorkloadSecretMetadata {
+            key: "PROJECT_TOKEN".to_owned(),
+            source: WorkloadSecretSource::Project,
+            overridden_sources: Vec::new(),
+        };
+        let explicit = ResolvedWorkloadSecretMetadata {
+            key: "EXPLICIT_TOKEN".to_owned(),
+            source: WorkloadSecretSource::ExplicitEnvironment,
+            overridden_sources: Vec::new(),
+        };
+        let binding = WorkloadSecretBinding::new(4096, [0x5a; 32], 1).unwrap();
+
+        assert!(validate_workload_secret_delivery(None, std::slice::from_ref(&project)).is_err());
+        assert!(
+            validate_workload_secret_delivery(Some(binding), std::slice::from_ref(&explicit))
+                .is_err()
+        );
+        assert!(validate_workload_secret_delivery(None, &[explicit]).is_ok());
+        assert!(validate_workload_secret_delivery(Some(binding), &[project]).is_ok());
     }
 }

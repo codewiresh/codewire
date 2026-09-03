@@ -117,6 +117,7 @@ mod linux {
             mesh_data_dir: args.state_root.join("unused-mesh-auth"),
             platform_config_dir: args.state_root.join("unused-platform-auth"),
             credential_authority_root,
+            workload_secret_runtime_root: None,
             executable: args.cw_bin.clone(),
         })
         .await?;

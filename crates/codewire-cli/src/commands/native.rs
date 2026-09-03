@@ -113,6 +113,7 @@ pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow:
         mesh_data_dir: args.mesh_data_dir,
         platform_config_dir: args.platform_config_dir,
         credential_authority_root: args.credential_authority_root,
+        workload_secret_runtime_root: args.workload_secret_runtime_root,
         executable,
     })
     .await
@@ -129,6 +130,7 @@ pub(crate) async fn run_native_runner(args: NativeRunnerArgs) -> anyhow::Result<
         artifact_generation: args.artifact_generation,
         mesh_data_dir: args.mesh_data_dir,
         platform_config_dir: args.platform_config_dir,
+        workload_secret_runtime_root: args.workload_secret_runtime_root,
     })
     .await
     .context("run native environment runner")
@@ -1141,6 +1143,17 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
         mesh_data_dir: paths.mesh_data_dir,
         platform_config_dir: paths.platform_config_dir,
         credential_authority_root: local_credential_root(&env)?,
+        workload_secret_runtime_root: env::var_os("XDG_RUNTIME_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(|path| {
+                if path.is_absolute() {
+                    Ok(path)
+                } else {
+                    anyhow::bail!("XDG_RUNTIME_DIR must be an absolute path")
+                }
+            })
+            .transpose()?,
         executable: canonical_current_executable()?,
     })
 }
@@ -1263,14 +1276,8 @@ fn native_unsupported_project_fields(
     if !spec.startup_script.is_empty() {
         unsupported.push("startup");
     }
-    if !spec.environment.is_empty() {
-        unsupported.push("env");
-    }
     if spec.agents.install == Some(true) || !spec.agent_environment.is_empty() {
         unsupported.push("agents");
-    }
-    if !spec.secrets.is_empty() {
-        unsupported.push("secrets");
     }
     unsupported
 }
@@ -1877,6 +1884,22 @@ mod tests {
             project.spec.access.as_ref().unwrap().profile.to_string(),
             "user/work"
         );
+    }
+
+    #[test]
+    fn native_yaml_preserves_explicit_workload_secret_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            "version: 1\nenv: {EXPLICIT: wins}\nsecrets: {user: true, project: development}\n",
+        )
+        .unwrap();
+
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert!(project.spec.secrets.user);
+        assert!(!project.spec.secrets.organization);
+        assert_eq!(project.spec.secrets.project, "development");
+        assert_eq!(project.spec.environment["EXPLICIT"], "wins");
     }
 
     #[test]

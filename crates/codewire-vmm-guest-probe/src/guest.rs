@@ -38,6 +38,10 @@ use tokio_vsock::{
 };
 use zeroize::Zeroizing;
 
+use codewire_workload_secrets::{
+    WORKLOAD_SECRET_DISK_SERIAL, WorkloadSecretBinding, decode_workload_secrets,
+};
+
 use crate::network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_HOST_HELLO_LEN,
     NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS, NETWORK_MAX_PACKET_BYTES,
@@ -50,7 +54,8 @@ use crate::setup_apply::{
 use crate::setup_archive::ArchiveError;
 use crate::setup_verify::{SetupContentError, verify_setup_contents};
 use crate::workspace_plan::{
-    CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH, WorkspaceIdentity, WorkspacePlan,
+    ACTIVE_WORKSPACE_PLAN_PATH, CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH,
+    WorkspaceIdentity, WorkspacePlan,
 };
 use crate::{
     DIRECT_SHARE_PLAN_PATH, DOCKER_DISK_SERIAL, DirectSharePlan, GUEST_PROGRESS_VSOCK_PORT,
@@ -300,6 +305,22 @@ pub fn run_init() -> Result<()> {
     validate_block_device(&seed_device)?;
     validate_block_device(&root_device)?;
     let seed = read_seed_file(&seed_device)?;
+    let workload_secret_device = if seed.workload_secrets().is_some() {
+        let device = wait_for_disk_by_serial(
+            Path::new(SYS_BLOCK_PATH),
+            Path::new(DEV_PATH),
+            WORKLOAD_SECRET_DISK_SERIAL,
+            DISK_DISCOVERY_TIMEOUT,
+        )?;
+        ensure!(
+            device != state_device && device != root_device && device != seed_device,
+            "workload-secret disk must be distinct from every persistent or seed disk"
+        );
+        validate_block_device(&device)?;
+        Some(device)
+    } else {
+        None
+    };
     let docker_device = if seed.docker_data_disk() {
         let device = wait_for_disk_by_serial(
             Path::new(SYS_BLOCK_PATH),
@@ -310,6 +331,12 @@ pub fn run_init() -> Result<()> {
         ensure!(
             device != state_device && device != root_device && device != seed_device,
             "Docker data disk must be distinct from every existing guest disk"
+        );
+        ensure!(
+            workload_secret_device
+                .as_ref()
+                .is_none_or(|workload_secrets| device != *workload_secrets),
+            "Docker and workload-secret disks must be distinct"
         );
         validate_block_device(&device)?;
         Some(device)
@@ -341,7 +368,10 @@ pub fn run_init() -> Result<()> {
                 && setup_device != seed_device
                 && docker_device
                     .as_ref()
-                    .is_none_or(|docker_device| setup_device != *docker_device),
+                    .is_none_or(|docker_device| setup_device != *docker_device)
+                && workload_secret_device
+                    .as_ref()
+                    .is_none_or(|workload_secrets| setup_device != *workload_secrets),
             "setup disk must be distinct from every persistent or secret-bearing disk"
         );
         validate_block_device(&setup_device)?;
@@ -375,6 +405,17 @@ pub fn run_init() -> Result<()> {
     } else {
         require_persisted_workspace_plan(load_workspace_plan()?)?
     };
+    let plan = match (seed.workload_secrets(), workload_secret_device.as_deref()) {
+        (Some(binding), Some(device)) => {
+            let secrets = read_workload_secret_disk(device, binding)?;
+            plan.with_workload_secrets(&secrets)
+                .context("apply one-boot workload secrets")?
+        }
+        (None, None) => plan,
+        _ => bail!("workload-secret disk does not match its seed binding"),
+    };
+    create_dir(Path::new("/run/codewire"), 0o700)?;
+    persist_active_workspace_plan(&plan)?;
     record_boot_stage("workspace-plan-ready")?;
     normalize_initial_persistent_ownership(&plan)?;
     prepare_codex_projection(&plan)?;
@@ -442,8 +483,7 @@ pub async fn run_daemon() -> Result<()> {
         "guest daemon refuses an ambient environment"
     );
     let seed = read_seed_from_discovered_disk()?;
-    let plan = load_workspace_plan()?
-        .ok_or_else(|| anyhow::anyhow!("sealed workspace execution plan is absent"))?;
+    let plan = load_active_workspace_plan()?;
     let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, seed.daemon_vsock_port()))
         .with_context(|| {
             format!(
@@ -2237,10 +2277,50 @@ fn verify_setup_header(
     Ok(header)
 }
 
+fn read_workload_secret_disk(
+    device: &Path,
+    binding: WorkloadSecretBinding,
+) -> Result<codewire_workload_secrets::DecodedWorkloadSecrets> {
+    let length = usize::try_from(binding.total_bytes())
+        .context("workload-secret disk binding exceeds this guest")?;
+    let mut input = File::open(device).context("open workload-secret disk")?;
+    let mut bytes = Zeroizing::new(vec![0_u8; length]);
+    input
+        .read_exact(&mut bytes)
+        .context("read bound workload-secret disk")?;
+    decode_workload_secrets(&bytes, binding).context("verify workload-secret disk")
+}
+
 fn persist_workspace_plan(plan: &WorkspacePlan) -> Result<()> {
     let bytes = plan.encode().context("encode sealed workspace plan")?;
     ensure_exact_bytes(Path::new(WORKSPACE_PLAN_PATH), &bytes, 0o400)
         .context("publish sealed workspace plan")
+}
+
+fn persist_active_workspace_plan(plan: &WorkspacePlan) -> Result<()> {
+    let bytes = Zeroizing::new(plan.encode().context("encode active workspace plan")?);
+    ensure_exact_bytes(Path::new(ACTIVE_WORKSPACE_PLAN_PATH), &bytes, 0o400)
+        .context("publish active workspace plan")
+}
+
+fn load_active_workspace_plan() -> Result<WorkspacePlan> {
+    let metadata = fs::symlink_metadata(ACTIVE_WORKSPACE_PLAN_PATH)
+        .context("inspect active workspace plan")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.gid() == unsafe { libc::getegid() }
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= MAX_PLAN_BYTES as u64,
+        "active workspace plan metadata is invalid"
+    );
+    let bytes = Zeroizing::new(
+        read_bounded(Path::new(ACTIVE_WORKSPACE_PLAN_PATH), MAX_PLAN_BYTES + 1)
+            .context("read active workspace plan")?,
+    );
+    WorkspacePlan::decode(&bytes).context("validate active workspace plan")
 }
 
 fn load_workspace_plan() -> Result<Option<WorkspacePlan>> {
@@ -3859,7 +3939,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"] },
             { "destination": "/run", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=0755", "size=16m"] },
             { "destination": CONTAINER_INIT_PATH, "type": "none", "source": INIT_PATH, "options": ["bind", "ro", "nosuid", "nodev", "exec"] },
-            { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": ACTIVE_WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_MACHINE_ID_DESTINATION, "type": "none", "source": CONTAINER_MACHINE_ID_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_RESOLV_CONF_DESTINATION, "type": "none", "source": CONTAINER_RESOLV_CONF_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
@@ -5071,6 +5151,7 @@ mod tests {
                 "SHELL=/bin/sh".to_owned(),
                 "USER=root".to_owned(),
             ],
+            explicit_environment_keys: Vec::new(),
             workload_args: Vec::new(),
             workload_cwd: "/workspace".to_owned(),
             session_cwd: "/workspace".to_owned(),
@@ -5263,7 +5344,7 @@ mod tests {
             .iter()
             .find(|mount| mount["destination"] == CONTAINER_PLAN_PATH)
             .unwrap();
-        assert_eq!(plan_mount["source"], WORKSPACE_PLAN_PATH);
+        assert_eq!(plan_mount["source"], ACTIVE_WORKSPACE_PLAN_PATH);
         assert_eq!(
             plan_mount["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])

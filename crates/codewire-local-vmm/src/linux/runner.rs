@@ -14,6 +14,7 @@ use codewire_vmm_guest_probe::{
     NetworkKey, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed,
     SetupBinding, Sha256Value, guest::CONTAINER_INIT_PATH,
 };
+use codewire_workload_secrets::WorkloadSecretBinding;
 use futures::FutureExt as _;
 use rand::{RngCore, rngs::OsRng};
 use rustix::process::Signal;
@@ -125,12 +126,32 @@ pub struct CreateVmRequest {
     pub mesh: Option<MeshAttachment>,
     pub direct_shares: Vec<DirectShareRequest>,
     pub skill_snapshot_sha256: Option<Sha256Value>,
+    pub workload_secrets: Option<WorkloadSecretDiskRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SetupDiskIdentity {
     path: PathBuf,
     file: FileIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadSecretDiskRequest {
+    pub path: PathBuf,
+    pub binding: WorkloadSecretBinding,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WorkloadSecretDiskIdentity {
+    path: PathBuf,
+    file: FileIdentity,
+    binding: WorkloadSecretBinding,
+}
+
+impl Drop for WorkloadSecretDiskIdentity {
+    fn drop(&mut self) {
+        let _ = remove_workload_secret_disk(self);
+    }
 }
 
 #[derive(Debug)]
@@ -207,6 +228,7 @@ impl CloudHypervisorRunner {
         let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref())?;
         let (root_disk_path, root_disk) = admit_root_disk(&paths, &request, persisted.as_ref())?;
         let setup_disk = admit_setup_disk(&paths, &request)?;
+        let workload_secret_disk = admit_workload_secret_disk(&request)?;
         paths.clear_stale_runtime_endpoints()?;
 
         let direct_shares = self.prepare_direct_shares(&request, &paths)?;
@@ -229,6 +251,11 @@ impl CloudHypervisorRunner {
         )?;
         let seed = if docker_disk.is_some() {
             seed.with_docker_data_disk()
+        } else {
+            seed
+        };
+        let seed = if let Some(workload_secrets) = &workload_secret_disk {
+            seed.with_workload_secrets(workload_secrets.binding)
         } else {
             seed
         };
@@ -267,6 +294,11 @@ impl CloudHypervisorRunner {
             )?,
         }
         .with_docker_disk(docker_disk.as_ref().map(|_| paths.docker_disk.clone()))?
+        .with_workload_secret_disk(
+            workload_secret_disk
+                .as_ref()
+                .map(|workload_secrets| workload_secrets.path.clone()),
+        )?
         .with_virtiofs(
             direct_shares
                 .iter()
@@ -284,6 +316,7 @@ impl CloudHypervisorRunner {
             docker_disk,
             root_disk,
             setup_disk,
+            workload_secret_disk,
             direct_shares,
             token,
             command,
@@ -343,6 +376,9 @@ impl CloudHypervisorRunner {
         )?)?;
         if let Some(setup) = &prepared.setup_disk {
             revalidate_setup_disk(setup, prepared.request.setup)?;
+        }
+        if let Some(workload_secrets) = &prepared.workload_secret_disk {
+            revalidate_workload_secret_disk(workload_secrets)?;
         }
         validate_seed_file(&prepared.paths.seed_disk)?;
         let mut direct_share_startup = DirectShareStartup::start(
@@ -445,6 +481,7 @@ impl CloudHypervisorRunner {
             docker_disk: prepared.docker_disk,
             root_disk: prepared.root_disk,
             setup_disk: prepared.setup_disk,
+            workload_secret_disk: prepared.workload_secret_disk,
             direct_shares: direct_share_startup.disarm(),
             token: prepared.token,
             child,
@@ -845,6 +882,7 @@ pub struct PreparedVm {
     docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
+    workload_secret_disk: Option<WorkloadSecretDiskIdentity>,
     direct_shares: Vec<PreparedDirectShare>,
     token: Zeroizing<String>,
     command: CommandSpec,
@@ -862,6 +900,7 @@ impl fmt::Debug for PreparedVm {
             .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk)
+            .field("workload_secret_disk", &self.workload_secret_disk)
             .field("direct_share_count", &self.direct_shares.len())
             .field("token", &"[REDACTED]")
             .field("command", &self.command)
@@ -906,6 +945,7 @@ pub struct RunningVm {
     docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
+    workload_secret_disk: Option<WorkloadSecretDiskIdentity>,
     direct_shares: Vec<DirectShareProcess>,
     token: Zeroizing<String>,
     child: tokio::process::Child,
@@ -927,6 +967,7 @@ impl fmt::Debug for RunningVm {
             .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk)
+            .field("workload_secret_disk", &self.workload_secret_disk)
             .field("direct_share_count", &self.direct_shares.len())
             .field("process", &self.process)
             .field("token", &"[REDACTED]")
@@ -1303,7 +1344,12 @@ impl RunningVm {
     /// in runner/guest memory and cannot be recovered from persistent state;
     /// a setup pack contains no credential material.
     pub fn discard_one_boot_inputs(&self) -> Result<(), RunnerError> {
-        discard_one_boot_inputs(&self.paths, self.setup_disk.as_ref(), self.request.setup)
+        discard_one_boot_inputs(
+            &self.paths,
+            self.setup_disk.as_ref(),
+            self.request.setup,
+            self.workload_secret_disk.as_ref(),
+        )
     }
 
     pub fn try_exit(&mut self) -> Result<ExitClass, RunnerError> {
@@ -3667,6 +3713,121 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
     Ok(())
 }
 
+fn admit_workload_secret_disk(
+    request: &CreateVmRequest,
+) -> Result<Option<WorkloadSecretDiskIdentity>, RunnerError> {
+    let Some(requested) = &request.workload_secrets else {
+        return Ok(None);
+    };
+    let parent = requested
+        .path
+        .parent()
+        .ok_or(RunnerError::InvalidWorkloadSecretDisk)?;
+    let name = requested
+        .path
+        .file_name()
+        .map(Path::new)
+        .ok_or(RunnerError::InvalidWorkloadSecretDisk)?;
+    let root = PrivateRoot::open(parent).map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?;
+    let opened = root
+        .open_regular(
+            name,
+            false,
+            Some(requested.binding.total_bytes()),
+            false,
+            Some(0o400),
+        )
+        .map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?;
+    if rustix::fs::fstatfs(opened.file())
+        .map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?
+        .f_type
+        != 0x0102_1994
+    {
+        return Err(RunnerError::InvalidWorkloadSecretDisk);
+    }
+    verify_workload_secret_digest(opened.file(), requested.binding)?;
+    Ok(Some(WorkloadSecretDiskIdentity {
+        path: requested.path.clone(),
+        file: opened.identity().clone(),
+        binding: requested.binding,
+    }))
+}
+
+fn revalidate_workload_secret_disk(
+    expected: &WorkloadSecretDiskIdentity,
+) -> Result<(), RunnerError> {
+    let parent = expected
+        .path
+        .parent()
+        .ok_or(RunnerError::InvalidWorkloadSecretDisk)?;
+    let name = expected
+        .path
+        .file_name()
+        .map(Path::new)
+        .ok_or(RunnerError::InvalidWorkloadSecretDisk)?;
+    let root = PrivateRoot::open(parent).map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?;
+    let opened = root
+        .open_regular(
+            name,
+            false,
+            Some(expected.binding.total_bytes()),
+            false,
+            Some(0o400),
+        )
+        .map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?;
+    if opened.identity() != &expected.file {
+        return Err(RunnerError::WorkloadSecretDiskIdentityChanged);
+    }
+    verify_workload_secret_digest(opened.file(), expected.binding)
+}
+
+fn remove_workload_secret_disk(
+    workload_secrets: &WorkloadSecretDiskIdentity,
+) -> Result<(), RunnerError> {
+    revalidate_workload_secret_disk(workload_secrets)?;
+    let parent = workload_secrets
+        .path
+        .parent()
+        .ok_or(RunnerError::InvalidWorkloadSecretDisk)?;
+    let name = workload_secrets
+        .path
+        .file_name()
+        .map(Path::new)
+        .ok_or(RunnerError::InvalidWorkloadSecretDisk)?;
+    let root = PrivateRoot::open(parent).map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?;
+    if !root.remove_private_regular(name, 0o400)? {
+        return Err(RunnerError::MissingWorkloadSecretDiskAfterReadiness);
+    }
+    Ok(())
+}
+
+fn verify_workload_secret_digest(
+    file: &std::fs::File,
+    binding: WorkloadSecretBinding,
+) -> Result<(), RunnerError> {
+    let mut input = file;
+    let mut remaining = binding.total_bytes();
+    let mut digest = Sha256::new();
+    let mut buffer = Zeroizing::new(vec![0_u8; 64 * 1024]);
+    while remaining != 0 {
+        let limit = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?;
+        let read = input
+            .read(&mut buffer[..limit])
+            .map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?;
+        if read == 0 {
+            return Err(RunnerError::InvalidWorkloadSecretDisk);
+        }
+        digest.update(&buffer[..read]);
+        remaining -= u64::try_from(read).map_err(|_| RunnerError::InvalidWorkloadSecretDisk)?;
+    }
+    let actual: [u8; 32] = digest.finalize().into();
+    if actual != binding.sha256() {
+        return Err(RunnerError::WorkloadSecretDiskDigestMismatch);
+    }
+    Ok(())
+}
+
 fn admit_docker_disk(
     paths: &VmPaths,
     request: &CreateVmRequest,
@@ -3838,11 +3999,18 @@ fn discard_one_boot_inputs(
     paths: &VmPaths,
     setup_disk: Option<&SetupDiskIdentity>,
     binding: Option<SetupBinding>,
+    workload_secret_disk: Option<&WorkloadSecretDiskIdentity>,
 ) -> Result<(), RunnerError> {
-    // A setup cleanup failure must never prevent the secret-bearing seed from
-    // being unlinked. Preserve the first setup error for the caller after the
-    // independent seed cleanup has been attempted.
-    let setup_result = (|| {
+    // A cleanup failure must never prevent either other one-boot input from
+    // being unlinked. Preserve the material-bearing workload-secret error
+    // first, after every independent cleanup has been attempted.
+    let workload_secret_result: Result<(), RunnerError> = (|| {
+        if let Some(workload_secrets) = workload_secret_disk {
+            remove_workload_secret_disk(workload_secrets)?;
+        }
+        Ok(())
+    })();
+    let setup_result: Result<(), RunnerError> = (|| {
         if let Some(setup) = setup_disk {
             revalidate_setup_disk(setup, binding)?;
             let setup_root =
@@ -3853,13 +4021,14 @@ fn discard_one_boot_inputs(
         }
         Ok(())
     })();
-    let seed_result = (|| {
+    let seed_result: Result<(), RunnerError> = (|| {
         let seed_root = PrivateRoot::open(&paths.seed_dir)?;
         if !seed_root.remove_private_regular(Path::new("seed.raw"), 0o400)? {
             return Err(RunnerError::MissingSeedAfterReadiness);
         }
         Ok(())
     })();
+    workload_secret_result?;
     setup_result?;
     seed_result
 }
@@ -4327,8 +4496,16 @@ pub enum RunnerError {
     MissingSeedAfterReadiness,
     #[error("one-boot guest setup pack is missing after daemon readiness")]
     MissingSetupAfterReadiness,
+    #[error("one-boot workload-secret disk is missing after daemon readiness")]
+    MissingWorkloadSecretDiskAfterReadiness,
     #[error("one-boot guest setup pack identity changed before VMM admission")]
     SetupDiskIdentityChanged,
+    #[error("one-boot workload-secret disk is invalid")]
+    InvalidWorkloadSecretDisk,
+    #[error("one-boot workload-secret disk identity changed before VMM admission")]
+    WorkloadSecretDiskIdentityChanged,
+    #[error("one-boot workload-secret disk digest differs from its control binding")]
+    WorkloadSecretDiskDigestMismatch,
     #[error("the preformatted ext4 state disk is absent; production prepare never formats disks")]
     MissingPreformattedStateDisk,
     #[error("the preformatted ext4 Docker data disk is absent; runner prepare never formats it")]
@@ -4557,6 +4734,7 @@ mod tests {
             mesh: None,
             direct_shares: Vec::new(),
             skill_snapshot_sha256: None,
+            workload_secrets: None,
         }
     }
 
@@ -5427,7 +5605,7 @@ mod tests {
         drop(seed);
 
         fs::remove_file(&generation.setup_disk).unwrap();
-        assert!(discard_one_boot_inputs(&paths, Some(&admitted), request.setup).is_err());
+        assert!(discard_one_boot_inputs(&paths, Some(&admitted), request.setup, None).is_err());
         assert!(!paths.seed_disk.exists());
     }
 

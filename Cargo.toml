@@ -35,6 +35,7 @@ members = [
     "crates/codewire-types",
     "crates/codewire-udp-relay",
     "crates/codewire-vmm-guest-probe",
+    "crates/codewire-workload-secrets",
 ]
 exclude = [
     "crates/codewire-desktop",
@@ -79,6 +80,7 @@ codewire-project-proto = { path = "crates/codewire-project-proto" }
 codewire-protected-store = { path = "crates/codewire-protected-store" }
 codewire-credential-broker = { path = "crates/codewire-credential-broker" }
 codewire-local-credentials = { path = "crates/codewire-local-credentials" }
+codewire-workload-secrets = { path = "crates/codewire-workload-secrets" }
 
 # FFI
 uniffi = "0.31"

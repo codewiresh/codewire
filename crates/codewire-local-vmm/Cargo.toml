@@ -33,6 +33,7 @@ codewire-egress-policy = { workspace = true }
 codewire-netstack = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
+codewire-workload-secrets = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 futures = { workspace = true }
 hmac = { workspace = true }

@@ -11,7 +11,9 @@ build = "build.rs"
 [dependencies]
 codewire-access = { workspace = true }
 codewire-protected-store = { workspace = true }
+codewire-workload-secrets = { workspace = true }
 http = { workspace = true }
+libc = "0.2"
 hyper-util = { workspace = true }
 prost = { workspace = true }
 rusqlite = { workspace = true }

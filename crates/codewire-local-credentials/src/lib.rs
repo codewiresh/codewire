@@ -17,6 +17,7 @@ mod control;
 mod repository;
 mod service;
 mod transport;
+mod workload_secret;
 
 pub use broker_channel::{
     BrokerCredentialRefreshPermit, BrokerLeaseAuditDecision, BrokerLeaseAuditEvent,
@@ -42,6 +43,10 @@ pub use service::{
     serve_os_local_credential_authority_with_process_spawners,
 };
 pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
+pub use workload_secret::{
+    LocalSecretProject, ResolvedWorkloadSecretMetadata, WorkloadSecretDelivery,
+    WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -82,7 +87,7 @@ pub const AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES: [&str; 2] =
 
 const AUTHORITY_LOCK_FILE: &str = "authority.lock";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_4352; // "CWCR"
-const DATABASE_SCHEMA_VERSION: i64 = 1;
+const DATABASE_SCHEMA_VERSION: i64 = 2;
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,6 +366,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             active_refreshes: Mutex::new(BTreeMap::new()),
         };
         authority.reconcile()?;
+        authority.reconcile_workload_secrets()?;
         Ok(authority)
     }
 
@@ -1710,6 +1716,7 @@ fn open_database(root: &Path) -> Result<Connection, LocalCredentialError> {
         if before.is_none() || before == Some(0) {
             initialize_schema(&connection)?;
         } else {
+            migrate_schema(&connection)?;
             validate_schema(&connection)?;
         }
         validate_database(&connection)?;
@@ -1872,6 +1879,39 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
              ) STRICT;
              CREATE INDEX environment_access_bindings_profile
                ON environment_access_bindings(profile_id, profile_revision);
+             CREATE TABLE secret_projects(
+               id TEXT PRIMARY KEY NOT NULL,
+               owner_id TEXT NOT NULL,
+               name TEXT NOT NULL COLLATE NOCASE,
+               created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
+               updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
+               UNIQUE(owner_id, name)
+             ) STRICT;
+             CREATE TABLE workload_secrets(
+               id TEXT PRIMARY KEY NOT NULL,
+               scope_kind TEXT NOT NULL CHECK(scope_kind IN ('user', 'project')),
+               scope_id TEXT NOT NULL,
+               project_id TEXT NULL,
+               key TEXT NOT NULL,
+               material_generation INTEGER NOT NULL CHECK(material_generation > 0),
+               protected_entry_id TEXT NOT NULL UNIQUE,
+               material_state TEXT NOT NULL CHECK(material_state IN ('pending_write', 'ready', 'pending_delete')),
+               created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
+               updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
+               UNIQUE(scope_kind, scope_id, key),
+               CHECK((scope_kind = 'user' AND project_id IS NULL) OR
+                     (scope_kind = 'project' AND project_id = scope_id)),
+               FOREIGN KEY(project_id) REFERENCES secret_projects(id) ON DELETE RESTRICT
+             ) STRICT;
+             CREATE INDEX workload_secrets_scope
+               ON workload_secrets(scope_kind, scope_id, key);
+             CREATE TABLE workload_secret_journal(
+               secret_id TEXT PRIMARY KEY NOT NULL,
+               operation TEXT NOT NULL CHECK(operation IN ('rollback_write', 'delete_retired')),
+               protected_entry_id TEXT NOT NULL UNIQUE,
+               created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
+               FOREIGN KEY(secret_id) REFERENCES workload_secrets(id) ON DELETE CASCADE
+             ) STRICT;
              COMMIT;",
         )
         .map_err(database_error)?;
@@ -1882,6 +1922,58 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
         .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
         .map_err(database_error)?;
     validate_schema(connection)
+}
+
+fn migrate_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(database_error)?;
+    match version {
+        DATABASE_SCHEMA_VERSION => Ok(()),
+        1 => {
+            connection
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                     CREATE TABLE secret_projects(
+                       id TEXT PRIMARY KEY NOT NULL,
+                       owner_id TEXT NOT NULL,
+                       name TEXT NOT NULL COLLATE NOCASE,
+                       created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
+                       updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
+                       UNIQUE(owner_id, name)
+                     ) STRICT;
+                     CREATE TABLE workload_secrets(
+                       id TEXT PRIMARY KEY NOT NULL,
+                       scope_kind TEXT NOT NULL CHECK(scope_kind IN ('user', 'project')),
+                       scope_id TEXT NOT NULL,
+                       project_id TEXT NULL,
+                       key TEXT NOT NULL,
+                       material_generation INTEGER NOT NULL CHECK(material_generation > 0),
+                       protected_entry_id TEXT NOT NULL UNIQUE,
+                       material_state TEXT NOT NULL CHECK(material_state IN ('pending_write', 'ready', 'pending_delete')),
+                       created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
+                       updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
+                       UNIQUE(scope_kind, scope_id, key),
+                       CHECK((scope_kind = 'user' AND project_id IS NULL) OR
+                             (scope_kind = 'project' AND project_id = scope_id)),
+                       FOREIGN KEY(project_id) REFERENCES secret_projects(id) ON DELETE RESTRICT
+                     ) STRICT;
+                     CREATE INDEX workload_secrets_scope
+                       ON workload_secrets(scope_kind, scope_id, key);
+                     CREATE TABLE workload_secret_journal(
+                       secret_id TEXT PRIMARY KEY NOT NULL,
+                       operation TEXT NOT NULL CHECK(operation IN ('rollback_write', 'delete_retired')),
+                       protected_entry_id TEXT NOT NULL UNIQUE,
+                       created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
+                       FOREIGN KEY(secret_id) REFERENCES workload_secrets(id) ON DELETE CASCADE
+                     ) STRICT;
+                     PRAGMA user_version = 2;
+                     COMMIT;",
+                )
+                .map_err(database_error)
+        }
+        _ => Err(LocalCredentialError::UnsupportedSchema),
+    }
 }
 
 fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
@@ -1902,6 +1994,9 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
         "profile_revisions",
         "profile_entries",
         "environment_access_bindings",
+        "secret_projects",
+        "workload_secrets",
+        "workload_secret_journal",
     ] {
         let present = connection
             .query_row(
@@ -2902,7 +2997,9 @@ pub enum LocalCredentialError {
     UnsupportedPlatform,
     #[error("local credential time value is invalid")]
     InvalidTime,
-    #[error("a local credential or access profile with that name already exists")]
+    #[error(
+        "a local credential, access profile, secret project, or workload-secret key already exists"
+    )]
     AlreadyExists,
     #[error("local credential was not found")]
     CredentialNotFound,
@@ -2936,6 +3033,18 @@ pub enum LocalCredentialError {
     EnvironmentBindingNotFound,
     #[error("local environment access binding changed")]
     StaleEnvironmentBinding,
+    #[error("local secret project was not found")]
+    SecretProjectNotFound,
+    #[error("local workload secret was not found")]
+    WorkloadSecretNotFound,
+    #[error("local workload secret request is invalid")]
+    InvalidWorkloadSecret,
+    #[error("organization workload secrets are unsupported locally")]
+    OrganizationSecretsUnsupported,
+    #[error("local workload secret material is missing from protected storage")]
+    WorkloadSecretMaterialMissing,
+    #[error("local workload-secret one-boot delivery is unavailable")]
+    WorkloadSecretDeliveryUnavailable,
     #[error(transparent)]
     Access(#[from] AccessError),
     #[error(transparent)]

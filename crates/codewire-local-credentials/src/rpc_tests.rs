@@ -26,8 +26,8 @@ use super::*;
 use crate::control::v1;
 use crate::service::{serve_until, serve_until_with_process_spawners, serve_until_with_spawner};
 use crate::transport::{
-    bind_owner_only, bind_owner_only_for_uid, current_uid, owner_only_connector,
-    remove_bound_socket,
+    AUTHORITY_PROTOCOL_VERSION, bind_owner_only, bind_owner_only_for_uid, current_uid,
+    owner_only_connector, remove_bound_socket,
 };
 
 const FIRST_MATERIAL: &[u8] = b"synthetic-oauth-material-alpha";
@@ -408,7 +408,7 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
     assert_eq!(
         client.info(),
         AuthorityInfo {
-            protocol_version: 5,
+            protocol_version: AUTHORITY_PROTOCOL_VERSION,
             protected_store_persistence: ProtectedStorePersistence::ProcessLifetime,
         }
     );
@@ -872,7 +872,7 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 5);
+    assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     drop(shutdown);
@@ -903,7 +903,7 @@ async fn losing_launcher_waits_for_the_admitted_authority() {
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, 5);
+    assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     assert!(!config.socket().exists());

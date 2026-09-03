@@ -446,6 +446,12 @@ message StartVmRequest {
   // Dedicated preformatted Docker data disk. Zero means no Docker device is
   // attached and the guest must not start dockerd.
   uint64 docker_disk_bytes = 17;
+  // Optional one-boot workload-secret disk binding. All fields must be zero/
+  // empty or valid together. The runner derives its exact owner-tmpfs path;
+  // neither this contract nor supervisor state carries secret values.
+  uint64 workload_secret_total_bytes = 18;
+  bytes workload_secret_sha256 = 19;
+  uint32 workload_secret_entry_count = 20;
 }
 
 message DirectShareAttachment {
