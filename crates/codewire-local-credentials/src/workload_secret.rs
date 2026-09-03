@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
 };
+pub use codewire_workload_secrets::{ResolvedWorkloadSecretMetadata, WorkloadSecretSource};
 use codewire_workload_secrets::{
-    MAX_WORKLOAD_SECRETS, WorkloadSecretBinding, encode_workload_secrets,
+    WorkloadSecretBinding, encode_workload_secrets, resolve_workload_secret_metadata,
     validate_workload_secret_value, workload_secret_delivery_relative_path,
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
@@ -49,26 +50,12 @@ pub struct LocalSecretProject {
     pub updated_at_unix_ms: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum WorkloadSecretSource {
-    Project,
-    User,
-    ExplicitEnvironment,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkloadSecretSelection {
     pub organization: bool,
     pub project: Option<String>,
     pub user: bool,
     pub explicit_environment_keys: BTreeSet<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedWorkloadSecretMetadata {
-    pub key: String,
-    pub source: WorkloadSecretSource,
-    pub overridden_sources: Vec<WorkloadSecretSource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -412,51 +399,34 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             return Err(LocalCredentialError::OrganizationSecretsUnsupported);
         }
         let connection = self.connection()?;
-        let mut sources: BTreeMap<String, Vec<WorkloadSecretSource>> = BTreeMap::new();
+        let mut metadata_sources = Vec::<(WorkloadSecretSource, String)>::new();
         let mut winners: BTreeMap<String, InternalWorkloadSecret> = BTreeMap::new();
 
         if let Some(project_name) = selection.project.as_deref() {
             let project = load_project_by_name(&connection, project_name)?
                 .ok_or(LocalCredentialError::SecretProjectNotFound)?;
             for secret in list_internal_secrets(&connection, SecretScope::Project(&project.id))? {
-                sources
-                    .entry(secret.metadata.key.clone())
-                    .or_default()
-                    .push(WorkloadSecretSource::Project);
+                metadata_sources.push((WorkloadSecretSource::Project, secret.metadata.key.clone()));
                 winners.insert(secret.metadata.key.clone(), secret);
             }
         }
         if selection.user {
             for secret in list_internal_secrets(&connection, SecretScope::User)? {
-                sources
-                    .entry(secret.metadata.key.clone())
-                    .or_default()
-                    .push(WorkloadSecretSource::User);
+                metadata_sources.push((WorkloadSecretSource::User, secret.metadata.key.clone()));
                 winners.insert(secret.metadata.key.clone(), secret);
             }
         }
         for key in &selection.explicit_environment_keys {
-            sources
-                .entry(key.clone())
-                .or_default()
-                .push(WorkloadSecretSource::ExplicitEnvironment);
+            metadata_sources.push((WorkloadSecretSource::ExplicitEnvironment, key.clone()));
             winners.remove(key);
         }
 
-        let metadata = sources
-            .into_iter()
-            .map(|(key, mut ordered)| {
-                let source = ordered.pop().ok_or(LocalCredentialError::CorruptMetadata)?;
-                Ok(ResolvedWorkloadSecretMetadata {
-                    key,
-                    source,
-                    overridden_sources: ordered,
-                })
-            })
-            .collect::<Result<Vec<_>, LocalCredentialError>>()?;
-        if metadata.len() > MAX_WORKLOAD_SECRETS {
-            return Err(LocalCredentialError::InvalidWorkloadSecret);
-        }
+        let metadata = resolve_workload_secret_metadata(
+            metadata_sources
+                .iter()
+                .map(|(source, key)| (*source, key.as_str())),
+        )
+        .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)?;
         let mut values = BTreeMap::new();
         if include_values {
             for (key, secret) in winners {

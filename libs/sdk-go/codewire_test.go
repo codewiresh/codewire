@@ -2,6 +2,7 @@ package codewire_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -281,6 +282,7 @@ type secretServiceHandler struct {
 	setProjectSecret    func(context.Context, *connect.Request[codewirev1.SetProjectSecretRequest]) (*connect.Response[codewirev1.SetProjectSecretResponse], error)
 	deleteProjectSecret func(context.Context, *connect.Request[codewirev1.DeleteProjectSecretRequest]) (*connect.Response[codewirev1.DeleteProjectSecretResponse], error)
 	renameProjectSecret func(context.Context, *connect.Request[codewirev1.RenameProjectSecretRequest]) (*connect.Response[codewirev1.RenameProjectSecretResponse], error)
+	previewSecrets      func(context.Context, *connect.Request[codewirev1.PreviewWorkloadSecretResolutionRequest]) (*connect.Response[codewirev1.PreviewWorkloadSecretResolutionResponse], error)
 }
 
 func (h secretServiceHandler) ListSecrets(ctx context.Context, req *connect.Request[codewirev1.ListSecretsRequest]) (*connect.Response[codewirev1.ListSecretsResponse], error) {
@@ -372,6 +374,12 @@ func (h secretServiceHandler) RenameProjectSecret(ctx context.Context, req *conn
 		return h.renameProjectSecret(ctx, req)
 	}
 	return h.UnimplementedSecretServiceHandler.RenameProjectSecret(ctx, req)
+}
+func (h secretServiceHandler) PreviewWorkloadSecretResolution(ctx context.Context, req *connect.Request[codewirev1.PreviewWorkloadSecretResolutionRequest]) (*connect.Response[codewirev1.PreviewWorkloadSecretResolutionResponse], error) {
+	if h.previewSecrets != nil {
+		return h.previewSecrets(ctx, req)
+	}
+	return h.UnimplementedSecretServiceHandler.PreviewWorkloadSecretResolution(ctx, req)
 }
 
 func testSecretServer(t *testing.T, handler secretServiceHandler) (*codewire.Client, *httptest.Server) {
@@ -871,6 +879,16 @@ func TestSecrets(t *testing.T) {
 			}
 			return connect.NewResponse(&codewirev1.DeleteUserSecretResponse{}), nil
 		},
+		previewSecrets: func(_ context.Context, req *connect.Request[codewirev1.PreviewWorkloadSecretResolutionRequest]) (*connect.Response[codewirev1.PreviewWorkloadSecretResolutionResponse], error) {
+			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetOrgId() != "org_test" || !req.Msg.GetOrganization() || !req.Msg.GetUser() || req.Msg.GetSecretProjectId() != "proj_1" || len(req.Msg.GetExplicitEnvironmentKeys()) != 1 || req.Msg.GetExplicitEnvironmentKeys()[0] != "EXPLICIT" {
+				t.Errorf("unexpected preview request: %#v", req.Msg)
+			}
+			return connect.NewResponse(&codewirev1.PreviewWorkloadSecretResolutionResponse{Secrets: []*codewirev1.ResolvedWorkloadSecretMetadata{{
+				Key:               "TOKEN",
+				Source:            codewirev1.WorkloadSecretSource_WORKLOAD_SECRET_SOURCE_USER,
+				OverriddenSources: []codewirev1.WorkloadSecretSource{codewirev1.WorkloadSecretSource_WORKLOAD_SECRET_SOURCE_ORGANIZATION},
+			}}}), nil
+		},
 	})
 
 	ctx := context.Background()
@@ -905,6 +923,26 @@ func TestSecrets(t *testing.T) {
 
 	if err := client.Secrets.DeleteUser(ctx, "TOKEN"); err != nil {
 		t.Fatalf("delete user: %v", err)
+	}
+
+	preview, err := client.Secrets.Preview(ctx, codewire.WorkloadSecretPreviewInput{
+		Organization:            true,
+		SecretProjectID:         "proj_1",
+		User:                    true,
+		ExplicitEnvironmentKeys: []string{"EXPLICIT"},
+	})
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(preview) != 1 || preview[0].Key != "TOKEN" || preview[0].Source != codewire.WorkloadSecretSourceUser || len(preview[0].OverriddenSources) != 1 || preview[0].OverriddenSources[0] != codewire.WorkloadSecretSourceOrganization {
+		t.Errorf("unexpected preview: %#v", preview)
+	}
+	encoded, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatalf("marshal preview: %v", err)
+	}
+	if strings.Contains(string(encoded), "value") {
+		t.Fatalf("preview exposed a value field: %s", encoded)
 	}
 }
 

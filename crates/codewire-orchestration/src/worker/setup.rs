@@ -1379,7 +1379,11 @@ impl WorkerSetupOps<'_> {
             .env
             .setup_config
             .get_or_insert_with(SetupConfig::default);
-        let injected = merge_secrets(&mut sc.env_vars, secrets, &["SSH_PRIVATE_KEY"]);
+        let injected = merge_secrets(
+            &mut sc.env_vars,
+            secrets,
+            &[super::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
+        );
         if injected > 0 {
             tracing::info!(
                 environment_id = self.env.id,

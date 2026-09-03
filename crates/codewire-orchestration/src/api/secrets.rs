@@ -1,12 +1,18 @@
 //! Shared organization and user secret service logic.
 
+use std::collections::BTreeSet;
+
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::user_org_role;
 use codewire_server_core::org_deletion::{
     OrganizationTenantSecretMutationError, run_organization_tenant_secret_mutation,
 };
 use codewire_server_core::{AppError, AppResult};
-use codewire_workload_secrets::{MAX_WORKLOAD_SECRET_VALUE_BYTES, validate_workload_secret_value};
+use codewire_workload_secrets::{
+    MAX_WORKLOAD_SECRET_VALUE_BYTES, MAX_WORKLOAD_SECRETS, ResolvedWorkloadSecretMetadata,
+    WorkloadSecretCodecError, WorkloadSecretSource, resolve_workload_secret_metadata,
+    validate_workload_secret_key, validate_workload_secret_value,
+};
 
 use super::ApiState;
 
@@ -57,6 +63,140 @@ pub(super) fn validate_secret_value(value: &str) -> AppResult<()> {
         )
         .into())
     })
+}
+
+pub(crate) async fn preview_workload_secret_resolution_core(
+    state: &ApiState,
+    user: &AuthUser,
+    org_id: &str,
+    organization: bool,
+    secret_project_id: Option<&str>,
+    include_user: bool,
+    explicit_environment_keys: &[String],
+) -> AppResult<Vec<ResolvedWorkloadSecretMetadata>> {
+    org_role(state, user, org_id).await?;
+    validate_preview_explicit_environment_keys(explicit_environment_keys)?;
+
+    let mut source_keys = Vec::<(WorkloadSecretSource, String)>::new();
+    if organization {
+        append_preview_source_keys(
+            state,
+            &org_secret_path(org_id),
+            WorkloadSecretSource::Organization,
+            &[],
+            &mut source_keys,
+        )
+        .await?;
+    }
+    if let Some(project_id) = secret_project_id.filter(|value| !value.is_empty()) {
+        let project = super::secret_projects::get_project(state, project_id, org_id).await?;
+        append_preview_source_keys(
+            state,
+            &super::secret_projects::secret_project_path(org_id, &project.id),
+            WorkloadSecretSource::Project,
+            &[],
+            &mut source_keys,
+        )
+        .await?;
+    }
+    if include_user {
+        append_preview_source_keys(
+            state,
+            &user_secret_path(&user.user_id),
+            WorkloadSecretSource::User,
+            &[crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
+            &mut source_keys,
+        )
+        .await?;
+    }
+    source_keys.extend(
+        explicit_environment_keys
+            .iter()
+            .cloned()
+            .map(|key| (WorkloadSecretSource::ExplicitEnvironment, key)),
+    );
+
+    resolve_workload_secret_metadata(
+        source_keys
+            .iter()
+            .map(|(source, key)| (*source, key.as_str())),
+    )
+    .map_err(map_preview_resolution_error)
+}
+
+fn map_preview_resolution_error(error: WorkloadSecretCodecError) -> AppError {
+    if error == WorkloadSecretCodecError::InvalidEntryCount {
+        return AppError::BadRequest(
+            "selected workload-secret sources resolve to too many keys".into(),
+        );
+    }
+    tracing::error!(error = %error, "workload-secret preview metadata is invalid");
+    AppError::InternalMsg("failed to preview workload-secret resolution".into())
+}
+
+fn validate_preview_explicit_environment_keys(
+    explicit_environment_keys: &[String],
+) -> AppResult<()> {
+    if explicit_environment_keys.len() > MAX_WORKLOAD_SECRETS {
+        return Err(AppError::BadRequest(
+            "too many explicit environment keys".into(),
+        ));
+    }
+    let mut unique_explicit = BTreeSet::new();
+    for key in explicit_environment_keys {
+        validate_workload_secret_key(key)
+            .map_err(|_| AppError::BadRequest("invalid explicit environment key".into()))?;
+        if !unique_explicit.insert(key.as_str()) {
+            return Err(AppError::BadRequest(
+                "duplicate explicit environment key".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn append_preview_source_keys(
+    state: &ApiState,
+    path: &str,
+    source: WorkloadSecretSource,
+    excluded_keys: &[&str],
+    destination: &mut Vec<(WorkloadSecretSource, String)>,
+) -> AppResult<()> {
+    let query_limit = MAX_WORKLOAD_SECRETS
+        .checked_add(excluded_keys.len())
+        .and_then(|limit| limit.checked_add(1))
+        .ok_or_else(|| AppError::InternalMsg("workload-secret preview limit invalid".into()))?;
+    let metadata = state
+        .secrets
+        .get_secret_metadata_at_path_bounded(path, query_limit)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, ?source, "workload-secret preview source unavailable");
+            AppError::InternalMsg("selected workload-secret source is unavailable".into())
+        })?;
+    let source_count = extend_preview_source_keys(destination, metadata, source, excluded_keys);
+    if source_count > MAX_WORKLOAD_SECRETS {
+        return Err(AppError::BadRequest(
+            "selected workload-secret source has too many keys".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn extend_preview_source_keys(
+    destination: &mut Vec<(WorkloadSecretSource, String)>,
+    metadata: Vec<crate::worker::secrets::StoredSecretMetadata>,
+    source: WorkloadSecretSource,
+    excluded_keys: &[&str],
+) -> usize {
+    let initial_len = destination.len();
+    destination.extend(
+        metadata
+            .into_iter()
+            .filter(|secret| !excluded_keys.contains(&secret.key.as_str()))
+            .map(|secret| (source, secret.key)),
+    );
+    destination.len() - initial_len
 }
 
 /// Shared existence-hiding organization gate for Connect services.
@@ -324,26 +464,6 @@ pub(crate) async fn set_user_secret_core(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn workload_secret_values_use_the_shared_bounds_without_rendering_material() {
-        assert!(validate_secret_value(" leading and trailing \n").is_ok());
-        for invalid in [
-            String::new(),
-            "contains\0nul".to_string(),
-            "x".repeat(MAX_WORKLOAD_SECRET_VALUE_BYTES + 1),
-        ] {
-            let error = validate_secret_value(&invalid).unwrap_err();
-            if !invalid.is_empty() {
-                assert!(!format!("{error:?}").contains(&invalid));
-            }
-        }
-    }
-}
-
 pub(crate) async fn delete_user_secret_core(
     state: &ApiState,
     user: &AuthUser,
@@ -398,4 +518,134 @@ pub(crate) async fn rename_user_secret_core(
     )
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workload_secret_values_use_the_shared_bounds_without_rendering_material() {
+        assert!(validate_secret_value(" leading and trailing \n").is_ok());
+        for invalid in [
+            String::new(),
+            "contains\0nul".to_string(),
+            "x".repeat(MAX_WORKLOAD_SECRET_VALUE_BYTES + 1),
+        ] {
+            let error = validate_secret_value(&invalid).unwrap_err();
+            if !invalid.is_empty() {
+                assert!(!format!("{error:?}").contains(&invalid));
+            }
+        }
+    }
+
+    #[test]
+    fn preview_excludes_legacy_user_ssh_material_before_precedence_resolution() {
+        let metadata = |key: &str| crate::worker::secrets::StoredSecretMetadata {
+            key: key.into(),
+            ..Default::default()
+        };
+        let mut source_keys = vec![
+            (
+                WorkloadSecretSource::Organization,
+                crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY.into(),
+            ),
+            (
+                WorkloadSecretSource::Project,
+                crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY.into(),
+            ),
+        ];
+        let source_count = extend_preview_source_keys(
+            &mut source_keys,
+            vec![metadata(crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY)],
+            WorkloadSecretSource::User,
+            &[crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
+        );
+        assert_eq!(source_count, 0);
+        let resolved = resolve_workload_secret_metadata(
+            source_keys
+                .iter()
+                .map(|(source, key)| (*source, key.as_str())),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            vec![ResolvedWorkloadSecretMetadata {
+                key: crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY.into(),
+                source: WorkloadSecretSource::Project,
+                overridden_sources: vec![WorkloadSecretSource::Organization],
+            }]
+        );
+    }
+
+    #[test]
+    fn preview_source_bound_counts_only_participating_keys() {
+        let metadata = |normal_count: usize| {
+            let mut rows = (0..normal_count)
+                .map(|index| crate::worker::secrets::StoredSecretMetadata {
+                    key: format!("KEY_{index}"),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>();
+            rows.push(crate::worker::secrets::StoredSecretMetadata {
+                key: crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY.into(),
+                ..Default::default()
+            });
+            rows
+        };
+        let mut source_keys = Vec::new();
+        assert_eq!(
+            extend_preview_source_keys(
+                &mut source_keys,
+                metadata(MAX_WORKLOAD_SECRETS),
+                WorkloadSecretSource::User,
+                &[crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
+            ),
+            MAX_WORKLOAD_SECRETS
+        );
+        source_keys.clear();
+        assert_eq!(
+            extend_preview_source_keys(
+                &mut source_keys,
+                metadata(MAX_WORKLOAD_SECRETS + 1),
+                WorkloadSecretSource::User,
+                &[crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
+            ),
+            MAX_WORKLOAD_SECRETS + 1
+        );
+    }
+
+    #[test]
+    fn preview_rejects_noncanonical_or_duplicate_explicit_environment_keys() {
+        assert!(
+            validate_preview_explicit_environment_keys(&["CANONICAL".into(), "_ALSO_OK".into()])
+                .is_ok()
+        );
+        assert!(validate_preview_explicit_environment_keys(&["1LEGACY".into()]).is_err());
+        assert!(
+            validate_preview_explicit_environment_keys(&["DUPLICATE".into(), "DUPLICATE".into()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn preview_reports_aggregate_source_overflow_as_bad_request() {
+        let organization_keys = (0..MAX_WORKLOAD_SECRETS)
+            .map(|index| (WorkloadSecretSource::Organization, format!("ORG_{index}")))
+            .collect::<Vec<_>>();
+        let mut source_keys = organization_keys;
+        source_keys.push((WorkloadSecretSource::Project, "PROJECT_ONLY".into()));
+
+        let error = resolve_workload_secret_metadata(
+            source_keys
+                .iter()
+                .map(|(source, key)| (*source, key.as_str())),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            map_preview_resolution_error(error),
+            AppError::BadRequest(message)
+                if message == "selected workload-secret sources resolve to too many keys"
+        ));
+    }
 }

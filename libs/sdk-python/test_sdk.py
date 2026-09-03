@@ -87,14 +87,18 @@ from codewire.v1.secret_pb2 import (
     ListSecretProjectsResponse,
     ListSecretsResponse,
     ListUserSecretsResponse,
+    PreviewWorkloadSecretResolutionRequest,
+    PreviewWorkloadSecretResolutionResponse,
     RenameProjectSecretResponse,
     RenameSecretResponse,
     RenameUserSecretResponse,
+    ResolvedWorkloadSecretMetadata,
     SecretMetadata,
     SecretProject,
     SetProjectSecretResponse,
     SetSecretResponse,
     SetUserSecretResponse,
+    WorkloadSecretSource,
 )
 
 
@@ -278,6 +282,7 @@ class ControlPlaneFixture:
     last_create_secret_project = ""
     last_create_isolation_tier = IsolationTier.ISOLATION_TIER_UNSPECIFIED
     last_create_project_spec: ProjectSpec | None = None
+    last_preview_request: PreviewWorkloadSecretResolutionRequest | None = None
 
     def __getattr__(self, name):
         def unimplemented(*args, **kwargs):
@@ -528,6 +533,23 @@ class ControlPlaneFixture:
     def rename_project_secret(self, request, ctx):
         self._require_auth(ctx)
         return RenameProjectSecretResponse()
+
+    def preview_workload_secret_resolution(self, request, ctx):
+        self._require_auth(ctx)
+        type(self).last_preview_request = request
+        if request.org_id != "org_test":
+            raise ConnectError(Code.NOT_FOUND, "organization not found")
+        return PreviewWorkloadSecretResolutionResponse(
+            secrets=[
+                ResolvedWorkloadSecretMetadata(
+                    key="TOKEN",
+                    source=WorkloadSecretSource.WORKLOAD_SECRET_SOURCE_USER,
+                    overridden_sources=[
+                        WorkloadSecretSource.WORKLOAD_SECRET_SOURCE_ORGANIZATION
+                    ],
+                )
+            ]
+        )
 
     @staticmethod
     def _project() -> SecretProject:
@@ -808,6 +830,32 @@ class SDKTestCase(unittest.TestCase):
 
         self.cw.secrets.set_user("TOKEN", "abc")
         self.cw.secrets.delete_user("TOKEN")
+
+    def test_secret_preview_is_metadata_only(self):
+        preview = self.cw.secrets.preview(
+            organization=True,
+            secret_project_id="proj_1",
+            user=True,
+            explicit_environment_keys=["EXPLICIT"],
+        )
+        self.assertEqual(
+            preview,
+            [
+                {
+                    "key": "TOKEN",
+                    "source": "user",
+                    "overridden_sources": ["organization"],
+                }
+            ],
+        )
+        self.assertNotIn("value", preview[0])
+        request = ControlPlaneFixture.last_preview_request
+        self.assertIsNotNone(request)
+        self.assertEqual(request.org_id, "org_test")
+        self.assertTrue(request.organization)
+        self.assertEqual(request.secret_project_id, "proj_1")
+        self.assertTrue(request.user)
+        self.assertEqual(list(request.explicit_environment_keys), ["EXPLICIT"])
 
     def test_secret_projects(self):
         proj = self.cw.secret_projects.create("myapp")

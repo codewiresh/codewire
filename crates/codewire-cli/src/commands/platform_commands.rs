@@ -1195,6 +1195,31 @@ pub(crate) async fn handle_platform_secrets_command(
             let inventory = platform_secret_inventory(globals).await?;
             print_secret_inventory(&inventory, args.output)?;
         }
+        SecretsCommand::Preview(args) => {
+            let intent = load_secret_preview_intent(&args.file)?;
+            let orgs = organizations.list_orgs().await.context("list orgs")?;
+            let org_id = current_org_id(&platform, &orgs)?;
+            let secret_project_id = if let Some(project_name) = intent.project.as_deref() {
+                Some(
+                    load_secret_project_by_name(&client, &org_id, project_name)
+                        .await?
+                        .id,
+                )
+            } else {
+                None
+            };
+            let secrets = client
+                .preview_workload_secret_resolution(
+                    &org_id,
+                    intent.organization,
+                    secret_project_id.as_deref(),
+                    intent.user,
+                    intent.explicit_environment_keys,
+                )
+                .await
+                .context("preview platform workload-secret resolution")?;
+            print_secret_resolution("platform", &secrets, args.output)?;
+        }
         SecretsCommand::Project { command } => {
             let orgs = organizations.list_orgs().await.context("list orgs")?;
             let org_id = current_org_id(&platform, &orgs)?;

@@ -4,11 +4,14 @@ use super::*;
 
 #[cfg(target_os = "linux")]
 use codewire_local_credentials::{
-    LocalCredentialClient, LocalSecretProject, WorkloadSecretMetadata,
+    LocalCredentialClient, LocalSecretProject, WorkloadSecretMetadata, WorkloadSecretSelection,
 };
 #[cfg(target_os = "linux")]
 use codewire_protected_store::ProtectedValue;
-use codewire_workload_secrets::{MAX_WORKLOAD_SECRET_VALUE_BYTES, validate_workload_secret_value};
+use codewire_workload_secrets::{
+    MAX_WORKLOAD_SECRET_VALUE_BYTES, ResolvedWorkloadSecretMetadata, WorkloadSecretSource,
+    validate_workload_secret_value,
+};
 use std::io::{BufRead as _, Read as _};
 use zeroize::Zeroizing;
 
@@ -32,14 +35,28 @@ pub(crate) struct SecretInventoryView {
     pub(crate) updated_at: String,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct SecretResolutionView {
+    pub(crate) placement: &'static str,
+    pub(crate) key: String,
+    pub(crate) source: &'static str,
+    pub(crate) overridden_sources: Vec<&'static str>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SecretPreviewIntent {
+    pub(crate) organization: bool,
+    pub(crate) project: Option<String>,
+    pub(crate) user: bool,
+    pub(crate) explicit_environment_keys: BTreeSet<String>,
+}
+
 pub(crate) async fn handle_secrets_command(
     globals: &Globals,
     args: SecretsArgs,
 ) -> anyhow::Result<()> {
     let placement = secret_placement(&args)?;
-    if placement == SecretPlacement::All && !matches!(args.command, SecretsCommand::List(_)) {
-        anyhow::bail!("--all-placements is available only for 'cw secrets list'");
-    }
+    validate_secret_command_placement(placement, &args.command)?;
     match placement {
         SecretPlacement::Platform => handle_platform_secrets_command(globals, args.command).await,
         SecretPlacement::Local => handle_local_secrets_command(args.command).await,
@@ -66,6 +83,16 @@ pub(crate) async fn handle_secrets_command(
             print_secret_inventory(&inventory, list.output)
         }
     }
+}
+
+fn validate_secret_command_placement(
+    placement: SecretPlacement,
+    command: &SecretsCommand,
+) -> anyhow::Result<()> {
+    if placement == SecretPlacement::All && !matches!(command, SecretsCommand::List(_)) {
+        anyhow::bail!("--all-placements is available only for 'cw secrets list'");
+    }
+    Ok(())
 }
 
 fn secret_placement(args: &SecretsArgs) -> anyhow::Result<SecretPlacement> {
@@ -127,11 +154,95 @@ async fn handle_local_secrets_command(command: SecretsCommand) -> anyhow::Result
             let inventory = local_secret_inventory_with_client(&mut client).await?;
             print_secret_inventory(&inventory, args.output)
         }
+        SecretsCommand::Preview(args) => {
+            let intent = load_secret_preview_intent(&args.file)?;
+            let secrets = client
+                .resolve_workload_secret_metadata(WorkloadSecretSelection {
+                    organization: intent.organization,
+                    project: intent.project,
+                    user: intent.user,
+                    explicit_environment_keys: intent.explicit_environment_keys,
+                })
+                .await
+                .context("preview local workload-secret resolution")?;
+            print_secret_resolution("local", &secrets, args.output)
+        }
         SecretsCommand::Organization { .. } => {
             anyhow::bail!("organization workload secrets are unsupported locally")
         }
         SecretsCommand::User { command } => local_user_command(&mut client, command).await,
         SecretsCommand::Project { command } => local_project_command(&mut client, command).await,
+    }
+}
+
+pub(crate) fn load_secret_preview_intent(path: &Path) -> anyhow::Result<SecretPreviewIntent> {
+    let file = fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let mut data = String::new();
+    file.take((codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1) as u64)
+        .read_to_string(&mut data)
+        .with_context(|| format!("read {}", path.display()))?;
+    let document = codewire_project::parse_project_yaml(&data)
+        .with_context(|| format!("parse {}", path.display()))?;
+    Ok(SecretPreviewIntent {
+        organization: document.spec.secrets.organization,
+        project: (!document.spec.secrets.project.is_empty())
+            .then_some(document.spec.secrets.project),
+        user: document.spec.secrets.user,
+        explicit_environment_keys: document.spec.environment.into_keys().collect(),
+    })
+}
+
+pub(crate) fn print_secret_resolution(
+    placement: &'static str,
+    secrets: &[ResolvedWorkloadSecretMetadata],
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let rows = secrets
+        .iter()
+        .map(|secret| SecretResolutionView {
+            placement,
+            key: secret.key.clone(),
+            source: workload_secret_source_label(secret.source),
+            overridden_sources: secret
+                .overridden_sources
+                .iter()
+                .copied()
+                .map(workload_secret_source_label)
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&rows)?),
+        OutputFormat::Text if rows.is_empty() => println!("No workload secrets selected."),
+        OutputFormat::Text => {
+            println!(
+                "{:<10} {:<32} {:<24} OVERRIDDEN",
+                "PLACEMENT", "KEY", "SOURCE"
+            );
+            for row in rows {
+                println!(
+                    "{:<10} {:<32} {:<24} {}",
+                    row.placement,
+                    row.key,
+                    row.source,
+                    if row.overridden_sources.is_empty() {
+                        "-".to_string()
+                    } else {
+                        row.overridden_sources.join(",")
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn workload_secret_source_label(source: WorkloadSecretSource) -> &'static str {
+    match source {
+        WorkloadSecretSource::Organization => "organization",
+        WorkloadSecretSource::Project => "project",
+        WorkloadSecretSource::User => "user",
+        WorkloadSecretSource::ExplicitEnvironment => "explicit_environment",
     }
 }
 
@@ -495,6 +606,38 @@ mod tests {
                 .is_err()
         );
         assert!(Cli::try_parse_from(["cw", "secrets", "--all-placements", "list"]).is_ok());
+        for placement in ["--local", "--platform"] {
+            let Command::Secrets(args) = Cli::try_parse_from([
+                "cw",
+                "secrets",
+                placement,
+                "preview",
+                "--file",
+                "project.yaml",
+                "--output",
+                "json",
+            ])
+            .unwrap()
+            .command
+            else {
+                panic!("expected secrets command")
+            };
+            let SecretsCommand::Preview(preview) = args.command else {
+                panic!("expected secret preview")
+            };
+            assert_eq!(preview.file, PathBuf::from("project.yaml"));
+            assert_eq!(preview.output, OutputFormat::Json);
+        }
+        let Command::Secrets(args) =
+            Cli::try_parse_from(["cw", "secrets", "--all-placements", "preview"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected secrets command")
+        };
+        let placement = secret_placement(&args).unwrap();
+        assert_eq!(placement, SecretPlacement::All);
+        assert!(validate_secret_command_placement(placement, &args.command).is_err());
     }
 
     #[test]
@@ -510,6 +653,51 @@ mod tests {
         let json = serde_json::to_string(&inventory).unwrap();
         assert!(json.contains("\"placement\":\"local\""));
         assert!(!json.contains("value"));
+    }
+
+    #[test]
+    fn secret_preview_loads_only_selectors_and_explicit_environment_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("codewire.yaml");
+        fs::write(
+            &path,
+            r#"
+secrets:
+  organization: true
+  project: development
+  user: true
+environment:
+  Z_TOKEN: synthetic-z
+  A_TOKEN: synthetic-a
+"#,
+        )
+        .unwrap();
+
+        let intent = load_secret_preview_intent(&path).unwrap();
+        assert!(intent.organization);
+        assert!(intent.user);
+        assert_eq!(intent.project.as_deref(), Some("development"));
+        assert_eq!(
+            intent
+                .explicit_environment_keys
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["A_TOKEN", "Z_TOKEN"]
+        );
+    }
+
+    #[test]
+    fn secret_preview_presentation_is_metadata_only() {
+        let rows = vec![SecretResolutionView {
+            placement: "platform",
+            key: "DATABASE_URL".into(),
+            source: "explicit_environment",
+            overridden_sources: vec!["organization", "project", "user"],
+        }];
+        let json = serde_json::to_value(rows).unwrap();
+        assert_eq!(json[0]["placement"], "platform");
+        assert_eq!(json[0]["source"], "explicit_environment");
+        assert!(json[0].get("value").is_none());
     }
 
     #[test]

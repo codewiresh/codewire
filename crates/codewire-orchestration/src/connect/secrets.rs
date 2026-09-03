@@ -16,15 +16,21 @@ use codewire_proto::codewire::v1::{
     DeleteSecretRequest, DeleteSecretResponse, DeleteUserSecretRequest, DeleteUserSecretResponse,
     ListProjectSecretsRequest, ListProjectSecretsResponse, ListSecretProjectsRequest,
     ListSecretProjectsResponse, ListSecretsRequest, ListSecretsResponse, ListUserSecretsRequest,
-    ListUserSecretsResponse, RenameProjectSecretRequest, RenameProjectSecretResponse,
-    RenameSecretRequest, RenameSecretResponse, RenameUserSecretRequest, RenameUserSecretResponse,
+    ListUserSecretsResponse, PreviewWorkloadSecretResolutionRequest,
+    PreviewWorkloadSecretResolutionResponse, RenameProjectSecretRequest,
+    RenameProjectSecretResponse, RenameSecretRequest, RenameSecretResponse,
+    RenameUserSecretRequest, RenameUserSecretResponse,
+    ResolvedWorkloadSecretMetadata as ProtoResolvedWorkloadSecretMetadata,
     SecretMetadata as ProtoSecretMetadata, SecretProject as ProtoSecretProject, SecretService,
     SetProjectSecretRequest, SetProjectSecretResponse, SetSecretRequest, SetSecretResponse,
-    SetUserSecretRequest, SetUserSecretResponse,
+    SetUserSecretRequest, SetUserSecretResponse, WorkloadSecretSource as ProtoWorkloadSecretSource,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
-use codewire_workload_secrets::{MAX_WORKLOAD_SECRET_VALUE_BYTES, validate_workload_secret_value};
+use codewire_workload_secrets::{
+    MAX_WORKLOAD_SECRET_VALUE_BYTES, ResolvedWorkloadSecretMetadata, WorkloadSecretSource,
+    validate_workload_secret_value,
+};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
@@ -35,11 +41,11 @@ use crate::api::secret_projects::{
 };
 use crate::api::secrets::{
     SecretMetadata, delete_secret_core, delete_user_secret_core, list_secrets_core,
-    list_user_secrets_core, rename_secret_core, rename_user_secret_core, set_secret_core,
-    set_user_secret_core,
+    list_user_secrets_core, preview_workload_secret_resolution_core, rename_secret_core,
+    rename_user_secret_core, set_secret_core, set_user_secret_core,
 };
 
-/// Registers all fifteen SecretService RPCs on their generated Connect routes.
+/// Registers every SecretService RPC on its generated Connect route.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(SecretConnectService { state }))
 }
@@ -337,6 +343,62 @@ impl SecretService for SecretConnectService {
         .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(RenameProjectSecretResponse::default())
     }
+
+    async fn preview_workload_secret_resolution(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, PreviewWorkloadSecretResolutionRequest>,
+    ) -> ServiceResult<PreviewWorkloadSecretResolutionResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let explicit_environment_keys = request
+            .explicit_environment_keys
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<Vec<_>>();
+        let secrets = preview_workload_secret_resolution_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.organization,
+            (!request.secret_project_id.is_empty()).then_some(request.secret_project_id),
+            request.user,
+            &explicit_environment_keys,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(PreviewWorkloadSecretResolutionResponse {
+            secrets: secrets
+                .into_iter()
+                .map(proto_resolved_workload_secret_metadata)
+                .collect(),
+            ..Default::default()
+        })
+    }
+}
+
+fn proto_resolved_workload_secret_metadata(
+    secret: ResolvedWorkloadSecretMetadata,
+) -> ProtoResolvedWorkloadSecretMetadata {
+    ProtoResolvedWorkloadSecretMetadata {
+        key: secret.key,
+        source: proto_workload_secret_source(secret.source).into(),
+        overridden_sources: secret
+            .overridden_sources
+            .into_iter()
+            .map(|source| proto_workload_secret_source(source).into())
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn proto_workload_secret_source(source: WorkloadSecretSource) -> ProtoWorkloadSecretSource {
+    match source {
+        WorkloadSecretSource::Organization => ProtoWorkloadSecretSource::Organization,
+        WorkloadSecretSource::Project => ProtoWorkloadSecretSource::Project,
+        WorkloadSecretSource::User => ProtoWorkloadSecretSource::User,
+        WorkloadSecretSource::ExplicitEnvironment => ProtoWorkloadSecretSource::ExplicitEnvironment,
+    }
 }
 
 fn validate_pagination(page_token: &str) -> AppResult<()> {
@@ -468,6 +530,38 @@ mod tests {
         assert!(optional_proto_timestamp("not-a-time").is_unset());
         assert!(optional_proto_timestamp("2026-07-18T04:00:00.123456Z").is_set());
         assert!(required_proto_timestamp("not-a-time").is_err());
+    }
+
+    #[test]
+    fn workload_secret_preview_mapping_contains_only_keys_and_precedence() {
+        let proto = proto_resolved_workload_secret_metadata(ResolvedWorkloadSecretMetadata {
+            key: "TOKEN".into(),
+            source: WorkloadSecretSource::ExplicitEnvironment,
+            overridden_sources: vec![
+                WorkloadSecretSource::Organization,
+                WorkloadSecretSource::Project,
+                WorkloadSecretSource::User,
+            ],
+        });
+        assert_eq!(
+            proto.source.as_known(),
+            Some(ProtoWorkloadSecretSource::ExplicitEnvironment)
+        );
+        assert_eq!(
+            proto
+                .overridden_sources
+                .iter()
+                .filter_map(|source| source.as_known())
+                .collect::<Vec<_>>(),
+            [
+                ProtoWorkloadSecretSource::Organization,
+                ProtoWorkloadSecretSource::Project,
+                ProtoWorkloadSecretSource::User,
+            ]
+        );
+        let json = serde_json::to_value(proto).unwrap();
+        assert_eq!(json["key"], "TOKEN");
+        assert!(json.get("value").is_none());
     }
 
     #[test]

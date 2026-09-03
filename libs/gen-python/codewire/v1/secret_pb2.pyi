@@ -2,12 +2,26 @@ import datetime
 
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from collections.abc import Iterable as _Iterable, Mapping as _Mapping
 from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
+
+class WorkloadSecretSource(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    WORKLOAD_SECRET_SOURCE_UNSPECIFIED: _ClassVar[WorkloadSecretSource]
+    WORKLOAD_SECRET_SOURCE_ORGANIZATION: _ClassVar[WorkloadSecretSource]
+    WORKLOAD_SECRET_SOURCE_PROJECT: _ClassVar[WorkloadSecretSource]
+    WORKLOAD_SECRET_SOURCE_USER: _ClassVar[WorkloadSecretSource]
+    WORKLOAD_SECRET_SOURCE_EXPLICIT_ENVIRONMENT: _ClassVar[WorkloadSecretSource]
+WORKLOAD_SECRET_SOURCE_UNSPECIFIED: WorkloadSecretSource
+WORKLOAD_SECRET_SOURCE_ORGANIZATION: WorkloadSecretSource
+WORKLOAD_SECRET_SOURCE_PROJECT: WorkloadSecretSource
+WORKLOAD_SECRET_SOURCE_USER: WorkloadSecretSource
+WORKLOAD_SECRET_SOURCE_EXPLICIT_ENVIRONMENT: WorkloadSecretSource
 
 class SecretMetadata(_message.Message):
     __slots__ = ("key", "created_at", "updated_at")
@@ -250,3 +264,33 @@ class RenameProjectSecretRequest(_message.Message):
 class RenameProjectSecretResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class PreviewWorkloadSecretResolutionRequest(_message.Message):
+    __slots__ = ("org_id", "organization", "secret_project_id", "user", "explicit_environment_keys")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ORGANIZATION_FIELD_NUMBER: _ClassVar[int]
+    SECRET_PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    USER_FIELD_NUMBER: _ClassVar[int]
+    EXPLICIT_ENVIRONMENT_KEYS_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    organization: bool
+    secret_project_id: str
+    user: bool
+    explicit_environment_keys: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, org_id: _Optional[str] = ..., organization: _Optional[bool] = ..., secret_project_id: _Optional[str] = ..., user: _Optional[bool] = ..., explicit_environment_keys: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class ResolvedWorkloadSecretMetadata(_message.Message):
+    __slots__ = ("key", "source", "overridden_sources")
+    KEY_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_FIELD_NUMBER: _ClassVar[int]
+    OVERRIDDEN_SOURCES_FIELD_NUMBER: _ClassVar[int]
+    key: str
+    source: WorkloadSecretSource
+    overridden_sources: _containers.RepeatedScalarFieldContainer[WorkloadSecretSource]
+    def __init__(self, key: _Optional[str] = ..., source: _Optional[_Union[WorkloadSecretSource, str]] = ..., overridden_sources: _Optional[_Iterable[_Union[WorkloadSecretSource, str]]] = ...) -> None: ...
+
+class PreviewWorkloadSecretResolutionResponse(_message.Message):
+    __slots__ = ("secrets",)
+    SECRETS_FIELD_NUMBER: _ClassVar[int]
+    secrets: _containers.RepeatedCompositeFieldContainer[ResolvedWorkloadSecretMetadata]
+    def __init__(self, secrets: _Optional[_Iterable[_Union[ResolvedWorkloadSecretMetadata, _Mapping]]] = ...) -> None: ...

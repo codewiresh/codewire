@@ -381,6 +381,31 @@ type SecretMetadata struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
+// WorkloadSecretSource names one source in workload-secret precedence order.
+type WorkloadSecretSource string
+
+const (
+	WorkloadSecretSourceOrganization        WorkloadSecretSource = "organization"
+	WorkloadSecretSourceProject             WorkloadSecretSource = "project"
+	WorkloadSecretSourceUser                WorkloadSecretSource = "user"
+	WorkloadSecretSourceExplicitEnvironment WorkloadSecretSource = "explicit_environment"
+)
+
+// WorkloadSecretPreviewInput selects the metadata sources to preview.
+type WorkloadSecretPreviewInput struct {
+	Organization            bool     `json:"organization,omitempty"`
+	SecretProjectID         string   `json:"secret_project_id,omitempty"`
+	User                    bool     `json:"user,omitempty"`
+	ExplicitEnvironmentKeys []string `json:"explicit_environment_keys,omitempty"`
+}
+
+// ResolvedWorkloadSecretMetadata describes one winning key without its value.
+type ResolvedWorkloadSecretMetadata struct {
+	Key               string                 `json:"key"`
+	Source            WorkloadSecretSource   `json:"source"`
+	OverriddenSources []WorkloadSecretSource `json:"overridden_sources,omitempty"`
+}
+
 // ListSecretsOutputBody holds organization or user secret metadata.
 type ListSecretsOutputBody struct {
 	Schema  *string           `json:"$schema,omitempty"`

@@ -26,7 +26,7 @@ pub struct SecretProject {
     pub created_at: String,
 }
 
-fn secret_project_path(org_id: &str, project_id: &str) -> String {
+pub(super) fn secret_project_path(org_id: &str, project_id: &str) -> String {
     format!("/projects/{org_id}/{project_id}")
 }
 
@@ -45,7 +45,11 @@ fn row_to_project(r: &sqlx::postgres::PgRow) -> Result<SecretProject, AppError> 
 
 /// Loads a project and verifies it belongs to `org_id` (404 on either miss),
 /// mirroring the Go `getSecretProject` + org-match guard.
-async fn get_project(state: &ApiState, project_id: &str, org_id: &str) -> AppResult<SecretProject> {
+pub(super) async fn get_project(
+    state: &ApiState,
+    project_id: &str,
+    org_id: &str,
+) -> AppResult<SecretProject> {
     let row = sqlx::query("SELECT id, org_id, name, created_at FROM secret_projects WHERE id = $1")
         .bind(project_id)
         .fetch_optional(&state.pool)

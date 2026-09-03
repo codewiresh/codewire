@@ -358,6 +358,33 @@ impl PostgresSecretStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|_| store_error("secret-metadata-query-failed"))?;
+        Self::metadata_rows(&context, rows)
+    }
+
+    pub async fn get_secret_metadata_at_path_bounded(
+        &self,
+        secret_path: &str,
+        maximum_rows: usize,
+    ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
+        let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
+        let maximum_rows = i64::try_from(maximum_rows)
+            .map_err(|_| store_error("secret-metadata-limit-invalid"))?;
+        let rows: Vec<SecretMetadataRow> = sqlx::query_as(
+            "SELECT key, scope, scope_id, created_at, updated_at \
+             FROM tenant_secrets WHERE path = $1 ORDER BY key LIMIT $2",
+        )
+        .bind(secret_path)
+        .bind(maximum_rows)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| store_error("secret-metadata-query-failed"))?;
+        Self::metadata_rows(&context, rows)
+    }
+
+    fn metadata_rows(
+        context: &DekContext,
+        rows: Vec<SecretMetadataRow>,
+    ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
         rows.into_iter()
             .map(|row| {
                 if row.scope != context.scope.as_str() || row.scope_id != context.scope_id {

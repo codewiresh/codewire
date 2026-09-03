@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .secret_pb2 import CreateSecretProjectRequest, CreateSecretProjectResponse, DeleteProjectSecretRequest, DeleteProjectSecretResponse, DeleteSecretProjectRequest, DeleteSecretProjectResponse, DeleteSecretRequest, DeleteSecretResponse, DeleteUserSecretRequest, DeleteUserSecretResponse, ListProjectSecretsRequest, ListProjectSecretsResponse, ListSecretProjectsRequest, ListSecretProjectsResponse, ListSecretsRequest, ListSecretsResponse, ListUserSecretsRequest, ListUserSecretsResponse, RenameProjectSecretRequest, RenameProjectSecretResponse, RenameSecretRequest, RenameSecretResponse, RenameUserSecretRequest, RenameUserSecretResponse, SetProjectSecretRequest, SetProjectSecretResponse, SetSecretRequest, SetSecretResponse, SetUserSecretRequest, SetUserSecretResponse
+from .secret_pb2 import CreateSecretProjectRequest, CreateSecretProjectResponse, DeleteProjectSecretRequest, DeleteProjectSecretResponse, DeleteSecretProjectRequest, DeleteSecretProjectResponse, DeleteSecretRequest, DeleteSecretResponse, DeleteUserSecretRequest, DeleteUserSecretResponse, ListProjectSecretsRequest, ListProjectSecretsResponse, ListSecretProjectsRequest, ListSecretProjectsResponse, ListSecretsRequest, ListSecretsResponse, ListUserSecretsRequest, ListUserSecretsResponse, PreviewWorkloadSecretResolutionRequest, PreviewWorkloadSecretResolutionResponse, RenameProjectSecretRequest, RenameProjectSecretResponse, RenameSecretRequest, RenameSecretResponse, RenameUserSecretRequest, RenameUserSecretResponse, SetProjectSecretRequest, SetProjectSecretResponse, SetSecretRequest, SetSecretResponse, SetUserSecretRequest, SetUserSecretResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -78,6 +78,9 @@ class SecretService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def rename_project_secret(self, request: RenameProjectSecretRequest, ctx: RequestContext[RenameProjectSecretRequest, RenameProjectSecretResponse]) -> RenameProjectSecretResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def preview_workload_secret_resolution(self, request: PreviewWorkloadSecretResolutionRequest, ctx: RequestContext[PreviewWorkloadSecretResolutionRequest, PreviewWorkloadSecretResolutionResponse]) -> PreviewWorkloadSecretResolutionResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -243,6 +246,16 @@ class SecretServiceASGIApplication(ConnectASGIApplication[SecretService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.rename_project_secret,
+                ),
+                "/codewire.v1.SecretService/PreviewWorkloadSecretResolution": Endpoint.unary(
+                    method=MethodInfo(
+                        name="PreviewWorkloadSecretResolution",
+                        service_name="codewire.v1.SecretService",
+                        input=PreviewWorkloadSecretResolutionRequest,
+                        output=PreviewWorkloadSecretResolutionResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.preview_workload_secret_resolution,
                 ),
             },
             interceptors=interceptors,
@@ -590,6 +603,28 @@ class SecretServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def preview_workload_secret_resolution(
+        self,
+        request: PreviewWorkloadSecretResolutionRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> PreviewWorkloadSecretResolutionResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="PreviewWorkloadSecretResolution",
+                service_name="codewire.v1.SecretService",
+                input=PreviewWorkloadSecretResolutionRequest,
+                output=PreviewWorkloadSecretResolutionResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
 class SecretServiceSync(Protocol):
     def list_secrets(self, request: ListSecretsRequest, ctx: RequestContext[ListSecretsRequest, ListSecretsResponse]) -> ListSecretsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -634,6 +669,9 @@ class SecretServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def rename_project_secret(self, request: RenameProjectSecretRequest, ctx: RequestContext[RenameProjectSecretRequest, RenameProjectSecretResponse]) -> RenameProjectSecretResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def preview_workload_secret_resolution(self, request: PreviewWorkloadSecretResolutionRequest, ctx: RequestContext[PreviewWorkloadSecretResolutionRequest, PreviewWorkloadSecretResolutionResponse]) -> PreviewWorkloadSecretResolutionResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -797,6 +835,16 @@ class SecretServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.rename_project_secret,
+                ),
+                "/codewire.v1.SecretService/PreviewWorkloadSecretResolution": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="PreviewWorkloadSecretResolution",
+                        service_name="codewire.v1.SecretService",
+                        input=PreviewWorkloadSecretResolutionRequest,
+                        output=PreviewWorkloadSecretResolutionResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.preview_workload_secret_resolution,
                 ),
             },
             interceptors=interceptors,
@@ -1128,4 +1176,25 @@ class SecretServiceClientSync(ConnectClientSync):
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+        )
+    def preview_workload_secret_resolution(
+        self,
+        request: PreviewWorkloadSecretResolutionRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> PreviewWorkloadSecretResolutionResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="PreviewWorkloadSecretResolution",
+                service_name="codewire.v1.SecretService",
+                input=PreviewWorkloadSecretResolutionRequest,
+                output=PreviewWorkloadSecretResolutionResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
         )

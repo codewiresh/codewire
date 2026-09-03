@@ -31,6 +31,57 @@ const ENTRY_COUNT_OFFSET: usize = 20;
 const RESERVED_OFFSET: usize = 24;
 pub const WORKLOAD_SECRET_RUNTIME_NAMESPACE: &str = "codewire/workload-secrets-v1";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WorkloadSecretSource {
+    Organization,
+    Project,
+    User,
+    ExplicitEnvironment,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedWorkloadSecretMetadata {
+    pub key: String,
+    pub source: WorkloadSecretSource,
+    pub overridden_sources: Vec<WorkloadSecretSource>,
+}
+
+/// Resolves key-only source metadata supplied from lowest to highest precedence.
+pub fn resolve_workload_secret_metadata<'a>(
+    source_keys: impl IntoIterator<Item = (WorkloadSecretSource, &'a str)>,
+) -> Result<Vec<ResolvedWorkloadSecretMetadata>, WorkloadSecretCodecError> {
+    let mut sources = BTreeMap::<String, Vec<WorkloadSecretSource>>::new();
+    let mut previous_source = None;
+    for (source, key) in source_keys {
+        if previous_source.is_some_and(|previous| source < previous) {
+            return Err(WorkloadSecretCodecError::NonCanonicalOrdering);
+        }
+        previous_source = Some(source);
+        validate_workload_secret_metadata_key(key)?;
+        let entry = sources.entry(key.to_owned()).or_default();
+        if entry.last() == Some(&source) {
+            return Err(WorkloadSecretCodecError::NonCanonicalOrdering);
+        }
+        entry.push(source);
+        if sources.len() > MAX_WORKLOAD_SECRETS {
+            return Err(WorkloadSecretCodecError::InvalidEntryCount);
+        }
+    }
+    sources
+        .into_iter()
+        .map(|(key, mut ordered)| {
+            let source = ordered
+                .pop()
+                .ok_or(WorkloadSecretCodecError::InvalidEntryCount)?;
+            Ok(ResolvedWorkloadSecretMetadata {
+                key,
+                source,
+                overridden_sources: ordered,
+            })
+        })
+        .collect()
+}
+
 pub fn workload_secret_delivery_relative_path(
     environment_id: Uuid,
     generation: u64,
@@ -156,7 +207,7 @@ pub fn encode_workload_secrets<'a>(
     let mut previous = None;
     let mut payload_len = 0_usize;
     for (key, value) in &entries {
-        validate_key(key)?;
+        validate_workload_secret_key(key)?;
         validate_workload_secret_value(value)?;
         if previous.is_some_and(|previous| previous >= *key) {
             return Err(WorkloadSecretCodecError::NonCanonicalOrdering);
@@ -270,7 +321,7 @@ pub fn decode_workload_secrets(
         let key = std::str::from_utf8(&bytes[offset..key_end])
             .map_err(|_| WorkloadSecretCodecError::InvalidKey)?
             .to_owned();
-        validate_key(&key)?;
+        validate_workload_secret_key(&key)?;
         if previous_key
             .as_ref()
             .is_some_and(|previous| previous >= &key)
@@ -298,7 +349,8 @@ pub fn decode_workload_secrets(
     Ok(DecodedWorkloadSecrets { entries })
 }
 
-fn validate_key(key: &str) -> Result<(), WorkloadSecretCodecError> {
+/// Validates one canonical environment-style workload-secret key.
+pub fn validate_workload_secret_key(key: &str) -> Result<(), WorkloadSecretCodecError> {
     let mut bytes = key.bytes();
     if key.is_empty()
         || key.len() > MAX_WORKLOAD_SECRET_KEY_BYTES
@@ -306,6 +358,22 @@ fn validate_key(key: &str) -> Result<(), WorkloadSecretCodecError> {
             .next()
             .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
         || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(WorkloadSecretCodecError::InvalidKey);
+    }
+    Ok(())
+}
+
+/// Validates key-only resolution metadata across legacy platform and local
+/// sources. Platform storage historically permits an ASCII digit first;
+/// local delivery retains the stricter [`validate_workload_secret_key`]
+/// grammar before values can be encoded.
+pub fn validate_workload_secret_metadata_key(key: &str) -> Result<(), WorkloadSecretCodecError> {
+    if key.is_empty()
+        || key.len() > MAX_WORKLOAD_SECRET_KEY_BYTES
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     {
         return Err(WorkloadSecretCodecError::InvalidKey);
     }
@@ -440,6 +508,69 @@ mod tests {
         );
         assert!(
             validate_workload_secret_value(&vec![b'x'; MAX_WORKLOAD_SECRET_VALUE_BYTES + 1])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn metadata_resolution_is_sorted_bounded_and_uses_last_source_as_winner() {
+        let inputs = [
+            (WorkloadSecretSource::Organization, "SHARED"),
+            (WorkloadSecretSource::Project, "PROJECT_ONLY"),
+            (WorkloadSecretSource::Project, "SHARED"),
+            (WorkloadSecretSource::User, "SHARED"),
+            (WorkloadSecretSource::ExplicitEnvironment, "EXPLICIT"),
+            (WorkloadSecretSource::ExplicitEnvironment, "SHARED"),
+        ];
+        assert_eq!(
+            resolve_workload_secret_metadata(inputs).unwrap(),
+            vec![
+                ResolvedWorkloadSecretMetadata {
+                    key: "EXPLICIT".into(),
+                    source: WorkloadSecretSource::ExplicitEnvironment,
+                    overridden_sources: vec![],
+                },
+                ResolvedWorkloadSecretMetadata {
+                    key: "PROJECT_ONLY".into(),
+                    source: WorkloadSecretSource::Project,
+                    overridden_sources: vec![],
+                },
+                ResolvedWorkloadSecretMetadata {
+                    key: "SHARED".into(),
+                    source: WorkloadSecretSource::ExplicitEnvironment,
+                    overridden_sources: vec![
+                        WorkloadSecretSource::Organization,
+                        WorkloadSecretSource::Project,
+                        WorkloadSecretSource::User,
+                    ],
+                },
+            ]
+        );
+        assert!(
+            resolve_workload_secret_metadata([
+                (WorkloadSecretSource::User, "SHARED"),
+                (WorkloadSecretSource::Project, "SHARED"),
+            ])
+            .is_err()
+        );
+        assert!(
+            resolve_workload_secret_metadata([
+                (WorkloadSecretSource::User, "SHARED"),
+                (WorkloadSecretSource::User, "SHARED"),
+            ])
+            .is_err()
+        );
+        assert_eq!(
+            resolve_workload_secret_metadata([(
+                WorkloadSecretSource::Organization,
+                "1LEGACY_PLATFORM_KEY",
+            )])
+            .unwrap()[0]
+                .key,
+            "1LEGACY_PLATFORM_KEY"
+        );
+        assert!(
+            resolve_workload_secret_metadata([(WorkloadSecretSource::Organization, "unsafe/key",)])
                 .is_err()
         );
     }

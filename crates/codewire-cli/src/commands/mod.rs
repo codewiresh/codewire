@@ -1321,6 +1321,8 @@ pub(crate) struct PresetRmArgs {
 pub(crate) enum SecretsCommand {
     #[command(about = "List workload-secret metadata")]
     List(SecretInventoryListArgs),
+    #[command(about = "Preview key/source resolution from codewire.yaml")]
+    Preview(SecretPreviewArgs),
     #[command(about = "Manage user-scoped secrets")]
     User {
         #[command(subcommand)]
@@ -1352,6 +1354,18 @@ pub(crate) struct SecretsArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct SecretInventoryListArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SecretPreviewArgs {
+    #[arg(
+        long,
+        default_value = "codewire.yaml",
+        help = "Project document to preview"
+    )]
+    pub(crate) file: PathBuf,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
 }

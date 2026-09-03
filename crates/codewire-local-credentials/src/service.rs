@@ -1494,6 +1494,7 @@ fn workload_secret_to_proto(secret: WorkloadSecretMetadata) -> v1::WorkloadSecre
 
 fn workload_secret_source_to_proto(source: WorkloadSecretSource) -> v1::WorkloadSecretSource {
     match source {
+        WorkloadSecretSource::Organization => v1::WorkloadSecretSource::Organization,
         WorkloadSecretSource::Project => v1::WorkloadSecretSource::Project,
         WorkloadSecretSource::User => v1::WorkloadSecretSource::User,
         WorkloadSecretSource::ExplicitEnvironment => v1::WorkloadSecretSource::ExplicitEnvironment,

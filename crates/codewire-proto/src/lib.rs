@@ -45,11 +45,12 @@ mod tests {
         MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshNetwork, MeshNode, MeshNodeEnrollment,
         ORGANIZATION_SERVICE_SERVICE_NAME, OrgMember, OrgRole, Organization,
         OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME, PRESET_SERVICE_SERVICE_NAME, Port,
-        PortAccess, Preset, ProjectAccessBinding, ProjectAgents, ProjectResources,
-        ProjectSecretBindings, ProjectSkillSelection, ProjectSkillSource, ProjectSpec,
-        RedeemMeshNodeEnrollmentResponse, RepoEntry, SECRET_SERVICE_SERVICE_NAME, SecretMetadata,
-        SetProjectSecretRequest, SetSecretRequest, SetUserSecretRequest, SetupAgent, SetupConfig,
-        UpdatePresetRequest,
+        PortAccess, Preset, PreviewWorkloadSecretResolutionResponse, ProjectAccessBinding,
+        ProjectAgents, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
+        ProjectSkillSource, ProjectSpec, RedeemMeshNodeEnrollmentResponse, RepoEntry,
+        ResolvedWorkloadSecretMetadata, SECRET_SERVICE_PREVIEW_WORKLOAD_SECRET_RESOLUTION_SPEC,
+        SECRET_SERVICE_SERVICE_NAME, SecretMetadata, SetProjectSecretRequest, SetSecretRequest,
+        SetUserSecretRequest, SetupAgent, SetupConfig, UpdatePresetRequest, WorkloadSecretSource,
     };
 
     #[test]
@@ -674,6 +675,48 @@ mod tests {
             assert!(!rendered.contains(MARKER), "secret leaked through Debug");
             assert!(rendered.contains("[REDACTED]"));
         }
+    }
+
+    #[test]
+    fn workload_secret_preview_contract_is_metadata_only_and_no_side_effects() {
+        assert_eq!(
+            SECRET_SERVICE_PREVIEW_WORKLOAD_SECRET_RESOLUTION_SPEC.procedure,
+            "/codewire.v1.SecretService/PreviewWorkloadSecretResolution"
+        );
+        assert_eq!(
+            SECRET_SERVICE_PREVIEW_WORKLOAD_SECRET_RESOLUTION_SPEC.idempotency_level,
+            connectrpc::IdempotencyLevel::NoSideEffects
+        );
+
+        let response = PreviewWorkloadSecretResolutionResponse {
+            secrets: vec![ResolvedWorkloadSecretMetadata {
+                key: "DATABASE_URL".into(),
+                source: WorkloadSecretSource::ExplicitEnvironment.into(),
+                overridden_sources: vec![
+                    WorkloadSecretSource::Organization.into(),
+                    WorkloadSecretSource::Project.into(),
+                    WorkloadSecretSource::User.into(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(response).expect("workload secret preview proto3 JSON");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "secrets": [{
+                    "key": "DATABASE_URL",
+                    "source": "WORKLOAD_SECRET_SOURCE_EXPLICIT_ENVIRONMENT",
+                    "overriddenSources": [
+                        "WORKLOAD_SECRET_SOURCE_ORGANIZATION",
+                        "WORKLOAD_SECRET_SOURCE_PROJECT",
+                        "WORKLOAD_SECRET_SOURCE_USER"
+                    ]
+                }]
+            })
+        );
+        assert!(json["secrets"][0].get("value").is_none());
     }
 
     #[test]

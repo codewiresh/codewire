@@ -1346,6 +1346,7 @@ fn resolved_workload_secret_from_proto(
 
 fn workload_secret_source_from_proto(value: i32) -> Result<WorkloadSecretSource, Status> {
     match v1::WorkloadSecretSource::try_from(value) {
+        Ok(v1::WorkloadSecretSource::Organization) => Ok(WorkloadSecretSource::Organization),
         Ok(v1::WorkloadSecretSource::Project) => Ok(WorkloadSecretSource::Project),
         Ok(v1::WorkloadSecretSource::User) => Ok(WorkloadSecretSource::User),
         Ok(v1::WorkloadSecretSource::ExplicitEnvironment) => {

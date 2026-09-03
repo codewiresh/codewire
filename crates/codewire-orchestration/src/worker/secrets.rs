@@ -11,6 +11,10 @@ use std::fmt;
 use serde::Deserialize;
 use sqlx::PgPool;
 
+/// Legacy SSH material is consumed by setup's dedicated SSH path and must
+/// never be resolved into the workload environment from user secrets.
+pub const SSH_PRIVATE_KEY_SECRET_KEY: &str = "SSH_PRIVATE_KEY";
+
 /// Mirrors `worker.StoredSecret`. `created_at`/`updated_at` are surfaced by
 /// the secrets-list endpoint (RFC3339 strings; empty when the backend omits
 /// them); the env-setup flow only reads `key`/`value`.
@@ -110,6 +114,19 @@ impl SecretStore {
         secret_path: &str,
     ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
         self.0.get_secret_metadata_at_path(secret_path).await
+    }
+
+    /// Lists at most `maximum_rows` keys and timestamps without unwrapping a
+    /// DEK. Preview callers request one extra row to detect an oversized
+    /// source without materializing the full scope.
+    pub async fn get_secret_metadata_at_path_bounded(
+        &self,
+        secret_path: &str,
+        maximum_rows: usize,
+    ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
+        self.0
+            .get_secret_metadata_at_path_bounded(secret_path, maximum_rows)
+            .await
     }
 
     /// Mirrors `GetAllSecretsAtPath`.

@@ -1,5 +1,9 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use codewire_client::{self as rpc, ClientConfig, CodewireClient};
+use codewire_workload_secrets::{
+    MAX_WORKLOAD_SECRETS, ResolvedWorkloadSecretMetadata, WorkloadSecretSource,
+    validate_workload_secret_metadata_key,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::CLI_VERSION;
@@ -326,6 +330,85 @@ impl SecretClient {
             .map_err(display_client_error)?;
         Ok(())
     }
+
+    pub async fn preview_workload_secret_resolution(
+        &self,
+        org_id: &str,
+        organization: bool,
+        secret_project_id: Option<&str>,
+        user: bool,
+        explicit_environment_keys: impl IntoIterator<Item = String>,
+    ) -> anyhow::Result<Vec<ResolvedWorkloadSecretMetadata>> {
+        let response = self
+            .inner
+            .preview_workload_secret_resolution(rpc::PreviewWorkloadSecretResolutionRequest {
+                org_id: org_id.to_string(),
+                organization,
+                secret_project_id: secret_project_id.unwrap_or_default().to_string(),
+                user,
+                explicit_environment_keys: explicit_environment_keys.into_iter().collect(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        validate_preview_response(response)
+    }
+}
+
+fn validate_preview_response(
+    response: rpc::PreviewWorkloadSecretResolutionResponse,
+) -> anyhow::Result<Vec<ResolvedWorkloadSecretMetadata>> {
+    if response.secrets.len() > MAX_WORKLOAD_SECRETS {
+        anyhow::bail!("platform returned invalid workload-secret preview metadata");
+    }
+    let mut previous_key: Option<&str> = None;
+    let mut secrets = Vec::with_capacity(response.secrets.len());
+    for secret in &response.secrets {
+        validate_workload_secret_metadata_key(&secret.key).map_err(|_| {
+            anyhow::anyhow!("platform returned invalid workload-secret preview metadata")
+        })?;
+        if previous_key.is_some_and(|previous| previous >= secret.key.as_str()) {
+            anyhow::bail!("platform returned invalid workload-secret preview metadata");
+        }
+        previous_key = Some(&secret.key);
+        let source = workload_secret_source(secret.source.as_known())?;
+        let overridden_sources = secret
+            .overridden_sources
+            .iter()
+            .map(|source| workload_secret_source(source.as_known()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if overridden_sources
+            .windows(2)
+            .any(|sources| sources[0] >= sources[1])
+            || overridden_sources
+                .iter()
+                .any(|overridden| *overridden >= source)
+        {
+            anyhow::bail!("platform returned invalid workload-secret preview metadata");
+        }
+        secrets.push(ResolvedWorkloadSecretMetadata {
+            key: secret.key.clone(),
+            source,
+            overridden_sources,
+        });
+    }
+    Ok(secrets)
+}
+
+fn workload_secret_source(
+    source: Option<rpc::WorkloadSecretSource>,
+) -> anyhow::Result<WorkloadSecretSource> {
+    match source {
+        Some(rpc::WorkloadSecretSource::Organization) => Ok(WorkloadSecretSource::Organization),
+        Some(rpc::WorkloadSecretSource::Project) => Ok(WorkloadSecretSource::Project),
+        Some(rpc::WorkloadSecretSource::User) => Ok(WorkloadSecretSource::User),
+        Some(rpc::WorkloadSecretSource::ExplicitEnvironment) => {
+            Ok(WorkloadSecretSource::ExplicitEnvironment)
+        }
+        Some(rpc::WorkloadSecretSource::Unspecified) | None => {
+            anyhow::bail!("platform returned invalid workload-secret preview metadata")
+        }
+    }
 }
 
 fn legacy_secret_metadata(value: rpc::SecretMetadata) -> SecretMetadata {
@@ -445,6 +528,71 @@ mod tests {
         assert!(project_json.get("secret_count").is_none());
     }
 
+    #[test]
+    fn preview_response_validation_accepts_canonical_metadata_only_results() {
+        let response = rpc::PreviewWorkloadSecretResolutionResponse {
+            secrets: vec![rpc::ResolvedWorkloadSecretMetadata {
+                key: "TOKEN".into(),
+                source: rpc::WorkloadSecretSource::User.into(),
+                overridden_sources: vec![
+                    rpc::WorkloadSecretSource::Organization.into(),
+                    rpc::WorkloadSecretSource::Project.into(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_preview_response(response).unwrap(),
+            vec![ResolvedWorkloadSecretMetadata {
+                key: "TOKEN".into(),
+                source: WorkloadSecretSource::User,
+                overridden_sources: vec![
+                    WorkloadSecretSource::Organization,
+                    WorkloadSecretSource::Project,
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn preview_response_validation_rejects_unknown_or_noncanonical_metadata() {
+        let secret = |key: &str, source: rpc::EnumValue<rpc::WorkloadSecretSource>| {
+            rpc::ResolvedWorkloadSecretMetadata {
+                key: key.into(),
+                source,
+                ..Default::default()
+            }
+        };
+        for response in [
+            rpc::PreviewWorkloadSecretResolutionResponse {
+                secrets: vec![secret("TOKEN", rpc::EnumValue::Unknown(99))],
+                ..Default::default()
+            },
+            rpc::PreviewWorkloadSecretResolutionResponse {
+                secrets: vec![
+                    secret("TOKEN", rpc::WorkloadSecretSource::User.into()),
+                    secret(
+                        "TOKEN",
+                        rpc::WorkloadSecretSource::ExplicitEnvironment.into(),
+                    ),
+                ],
+                ..Default::default()
+            },
+            rpc::PreviewWorkloadSecretResolutionResponse {
+                secrets: vec![rpc::ResolvedWorkloadSecretMetadata {
+                    key: "TOKEN".into(),
+                    source: rpc::WorkloadSecretSource::Project.into(),
+                    overridden_sources: vec![rpc::WorkloadSecretSource::User.into()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_preview_response(response).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn secret_lists_follow_every_page_token() {
         let server = MockServer::start().await;
@@ -536,6 +684,36 @@ mod tests {
             .mount(&server)
             .await;
 
+        Mock::given(method("POST"))
+            .and(path(
+                "/codewire.v1.SecretService/PreviewWorkloadSecretResolution",
+            ))
+            .respond_with(|request: &wiremock::Request| {
+                let mut body = request.body.as_slice();
+                let request = rpc::PreviewWorkloadSecretResolutionRequest::decode(&mut body)
+                    .expect("decode workload-secret preview request");
+                assert_eq!(request.org_id, "org_123");
+                assert!(request.organization);
+                assert_eq!(request.secret_project_id, "sp_123");
+                assert!(request.user);
+                assert_eq!(request.explicit_environment_keys, ["EXPLICIT"]);
+                let response = rpc::PreviewWorkloadSecretResolutionResponse {
+                    secrets: vec![rpc::ResolvedWorkloadSecretMetadata {
+                        key: "EXPLICIT".into(),
+                        source: rpc::WorkloadSecretSource::ExplicitEnvironment.into(),
+                        overridden_sources: vec![rpc::WorkloadSecretSource::User.into()],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(response.encode_to_vec())
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
         let client = SecretClient::new(&ResolvedPlatformConfig::static_token(
             server.uri(),
             "test-token",
@@ -573,6 +751,23 @@ mod tests {
                 .map(|secret| secret.key.as_str())
                 .collect::<Vec<_>>(),
             ["PROJECT_0", "PROJECT_1"]
+        );
+        assert_eq!(
+            client
+                .preview_workload_secret_resolution(
+                    "org_123",
+                    true,
+                    Some("sp_123"),
+                    true,
+                    ["EXPLICIT".to_string()],
+                )
+                .await
+                .expect("preview workload-secret resolution"),
+            vec![ResolvedWorkloadSecretMetadata {
+                key: "EXPLICIT".into(),
+                source: WorkloadSecretSource::ExplicitEnvironment,
+                overridden_sources: vec![WorkloadSecretSource::User],
+            }]
         );
     }
 }
