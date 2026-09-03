@@ -41,6 +41,7 @@ SOURCE_CONFIG_SHA256=''
 HOST_PORT=''
 MESH_PORT=''
 DERP_PORT=''
+DOCKER_HOST_PORT=''
 MESH_NETWORK='native-smoke-network'
 MESH_ORGANIZATION_ID=''
 GITEA_COMMIT='bcbae548ab2f4f0e407068aa8717cec341084d7a'
@@ -48,6 +49,7 @@ GITEA_README_SHA256='d4911db7bc817528fbcbaaf39e76851700084b65494dac1e29afb997867
 GITHUB_COMMIT='93f68ba4abc9f6e222481265b9b759e71d332575'
 GITHUB_README_SHA256='3661bce99f8eba5e48077eeddb4840f4404c1ceafbf200b9e8470bc7b4f22e50'
 WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:fa5d2fa61bb03b0e9181915b57ce5f2f8fa053eec8b7c6a950ecaadf93bc3645'
+DOCKER_PUBLIC_IMAGE='ghcr.io/stargz-containers/alpine@sha256:237e28761b771d41d0b841bacfe39f4a49d30b1c8dfecc90aef09b68d86ebc99'
 SCRATCH_MOUNT_OPTIONS=''
 NAME='native-smoke'
 COMMAND_INDEX=0
@@ -75,6 +77,7 @@ KEYRING_DBUS_ADDRESS=''
 KEYRING_DBUS_PID=''
 KEYRING_DAEMON_PID=''
 CREATE_ACCESS_ARGS=()
+CREATE_DOCKER_ARGS=()
 DIRECT_SHARE_PIDS=()
 
 usage() {
@@ -368,19 +371,20 @@ for offset in range(span):
             listener.close()
         continue
     listeners.append(listener)
-    if len(listeners) == 3:
+    if len(listeners) == 4:
         break
-if len(listeners) != 3:
-    raise SystemExit("fewer than three loopback ports are free in the native smoke range")
+if len(listeners) != 4:
+    raise SystemExit("fewer than four loopback ports are free in the native smoke range")
 for listener in listeners:
     print(listener.getsockname()[1])
 PY
 )
-[[ ${#LOCAL_PORTS[@]} -eq 3 ]] || die 'failed to select three loopback smoke ports'
+[[ ${#LOCAL_PORTS[@]} -eq 4 ]] || die 'failed to select four loopback smoke ports'
 HOST_PORT="${LOCAL_PORTS[0]}"
 MESH_PORT="${LOCAL_PORTS[1]}"
 DERP_PORT="${LOCAL_PORTS[2]}"
-for port in "$HOST_PORT" "$MESH_PORT" "$DERP_PORT"; do
+DOCKER_HOST_PORT="${LOCAL_PORTS[3]}"
+for port in "$HOST_PORT" "$MESH_PORT" "$DERP_PORT" "$DOCKER_HOST_PORT"; do
   [[ "$port" =~ ^[0-9]+$ ]] || die 'failed to select a loopback smoke port'
 done
 MOUNT_SOURCE="$SMOKE_ROOT/m"
@@ -390,6 +394,71 @@ printf 'hidden copy mount content\n' >"$MOUNT_SOURCE/.hidden"
 printf 'nested copy mount content\n' >"$MOUNT_SOURCE/nested/file.txt"
 printf '#!/bin/sh\nprintf "copy-mount-executable-ok\\n"\n' >"$MOUNT_SOURCE/tool.sh"
 chmod 0755 "$MOUNT_SOURCE/tool.sh"
+cat >"$MOUNT_SOURCE/docker-smoke.sh" <<'DOCKER_SMOKE'
+#!/bin/sh
+set -eu
+
+host_port="$1"
+public_image="$2"
+root=/workspace/docker-smoke
+context="$root/context"
+rm -rf -- "$root"
+mkdir -p "$context"
+cp /run/codewire-runtime/init "$context/init"
+chmod 0755 "$context/init"
+cat >"$context/Dockerfile" <<'DOCKERFILE'
+FROM scratch
+COPY init /init
+ENTRYPOINT ["/init", "docker-fixture"]
+DOCKERFILE
+cat >"$root/compose.yaml" <<'COMPOSE'
+services:
+  fixture:
+    image: codewire-native-smoke:1913
+COMPOSE
+
+test -S /var/run/docker.sock
+test "$(stat -Lc '%u:%g:%a' /var/run/docker.sock)" = "0:$(id -g):660"
+test ! -S /run/containerd/containerd.sock
+test "$(docker info --format '{{.DockerRootDir}}|{{.Driver}}')" = '/var/lib/docker|overlay2'
+docker version >/dev/null
+docker compose version >/dev/null
+docker build --network=none --quiet -t codewire-native-smoke:1913 "$context" >/dev/null
+test "$(docker run --rm codewire-native-smoke:1913 emit docker-run-ok)" = docker-run-ok
+test "$(docker run --rm --privileged -v /:/host:ro codewire-native-smoke:1913 assert-boundary)" = docker-privileged-boundary-ok
+test "$(docker compose -p codewire-native-smoke -f "$root/compose.yaml" run --rm fixture emit docker-compose-ok)" = docker-compose-ok
+docker volume create codewire-native-smoke-volume >/dev/null
+docker run --rm -v codewire-native-smoke-volume:/data codewire-native-smoke:1913 \
+  write-volume generation-one
+docker run -d --name codewire-native-smoke-port -p "${host_port}:8080" \
+  codewire-native-smoke:1913 serve 8080 >/dev/null
+for attempt in $(seq 1 100); do
+  if response="$(curl -fsS "http://127.0.0.1:${host_port}/")" &&
+     test "$response" = docker-port-local; then
+    break
+  fi
+  test "$attempt" -lt 100 || exit 91
+  sleep 0.05
+done
+docker pull "$public_image" >/dev/null
+docker image inspect "$public_image" >/dev/null
+docker image rm "$public_image" >/dev/null
+if docker pull ghcr.io/codewiresh/private-native-docker-smoke:1913 \
+  >"$root/private-pull.stdout" 2>"$root/private-pull.stderr"; then
+  exit 92
+fi
+test -s "$root/private-pull.stderr"
+rm -f "$root/private-pull.stdout" "$root/private-pull.stderr"
+mkdir -p "$HOME/.docker"
+chmod 0700 "$HOME/.docker"
+auth="$(printf '%s' 'synthetic-user:synthetic-token' | base64 | tr -d '\n')"
+printf '{"auths":{"registry.invalid":{"auth":"%s"}}}\n' "$auth" >"$HOME/.docker/config.json"
+chmod 0600 "$HOME/.docker/config.json"
+unset auth
+printf '%s\n' docker-build-run-compose-ok docker-public-private-policy-ok \
+  docker-user-auth-visible-ok docker-vm-port-local-ok docker-privileged-boundary-ok
+DOCKER_SMOKE
+chmod 0755 "$MOUNT_SOURCE/docker-smoke.sh"
 ln "$MOUNT_SOURCE/data.txt" "$MOUNT_SOURCE/hardlink.txt"
 ln -s nested/file.txt "$MOUNT_SOURCE/link.txt"
 REPOSITORY_SKILL_SOURCE="$MOUNT_SOURCE/.agents/skills/repo-smoke"
@@ -557,6 +626,19 @@ run_cw_expect_failure() {
   LAST_STDERR="$stderr_file"
 }
 
+run_cw_disruptive() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if cw_isolated "$@" >"$stdout_file" 2>"$stderr_file"; then
+    :
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  LAST_STDOUT="$stdout_file"
+  LAST_STDERR="$stderr_file"
+}
+
 start_smoke_mesh() {
   run_cw mesh up \
     --binary "$MESH_BIN" \
@@ -612,6 +694,24 @@ run_public_data_smoke() {
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   [[ "$(cat "$stdout_file")" == 'codewire-local-public-data-smoke: PASS' ]] ||
     die 'public Exec/File data-plane smoke receipt drifted'
+}
+
+run_docker_persistence_smoke() {
+  local marker="$1"
+  run_cw run --no-tty -- /bin/sh -c '
+    set -eu
+    test "$(docker info --format "{{.DockerRootDir}}|{{.Driver}}")" = "/var/lib/docker|overlay2"
+    docker image inspect codewire-native-smoke:1913 >/dev/null
+    test "$(docker run --rm -v codewire-native-smoke-volume:/data codewire-native-smoke:1913 read-volume)" = generation-one
+    node -e "
+      const fs = require(\"node:fs\");
+      const config = JSON.parse(fs.readFileSync(process.env.HOME + \"/.docker/config.json\", \"utf8\"));
+      const auth = config.auths?.[\"registry.invalid\"]?.auth;
+      process.exit(Buffer.from(auth ?? \"\", \"base64\").toString(\"utf8\") === \"synthetic-user:synthetic-token\" ? 0 : 1);
+    "
+    printf "%s\n" "$1"
+  ' docker-persistence "$marker"
+  rg -qxF "$marker" "$LAST_STDOUT" || die "Docker persistence marker drifted: $marker"
 }
 
 run_codex_credential_bridge_smoke() {
@@ -1556,13 +1656,17 @@ fi
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'creating a broker-bound 2-vCPU, 16-GiB native environment'
+  CREATE_DOCKER_ARGS=(--no-docker)
+  EXPECTED_OWNED_OBJECT_COUNT=6
 else
   log 'creating account-free 2-vCPU, 16-GiB native environment'
+  CREATE_DOCKER_ARGS=(--docker-disk 1Gi)
+  EXPECTED_OWNED_OBJECT_COUNT=7
 fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
 run_cw env create --local --name "$NAME" --cpu 2 --memory 16GB \
-  --path "$WORKSPACE" "${CREATE_ACCESS_ARGS[@]}" --output json
+  --path "$WORKSPACE" "${CREATE_ACCESS_ARGS[@]}" "${CREATE_DOCKER_ARGS[@]}" --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
@@ -1583,6 +1687,13 @@ jq -e --arg listen "127.0.0.1:$HOST_PORT" --arg network "$MESH_NETWORK" '
   .ports == [{"listen": $listen, "guest_port": 3000}] and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  jq -e 'has("docker_disk") | not' "$LAST_STDOUT" >/dev/null ||
+    die 'Docker-disabled broker environment metadata drifted'
+else
+  jq -e '.docker_disk == "1Gi"' "$LAST_STDOUT" >/dev/null ||
+    die 'native Docker disk metadata drifted'
+fi
 INITIAL_SKILL_SNAPSHOT="$(jq -er '.skill_snapshot | select(test("^[0-9a-f]{64}$"))' "$LAST_STDOUT")" ||
   die 'created native environment omitted its immutable skill snapshot identity'
 rg -qF 'direct mounts let guest root inspect every file' "$LAST_STDERR" ||
@@ -1630,11 +1741,11 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:9:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:10:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
-[[ "$(native_database_value ownership)" == '64:6' ]] ||
+[[ "$(native_database_value ownership)" == "64:$EXPECTED_OWNED_OBJECT_COUNT" ]] ||
   die 'native artifact generation or owned-object manifest was not recorded'
 if ! ORIGINAL_ARTIFACT_GENERATION="$(native_database_value active_artifact_generation)"; then
   die 'active runtime artifact generation is missing'
@@ -1920,8 +2031,71 @@ MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 15000000 && "$MEMORY_KIB" -le 17500000 ]] ||
   die "guest MemTotal is not consistent with 16 GiB: ${MEMORY_KIB:-missing} KiB"
 
+DOCKER_DISK_PATH="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/docker.raw"
+[[ -f "$DOCKER_DISK_PATH" && ! -L "$DOCKER_DISK_PATH" ]] ||
+  die 'dedicated Docker data disk is not an exact regular file'
+[[ "$(stat -c '%s' "$DOCKER_DISK_PATH")" == 1073741824 ]] ||
+  die 'dedicated Docker data disk is not exactly 1 GiB'
+[[ "$(stat -c '%d:%i' "$DOCKER_DISK_PATH")" != \
+   "$(stat -c '%d:%i' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/state.raw")" ]] ||
+  die 'Docker and workspace state disks share an inode'
+
+log 'checking private guest Docker build, run, Compose, pulls, and VM-only publication'
+CW_COMMAND_TIMEOUT_SECONDS=900
+run_cw run --no-tty -- /workspace/fixtures/docker-smoke.sh \
+  "$DOCKER_HOST_PORT" "$DOCKER_PUBLIC_IMAGE"
+CW_COMMAND_TIMEOUT_SECONDS=180
+for marker in docker-build-run-compose-ok docker-public-private-policy-ok \
+  docker-user-auth-visible-ok docker-vm-port-local-ok docker-privileged-boundary-ok; do
+  rg -qxF "$marker" "$LAST_STDOUT" || die "guest Docker marker drifted: $marker"
+done
+if /usr/bin/env python3 - "$DOCKER_HOST_PORT" <<'PY'
+import socket
+import sys
+
+try:
+    socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1)
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+then
+  die 'docker -p escaped the VM through an unadmitted host port'
+fi
+run_cw run --no-tty -- docker rm -f codewire-native-smoke-port
+[[ ! -e "$WORKSPACE/.docker/config.json" && ! -e "$MOUNT_SOURCE/.docker/config.json" ]] ||
+  die 'guest-visible Docker login state escaped into a selected host source'
+
+log 'checking bounded Docker logs and recoverable block and inode exhaustion'
+CW_COMMAND_TIMEOUT_SECONDS=900
+run_cw run --no-tty -- /bin/sh -lc '
+  set -eu
+  docker volume create codewire-native-smoke-bytes >/dev/null
+  test "$(docker run --rm --log-driver=none -v codewire-native-smoke-bytes:/data codewire-native-smoke:1913 fill-bytes)" = docker-byte-enospc-ok
+  docker volume rm codewire-native-smoke-bytes >/dev/null
+  docker volume create codewire-native-smoke-inodes >/dev/null
+  test "$(docker run --rm --log-driver=none -v codewire-native-smoke-inodes:/data codewire-native-smoke:1913 fill-inodes)" = docker-inode-enospc-ok
+  docker volume rm codewire-native-smoke-inodes >/dev/null
+  docker run --name codewire-native-smoke-log codewire-native-smoke:1913 spam-log 41943040 >/dev/null
+  log_bytes="$(docker logs codewire-native-smoke-log | wc -c)"
+  test "$log_bytes" -gt 0
+  test "$log_bytes" -le 33554432
+  docker rm codewire-native-smoke-log >/dev/null
+  test "$(cat /workspace/sentinel.txt)" = persistence-ok
+  docker info >/dev/null
+  printf "%s\n" docker-byte-enospc-ok docker-inode-enospc-ok docker-log-bound-ok
+'
+for marker in docker-byte-enospc-ok docker-inode-enospc-ok docker-log-bound-ok; do
+  rg -qxF "$marker" "$LAST_STDOUT" || die "Docker exhaustion marker drifted: $marker"
+done
+[[ "$(stat -c '%s' "$DOCKER_DISK_PATH")" == 1073741824 ]] ||
+  die 'Docker exhaustion changed the dedicated data disk boundary'
+
 log 'checking explicit offline immutable skill refresh and read-only reprojection'
+# Refreshing the snapshot can materialize a new OCI root generation. Retain the
+# same bounded budget as the preceding guest storage workloads for that rebuild.
 run_cw env refresh-skills --local "$NAME" --output json
+CW_COMMAND_TIMEOUT_SECONDS=180
 jq -e --arg prior "$INITIAL_SKILL_SNAPSHOT" '
   .name == "native-smoke" and
   .state == "running" and
@@ -1944,7 +2118,7 @@ DAEMON_GUEST_SENTINEL='guest-output-must-not-enter-daemon-logs-1909'
 run_cw run --no-tty -- /bin/sh -lc "printf '%s\\n' '$DAEMON_GUEST_SENTINEL'"
 rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT" || die 'guest diagnostic sentinel was not emitted'
 run_cw env --local daemon logs "$NAME"
-rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=8 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
+rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=9 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
   die 'native daemon logs did not expose the trusted create journal record'
 [[ "$(stat -c '%s' "$LAST_STDOUT")" -le 65536 ]] || die 'native daemon logs exceeded their public bound'
 if rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT"; then
@@ -2048,6 +2222,7 @@ rg -qF "$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
   die 'environment-specific machine identity did not survive restart'
 [[ "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
   die 'restarted direct read-write share was not live'
+run_docker_persistence_smoke docker-runtime-generation-persistence-ok
 
 log 'checking exact runner adoption after supervisor crash'
 SUPERVISOR_PID="$(find_exact_supervisor_pid)" || die 'native supervisor process was not found exactly'
@@ -2139,6 +2314,7 @@ RECOVERED_VMM_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRO
 run_cw run --no-tty -- /bin/sh -lc \
   "cat /workspace/sentinel.txt; test \"\$(git -C /workspace/github rev-parse HEAD)\" = '$GITHUB_COMMIT'; test \"\$(git -C /workspace/gitea rev-parse HEAD)\" = '$GITEA_COMMIT'"
 rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact VMM death'
+run_docker_persistence_smoke docker-vmm-recovery-persistence-ok
 
 log 'checking exact runner death, VMM parent-death containment, and recovery'
 RUNNER_PID="$(native_database_value runner_pid)"
@@ -2162,8 +2338,28 @@ RECOVERED_VMM_PID="$(recorded_vmm_pid)"
 run_cw run --no-tty -- /bin/sh -lc \
   "cat /workspace/sentinel.txt; test \"\$(git -C /workspace/github rev-parse HEAD)\" = '$GITHUB_COMMIT'; test \"\$(git -C /workspace/gitea rev-parse HEAD)\" = '$GITEA_COMMIT'"
 rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact runner death'
+run_docker_persistence_smoke docker-runner-recovery-persistence-ok
 wait_for_journal_complete ||
   die 'native lifecycle journal contains a pending or partial operation'
+
+log 'checking privileged nested Docker ownership remains confined to the guest'
+VMM_PID="$(recorded_vmm_pid)" || die 'persisted VMM process identity was not readable'
+run_cw_disruptive run --no-tty -- docker run --rm --privileged --pid=host \
+  codewire-native-smoke:1913 crash-dockerd
+wait_for_environment_state error ||
+  die 'guest-local dockerd crash was not classified as an environment error'
+wait_for_pid_death "$VMM_PID" || die 'VMM remained live after guest-local dockerd crashed'
+run_cw env --local daemon status "$NAME" --output json
+jq -e '.state == "unhealthy" and .message == "local environment runtime requires repair"' \
+  "$LAST_STDOUT" >/dev/null || die 'daemon remained healthy after guest-local dockerd crashed'
+run_cw env --local daemon repair "$NAME" --output json
+jq -e '.replaced_pod_name == "" and .status.state == "ready"' "$LAST_STDOUT" >/dev/null ||
+  die 'environment daemon did not repair after guest-local dockerd crashed'
+RECOVERED_VMM_PID="$(recorded_vmm_pid)" || die 'repaired Docker VMM identity was not readable'
+[[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
+  die 'Docker crash recovery did not produce a new live VMM process'
+run_cw run --no-tty -- /bin/sh -lc 'test "$(cat /workspace/sentinel.txt)" = persistence-ok'
+run_docker_persistence_smoke docker-crash-persistence-ok
 
 log 'checking journaled offline disk growth and restart-applied CPU and memory'
 run_cw env resize --local "$NAME" --cpu 3 --memory 12GB --disk 21GB --yes --force --output json
@@ -2184,6 +2380,7 @@ rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace sentinel did not surviv
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 11000000 && "$MEMORY_KIB" -le 13000000 ]] ||
   die "guest MemTotal is not consistent with 12 GiB after resize: ${MEMORY_KIB:-missing} KiB"
+run_docker_persistence_smoke docker-resize-persistence-ok
 run_cw_expect_failure env resize --local "$NAME" --disk 20Gi --yes --output json
 rg -qF 'disk shrink is not supported' "$LAST_STDERR" ||
   die 'native disk shrink did not fail with an actionable error'
@@ -2254,7 +2451,7 @@ ln -s data.txt "$WORKSPACE/link.txt"
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
 run_cw env create --local --name "$NAME" --cpu 2 --memory 16GB \
-  --path "$WORKSPACE" --path-mode copy --no-network --output json
+  --path "$WORKSPACE" --path-mode copy --no-network --no-docker --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
@@ -2262,16 +2459,20 @@ jq -e '
   .name == "native-copy-smoke" and
   .backend == "cloud-hypervisor" and
   .state == "running" and
+  (has("docker_disk") | not) and
   .working_directory == "/workspace" and
   .workspace_inputs == 1 and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'copy-mode environment metadata drifted'
+COPY_ENVIRONMENT_ID="$(native_database_value environment_id)"
+[[ ! -e "$STATE_ROOT/engine/vms/$COPY_ENVIRONMENT_ID/disks/docker.raw" ]] ||
+  die 'Docker-disabled environment created a Docker data disk'
 printf 'host changed after copy creation\n' >"$WORKSPACE/data.txt"
 printf 'host-only after copy\n' >"$WORKSPACE/host-only.txt"
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'test ! -e .git; grep -qx "copy source before creation" data.txt; grep -qx "hidden copy content" .hidden; test "$(readlink link.txt)" = data.txt; test "$(stat -c %h data.txt)" = 1; test "$(stat -c %h hardlink.txt)" = 1; test ! -e host-only.txt; ./tool.sh; printf guest-copy-write > guest-only.txt'
+  'test ! -e .git; test ! -S /var/run/docker.sock; if docker info >/dev/null 2>&1; then exit 86; fi; grep -qx "copy source before creation" data.txt; grep -qx "hidden copy content" .hidden; test "$(readlink link.txt)" = data.txt; test "$(stat -c %h data.txt)" = 1; test "$(stat -c %h hardlink.txt)" = 1; test ! -e host-only.txt; ./tool.sh; printf guest-copy-write > guest-only.txt'
 rg -qF 'copy-executable-ok' "$LAST_STDOUT" ||
   die 'copy-mode executable content was unavailable in the guest'
 [[ "$(cat "$WORKSPACE/data.txt")" == 'host changed after copy creation' ]] ||

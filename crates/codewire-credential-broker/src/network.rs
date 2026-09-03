@@ -240,7 +240,7 @@ fn validate_response_headers(headers: &HeaderMap) -> Result<(), BrokerUpstreamEr
             .checked_add(name.as_str().len())
             .and_then(|total| total.checked_add(value.as_bytes().len()))
     });
-    if !bytes.is_some_and(|bytes| bytes <= MAX_RESPONSE_HEADER_BYTES) {
+    if bytes.is_none_or(|bytes| bytes > MAX_RESPONSE_HEADER_BYTES) {
         return Err(BrokerUpstreamError::ResourceLimit);
     }
     Ok(())

@@ -76,8 +76,8 @@ use crate::supervisor_store::{
 use crate::uds::{UdsError, bind_owner_only_listener, connect_owner_only, remove_bound_socket};
 use crate::workspace::{
     WorkspaceError, WorkspaceSelection, WorkspaceSourceMode,
-    cleanup_interrupted_workspace_provisioning, ensure_workspace_plan, inspect_workspace,
-    workspace_content_limit,
+    cleanup_interrupted_workspace_provisioning, ensure_docker_data_disk, ensure_workspace_plan,
+    inspect_workspace, workspace_content_limit,
 };
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 use crate::workspace_plan::{
@@ -688,6 +688,8 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) vcpus: u8,
     pub(crate) memory_mib: u32,
     pub(crate) disk_bytes: u64,
+    #[serde(default)]
+    pub(crate) docker_disk_bytes: u64,
     pub(crate) generation: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) host_ports: Vec<HostPortBinding>,
@@ -732,6 +734,7 @@ impl EnvironmentRecord {
             vcpus: u32::from(self.vcpus),
             memory_mib: self.memory_mib,
             disk_bytes: self.disk_bytes,
+            docker_disk_bytes: self.docker_disk_bytes,
             generation: self.generation,
             selected,
             project_spec_sha256: self.project_spec_sha256.clone().unwrap_or_default(),
@@ -1019,6 +1022,9 @@ impl EnvironmentRecord {
             || !(128..=65_536).contains(&self.memory_mib)
             || self.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
             || !self.disk_bytes.is_multiple_of(1024 * 1024)
+            || (self.docker_disk_bytes != 0
+                && (self.docker_disk_bytes < crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+                    || !self.docker_disk_bytes.is_multiple_of(1024 * 1024)))
             || self.workspace_plan.validate().is_err()
             || validate_canonical_host_port_bindings(&self.host_ports).is_err()
             || self.mesh.as_ref().is_some_and(|mesh| {
@@ -1752,6 +1758,7 @@ impl SupervisorCore {
                             || u32::from(environment.vcpus) != request.vcpus
                             || environment.memory_mib != request.memory_mib
                             || environment.disk_bytes != request.disk_bytes
+                            || environment.docker_disk_bytes != request.docker_disk_bytes
                             || environment.host_ports != host_ports_from_proto(&request.host_ports)?
                             || environment.mesh
                                 != mesh_attachment_from_proto(request.mesh.as_ref())?
@@ -1778,6 +1785,7 @@ impl SupervisorCore {
                                 vcpus,
                                 memory_mib: request.memory_mib,
                                 disk_bytes: request.disk_bytes,
+                                docker_disk_bytes: request.docker_disk_bytes,
                                 generation: 0,
                                 host_ports: host_ports_from_proto(&request.host_ports)?,
                                 mesh: mesh_attachment_from_proto(request.mesh.as_ref())?,
@@ -1809,8 +1817,18 @@ impl SupervisorCore {
                     let expected_plan_sha256 = environment.workspace_plan.sha256()?;
                     let plan = environment.workspace_plan;
                     let disk_bytes = environment.disk_bytes;
+                    let docker_disk_bytes = environment.docker_disk_bytes;
                     let snapshot = tokio::task::spawn_blocking(move || {
-                        ensure_workspace_plan(&engine_root, environment_id, &plan, disk_bytes)
+                        let snapshot =
+                            ensure_workspace_plan(&engine_root, environment_id, &plan, disk_bytes)?;
+                        if docker_disk_bytes != 0 {
+                            ensure_docker_data_disk(
+                                &engine_root,
+                                environment_id,
+                                docker_disk_bytes,
+                            )?;
+                        }
+                        Ok::<_, WorkspaceError>(snapshot)
                     })
                     .await
                     .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
@@ -2781,6 +2799,7 @@ impl SupervisorCore {
                 vsock_cid: allocate_vsock_cid(environment.id),
                 daemon_vsock_port: DAEMON_VSOCK_PORT,
                 state_disk_bytes: environment.disk_bytes,
+                docker_disk_bytes: environment.docker_disk_bytes,
                 vcpus: u32::from(environment.vcpus),
                 memory_mib: environment.memory_mib,
                 root_generation: workspace.root_generation,
@@ -5050,6 +5069,9 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
         || !(128..=65_536).contains(&request.memory_mib)
         || request.disk_bytes < crate::linux::state::MINIMUM_STATE_DISK_BYTES
         || !request.disk_bytes.is_multiple_of(1024 * 1024)
+        || (request.docker_disk_bytes != 0
+            && (request.docker_disk_bytes < crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+                || !request.docker_disk_bytes.is_multiple_of(1024 * 1024)))
         || validate_project_intent(
             &request.project_spec_json,
             &request.project_spec_sha256,
@@ -5525,6 +5547,7 @@ fn create_operation_payload(
         "vcpus": request.vcpus,
         "memory_mib": request.memory_mib,
         "disk_bytes": request.disk_bytes,
+        "docker_disk_bytes": request.docker_disk_bytes,
         "project_spec_json": project_spec_json,
         "project_spec_sha256": request.project_spec_sha256,
         "implicit_path_mode": request.implicit_path_mode,
@@ -5545,7 +5568,7 @@ fn create_request_from_operation(
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 13)
+        .filter(|fields| fields.len() == 14)
         .ok_or(SupervisorError::InvalidState)?;
     let name = fields
         .get("name")
@@ -5569,6 +5592,10 @@ fn create_request_from_operation(
         .ok_or(SupervisorError::InvalidState)?;
     let disk_bytes = fields
         .get("disk_bytes")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(SupervisorError::InvalidState)?;
+    let docker_disk_bytes = fields
+        .get("docker_disk_bytes")
         .and_then(serde_json::Value::as_u64)
         .ok_or(SupervisorError::InvalidState)?;
     let project_spec_json = fields
@@ -5638,6 +5665,7 @@ fn create_request_from_operation(
         vcpus,
         memory_mib,
         disk_bytes,
+        docker_disk_bytes,
         request_id: operation.request_id.to_string(),
         project_spec_json,
         project_spec_sha256,
@@ -6970,6 +6998,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
+            docker_disk_bytes: 0,
             generation: 1,
             host_ports: Vec::new(),
             mesh: None,
@@ -8484,6 +8513,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
+            docker_disk_bytes: crate::linux::state::MINIMUM_DOCKER_DISK_BYTES,
             request_id: Uuid::new_v4().to_string(),
             project_spec_json,
             project_spec_sha256,
@@ -8509,6 +8539,12 @@ mod tests {
         incomplete.access_profile_revision = 0;
         assert!(matches!(
             validate_create(&incomplete),
+            Err(SupervisorError::InvalidRequest)
+        ));
+        let mut invalid_docker = request.clone();
+        invalid_docker.docker_disk_bytes = crate::linux::state::MINIMUM_DOCKER_DISK_BYTES - 1;
+        assert!(matches!(
+            validate_create(&invalid_docker),
             Err(SupervisorError::InvalidRequest)
         ));
         let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
@@ -8707,6 +8743,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
+            docker_disk_bytes: 0,
             request_id: Uuid::new_v4().to_string(),
             project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
             project_spec_json,
@@ -8784,6 +8821,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
+            docker_disk_bytes: 0,
             request_id: Uuid::new_v4().to_string(),
             project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
             project_spec_json,
@@ -8839,6 +8877,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
+            docker_disk_bytes: 0,
             request_id: Uuid::new_v4().to_string(),
             project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
             project_spec_json,
@@ -9805,6 +9844,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: 20 * 1024 * 1024 * 1024,
+            docker_disk_bytes: 0,
             request_id: request_id.to_string(),
             project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
             project_spec_json,
@@ -9884,6 +9924,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
+            docker_disk_bytes: 0,
             generation: 1,
             host_ports: Vec::new(),
             mesh: None,

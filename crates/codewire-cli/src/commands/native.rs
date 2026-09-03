@@ -30,6 +30,8 @@ const NATIVE_ARTIFACT_LOCK_ENV: &str = "CODEWIRE_NATIVE_ARTIFACT_LOCK";
 const DEFAULT_NATIVE_VCPUS: u32 = 2;
 const DEFAULT_NATIVE_MEMORY_MIB: u32 = 4 * 1024;
 const DEFAULT_NATIVE_DISK_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const DEFAULT_NATIVE_DOCKER_DISK_BYTES: u64 =
+    codewire_local_vmm::linux::state::DEFAULT_DOCKER_DISK_BYTES;
 
 pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow::Result<()> {
     let executable = canonical_current_executable()?;
@@ -380,6 +382,14 @@ pub(crate) async fn create_native_environment(
         Some(value) => parse_native_disk(value)?,
         None => project.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES),
     };
+    let docker_disk_bytes = if args.no_docker {
+        0
+    } else {
+        match args.docker_disk.as_deref() {
+            Some(value) => parse_native_disk(value)?,
+            None => DEFAULT_NATIVE_DOCKER_DISK_BYTES,
+        }
+    };
     let host_ports = project
         .host_ports
         .iter()
@@ -448,6 +458,7 @@ pub(crate) async fn create_native_environment(
             vcpus,
             memory_mib,
             disk_bytes,
+            docker_disk_bytes,
             request_id: Uuid::new_v4().to_string(),
             project_spec_json,
             project_spec_sha256,
@@ -858,6 +869,8 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) cpu: u32,
     pub(crate) memory: String,
     pub(crate) disk: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) docker_disk: Option<String>,
     pub(crate) workspace_plan: String,
     pub(crate) workspace_inputs: u32,
     pub(crate) working_directory: String,
@@ -894,6 +907,8 @@ impl From<&v1::Environment> for NativeEnvironmentView {
             cpu: environment.vcpus,
             memory: format_binary_mib(environment.memory_mib),
             disk: format_binary_bytes(environment.disk_bytes),
+            docker_disk: (environment.docker_disk_bytes != 0)
+                .then(|| format_binary_bytes(environment.docker_disk_bytes)),
             workspace_plan: environment.workspace_plan_sha256.clone(),
             workspace_inputs: environment.workspace_input_count,
             working_directory: environment.working_directory.clone(),
@@ -943,6 +958,10 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
         view.working_directory,
         access,
     );
+    output.push_str(&format!(
+        "Docker:      {}\n",
+        view.docker_disk.as_deref().unwrap_or("disabled")
+    ));
     if let Some(generation) = view.skill_snapshot_generation {
         output.push_str(&format!(
             "Skills:      {} snapshot(s), generation {}, plan {}\n",
@@ -1932,6 +1951,7 @@ working_directory: /workspace/github
     #[test]
     fn native_environment_view_reports_mesh_and_typed_runtime_failure() {
         let environment = v1::Environment {
+            docker_disk_bytes: 8 * 1024 * 1024 * 1024,
             mesh: Some(v1::MeshAttachment {
                 network_id: "mesh-dev".to_owned(),
                 ..Default::default()
@@ -1944,6 +1964,15 @@ working_directory: /workspace/github
         let view = NativeEnvironmentView::from(&environment);
         assert_eq!(view.network.as_deref(), Some("mesh-dev"));
         assert_eq!(view.error_code.as_deref(), Some("mesh_transport_exit"));
+        assert_eq!(view.docker_disk.as_deref(), Some("8Gi"));
+    }
+
+    #[test]
+    fn native_environment_view_omits_disabled_docker_disk_from_json() {
+        let view = NativeEnvironmentView::from(&v1::Environment::default());
+
+        let json = serde_json::to_value(view).expect("serialize native environment view");
+        assert!(json.get("docker_disk").is_none());
     }
 
     #[test]
@@ -1957,6 +1986,7 @@ working_directory: /workspace/github
             cpu: 2,
             memory: "16Gi".to_owned(),
             disk: "20Gi".to_owned(),
+            docker_disk: Some("8Gi".to_owned()),
             workspace_plan: "c".repeat(64),
             workspace_inputs: 1,
             working_directory: "/workspace".to_owned(),
@@ -1977,6 +2007,7 @@ working_directory: /workspace/github
         assert!(output.contains("Port:        127.0.0.1:18080 -> 8080\n"));
         assert!(output.contains("Network:     mesh-dev\n"));
         assert!(output.contains("Access:      user/work (revision 2)\n"));
+        assert!(output.contains("Docker:      8Gi\n"));
     }
 
     #[test]

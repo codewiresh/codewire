@@ -15,6 +15,8 @@ pub const PERSISTED_STATE_SCHEMA_VERSION: u32 = 1;
 pub const MINIMUM_STATE_DISK_BYTES: u64 = 256 * 1024 * 1024;
 pub const MINIMUM_ROOT_DISK_BYTES: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_ROOT_DISK_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MINIMUM_DOCKER_DISK_BYTES: u64 = 1024 * 1024 * 1024;
+pub const DEFAULT_DOCKER_DISK_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const MAXIMUM_ROOT_GENERATIONS: usize = 64;
 const EXT4_SUPERBLOCK_OFFSET: u64 = 1024;
 const EXT4_SUPERBLOCK_BYTES: usize = 0x78;
@@ -31,6 +33,7 @@ pub struct VmPaths {
     pub virtiofs_dir: PathBuf,
     pub disks_dir: PathBuf,
     pub state_disk: PathBuf,
+    pub docker_disk: PathBuf,
     pub generations_dir: PathBuf,
     pub seed_dir: PathBuf,
     pub seed_disk: PathBuf,
@@ -61,6 +64,7 @@ impl VmPaths {
             vsock_socket: vsock_dir.join("vsock.sock"),
             virtiofs_dir,
             state_disk: disks_dir.join("state.raw"),
+            docker_disk: disks_dir.join("docker.raw"),
             seed_disk: seed_dir.join("seed.raw"),
             serial_log: diagnostics_dir.join("serial.log"),
             vmm_log: diagnostics_dir.join("vmm.log"),
@@ -236,6 +240,8 @@ pub struct PersistedVmState {
     pub process: ProcessIdentity,
     pub state_disk: StateDiskIdentity,
     #[serde(default)]
+    pub docker_disk: Option<StateDiskIdentity>,
+    #[serde(default)]
     pub root_generation: Option<String>,
     #[serde(default)]
     pub root_disk: Option<StateDiskIdentity>,
@@ -301,6 +307,10 @@ impl PersistedVmState {
             || self.daemon_vsock_port == 0
             || self.daemon_vsock_port == u32::MAX
             || self.state_disk.filesystem_uuid.is_nil()
+            || self
+                .docker_disk
+                .as_ref()
+                .is_some_and(|disk| disk.filesystem_uuid.is_nil())
             || !valid_root
             || !valid_phase
         {
@@ -437,6 +447,8 @@ pub fn cleanup_trashed_vm(
     }
     if let Some(disks) = optional_private_directory(&vm, Path::new("disks"))? {
         disks.remove_private_regular(Path::new("state.raw"), 0o600)?;
+        disks.remove_private_regular(Path::new("docker.raw"), 0o600)?;
+        disks.remove_private_regular(Path::new("docker.raw.staging"), 0o600)?;
         vm.remove_empty_private_directory(Path::new("disks"))?;
     }
     if let Some(seed) = optional_private_directory(&vm, Path::new("seed"))? {
@@ -597,7 +609,14 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
             &[(&"api.sock", 0o600, true), (&"api.sock.lock", 0o600, false)][..],
         ),
         ("vsock", &[(&"vsock.sock", 0o600, true)][..]),
-        ("disks", &[(&"state.raw", 0o600, false)][..]),
+        (
+            "disks",
+            &[
+                (&"state.raw", 0o600, false),
+                (&"docker.raw", 0o600, false),
+                (&"docker.raw.staging", 0o600, false),
+            ][..],
+        ),
         ("seed", &[(&"seed.raw", 0o400, false)][..]),
         (
             "diagnostics",
@@ -857,6 +876,7 @@ mod tests {
                 },
                 filesystem_uuid: Uuid::new_v4(),
             },
+            docker_disk: None,
             root_generation: None,
             root_disk: None,
             api_socket: None,
@@ -892,6 +912,8 @@ mod tests {
             }
         }
         assert_eq!(paths.state_disk.parent(), Some(paths.disks_dir.as_path()));
+        assert_eq!(paths.docker_disk.parent(), Some(paths.disks_dir.as_path()));
+        assert_ne!(paths.docker_disk, paths.state_disk);
         assert_eq!(paths.seed_disk.parent(), Some(paths.seed_dir.as_path()));
         assert_eq!(fs::metadata(&paths.vm_dir).unwrap().mode() & 0o777, 0o700);
     }
@@ -1034,6 +1056,14 @@ mod tests {
         let vm_id = Uuid::new_v4();
         let operation_id = Uuid::new_v4();
         let paths = VmPaths::create(&root, vm_id).unwrap();
+        write_minimal_ext4(&paths.state_disk, Uuid::new_v4());
+        write_minimal_ext4(&paths.docker_disk, Uuid::new_v4());
+        fs::write(paths.disks_dir.join("docker.raw.staging"), b"staging").unwrap();
+        fs::set_permissions(
+            paths.disks_dir.join("docker.raw.staging"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
 
         let trash = move_stopped_vm_to_trash(root.path(), vm_id, operation_id).unwrap();
         assert!(!paths.vm_dir.exists());

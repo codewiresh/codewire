@@ -180,6 +180,9 @@ message CreateEnvironmentRequest {
   // Both fields are empty/zero when the project selects no credential access.
   string access_profile_id = 13;
   uint64 access_profile_revision = 14;
+  // Dedicated guest-local Docker data disk. Zero disables Docker for this
+  // environment; nonzero values are whole-MiB ext4 disk sizes.
+  uint64 docker_disk_bytes = 15;
 }
 
 message HostPortBinding {
@@ -290,6 +293,8 @@ message Environment {
   string skill_snapshot_sha256 = 20;
   uint64 skill_snapshot_generation = 21;
   uint32 skill_snapshot_count = 22;
+  // Dedicated guest-local Docker data disk. Zero means Docker is disabled.
+  uint64 docker_disk_bytes = 23;
 }
 
 message ListEnvironmentsRequest {}
@@ -437,6 +442,9 @@ message StartVmRequest {
   // Digest of the canonical immutable skill-snapshot plan embedded in the
   // selected root generation. Empty means the project selected no skills.
   string skill_snapshot_sha256 = 16;
+  // Dedicated preformatted Docker data disk. Zero means no Docker device is
+  // attached and the guest must not start dockerd.
+  uint64 docker_disk_bytes = 17;
 }
 
 message DirectShareAttachment {

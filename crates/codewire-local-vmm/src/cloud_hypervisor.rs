@@ -4,7 +4,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use codewire_vmm_guest_probe::{
-    MAX_DIRECT_SHARES, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL, STATE_DISK_SERIAL,
+    DOCKER_DISK_SERIAL, MAX_DIRECT_SHARES, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL,
+    STATE_DISK_SERIAL,
 };
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
@@ -54,6 +55,7 @@ pub struct CloudHypervisorConfig {
     pub kernel: PathBuf,
     pub initramfs: PathBuf,
     pub state_disk: PathBuf,
+    pub docker_disk: Option<PathBuf>,
     pub root_disk: PathBuf,
     pub seed_disk: PathBuf,
     pub setup_disk: Option<PathBuf>,
@@ -82,6 +84,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("kernel", &self.kernel)
             .field("initramfs", &self.initramfs)
             .field("state_disk", &self.state_disk)
+            .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("seed_disk", &self.seed_disk)
             .field("setup_disk", &self.setup_disk)
@@ -185,6 +188,7 @@ impl CloudHypervisorConfig {
             kernel: artifacts.kernel.path().to_owned(),
             initramfs: artifacts.initramfs.path().to_owned(),
             state_disk,
+            docker_disk: None,
             root_disk,
             seed_disk,
             setup_disk,
@@ -211,6 +215,15 @@ impl CloudHypervisorConfig {
         Ok(self)
     }
 
+    pub fn with_docker_disk(
+        mut self,
+        docker_disk: Option<PathBuf>,
+    ) -> Result<Self, CloudHypervisorConfigError> {
+        self.docker_disk = docker_disk;
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn validate(&self) -> Result<(), CloudHypervisorConfigError> {
         if self.vsock_cid < 3 || self.vsock_cid == u32::MAX {
             return Err(CloudHypervisorConfigError::InvalidVsockCid);
@@ -231,6 +244,9 @@ impl CloudHypervisorConfig {
             validate_parameter_path(path).map_err(CloudHypervisorConfigError::UnsafePath)?;
         }
         let mut disks = vec![&self.state_disk, &self.root_disk, &self.seed_disk];
+        if let Some(docker) = &self.docker_disk {
+            disks.push(docker);
+        }
         if let Some(setup) = &self.setup_disk {
             disks.push(setup);
         }
@@ -313,6 +329,17 @@ impl CloudHypervisorConfig {
                 STATE_DISK_SERIAL,
             ),
         );
+        if let Some(docker_disk) = &self.docker_disk {
+            push_option(
+                &mut arguments,
+                "--disk",
+                format!(
+                    "path={},readonly=off,direct=off,id=cw-docker,serial={},image_type=raw,backing_files=off,sparse=on,lock_granularity=full",
+                    display(docker_disk)?,
+                    DOCKER_DISK_SERIAL,
+                ),
+            );
+        }
         push_option(
             &mut arguments,
             "--disk",
@@ -384,7 +411,9 @@ impl CloudHypervisorConfig {
         let command = CommandSpec {
             program: self.executable.clone(),
             arguments,
-            expected_disk_count: if self.setup_disk.is_some() { 4 } else { 3 },
+            expected_disk_count: 3
+                + usize::from(self.docker_disk.is_some())
+                + usize::from(self.setup_disk.is_some()),
             expected_fs_count: self.virtiofs.len(),
         };
         command.validate_allowlist()?;
@@ -405,6 +434,9 @@ impl CloudHypervisorConfig {
             self.serial_log.as_path(),
             self.vmm_log.as_path(),
         ];
+        if let Some(docker) = &self.docker_disk {
+            paths.push(docker.as_path());
+        }
         if let Some(setup) = &self.setup_disk {
             paths.push(setup.as_path());
         }
@@ -699,11 +731,46 @@ mod tests {
     }
 
     #[test]
+    fn docker_data_is_an_exact_optional_writable_disk_without_network_devices() {
+        let config = config()
+            .with_docker_disk(Some("/state/disks/docker.raw".into()))
+            .unwrap();
+        let command = config.command().unwrap();
+        command.validate_allowlist().unwrap();
+        let args = command
+            .arguments()
+            .iter()
+            .map(|argument| argument.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(args.iter().filter(|value| **value == "--disk").count(), 4);
+        assert!(args.iter().any(|argument| {
+            argument.contains("path=/state/disks/docker.raw")
+                && argument.contains("id=cw-docker")
+                && argument.contains("serial=CWDOCKER1")
+                && argument.contains("readonly=off")
+                && argument.contains("direct=off")
+                && argument.contains("backing_files=off")
+                && argument.contains("sparse=on")
+                && argument.contains("lock_granularity=full")
+        }));
+        for flag in FORBIDDEN_FLAGS {
+            assert!(!args.contains(flag), "forbidden flag {flag}");
+        }
+    }
+
+    #[test]
     fn setup_pack_must_not_alias_another_disk() {
-        let mut config = config();
-        config.setup_disk = Some(config.root_disk.clone());
+        let mut setup_alias = config();
+        setup_alias.setup_disk = Some(setup_alias.root_disk.clone());
         assert!(matches!(
-            config.validate(),
+            setup_alias.validate(),
+            Err(CloudHypervisorConfigError::AliasedDiskPaths)
+        ));
+
+        let mut docker_alias = config();
+        docker_alias.docker_disk = Some(docker_alias.state_disk.clone());
+        assert!(matches!(
+            docker_alias.validate(),
             Err(CloudHypervisorConfigError::AliasedDiskPaths)
         ));
     }

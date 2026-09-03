@@ -344,8 +344,11 @@ impl RunnerState {
             ExitClass::StillRunning => Ok(error_code),
             ExitClass::GuestShutdown => {
                 self.running = None;
-                self.state = v1::EnvironmentState::Stopped;
-                self.error_code = None;
+                // A requested stop is handled synchronously by stop_vm below.
+                // Any shutdown first discovered by observation is therefore
+                // an unrequested guest/runtime exit and must require repair.
+                self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
                 Ok(error_code)
             }
             ExitClass::VmmFailure(_) => {
@@ -394,7 +397,8 @@ impl RunnerState {
 
 fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
     match exit {
-        ExitClass::StillRunning | ExitClass::GuestShutdown => None,
+        ExitClass::StillRunning => None,
+        ExitClass::GuestShutdown => Some("guest_shutdown"),
         ExitClass::VmmFailure(_) => Some("vmm_exit"),
         ExitClass::DirectShareFailure(_) => Some("direct_share_exit"),
         ExitClass::NetworkWorkerFailure(_) => Some("network_worker_exit"),
@@ -552,6 +556,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 vsock_cid: request.vsock_cid,
                 daemon_vsock_port: request.daemon_vsock_port,
                 state_disk_bytes: request.state_disk_bytes,
+                docker_disk_bytes: (request.docker_disk_bytes != 0)
+                    .then_some(request.docker_disk_bytes),
                 root_generation: request.root_generation,
                 root_disk_bytes: request.root_disk_bytes,
                 vcpus,
@@ -1699,7 +1705,10 @@ mod tests {
     #[test]
     fn internal_runner_exit_codes_preserve_the_failed_component() {
         assert_eq!(runner_exit_error_code(ExitClass::StillRunning), None);
-        assert_eq!(runner_exit_error_code(ExitClass::GuestShutdown), None);
+        assert_eq!(
+            runner_exit_error_code(ExitClass::GuestShutdown),
+            Some("guest_shutdown")
+        );
         assert_eq!(
             runner_exit_error_code(ExitClass::VmmFailure(Some(1))),
             Some("vmm_exit")

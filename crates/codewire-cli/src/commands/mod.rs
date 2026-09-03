@@ -913,6 +913,19 @@ pub(crate) struct EnvCreateArgs {
     memory: Option<String>,
     #[arg(long, value_name = "QUANTITY", help = "Disk size (for example 40GB)")]
     disk: Option<String>,
+    #[arg(
+        long,
+        value_name = "QUANTITY",
+        conflicts_with = "no_docker",
+        help = "Dedicated guest Docker data disk (default 8Gi); requires the native local backend"
+    )]
+    docker_disk: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "docker_disk",
+        help = "Disable the guest-local Docker daemon; requires the native local backend"
+    )]
+    no_docker: bool,
     #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
     isolation: Option<String>,
     #[arg(

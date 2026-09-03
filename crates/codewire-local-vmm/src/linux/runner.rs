@@ -115,6 +115,7 @@ pub struct CreateVmRequest {
     pub vsock_cid: u32,
     pub daemon_vsock_port: u32,
     pub state_disk_bytes: u64,
+    pub docker_disk_bytes: Option<u64>,
     pub root_generation: String,
     pub root_disk_bytes: u64,
     pub vcpus: u8,
@@ -203,6 +204,7 @@ impl CloudHypervisorRunner {
         let lock = paths.lock()?;
         let persisted = read_stopped_persisted_state(&paths, request.vm_id)?;
         let state_disk = admit_state_disk(&paths, &request, persisted.as_ref())?;
+        let docker_disk = admit_docker_disk(&paths, &request, persisted.as_ref())?;
         let (root_disk_path, root_disk) = admit_root_disk(&paths, &request, persisted.as_ref())?;
         let setup_disk = admit_setup_disk(&paths, &request)?;
         paths.clear_stale_runtime_endpoints()?;
@@ -225,6 +227,11 @@ impl CloudHypervisorRunner {
             direct_shares_sha256,
             request.skill_snapshot_sha256,
         )?;
+        let seed = if docker_disk.is_some() {
+            seed.with_docker_data_disk()
+        } else {
+            seed
+        };
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
 
@@ -259,6 +266,7 @@ impl CloudHypervisorRunner {
                 request.memory_mib,
             )?,
         }
+        .with_docker_disk(docker_disk.as_ref().map(|_| paths.docker_disk.clone()))?
         .with_virtiofs(
             direct_shares
                 .iter()
@@ -273,6 +281,7 @@ impl CloudHypervisorRunner {
             request,
             paths,
             state_disk,
+            docker_disk,
             root_disk,
             setup_disk,
             direct_shares,
@@ -325,6 +334,9 @@ impl CloudHypervisorRunner {
         preflight()?;
         self.artifacts.revalidate()?;
         prepared.state_disk.revalidate(&prepared.paths.state_disk)?;
+        if let Some(docker_disk) = &prepared.docker_disk {
+            docker_disk.revalidate(&prepared.paths.docker_disk)?;
+        }
         prepared.root_disk.revalidate(&root_disk_path(
             &prepared.paths,
             &prepared.request.root_generation,
@@ -376,6 +388,7 @@ impl CloudHypervisorRunner {
             phase: VmPhase::Starting,
             process: startup.process().identity().clone(),
             state_disk: prepared.state_disk.clone(),
+            docker_disk: prepared.docker_disk.clone(),
             root_generation: Some(prepared.request.root_generation.clone()),
             root_disk: Some(prepared.root_disk.clone()),
             api_socket: None,
@@ -405,6 +418,7 @@ impl CloudHypervisorRunner {
                 phase: VmPhase::Running,
                 process: startup.process().identity().clone(),
                 state_disk: prepared.state_disk.clone(),
+                docker_disk: prepared.docker_disk.clone(),
                 root_generation: Some(prepared.request.root_generation.clone()),
                 root_disk: Some(prepared.root_disk.clone()),
                 api_socket: Some(set_socket_private(&prepared.paths.api_socket)?),
@@ -428,6 +442,7 @@ impl CloudHypervisorRunner {
             request: prepared.request,
             paths: prepared.paths,
             state_disk: prepared.state_disk,
+            docker_disk: prepared.docker_disk,
             root_disk: prepared.root_disk,
             setup_disk: prepared.setup_disk,
             direct_shares: direct_share_startup.disarm(),
@@ -450,6 +465,9 @@ impl CloudHypervisorRunner {
             return Err(RunnerError::PersistedIdentityMismatch);
         }
         state.state_disk.revalidate(&paths.state_disk)?;
+        if let Some(docker_disk) = &state.docker_disk {
+            docker_disk.revalidate(&paths.docker_disk)?;
+        }
         if let (Some(generation), Some(root_disk)) = (&state.root_generation, &state.root_disk) {
             root_disk.revalidate(&root_disk_path(&paths, generation)?)?;
         }
@@ -824,6 +842,7 @@ pub struct PreparedVm {
     request: CreateVmRequest,
     paths: VmPaths,
     state_disk: StateDiskIdentity,
+    docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
     direct_shares: Vec<PreparedDirectShare>,
@@ -840,6 +859,7 @@ impl fmt::Debug for PreparedVm {
             .field("request", &self.request)
             .field("paths", &self.paths)
             .field("state_disk", &self.state_disk)
+            .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk)
             .field("direct_share_count", &self.direct_shares.len())
@@ -866,6 +886,10 @@ impl PreparedVm {
         &self.state_disk
     }
 
+    pub fn docker_disk_identity(&self) -> Option<&StateDiskIdentity> {
+        self.docker_disk.as_ref()
+    }
+
     pub fn root_disk_identity(&self) -> &StateDiskIdentity {
         &self.root_disk
     }
@@ -879,6 +903,7 @@ pub struct RunningVm {
     request: CreateVmRequest,
     paths: VmPaths,
     state_disk: StateDiskIdentity,
+    docker_disk: Option<StateDiskIdentity>,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
     direct_shares: Vec<DirectShareProcess>,
@@ -899,6 +924,7 @@ impl fmt::Debug for RunningVm {
             .field("request", &self.request)
             .field("paths", &self.paths)
             .field("state_disk", &self.state_disk)
+            .field("docker_disk", &self.docker_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk)
             .field("direct_share_count", &self.direct_shares.len())
@@ -927,6 +953,10 @@ impl RunningVm {
 
     pub fn state_disk_identity(&self) -> &StateDiskIdentity {
         &self.state_disk
+    }
+
+    pub fn docker_disk_identity(&self) -> Option<&StateDiskIdentity> {
+        self.docker_disk.as_ref()
     }
 
     pub fn root_disk_identity(&self) -> &StateDiskIdentity {
@@ -3613,6 +3643,10 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
         || request.daemon_vsock_port == u32::MAX
         || request.state_disk_bytes < MINIMUM_STATE_DISK_BYTES
         || !request.state_disk_bytes.is_multiple_of(1024 * 1024)
+        || request.docker_disk_bytes.is_some_and(|bytes| {
+            bytes < crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+                || !bytes.is_multiple_of(1024 * 1024)
+        })
         || !valid_root_generation(&request.root_generation)
         || request.root_disk_bytes < MINIMUM_ROOT_DISK_BYTES
         || !request.root_disk_bytes.is_multiple_of(1024 * 1024)
@@ -3631,6 +3665,40 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
         return Err(RunnerError::InvalidRequest);
     }
     Ok(())
+}
+
+fn admit_docker_disk(
+    paths: &VmPaths,
+    request: &CreateVmRequest,
+    persisted: Option<&PersistedVmState>,
+) -> Result<Option<StateDiskIdentity>, RunnerError> {
+    let Some(requested_bytes) = request.docker_disk_bytes else {
+        if persisted
+            .and_then(|state| state.docker_disk.as_ref())
+            .is_some()
+            || paths.docker_disk.exists()
+        {
+            return Err(RunnerError::UnexpectedDockerDisk);
+        }
+        return Ok(None);
+    };
+    if !paths.docker_disk.exists() {
+        return Err(RunnerError::MissingPreformattedDockerDisk);
+    }
+    let identity = match persisted.and_then(|state| state.docker_disk.as_ref()) {
+        Some(expected) => {
+            expected.revalidate(&paths.docker_disk)?;
+            expected.clone()
+        }
+        None => StateDiskIdentity::capture(&paths.docker_disk)?,
+    };
+    if identity.file.size != requested_bytes {
+        return Err(RunnerError::DockerDiskSizeMismatch {
+            current: identity.file.size,
+            requested: requested_bytes,
+        });
+    }
+    Ok(Some(identity))
 }
 
 fn direct_share_plan(
@@ -4263,6 +4331,10 @@ pub enum RunnerError {
     SetupDiskIdentityChanged,
     #[error("the preformatted ext4 state disk is absent; production prepare never formats disks")]
     MissingPreformattedStateDisk,
+    #[error("the preformatted ext4 Docker data disk is absent; runner prepare never formats it")]
+    MissingPreformattedDockerDisk,
+    #[error("a Docker data disk exists although this environment has Docker disabled")]
+    UnexpectedDockerDisk,
     #[error(
         "the preformatted ext4 root generation disk is absent; runner prepare never formats it"
     )]
@@ -4271,6 +4343,10 @@ pub enum RunnerError {
         "existing state disk size differs from the requested immutable boot size ({current} != {requested}); resize is a separate stopped operation"
     )]
     StateDiskSizeMismatch { current: u64, requested: u64 },
+    #[error(
+        "existing Docker data disk size differs from the requested immutable boot size ({current} != {requested})"
+    )]
+    DockerDiskSizeMismatch { current: u64, requested: u64 },
     #[error(
         "existing root generation disk size differs from the requested immutable boot size ({current} != {requested})"
     )]
@@ -4439,6 +4515,7 @@ mod tests {
                 },
                 filesystem_uuid: Uuid::new_v4(),
             },
+            docker_disk: None,
             root_generation: None,
             root_disk: None,
             api_socket: None,
@@ -4470,6 +4547,7 @@ mod tests {
             vsock_cid: 7,
             daemon_vsock_port: 7_777,
             state_disk_bytes: MINIMUM_STATE_DISK_BYTES,
+            docker_disk_bytes: None,
             root_generation: "a".repeat(64),
             root_disk_bytes: MINIMUM_ROOT_DISK_BYTES,
             vcpus,
@@ -4838,6 +4916,15 @@ mod tests {
             Err(RunnerError::InvalidRequest)
         ));
 
+        let mut valid_docker = request(2, 16_384);
+        valid_docker.docker_disk_bytes = Some(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES);
+        assert!(validate_request(&valid_docker).is_ok());
+        valid_docker.docker_disk_bytes = Some(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES - 1);
+        assert!(matches!(
+            validate_request(&valid_docker),
+            Err(RunnerError::InvalidRequest)
+        ));
+
         let mut valid_host_port = request(2, 16_384);
         valid_host_port.host_ports = vec![HostPortBinding::new(18_080, 3_000).unwrap()];
         assert!(validate_request(&valid_host_port).is_ok());
@@ -5100,6 +5187,7 @@ mod tests {
             phase: VmPhase::Starting,
             process: ProcessIdentity::capture(std::process::id()).unwrap(),
             state_disk: admitted.clone(),
+            docker_disk: None,
             root_generation: None,
             root_disk: None,
             api_socket: None,
@@ -5138,6 +5226,78 @@ mod tests {
     }
 
     #[test]
+    fn docker_disk_admission_is_explicit_sized_and_replacement_safe() {
+        let (_parent, runner) = test_runner();
+        let vm_id = Uuid::new_v4();
+        let paths = VmPaths::create(&runner.state_root, vm_id).unwrap();
+        let mut request = request(2, 16_384);
+        request.vm_id = vm_id;
+        request.docker_disk_bytes = Some(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES);
+        assert!(matches!(
+            admit_docker_disk(&paths, &request, None),
+            Err(RunnerError::MissingPreformattedDockerDisk)
+        ));
+
+        let filesystem_uuid = Uuid::new_v4();
+        write_test_ext4(&paths.docker_disk, filesystem_uuid);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&paths.docker_disk)
+            .unwrap()
+            .set_len(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES)
+            .unwrap();
+        let admitted = admit_docker_disk(&paths, &request, None).unwrap().unwrap();
+        assert_eq!(
+            admitted.file.size,
+            crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+        );
+
+        let mut wrong_size = request.clone();
+        wrong_size.docker_disk_bytes =
+            Some(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES + 1024 * 1024);
+        assert!(matches!(
+            admit_docker_disk(&paths, &wrong_size, None),
+            Err(RunnerError::DockerDiskSizeMismatch { .. })
+        ));
+        let mut disabled = request.clone();
+        disabled.docker_disk_bytes = None;
+        assert!(matches!(
+            admit_docker_disk(&paths, &disabled, None),
+            Err(RunnerError::UnexpectedDockerDisk)
+        ));
+
+        let persisted = PersistedVmState {
+            schema_version: PERSISTED_STATE_SCHEMA_VERSION,
+            vm_id,
+            generation: 1,
+            vsock_cid: 7,
+            daemon_vsock_port: 7_777,
+            phase: VmPhase::Starting,
+            process: ProcessIdentity::capture(std::process::id()).unwrap(),
+            state_disk: admitted.clone(),
+            docker_disk: Some(admitted),
+            root_generation: None,
+            root_disk: None,
+            api_socket: None,
+            vsock_socket: None,
+        };
+        let replacement = paths.disks_dir.join("docker-replacement.raw");
+        write_test_ext4(&replacement, filesystem_uuid);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_len(crate::linux::state::MINIMUM_DOCKER_DISK_BYTES)
+            .unwrap();
+        fs::rename(&replacement, &paths.docker_disk).unwrap();
+        assert!(matches!(
+            admit_docker_disk(&paths, &request, Some(&persisted)),
+            Err(RunnerError::State(StateError::StateDiskIdentityChanged(path)))
+                if path == paths.docker_disk
+        ));
+    }
+
+    #[test]
     fn root_generation_replay_is_bound_to_the_persisted_disk_identity() {
         let (_parent, runner) = test_runner();
         let vm_id = Uuid::new_v4();
@@ -5156,6 +5316,7 @@ mod tests {
             phase: VmPhase::Starting,
             process: ProcessIdentity::capture(std::process::id()).unwrap(),
             state_disk: admitted.clone(),
+            docker_disk: None,
             root_generation: Some(generation.clone()),
             root_disk: Some(admitted.clone()),
             api_socket: None,
@@ -5288,6 +5449,7 @@ mod tests {
             phase: VmPhase::Starting,
             process: ProcessIdentity::capture(std::process::id()).unwrap(),
             state_disk: previous_identity.clone(),
+            docker_disk: None,
             root_generation: Some(previous_generation),
             root_disk: Some(previous_identity),
             api_socket: None,

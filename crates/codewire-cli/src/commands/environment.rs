@@ -1886,6 +1886,8 @@ pub(crate) fn local_create_args_from_environment_args(
         || args.no_wait
         || args.write_preset
         || args.save_preset.is_some()
+        || args.docker_disk.is_some()
+        || args.no_docker
     {
         anyhow::bail!("the selected create option is only supported for --platform environments");
     }
@@ -1937,9 +1939,11 @@ pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Resul
         || args.path_mode.is_some()
         || args.file.is_some()
         || args.spec.is_some()
+        || args.docker_disk.is_some()
+        || args.no_docker
     {
         anyhow::bail!(
-            "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
+            "--backend, --path, --path-mode, --file, --spec, --docker-disk, and --no-docker require `cw env create --local`"
         );
     }
     if args.access_profile.is_some() {

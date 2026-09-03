@@ -32,7 +32,7 @@ const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
-const DATABASE_SCHEMA_VERSION: i64 = 9;
+const DATABASE_SCHEMA_VERSION: i64 = 10;
 // A create journal entry contains the exact canonical project JSON so replay
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
@@ -447,7 +447,7 @@ impl SupervisorStore {
             |row| row.get(0),
         )?;
         let mut statement = self.connection.prepare(
-            "SELECT id, name, observed_state, vcpus, memory_mib, disk_bytes, generation, \
+            "SELECT id, name, observed_state, vcpus, memory_mib, disk_bytes, docker_disk_bytes, generation, \
                     host_ports_json, mesh_attachment_json, workspace_plan_json, \
                     project_spec_json, project_spec_sha256, \
                     access_profile_reference, access_profile_id, access_profile_revision, \
@@ -465,20 +465,21 @@ impl SupervisorStore {
                 row.get::<_, i64>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
-                row.get::<_, Vec<u8>>(7)?,
-                row.get::<_, Option<Vec<u8>>>(8)?,
-                row.get::<_, Vec<u8>>(9)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Vec<u8>>(8)?,
+                row.get::<_, Option<Vec<u8>>>(9)?,
                 row.get::<_, Vec<u8>>(10)?,
-                row.get::<_, String>(11)?,
-                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Vec<u8>>(11)?,
+                row.get::<_, String>(12)?,
                 row.get::<_, Option<String>>(13)?,
-                row.get::<_, Option<i64>>(14)?,
-                row.get::<_, Option<Vec<u8>>>(15)?,
-                row.get::<_, String>(16)?,
-                row.get::<_, Option<String>>(17)?,
-                row.get::<_, Option<Vec<u8>>>(18)?,
+                row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<i64>>(15)?,
+                row.get::<_, Option<Vec<u8>>>(16)?,
+                row.get::<_, String>(17)?,
+                row.get::<_, Option<String>>(18)?,
                 row.get::<_, Option<Vec<u8>>>(19)?,
                 row.get::<_, Option<Vec<u8>>>(20)?,
+                row.get::<_, Option<Vec<u8>>>(21)?,
             ))
         })?;
         let mut environments = BTreeMap::new();
@@ -491,6 +492,7 @@ impl SupervisorStore {
                 vcpus,
                 memory_mib,
                 disk_bytes,
+                docker_disk_bytes,
                 generation,
                 host_ports_json,
                 mesh_attachment_json,
@@ -533,6 +535,8 @@ impl SupervisorStore {
                 memory_mib: u32::try_from(memory_mib)
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
                 disk_bytes: u64::try_from(disk_bytes)
+                    .map_err(|_| SupervisorStoreError::InvalidState)?,
+                docker_disk_bytes: u64::try_from(docker_disk_bytes)
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
                 generation: u64::try_from(generation)
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
@@ -815,6 +819,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            vcpus INTEGER NOT NULL CHECK (vcpus BETWEEN 1 AND 32),
            memory_mib INTEGER NOT NULL CHECK (memory_mib BETWEEN 128 AND 65536),
            disk_bytes INTEGER NOT NULL CHECK (disk_bytes > 0),
+           docker_disk_bytes INTEGER NOT NULL CHECK (docker_disk_bytes >= 0),
            generation INTEGER NOT NULL CHECK (generation >= 0),
            host_ports_json BLOB NOT NULL,
            mesh_attachment_json BLOB NULL,
@@ -864,7 +869,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            updated_unix_ms INTEGER NOT NULL
          ) STRICT;
          PRAGMA application_id = 1129797197;
-         PRAGMA user_version = 9;
+         PRAGMA user_version = 10;
          COMMIT;",
     )?;
     validate_schema(connection)
@@ -906,6 +911,7 @@ fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> 
         "mesh_attachment_json",
         "project_spec_json",
         "project_spec_sha256",
+        "docker_disk_bytes",
         "access_profile_reference",
         "access_profile_id",
         "access_profile_revision",
@@ -978,6 +984,8 @@ fn write_state(
         let encoded_access = encode_access_binding(environment)?;
         let disk_bytes = i64::try_from(environment.disk_bytes)
             .map_err(|_| SupervisorStoreError::InvalidState)?;
+        let docker_disk_bytes = i64::try_from(environment.docker_disk_bytes)
+            .map_err(|_| SupervisorStoreError::InvalidState)?;
         let generation = i64::try_from(environment.generation)
             .map_err(|_| SupervisorStoreError::InvalidState)?;
         transaction.execute(
@@ -987,14 +995,14 @@ fn write_state(
         transaction.execute(
             "INSERT INTO environments(
                id, name, desired_state, observed_state, vcpus, memory_mib,
-               disk_bytes, generation, host_ports_json, mesh_attachment_json,
+               disk_bytes, docker_disk_bytes, generation, host_ports_json, mesh_attachment_json,
                workspace_plan_json, runner_json,
                active_artifact_generation, staging_artifact_generation,
                project_spec_json, project_spec_sha256, access_profile_reference,
                access_profile_id, access_profile_revision,
                active_workspace_generation_json, staging_workspace_generation_json,
                rollback_workspace_generation_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                desired_state = excluded.desired_state,
@@ -1002,6 +1010,7 @@ fn write_state(
                vcpus = excluded.vcpus,
                memory_mib = excluded.memory_mib,
                disk_bytes = excluded.disk_bytes,
+               docker_disk_bytes = excluded.docker_disk_bytes,
                generation = excluded.generation,
                host_ports_json = excluded.host_ports_json,
                mesh_attachment_json = excluded.mesh_attachment_json,
@@ -1025,6 +1034,7 @@ fn write_state(
                 i64::from(environment.vcpus),
                 i64::from(environment.memory_mib),
                 disk_bytes,
+                docker_disk_bytes,
                 generation,
                 host_ports_json,
                 mesh_attachment_json,
@@ -1064,6 +1074,15 @@ fn write_state(
                     relative_path.as_bytes(),
                     identity_json,
                 ],
+            )?;
+        }
+        if environment.docker_disk_bytes != 0 {
+            let relative_path = format!("{vm}/disks/docker.raw");
+            transaction.execute(
+                "INSERT INTO owned_objects(
+                   environment_id, kind, relative_path, identity_json, lifecycle
+                 ) VALUES (?1, 'docker_disk', ?2, NULL, 'active')",
+                params![environment.id.to_string(), relative_path.as_bytes()],
             )?;
         }
         if matches!(
@@ -1700,6 +1719,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 16 * 1024,
             disk_bytes: crate::linux::state::MINIMUM_STATE_DISK_BYTES,
+            docker_disk_bytes: 0,
             generation: 7,
             host_ports: vec![HostPortBinding::new(18_080, 3_000).unwrap()],
             mesh: None,
@@ -1988,6 +2008,42 @@ mod tests {
         assert_eq!(inspected, expected);
         drop(store);
         assert_eq!(fs::read(database).unwrap(), before);
+    }
+
+    #[test]
+    fn docker_disk_size_and_owned_object_survive_exact_database_reopen() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let mut environment = environment(StoredEnvironmentState::Stopped, None);
+        environment.docker_disk_bytes = crate::linux::state::MINIMUM_DOCKER_DISK_BYTES;
+        let environment_id = environment.id;
+        let expected = state(environment);
+        store.replace_state(&expected).unwrap();
+        let object: (String, Vec<u8>, String) = store
+            .connection
+            .query_row(
+                "SELECT kind, relative_path, lifecycle FROM owned_objects \
+                 WHERE environment_id = ?1 AND kind = 'docker_disk'",
+                [environment_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            object,
+            (
+                "docker_disk".to_owned(),
+                format!("engine/vms/{environment_id}/disks/docker.raw").into_bytes(),
+                "active".to_owned(),
+            )
+        );
+        drop(store);
+
+        let (_reopened, loaded) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        assert_eq!(loaded, expected);
+        assert_eq!(
+            loaded.environments["dev"].docker_disk_bytes,
+            crate::linux::state::MINIMUM_DOCKER_DISK_BYTES
+        );
     }
 
     #[test]

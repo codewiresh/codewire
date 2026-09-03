@@ -116,6 +116,7 @@ fn entrypoint() -> anyhow::Result<()> {
             runtime.block_on(guest::run_credential_forwarder())
         }
         Some("workspace-exec") => guest::run_workspace_exec(arguments.collect()),
+        Some("docker-fixture") => guest::run_docker_fixture(arguments.collect()),
         Some("newc") => build_newc(arguments),
         Some("newc-root") => build_guest_root_newc(arguments),
         Some(_) => {

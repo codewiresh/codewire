@@ -349,6 +349,8 @@ pub(crate) fn env_create_request_from_init_args(
         cpu: args.cpu.map(|value| value.to_string()),
         memory: args.memory.map(|value| value.to_string()),
         disk: args.disk.map(|value| value.to_string()),
+        docker_disk: None,
+        no_docker: false,
         isolation: args.isolation.clone(),
         repo_flags: args.repo_flags.clone(),
         branch: args.branch.clone(),

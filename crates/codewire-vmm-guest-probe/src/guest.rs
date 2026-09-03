@@ -53,8 +53,8 @@ use crate::workspace_plan::{
     CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH, WorkspaceIdentity, WorkspacePlan,
 };
 use crate::{
-    DIRECT_SHARE_PLAN_PATH, DirectSharePlan, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage,
-    MAX_DIRECT_SHARE_PLAN_BYTES, MAX_SKILL_SNAPSHOT_PLAN_BYTES, PROGRESS_FRAME_LEN,
+    DIRECT_SHARE_PLAN_PATH, DOCKER_DISK_SERIAL, DirectSharePlan, GUEST_PROGRESS_VSOCK_PORT,
+    GuestBootStage, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_SKILL_SNAPSHOT_PLAN_BYTES, PROGRESS_FRAME_LEN,
     PROGRESS_REQUEST_LEN, ProgressFrame, ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL,
     SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN, SKILL_SNAPSHOT_CONTENT_PATH,
     SKILL_SNAPSHOT_PLAN_PATH, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
@@ -98,6 +98,16 @@ const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
 const CONTAINER_MACHINE_ID_PATH: &str = "/run/codewire/container/machine-id";
 const CONTAINER_RESOLV_CONF_PATH: &str = "/run/codewire/container/resolv.conf";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
+const DOCKER_DATA_PATH: &str = "/var/lib/docker";
+const DOCKER_RUNTIME_PATH: &str = "/run/codewire/docker";
+const DOCKER_SOCKET_PATH: &str = "/run/codewire/docker/docker.sock";
+const DOCKER_ROOT_PATH: &str = "/run/codewire/docker-root";
+const DOCKER_ROOT_BINARY_PATH: &str = "/usr/local/bin/dockerd";
+const CONTAINER_DOCKER_RUNTIME_PATH: &str = "/run/codewire-docker";
+const CONTAINER_DOCKER_SOCKET_PATH: &str = "/run/codewire-docker/docker.sock";
+const CONTAINER_DEFAULT_DOCKER_SOCKET_PATH: &str = "/run/docker.sock";
+const DOCKERD_PATH: &str = "/generation/merged/usr/local/bin/dockerd";
+const DOCKER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const CREDENTIAL_INGRESS_SOCKET: &str = "/run/codewire/container/credential.sock";
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
@@ -289,15 +299,34 @@ pub fn run_init() -> Result<()> {
     );
     validate_block_device(&seed_device)?;
     validate_block_device(&root_device)?;
+    let seed = read_seed_file(&seed_device)?;
+    let docker_device = if seed.docker_data_disk() {
+        let device = wait_for_disk_by_serial(
+            Path::new(SYS_BLOCK_PATH),
+            Path::new(DEV_PATH),
+            DOCKER_DISK_SERIAL,
+            DISK_DISCOVERY_TIMEOUT,
+        )?;
+        ensure!(
+            device != state_device && device != root_device && device != seed_device,
+            "Docker data disk must be distinct from every existing guest disk"
+        );
+        validate_block_device(&device)?;
+        Some(device)
+    } else {
+        None
+    };
     record_boot_stage("disks-admitted")?;
     mount_root_generation(&root_device)?;
+    if let Some(device) = docker_device.as_deref() {
+        mount_docker_data(device)?;
+    }
     record_boot_stage("root-mounted")?;
     create_state_layout()?;
 
     // Validate the complete seed before starting anything that accepts guest
     // control traffic. The child deliberately rereads it from the immutable
     // disk rather than inheriting the token through argv or environment.
-    let seed = read_seed_file(&seed_device)?;
     start_boot_progress(&seed, GuestBootStage::RootMounted)?;
     let plan = if let Some(binding) = seed.setup() {
         let setup_device = wait_for_disk_by_serial(
@@ -309,7 +338,10 @@ pub fn run_init() -> Result<()> {
         ensure!(
             setup_device != state_device
                 && setup_device != root_device
-                && setup_device != seed_device,
+                && setup_device != seed_device
+                && docker_device
+                    .as_ref()
+                    .is_none_or(|docker_device| setup_device != *docker_device),
             "setup disk must be distinct from every persistent or secret-bearing disk"
         );
         validate_block_device(&setup_device)?;
@@ -349,6 +381,7 @@ pub fn run_init() -> Result<()> {
     record_boot_stage("ownership-ready")?;
     prepare_install_state()?;
     let poweroff = prepare_container_control(&seed, &plan.identity)?;
+    prepare_docker_runtime(&seed, &plan.identity)?;
     record_boot_stage("container-control-ready")?;
     let mut network = match spawn_guest_network_agent() {
         Ok(network) => network,
@@ -359,20 +392,40 @@ pub fn run_init() -> Result<()> {
     };
     prepare_workspace_generation(&plan)?;
     record_boot_stage("root-generation-ready")?;
-    mount_direct_shares(&seed)?;
-    expose_persistent_layout(&plan)?;
-    mount_skill_snapshots(&seed, &plan)?;
+    if let Err(error) = mount_direct_shares(&seed) {
+        record_boot_stage("workspace-direct-share-failed")?;
+        return Err(error);
+    }
+    if let Err(error) = expose_persistent_layout(&plan) {
+        record_boot_stage("workspace-layout-failed")?;
+        return Err(error);
+    }
+    if let Err(error) = mount_skill_snapshots(&seed, &plan) {
+        record_boot_stage("workspace-skills-failed")?;
+        return Err(error);
+    }
+    if seed.docker_data_disk()
+        && let Err(error) = prepare_docker_root(&plan)
+    {
+        record_boot_stage("workspace-docker-root-failed")?;
+        return Err(error);
+    }
     record_boot_stage("persistent-layout-ready")?;
     if let Err(error) = network.wait_for_host() {
         record_network_agent_failure(NETWORK_AGENT_HOST_FAILURE_STAGE)?;
         return Err(error);
     }
+    let docker = if seed.docker_data_disk() {
+        Some(spawn_docker_daemon(&plan.identity)?)
+    } else {
+        None
+    };
     let workspace = spawn_workspace_container(&plan)?;
     record_boot_stage("workspace-running")?;
 
     let daemon = spawn_daemon()?;
     record_boot_stage("daemon-started")?;
-    supervise_guest(daemon, workspace, network.into_child()?, poweroff)
+    supervise_guest(daemon, workspace, network.into_child()?, docker, poweroff)
 }
 
 fn require_persisted_workspace_plan(plan: Option<WorkspacePlan>) -> Result<WorkspacePlan> {
@@ -1273,6 +1326,9 @@ pub fn run_workspace_init() -> Result<()> {
         Ok(plan) => plan,
         Err(error) => return fail_workspace_init("workspace-plan-invalid", error),
     };
+    if let Err(error) = prepare_container_docker_socket(&plan.identity) {
+        return fail_workspace_init("workspace-confinement-failed", error);
+    }
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = request_poweroff_signal as *const () as usize;
     action.sa_flags = libc::SA_NOCLDSTOP;
@@ -1352,6 +1408,268 @@ pub fn run_workspace_init() -> Result<()> {
         }
         return Err(io::Error::last_os_error()).context("reap workspace child");
     }
+}
+
+/// Synthetic, static workload used by the checked-in native acceptance gate.
+/// It deliberately has no provider, host, or ambient credential integration.
+pub fn run_docker_fixture(arguments: Vec<OsString>) -> Result<()> {
+    let mut arguments = arguments.into_iter();
+    let action = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or_else(|| anyhow::anyhow!("Docker fixture requires one action"))?;
+    match action.as_str() {
+        "emit" => {
+            let value = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| anyhow::anyhow!("Docker emit fixture requires one value"))?;
+            ensure!(arguments.next().is_none(), "Docker emit accepts one value");
+            println!("{value}");
+            Ok(())
+        }
+        "write-volume" => {
+            let value = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| anyhow::anyhow!("Docker volume fixture requires one value"))?;
+            ensure!(
+                arguments.next().is_none(),
+                "Docker volume write accepts one value"
+            );
+            let mut file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open("/data/value")
+                .context("create Docker volume marker")?;
+            file.write_all(value.as_bytes())
+                .and_then(|()| file.write_all(b"\n"))
+                .and_then(|()| file.sync_all())
+                .context("persist Docker volume marker")
+        }
+        "read-volume" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker volume read accepts no value"
+            );
+            let bytes = read_bounded(Path::new("/data/value"), 4096)
+                .context("read Docker volume marker")?;
+            ensure!(bytes.len() < 4096, "Docker volume marker is too large");
+            io::stdout()
+                .write_all(&bytes)
+                .context("emit Docker volume marker")
+        }
+        "serve" => {
+            let port = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .and_then(|value| value.parse::<u16>().ok())
+                .filter(|port| *port != 0)
+                .ok_or_else(|| anyhow::anyhow!("Docker server fixture port is invalid"))?;
+            ensure!(arguments.next().is_none(), "Docker server accepts one port");
+            let listener = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))
+                .context("bind Docker fixture server")?;
+            loop {
+                let (mut stream, _) = listener.accept().context("accept Docker fixture request")?;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\nConnection: close\r\n\r\ndocker-port-local",
+                    )
+                    .context("write Docker fixture response")?;
+            }
+        }
+        "fill-bytes" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker byte fill accepts no value"
+            );
+            let path = Path::new("/data/fill");
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)
+                .context("create Docker byte exhaustion fixture")?;
+            let chunk = vec![0xa5_u8; 1024 * 1024];
+            let mut exhausted = false;
+            for _ in 0..2048 {
+                match file.write_all(&chunk) {
+                    Ok(()) => {}
+                    Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
+                        exhausted = true;
+                        break;
+                    }
+                    Err(error) => return Err(error).context("fill Docker data disk by bytes"),
+                }
+            }
+            drop(file);
+            ensure!(exhausted, "Docker byte fixture did not reach ENOSPC");
+            fs::remove_file(path).context("remove Docker byte exhaustion fixture")?;
+            File::open("/data")
+                .and_then(|directory| directory.sync_all())
+                .context("persist Docker byte exhaustion cleanup")?;
+            println!("docker-byte-enospc-ok");
+            Ok(())
+        }
+        "fill-inodes" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker inode fill accepts no value"
+            );
+            let root = Path::new("/data/inodes");
+            fs::create_dir(root).context("create Docker inode exhaustion directory")?;
+            let mut exhausted = false;
+            for index in 0..250_000_u32 {
+                let path = root.join(format!("{index:06x}"));
+                match OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(path)
+                {
+                    Ok(_) => {}
+                    Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
+                        exhausted = true;
+                        break;
+                    }
+                    Err(error) => return Err(error).context("fill Docker data disk by inodes"),
+                }
+            }
+            ensure!(exhausted, "Docker inode fixture did not reach ENOSPC");
+            for entry in fs::read_dir(root).context("read Docker inode exhaustion directory")? {
+                fs::remove_file(entry?.path()).context("remove Docker inode exhaustion file")?;
+            }
+            fs::remove_dir(root).context("remove Docker inode exhaustion directory")?;
+            File::open("/data")
+                .and_then(|directory| directory.sync_all())
+                .context("persist Docker inode exhaustion cleanup")?;
+            println!("docker-inode-enospc-ok");
+            Ok(())
+        }
+        "spam-log" => {
+            let length = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|length| *length > 0 && *length <= 64 * 1024 * 1024)
+                .ok_or_else(|| anyhow::anyhow!("Docker log fixture length is invalid"))?;
+            ensure!(
+                arguments.next().is_none(),
+                "Docker log fixture accepts one length"
+            );
+            let chunk = [b'x'; 64 * 1024];
+            let mut remaining = length;
+            let mut stdout = io::stdout().lock();
+            while remaining != 0 {
+                let write_length = remaining.min(chunk.len());
+                stdout
+                    .write_all(&chunk[..write_length])
+                    .context("write Docker log fixture")?;
+                remaining -= write_length;
+            }
+            stdout.flush().context("flush Docker log fixture")
+        }
+        "assert-boundary" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker boundary fixture accepts no value"
+            );
+            for path in [
+                "/host/state",
+                "/host/generation",
+                "/host/run/codewire/container",
+                "/host/dev/vda",
+                "/host/dev/vdb",
+                "/host/dev/vdc",
+                "/host/dev/vdd",
+                "/host/dev/vsock",
+                "/host/dev/net/tun",
+            ] {
+                ensure!(
+                    fs::symlink_metadata(path)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+                    "private Docker root exposed forbidden guest authority"
+                );
+            }
+            ensure!(
+                Path::new("/host/workspace").is_dir(),
+                "private Docker root omitted the admitted workspace"
+            );
+            println!("docker-privileged-boundary-ok");
+            Ok(())
+        }
+        "crash-dockerd" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker crash fixture accepts no value"
+            );
+            let mut dockerd_pid = None;
+            for entry in fs::read_dir("/proc").context("read guest process table")? {
+                let entry = entry?;
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|value| value.parse::<libc::pid_t>().ok())
+                    .filter(|pid| *pid > 1)
+                else {
+                    continue;
+                };
+                let comm = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+                if comm.trim() == "dockerd" {
+                    ensure!(
+                        dockerd_pid.replace(pid).is_none(),
+                        "multiple dockerd processes found"
+                    );
+                }
+            }
+            let pid = dockerd_pid.ok_or_else(|| anyhow::anyhow!("dockerd process is absent"))?;
+            ensure!(
+                unsafe { libc::kill(pid, libc::SIGKILL) } == 0,
+                "kill guest-local dockerd: {}",
+                io::Error::last_os_error()
+            );
+            Ok(())
+        }
+        _ => bail!("unknown Docker fixture action"),
+    }
+}
+
+fn prepare_container_docker_socket(identity: &WorkspaceIdentity) -> Result<()> {
+    let source = Path::new(CONTAINER_DOCKER_SOCKET_PATH);
+    match fs::symlink_metadata(source) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_socket()
+                    && metadata.uid() == 0
+                    && metadata.gid() == identity.gid
+                    && metadata.permissions().mode() & 0o777 == 0o660,
+                "guest-local Docker socket metadata is invalid"
+            );
+            std::os::unix::fs::symlink(
+                CONTAINER_DOCKER_SOCKET_PATH,
+                CONTAINER_DEFAULT_DOCKER_SOCKET_PATH,
+            )
+            .context("publish standard guest-local Docker socket")?;
+            ensure!(
+                fs::read_link(CONTAINER_DEFAULT_DOCKER_SOCKET_PATH)
+                    .ok()
+                    .as_deref()
+                    == Some(source),
+                "standard guest-local Docker socket target changed"
+            );
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ensure!(
+                fs::symlink_metadata(CONTAINER_DEFAULT_DOCKER_SOCKET_PATH)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+                "Docker-disabled workspace contains an unexpected default socket"
+            );
+        }
+        Err(error) => return Err(error).context("inspect guest-local Docker socket"),
+    }
+    Ok(())
 }
 
 fn read_container_workspace_plan() -> Result<WorkspacePlan> {
@@ -2355,6 +2673,17 @@ fn mount_state(device: &Path) -> Result<()> {
     .context("mount persistent state disk")
 }
 
+fn mount_docker_data(device: &Path) -> Result<()> {
+    create_dir(Path::new("/var"), 0o755)?;
+    create_dir(Path::new("/var/lib"), 0o755)?;
+    create_dir(Path::new(DOCKER_DATA_PATH), 0o700)?;
+    let device = device
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Docker data disk path is not UTF-8"))?;
+    mount_fs(device, DOCKER_DATA_PATH, "ext4", 0, "errors=remount-ro")
+        .context("mount dedicated Docker data disk")
+}
+
 fn mount_root_generation(device: &Path) -> Result<()> {
     create_dir(Path::new(ROOT_MOUNT_PATH), 0o700)?;
     let device = device
@@ -2873,13 +3202,21 @@ fn expose_persistent_layout(plan: &WorkspacePlan) -> Result<()> {
         HOME_MERGED_PATH,
         "overlay",
         libc::MS_NOSUID | libc::MS_NODEV,
-        &format!(
-            "lowerdir={},upperdir={PERSISTENT_HOME_PATH},workdir={PERSISTENT_HOME_WORK_PATH}",
-            lower.display()
-        ),
+        &persistent_home_overlay_options(&lower),
     )
     .context("mount persistent workspace home overlay")?;
     bind_mount(HOME_MERGED_PATH, &plan.identity.home)
+}
+
+fn persistent_home_overlay_options(lower: &Path) -> String {
+    // A workspace update replaces the admitted root filesystem while retaining
+    // the persistent home upper/work directories. Overlay origin, metadata-only
+    // copy-up, redirect, and inode-index features bind upper data to a specific
+    // lower tree, so pin them off for this deliberately changing-lower mount.
+    format!(
+        "lowerdir={},upperdir={PERSISTENT_HOME_PATH},workdir={PERSISTENT_HOME_WORK_PATH},index=off,metacopy=off,redirect_dir=off,xino=off,nfs_export=off",
+        lower.display()
+    )
 }
 
 fn confined_image_directory_exists(relative: &Path) -> Result<bool> {
@@ -2975,6 +3312,236 @@ fn prepare_container_control(
         .set_nonblocking(true)
         .context("make guest poweroff socket nonblocking")?;
     Ok(socket)
+}
+
+fn prepare_docker_runtime(seed: &Seed, workspace_identity: &WorkspaceIdentity) -> Result<()> {
+    create_dir(Path::new(DOCKER_RUNTIME_PATH), 0o750)?;
+    lchown(
+        Path::new(DOCKER_RUNTIME_PATH),
+        unsafe { libc::geteuid() },
+        workspace_identity.gid,
+    )?;
+    if !seed.docker_data_disk() {
+        return Ok(());
+    }
+    create_dir(Path::new("/etc"), 0o755)?;
+    write_durable(
+        Path::new("/etc/resolv.conf"),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        0o444,
+    )
+    .context("publish isolated Docker resolver configuration")
+}
+
+fn prepare_docker_root(plan: &WorkspacePlan) -> Result<()> {
+    create_dir(Path::new(DOCKER_ROOT_PATH), 0o700)?;
+    mount_fs(
+        "tmpfs",
+        DOCKER_ROOT_PATH,
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "mode=0700,size=4m",
+    )
+    .context("mount private Docker daemon root")?;
+    for (relative, mode) in [
+        ("usr", 0o755),
+        ("etc", 0o755),
+        ("etc/ssl", 0o755),
+        ("var", 0o755),
+        ("var/lib", 0o755),
+        ("var/lib/docker", 0o700),
+        ("run", 0o755),
+        ("run/codewire", 0o700),
+        ("run/codewire/bin", 0o700),
+        ("run/codewire/docker", 0o750),
+        ("tmp", 0o1777),
+        ("workspace", 0o700),
+        ("home", 0o755),
+        ("root", 0o700),
+        ("proc", 0o555),
+        ("sys", 0o555),
+        ("dev", 0o755),
+    ] {
+        create_dir(&Path::new(DOCKER_ROOT_PATH).join(relative), mode)?;
+    }
+    let home = Path::new(&plan.identity.home);
+    let docker_home = Path::new(DOCKER_ROOT_PATH).join(
+        home.strip_prefix("/")
+            .context("derive private Docker daemon home path")?,
+    );
+    fs::create_dir_all(&docker_home).context("create private Docker daemon home path")?;
+    create_dir(&docker_home, 0o700)?;
+
+    bind_mount_read_only(
+        &format!("{ROOT_MERGED_PATH}/usr"),
+        &format!("{DOCKER_ROOT_PATH}/usr"),
+    )?;
+    bind_mount_read_only(
+        &format!("{ROOT_MERGED_PATH}/etc/ssl"),
+        &format!("{DOCKER_ROOT_PATH}/etc/ssl"),
+    )?;
+    bind_mount_confined(
+        DOCKER_DATA_PATH,
+        &format!("{DOCKER_ROOT_PATH}{DOCKER_DATA_PATH}"),
+        false,
+    )?;
+    bind_mount_confined(
+        DOCKER_RUNTIME_PATH,
+        &format!("{DOCKER_ROOT_PATH}{DOCKER_RUNTIME_PATH}"),
+        false,
+    )?;
+    bind_mount_confined(
+        WORKSPACE_PATH,
+        &format!("{DOCKER_ROOT_PATH}{WORKSPACE_PATH}"),
+        true,
+    )?;
+    bind_mount_confined(
+        home.to_str()
+            .context("Docker workspace home is not UTF-8")?,
+        docker_home
+            .to_str()
+            .context("private Docker daemon home is not UTF-8")?,
+        true,
+    )?;
+
+    for (link, target) in [
+        ("bin", "usr/bin"),
+        ("sbin", "usr/sbin"),
+        ("var/run", "/run"),
+    ] {
+        create_symlink(target, &format!("{DOCKER_ROOT_PATH}/{link}"))?;
+    }
+    let (library_directory, loader_link, loader_target) = match std::env::consts::ARCH {
+        "x86_64" => (
+            "x86_64-linux-gnu",
+            "lib64/ld-linux-x86-64.so.2",
+            "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        ),
+        "aarch64" => (
+            "aarch64-linux-gnu",
+            "lib/ld-linux-aarch64.so.1",
+            "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+        ),
+        _ => bail!("private Docker daemon architecture is unsupported"),
+    };
+    create_dir(&Path::new(DOCKER_ROOT_PATH).join("lib"), 0o755)?;
+    create_dir(&Path::new(DOCKER_ROOT_PATH).join("lib64"), 0o755)?;
+    create_symlink(
+        &format!("/usr/lib/{library_directory}"),
+        &format!("{DOCKER_ROOT_PATH}/lib/{library_directory}"),
+    )?;
+    create_symlink(loader_target, &format!("{DOCKER_ROOT_PATH}/{loader_link}"))?;
+
+    let iptables = Path::new(DOCKER_ROOT_PATH).join("usr/sbin/xtables-nft-multi");
+    let metadata =
+        fs::symlink_metadata(&iptables).context("inspect sealed Docker iptables tool")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o111 != 0,
+        "sealed Docker iptables tool metadata is invalid"
+    );
+    for tool in [
+        "iptables",
+        "iptables-save",
+        "iptables-restore",
+        "ip6tables",
+        "ip6tables-save",
+        "ip6tables-restore",
+    ] {
+        create_symlink(
+            "/usr/sbin/xtables-nft-multi",
+            &format!("{DOCKER_ROOT_PATH}/run/codewire/bin/{tool}"),
+        )?;
+    }
+
+    write_durable(
+        &Path::new(DOCKER_ROOT_PATH).join("etc/resolv.conf"),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        0o444,
+    )?;
+    mount_fs(
+        "proc",
+        &format!("{DOCKER_ROOT_PATH}/proc"),
+        "proc",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "",
+    )
+    .context("mount private Docker procfs")?;
+    mount_fs(
+        "sysfs",
+        &format!("{DOCKER_ROOT_PATH}/sys"),
+        "sysfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY,
+        "",
+    )
+    .context("mount private Docker sysfs")?;
+    bind_mount_confined(
+        CGROUP_ROOT_PATH,
+        &format!("{DOCKER_ROOT_PATH}{CGROUP_ROOT_PATH}"),
+        true,
+    )?;
+    prepare_docker_devices()?;
+    Ok(())
+}
+
+fn prepare_docker_devices() -> Result<()> {
+    let dev = format!("{DOCKER_ROOT_PATH}/dev");
+    mount_fs(
+        "tmpfs",
+        &dev,
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        "mode=0755,size=16m",
+    )
+    .context("mount private Docker device filesystem")?;
+    create_dir(&Path::new(&dev).join("pts"), 0o755)?;
+    create_dir(&Path::new(&dev).join("shm"), 0o1777)?;
+    mount_fs(
+        "devpts",
+        &format!("{dev}/pts"),
+        "devpts",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        "newinstance,ptmxmode=0666,mode=0620,gid=5",
+    )
+    .context("mount private Docker devpts")?;
+    mount_fs(
+        "tmpfs",
+        &format!("{dev}/shm"),
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "mode=1777,size=64m",
+    )
+    .context("mount private Docker shared memory")?;
+    create_symlink("pts/ptmx", &format!("{dev}/ptmx"))?;
+    for device in ["null", "zero", "full", "random", "urandom", "tty"] {
+        let target = Path::new(&dev).join(device);
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&target)
+            .with_context(|| format!("create private Docker device target {device}"))?;
+        mount_fs(
+            &format!("/dev/{device}"),
+            target
+                .to_str()
+                .context("private Docker device target is not UTF-8")?,
+            "none",
+            libc::MS_BIND,
+            "",
+        )
+        .with_context(|| format!("bind private Docker device {device}"))?;
+    }
+    for (link, target) in [
+        ("fd", "/proc/self/fd"),
+        ("stdin", "/proc/self/fd/0"),
+        ("stdout", "/proc/self/fd/1"),
+        ("stderr", "/proc/self/fd/2"),
+    ] {
+        create_symlink(target, &format!("{dev}/{link}"))?;
+    }
+    Ok(())
 }
 
 struct GuestNetworkAgent {
@@ -3301,7 +3868,8 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": plan.identity.home, "type": "none", "source": HOME_MERGED_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": crate::CODEX_GUEST_HOME_PATH, "type": "none", "source": PERSISTENT_CODEX_HOME_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": CONTAINER_CONTROL_DESTINATION, "type": "none", "source": CONTAINER_CONTROL_PATH, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] },
-            { "destination": CONTAINER_PROBE_DESTINATION, "type": "none", "source": PERSISTENT_PROBE_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
+            { "destination": CONTAINER_PROBE_DESTINATION, "type": "none", "source": PERSISTENT_PROBE_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_DOCKER_RUNTIME_PATH, "type": "none", "source": DOCKER_RUNTIME_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
         ],
         "linux": {
             "rootfsPropagation": "rslave",
@@ -3342,6 +3910,33 @@ fn bind_mount(source: &str, target: &str) -> Result<()> {
         "",
     )
     .with_context(|| format!("confine persistent guest bind mount {target}"))
+}
+
+fn bind_mount_confined(source: &str, target: &str, recursive: bool) -> Result<()> {
+    let initial_flags = libc::MS_BIND | if recursive { libc::MS_REC } else { 0 };
+    mount_fs(source, target, "none", initial_flags, "")
+        .with_context(|| format!("bind private Docker path {target}"))?;
+    mount_fs(
+        source,
+        target,
+        "none",
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )
+    .with_context(|| format!("confine private Docker bind mount {target}"))
+}
+
+fn bind_mount_read_only(source: &str, target: &str) -> Result<()> {
+    mount_fs(source, target, "none", libc::MS_BIND, "")
+        .with_context(|| format!("bind sealed Docker path {target}"))?;
+    mount_fs(
+        source,
+        target,
+        "none",
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )
+    .with_context(|| format!("make sealed Docker path read-only {target}"))
 }
 
 fn create_dir(path: &Path, mode: u32) -> Result<()> {
@@ -3809,10 +4404,141 @@ fn spawn_daemon() -> Result<std::process::Child> {
         .context("spawn environment-free guest daemon")
 }
 
+fn spawn_docker_daemon(identity: &WorkspaceIdentity) -> Result<std::process::Child> {
+    let metadata = fs::symlink_metadata(DOCKERD_PATH).context("inspect sealed dockerd binary")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o111 != 0,
+        "sealed dockerd binary metadata is invalid"
+    );
+    let namespace = File::open(NETWORK_NAMESPACE_PATH)
+        .context("open pinned workspace network namespace for dockerd")?;
+    let namespace_fd = namespace.as_raw_fd();
+    let docker_root = CString::new(DOCKER_ROOT_PATH).context("encode private Docker root path")?;
+    let root = CString::new("/").expect("root path contains no NUL");
+    let mut command = Command::new(DOCKER_ROOT_BINARY_PATH);
+    command
+        .args([
+            "--host=unix:///run/codewire/docker/docker.sock",
+            "--data-root=/var/lib/docker",
+            "--exec-root=/run/codewire/docker/exec",
+            "--pidfile=/run/codewire/docker/dockerd.pid",
+            "--storage-driver=overlay2",
+            "--iptables=true",
+            "--ip-masq=true",
+            "--userland-proxy=false",
+            "--log-driver=local",
+            "--log-opt=max-size=10m",
+            "--log-opt=max-file=3",
+            "--log-level=error",
+            "--shutdown-timeout=5",
+        ])
+        .env_clear()
+        .env(
+            "PATH",
+            "/run/codewire/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+        // The Codewire resolver admits one bounded canonical question. Keep
+        // dockerd inside that seam instead of widening it to accept EDNS.
+        .env("GODEBUG", "netedns0=0")
+        .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1
+                || libc::getppid() != 1
+                || libc::setns(namespace_fd, libc::CLONE_NEWNET) == -1
+                || libc::chroot(docker_root.as_ptr()) == -1
+                || libc::chdir(root.as_ptr()) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().context("start guest-local Docker daemon")?;
+    drop(namespace);
+    let deadline = Instant::now() + DOCKER_START_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().context("observe Docker startup")? {
+            bail!("guest-local Docker daemon exited during startup: {status}");
+        }
+        if docker_socket_ready()? {
+            fs::set_permissions(DOCKER_SOCKET_PATH, fs::Permissions::from_mode(0o660))
+                .context("set guest-local Docker socket mode")?;
+            lchown(Path::new(DOCKER_SOCKET_PATH), 0, identity.gid)?;
+            let metadata = fs::symlink_metadata(DOCKER_SOCKET_PATH)
+                .context("inspect admitted guest-local Docker socket")?;
+            ensure!(
+                metadata.file_type().is_socket()
+                    && metadata.uid() == 0
+                    && metadata.gid() == identity.gid
+                    && metadata.permissions().mode() & 0o777 == 0o660,
+                "guest-local Docker socket admission failed"
+            );
+            return Ok(child);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("guest-local Docker daemon readiness timed out");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn docker_socket_ready() -> Result<bool> {
+    let mut stream = match UnixStream::connect(DOCKER_SOCKET_PATH) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error).context("connect guest-local Docker socket"),
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .context("bound Docker readiness read")?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(250)))
+        .context("bound Docker readiness write")?;
+    stream
+        .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+        .context("write Docker readiness request")?;
+    let mut response = [0_u8; 4096];
+    let length = match stream.read(&mut response) {
+        Ok(length) => length,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error).context("read Docker readiness response"),
+    };
+    Ok(response[..length].starts_with(b"HTTP/1.1 200")
+        && response[..length]
+            .windows(4)
+            .any(|window| window == b"\r\n\r\n"))
+}
+
 fn supervise_guest(
     mut daemon: std::process::Child,
     mut workspace: std::process::Child,
     mut network: std::process::Child,
+    mut docker: Option<std::process::Child>,
     poweroff: UnixDatagram,
 ) -> Result<()> {
     loop {
@@ -3820,12 +4546,18 @@ fn supervise_guest(
         if POWEROFF_REQUESTED.load(Ordering::Acquire) || container_poweroff_requested(&poweroff)? {
             stop_daemon(&mut daemon);
             stop_workspace_container(&mut workspace);
+            if let Some(docker) = docker.as_mut() {
+                stop_docker_daemon(docker);
+            }
             stop_network_agent(&mut network);
             return power_off();
         }
         if daemon.try_wait().context("observe guest daemon")?.is_some() {
             eprintln!("guest daemon exited; powering off generation");
             stop_workspace_container(&mut workspace);
+            if let Some(docker) = docker.as_mut() {
+                stop_docker_daemon(docker);
+            }
             stop_network_agent(&mut network);
             return power_off();
         }
@@ -3836,6 +4568,9 @@ fn supervise_guest(
         {
             eprintln!("workspace container exited; powering off generation");
             stop_daemon(&mut daemon);
+            if let Some(docker) = docker.as_mut() {
+                stop_docker_daemon(docker);
+            }
             stop_network_agent(&mut network);
             let _ = force_delete_workspace_container();
             return power_off();
@@ -3848,10 +4583,45 @@ fn supervise_guest(
             eprintln!("guest network agent exited; powering off generation");
             stop_daemon(&mut daemon);
             stop_workspace_container(&mut workspace);
+            if let Some(docker) = docker.as_mut() {
+                stop_docker_daemon(docker);
+            }
+            return power_off();
+        }
+        if let Some(docker) = docker.as_mut()
+            && docker
+                .try_wait()
+                .context("observe guest-local Docker daemon")?
+                .is_some()
+        {
+            eprintln!("guest-local Docker daemon exited; powering off generation");
+            stop_daemon(&mut daemon);
+            stop_workspace_container(&mut workspace);
+            stop_network_agent(&mut network);
             return power_off();
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn stop_docker_daemon(docker: &mut std::process::Child) {
+    if docker.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    if let Ok(pid) = libc::pid_t::try_from(docker.id()) {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+    let deadline = Instant::now() + DAEMON_SHUTDOWN_TIMEOUT;
+    while Instant::now() < deadline {
+        if docker.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = docker.kill();
+    let _ = docker.wait();
 }
 
 fn stop_network_agent(network: &mut std::process::Child) {
@@ -4539,6 +5309,22 @@ mod tests {
             codex_home["options"],
             serde_json::json!(["rbind", "rw", "nosuid", "nodev"])
         );
+        let docker_runtime = mounts
+            .iter()
+            .find(|mount| mount["destination"] == CONTAINER_DOCKER_RUNTIME_PATH)
+            .unwrap();
+        assert_eq!(docker_runtime["source"], DOCKER_RUNTIME_PATH);
+        assert_eq!(
+            docker_runtime["options"],
+            serde_json::json!(["rbind", "rw", "nosuid", "nodev", "noexec"])
+        );
+        assert!(mounts.iter().all(|mount| {
+            let source = mount["source"].as_str().unwrap_or_default();
+            source != "/var/run/docker.sock"
+                && source != "/run/docker.sock"
+                && source != "/run/containerd/containerd.sock"
+                && source != "/var/run/containerd/containerd.sock"
+        }));
         assert_eq!(
             config["process"]["capabilities"]["effective"],
             serde_json::json!(["CAP_SETGID", "CAP_SETUID"])
@@ -4852,6 +5638,18 @@ mod tests {
         assert!(!is_host_cid(VMADDR_CID_ANY));
         assert!(!is_host_cid(3));
         assert!(!is_host_cid(u32::MAX));
+    }
+
+    #[test]
+    fn persistent_home_overlay_allows_only_the_generation_changing_contract() {
+        assert_eq!(
+            persistent_home_overlay_options(Path::new("/run/codewire/root/lower/root")),
+            concat!(
+                "lowerdir=/run/codewire/root/lower/root,",
+                "upperdir=/state/home,workdir=/state/home-work,",
+                "index=off,metacopy=off,redirect_dir=off,xino=off,nfs_export=off"
+            )
+        );
     }
 
     #[test]

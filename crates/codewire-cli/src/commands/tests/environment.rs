@@ -17,6 +17,8 @@
             "2",
             "--memory",
             "8GB",
+            "--docker-disk",
+            "12Gi",
             "--path",
             ".",
             "--path-mode",
@@ -39,6 +41,8 @@
         assert_eq!(args.name.as_deref(), Some("workspace"));
         assert_eq!(args.cpu.as_deref(), Some("2"));
         assert_eq!(args.memory.as_deref(), Some("8GB"));
+        assert_eq!(args.docker_disk.as_deref(), Some("12Gi"));
+        assert!(!args.no_docker);
         assert_eq!(args.path.as_deref(), Some(std::path::Path::new(".")));
         assert_eq!(args.path_mode, Some(PathModeArg::Copy));
         assert_eq!(args.output, OutputFormat::Json);
@@ -73,6 +77,18 @@
 
         assert!(Cli::try_parse_from(["cw", "env", "--local", "--platform", "list"]).is_err());
         assert!(Cli::try_parse_from(["cw", "environment", "list"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "cw",
+                "env",
+                "create",
+                "--local",
+                "--docker-disk",
+                "8Gi",
+                "--no-docker",
+            ])
+            .is_err()
+        );
         let cli = Cli::try_parse_from([
             "cw",
             "env",
@@ -435,7 +451,7 @@
         };
         assert_eq!(
             reject_local_create_options(&args).unwrap_err().to_string(),
-            "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
+            "--backend, --path, --path-mode, --file, --spec, --docker-disk, and --no-docker require `cw env create --local`"
         );
 
         let cli = Cli::try_parse_from([

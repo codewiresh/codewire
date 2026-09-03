@@ -19,7 +19,9 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::linux::path::{PrivateRoot, current_uid};
-use crate::linux::state::{MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths};
+use crate::linux::state::{
+    MINIMUM_DOCKER_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths,
+};
 use crate::oci::ContentStore;
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
 use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
@@ -390,6 +392,93 @@ pub(crate) fn ensure_workspace_plan(
             source: source_error,
         }),
     }
+}
+
+/// Create or admit the environment-owned Docker data disk. The disk is
+/// formatted before a no-replace rename publishes it, so interruption leaves
+/// either the complete final disk or one exact, safely removable staging file.
+pub(crate) fn ensure_docker_data_disk(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    disk_bytes: u64,
+) -> Result<StateDiskIdentity, WorkspaceError> {
+    if disk_bytes < MINIMUM_DOCKER_DISK_BYTES || !disk_bytes.is_multiple_of(1024 * 1024) {
+        return Err(WorkspaceError::InvalidDockerDiskSize(disk_bytes));
+    }
+    let engine_root = PrivateRoot::open(engine_state_root)?;
+    let paths = VmPaths::create(&engine_root, vm_id)?;
+    let disks = PrivateRoot::open(&paths.disks_dir)?;
+    match fs::symlink_metadata(&paths.docker_disk) {
+        Ok(_) => {
+            let identity = StateDiskIdentity::capture(&paths.docker_disk)?;
+            if identity.file.size != disk_bytes {
+                return Err(WorkspaceError::ExistingDiskSizeMismatch {
+                    path: paths.docker_disk,
+                    expected: disk_bytes,
+                    actual: identity.file.size,
+                });
+            }
+            return Ok(identity);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(WorkspaceError::Io {
+                path: paths.docker_disk,
+                source,
+            });
+        }
+    }
+
+    let staging_name = Path::new("docker.raw.staging");
+    if disks
+        .open_regular(staging_name, true, None, false, Some(0o600))
+        .is_ok()
+    {
+        disks.remove_private_regular(staging_name, 0o600)?;
+    } else if fs::symlink_metadata(paths.disks_dir.join(staging_name)).is_ok() {
+        return Err(WorkspaceError::UnsafeDockerStaging(
+            paths.disks_dir.join(staging_name),
+        ));
+    }
+
+    let staging = disks.create_regular(staging_name, 0o600, true)?;
+    let operation = (|| {
+        staging
+            .file()
+            .set_len(disk_bytes)
+            .map_err(|source| WorkspaceError::Io {
+                path: paths.disks_dir.join(staging_name),
+                source,
+            })?;
+        drop(staging);
+        format_empty_ext4(&paths.disks_dir.join(staging_name))?;
+        File::open(paths.disks_dir.join(staging_name))
+            .and_then(|file| file.sync_all())
+            .map_err(|source| WorkspaceError::Io {
+                path: paths.disks_dir.join(staging_name),
+                source,
+            })?;
+        if !disks.publish_private_regular_no_replace(
+            staging_name,
+            Path::new("docker.raw"),
+            0o600,
+        )? {
+            disks.remove_private_regular(staging_name, 0o600)?;
+        }
+        let identity = StateDiskIdentity::capture(&paths.docker_disk)?;
+        if identity.file.size != disk_bytes {
+            return Err(WorkspaceError::ExistingDiskSizeMismatch {
+                path: paths.docker_disk,
+                expected: disk_bytes,
+                actual: identity.file.size,
+            });
+        }
+        Ok(identity)
+    })();
+    if operation.is_err() {
+        let _ = disks.remove_private_regular(staging_name, 0o600);
+    }
+    operation
 }
 
 fn provision_workspace_plan(
@@ -1828,6 +1917,27 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
+fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
+    let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).is_file())
+        .ok_or(WorkspaceError::MkfsUnavailable)?;
+    let status = Command::new(mkfs)
+        .args(["-q", "-F", "-m", "0"])
+        .arg(disk)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| WorkspaceError::MkfsUnavailable)?;
+    if !status.success() {
+        return Err(WorkspaceError::MkfsFailed);
+    }
+    Ok(())
+}
+
 struct ProvisionCleanup {
     staging: Option<PathBuf>,
     disk: Option<PathBuf>,
@@ -1872,6 +1982,10 @@ impl Drop for ProvisionCleanup {
 pub enum WorkspaceError {
     #[error("workspace disk size is invalid: {0}")]
     InvalidDiskSize(u64),
+    #[error("Docker data disk size is invalid: {0}")]
+    InvalidDockerDiskSize(u64),
+    #[error("Docker data disk staging path is unsafe: {0}")]
+    UnsafeDockerStaging(PathBuf),
     #[error("workspace source is not a directory: {0}")]
     SourceNotDirectory(PathBuf),
     #[error("workspace source root changed while it was being opened or copied: {0}")]
@@ -2055,6 +2169,63 @@ mod tests {
             Err(WorkspaceError::UnsafeProvisioningStaging(path)) if path == staging
         ));
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn docker_data_disk_is_formatted_then_replayed_by_exact_identity() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let vm_id = Uuid::new_v4();
+
+        let admitted =
+            ensure_docker_data_disk(engine.path(), vm_id, MINIMUM_DOCKER_DISK_BYTES).unwrap();
+        let paths = VmPaths::create(&PrivateRoot::open(engine.path()).unwrap(), vm_id).unwrap();
+        assert_eq!(admitted.file.size, MINIMUM_DOCKER_DISK_BYTES);
+        assert!(!admitted.filesystem_uuid.is_nil());
+        assert_eq!(
+            fs::metadata(&paths.docker_disk)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(!paths.disks_dir.join("docker.raw.staging").exists());
+        assert_eq!(
+            ensure_docker_data_disk(engine.path(), vm_id, MINIMUM_DOCKER_DISK_BYTES).unwrap(),
+            admitted
+        );
+        assert!(matches!(
+            ensure_docker_data_disk(
+                engine.path(),
+                vm_id,
+                MINIMUM_DOCKER_DISK_BYTES + 1024 * 1024,
+            ),
+            Err(WorkspaceError::ExistingDiskSizeMismatch { path, .. })
+                if path == paths.docker_disk
+        ));
+    }
+
+    #[test]
+    fn docker_data_disk_rejects_invalid_size_and_unsafe_staging_object() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let vm_id = Uuid::new_v4();
+        assert!(matches!(
+            ensure_docker_data_disk(engine.path(), vm_id, MINIMUM_DOCKER_DISK_BYTES - 1),
+            Err(WorkspaceError::InvalidDockerDiskSize(_))
+        ));
+
+        let paths = VmPaths::create(&PrivateRoot::open(engine.path()).unwrap(), vm_id).unwrap();
+        let outside = engine.path().join("outside");
+        fs::write(&outside, b"preserve").unwrap();
+        symlink(&outside, paths.disks_dir.join("docker.raw.staging")).unwrap();
+        assert!(matches!(
+            ensure_docker_data_disk(engine.path(), vm_id, MINIMUM_DOCKER_DISK_BYTES),
+            Err(WorkspaceError::UnsafeDockerStaging(path))
+                if path == paths.disks_dir.join("docker.raw.staging")
+        ));
+        assert_eq!(fs::read(outside).unwrap(), b"preserve");
     }
 
     fn git(source: &Path, arguments: &[&str]) {
