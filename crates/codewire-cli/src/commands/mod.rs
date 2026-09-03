@@ -821,6 +821,11 @@ pub(crate) enum EnvCommand {
     Stop(EnvTargetArgs),
     #[command(about = "Start an environment")]
     Start(EnvTargetArgs),
+    #[command(
+        name = "refresh-skills",
+        about = "Refresh immutable skills for a native local environment"
+    )]
+    RefreshSkills(EnvTargetArgs),
     #[command(about = "Delete an environment")]
     Rm(EnvDeleteArgs),
     #[command(

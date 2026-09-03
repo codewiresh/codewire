@@ -18,9 +18,11 @@ const MAGIC: &[u8; 8] = b"CWSEED1\0";
 const FORMAT_VERSION_V1: u16 = 1;
 const FORMAT_VERSION_V2: u16 = 2;
 const FORMAT_VERSION_V3: u16 = 3;
+const FORMAT_VERSION_V4: u16 = 4;
 const HEADER_LEN_V1: usize = 48;
 const HEADER_LEN_V2: usize = 128;
 const HEADER_LEN_V3: usize = 160;
+const HEADER_LEN_V4: usize = 192;
 const CHECKSUM_LEN: usize = 32;
 const CHECKSUM_OFFSET: usize = SEED_LEN - CHECKSUM_LEN;
 const TOKEN_MAX_LEN: usize = 512;
@@ -40,11 +42,15 @@ const SETUP_HEADER_SHA256_OFFSET: usize = 88;
 const V2_RESERVED_OFFSET: usize = 120;
 const DIRECT_SHARES_SHA256_OFFSET: usize = 120;
 const V3_RESERVED_OFFSET: usize = 152;
+const SKILL_SNAPSHOT_SHA256_OFFSET: usize = 152;
+const V4_RESERVED_OFFSET: usize = 184;
 const TOKEN_OFFSET_V1: usize = HEADER_LEN_V1;
 const TOKEN_OFFSET_V2: usize = HEADER_LEN_V2;
 const TOKEN_OFFSET_V3: usize = HEADER_LEN_V3;
+const TOKEN_OFFSET_V4: usize = HEADER_LEN_V4;
 const SETUP_PRESENT_FLAG: u16 = 1;
 const DIRECT_SHARES_PRESENT_FLAG: u16 = 1 << 1;
+const SKILL_SNAPSHOT_PRESENT_FLAG: u16 = 1 << 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetupBinding {
@@ -98,6 +104,7 @@ pub struct Seed {
     auth_token: String,
     setup: Option<SetupBinding>,
     direct_shares_sha256: Option<Sha256Value>,
+    skill_snapshot_sha256: Option<Sha256Value>,
 }
 
 impl Seed {
@@ -114,6 +121,7 @@ impl Seed {
             auth_token: auth_token.into(),
             setup: None,
             direct_shares_sha256: None,
+            skill_snapshot_sha256: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -133,6 +141,7 @@ impl Seed {
             auth_token: auth_token.into(),
             setup: Some(setup),
             direct_shares_sha256: None,
+            skill_snapshot_sha256: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -153,6 +162,29 @@ impl Seed {
             auth_token: auth_token.into(),
             setup,
             direct_shares_sha256,
+            skill_snapshot_sha256: None,
+        };
+        seed.validate()?;
+        Ok(seed)
+    }
+
+    pub fn new_with_all_bindings(
+        vm_id: Uuid,
+        generation: u64,
+        daemon_vsock_port: u32,
+        auth_token: impl Into<String>,
+        setup: Option<SetupBinding>,
+        direct_shares_sha256: Option<Sha256Value>,
+        skill_snapshot_sha256: Option<Sha256Value>,
+    ) -> Result<Self, SeedError> {
+        let seed = Self {
+            vm_id,
+            generation,
+            daemon_vsock_port,
+            auth_token: auth_token.into(),
+            setup,
+            direct_shares_sha256,
+            skill_snapshot_sha256,
         };
         seed.validate()?;
         Ok(seed)
@@ -182,6 +214,10 @@ impl Seed {
         self.direct_shares_sha256
     }
 
+    pub fn skill_snapshot_sha256(&self) -> Option<Sha256Value> {
+        self.skill_snapshot_sha256
+    }
+
     pub fn encode(&self) -> [u8; SEED_LEN] {
         // Construction and decoding are the only ways to obtain a Seed, so
         // these invariants have already been checked.
@@ -189,10 +225,15 @@ impl Seed {
 
         let mut bytes = [0_u8; SEED_LEN];
         bytes[..MAGIC.len()].copy_from_slice(MAGIC);
-        let (version, header_len, token_offset) = match (self.setup, self.direct_shares_sha256) {
-            (_, Some(_)) => (FORMAT_VERSION_V3, HEADER_LEN_V3, TOKEN_OFFSET_V3),
-            (Some(_), None) => (FORMAT_VERSION_V2, HEADER_LEN_V2, TOKEN_OFFSET_V2),
-            (None, None) => (FORMAT_VERSION_V1, HEADER_LEN_V1, TOKEN_OFFSET_V1),
+        let (version, header_len, token_offset) = match (
+            self.setup,
+            self.direct_shares_sha256,
+            self.skill_snapshot_sha256,
+        ) {
+            (_, _, Some(_)) => (FORMAT_VERSION_V4, HEADER_LEN_V4, TOKEN_OFFSET_V4),
+            (_, Some(_), None) => (FORMAT_VERSION_V3, HEADER_LEN_V3, TOKEN_OFFSET_V3),
+            (Some(_), None, None) => (FORMAT_VERSION_V2, HEADER_LEN_V2, TOKEN_OFFSET_V2),
+            (None, None, None) => (FORMAT_VERSION_V1, HEADER_LEN_V1, TOKEN_OFFSET_V1),
         };
         put_u16(&mut bytes, VERSION_OFFSET, version);
         put_u16(&mut bytes, HEADER_LEN_OFFSET, header_len as u16);
@@ -214,6 +255,11 @@ impl Seed {
             flags |= DIRECT_SHARES_PRESENT_FLAG;
             bytes[DIRECT_SHARES_SHA256_OFFSET..DIRECT_SHARES_SHA256_OFFSET + 32]
                 .copy_from_slice(&direct_shares_sha256.as_bytes());
+        }
+        if let Some(skill_snapshot_sha256) = self.skill_snapshot_sha256 {
+            flags |= SKILL_SNAPSHOT_PRESENT_FLAG;
+            bytes[SKILL_SNAPSHOT_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET + 32]
+                .copy_from_slice(&skill_snapshot_sha256.as_bytes());
         }
         put_u16(&mut bytes, FLAGS_OFFSET, flags);
         bytes[token_offset..token_offset + self.auth_token.len()]
@@ -242,89 +288,159 @@ impl Seed {
             return Err(SeedError::ChecksumMismatch);
         }
 
-        let (token_offset, setup, direct_shares_sha256) = match get_u16(bytes, VERSION_OFFSET) {
-            FORMAT_VERSION_V1 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V1 {
-                    return Err(SeedError::InvalidFraming);
+        let (token_offset, setup, direct_shares_sha256, skill_snapshot_sha256) =
+            match get_u16(bytes, VERSION_OFFSET) {
+                FORMAT_VERSION_V1 => {
+                    if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V1 {
+                        return Err(SeedError::InvalidFraming);
+                    }
+                    if get_u16(bytes, FLAGS_OFFSET) != 0 {
+                        return Err(SeedError::NonZeroReserved);
+                    }
+                    (TOKEN_OFFSET_V1, None, None, None)
                 }
-                if get_u16(bytes, FLAGS_OFFSET) != 0 {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                (TOKEN_OFFSET_V1, None, None)
-            }
-            FORMAT_VERSION_V2 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V2 {
-                    return Err(SeedError::InvalidFraming);
-                }
-                if get_u16(bytes, FLAGS_OFFSET) != SETUP_PRESENT_FLAG
-                    || bytes[V2_RESERVED_OFFSET..HEADER_LEN_V2]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                let root_generation = Sha256Value::from_bytes(
-                    bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
-                        .try_into()
-                        .expect("fixed seed setup digest"),
-                );
-                let header_sha256 = Sha256Value::from_bytes(
-                    bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
-                        .try_into()
-                        .expect("fixed seed setup digest"),
-                );
-                let setup = SetupBinding::new(
-                    get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
-                    root_generation,
-                    header_sha256,
-                )?;
-                (TOKEN_OFFSET_V2, Some(setup), None)
-            }
-            FORMAT_VERSION_V3 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V3 {
-                    return Err(SeedError::InvalidFraming);
-                }
-                let flags = get_u16(bytes, FLAGS_OFFSET);
-                if flags & DIRECT_SHARES_PRESENT_FLAG == 0
-                    || flags & !(SETUP_PRESENT_FLAG | DIRECT_SHARES_PRESENT_FLAG) != 0
-                    || bytes[V3_RESERVED_OFFSET..HEADER_LEN_V3]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                let setup = if flags & SETUP_PRESENT_FLAG != 0 {
-                    Some(SetupBinding::new(
-                        get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                    )?)
-                } else {
-                    if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
+                FORMAT_VERSION_V2 => {
+                    if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V2 {
+                        return Err(SeedError::InvalidFraming);
+                    }
+                    if get_u16(bytes, FLAGS_OFFSET) != SETUP_PRESENT_FLAG
+                        || bytes[V2_RESERVED_OFFSET..HEADER_LEN_V2]
+                            .iter()
+                            .any(|byte| *byte != 0)
                     {
                         return Err(SeedError::NonZeroReserved);
                     }
-                    None
-                };
-                let direct_shares_sha256 = Sha256Value::from_bytes(
-                    bytes[DIRECT_SHARES_SHA256_OFFSET..DIRECT_SHARES_SHA256_OFFSET + 32]
-                        .try_into()
-                        .expect("fixed seed direct-share digest"),
-                );
-                (TOKEN_OFFSET_V3, setup, Some(direct_shares_sha256))
-            }
-            _ => return Err(SeedError::UnsupportedVersion),
-        };
+                    let root_generation = Sha256Value::from_bytes(
+                        bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
+                            .try_into()
+                            .expect("fixed seed setup digest"),
+                    );
+                    let header_sha256 = Sha256Value::from_bytes(
+                        bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
+                            .try_into()
+                            .expect("fixed seed setup digest"),
+                    );
+                    let setup = SetupBinding::new(
+                        get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
+                        root_generation,
+                        header_sha256,
+                    )?;
+                    (TOKEN_OFFSET_V2, Some(setup), None, None)
+                }
+                FORMAT_VERSION_V3 => {
+                    if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V3 {
+                        return Err(SeedError::InvalidFraming);
+                    }
+                    let flags = get_u16(bytes, FLAGS_OFFSET);
+                    if flags & DIRECT_SHARES_PRESENT_FLAG == 0
+                        || flags & !(SETUP_PRESENT_FLAG | DIRECT_SHARES_PRESENT_FLAG) != 0
+                        || bytes[V3_RESERVED_OFFSET..HEADER_LEN_V3]
+                            .iter()
+                            .any(|byte| *byte != 0)
+                    {
+                        return Err(SeedError::NonZeroReserved);
+                    }
+                    let setup = if flags & SETUP_PRESENT_FLAG != 0 {
+                        Some(SetupBinding::new(
+                            get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
+                            Sha256Value::from_bytes(
+                                bytes[SETUP_ROOT_GENERATION_OFFSET
+                                    ..SETUP_ROOT_GENERATION_OFFSET + 32]
+                                    .try_into()
+                                    .expect("fixed seed setup digest"),
+                            ),
+                            Sha256Value::from_bytes(
+                                bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
+                                    .try_into()
+                                    .expect("fixed seed setup digest"),
+                            ),
+                        )?)
+                    } else {
+                        if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
+                            .iter()
+                            .any(|byte| *byte != 0)
+                        {
+                            return Err(SeedError::NonZeroReserved);
+                        }
+                        None
+                    };
+                    let direct_shares_sha256 = Sha256Value::from_bytes(
+                        bytes[DIRECT_SHARES_SHA256_OFFSET..DIRECT_SHARES_SHA256_OFFSET + 32]
+                            .try_into()
+                            .expect("fixed seed direct-share digest"),
+                    );
+                    (TOKEN_OFFSET_V3, setup, Some(direct_shares_sha256), None)
+                }
+                FORMAT_VERSION_V4 => {
+                    if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V4 {
+                        return Err(SeedError::InvalidFraming);
+                    }
+                    let flags = get_u16(bytes, FLAGS_OFFSET);
+                    if flags & SKILL_SNAPSHOT_PRESENT_FLAG == 0
+                        || flags
+                            & !(SETUP_PRESENT_FLAG
+                                | DIRECT_SHARES_PRESENT_FLAG
+                                | SKILL_SNAPSHOT_PRESENT_FLAG)
+                            != 0
+                        || bytes[V4_RESERVED_OFFSET..HEADER_LEN_V4]
+                            .iter()
+                            .any(|byte| *byte != 0)
+                    {
+                        return Err(SeedError::NonZeroReserved);
+                    }
+                    let setup = if flags & SETUP_PRESENT_FLAG != 0 {
+                        Some(SetupBinding::new(
+                            get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
+                            Sha256Value::from_bytes(
+                                bytes[SETUP_ROOT_GENERATION_OFFSET
+                                    ..SETUP_ROOT_GENERATION_OFFSET + 32]
+                                    .try_into()
+                                    .expect("fixed seed setup digest"),
+                            ),
+                            Sha256Value::from_bytes(
+                                bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
+                                    .try_into()
+                                    .expect("fixed seed setup digest"),
+                            ),
+                        )?)
+                    } else {
+                        if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
+                            .iter()
+                            .any(|byte| *byte != 0)
+                        {
+                            return Err(SeedError::NonZeroReserved);
+                        }
+                        None
+                    };
+                    let direct_shares_sha256 = if flags & DIRECT_SHARES_PRESENT_FLAG != 0 {
+                        Some(Sha256Value::from_bytes(
+                            bytes[DIRECT_SHARES_SHA256_OFFSET..DIRECT_SHARES_SHA256_OFFSET + 32]
+                                .try_into()
+                                .expect("fixed seed direct-share digest"),
+                        ))
+                    } else {
+                        if bytes[DIRECT_SHARES_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET]
+                            .iter()
+                            .any(|byte| *byte != 0)
+                        {
+                            return Err(SeedError::NonZeroReserved);
+                        }
+                        None
+                    };
+                    let skill_snapshot_sha256 = Sha256Value::from_bytes(
+                        bytes[SKILL_SNAPSHOT_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET + 32]
+                            .try_into()
+                            .expect("fixed seed skill-snapshot digest"),
+                    );
+                    (
+                        TOKEN_OFFSET_V4,
+                        setup,
+                        direct_shares_sha256,
+                        Some(skill_snapshot_sha256),
+                    )
+                }
+                _ => return Err(SeedError::UnsupportedVersion),
+            };
 
         let token_len = usize::from(get_u16(bytes, TOKEN_LEN_OFFSET));
         let token_end = token_offset
@@ -342,13 +458,14 @@ impl Seed {
             .map_err(|_| SeedError::InvalidTokenCharacters)?;
         let vm_id = Uuid::from_slice(&bytes[VM_ID_OFFSET..VM_ID_OFFSET + 16])
             .map_err(|_| SeedError::InvalidVmId)?;
-        Self::new_with_bindings(
+        Self::new_with_all_bindings(
             vm_id,
             get_u64(bytes, GENERATION_OFFSET),
             get_u32(bytes, PORT_OFFSET),
             token,
             setup,
             direct_shares_sha256,
+            skill_snapshot_sha256,
         )
     }
 
@@ -395,6 +512,7 @@ impl fmt::Debug for Seed {
             .field("auth_token", &"[REDACTED]")
             .field("setup", &self.setup)
             .field("direct_shares_sha256", &self.direct_shares_sha256)
+            .field("skill_snapshot_sha256", &self.skill_snapshot_sha256)
             .finish()
     }
 }
@@ -629,6 +747,42 @@ mod tests {
             assert_eq!(Seed::decode(&encoded).unwrap(), seed);
             assert_eq!(seed.setup(), setup);
             assert_eq!(seed.direct_shares_sha256(), Some(direct_shares));
+        }
+    }
+
+    #[test]
+    fn seed_v4_binds_skill_snapshot_with_optional_existing_bindings() {
+        let setup = SetupBinding::new(
+            SETUP_HEADER_LEN as u64 + SETUP_ALIGNMENT,
+            Sha256Value::calculate(b"root-generation"),
+            Sha256Value::calculate(b"setup-header"),
+        )
+        .unwrap();
+        let direct_shares = Sha256Value::calculate(b"direct-share-plan");
+        let skill_snapshot = Sha256Value::calculate(b"skill-snapshot-plan");
+        for (setup, direct_shares) in [
+            (None, None),
+            (Some(setup), None),
+            (None, Some(direct_shares)),
+            (Some(setup), Some(direct_shares)),
+        ] {
+            let seed = Seed::new_with_all_bindings(
+                Uuid::parse_str("8c3d9e72-e77f-4e75-9396-43a292614fa7").unwrap(),
+                7,
+                17777,
+                TOKEN,
+                setup,
+                direct_shares,
+                Some(skill_snapshot),
+            )
+            .unwrap();
+            let encoded = seed.encode();
+            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION_V4);
+            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN_V4 as u16);
+            assert_eq!(Seed::decode(&encoded).unwrap(), seed);
+            assert_eq!(seed.setup(), setup);
+            assert_eq!(seed.direct_shares_sha256(), direct_shares);
+            assert_eq!(seed.skill_snapshot_sha256(), Some(skill_snapshot));
         }
     }
 }

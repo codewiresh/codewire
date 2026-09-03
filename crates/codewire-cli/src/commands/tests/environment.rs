@@ -1651,6 +1651,26 @@ secrets: {project: development, organization: false, user: false}
         assert_eq!(args.environment, "builder");
         assert!(matches!(args.output, OutputFormat::Json));
 
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "refresh-skills",
+            "--local",
+            "builder",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, local, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::RefreshSkills(args) = command else {
+            panic!("expected env refresh-skills command");
+        };
+        assert!(local);
+        assert_eq!(args.environment, "builder");
+        assert!(matches!(args.output, OutputFormat::Json));
+
         let cli = Cli::try_parse_from(["cw", "env", "rm", "builder", "--yes"]).unwrap();
         let Command::Env(EnvArgs { command, .. }) = cli.command else {
             panic!("expected env command");

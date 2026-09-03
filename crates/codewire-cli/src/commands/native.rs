@@ -579,6 +579,16 @@ pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::En
         .map_err(native_status)
 }
 
+pub(crate) async fn refresh_native_environment_skills(
+    name: &str,
+) -> anyhow::Result<v1::Environment> {
+    native_client()
+        .await?
+        .refresh_skills(name)
+        .await
+        .map_err(native_status)
+}
+
 pub(crate) async fn resize_native_environment(
     name: &str,
     vcpus: u32,
@@ -851,6 +861,11 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) workspace_plan: String,
     pub(crate) workspace_inputs: u32,
     pub(crate) working_directory: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) skill_snapshot: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skill_snapshot_generation: Option<u64>,
+    pub(crate) skill_count: u32,
     pub(crate) ports: Vec<NativeHostPortView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) network: Option<String>,
@@ -882,6 +897,10 @@ impl From<&v1::Environment> for NativeEnvironmentView {
             workspace_plan: environment.workspace_plan_sha256.clone(),
             workspace_inputs: environment.workspace_input_count,
             working_directory: environment.working_directory.clone(),
+            skill_snapshot: environment.skill_snapshot_sha256.clone(),
+            skill_snapshot_generation: (environment.skill_snapshot_generation > 0)
+                .then_some(environment.skill_snapshot_generation),
+            skill_count: environment.skill_snapshot_count,
             ports: environment
                 .host_ports
                 .iter()
@@ -924,6 +943,12 @@ fn format_native_environment(view: &NativeEnvironmentView) -> String {
         view.working_directory,
         access,
     );
+    if let Some(generation) = view.skill_snapshot_generation {
+        output.push_str(&format!(
+            "Skills:      {} snapshot(s), generation {}, plan {}\n",
+            view.skill_count, generation, view.skill_snapshot
+        ));
+    }
     for port in &view.ports {
         output.push_str(&format!(
             "Port:        {} -> {}\n",
@@ -1120,11 +1145,8 @@ fn native_unsupported_project_fields(
     if !spec.environment.is_empty() {
         unsupported.push("env");
     }
-    if !spec.agents.is_empty() || !spec.agent_environment.is_empty() {
+    if spec.agents.install == Some(true) || !spec.agent_environment.is_empty() {
         unsupported.push("agents");
-    }
-    if !spec.skills.is_empty() {
-        unsupported.push("skills");
     }
     if !spec.secrets.is_empty() {
         unsupported.push("secrets");
@@ -1797,6 +1819,29 @@ working_directory: /workspace/github
     }
 
     #[test]
+    fn native_yaml_accepts_skill_projection_metadata_without_agent_installation() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".agents/skills/rust")).unwrap();
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            "agents: [codex]\nskills: [.agents/skills/rust]\n",
+        )
+        .unwrap();
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(project.spec.agents.tools, vec!["codex"]);
+        assert_eq!(project.spec.agents.install, None);
+        assert_eq!(project.spec.skills.len(), 1);
+
+        std::fs::write(
+            temp.path().join("codewire.yaml"),
+            "agents: {install: true, tools: [codex]}\nskills: [.agents/skills/rust]\n",
+        )
+        .unwrap();
+        let error = native_codewire_yaml(temp.path(), None).unwrap_err();
+        assert!(error.to_string().contains("fields: agents"), "{error}");
+    }
+
+    #[test]
     fn native_yaml_keeps_port_intent_and_exact_loopback_publications() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1915,6 +1960,9 @@ working_directory: /workspace/github
             workspace_plan: "c".repeat(64),
             workspace_inputs: 1,
             working_directory: "/workspace".to_owned(),
+            skill_snapshot: String::new(),
+            skill_snapshot_generation: None,
+            skill_count: 0,
             ports: vec![NativeHostPortView {
                 listen: "127.0.0.1:18080".to_owned(),
                 guest_port: 8_080,

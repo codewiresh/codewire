@@ -519,6 +519,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let host_ports = parse_host_ports(&request)?;
         let mesh = parse_mesh_attachment(&request)?;
         let direct_shares = parse_direct_shares(&request)?;
+        let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
@@ -559,6 +560,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 host_ports,
                 mesh,
                 direct_shares,
+                skill_snapshot_sha256,
             })
             .await
         {
@@ -987,6 +989,16 @@ fn parse_direct_shares(request: &v1::StartVmRequest) -> Result<Vec<DirectShareRe
             .map_err(|_| Status::invalid_argument("invalid direct share"))
         })
         .collect()
+}
+
+fn parse_skill_snapshot(request: &v1::StartVmRequest) -> Result<Option<Sha256Value>, Status> {
+    if request.skill_snapshot_sha256.is_empty() {
+        Ok(None)
+    } else {
+        Sha256Value::parse_hex(&request.skill_snapshot_sha256)
+            .map(Some)
+            .map_err(|_| Status::invalid_argument("invalid skill snapshot digest"))
+    }
 }
 
 fn map_start_error(error: RunnerError) -> Status {
@@ -1503,6 +1515,29 @@ mod tests {
         invalid.direct_shares = vec![raw; MAX_DIRECT_SHARES + 1];
         assert_eq!(
             parse_direct_shares(&invalid).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn skill_snapshot_parser_accepts_only_an_exact_optional_sha256() {
+        let digest = Sha256Value::calculate(b"skill-snapshot-plan");
+        let request = v1::StartVmRequest {
+            skill_snapshot_sha256: digest.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(parse_skill_snapshot(&request).unwrap(), Some(digest));
+        assert_eq!(
+            parse_skill_snapshot(&v1::StartVmRequest::default()).unwrap(),
+            None
+        );
+
+        let invalid = v1::StartVmRequest {
+            skill_snapshot_sha256: "not-a-sha256".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_skill_snapshot(&invalid).unwrap_err().code(),
             tonic::Code::InvalidArgument
         );
     }

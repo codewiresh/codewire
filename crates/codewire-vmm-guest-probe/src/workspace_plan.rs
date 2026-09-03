@@ -24,7 +24,7 @@ use crate::{SetupArchitecture, SetupHeader, Sha256Value};
 pub(crate) const WORKSPACE_PLAN_PATH: &str = "/generation/workspace-plan.json";
 pub(crate) const CONTAINER_PLAN_PATH: &str = "/run/codewire-runtime/plan.json";
 
-pub(crate) const PLAN_SCHEMA_VERSION: u32 = 3;
+pub(crate) const PLAN_SCHEMA_VERSION: u32 = 4;
 pub(crate) const MAX_PLAN_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_ENTRIES: usize = 65_536;
@@ -62,6 +62,7 @@ impl fmt::Debug for WorkspaceIdentity {
 pub(crate) struct WorkspacePlan {
     pub schema_version: u32,
     pub root_generation: String,
+    pub project_sha256: String,
     pub identity: WorkspaceIdentity,
     pub environment: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -72,6 +73,7 @@ pub(crate) struct WorkspacePlan {
     pub install_command: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub startup_script: String,
+    pub skills_selected: bool,
 }
 
 impl fmt::Debug for WorkspacePlan {
@@ -80,11 +82,13 @@ impl fmt::Debug for WorkspacePlan {
             .debug_struct("WorkspacePlan")
             .field("schema_version", &self.schema_version)
             .field("root_generation", &self.root_generation)
+            .field("project_sha256", &self.project_sha256)
             .field("identity", &self.identity)
             .field("environment_count", &self.environment.len())
             .field("workload_argument_count", &self.workload_args.len())
             .field("install_present", &!self.install_command.is_empty())
             .field("startup_present", &!self.startup_script.is_empty())
+            .field("skills_selected", &self.skills_selected)
             .finish_non_exhaustive()
     }
 }
@@ -184,6 +188,7 @@ impl WorkspacePlan {
         let plan = Self {
             schema_version: PLAN_SCHEMA_VERSION,
             root_generation: header.root_generation.to_string(),
+            project_sha256: Sha256Value::calculate(project_bytes).to_string(),
             identity,
             environment: environment
                 .into_iter()
@@ -194,6 +199,7 @@ impl WorkspacePlan {
             session_cwd: project.working_directory,
             install_command: project.install_command,
             startup_script: project.startup_script,
+            skills_selected: !project.skills.is_empty(),
         };
         plan.validate()?;
         Ok(plan)
@@ -223,6 +229,7 @@ impl WorkspacePlan {
     fn validate(&self) -> Result<(), WorkspacePlanError> {
         if self.schema_version != PLAN_SCHEMA_VERSION
             || !valid_sha256(&self.root_generation)
+            || !valid_sha256(&self.project_sha256)
             || self.identity.username.is_empty()
             || self.identity.username.len() > 256
             || !valid_account_name(&self.identity.username)
@@ -814,6 +821,11 @@ mod tests {
         assert_eq!(plan.identity.shell, "/bin/bash");
         assert_eq!(plan.workload_cwd, "/home/codewire");
         assert_eq!(plan.session_cwd, "/workspace");
+        assert_eq!(
+            plan.project_sha256,
+            Sha256Value::calculate(&project()).to_string()
+        );
+        assert!(!plan.skills_selected);
         assert_eq!(plan.workload_args, ["/entrypoint.sh", "sleep", "infinity"]);
         assert!(plan.environment.contains(&"IMAGE=yes".to_owned()));
         assert!(plan.environment.contains(&"PROJECT=yes".to_owned()));

@@ -43,7 +43,7 @@ use crate::control::v1::local_supervisor_service_client::LocalSupervisorServiceC
 use crate::control::v1::local_supervisor_service_server::{
     LocalSupervisorService, LocalSupervisorServiceServer,
 };
-use crate::generation::{GenerationError, ensure_empty_root_generation, valid_root_disk_bytes};
+use crate::generation::{GenerationError, ensure_root_generation, valid_root_disk_bytes};
 use crate::host_port::{
     HostPortBinding, canonical_host_port_bindings, validate_canonical_host_port_bindings,
 };
@@ -65,6 +65,10 @@ use crate::oci::{
 };
 use crate::runner_service::{RunnerClient, RunnerServiceError};
 use crate::setup_pack::{SetupPackError, SetupPackRequest, ensure_setup_pack};
+use crate::skill_snapshot::{
+    SkillSnapshotPreparationError, SkillSnapshotRequest, cleanup_interrupted_skill_snapshot,
+    prepare_skill_snapshot,
+};
 use crate::supervisor_store::{
     OperationKind, OperationPhase, OperationRecord, SupervisorOperationReader, SupervisorStore,
     SupervisorStoreError,
@@ -101,6 +105,7 @@ struct PreparedWorkspaceBoot {
     setup_root_generation: String,
     setup_total_bytes: u64,
     setup_header_sha256: String,
+    skill_snapshot_sha256: String,
 }
 
 #[derive(Clone)]
@@ -192,6 +197,16 @@ impl NativeRuntimeConfig {
             root: self.credential_authority_root.clone(),
             executable: self.executable.clone(),
         }
+    }
+
+    fn direct_share_forbidden_roots(&self) -> Vec<PathBuf> {
+        vec![
+            self.root.clone(),
+            self.artifact_root.clone(),
+            self.credential_authority_root.clone(),
+            self.mesh_data_dir.clone(),
+            self.platform_config_dir.clone(),
+        ]
     }
 }
 
@@ -305,6 +320,15 @@ impl NativeSupervisorClient {
         let operation = self
             .inner
             .stop_environment(mutation_selector(name))
+            .await?
+            .into_inner();
+        self.follow_environment_operation(operation, name).await
+    }
+
+    pub async fn refresh_skills(&mut self, name: &str) -> Result<v1::Environment, Status> {
+        let operation = self
+            .inner
+            .refresh_environment_skills(mutation_selector(name))
             .await?
             .into_inner();
         self.follow_environment_operation(operation, name).await
@@ -697,6 +721,10 @@ impl EnvironmentRecord {
             .project_spec_json
             .as_deref()
             .and_then(|bytes| serde_json::from_slice::<codewire_project::ProjectSpec>(bytes).ok());
+        let skill_snapshot = self
+            .active_workspace_generation
+            .as_ref()
+            .and_then(|generation| generation.skill_snapshot.as_ref());
         v1::Environment {
             id: self.id.to_string(),
             name: self.name.clone(),
@@ -723,6 +751,15 @@ impl EnvironmentRecord {
                 .access_binding
                 .as_ref()
                 .map(|binding| binding.profile_revision)
+                .unwrap_or_default(),
+            skill_snapshot_sha256: skill_snapshot
+                .and_then(|snapshot| snapshot.sha256().ok())
+                .unwrap_or_default(),
+            skill_snapshot_generation: skill_snapshot
+                .map(codewire_vmm_guest_probe::SkillSnapshotPlan::plan_generation)
+                .unwrap_or_default(),
+            skill_snapshot_count: skill_snapshot
+                .and_then(|snapshot| u32::try_from(snapshot.skills().len()).ok())
                 .unwrap_or_default(),
             host_ports: host_ports_to_proto(&self.host_ports),
             mesh: mesh_attachment_to_proto(self.mesh.as_ref()),
@@ -1370,13 +1407,7 @@ impl SupervisorCore {
         if !request.local_mounts.is_empty() {
             let mounts = request.local_mounts.clone();
             let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
-            let forbidden_roots = vec![
-                self.config.root.clone(),
-                self.config.artifact_root.clone(),
-                self.config.credential_authority_root.clone(),
-                self.config.mesh_data_dir.clone(),
-                self.config.platform_config_dir.clone(),
-            ];
+            let forbidden_roots = self.config.direct_share_forbidden_roots();
             let local_inputs = tokio::task::spawn_blocking(move || {
                 mounts
                     .into_iter()
@@ -1462,12 +1493,17 @@ impl SupervisorCore {
         let image = RegistryResolver::new(&content)?
             .resolve_anonymous(&reference)
             .await?;
-        let generation = WorkspaceGenerationRecord::new(
+        let skill_snapshot = self
+            .spawn_skill_snapshot_resolution(name, &project, &project_sha256, 1, None)?
+            .await
+            .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
+        let generation = WorkspaceGenerationRecord::new_with_skill_snapshot(
             &project_json,
             project_sha256.to_owned(),
             artifact_generation,
             image,
             DEFAULT_OCI_ROOT_DISK_BYTES,
+            skill_snapshot,
         )?;
 
         let mut next_state = self.state.clone();
@@ -1516,19 +1552,56 @@ impl SupervisorCore {
 
         let project: codewire_project::ProjectSpec =
             serde_json::from_slice(project_spec_json).map_err(|_| SupervisorError::InvalidState)?;
-        let reference = RegistryReference::parse(&project.image)?;
-        let artifact_generation = self.admit_current_artifact_generation().await?;
-        let engine = PrivateRoot::open(&self.config.engine_root())?;
-        let content = ContentStore::create(&engine)?;
-        let image = RegistryResolver::new(&content)?
-            .resolve_anonymous(&reference)
-            .await?;
-        let generation = WorkspaceGenerationRecord::new(
+        let (artifact_generation, image, root_disk_bytes) = if parameters.refresh_skills {
+            let active = self
+                .environment(name)?
+                .active_workspace_generation
+                .as_ref()
+                .ok_or(SupervisorError::InvalidState)?;
+            (
+                active.artifact_generation.clone(),
+                active.image.clone(),
+                active.root_disk_bytes,
+            )
+        } else {
+            let reference = RegistryReference::parse(&project.image)?;
+            let artifact_generation = self.admit_current_artifact_generation().await?;
+            let engine = PrivateRoot::open(&self.config.engine_root())?;
+            let content = ContentStore::create(&engine)?;
+            let image = RegistryResolver::new(&content)?
+                .resolve_anonymous(&reference)
+                .await?;
+            (artifact_generation, image, DEFAULT_OCI_ROOT_DISK_BYTES)
+        };
+        let plan_generation = match self
+            .environment(name)?
+            .active_workspace_generation
+            .as_ref()
+            .and_then(|generation| generation.skill_snapshot.as_ref())
+        {
+            Some(snapshot) => snapshot
+                .plan_generation()
+                .checked_add(1)
+                .ok_or(SupervisorError::InvalidState)?,
+            None => 1,
+        };
+        let skill_snapshot = self
+            .spawn_skill_snapshot_resolution(
+                name,
+                &project,
+                project_spec_sha256,
+                plan_generation,
+                None,
+            )?
+            .await
+            .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
+        let generation = WorkspaceGenerationRecord::new_with_skill_snapshot(
             project_spec_json,
             project_spec_sha256.clone(),
             artifact_generation.clone(),
             image,
-            DEFAULT_OCI_ROOT_DISK_BYTES,
+            root_disk_bytes,
+            skill_snapshot,
         )?;
 
         let mut next_state = self.state.clone();
@@ -1549,6 +1622,47 @@ impl SupervisorCore {
         environment.staging_artifact_generation = Some(artifact_generation);
         environment.staging_workspace_generation = Some(generation);
         Ok(next_state)
+    }
+
+    fn spawn_skill_snapshot_resolution(
+        &self,
+        name: &str,
+        project: &codewire_project::ProjectSpec,
+        project_sha256: &str,
+        plan_generation: u64,
+        expected: Option<&codewire_vmm_guest_probe::SkillSnapshotPlan>,
+    ) -> Result<
+        tokio::task::JoinHandle<
+            Result<
+                Option<codewire_vmm_guest_probe::SkillSnapshotPlan>,
+                SkillSnapshotPreparationError,
+            >,
+        >,
+        SupervisorError,
+    > {
+        let environment = self.environment(name)?;
+        let engine_root = self.config.engine_root();
+        let vm_id = environment.id;
+        let workspace_plan = environment.workspace_plan.clone();
+        let project = project.clone();
+        let project_sha256 = project_sha256.to_owned();
+        let user_skills_root = self.config.mesh_data_dir.join("skills");
+        let forbidden_direct_roots = self.config.direct_share_forbidden_roots();
+        let expected = expected.cloned();
+        Ok(tokio::task::spawn_blocking(move || {
+            prepare_skill_snapshot(SkillSnapshotRequest {
+                engine_state_root: &engine_root,
+                vm_id,
+                workspace_plan: &workspace_plan,
+                project: &project,
+                project_sha256: &project_sha256,
+                user_skills_root: &user_skills_root,
+                forbidden_direct_roots: &forbidden_direct_roots,
+                plan_generation,
+                expected: expected.as_ref(),
+            })
+            .map(|prepared| prepared.map(|prepared| prepared.plan().clone()))
+        }))
     }
 
     fn stage_workspace_rollback(
@@ -1984,6 +2098,7 @@ impl SupervisorCore {
             if environment.id != environment_id {
                 return Err(SupervisorError::InvalidState);
             }
+            cleanup_interrupted_skill_snapshot(&self.config.engine_root(), environment_id)?;
             if environment.staging_workspace_generation.is_none() {
                 continue;
             }
@@ -2628,9 +2743,16 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidRunnerResponse);
         }
         let engine_root = self.config.engine_root();
+        let user_skills_root = self.config.mesh_data_dir.join("skills");
+        let forbidden_direct_roots = self.config.direct_share_forbidden_roots();
         let boot_environment = environment.clone();
         let workspace = tokio::task::spawn_blocking(move || {
-            prepare_workspace_boot(&engine_root, &boot_environment)
+            prepare_workspace_boot(
+                &engine_root,
+                &user_skills_root,
+                &forbidden_direct_roots,
+                &boot_environment,
+            )
         })
         .await
         .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
@@ -2669,6 +2791,7 @@ impl SupervisorCore {
                 host_ports: host_ports_to_proto(&environment.host_ports),
                 mesh: mesh_attachment_to_proto(environment.mesh.as_ref()),
                 direct_shares: direct_share_attachments_to_proto(&environment.workspace_plan)?,
+                skill_snapshot_sha256: workspace.skill_snapshot_sha256,
             })
             .await;
         let relay_result = match tokio::time::timeout(RUNNER_EVENT_DRAIN_TIMEOUT, &mut relay).await
@@ -3284,6 +3407,7 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidState);
         }
         let parameters = workspace_transition_parameters(operation, environment)?;
+        cleanup_interrupted_skill_snapshot(&self.config.engine_root(), environment.id)?;
         if operation.checkpoint == 0 {
             return self.fail_operation(operation, error_code);
         }
@@ -3816,6 +3940,85 @@ impl LocalSupervisorService for SupervisorRpc {
                     request_id,
                     Some(environment.id),
                     OperationKind::Restart,
+                    &payload,
+                )
+                .map_err(SupervisorError::from)
+                .map_err(Status::from)?
+        };
+        let response = operation_proto(&operation)?;
+        drop(core);
+        if !operation.phase.terminal() {
+            self.schedule_operation_worker(false);
+        }
+        Ok(Response::new(response))
+    }
+
+    async fn refresh_environment_skills(
+        &self,
+        request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::Operation>, Status> {
+        let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
+        let mut core = self.core.lock().await;
+        core.reconcile(&name).await.map_err(Status::from)?;
+        let environment = core.environment(&name).map_err(Status::from)?.clone();
+        require_expected_environment(&environment, expected_environment_id)?;
+        if !matches!(
+            environment.state,
+            StoredEnvironmentState::Running | StoredEnvironmentState::Stopped
+        ) {
+            return Err(Status::failed_precondition(
+                "native local environment must be running or stopped",
+            ));
+        }
+        let active = environment
+            .active_workspace_generation
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("workspace generation is unavailable"))?;
+        if active
+            .skill_snapshot()
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?
+            .is_none()
+        {
+            return Err(Status::failed_precondition(
+                "native local environment has no selected skills",
+            ));
+        }
+        let prior_storage_generation =
+            workspace_storage_generation(active).map_err(Status::from)?;
+        let target_generation = environment
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| Status::internal("local generation overflow"))?;
+        let payload = serde_json::json!({
+            "name": name,
+            "project_spec_json": std::str::from_utf8(active.project_spec_json().map_err(SupervisorError::from).map_err(Status::from)?)
+                .map_err(|_| Status::internal("workspace project is not UTF-8"))?,
+            "project_spec_sha256": active.project_sha256,
+            "prior_storage_generation": prior_storage_generation,
+            "target_generation": target_generation,
+            "was_running": environment.state == StoredEnvironmentState::Running,
+            "refresh_skills": true,
+        });
+        let existing = core
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?;
+        let operation = if let Some(operation) = existing {
+            if operation.kind != OperationKind::UpdateWorkspace
+                || operation.environment_id != Some(environment.id)
+                || operation.payload != payload
+            {
+                return Err(Status::aborted("local lifecycle request ID collision"));
+            }
+            operation
+        } else {
+            core.store
+                .begin_operation(
+                    request_id,
+                    Some(environment.id),
+                    OperationKind::UpdateWorkspace,
                     &payload,
                 )
                 .map_err(SupervisorError::from)
@@ -4962,9 +5165,8 @@ fn validate_project_intent(
         || !spec.install_command.is_empty()
         || !spec.startup_script.is_empty()
         || !spec.environment.is_empty()
-        || !spec.agents.is_empty()
+        || spec.agents.install == Some(true)
         || !spec.agent_environment.is_empty()
-        || !spec.skills.is_empty()
         || !spec.secrets.is_empty()
     {
         return Err(());
@@ -5582,6 +5784,8 @@ fn environment_operation_result(environment: &EnvironmentRecord) -> serde_json::
 
 fn prepare_workspace_boot(
     engine_state_root: &Path,
+    user_skills_root: &Path,
+    forbidden_direct_roots: &[PathBuf],
     environment: &EnvironmentRecord,
 ) -> Result<PreparedWorkspaceBoot, SupervisorError> {
     let (workspace, staging) = match environment.staging_workspace_generation.as_ref() {
@@ -5594,7 +5798,7 @@ fn prepare_workspace_boot(
             false,
         ),
     };
-    let artifact_generation = artifact_generation_for_boot(environment, staging)?;
+    artifact_generation_for_boot(environment, staging)?;
     if staging {
         workspace.validate()?;
     } else {
@@ -5609,24 +5813,57 @@ fn prepare_workspace_boot(
                 .ok_or(SupervisorError::InvalidState)?,
         )?;
     };
-    let root_generation = oci_storage_generation(
-        &workspace.root_generation,
-        artifact_generation,
-        workspace.root_disk_bytes,
-    )?;
+    let root_generation = workspace_storage_generation(workspace)?;
     let root_disk_bytes = workspace.root_disk_bytes;
     let setup_root_generation = workspace.root_generation.clone();
+    let skill_snapshot = workspace.skill_snapshot()?;
+    let skill_snapshot_sha256 = skill_snapshot
+        .map(codewire_vmm_guest_probe::SkillSnapshotPlan::sha256)
+        .transpose()
+        .map_err(|_| SupervisorError::WorkspaceGeneration)?
+        .unwrap_or_default();
 
     // Provision at the replayable start boundary, not only during create.
     // An active generation normally reuses its admitted root without needing
     // the CAS. If its root was removed, rebuilding it still uses the exact
     // committed descriptors rather than resolving a moving tag again.
-    let root = ensure_empty_root_generation(
+    let root = match ensure_root_generation(
         engine_state_root,
         environment.id,
         &root_generation,
         root_disk_bytes,
-    )?;
+        skill_snapshot.is_some(),
+        None,
+    ) {
+        Ok(root) => root,
+        Err(GenerationError::SkillSnapshotSeedRequired) => {
+            let project: codewire_project::ProjectSpec =
+                serde_json::from_slice(workspace.project_spec_json()?)
+                    .map_err(|_| SupervisorError::InvalidState)?;
+            let expected = skill_snapshot.ok_or(SupervisorError::InvalidState)?;
+            let prepared = prepare_skill_snapshot(SkillSnapshotRequest {
+                engine_state_root,
+                vm_id: environment.id,
+                workspace_plan: &environment.workspace_plan,
+                project: &project,
+                project_sha256: &workspace.project_sha256,
+                user_skills_root,
+                forbidden_direct_roots,
+                plan_generation: expected.plan_generation(),
+                expected: Some(expected),
+            })?
+            .ok_or(SupervisorError::InvalidState)?;
+            ensure_root_generation(
+                engine_state_root,
+                environment.id,
+                &root_generation,
+                root_disk_bytes,
+                true,
+                Some(prepared.root()),
+            )?
+        }
+        Err(error) => return Err(error.into()),
+    };
     let setup = if staging || root.created {
         let project_json = workspace.project_spec_json()?;
         let engine = PrivateRoot::open(engine_state_root)?;
@@ -5659,6 +5896,7 @@ fn prepare_workspace_boot(
         setup_header_sha256: setup
             .map(|pack| pack.header_sha256.to_string())
             .unwrap_or_default(),
+        skill_snapshot_sha256,
     })
 }
 
@@ -5740,11 +5978,22 @@ fn oci_storage_generation(
 fn workspace_storage_generation(
     generation: &WorkspaceGenerationRecord,
 ) -> Result<String, SupervisorError> {
-    oci_storage_generation(
+    let oci = oci_storage_generation(
         &generation.root_generation,
         generation.artifact_generation()?,
         generation.root_disk_bytes,
-    )
+    )?;
+    let Some(snapshot) = generation.skill_snapshot()? else {
+        return Ok(oci);
+    };
+    let snapshot_sha256 = snapshot
+        .sha256()
+        .map_err(|_| SupervisorError::WorkspaceGeneration)?;
+    let mut digest = Sha256::new();
+    digest.update(b"codewire-root-generation-with-skills-v1\0");
+    digest.update(oci.as_bytes());
+    digest.update(snapshot_sha256.as_bytes());
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn referenced_root_storage_generations(
@@ -6027,6 +6276,7 @@ struct WorkspaceTransitionParameters {
     prior_storage_generation: String,
     target_generation: u64,
     was_running: bool,
+    refresh_skills: bool,
     intent: WorkspaceTransitionIntent,
 }
 
@@ -6049,7 +6299,13 @@ fn workspace_transition_parameters(
         .as_object()
         .ok_or(SupervisorError::InvalidState)?;
     let expected_fields = match operation.kind {
-        OperationKind::UpdateWorkspace => 6,
+        OperationKind::UpdateWorkspace => {
+            if fields.contains_key("refresh_skills") {
+                7
+            } else {
+                6
+            }
+        }
         OperationKind::RollbackWorkspace => 5,
         _ => return Err(SupervisorError::InvalidState),
     };
@@ -6073,6 +6329,14 @@ fn workspace_transition_parameters(
         .get("was_running")
         .and_then(serde_json::Value::as_bool)
         .ok_or(SupervisorError::InvalidState)?;
+    let refresh_skills = fields
+        .get("refresh_skills")
+        .map(|value| value.as_bool().ok_or(SupervisorError::InvalidState))
+        .transpose()?
+        .unwrap_or(false);
+    if refresh_skills && operation.kind != OperationKind::UpdateWorkspace {
+        return Err(SupervisorError::InvalidState);
+    }
     let intent = match operation.kind {
         OperationKind::UpdateWorkspace => {
             let project_spec_json = fields
@@ -6118,6 +6382,7 @@ fn workspace_transition_parameters(
         prior_storage_generation,
         target_generation,
         was_running,
+        refresh_skills,
         intent,
     })
 }
@@ -6200,6 +6465,18 @@ fn validate_workspace_transition_start(
     };
     let target_project: codewire_project::ProjectSpec =
         serde_json::from_slice(target_project_json).map_err(|_| SupervisorError::InvalidState)?;
+    if parameters.refresh_skills {
+        let active = environment
+            .active_workspace_generation
+            .as_ref()
+            .ok_or(SupervisorError::InvalidState)?;
+        if active.project_spec_json()? != target_project_json
+            || active.skill_snapshot()?.is_none()
+            || target_project.skills.is_empty()
+        {
+            return Err(SupervisorError::InvalidState);
+        }
+    }
     if matches!(parameters.intent, WorkspaceTransitionIntent::Update { .. })
         && target_project.access.as_ref().map(|access| &access.profile)
             != environment.access_profile.as_ref()
@@ -6491,6 +6768,8 @@ pub enum SupervisorError {
     ContentStore(#[from] ContentStoreError),
     #[error(transparent)]
     SetupPack(#[from] SetupPackError),
+    #[error(transparent)]
+    SkillSnapshot(#[from] SkillSnapshotPreparationError),
     #[error("workspace generation identity is invalid")]
     WorkspaceGeneration,
     #[error(transparent)]
@@ -7074,6 +7353,35 @@ mod tests {
         assert_eq!(environment.active_workspace_generation, Some(staging));
         assert_eq!(environment.rollback_workspace_generation, Some(active));
         environment.validate("dev").unwrap();
+    }
+
+    #[test]
+    fn workspace_update_journal_distinguishes_explicit_skill_refresh() {
+        let mut environment = project_environment();
+        let project_json = environment.project_spec_json.clone().unwrap();
+        let project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        environment.active_workspace_generation = Some(test_workspace_generation(
+            &project_json,
+            &project_sha256,
+            b"active",
+        ));
+        let mut payload =
+            workspace_update_payload(&environment, &project_json, &project_sha256, false);
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("refresh_skills".to_owned(), true.into());
+        let operation = test_workspace_transition_operation(
+            &environment,
+            OperationKind::UpdateWorkspace,
+            payload,
+            0,
+        );
+        assert!(
+            workspace_transition_parameters(&operation, &environment)
+                .unwrap()
+                .refresh_skills
+        );
     }
 
     #[tokio::test]
@@ -8043,7 +8351,7 @@ mod tests {
             generation.root_disk_bytes,
         )
         .unwrap();
-        ensure_empty_root_generation(
+        crate::generation::ensure_empty_root_generation(
             engine.path(),
             environment.id,
             &storage_generation,
@@ -8052,7 +8360,7 @@ mod tests {
         .unwrap();
         environment.active_workspace_generation = Some(generation.clone());
 
-        let boot = prepare_workspace_boot(engine.path(), &environment).unwrap();
+        let boot = prepare_workspace_boot(engine.path(), engine.path(), &[], &environment).unwrap();
 
         assert_eq!(boot.root_generation, storage_generation);
         assert_eq!(boot.root_disk_bytes, generation.root_disk_bytes);
@@ -8074,7 +8382,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            prepare_workspace_boot(engine.path(), &environment),
+            prepare_workspace_boot(engine.path(), engine.path(), &[], &environment),
             Err(SupervisorError::SetupPack(SetupPackError::Registry(
                 RegistryResolverError::Content(ContentStoreError::BlobMissing)
             )))

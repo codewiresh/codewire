@@ -12,6 +12,7 @@ service LocalSupervisorService {
   rpc StartEnvironment(EnvironmentSelector) returns (Operation);
   rpc StopEnvironment(EnvironmentSelector) returns (Operation);
   rpc RestartEnvironment(EnvironmentSelector) returns (Operation);
+  rpc RefreshEnvironmentSkills(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
   rpc ApplyEnvironmentAccess(ApplyEnvironmentAccessRequest) returns (Operation);
   rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
@@ -284,6 +285,11 @@ message Environment {
   // Exact bound revision safe to display. The placement-private profile ID is
   // deliberately omitted.
   uint64 access_profile_revision = 19;
+  // Environment-owned immutable skill snapshot identity and explicit refresh
+  // generation. Empty/zero means the project selected no skills.
+  string skill_snapshot_sha256 = 20;
+  uint64 skill_snapshot_generation = 21;
+  uint32 skill_snapshot_count = 22;
 }
 
 message ListEnvironmentsRequest {}
@@ -428,6 +434,9 @@ message StartVmRequest {
   // Exact host-only direct-share admissions for this generation. Source paths
   // and filesystem identity never enter the guest-visible plan or VMM argv.
   repeated DirectShareAttachment direct_shares = 15;
+  // Digest of the canonical immutable skill-snapshot plan embedded in the
+  // selected root generation. Empty means the project selected no skills.
+  string skill_snapshot_sha256 = 16;
 }
 
 message DirectShareAttachment {

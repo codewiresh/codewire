@@ -54,6 +54,8 @@ pub mod runner_service;
 #[cfg(target_os = "linux")]
 pub mod setup_pack;
 #[cfg(target_os = "linux")]
+mod skill_snapshot;
+#[cfg(target_os = "linux")]
 pub mod supervisor;
 #[cfg(target_os = "linux")]
 mod supervisor_store;

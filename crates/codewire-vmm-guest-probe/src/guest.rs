@@ -54,10 +54,11 @@ use crate::workspace_plan::{
 };
 use crate::{
     DIRECT_SHARE_PLAN_PATH, DirectSharePlan, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage,
-    MAX_DIRECT_SHARE_PLAN_BYTES, PROGRESS_FRAME_LEN, PROGRESS_REQUEST_LEN, ProgressFrame,
-    ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, SETUP_DISK_SERIAL,
-    SETUP_HEADER_LEN, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding, SetupHeader,
-    Sha256Value,
+    MAX_DIRECT_SHARE_PLAN_BYTES, MAX_SKILL_SNAPSHOT_PLAN_BYTES, PROGRESS_FRAME_LEN,
+    PROGRESS_REQUEST_LEN, ProgressFrame, ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL,
+    SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN, SKILL_SNAPSHOT_CONTENT_PATH,
+    SKILL_SNAPSHOT_PLAN_PATH, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
+    SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan,
 };
 
 pub const INIT_PATH: &str = "/init";
@@ -360,6 +361,7 @@ pub fn run_init() -> Result<()> {
     record_boot_stage("root-generation-ready")?;
     mount_direct_shares(&seed)?;
     expose_persistent_layout(&plan)?;
+    mount_skill_snapshots(&seed, &plan)?;
     record_boot_stage("persistent-layout-ready")?;
     if let Err(error) = network.wait_for_host() {
         record_network_agent_failure(NETWORK_AGENT_HOST_FAILURE_STAGE)?;
@@ -2035,6 +2037,197 @@ fn mount_direct_shares(seed: &Seed) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn mount_skill_snapshots(seed: &Seed, workspace: &WorkspacePlan) -> Result<()> {
+    let expected = seed.skill_snapshot_sha256();
+    let metadata = match fs::symlink_metadata(SKILL_SNAPSHOT_PLAN_PATH) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("inspect immutable skill snapshot plan"),
+    };
+    let (expected, metadata) = match (expected, metadata, workspace.skills_selected) {
+        (None, None, false) => return Ok(()),
+        (Some(expected), Some(metadata), true) => (expected, metadata),
+        _ => bail!("skill snapshot plan does not match the selected project and seed binding"),
+    };
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= MAX_SKILL_SNAPSHOT_PLAN_BYTES as u64,
+        "immutable skill snapshot plan metadata is invalid"
+    );
+    let bytes = read_bounded(
+        Path::new(SKILL_SNAPSHOT_PLAN_PATH),
+        MAX_SKILL_SNAPSHOT_PLAN_BYTES + 1,
+    )
+    .context("read immutable skill snapshot plan")?;
+    ensure!(
+        Sha256Value::calculate(&bytes) == expected,
+        "skill snapshot plan differs from its seed binding"
+    );
+    let plan = SkillSnapshotPlan::decode_canonical(&bytes)
+        .context("validate immutable skill snapshot plan")?;
+    ensure!(
+        plan.project_sha256() == workspace.project_sha256,
+        "skill snapshot project identity differs from the sealed workspace plan"
+    );
+
+    let content_root = rustix::fs::open(
+        SKILL_SNAPSHOT_CONTENT_PATH,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open immutable skill snapshot content root")?;
+    let home_root = rustix::fs::open(
+        HOME_MERGED_PATH,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open persistent workspace home projection")?;
+    let codex_root = rustix::fs::open(
+        PERSISTENT_CODEX_HOME_PATH,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open persistent Codex home projection")?;
+
+    for skill in plan.skills() {
+        let source = rustix::fs::openat2(
+            &content_root,
+            Path::new(skill.digest()),
+            RustixOFlags::RDONLY
+                | RustixOFlags::DIRECTORY
+                | RustixOFlags::CLOEXEC
+                | RustixOFlags::NOFOLLOW,
+            RustixMode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .context("open digest-addressed immutable skill snapshot")?;
+        for projection in skill.projections() {
+            let (root, root_path) = match projection.root() {
+                SkillProjectionRoot::UserHome => (&home_root, HOME_MERGED_PATH),
+                SkillProjectionRoot::CodexHome => (&codex_root, PERSISTENT_CODEX_HOME_PATH),
+            };
+            let target_path = Path::new(root_path).join(projection.relative_path());
+            let target = create_projection_directory(
+                root,
+                Path::new(projection.relative_path()),
+                workspace.identity.uid,
+                workspace.identity.gid,
+            )?;
+            bind_mount_fd_read_only(&source, &target, &target_path).with_context(|| {
+                format!(
+                    "project immutable skill for agent {} at {}",
+                    projection.agent(),
+                    projection.relative_path()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn create_projection_directory(
+    root: &OwnedFd,
+    relative: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<OwnedFd> {
+    let mut directory = rustix::fs::openat2(
+        root,
+        Path::new("."),
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .context("reopen skill projection root")?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            bail!("skill projection path is not relative and normalized");
+        };
+        match rustix::fs::mkdirat(&directory, name, RustixMode::from_raw_mode(0o700)) {
+            Ok(()) | Err(RustixErrno::EXIST) => {}
+            Err(error) => return Err(error).context("create confined skill projection directory"),
+        }
+        let next = rustix::fs::openat2(
+            &directory,
+            Path::new(name),
+            RustixOFlags::RDONLY
+                | RustixOFlags::DIRECTORY
+                | RustixOFlags::CLOEXEC
+                | RustixOFlags::NOFOLLOW,
+            RustixMode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .context("open confined skill projection directory")?;
+        rustix::fs::fchown(
+            &next,
+            Some(rustix::fs::Uid::from_raw(uid)),
+            Some(rustix::fs::Gid::from_raw(gid)),
+        )
+        .context("set skill projection directory ownership")?;
+        rustix::fs::fchmod(&next, RustixMode::from_raw_mode(0o700))
+            .context("set skill projection directory mode")?;
+        directory = next;
+    }
+    Ok(directory)
+}
+
+fn bind_mount_fd_read_only(source: &OwnedFd, target: &OwnedFd, target_path: &Path) -> Result<()> {
+    let source = format!("/proc/self/fd/{}", source.as_raw_fd());
+    let target_fd = format!("/proc/self/fd/{}", target.as_raw_fd());
+    mount_fs(&source, &target_fd, "none", libc::MS_BIND, "")
+        .context("bind immutable skill snapshot")?;
+    let target = target_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("immutable skill projection path is not UTF-8"))?;
+    // Linux resolves the descriptor opened before the overmount back to the
+    // underlying directory, so MS_REMOUNT through target_fd fails with EINVAL.
+    // No untrusted guest process exists yet, and target_path was assembled
+    // from a fixed root plus a canonical plan path whose components were all
+    // opened without following links above.
+    mount_fs(
+        &source,
+        target,
+        "none",
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )
+    .context("remount immutable skill snapshot read-only")?;
+    let target =
+        CString::new(target.as_bytes()).context("immutable skill projection path contains NUL")?;
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    if unsafe { libc::statvfs(target.as_ptr(), status.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error()).context("inspect immutable skill projection");
+    }
+    let status = unsafe { status.assume_init() };
+    ensure!(
+        status.f_flag & (libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV)
+            == (libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV),
+        "immutable skill projection lacks required mount confinement"
+    );
     Ok(())
 }
 
@@ -4089,6 +4282,8 @@ mod tests {
             schema_version: PLAN_SCHEMA_VERSION,
             root_generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
+            project_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
             identity: WorkspaceIdentity {
                 username: "root".to_owned(),
                 home: "/root".to_owned(),
@@ -4111,6 +4306,7 @@ mod tests {
             session_cwd: "/workspace".to_owned(),
             install_command: String::new(),
             startup_script: String::new(),
+            skills_selected: false,
         }
     }
 

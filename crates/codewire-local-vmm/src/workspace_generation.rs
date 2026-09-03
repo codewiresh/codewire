@@ -6,13 +6,15 @@
 //! define the guest generation.
 
 use codewire_project::{MAX_PROJECT_DOCUMENT_BYTES, ProjectSpec};
-use codewire_vmm_guest_probe::{SetupArchitecture, Sha256Value, oci_root_generation};
+use codewire_vmm_guest_probe::{
+    SetupArchitecture, Sha256Value, SkillSnapshotPlan, oci_root_generation,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::generation::valid_root_disk_bytes;
 use crate::oci::{OciArchitecture, ResolvedImage};
 
-const WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 3;
+const WORKSPACE_GENERATION_SCHEMA_VERSION: u32 = 4;
 const MAXIMUM_WORKSPACE_GENERATION_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,6 +27,8 @@ pub(crate) struct WorkspaceGenerationRecord {
     pub(crate) artifact_generation: String,
     pub(crate) image: ResolvedImage,
     pub(crate) root_disk_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) skill_snapshot: Option<SkillSnapshotPlan>,
 }
 
 impl std::fmt::Debug for WorkspaceGenerationRecord {
@@ -40,17 +44,43 @@ impl std::fmt::Debug for WorkspaceGenerationRecord {
             .field("manifest_digest", &self.image.manifest.digest)
             .field("layer_count", &self.image.layers.len())
             .field("root_disk_bytes", &self.root_disk_bytes)
+            .field(
+                "skill_snapshot_generation",
+                &self
+                    .skill_snapshot
+                    .as_ref()
+                    .map(SkillSnapshotPlan::plan_generation),
+            )
             .finish()
     }
 }
 
 impl WorkspaceGenerationRecord {
+    #[cfg(test)]
     pub(crate) fn new(
         project_spec_json: &[u8],
         project_sha256: String,
         artifact_generation: String,
         image: ResolvedImage,
         root_disk_bytes: u64,
+    ) -> Result<Self, WorkspaceGenerationError> {
+        Self::new_with_skill_snapshot(
+            project_spec_json,
+            project_sha256,
+            artifact_generation,
+            image,
+            root_disk_bytes,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_skill_snapshot(
+        project_spec_json: &[u8],
+        project_sha256: String,
+        artifact_generation: String,
+        image: ResolvedImage,
+        root_disk_bytes: u64,
+        skill_snapshot: Option<SkillSnapshotPlan>,
     ) -> Result<Self, WorkspaceGenerationError> {
         let project = validate_project_spec(project_spec_json, &project_sha256)?;
         if project.image != image.source_reference {
@@ -68,6 +98,7 @@ impl WorkspaceGenerationRecord {
             artifact_generation,
             image,
             root_disk_bytes,
+            skill_snapshot,
         };
         record.validate()?;
         Ok(record)
@@ -89,6 +120,18 @@ impl WorkspaceGenerationRecord {
                 != OciArchitecture::native().map_err(|_| WorkspaceGenerationError)?
         {
             return Err(WorkspaceGenerationError);
+        }
+        match (&project.skills[..], &self.skill_snapshot) {
+            ([], None) => {}
+            ([], Some(_)) | (_, None) => return Err(WorkspaceGenerationError),
+            (_, Some(snapshot)) => {
+                snapshot
+                    .encode_canonical()
+                    .map_err(|_| WorkspaceGenerationError)?;
+                if snapshot.project_sha256() != self.project_sha256 {
+                    return Err(WorkspaceGenerationError);
+                }
+            }
         }
         self.image
             .validate_metadata()
@@ -133,6 +176,13 @@ impl WorkspaceGenerationRecord {
     pub(crate) fn artifact_generation(&self) -> Result<&str, WorkspaceGenerationError> {
         self.validate()?;
         Ok(&self.artifact_generation)
+    }
+
+    pub(crate) fn skill_snapshot(
+        &self,
+    ) -> Result<Option<&SkillSnapshotPlan>, WorkspaceGenerationError> {
+        self.validate()?;
+        Ok(self.skill_snapshot.as_ref())
     }
 
     pub(crate) fn encode_canonical(&self) -> Result<Vec<u8>, WorkspaceGenerationError> {
@@ -211,6 +261,8 @@ pub(crate) struct WorkspaceGenerationError;
 
 #[cfg(test)]
 mod tests {
+    use codewire_project::{AgentsSpec, SkillSelection, SkillSource};
+    use codewire_vmm_guest_probe::{SkillSnapshot, SkillSnapshotSource};
     use sha2::{Digest as _, Sha256};
 
     use super::*;
@@ -264,6 +316,7 @@ mod tests {
             artifact_generation: "a".repeat(64),
             image,
             root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
+            skill_snapshot: None,
         }
     }
 
@@ -296,6 +349,71 @@ mod tests {
         .unwrap();
 
         assert_eq!(constructed, expected);
+    }
+
+    #[test]
+    fn selected_skills_require_an_exact_project_bound_snapshot_plan() {
+        let baseline = record();
+        let project = ProjectSpec {
+            image: baseline.image.source_reference.clone(),
+            agents: AgentsSpec {
+                install: None,
+                tools: vec!["codex".to_owned()],
+            },
+            skills: vec![SkillSelection {
+                source: SkillSource::User,
+                reference: "rust".to_owned(),
+                agents: vec!["codex".to_owned()],
+            }],
+            ..Default::default()
+        };
+        let project_json = project.canonical_json().unwrap();
+        let project_sha256 = format!("{:x}", Sha256::digest(&project_json));
+        let snapshot = SkillSnapshot::new(
+            SkillSnapshotSource::User,
+            "user:rust".to_owned(),
+            "rust".to_owned(),
+            "b".repeat(64),
+            "rust",
+            &["codex".to_owned()],
+        )
+        .unwrap();
+        let plan = SkillSnapshotPlan::new(project_sha256.clone(), 1, vec![snapshot]).unwrap();
+        let record = WorkspaceGenerationRecord::new_with_skill_snapshot(
+            &project_json,
+            project_sha256.clone(),
+            baseline.artifact_generation,
+            baseline.image,
+            baseline.root_disk_bytes,
+            Some(plan.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            WorkspaceGenerationRecord::decode_canonical(&record.encode_canonical().unwrap())
+                .unwrap(),
+            record
+        );
+
+        assert!(
+            WorkspaceGenerationRecord::new_with_skill_snapshot(
+                &project_json,
+                project_sha256,
+                record.artifact_generation.clone(),
+                record.image.clone(),
+                record.root_disk_bytes,
+                None,
+            )
+            .is_err()
+        );
+        let wrong_plan = SkillSnapshotPlan::new(
+            "c".repeat(64),
+            plan.plan_generation(),
+            plan.skills().to_vec(),
+        )
+        .unwrap();
+        let mut invalid = record;
+        invalid.skill_snapshot = Some(wrong_plan);
+        assert!(invalid.encode_canonical().is_err());
     }
 
     #[test]

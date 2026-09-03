@@ -1652,13 +1652,14 @@ mod tests {
         )
         .to_string();
         WorkspaceGenerationRecord {
-            schema_version: 3,
+            schema_version: 4,
             root_generation,
             project_sha256: project_sha256.to_owned(),
             project_spec_json: String::from_utf8(project_spec_json.to_vec()).unwrap(),
             artifact_generation: "c".repeat(64),
             image,
             root_disk_bytes: crate::linux::state::MINIMUM_ROOT_DISK_BYTES,
+            skill_snapshot: None,
         }
     }
 

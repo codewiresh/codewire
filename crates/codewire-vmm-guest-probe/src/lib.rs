@@ -17,6 +17,9 @@ mod seed;
 mod setup;
 
 #[cfg(target_os = "linux")]
+mod skill_snapshot;
+
+#[cfg(target_os = "linux")]
 pub mod guest;
 #[cfg(target_os = "linux")]
 mod setup_apply;
@@ -56,4 +59,11 @@ pub use setup::{
     ROOT_FORMAT_VERSION, SETUP_ALIGNMENT, SETUP_DISK_SERIAL, SETUP_HEADER_LEN, SetupArchitecture,
     SetupBlob, SetupError, SetupHeader, SetupLayer, SetupLayerBlob, SetupObject, Sha256Value,
     oci_root_generation,
+};
+#[cfg(target_os = "linux")]
+pub use skill_snapshot::{
+    MAX_SKILL_SNAPSHOT_PLAN_BYTES, SKILL_SNAPSHOT_CONTENT_PATH,
+    SKILL_SNAPSHOT_CONTENT_RELATIVE_PATH, SKILL_SNAPSHOT_PLAN_PATH,
+    SKILL_SNAPSHOT_PLAN_RELATIVE_PATH, SkillProjection, SkillProjectionRoot, SkillSnapshot,
+    SkillSnapshotError, SkillSnapshotMode, SkillSnapshotPlan, SkillSnapshotSource,
 };

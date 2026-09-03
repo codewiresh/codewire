@@ -37,6 +37,9 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             )
             .await
         }
+        EnvCommand::RefreshSkills(target) => {
+            handle_unified_environment_refresh_skills(globals, placement, target).await
+        }
         EnvCommand::Rm(target) => {
             handle_unified_environment_lifecycle(
                 globals,
@@ -54,7 +57,7 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, list, info, start, stop, rm, access, and daemon diagnostics"
+                    "--local and --platform currently support only create, list, info, start, stop, refresh-skills, rm, access, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
@@ -231,6 +234,9 @@ pub(crate) async fn handle_platform_env_command(
             .await
             .context("wait for environment daemon readiness")?;
             print_env_status(&args.environment, &response, args.output)?;
+        }
+        EnvCommand::RefreshSkills(_) => {
+            anyhow::bail!("refresh-skills is supported only for native local environments");
         }
         EnvCommand::Rm(args) => {
             let _skip_confirmation = args.yes;
@@ -1755,6 +1761,26 @@ async fn handle_unified_environment_lifecycle(
                 }),
             )
             .await
+        }
+    }
+}
+
+async fn handle_unified_environment_refresh_skills(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvTargetArgs,
+) -> anyhow::Result<()> {
+    let target =
+        resolve_unified_environment_target(globals, placement, &args.environment, "refresh-skills")
+            .await?;
+    match target {
+        #[cfg(target_os = "linux")]
+        UnifiedEnvironmentTarget::NativeLocal(name) => {
+            let environment = refresh_native_environment_skills(&name).await?;
+            print_native_environment(&environment, args.output)
+        }
+        UnifiedEnvironmentTarget::Local(_) | UnifiedEnvironmentTarget::Platform(_) => {
+            anyhow::bail!("refresh-skills is supported only for native local environments")
         }
     }
 }

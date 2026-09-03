@@ -7,7 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::AsFd as _;
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Component, Path, PathBuf};
@@ -84,8 +84,10 @@ struct SourceDirectory {
 }
 
 #[derive(Debug)]
-struct CopyManifest {
-    sha256: String,
+pub(crate) struct DirectorySnapshot {
+    pub(crate) sha256: String,
+    pub(crate) regular_bytes: u64,
+    pub(crate) entries: u64,
 }
 
 pub fn resolve_workspace_mode(
@@ -186,6 +188,7 @@ fn provision_workspace(
                 &open_source_directory(&source.source_path)?,
                 Some(&workspace),
                 content_limit,
+                MAXIMUM_COPY_ENTRIES,
             )?;
             manifest.sha256
         }
@@ -294,7 +297,7 @@ fn inspect_copy_workspace(
     maximum_bytes: u64,
 ) -> Result<WorkspaceSource, WorkspaceError> {
     let source = open_source_directory(requested_source)?;
-    let manifest = copy_directory_manifest(&source, None, maximum_bytes)?;
+    let manifest = copy_directory_manifest(&source, None, maximum_bytes, MAXIMUM_COPY_ENTRIES)?;
     Ok(WorkspaceSource {
         source_path: source.path,
         commit: manifest.sha256,
@@ -595,6 +598,7 @@ fn prepare_copy_input(
         &open_source_directory(&source.source_path)?,
         Some(destination),
         remaining_bytes,
+        MAXIMUM_COPY_ENTRIES,
     )?;
     if manifest.sha256 != identity {
         return Err(WorkspaceError::SourceChanged);
@@ -803,18 +807,21 @@ struct CopyWalk {
     regular_bytes: u64,
     entries: u64,
     maximum_bytes: u64,
+    maximum_entries: u64,
 }
 
 fn copy_directory_manifest(
     source: &SourceDirectory,
     destination: Option<&Path>,
     maximum_bytes: u64,
-) -> Result<CopyManifest, WorkspaceError> {
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
     let mut walk = CopyWalk {
         hasher: Sha256::new(),
         regular_bytes: 0,
         entries: 0,
         maximum_bytes,
+        maximum_entries,
     };
     walk.hasher.update(COPY_MANIFEST_SCHEMA);
     copy_directory_level(
@@ -826,9 +833,139 @@ fn copy_directory_manifest(
         &mut walk,
     )?;
     verify_source_root(source)?;
-    Ok(CopyManifest {
+    Ok(DirectorySnapshot {
         sha256: format!("{:x}", walk.hasher.finalize()),
+        regular_bytes: walk.regular_bytes,
+        entries: walk.entries,
     })
+}
+
+/// Copy one exact relative directory beneath an already-selected root using
+/// the same no-follow, no-mount-crossing and race-detecting walk as workspace
+/// copies. The selected directory itself may not be a symlink.
+pub(crate) fn snapshot_confined_directory(
+    requested_root: &Path,
+    relative: &Path,
+    destination: &Path,
+    maximum_bytes: u64,
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
+    let root = open_source_directory(requested_root)?;
+    if root.path != requested_root {
+        return Err(WorkspaceError::SourceRootChanged(requested_root.to_owned()));
+    }
+    snapshot_confined_source_directory(root, relative, destination, maximum_bytes, maximum_entries)
+}
+
+/// Copy from an exact already-admitted directory descriptor. This keeps a
+/// direct-share identity pinned while the selected skill is snapshotted and
+/// still rejects a renamed or replaced host path.
+pub(crate) fn snapshot_confined_open_directory(
+    requested_root: &Path,
+    root_descriptor: BorrowedFd<'_>,
+    relative: &Path,
+    destination: &Path,
+    maximum_bytes: u64,
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
+    let directory = openat2(
+        root_descriptor,
+        Path::new("."),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: requested_root.to_owned(),
+        source,
+    })?;
+    let directory = File::from(directory);
+    let metadata = directory.metadata().map_err(|source| WorkspaceError::Io {
+        path: requested_root.to_owned(),
+        source,
+    })?;
+    let root = SourceDirectory {
+        path: requested_root.to_owned(),
+        directory,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    verify_source_root(&root)?;
+    snapshot_confined_source_directory(root, relative, destination, maximum_bytes, maximum_entries)
+}
+
+fn snapshot_confined_source_directory(
+    root: SourceDirectory,
+    relative: &Path,
+    destination: &Path,
+    maximum_bytes: u64,
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
+    if relative.as_os_str().is_empty() {
+        return copy_directory_manifest(&root, Some(destination), maximum_bytes, maximum_entries);
+    }
+    validate_copy_path(relative)?;
+    let selected_path = root.path.join(relative);
+    let directory = openat2(
+        root.directory.as_fd(),
+        relative,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: selected_path.clone(),
+        source,
+    })?;
+    let directory = File::from(directory);
+    let metadata = directory.metadata().map_err(|source| WorkspaceError::Io {
+        path: selected_path.clone(),
+        source,
+    })?;
+    if !metadata.is_dir() || metadata.dev() != root.device {
+        return Err(WorkspaceError::SourceMountBoundary(relative.to_owned()));
+    }
+    let source = SourceDirectory {
+        path: selected_path.clone(),
+        directory,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    let snapshot =
+        copy_directory_manifest(&source, Some(destination), maximum_bytes, maximum_entries)?;
+
+    let reopened = openat2(
+        root.directory.as_fd(),
+        relative,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: selected_path.clone(),
+        source,
+    })?;
+    let reopened = rustix::fs::fstat(&reopened).map_err(|source| WorkspaceError::SourceOpen {
+        path: selected_path.clone(),
+        source,
+    })?;
+    if reopened.st_dev != metadata.dev() || reopened.st_ino != metadata.ino() {
+        return Err(WorkspaceError::SourceRootChanged(selected_path));
+    }
+    verify_source_root(&root)?;
+    Ok(snapshot)
+}
+
+pub(crate) fn manifest_directory(
+    requested_root: &Path,
+    maximum_bytes: u64,
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
+    let source = open_source_directory(requested_root)?;
+    if source.path != requested_root {
+        return Err(WorkspaceError::SourceRootChanged(requested_root.to_owned()));
+    }
+    copy_directory_manifest(&source, None, maximum_bytes, maximum_entries)
 }
 
 fn copy_directory_level(
@@ -866,7 +1003,7 @@ fn copy_directory_level(
         if bytes.is_empty() || bytes.contains(&b'/') {
             return Err(WorkspaceError::InvalidCopyPath(relative.to_owned()));
         }
-        if names.len() as u64 == MAXIMUM_COPY_ENTRIES {
+        if names.len() as u64 == walk.maximum_entries {
             return Err(WorkspaceError::CopyEntryLimitExceeded);
         }
         names.push(OsString::from_vec(bytes.to_vec()));
@@ -878,7 +1015,7 @@ fn copy_directory_level(
             .entries
             .checked_add(1)
             .ok_or(WorkspaceError::WorkspaceTooLarge)?;
-        if walk.entries > MAXIMUM_COPY_ENTRIES {
+        if walk.entries > walk.maximum_entries {
             return Err(WorkspaceError::CopyEntryLimitExceeded);
         }
         let entry_relative = relative.join(&name);
@@ -1200,7 +1337,7 @@ fn copy_regular_contents(
     Ok(())
 }
 
-fn prepare_git_clone(
+pub(crate) fn prepare_git_clone(
     source: &WorkspaceSource,
     workspace: &Path,
     staging: &Path,
@@ -1264,7 +1401,7 @@ fn prepare_git_clone(
     Ok(())
 }
 
-fn prepare_git_bundle(
+pub(crate) fn prepare_git_bundle(
     bundle: &Path,
     workspace: &Path,
     staging: &Path,
@@ -1990,6 +2127,7 @@ mod tests {
             &open_source_directory(source.path()).unwrap(),
             Some(destination.path()),
             MAXIMUM_COPY_BYTES,
+            MAXIMUM_COPY_ENTRIES,
         )
         .unwrap();
         assert_eq!(copied.sha256, admitted.commit);
@@ -2018,6 +2156,26 @@ mod tests {
         let changed =
             inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES).unwrap();
         assert_ne!(changed.commit, admitted.commit);
+    }
+
+    #[test]
+    fn confined_snapshot_enforces_its_narrow_entry_budget_during_copy() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("skill")).unwrap();
+        fs::write(source.path().join("skill/SKILL.md"), b"skill\n").unwrap();
+        fs::write(source.path().join("skill/extra"), b"extra\n").unwrap();
+        let destination = tempfile::tempdir().unwrap();
+
+        assert!(matches!(
+            snapshot_confined_directory(
+                source.path(),
+                Path::new("skill"),
+                destination.path(),
+                MAXIMUM_COPY_BYTES,
+                1,
+            ),
+            Err(WorkspaceError::CopyEntryLimitExceeded)
+        ));
     }
 
     #[test]
@@ -2093,6 +2251,7 @@ mod tests {
             regular_bytes: expected.len(),
             entries: 1,
             maximum_bytes: MAXIMUM_COPY_BYTES,
+            maximum_entries: MAXIMUM_COPY_ENTRIES,
         };
 
         assert!(matches!(

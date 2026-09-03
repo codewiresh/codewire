@@ -1305,6 +1305,7 @@ mod linux {
             host_ports: Vec::new(),
             mesh: None,
             direct_shares: Vec::new(),
+            skill_snapshot_sha256: None,
         }
     }
 

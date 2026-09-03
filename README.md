@@ -122,9 +122,11 @@ disconnected environment when enrollment cannot be completed.
 the product smoke. The host owns Mesh identity and transport, and the VM sees
 only admitted TCP streams for its declared application ports. Access profiles
 select material-free credential grants whose protected values remain in the
-isolated host broker. Preset, install/startup, environment, agent/skill, secret,
-and direct-mount options still fail explicitly while the remaining Forgejo
-#1910 slices are completed. An owner-only SQLite WAL is the authoritative
+isolated host broker. Preset, install/startup, environment, agent-installation,
+and secret options still fail explicitly while the remaining Forgejo #1910
+slices are completed. Repository, copy-mount, and direct-mount skills are
+captured into immutable environment-owned generations at create time and on
+explicit skill refresh. An owner-only SQLite WAL is the authoritative
 supervisor state; preview JSON state is imported exactly once. Lifecycle
 effects are journaled, disk shrink is rejected, and delete moves the
 environment tree to an operation-specific trash generation before removing
@@ -157,6 +159,10 @@ scripts/ci/verify/smoke-native-local-environment.sh \
   --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK" \
   --scratch-parent "$PWD/.tmp"
 ```
+
+The native smoke verifies that repository, copy-mount, and direct-mount skill
+inputs remain immutable until an explicit refresh, are projected read-only in
+the guest, and preserve executable helper modes.
 
 The legacy Docker and Lima local backends remain available explicitly during
 the migration:

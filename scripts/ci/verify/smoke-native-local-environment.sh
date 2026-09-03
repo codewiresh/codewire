@@ -28,6 +28,10 @@ MOUNT_SOURCE=''
 DIRECT_RO_SOURCE=''
 DIRECT_RW_SOURCE=''
 DIRECT_OUTSIDE_SOURCE=''
+REPOSITORY_SKILL_SOURCE=''
+DIRECT_SKILL_SOURCE=''
+USER_SKILL_SOURCE=''
+INITIAL_SKILL_SNAPSHOT=''
 PLATFORM_CONFIG=''
 TRIPWIRE=''
 TRANSCRIPT=''
@@ -388,6 +392,17 @@ printf '#!/bin/sh\nprintf "copy-mount-executable-ok\\n"\n' >"$MOUNT_SOURCE/tool.
 chmod 0755 "$MOUNT_SOURCE/tool.sh"
 ln "$MOUNT_SOURCE/data.txt" "$MOUNT_SOURCE/hardlink.txt"
 ln -s nested/file.txt "$MOUNT_SOURCE/link.txt"
+REPOSITORY_SKILL_SOURCE="$MOUNT_SOURCE/.agents/skills/repo-smoke"
+USER_SKILL_SOURCE="$SMOKE_HOME/.codewire/skills/user-smoke"
+mkdir -p "$REPOSITORY_SKILL_SOURCE/scripts" "$USER_SKILL_SOURCE"
+chmod 0700 \
+  "$MOUNT_SOURCE/.agents" "$MOUNT_SOURCE/.agents/skills" "$REPOSITORY_SKILL_SOURCE" \
+  "$REPOSITORY_SKILL_SOURCE/scripts" \
+  "$SMOKE_HOME/.codewire/skills" "$USER_SKILL_SOURCE"
+printf '%s\n' 'repository skill generation one' >"$REPOSITORY_SKILL_SOURCE/SKILL.md"
+printf '#!/bin/sh\nprintf "skill-executable-ok\\n"\n' >"$REPOSITORY_SKILL_SOURCE/scripts/verify.sh"
+chmod 0755 "$REPOSITORY_SKILL_SOURCE/scripts/verify.sh"
+printf '%s\n' 'user skill generation one' >"$USER_SKILL_SOURCE/SKILL.md"
 DIRECT_RO_SOURCE="$SMOKE_ROOT/direct-ro"
 DIRECT_RW_SOURCE="$SMOKE_ROOT/direct-rw"
 DIRECT_OUTSIDE_SOURCE="$SMOKE_ROOT/direct-outside"
@@ -397,6 +412,10 @@ printf 'direct read-write before creation\n' >"$DIRECT_RW_SOURCE/data.txt"
 printf 'direct outside must remain isolated\n' >"$DIRECT_OUTSIDE_SOURCE/data.txt"
 ln -s "$DIRECT_OUTSIDE_SOURCE/data.txt" "$DIRECT_RO_SOURCE/outside.txt"
 ln -s "$DIRECT_OUTSIDE_SOURCE/data.txt" "$DIRECT_RW_SOURCE/outside.txt"
+DIRECT_SKILL_SOURCE="$DIRECT_RO_SOURCE/.agents/skills/direct-smoke"
+mkdir -p "$DIRECT_SKILL_SOURCE"
+chmod 0700 "$DIRECT_RO_SOURCE/.agents" "$DIRECT_RO_SOURCE/.agents/skills" "$DIRECT_SKILL_SOURCE"
+printf '%s\n' 'direct skill generation one' >"$DIRECT_SKILL_SOURCE/SKILL.md"
 cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
 image: $WORKSPACE_IMAGE
@@ -420,6 +439,15 @@ mounts:
     mode: direct
     read_only: false
 working_directory: /workspace/github
+agents: [codex, claude-code]
+skills:
+  - path: fixtures/.agents/skills/repo-smoke
+    agents: [codex, claude-code]
+  - path: direct-ro/.agents/skills/direct-smoke
+    agents: [codex]
+  - source: user
+    name: user-smoke
+    agents: [codex]
 ports:
   - $HOST_PORT:3000
 EOF
@@ -1547,11 +1575,16 @@ jq -e --arg listen "127.0.0.1:$HOST_PORT" --arg network "$MESH_NETWORK" '
   .memory == "16Gi" and
   .working_directory == "/workspace/github" and
   .workspace_inputs == 5 and
+  .skill_count == 3 and
+  .skill_snapshot_generation == 1 and
+  (.skill_snapshot | test("^[0-9a-f]{64}$")) and
   .network == $network and
   (has("error_code") | not) and
   .ports == [{"listen": $listen, "guest_port": 3000}] and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
+INITIAL_SKILL_SNAPSHOT="$(jq -er '.skill_snapshot | select(test("^[0-9a-f]{64}$"))' "$LAST_STDOUT")" ||
+  die 'created native environment omitted its immutable skill snapshot identity'
 rg -qF 'direct mounts let guest root inspect every file' "$LAST_STDERR" ||
   die 'native creation did not present the direct-share guest-root warning'
 rg -qF 'Read-write grants let guest root modify or delete that host content' "$LAST_STDERR" ||
@@ -1569,6 +1602,9 @@ printf 'host changed after environment creation\n' >"$WORKSPACE/README.md"
 printf 'host-only untracked content\n' >"$WORKSPACE/host-only.txt"
 printf 'copy mount host changed after creation\n' >"$MOUNT_SOURCE/data.txt"
 printf 'copy mount host-only content\n' >"$MOUNT_SOURCE/host-only.txt"
+printf '%s\n' 'repository skill generation two' >"$REPOSITORY_SKILL_SOURCE/SKILL.md"
+printf '%s\n' 'direct skill generation two' >"$DIRECT_SKILL_SOURCE/SKILL.md"
+printf '%s\n' 'user skill generation two' >"$USER_SKILL_SOURCE/SKILL.md"
 printf 'direct read-only host changed after creation\n' >"$DIRECT_RO_SOURCE/data.txt"
 run_cw env list --local --output json
 jq -e '
@@ -1843,7 +1879,7 @@ log 'checking guest identity, live resources, workspace, and durable output'
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; printf "guest-machine-id="; cat /etc/machine-id; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d /workspace/github/.git; test -d /workspace/gitea/.git; test -z "$(git -C /workspace/github status --porcelain=v1 --untracked-files=all)"; test -z "$(git -C /workspace/gitea status --porcelain=v1 --untracked-files=all)"; grep -qx "copy mount before creation" /workspace/fixtures/data.txt; grep -qx "hidden copy mount content" /workspace/fixtures/.hidden; grep -qx "nested copy mount content" /workspace/fixtures/nested/file.txt; test "$(readlink /workspace/fixtures/link.txt)" = nested/file.txt; test "$(stat -c %h /workspace/fixtures/data.txt)" = 1; test "$(stat -c %h /workspace/fixtures/hardlink.txt)" = 1; test ! -e /workspace/fixtures/host-only.txt; /workspace/fixtures/tool.sh; printf guest-copy-mount-write > /workspace/fixtures/guest-only.txt; printf "guest-github-head="; git -C /workspace/github rev-parse HEAD; printf "guest-gitea-head="; git -C /workspace/gitea rev-parse HEAD; printf "guest-github-readme-sha="; sha256sum /workspace/github/README.md | cut -d " " -f 1; printf "guest-gitea-readme-sha="; sha256sum /workspace/gitea/README.md | cut -d " " -f 1; printf "guest-github-origin="; git -C /workspace/github config --local --get remote.origin.url; printf "guest-gitea-origin="; git -C /workspace/gitea config --local --get remote.origin.url; git -C /workspace/github config --local --list; git -C /workspace/gitea config --local --list; printf persistence-ok > /workspace/sentinel.txt'
+  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; printf "guest-machine-id="; cat /etc/machine-id; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d /workspace/github/.git; test -d /workspace/gitea/.git; test -z "$(git -C /workspace/github status --porcelain=v1 --untracked-files=all)"; test -z "$(git -C /workspace/gitea status --porcelain=v1 --untracked-files=all)"; grep -qx "copy mount before creation" /workspace/fixtures/data.txt; grep -qx "hidden copy mount content" /workspace/fixtures/.hidden; grep -qx "nested copy mount content" /workspace/fixtures/nested/file.txt; test "$(readlink /workspace/fixtures/link.txt)" = nested/file.txt; test "$(stat -c %h /workspace/fixtures/data.txt)" = 1; test "$(stat -c %h /workspace/fixtures/hardlink.txt)" = 1; test ! -e /workspace/fixtures/host-only.txt; /workspace/fixtures/tool.sh; grep -qx "repository skill generation one" "$CODEX_HOME/skills/repo-smoke/SKILL.md"; grep -qx "repository skill generation one" "$HOME/.claude/skills/repo-smoke/SKILL.md"; "$CODEX_HOME/skills/repo-smoke/scripts/verify.sh"; grep -qx "direct skill generation one" "$CODEX_HOME/skills/direct-smoke/SKILL.md"; grep -qx "user skill generation one" "$CODEX_HOME/skills/user-smoke/SKILL.md"; test ! -e "$HOME/.codex/skills/repo-smoke"; if printf forbidden >"$CODEX_HOME/skills/repo-smoke/SKILL.md" 2>/dev/null; then exit 84; fi; grep -qx "repository skill generation one" "$CODEX_HOME/skills/repo-smoke/SKILL.md"; printf guest-copy-mount-write > /workspace/fixtures/guest-only.txt; printf "guest-github-head="; git -C /workspace/github rev-parse HEAD; printf "guest-gitea-head="; git -C /workspace/gitea rev-parse HEAD; printf "guest-github-readme-sha="; sha256sum /workspace/github/README.md | cut -d " " -f 1; printf "guest-gitea-readme-sha="; sha256sum /workspace/gitea/README.md | cut -d " " -f 1; printf "guest-github-origin="; git -C /workspace/github config --local --get remote.origin.url; printf "guest-gitea-origin="; git -C /workspace/gitea config --local --get remote.origin.url; git -C /workspace/github config --local --list; git -C /workspace/gitea config --local --list; printf persistence-ok > /workspace/sentinel.txt'
 rg -qF 'guest-cwd=/workspace/github' "$LAST_STDOUT" ||
   die 'session did not start in the configured repository working directory'
 rg -qF 'guest-pid1-comm=init' "$LAST_STDOUT" ||
@@ -1883,6 +1919,25 @@ fi
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 15000000 && "$MEMORY_KIB" -le 17500000 ]] ||
   die "guest MemTotal is not consistent with 16 GiB: ${MEMORY_KIB:-missing} KiB"
+
+log 'checking explicit offline immutable skill refresh and read-only reprojection'
+run_cw env refresh-skills --local "$NAME" --output json
+jq -e --arg prior "$INITIAL_SKILL_SNAPSHOT" '
+  .name == "native-smoke" and
+  .state == "running" and
+  .skill_count == 3 and
+  .skill_snapshot_generation == 2 and
+  (.skill_snapshot | test("^[0-9a-f]{64}$")) and
+  .skill_snapshot != $prior
+' "$LAST_STDOUT" >/dev/null || die 'refreshed native skill snapshot metadata drifted'
+# The quoted expression is evaluated by the guest shell, not this host script.
+# shellcheck disable=SC2016
+run_cw run --no-tty -- /bin/sh -lc \
+  'set -eu; grep -qx "repository skill generation two" "$CODEX_HOME/skills/repo-smoke/SKILL.md"; grep -qx "repository skill generation two" "$HOME/.claude/skills/repo-smoke/SKILL.md"; grep -qx "direct skill generation two" "$CODEX_HOME/skills/direct-smoke/SKILL.md"; grep -qx "user skill generation two" "$CODEX_HOME/skills/user-smoke/SKILL.md"; if printf forbidden >"$CODEX_HOME/skills/user-smoke/SKILL.md" 2>/dev/null; then exit 85; fi; grep -qx "user skill generation two" "$CODEX_HOME/skills/user-smoke/SKILL.md"'
+[[ "$(cat "$REPOSITORY_SKILL_SOURCE/SKILL.md")" == 'repository skill generation two' &&
+   "$(cat "$DIRECT_SKILL_SOURCE/SKILL.md")" == 'direct skill generation two' &&
+   "$(cat "$USER_SKILL_SOURCE/SKILL.md")" == 'user skill generation two' ]] ||
+  die 'skill refresh mutated a selected host skill source'
 
 log 'checking daemon logs contain only trusted lifecycle journal fields'
 DAEMON_GUEST_SENTINEL='guest-output-must-not-enter-daemon-logs-1909'

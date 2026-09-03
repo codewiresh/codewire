@@ -12,7 +12,7 @@ use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_vmm_guest_probe::{
     DirectSharePlan, GUEST_NETWORK_VSOCK_PORT, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage,
     NetworkKey, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed,
-    SetupBinding, guest::CONTAINER_INIT_PATH,
+    SetupBinding, Sha256Value, guest::CONTAINER_INIT_PATH,
 };
 use futures::FutureExt as _;
 use rand::{RngCore, rngs::OsRng};
@@ -123,6 +123,7 @@ pub struct CreateVmRequest {
     pub host_ports: Vec<HostPortBinding>,
     pub mesh: Option<MeshAttachment>,
     pub direct_shares: Vec<DirectShareRequest>,
+    pub skill_snapshot_sha256: Option<Sha256Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,13 +216,14 @@ impl CloudHypervisorRunner {
             .map_err(|_| RunnerError::InvalidRequest)?;
 
         let token = Zeroizing::new(generate_auth_token());
-        let seed = Seed::new_with_bindings(
+        let seed = Seed::new_with_all_bindings(
             request.vm_id,
             request.generation,
             request.daemon_vsock_port,
             token.to_string(),
             request.setup,
             direct_shares_sha256,
+            request.skill_snapshot_sha256,
         )?;
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
@@ -4476,6 +4478,7 @@ mod tests {
             host_ports: Vec::new(),
             mesh: None,
             direct_shares: Vec::new(),
+            skill_snapshot_sha256: None,
         }
     }
 
