@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io;
+use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener as StdTcpListener};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -10,9 +10,9 @@ use std::time::Duration;
 use codewire_daemon::client::{SessionClient, v1 as daemon_v1};
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_vmm_guest_probe::{
-    GUEST_NETWORK_VSOCK_PORT, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, NetworkKey,
-    PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed, SetupBinding,
-    guest::CONTAINER_INIT_PATH,
+    DirectSharePlan, GUEST_NETWORK_VSOCK_PORT, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage,
+    NetworkKey, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed,
+    SetupBinding, guest::CONTAINER_INIT_PATH,
 };
 use futures::FutureExt as _;
 use rand::{RngCore, rngs::OsRng};
@@ -26,7 +26,10 @@ use zeroize::Zeroizing;
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, ArtifactLock};
 use crate::ch_api::{ChApiClient, ChApiError};
-use crate::cloud_hypervisor::{CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec};
+use crate::cloud_hypervisor::{
+    CloudHypervisorConfig, CloudHypervisorConfigError, CommandSpec, VirtioFsConfig,
+};
+use crate::direct_share::{AdmittedDirectShare, DirectShareRequest};
 use crate::egress_broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE,
     EGRESS_BROKER_CONFINEMENT_ADMISSION_TIMEOUT, EGRESS_BROKER_PREPARED_MESSAGE,
@@ -65,8 +68,11 @@ use crate::network_worker::{
     send_worker_network_descriptor,
 };
 
-use super::confinement::lock_process_privileges;
-use super::path::{FileIdentity, PathError, PrivateRoot, set_socket_private};
+use super::confinement::{
+    install_identity_preserving_setgroups_filter, lock_exec_process_privileges,
+    lock_process_privileges, prepare_virtiofsd_filesystem_domain,
+};
+use super::path::{FileIdentity, PathError, PrivateRoot, current_uid, set_socket_private};
 use super::preflight::{PreflightError, PreflightReport, preflight};
 use super::process::{LiveProcess, RecoveryError, signal_unreaped_child};
 use super::state::{
@@ -92,6 +98,8 @@ const HOST_PORT_ACCEPT_QUEUE: usize = 64;
 const VMM_CASCADE_EXIT_TIMEOUT: Duration = Duration::from_millis(250);
 const E2FSCK: &str = "/usr/bin/e2fsck";
 const RESIZE2FS: &str = "/usr/bin/resize2fs";
+const DIRECT_SHARE_SOURCE_FD: RawFd = 3;
+const DIRECT_SHARE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
@@ -114,12 +122,20 @@ pub struct CreateVmRequest {
     pub setup: Option<SetupBinding>,
     pub host_ports: Vec<HostPortBinding>,
     pub mesh: Option<MeshAttachment>,
+    pub direct_shares: Vec<DirectShareRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SetupDiskIdentity {
     path: PathBuf,
     file: FileIdentity,
+}
+
+#[derive(Debug)]
+struct PreparedDirectShare {
+    request: DirectShareRequest,
+    admitted: AdmittedDirectShare,
+    socket: PathBuf,
 }
 
 pub struct CloudHypervisorRunner {
@@ -190,22 +206,23 @@ impl CloudHypervisorRunner {
         let setup_disk = admit_setup_disk(&paths, &request)?;
         paths.clear_stale_runtime_endpoints()?;
 
+        let direct_shares = self.prepare_direct_shares(&request, &paths)?;
+        let direct_share_plan = direct_share_plan(&request.direct_shares)?;
+        let direct_shares_sha256 = direct_share_plan
+            .as_ref()
+            .map(DirectSharePlan::sha256)
+            .transpose()
+            .map_err(|_| RunnerError::InvalidRequest)?;
+
         let token = Zeroizing::new(generate_auth_token());
-        let seed = match request.setup {
-            Some(setup) => Seed::new_with_setup(
-                request.vm_id,
-                request.generation,
-                request.daemon_vsock_port,
-                token.to_string(),
-                setup,
-            )?,
-            None => Seed::new(
-                request.vm_id,
-                request.generation,
-                request.daemon_vsock_port,
-                token.to_string(),
-            )?,
-        };
+        let seed = Seed::new_with_bindings(
+            request.vm_id,
+            request.generation,
+            request.daemon_vsock_port,
+            token.to_string(),
+            request.setup,
+            direct_shares_sha256,
+        )?;
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
 
@@ -239,7 +256,16 @@ impl CloudHypervisorRunner {
                 request.vcpus,
                 request.memory_mib,
             )?,
-        };
+        }
+        .with_virtiofs(
+            direct_shares
+                .iter()
+                .map(|share| VirtioFsConfig {
+                    tag: share.request.mount.tag().to_owned(),
+                    socket: share.socket.clone(),
+                })
+                .collect(),
+        )?;
         let command = config.command()?;
         Ok(PreparedVm {
             request,
@@ -247,11 +273,50 @@ impl CloudHypervisorRunner {
             state_disk,
             root_disk,
             setup_disk,
+            direct_shares,
             token,
             command,
             host_port_listeners,
             lock,
         })
+    }
+
+    fn prepare_direct_shares(
+        &self,
+        request: &CreateVmRequest,
+        paths: &VmPaths,
+    ) -> Result<Vec<PreparedDirectShare>, RunnerError> {
+        if request.direct_shares.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.artifacts.virtiofsd.is_none() {
+            return Err(RunnerError::VirtiofsdUnavailable);
+        }
+        let mut forbidden_roots = vec![self.state_root.path().to_owned()];
+        forbidden_roots.extend([
+            self.artifacts.cloud_hypervisor.path().to_owned(),
+            self.artifacts.kernel.path().to_owned(),
+            self.artifacts.initramfs.path().to_owned(),
+        ]);
+        if let Some(virtiofsd) = &self.artifacts.virtiofsd {
+            forbidden_roots.push(virtiofsd.path().to_owned());
+        }
+        request
+            .direct_shares
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, share)| {
+                let admitted = share
+                    .reopen(&forbidden_roots)
+                    .map_err(|_| RunnerError::DirectShareChanged)?;
+                Ok(PreparedDirectShare {
+                    request: share,
+                    admitted,
+                    socket: paths.direct_share_socket(index)?,
+                })
+            })
+            .collect()
     }
 
     pub async fn start(&self, prepared: PreparedVm) -> Result<RunningVm, RunnerError> {
@@ -266,18 +331,32 @@ impl CloudHypervisorRunner {
             revalidate_setup_disk(setup, prepared.request.setup)?;
         }
         validate_seed_file(&prepared.paths.seed_disk)?;
+        let mut direct_share_startup = DirectShareStartup::start(
+            self.artifacts
+                .virtiofsd
+                .as_ref()
+                .map(|artifact| artifact.path()),
+            &prepared.direct_shares,
+            &prepared.paths.vm_dir,
+        )
+        .await?;
         // Arm cancellation cleanup in the same synchronous span as spawn. An
         // aborted start future must never drop the VM lock while leaving a VMM
         // alive, including before a pidfd identity has been admitted.
-        let mut startup = StartupOwnership::new(spawn_cloud_hypervisor(
-            &prepared.command,
-            &prepared.paths.vm_dir,
-        )?);
+        let vmm = match spawn_cloud_hypervisor(&prepared.command, &prepared.paths.vm_dir) {
+            Ok(vmm) => vmm,
+            Err(error) => {
+                direct_share_startup.stop().await?;
+                return Err(error);
+            }
+        };
+        let mut startup = StartupOwnership::new(vmm);
         let pid = startup.child_mut().id().ok_or(RunnerError::Spawn)?;
         let process = match LiveProcess::capture_child(pid, prepared.command.program()) {
             Ok(process) => process,
             Err(error) => {
                 startup.terminate_unadmitted(pid).await?;
+                direct_share_startup.stop().await?;
                 return Err(error.into());
             }
         };
@@ -302,6 +381,7 @@ impl CloudHypervisorRunner {
         };
         if let Err(error) = starting_state.write_atomic(&prepared.paths.state_file) {
             startup.terminate_admitted().await?;
+            direct_share_startup.stop().await?;
             return Err(error.into());
         }
 
@@ -336,6 +416,7 @@ impl CloudHypervisorRunner {
             Ok(value) => value,
             Err(error) => {
                 startup.terminate_admitted().await?;
+                direct_share_startup.stop().await?;
                 return Err(error);
             }
         };
@@ -347,6 +428,7 @@ impl CloudHypervisorRunner {
             state_disk: prepared.state_disk,
             root_disk: prepared.root_disk,
             setup_disk: prepared.setup_disk,
+            direct_shares: direct_share_startup.disarm(),
             token: prepared.token,
             child,
             process,
@@ -639,6 +721,77 @@ impl Drop for StartupOwnership {
     }
 }
 
+struct DirectShareProcess {
+    child: tokio::process::Child,
+    process: LiveProcess,
+    socket: PathBuf,
+}
+
+struct DirectShareStartup {
+    processes: Vec<DirectShareProcess>,
+}
+
+impl DirectShareStartup {
+    async fn start(
+        executable: Option<&Path>,
+        shares: &[PreparedDirectShare],
+        working_directory: &Path,
+    ) -> Result<Self, RunnerError> {
+        if shares.is_empty() {
+            return Ok(Self {
+                processes: Vec::new(),
+            });
+        }
+        let executable = executable.ok_or(RunnerError::VirtiofsdUnavailable)?;
+        let mut startup = Self {
+            processes: Vec::with_capacity(shares.len()),
+        };
+        for share in shares {
+            share
+                .request
+                .reopen(&[])
+                .map_err(|_| RunnerError::DirectShareChanged)?;
+            match start_direct_share(executable, share, working_directory).await {
+                Ok(process) => startup.processes.push(process),
+                Err(error) => {
+                    startup.stop().await?;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(startup)
+    }
+
+    async fn stop(&mut self) -> Result<(), RunnerError> {
+        let mut first_error = None;
+        for process in &mut self.processes {
+            if let Err(error) = stop_direct_share_process(process).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        self.processes.clear();
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn disarm(mut self) -> Vec<DirectShareProcess> {
+        std::mem::take(&mut self.processes)
+    }
+}
+
+impl Drop for DirectShareStartup {
+    fn drop(&mut self) {
+        for process in &mut self.processes {
+            let _ = process.process.signal(Signal::KILL);
+            let _ = process.child.start_kill();
+        }
+    }
+}
+
 struct ReservedHostPort {
     binding: HostPortBinding,
     listener: StdTcpListener,
@@ -671,6 +824,7 @@ pub struct PreparedVm {
     state_disk: StateDiskIdentity,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
+    direct_shares: Vec<PreparedDirectShare>,
     token: Zeroizing<String>,
     command: CommandSpec,
     host_port_listeners: Vec<ReservedHostPort>,
@@ -686,6 +840,7 @@ impl fmt::Debug for PreparedVm {
             .field("state_disk", &self.state_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk)
+            .field("direct_share_count", &self.direct_shares.len())
             .field("token", &"[REDACTED]")
             .field("command", &self.command)
             .finish_non_exhaustive()
@@ -724,6 +879,7 @@ pub struct RunningVm {
     state_disk: StateDiskIdentity,
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
+    direct_shares: Vec<DirectShareProcess>,
     token: Zeroizing<String>,
     child: tokio::process::Child,
     process: LiveProcess,
@@ -743,6 +899,7 @@ impl fmt::Debug for RunningVm {
             .field("state_disk", &self.state_disk)
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk)
+            .field("direct_share_count", &self.direct_shares.len())
             .field("process", &self.process)
             .field("token", &"[REDACTED]")
             .finish_non_exhaustive()
@@ -1127,6 +1284,13 @@ impl RunningVm {
         if vmm != ExitClass::StillRunning {
             return Ok(vmm);
         }
+        for share in &mut self.direct_shares {
+            match share.child.try_wait() {
+                Ok(Some(status)) => return Ok(ExitClass::DirectShareFailure(status.code())),
+                Ok(None) => {}
+                Err(_) => return Err(RunnerError::VirtiofsdWait),
+            }
+        }
         let Some(worker) = self.network_worker.as_mut() else {
             return Ok(ExitClass::StillRunning);
         };
@@ -1176,6 +1340,7 @@ impl RunningVm {
             ExitClass::GuestShutdown | ExitClass::VmmFailure(_)
         ) {
             self.stop_network_worker().await?;
+            self.stop_direct_shares().await?;
         }
         Ok(observed)
     }
@@ -1189,6 +1354,7 @@ impl RunningVm {
         }?;
         if exit != ExitClass::StillRunning {
             self.stop_network_worker().await?;
+            self.stop_direct_shares().await?;
         }
         Ok(exit)
     }
@@ -1196,9 +1362,10 @@ impl RunningVm {
     pub async fn stop(&mut self) -> Result<ExitClass, RunnerError> {
         let vmm = self.stop_vmm().await;
         let worker = self.stop_network_worker().await;
-        match (vmm, worker) {
-            (Ok(exit), Ok(())) => Ok(exit),
-            (Err(error), _) | (_, Err(error)) => Err(error),
+        let shares = self.stop_direct_shares().await;
+        match (vmm, worker, shares) {
+            (Ok(exit), Ok(()), Ok(())) => Ok(exit),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         }
     }
 
@@ -1239,6 +1406,22 @@ impl RunningVm {
         }
     }
 
+    async fn stop_direct_shares(&mut self) -> Result<(), RunnerError> {
+        let mut shares = std::mem::take(&mut self.direct_shares);
+        let mut first_error = None;
+        for share in &mut shares {
+            if let Err(error) = stop_direct_share_process(share).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     async fn request_guest_poweroff(
         &self,
     ) -> Result<tonic::Streaming<daemon_v1::ExecMessage>, RunnerError> {
@@ -1256,9 +1439,10 @@ impl RunningVm {
     pub async fn force_kill_for_test(&mut self) -> Result<ExitClass, RunnerError> {
         let exit = kill_and_reap(&self.process, &mut self.child).await;
         let worker = self.stop_network_worker().await;
-        match (exit, worker) {
-            (Ok(exit), Ok(())) => Ok(exit),
-            (Err(error), _) | (_, Err(error)) => Err(error),
+        let shares = self.stop_direct_shares().await;
+        match (exit, worker, shares) {
+            (Ok(exit), Ok(()), Ok(())) => Ok(exit),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         }
     }
 
@@ -3282,6 +3466,7 @@ pub enum ExitClass {
     StillRunning,
     GuestShutdown,
     VmmFailure(Option<i32>),
+    DirectShareFailure(Option<i32>),
     NetworkWorkerFailure(Option<i32>),
     EgressBrokerFailure(Option<i32>),
     IngressForwarderFailure,
@@ -3327,6 +3512,7 @@ async fn prioritize_exited_vmm(
 
     let exited = match observed {
         ExitClass::NetworkWorkerFailure(_)
+        | ExitClass::DirectShareFailure(_)
         | ExitClass::EgressBrokerFailure(_)
         | ExitClass::IngressForwarderFailure
         | ExitClass::MeshTransportFailure(_)
@@ -3416,6 +3602,7 @@ fn signal_or_observe_exit(process: &LiveProcess, signal: Signal) -> Result<bool,
 }
 
 fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
+    let direct_share_plan = direct_share_plan(&request.direct_shares)?;
     if request.vm_id.is_nil()
         || request.generation == 0
         || request.vsock_cid < 3
@@ -3435,10 +3622,24 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
             .mesh
             .as_ref()
             .is_some_and(|attachment| attachment.validate().is_err())
+        || direct_share_plan
+            .as_ref()
+            .is_some_and(|plan| plan.sha256().is_err())
     {
         return Err(RunnerError::InvalidRequest);
     }
     Ok(())
+}
+
+fn direct_share_plan(
+    shares: &[DirectShareRequest],
+) -> Result<Option<DirectSharePlan>, RunnerError> {
+    if shares.is_empty() {
+        return Ok(None);
+    }
+    DirectSharePlan::new(shares.iter().map(|share| share.mount.clone()).collect())
+        .map(Some)
+        .map_err(|_| RunnerError::InvalidRequest)
 }
 
 fn read_stopped_persisted_state(
@@ -3718,6 +3919,240 @@ fn spawn_cloud_hypervisor(
         .map_err(|_| RunnerError::Spawn)
 }
 
+async fn start_direct_share(
+    executable: &Path,
+    share: &PreparedDirectShare,
+    working_directory: &Path,
+) -> Result<DirectShareProcess, RunnerError> {
+    let pid_file = virtiofsd_pid_path(&share.socket);
+    let mut child = direct_share_process(executable, share, working_directory)?
+        .spawn()
+        .map_err(|_| RunnerError::VirtiofsdSpawn)?;
+    let Some(pid) = child.id() else {
+        cleanup_direct_share_endpoints(&share.socket)?;
+        return Err(RunnerError::VirtiofsdSpawn);
+    };
+    let process = match LiveProcess::capture_child(pid, executable) {
+        Ok(process) => process,
+        Err(error) => {
+            terminate_unadmitted_child(pid, &mut child).await?;
+            cleanup_direct_share_endpoints(&share.socket)?;
+            return Err(error.into());
+        }
+    };
+    let deadline = tokio::time::Instant::now() + DIRECT_SHARE_READY_TIMEOUT;
+    loop {
+        let exited = match child.try_wait() {
+            Ok(status) => status.is_some(),
+            Err(_) => {
+                terminate_failed_launch(&process, &mut child).await?;
+                cleanup_direct_share_endpoints(&share.socket)?;
+                return Err(RunnerError::VirtiofsdWait);
+            }
+        };
+        if exited {
+            cleanup_direct_share_endpoints(&share.socket)?;
+            return Err(RunnerError::VirtiofsdExitedDuringStart);
+        }
+        if share.socket.exists() && pid_file.exists() {
+            if let Err(error) = set_socket_private(&share.socket) {
+                terminate_failed_launch(&process, &mut child).await?;
+                cleanup_direct_share_endpoints(&share.socket)?;
+                return Err(error.into());
+            }
+            match virtiofsd_pid_file_matches(&pid_file, pid) {
+                Ok(true) => {}
+                Ok(false) => {
+                    terminate_failed_launch(&process, &mut child).await?;
+                    cleanup_direct_share_endpoints(&share.socket)?;
+                    return Err(RunnerError::VirtiofsdPidFile);
+                }
+                Err(error) => {
+                    terminate_failed_launch(&process, &mut child).await?;
+                    cleanup_direct_share_endpoints(&share.socket)?;
+                    return Err(error);
+                }
+            }
+            return Ok(DirectShareProcess {
+                child,
+                process,
+                socket: share.socket.clone(),
+            });
+        }
+        if tokio::time::Instant::now() >= deadline {
+            terminate_failed_launch(&process, &mut child).await?;
+            cleanup_direct_share_endpoints(&share.socket)?;
+            return Err(RunnerError::VirtiofsdStartTimeout);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn virtiofsd_pid_path(socket: &Path) -> PathBuf {
+    let mut name = socket.as_os_str().to_os_string();
+    name.push(".pid");
+    PathBuf::from(name)
+}
+
+fn cleanup_direct_share_endpoints(socket: &Path) -> Result<(), RunnerError> {
+    let parent = socket.parent().ok_or(RunnerError::InvalidRequest)?;
+    let socket_name = socket
+        .file_name()
+        .map(Path::new)
+        .ok_or(RunnerError::InvalidRequest)?;
+    let pid_file = virtiofsd_pid_path(socket);
+    let pid_name = pid_file
+        .file_name()
+        .map(Path::new)
+        .ok_or(RunnerError::InvalidRequest)?;
+    let root = PrivateRoot::open(parent)?;
+    root.remove_private_socket_with_permissions(socket_name, &[0o600, 0o700])?;
+    root.remove_private_regular(pid_name, 0o600)?;
+    Ok(())
+}
+
+fn virtiofsd_pid_file_matches(path: &Path, expected_pid: u32) -> Result<bool, RunnerError> {
+    let parent = path.parent().ok_or(RunnerError::InvalidRequest)?;
+    let name = path
+        .file_name()
+        .map(Path::new)
+        .ok_or(RunnerError::InvalidRequest)?;
+    let opened = PrivateRoot::open(parent)?.open_regular(name, false, None, false, Some(0o600))?;
+    let mut contents = String::new();
+    opened
+        .file()
+        .take(32)
+        .read_to_string(&mut contents)
+        .map_err(|source| RunnerError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+    Ok(contents.trim().parse::<u32>().ok() == Some(expected_pid))
+}
+
+fn direct_share_process(
+    executable: &Path,
+    share: &PreparedDirectShare,
+    working_directory: &Path,
+) -> Result<tokio::process::Command, RunnerError> {
+    let source_fd = share.admitted.descriptor().as_raw_fd();
+    if source_fd < DIRECT_SHARE_SOURCE_FD {
+        return Err(RunnerError::DirectShareChanged);
+    }
+    let socket_directory = share.socket.parent().ok_or(RunnerError::InvalidRequest)?;
+    let filesystem_domain = prepare_virtiofsd_filesystem_domain(
+        source_fd,
+        socket_directory,
+        executable,
+        share.request.mount.read_only(),
+    )
+    .map_err(|_| RunnerError::VirtiofsdConfinement)?;
+    let expected_parent_pid = unsafe { libc::getpid() };
+    let host_uid = current_uid();
+    let host_gid = unsafe { libc::getegid() };
+    let mut process = tokio::process::Command::new(executable);
+    process
+        .arg("--shared-dir")
+        // virtiofsd deliberately opens this value with O_PATH|O_NOFOLLOW. The
+        // trailing slash makes the kernel resolve the procfs descriptor link
+        // and require its target to remain a directory.
+        .arg(format!("/proc/self/fd/{DIRECT_SHARE_SOURCE_FD}/"))
+        .arg("--socket-path")
+        .arg(&share.socket)
+        .arg("--tag")
+        .arg(share.request.mount.tag())
+        .arg("--thread-pool-size")
+        .arg("1")
+        .arg("--sandbox")
+        .arg("none")
+        .arg("--seccomp")
+        .arg("kill")
+        .arg("--no-announce-submounts")
+        .arg("--inode-file-handles=never")
+        .arg("--cache=never")
+        // The daemon runs without capabilities, so it must never try to adopt
+        // a guest credential. Collapse every guest identity to this process's
+        // one admitted host identity while leaving numeric host ownership
+        // visible to the guest. This grants no access beyond the selected
+        // source descriptor.
+        .arg("--translate-uid")
+        .arg(format!("squash-guest:0:{host_uid}:{}", u32::MAX))
+        .arg("--translate-gid")
+        .arg(format!("squash-guest:0:{host_gid}:{}", u32::MAX))
+        .arg("--log-level")
+        .arg("off")
+        .arg("--preserve-noatime")
+        .arg("--rlimit-nofile")
+        .arg("65536")
+        .env_clear()
+        .current_dir(working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    if share.request.mount.read_only() {
+        process.arg("--readonly");
+    }
+    // SAFETY: only direct syscalls and async-signal-safe libc calls execute
+    // between fork and exec.
+    // The already-open source directory is duplicated to one fixed descriptor;
+    // every other non-stdio descriptor remains close-on-exec.
+    unsafe {
+        process.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getppid() != expected_parent_pid {
+                return Err(io::Error::from_raw_os_error(libc::ECHILD));
+            }
+            if source_fd != DIRECT_SHARE_SOURCE_FD
+                && libc::dup2(source_fd, DIRECT_SHARE_SOURCE_FD) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(DIRECT_SHARE_SOURCE_FD, libc::F_SETFD, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::syscall(
+                libc::SYS_close_range,
+                u32::try_from(DIRECT_SHARE_SOURCE_FD + 1).expect("fixed descriptor fits u32"),
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            lock_exec_process_privileges()?;
+            install_identity_preserving_setgroups_filter()?;
+            filesystem_domain.restrict_self()?;
+            Ok(())
+        });
+    }
+    Ok(process)
+}
+
+async fn stop_direct_share_process(process: &mut DirectShareProcess) -> Result<(), RunnerError> {
+    if process
+        .child
+        .try_wait()
+        .map_err(|_| RunnerError::VirtiofsdWait)?
+        .is_none()
+        && !signal_or_observe_exit(&process.process, Signal::TERM)?
+        && !process.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+        && !signal_or_observe_exit(&process.process, Signal::KILL)?
+        && !process.process.wait_exited(SIGNAL_STOP_TIMEOUT).await?
+    {
+        return Err(RunnerError::VirtiofsdKillTimeout);
+    }
+    process
+        .child
+        .wait()
+        .await
+        .map_err(|_| RunnerError::VirtiofsdWait)?;
+    cleanup_direct_share_endpoints(&process.socket)?;
+    Ok(())
+}
+
 async fn terminate_failed_launch(
     process: &LiveProcess,
     child: &mut tokio::process::Child,
@@ -3864,6 +4299,24 @@ pub enum RunnerError {
     ExitedDuringStart,
     #[error("Cloud Hypervisor startup timed out")]
     StartTimeout,
+    #[error("direct shares require the locked virtiofsd artifact")]
+    VirtiofsdUnavailable,
+    #[error("direct-share source changed before launch")]
+    DirectShareChanged,
+    #[error("virtiofsd process spawn failed")]
+    VirtiofsdSpawn,
+    #[error("virtiofsd filesystem confinement could not be prepared or installed")]
+    VirtiofsdConfinement,
+    #[error("virtiofsd exited during startup")]
+    VirtiofsdExitedDuringStart,
+    #[error("virtiofsd did not publish its private socket before the startup deadline")]
+    VirtiofsdStartTimeout,
+    #[error("virtiofsd published an invalid private pid file")]
+    VirtiofsdPidFile,
+    #[error("virtiofsd process wait failed")]
+    VirtiofsdWait,
+    #[error("virtiofsd process did not stop")]
+    VirtiofsdKillTimeout,
     #[error("network worker executable or lifecycle state is invalid")]
     InvalidNetworkWorker,
     #[error("network worker process spawn failed")]
@@ -3932,17 +4385,19 @@ pub enum RunnerError {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::{Read as _, Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     use crate::artifact::AdmittedArtifact;
+    use crate::direct_share::admit_direct_share;
     use crate::host_port::RESERVED_GUEST_DAEMON_PORT;
     use crate::linux::path::{FileIdentity, current_uid};
     use crate::linux::process::ProcessIdentity;
     use crate::linux::state::RootGenerationPaths;
     use crate::mesh_ingress::{MESH_INGRESS_CONTROL_FRAME_LEN, MeshIngressControlReceiver};
     use crate::network_worker::receive_mesh_ingress_descriptor;
+    use codewire_vmm_guest_probe::DirectShareMount;
 
     fn test_runner() -> (tempfile::TempDir, CloudHypervisorRunner) {
         let parent = tempfile::tempdir().unwrap();
@@ -3954,6 +4409,7 @@ mod tests {
             state_root: PrivateRoot::open(&state_path).unwrap(),
             artifacts: AdmittedArtifacts {
                 cloud_hypervisor: artifact.clone(),
+                virtiofsd: None,
                 kernel: artifact.clone(),
                 initramfs: artifact,
             },
@@ -4019,6 +4475,7 @@ mod tests {
             setup: None,
             host_ports: Vec::new(),
             mesh: None,
+            direct_shares: Vec::new(),
         }
     }
 
@@ -5054,6 +5511,85 @@ mod tests {
         let command = CommandSpec::for_test("/usr/bin/true".into());
         let process = cloud_hypervisor_process(&command, private.path()).unwrap();
         assert_eq!(process.as_std().get_current_dir(), Some(private.path()));
+    }
+
+    #[tokio::test]
+    async fn direct_share_helper_uses_only_the_fixed_descriptor_and_enters_confinement() {
+        let source = tempfile::tempdir().unwrap();
+        let source_path = fs::canonicalize(source.path()).unwrap();
+        let admitted = admit_direct_share(&source_path, &[]).unwrap();
+        let request = DirectShareRequest::new(
+            source_path.clone(),
+            admitted.identity().clone(),
+            DirectShareMount::for_index(0, "/workspace/source", true).unwrap(),
+        )
+        .unwrap();
+        let private = tempfile::tempdir().unwrap();
+        fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let share = PreparedDirectShare {
+            request,
+            admitted,
+            socket: private.path().join("share-00.sock"),
+        };
+        let executable = fs::canonicalize("/usr/bin/true").unwrap();
+        let mut command = direct_share_process(&executable, &share, private.path()).unwrap();
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == "/proc/self/fd/3/")
+        );
+        assert!(!arguments.iter().any(|argument| argument == &source_path));
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "none"])
+        );
+        assert!(arguments.windows(2).any(|pair| {
+            pair == [
+                "--translate-uid",
+                &format!("squash-guest:0:{}:{}", current_uid(), u32::MAX),
+            ]
+        }));
+        assert!(arguments.windows(2).any(|pair| {
+            pair == [
+                "--translate-gid",
+                &format!("squash-guest:0:{}:{}", unsafe { libc::getegid() }, u32::MAX),
+            ]
+        }));
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.starts_with("host:"))
+        );
+
+        let mut child = command.spawn().unwrap();
+        let status = tokio::time::timeout(SIGNAL_STOP_TIMEOUT, child.wait())
+            .await
+            .expect("confined fixture exceeded its deadline")
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn direct_share_startup_cleanup_normalizes_daemon_socket_permissions() {
+        let private = tempfile::tempdir().unwrap();
+        fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = private.path().join("share-00.sock");
+        let pid_file = virtiofsd_pid_path(&socket);
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&pid_file, b"1234\n").unwrap();
+        fs::set_permissions(&pid_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        cleanup_direct_share_endpoints(&socket).unwrap();
+
+        assert!(!socket.exists());
+        assert!(!pid_file.exists());
     }
 
     #[tokio::test]

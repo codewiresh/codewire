@@ -1,7 +1,10 @@
 //! Shared Linux confinement primitives for single-purpose local runtime workers.
 
 use std::io;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::path::Path;
+
+use rustix::fs::{Mode, OFlags, open};
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -64,6 +67,145 @@ struct LandlockRulesetAttr {
 }
 
 #[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
+}
+
+const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+
+pub(crate) struct PreparedFilesystemDomain(OwnedFd);
+
+impl PreparedFilesystemDomain {
+    pub(crate) fn restrict_self(&self) -> io::Result<()> {
+        if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, self.0.as_raw_fd(), 0_u32) }
+            != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn prepare_virtiofsd_filesystem_domain(
+    source_fd: RawFd,
+    socket_directory: &Path,
+    executable: &Path,
+    read_only: bool,
+) -> io::Result<PreparedFilesystemDomain> {
+    let ruleset = create_filesystem_ruleset()?;
+    // Guest execution reads file data through FUSE; it never requires the
+    // host daemon itself to execute anything from the selected source.
+    let source_access = if read_only {
+        LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+    } else {
+        LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_MAKE_DIR
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_MAKE_SYM
+            | LANDLOCK_ACCESS_FS_REFER
+            | LANDLOCK_ACCESS_FS_TRUNCATE
+    };
+    add_path_beneath_rule(&ruleset, source_fd, source_access)?;
+
+    let socket_directory = open(
+        socket_directory,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    add_path_beneath_rule(
+        &ruleset,
+        socket_directory.as_raw_fd(),
+        LANDLOCK_ACCESS_FS_WRITE_FILE
+            | LANDLOCK_ACCESS_FS_READ_FILE
+            | LANDLOCK_ACCESS_FS_READ_DIR
+            | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_MAKE_SOCK
+            | LANDLOCK_ACCESS_FS_TRUNCATE,
+    )?;
+
+    add_opened_rule(
+        &ruleset,
+        executable,
+        OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    add_opened_rule(
+        &ruleset,
+        Path::new("/usr/lib"),
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+    )?;
+    add_opened_rule(
+        &ruleset,
+        Path::new("/etc/ld.so.cache"),
+        OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    // virtiofsd validates even an explicit --rlimit-nofile against this
+    // kernel ceiling before publishing its vhost-user socket.
+    add_opened_rule(
+        &ruleset,
+        Path::new("/proc/sys/fs/nr_open"),
+        OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        LANDLOCK_ACCESS_FS_READ_FILE,
+    )?;
+    Ok(PreparedFilesystemDomain(ruleset))
+}
+
+fn create_filesystem_ruleset() -> io::Result<OwnedFd> {
+    let attributes = LandlockRulesetAttr {
+        handled_access_fs: LANDLOCK_HANDLED_ACCESS_FS_V3,
+    };
+    let descriptor = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &raw const attributes,
+            std::mem::size_of::<LandlockRulesetAttr>(),
+            0_u32,
+        )
+    };
+    if descriptor < 0 || descriptor > i32::MAX as libc::c_long {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(descriptor as libc::c_int) })
+}
+
+fn add_opened_rule(ruleset: &OwnedFd, path: &Path, flags: OFlags, access: u64) -> io::Result<()> {
+    let descriptor = open(path, flags, Mode::empty())?;
+    add_path_beneath_rule(ruleset, descriptor.as_raw_fd(), access)
+}
+
+fn add_path_beneath_rule(
+    ruleset: &OwnedFd,
+    parent_fd: RawFd,
+    allowed_access: u64,
+) -> io::Result<()> {
+    let attributes = LandlockPathBeneathAttr {
+        allowed_access,
+        parent_fd,
+    };
+    if unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset.as_raw_fd(),
+            LANDLOCK_RULE_PATH_BENEATH,
+            &raw const attributes,
+            0_u32,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[repr(C)]
 struct CapabilityHeader {
     version: u32,
     pid: i32,
@@ -88,6 +230,19 @@ pub(crate) fn require_single_threaded_process() -> io::Result<()> {
 /// Permanently discard process capabilities, ambient capability inheritance,
 /// ptrace/core-dump visibility, and future privilege gains.
 pub(crate) fn lock_process_privileges() -> io::Result<()> {
+    lock_process_privileges_inner(true)
+}
+
+/// Permanently discard executable privilege gains while retaining ordinary
+/// same-UID process observability for a parent that must admit the exec result.
+///
+/// This variant is for a directly spawned helper: setting `PR_SET_DUMPABLE`
+/// before exec would prevent the parent from validating `/proc/<pid>/exe`.
+pub(crate) fn lock_exec_process_privileges() -> io::Result<()> {
+    lock_process_privileges_inner(false)
+}
+
+fn lock_process_privileges_inner(disable_dumpability: bool) -> io::Result<()> {
     if unsafe {
         libc::prctl(
             libc::PR_CAP_AMBIENT,
@@ -110,10 +265,13 @@ pub(crate) fn lock_process_privileges() -> io::Result<()> {
         inheritable: 0,
     };
     let data = [empty; 2];
-    if unsafe { libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr()) } != 0
-        || unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1
-        || unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1
-    {
+    if unsafe { libc::syscall(libc::SYS_capset, &raw const header, data.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if disable_dumpability && unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
         return Err(io::Error::last_os_error());
     }
     unsafe {
@@ -129,32 +287,7 @@ pub(crate) fn install_deny_all_filesystem_domain() -> io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
         return Err(io::Error::last_os_error());
     }
-    let attributes = LandlockRulesetAttr {
-        handled_access_fs: LANDLOCK_HANDLED_ACCESS_FS_V3,
-    };
-    let descriptor = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            &raw const attributes,
-            std::mem::size_of::<LandlockRulesetAttr>(),
-            0_u32,
-        )
-    };
-    if descriptor < 0 || descriptor > i32::MAX as libc::c_long {
-        return Err(io::Error::last_os_error());
-    }
-    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor as libc::c_int) };
-    if unsafe {
-        libc::syscall(
-            libc::SYS_landlock_restrict_self,
-            descriptor.as_raw_fd(),
-            0_u32,
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    create_filesystem_ruleset().and_then(|domain| PreparedFilesystemDomain(domain).restrict_self())
 }
 
 pub(crate) fn install_denied_syscalls(
@@ -164,6 +297,27 @@ pub(crate) fn install_denied_syscalls(
     let mut filter = base_filter();
     append_denials(&mut filter, denied.iter().chain(architecture_denied));
     filter.push(bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW));
+    install_filter(&mut filter)
+}
+
+/// Make `setgroups(2)` an identity-preserving successful no-op.
+///
+/// A direct-share virtiofsd maps every guest GID to the daemon's existing
+/// effective GID and runs without capabilities. Linux may nevertheless attach
+/// the parent directory's GID to a create request through the FUSE
+/// supplementary-group extension, and virtiofsd unconditionally calls
+/// `setgroups(2)` when that extension is present. The call cannot change the
+/// intended identity, but would fail with `EPERM` after capabilities are
+/// discarded. Returning success without executing it preserves the already
+/// locked host identity and prevents the daemon from changing its inherited
+/// supplementary groups through any future request.
+pub(crate) fn install_identity_preserving_setgroups_filter() -> io::Result<()> {
+    let mut filter = base_filter();
+    filter.extend([
+        bpf_equal(libc::SYS_setgroups as u32, 0, 1),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ERRNO),
+        bpf_statement(BPF_RET_K, SECCOMP_RET_ALLOW),
+    ]);
     install_filter(&mut filter)
 }
 

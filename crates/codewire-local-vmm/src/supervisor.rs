@@ -78,7 +78,7 @@ use crate::workspace::{
 use crate::workspace_generation::{WorkspaceGenerationError, WorkspaceGenerationRecord};
 use crate::workspace_plan::{
     RepositoryCredentialAccess, WorkspaceInput, WorkspacePlan, WorkspacePlanError,
-    prepare_repository_plan, validate_local_mount_destination,
+    prepare_direct_input, prepare_repository_plan, validate_local_mount_destination,
 };
 
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 3;
@@ -1370,19 +1370,36 @@ impl SupervisorCore {
         if !request.local_mounts.is_empty() {
             let mounts = request.local_mounts.clone();
             let maximum_copy_bytes = workspace_content_limit(request.disk_bytes);
+            let forbidden_roots = vec![
+                self.config.root.clone(),
+                self.config.artifact_root.clone(),
+                self.config.credential_authority_root.clone(),
+                self.config.mesh_data_dir.clone(),
+                self.config.platform_config_dir.clone(),
+            ];
             let local_inputs = tokio::task::spawn_blocking(move || {
                 mounts
                     .into_iter()
                     .map(|mount| {
                         let requested_source =
                             PathBuf::from(OsString::from_vec(mount.source_path.clone()));
+                        if mount.mode == v1::LocalMountMode::Direct as i32 {
+                            return prepare_direct_input(
+                                &requested_source,
+                                &mount.destination,
+                                mount.read_only.ok_or(WorkspacePlanError::InvalidPlan)?,
+                                &forbidden_roots,
+                            )
+                            .map_err(SupervisorError::from);
+                        }
                         let source = inspect_workspace(
                             &requested_source,
                             WorkspaceSelection::Copy,
                             maximum_copy_bytes,
-                        )?;
+                        )
+                        .map_err(SupervisorError::from)?;
                         if source.source_path.as_os_str().as_bytes() != mount.source_path {
-                            return Err(WorkspaceError::SourceChanged);
+                            return Err(SupervisorError::from(WorkspaceError::SourceChanged));
                         }
                         Ok(WorkspaceInput::local(&source, &mount.destination))
                     })
@@ -2651,6 +2668,7 @@ impl SupervisorCore {
                 setup_root_generation: workspace.setup_root_generation,
                 host_ports: host_ports_to_proto(&environment.host_ports),
                 mesh: mesh_attachment_to_proto(environment.mesh.as_ref()),
+                direct_shares: direct_share_attachments_to_proto(&environment.workspace_plan)?,
             })
             .await;
         let relay_result = match tokio::time::timeout(RUNNER_EVENT_DRAIN_TIMEOUT, &mut relay).await
@@ -4671,6 +4689,36 @@ fn host_ports_to_proto(bindings: &[HostPortBinding]) -> Vec<v1::HostPortBinding>
         .collect()
 }
 
+fn direct_share_attachments_to_proto(
+    plan: &WorkspacePlan,
+) -> Result<Vec<v1::DirectShareAttachment>, SupervisorError> {
+    plan.direct_share_plan()
+        .map_err(|_| SupervisorError::InvalidState)?;
+    Ok(plan
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            WorkspaceInput::Direct {
+                source_path,
+                identity,
+                destination,
+                read_only,
+            } => Some(v1::DirectShareAttachment {
+                source_path: source_path.clone(),
+                device_major: identity.device_major(),
+                device_minor: identity.device_minor(),
+                inode: identity.inode(),
+                mount_id: identity.mount_id(),
+                owner_uid: identity.owner_uid(),
+                filesystem_magic: identity.filesystem_magic(),
+                destination: destination.clone(),
+                read_only: *read_only,
+            }),
+            WorkspaceInput::Local { .. } | WorkspaceInput::Repository { .. } => None,
+        })
+        .collect())
+}
+
 fn canonicalize_mesh_attachment_proto(
     attachment: Option<&v1::MeshAttachment>,
 ) -> Result<Option<v1::MeshAttachment>, SupervisorError> {
@@ -4841,11 +4889,14 @@ fn validate_local_mount_requests(mounts: &[v1::LocalMountInput]) -> Result<(), S
         if mount.source_path.is_empty()
             || mount.source_path.len() > MAXIMUM_HOST_PATH_BYTES
             || mount.source_path.contains(&0)
-            || mount.mode != v1::LocalMountMode::Copy as i32
-            || mount.read_only.is_some()
             || validate_local_mount_destination(&mount.destination).is_err()
         {
             return Err(SupervisorError::InvalidRequest);
+        }
+        match v1::LocalMountMode::try_from(mount.mode) {
+            Ok(v1::LocalMountMode::Copy) if mount.read_only.is_none() => {}
+            Ok(v1::LocalMountMode::Direct) if mount.read_only.is_some() => {}
+            _ => return Err(SupervisorError::InvalidRequest),
         }
         let path = PathBuf::from(OsString::from_vec(mount.source_path.clone()));
         if !path.is_absolute() || path == Path::new("/") {
@@ -5438,22 +5489,27 @@ fn validate_request_workspace_plan(
         return Err(SupervisorError::InvalidRequest);
     }
     for (input, mount) in local_inputs.iter().zip(&request.local_mounts) {
-        let WorkspaceInput::Local {
-            source_path,
-            mode,
-            destination,
-            ..
-        } = input
-        else {
-            return Err(SupervisorError::InvalidRequest);
-        };
-        if source_path != &mount.source_path
-            || *mode != WorkspaceSourceMode::Copy
-            || destination != &mount.destination
-            || mount.mode != v1::LocalMountMode::Copy as i32
-            || mount.read_only.is_some()
-        {
-            return Err(SupervisorError::InvalidRequest);
+        match input {
+            WorkspaceInput::Local {
+                source_path,
+                mode,
+                destination,
+                ..
+            } if source_path == &mount.source_path
+                && *mode == WorkspaceSourceMode::Copy
+                && destination == &mount.destination
+                && mount.mode == v1::LocalMountMode::Copy as i32
+                && mount.read_only.is_none() => {}
+            WorkspaceInput::Direct {
+                source_path,
+                destination,
+                read_only,
+                ..
+            } if source_path == &mount.source_path
+                && destination == &mount.destination
+                && mount.mode == v1::LocalMountMode::Direct as i32
+                && mount.read_only == Some(*read_only) => {}
+            _ => return Err(SupervisorError::InvalidRequest),
         }
     }
     Ok(())
@@ -5472,24 +5528,38 @@ fn local_mounts_from_workspace_plan(
         .get(repository_count..)
         .ok_or(SupervisorError::InvalidState)?
         .iter()
-        .map(|input| {
-            let WorkspaceInput::Local {
+        .map(|input| match input {
+            WorkspaceInput::Local {
                 source_path,
                 mode: WorkspaceSourceMode::Copy,
                 destination,
                 ..
-            } = input
-            else {
-                return Err(SupervisorError::InvalidState);
-            };
-            validate_local_mount_destination(destination)
-                .map_err(|_| SupervisorError::InvalidState)?;
-            Ok(v1::LocalMountInput {
-                source_path: source_path.clone(),
-                destination: destination.clone(),
-                mode: v1::LocalMountMode::Copy as i32,
-                read_only: None,
-            })
+            } => {
+                validate_local_mount_destination(destination)
+                    .map_err(|_| SupervisorError::InvalidState)?;
+                Ok(v1::LocalMountInput {
+                    source_path: source_path.clone(),
+                    destination: destination.clone(),
+                    mode: v1::LocalMountMode::Copy as i32,
+                    read_only: None,
+                })
+            }
+            WorkspaceInput::Direct {
+                source_path,
+                destination,
+                read_only,
+                ..
+            } => {
+                validate_local_mount_destination(destination)
+                    .map_err(|_| SupervisorError::InvalidState)?;
+                Ok(v1::LocalMountInput {
+                    source_path: source_path.clone(),
+                    destination: destination.clone(),
+                    mode: v1::LocalMountMode::Direct as i32,
+                    read_only: Some(*read_only),
+                })
+            }
+            _ => Err(SupervisorError::InvalidState),
         })
         .collect()
 }
@@ -6493,6 +6563,7 @@ mod tests {
                 artifact: cloud_hypervisor.clone(),
                 version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
             },
+            virtiofsd: None,
             kernel: kernel.clone(),
             initramfs: initramfs.clone(),
         };
@@ -8310,7 +8381,7 @@ mod tests {
     }
 
     #[test]
-    fn create_journal_reconstructs_explicit_copy_mounts_from_the_durable_plan() {
+    fn create_journal_reconstructs_copy_mounts_and_accepts_explicit_direct_shape() {
         let project = codewire_project::ProjectSpec {
             image: "registry.example/codewire/workspace:latest".to_owned(),
             working_directory: "/workspace/fixtures".to_owned(),
@@ -8375,6 +8446,8 @@ mod tests {
         let mut direct = request;
         direct.local_mounts[0].mode = v1::LocalMountMode::Direct as i32;
         direct.local_mounts[0].read_only = Some(true);
+        validate_create(&direct).unwrap();
+        direct.local_mounts[0].read_only = None;
         assert!(matches!(
             validate_create(&direct),
             Err(SupervisorError::InvalidRequest)
@@ -8434,6 +8507,89 @@ mod tests {
                 && destination == "/workspace/fixtures"
         ));
         plan.validate_for_project(&project).unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_preparation_binds_an_explicit_direct_mount_for_durable_replay() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("fixture.txt"), b"direct fixture").unwrap();
+        let source = fs::canonicalize(source.path()).unwrap();
+        let project = codewire_project::ProjectSpec {
+            image: "registry.example/codewire/workspace:latest".to_owned(),
+            working_directory: "/workspace/fixtures".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(2_000),
+                memory_mib: Some(16 * 1024),
+                disk_gib: Some(20),
+            },
+            ..Default::default()
+        };
+        let project_spec_json = project.canonical_json().unwrap();
+        let request = v1::CreateEnvironmentRequest {
+            name: "direct".to_owned(),
+            source_path: String::new(),
+            vcpus: 2,
+            memory_mib: 16 * 1024,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_sha256: format!("{:x}", Sha256::digest(&project_spec_json)),
+            project_spec_json,
+            implicit_path_mode: String::new(),
+            local_mounts: vec![v1::LocalMountInput {
+                source_path: source.as_os_str().as_bytes().to_vec(),
+                destination: "/workspace/fixtures".to_owned(),
+                mode: v1::LocalMountMode::Direct as i32,
+                read_only: Some(false),
+            }],
+            host_ports: Vec::new(),
+            mesh: None,
+            access_profile_id: String::new(),
+            access_profile_revision: 0,
+        };
+        validate_create(&request).unwrap();
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let plan = core.prepare_create_workspace_plan(&request).await.unwrap();
+
+        assert_eq!(plan.inputs.len(), 1);
+        assert!(matches!(
+            &plan.inputs[0],
+            WorkspaceInput::Direct {
+                source_path,
+                destination,
+                read_only: false,
+                ..
+            } if source_path == source.as_os_str().as_bytes()
+                && destination == "/workspace/fixtures"
+        ));
+        plan.validate_for_project(&project).unwrap();
+        let guest = plan.direct_share_plan().unwrap().unwrap();
+        assert_eq!(guest.mounts()[0].tag(), "cw-direct-00");
+        assert!(
+            !guest
+                .encode_canonical()
+                .unwrap()
+                .windows(source.as_os_str().as_bytes().len())
+                .any(|window| window == source.as_os_str().as_bytes())
+        );
+
+        let encoded = create_operation_payload(&request, &plan).unwrap();
+        let operation = OperationRecord {
+            operation_id: Uuid::new_v4(),
+            request_id: Uuid::parse_str(&request.request_id).unwrap(),
+            environment_id: Some(Uuid::new_v4()),
+            kind: OperationKind::Create,
+            phase: OperationPhase::Intent,
+            checkpoint: 0,
+            payload: encoded,
+            result: None,
+            error_code: None,
+            created_unix_ms: 1,
+            updated_unix_ms: 1,
+        };
+        assert_eq!(
+            create_request_from_operation(&operation).unwrap(),
+            (request, plan)
+        );
     }
 
     #[test]

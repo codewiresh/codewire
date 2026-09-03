@@ -53,10 +53,11 @@ use crate::workspace_plan::{
     CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH, WorkspaceIdentity, WorkspacePlan,
 };
 use crate::{
-    GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, PROGRESS_FRAME_LEN, PROGRESS_REQUEST_LEN,
-    ProgressFrame, ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN,
-    SETUP_DISK_SERIAL, SETUP_HEADER_LEN, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
-    SetupHeader, Sha256Value,
+    DIRECT_SHARE_PLAN_PATH, DirectSharePlan, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage,
+    MAX_DIRECT_SHARE_PLAN_BYTES, PROGRESS_FRAME_LEN, PROGRESS_REQUEST_LEN, ProgressFrame,
+    ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN, SETUP_DISK_SERIAL,
+    SETUP_HEADER_LEN, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding, SetupHeader,
+    Sha256Value,
 };
 
 pub const INIT_PATH: &str = "/init";
@@ -357,6 +358,7 @@ pub fn run_init() -> Result<()> {
     };
     prepare_workspace_generation(&plan)?;
     record_boot_stage("root-generation-ready")?;
+    mount_direct_shares(&seed)?;
     expose_persistent_layout(&plan)?;
     record_boot_stage("persistent-layout-ready")?;
     if let Err(error) = network.wait_for_host() {
@@ -1944,6 +1946,98 @@ fn load_workspace_plan() -> Result<Option<WorkspacePlan>> {
         .context("validate sealed workspace plan")
 }
 
+fn mount_direct_shares(seed: &Seed) -> Result<()> {
+    let expected = seed.direct_shares_sha256();
+    let metadata = match fs::symlink_metadata(DIRECT_SHARE_PLAN_PATH) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("inspect direct-share guest plan"),
+    };
+    let (expected, metadata) = match (expected, metadata) {
+        (None, None) => return Ok(()),
+        (Some(expected), Some(metadata)) => (expected, metadata),
+        _ => bail!("direct-share guest plan does not match its seed binding"),
+    };
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= MAX_DIRECT_SHARE_PLAN_BYTES as u64,
+        "direct-share guest plan metadata is invalid"
+    );
+    let bytes = read_bounded(
+        Path::new(DIRECT_SHARE_PLAN_PATH),
+        MAX_DIRECT_SHARE_PLAN_BYTES + 1,
+    )
+    .context("read direct-share guest plan")?;
+    ensure!(
+        Sha256Value::calculate(&bytes) == expected,
+        "direct-share guest plan differs from its seed binding"
+    );
+    let plan =
+        DirectSharePlan::decode_canonical(&bytes).context("validate direct-share guest plan")?;
+    let workspace = rustix::fs::open(
+        PERSISTENT_WORKSPACE_PATH,
+        RustixOFlags::PATH
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open persistent workspace for direct-share admission")?;
+    for share in plan.mounts() {
+        let relative = Path::new(share.destination())
+            .strip_prefix(WORKSPACE_PATH)
+            .context("derive direct-share workspace destination")?;
+        let target_path = Path::new(PERSISTENT_WORKSPACE_PATH).join(relative);
+        let target_path = target_path
+            .to_str()
+            .context("direct-share guest destination is not UTF-8")?;
+        let target = rustix::fs::openat2(
+            &workspace,
+            relative,
+            RustixOFlags::PATH
+                | RustixOFlags::DIRECTORY
+                | RustixOFlags::CLOEXEC
+                | RustixOFlags::NOFOLLOW,
+            RustixMode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+        )
+        .context("admit direct-share guest destination")?;
+        let stat = rustix::fs::fstat(&target).context("inspect direct-share guest destination")?;
+        ensure!(
+            RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Directory,
+            "direct-share guest destination is not a directory"
+        );
+        drop(target);
+        let flags = libc::MS_NOSUID
+            | libc::MS_NODEV
+            | if share.read_only() {
+                libc::MS_RDONLY
+            } else {
+                0
+            };
+        mount_fs(share.tag(), target_path, "virtiofs", flags, "")
+            .with_context(|| format!("mount admitted direct share at {}", share.destination()))?;
+        if share.read_only() {
+            let target =
+                CString::new(target_path).context("direct-share guest destination contains NUL")?;
+            let mut status = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+            if unsafe { libc::statvfs(target.as_ptr(), status.as_mut_ptr()) } == -1 {
+                return Err(io::Error::last_os_error())
+                    .context("inspect read-only direct-share mount");
+            }
+            let status = unsafe { status.assume_init() };
+            ensure!(
+                status.f_flag & libc::ST_RDONLY != 0,
+                "direct-share mount is not read-only"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     let mut file = File::open(path)?;
     let mut bytes = Vec::with_capacity(limit.min(4096));
@@ -2342,6 +2436,10 @@ fn create_state_layout() -> Result<()> {
     ] {
         create_dir(Path::new(path), mode)?;
     }
+    // A host-prepared state image can already contain the digest-bound
+    // direct-share plan beneath this directory. Restore the trusted runtime
+    // owner before capability-dropped guest helpers publish bounded status.
+    lchown(Path::new(CONTROL_PATH), 0, 0)?;
     File::open(STATE_MOUNT_PATH)
         .context("open state mount for fsync")?
         .sync_all()

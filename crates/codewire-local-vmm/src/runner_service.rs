@@ -2,7 +2,9 @@
 //! daemon capability. The supervisor may restart and reconnect to this socket;
 //! the capability never enters persistent state.
 
+use std::ffi::OsString;
 use std::io;
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,8 +20,9 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use codewire_vmm_guest_probe::{
-    GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN,
-    ProgressError, ProgressFrame, ProgressRequest, SetupBinding, Sha256Value,
+    DirectShareMount, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, MAX_DIRECT_SHARES,
+    PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressError, ProgressFrame, ProgressRequest,
+    SetupBinding, Sha256Value,
 };
 
 use crate::artifact_store::RuntimeArtifactStore;
@@ -28,6 +31,7 @@ use crate::control::v1::environment_runner_service_client::EnvironmentRunnerServ
 use crate::control::v1::environment_runner_service_server::{
     EnvironmentRunnerService, EnvironmentRunnerServiceServer,
 };
+use crate::direct_share::{DirectShareIdentity, DirectShareRequest};
 use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use crate::linux::path::PrivateRoot;
@@ -350,6 +354,14 @@ impl RunnerState {
                 self.error_code = error_code;
                 Ok(error_code)
             }
+            ExitClass::DirectShareFailure(_) => {
+                // Keep ownership of the live VM. Losing one separately
+                // confined filesystem server fails the admitted workspace
+                // layout closed until an explicit stop/restart.
+                self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
+                Ok(error_code)
+            }
             ExitClass::NetworkWorkerFailure(_) => {
                 // Keep ownership of the live, now fail-closed VMM so an
                 // explicit stop/restart can reap it safely.
@@ -384,6 +396,7 @@ fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
     match exit {
         ExitClass::StillRunning | ExitClass::GuestShutdown => None,
         ExitClass::VmmFailure(_) => Some("vmm_exit"),
+        ExitClass::DirectShareFailure(_) => Some("direct_share_exit"),
         ExitClass::NetworkWorkerFailure(_) => Some("network_worker_exit"),
         ExitClass::EgressBrokerFailure(_) => Some("egress_broker_exit"),
         ExitClass::IngressForwarderFailure => Some("ingress_forwarder_exit"),
@@ -505,6 +518,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let setup = parse_setup_binding(&request)?;
         let host_ports = parse_host_ports(&request)?;
         let mesh = parse_mesh_attachment(&request)?;
+        let direct_shares = parse_direct_shares(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
@@ -544,6 +558,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 setup,
                 host_ports,
                 mesh,
+                direct_shares,
             })
             .await
         {
@@ -706,6 +721,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 }
                 ExitClass::GuestShutdown
                 | ExitClass::VmmFailure(_)
+                | ExitClass::DirectShareFailure(_)
                 | ExitClass::NetworkWorkerFailure(_)
                 | ExitClass::EgressBrokerFailure(_)
                 | ExitClass::IngressForwarderFailure
@@ -938,6 +954,39 @@ fn parse_mesh_attachment(request: &v1::StartVmRequest) -> Result<Option<MeshAtta
         return Err(Status::invalid_argument("noncanonical Mesh attachment"));
     }
     Ok(Some(attachment))
+}
+
+fn parse_direct_shares(request: &v1::StartVmRequest) -> Result<Vec<DirectShareRequest>, Status> {
+    if request.direct_shares.len() > MAX_DIRECT_SHARES {
+        return Err(Status::invalid_argument("too many direct shares"));
+    }
+    request
+        .direct_shares
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            if raw.source_path.is_empty() || raw.source_path.contains(&0) {
+                return Err(Status::invalid_argument("invalid direct share"));
+            }
+            let identity = DirectShareIdentity::new(
+                raw.device_major,
+                raw.device_minor,
+                raw.inode,
+                raw.mount_id,
+                raw.owner_uid,
+                raw.filesystem_magic,
+            )
+            .map_err(|_| Status::invalid_argument("invalid direct share"))?;
+            let mount = DirectShareMount::for_index(index, raw.destination.clone(), raw.read_only)
+                .map_err(|_| Status::invalid_argument("invalid direct share"))?;
+            DirectShareRequest::new(
+                PathBuf::from(OsString::from_vec(raw.source_path.clone())),
+                identity,
+                mount,
+            )
+            .map_err(|_| Status::invalid_argument("invalid direct share"))
+        })
+        .collect()
 }
 
 fn map_start_error(error: RunnerError) -> Status {
@@ -1190,6 +1239,11 @@ async fn wait_for_guest_daemon(
                                 "Cloud Hypervisor exited before guest daemon readiness with status {code:?}"
                             )));
                         }
+                        ExitClass::DirectShareFailure(code) => {
+                            return Err(Status::unavailable(format!(
+                                "isolated direct-share server exited before guest daemon readiness with status {code:?}"
+                            )));
+                        }
                         ExitClass::NetworkWorkerFailure(code) => {
                             return Err(Status::unavailable(format!(
                                 "isolated network worker exited before guest daemon readiness with status {code:?}"
@@ -1413,6 +1467,47 @@ mod tests {
     }
 
     #[test]
+    fn private_start_binds_direct_shares_to_exact_host_identity_and_guest_order() {
+        let source = tempfile::tempdir().unwrap();
+        let source_path = std::fs::canonicalize(source.path()).unwrap();
+        let admitted = crate::direct_share::admit_direct_share(&source_path, &[]).unwrap();
+        let identity = admitted.identity();
+        let raw = v1::DirectShareAttachment {
+            source_path: std::os::unix::ffi::OsStrExt::as_bytes(source_path.as_os_str()).to_vec(),
+            device_major: identity.device_major(),
+            device_minor: identity.device_minor(),
+            inode: identity.inode(),
+            mount_id: identity.mount_id(),
+            owner_uid: identity.owner_uid(),
+            filesystem_magic: identity.filesystem_magic(),
+            destination: "/workspace/source".to_owned(),
+            read_only: true,
+        };
+        let request = v1::StartVmRequest {
+            direct_shares: vec![raw.clone()],
+            ..Default::default()
+        };
+        let parsed = parse_direct_shares(&request).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].mount.tag(), "cw-direct-00");
+        assert_eq!(parsed[0].mount.destination(), "/workspace/source");
+        assert!(parsed[0].mount.read_only());
+        assert!(!format!("{parsed:?}").contains(source_path.to_str().unwrap()));
+
+        let mut invalid = request;
+        invalid.direct_shares[0].inode = 0;
+        assert_eq!(
+            parse_direct_shares(&invalid).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        invalid.direct_shares = vec![raw; MAX_DIRECT_SHARES + 1];
+        assert_eq!(
+            parse_direct_shares(&invalid).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
     fn setup_boots_have_a_distinct_bounded_readiness_window() {
         assert_eq!(daemon_ready_timeout(false), DAEMON_READY_TIMEOUT);
         assert_eq!(daemon_ready_timeout(true), SETUP_DAEMON_READY_TIMEOUT);
@@ -1573,6 +1668,10 @@ mod tests {
         assert_eq!(
             runner_exit_error_code(ExitClass::VmmFailure(Some(1))),
             Some("vmm_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::DirectShareFailure(Some(7))),
+            Some("direct_share_exit")
         );
         assert_eq!(
             runner_exit_error_code(ExitClass::NetworkWorkerFailure(Some(2))),

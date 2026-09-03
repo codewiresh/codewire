@@ -25,6 +25,9 @@ SMOKE_HOME=''
 STATE_ROOT=''
 WORKSPACE=''
 MOUNT_SOURCE=''
+DIRECT_RO_SOURCE=''
+DIRECT_RW_SOURCE=''
+DIRECT_OUTSIDE_SOURCE=''
 PLATFORM_CONFIG=''
 TRIPWIRE=''
 TRANSCRIPT=''
@@ -68,6 +71,7 @@ KEYRING_DBUS_ADDRESS=''
 KEYRING_DBUS_PID=''
 KEYRING_DAEMON_PID=''
 CREATE_ACCESS_ARGS=()
+DIRECT_SHARE_PIDS=()
 
 usage() {
   cat <<'USAGE' >&2
@@ -85,8 +89,9 @@ usage: smoke-native-local-environment.sh \
 
 Runs the built cw Linux/KVM native-environment product smoke with 2 vCPUs and
 16 GiB of guest memory. The artifact root and lock must already contain the
-exact Cloud Hypervisor, kernel, and product guest-root artifacts admitted by
-codewire-local-vmm. Missing KVM, artifacts, or required tools fail nonzero.
+exact Cloud Hypervisor, virtiofsd, kernel, and product guest-root artifacts
+admitted by codewire-local-vmm. Missing KVM, artifacts, or required tools fail
+nonzero.
 
 The smoke uses an isolated HOME and short private native state root, poisons
 the platform destination, installs Docker/Lima/QEMU tripwires, starts an
@@ -383,6 +388,15 @@ printf '#!/bin/sh\nprintf "copy-mount-executable-ok\\n"\n' >"$MOUNT_SOURCE/tool.
 chmod 0755 "$MOUNT_SOURCE/tool.sh"
 ln "$MOUNT_SOURCE/data.txt" "$MOUNT_SOURCE/hardlink.txt"
 ln -s nested/file.txt "$MOUNT_SOURCE/link.txt"
+DIRECT_RO_SOURCE="$SMOKE_ROOT/direct-ro"
+DIRECT_RW_SOURCE="$SMOKE_ROOT/direct-rw"
+DIRECT_OUTSIDE_SOURCE="$SMOKE_ROOT/direct-outside"
+mkdir -m 0700 "$DIRECT_RO_SOURCE" "$DIRECT_RW_SOURCE" "$DIRECT_OUTSIDE_SOURCE"
+printf 'direct read-only before creation\n' >"$DIRECT_RO_SOURCE/data.txt"
+printf 'direct read-write before creation\n' >"$DIRECT_RW_SOURCE/data.txt"
+printf 'direct outside must remain isolated\n' >"$DIRECT_OUTSIDE_SOURCE/data.txt"
+ln -s "$DIRECT_OUTSIDE_SOURCE/data.txt" "$DIRECT_RO_SOURCE/outside.txt"
+ln -s "$DIRECT_OUTSIDE_SOURCE/data.txt" "$DIRECT_RW_SOURCE/outside.txt"
 cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
 image: $WORKSPACE_IMAGE
@@ -397,6 +411,14 @@ mounts:
   - source: ../m
     destination: /workspace/fixtures
     mode: copy
+  - source: ../direct-ro
+    destination: /workspace/direct-ro
+    mode: direct
+    read_only: true
+  - source: ../direct-rw
+    destination: /workspace/direct-rw
+    mode: direct
+    read_only: false
 working_directory: /workspace/github
 ports:
   - $HOST_PORT:3000
@@ -1219,10 +1241,12 @@ prepare_advanced_artifact_source() {
   ADVANCED_ARTIFACT_LOCK="$advanced_parent/artifacts.lock.json"
   mkdir -m 0700 "$advanced_parent" "$ADVANCED_ARTIFACT_ROOT"
   copy_advanced_artifact '.cloud_hypervisor.path' 'advanced-cloud-hypervisor' 0500
+  copy_advanced_artifact '.virtiofsd.path' 'advanced-virtiofsd' 0500
   copy_advanced_artifact '.kernel.path' 'advanced-kernel' 0400
   copy_advanced_artifact '.initramfs.path' 'advanced-initramfs' 0400
   jq '
     .cloud_hypervisor.path = "advanced-cloud-hypervisor" |
+    .virtiofsd.path = "advanced-virtiofsd" |
     .kernel.path = "advanced-kernel" |
     .initramfs.path = "advanced-initramfs"
   ' "$ORIGINAL_ARTIFACT_LOCK" >"$ADVANCED_ARTIFACT_LOCK"
@@ -1234,6 +1258,68 @@ prepare_advanced_artifact_source() {
   [[ "$(sha256sum "$ADVANCED_ARTIFACT_LOCK" | awk '{print $1}')" != \
      "$(sha256sum "$ORIGINAL_ARTIFACT_LOCK" | awk '{print $1}')" ]] ||
     die 'advanced artifact lock did not change'
+}
+
+assert_direct_share_processes() {
+  local generation_manifest virtiofsd_sha256 virtiofsd_executable index source socket pid_file pid
+  local no_new_privileges effective_capabilities seccomp_mode argument host_uid host_gid
+  local -a argv=()
+  generation_manifest="$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json"
+  virtiofsd_sha256="$(jq -er '.virtiofsd.sha256 | select(test("^[0-9a-f]{64}$"))' \
+    "$generation_manifest")" || die 'cached runtime generation is missing virtiofsd'
+  virtiofsd_executable="$(realpath -e -- \
+    "$STATE_ROOT/engine/runtime-artifacts/blobs/x-$virtiofsd_sha256")" ||
+    die 'cached virtiofsd executable is unavailable'
+  host_uid="$(id -u)"
+  host_gid="$(id -g)"
+  DIRECT_SHARE_PIDS=()
+  for index in 00 01; do
+    if [[ "$index" == 00 ]]; then
+      source="$DIRECT_RO_SOURCE"
+    else
+      source="$DIRECT_RW_SOURCE"
+    fi
+    socket="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/fs/$index.sock"
+    pid_file="$socket.pid"
+    [[ -S "$socket" && "$(stat -c '%a' "$socket")" == 600 ]] ||
+      die "direct-share socket $index is absent or not private"
+    [[ -f "$pid_file" && ! -L "$pid_file" && "$(stat -c '%a' "$pid_file")" == 600 ]] ||
+      die "direct-share PID file $index is absent or not private"
+    pid="$(tr -d '[:space:]' <"$pid_file")"
+    [[ "$pid" =~ ^[0-9]+$ ]] || die "direct-share PID $index is invalid"
+    exact_isolated_process "$pid" "$virtiofsd_executable" "/proc/self/fd/3/" ||
+      die "direct-share process $index identity or fixed descriptor argument drifted"
+    [[ "$(readlink -f "/proc/$pid/fd/3")" == "$source" ]] ||
+      die "direct-share process $index does not hold the admitted source descriptor"
+    argv=()
+    mapfile -d '' -t argv <"/proc/$pid/cmdline" ||
+      die "direct-share process $index command line is unreadable"
+    for argument in "${argv[@]}"; do
+      [[ "$argument" != *"$DIRECT_RO_SOURCE"* && "$argument" != *"$DIRECT_RW_SOURCE"* ]] ||
+        die "direct-share process $index leaked a host source path into argv"
+    done
+    printf '%s\n' "${argv[@]}" | grep -Fxq "squash-guest:0:$host_uid:4294967295" ||
+      die "direct-share process $index omitted its unprivileged UID translation"
+    printf '%s\n' "${argv[@]}" | grep -Fxq "squash-guest:0:$host_gid:4294967295" ||
+      die "direct-share process $index omitted its unprivileged GID translation"
+    no_new_privileges="$(awk '$1 == "NoNewPrivs:" { print $2 }' "/proc/$pid/status")"
+    effective_capabilities="$(awk '$1 == "CapEff:" { print $2 }' "/proc/$pid/status")"
+    seccomp_mode="$(awk '$1 == "Seccomp:" { print $2 }' "/proc/$pid/status")"
+    [[ "$no_new_privileges" == 1 && "$effective_capabilities" == 0000000000000000 &&
+       "$seccomp_mode" == 2 ]] ||
+      die "direct-share process $index confinement status drifted"
+    DIRECT_SHARE_PIDS+=("$pid")
+  done
+}
+
+assert_direct_share_processes_stopped() {
+  local pid
+  for pid in "${DIRECT_SHARE_PIDS[@]}"; do
+    wait_for_pid_death "$pid" || die "direct-share process $pid survived VM stop"
+  done
+  [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/fs" -mindepth 1 -print -quit)" ]] ||
+    die 'direct-share runtime endpoints remained after VM stop'
+  DIRECT_SHARE_PIDS=()
 }
 
 runtime_artifact_manifest_count() {
@@ -1460,12 +1546,16 @@ jq -e --arg listen "127.0.0.1:$HOST_PORT" --arg network "$MESH_NETWORK" '
   .cpu == 2 and
   .memory == "16Gi" and
   .working_directory == "/workspace/github" and
-  .workspace_inputs == 3 and
+  .workspace_inputs == 5 and
   .network == $network and
   (has("error_code") | not) and
   .ports == [{"listen": $listen, "guest_port": 3000}] and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
+rg -qF 'direct mounts let guest root inspect every file' "$LAST_STDERR" ||
+  die 'native creation did not present the direct-share guest-root warning'
+rg -qF 'Read-write grants let guest root modify or delete that host content' "$LAST_STDERR" ||
+  die 'native creation did not present the direct-share write warning'
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   jq -e '
     .access_profile == "user/native-broker" and
@@ -1479,6 +1569,7 @@ printf 'host changed after environment creation\n' >"$WORKSPACE/README.md"
 printf 'host-only untracked content\n' >"$WORKSPACE/host-only.txt"
 printf 'copy mount host changed after creation\n' >"$MOUNT_SOURCE/data.txt"
 printf 'copy mount host-only content\n' >"$MOUNT_SOURCE/host-only.txt"
+printf 'direct read-only host changed after creation\n' >"$DIRECT_RO_SOURCE/data.txt"
 run_cw env list --local --output json
 jq -e '
   length == 2 and
@@ -1533,6 +1624,17 @@ RUNNER_PID="$(native_database_value runner_pid)"
 [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/generations" -name setup.raw -print -quit)" ]] ||
   die 'credential-free one-boot setup pack remained after readiness'
 
+log 'checking confined live read-only and acknowledged read-write direct shares'
+assert_direct_share_processes
+run_cw run --no-tty -- /bin/sh -lc \
+  'set -eu; grep -qx "direct read-only host changed after creation" /workspace/direct-ro/data.txt; grep -qx "direct read-write before creation" /workspace/direct-rw/data.txt; if cat /workspace/direct-ro/outside.txt >/dev/null 2>&1; then exit 81; fi; if printf forbidden > /workspace/direct-ro/guest-write.txt 2>/dev/null; then exit 82; fi; test ! -e /workspace/direct-ro/guest-write.txt; printf "direct guest write\n" > /workspace/direct-rw/guest-write.txt; if printf forbidden > /workspace/direct-rw/outside.txt 2>/dev/null; then exit 83; fi'
+[[ "$(cat "$DIRECT_RW_SOURCE/guest-write.txt")" == 'direct guest write' ]] ||
+  die 'acknowledged direct read-write guest change did not reach the selected host source'
+[[ ! -e "$DIRECT_RO_SOURCE/guest-write.txt" ]] ||
+  die 'read-only direct share changed its selected host source'
+[[ "$(cat "$DIRECT_OUTSIDE_SOURCE/data.txt")" == 'direct outside must remain isolated' ]] ||
+  die 'direct-share symlink access mutated unselected host content'
+
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
   run_managed_credential_broker_smoke
@@ -1551,6 +1653,24 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     die 'broker-bound native environment did not stop'
   wait_for_journal_complete ||
     die 'broker-bound native stop returned before its lifecycle journal became terminal'
+  assert_direct_share_processes_stopped
+  printf 'direct read-only offline host change\n' >"$DIRECT_RO_SOURCE/restart.txt"
+  printf 'direct read-write offline host change\n' >"$DIRECT_RW_SOURCE/restart.txt"
+  log 'checking offline restart reopens the exact direct-share roots'
+  run_cw env start --local "$NAME" --output json
+  jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
+    die 'broker-bound native environment did not restart'
+  assert_direct_share_processes
+  run_cw run --no-tty -- /bin/sh -lc \
+    'set -eu; grep -qx "direct read-only offline host change" /workspace/direct-ro/restart.txt; grep -qx "direct read-write offline host change" /workspace/direct-rw/restart.txt; grep -qx "direct guest write" /workspace/direct-rw/guest-write.txt; printf "direct restarted guest write\n" > /workspace/direct-rw/restarted.txt'
+  [[ "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
+    die 'restarted direct read-write share was not live'
+  run_cw env stop --local "$NAME" --output json
+  jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
+    die 'restarted broker-bound native environment did not stop'
+  wait_for_journal_complete ||
+    die 'restarted broker-bound native stop did not finish its journal'
+  assert_direct_share_processes_stopped
   scan_for_credential_canary before-delete-access-token "$CREDENTIAL_CANARY"
   scan_for_credential_canary before-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
   scan_for_credential_canary before-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
@@ -1558,6 +1678,11 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'deleting the environment, profile, credential, and protected-store entry'
   run_cw env rm --local "$NAME" --yes
   ENV_CREATED=0
+  [[ -d "$DIRECT_RO_SOURCE" && -d "$DIRECT_RW_SOURCE" ]] ||
+    die 'environment deletion removed a direct-share host root'
+  [[ "$(cat "$DIRECT_RW_SOURCE/guest-write.txt")" == 'direct guest write' &&
+     "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
+    die 'environment deletion changed acknowledged direct-share host content'
   run_cw credentials --local profile delete "$CREDENTIAL_PROFILE_NAME" --yes
   run_cw credentials --local delete "$CREDENTIAL_ID" --yes
   run_cw credentials --local delete "$GITHUB_CREDENTIAL_ID" --yes
@@ -1822,6 +1947,9 @@ run_cw env stop --local "$NAME" --output json
 jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null || die 'native environment did not stop'
 wait_for_journal_complete ||
   die 'native stop returned before its lifecycle journal became terminal'
+assert_direct_share_processes_stopped
+printf 'direct read-only offline host change\n' >"$DIRECT_RO_SOURCE/restart.txt"
+printf 'direct read-write offline host change\n' >"$DIRECT_RW_SOURCE/restart.txt"
 STOPPED_RUNNER_PID="$(native_database_value runner_pid)"
 STOPPED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
   die 'native supervisor process was not found before installed artifact advance'
@@ -1851,7 +1979,8 @@ REPLACEMENT_RUNNER_PID="$(native_database_value runner_pid)"
 [[ -f "$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json" ]] ||
   die 'restart removed the environment-pinned runtime generation manifest'
 RUNNER_PID="$REPLACEMENT_RUNNER_PID"
-run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; cat /workspace/fixtures/guest-only.txt; grep -qx "copy mount before creation" /workspace/fixtures/data.txt; test ! -e /workspace/fixtures/host-only.txt; git -C /workspace/github rev-parse HEAD; git -C /workspace/gitea rev-parse HEAD; cat /etc/machine-id'
+assert_direct_share_processes
+run_cw run --no-tty -- /bin/sh -lc 'set -eu; cat /workspace/sentinel.txt; cat /workspace/fixtures/guest-only.txt; grep -qx "copy mount before creation" /workspace/fixtures/data.txt; test ! -e /workspace/fixtures/host-only.txt; grep -qx "direct read-only offline host change" /workspace/direct-ro/restart.txt; grep -qx "direct read-write offline host change" /workspace/direct-rw/restart.txt; grep -qx "direct guest write" /workspace/direct-rw/guest-write.txt; printf "direct restarted guest write\n" > /workspace/direct-rw/restarted.txt; git -C /workspace/github rev-parse HEAD; git -C /workspace/gitea rev-parse HEAD; cat /etc/machine-id'
 rg -qF 'persistence-ok' "$LAST_STDOUT" ||
   die 'workspace sentinel did not survive cached-runtime restart'
 rg -qF 'guest-copy-mount-write' "$LAST_STDOUT" ||
@@ -1862,6 +1991,8 @@ rg -qF "$GITEA_COMMIT" "$LAST_STDOUT" ||
   die 'git.example.invalid workspace did not survive cached-runtime restart'
 rg -qF "$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
   die 'environment-specific machine identity did not survive restart'
+[[ "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
+  die 'restarted direct read-write share was not live'
 
 log 'checking exact runner adoption after supervisor crash'
 SUPERVISOR_PID="$(find_exact_supervisor_pid)" || die 'native supervisor process was not found exactly'
@@ -2036,6 +2167,15 @@ wait_for_journal_complete ||
   die 'explicit copy mount deletion mutated host-only content'
 [[ ! -e "$MOUNT_SOURCE/guest-only.txt" ]] ||
   die 'explicit copy mount guest writes escaped or synchronized into the host source'
+[[ -d "$DIRECT_RO_SOURCE" && -d "$DIRECT_RW_SOURCE" ]] ||
+  die 'environment deletion removed a direct-share host root'
+[[ ! -e "$DIRECT_RO_SOURCE/guest-write.txt" ]] ||
+  die 'read-only direct-share host content changed during the lifecycle'
+[[ "$(cat "$DIRECT_RW_SOURCE/guest-write.txt")" == 'direct guest write' &&
+   "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
+  die 'environment deletion changed acknowledged direct-share host content'
+[[ "$(cat "$DIRECT_OUTSIDE_SOURCE/data.txt")" == 'direct outside must remain isolated' ]] ||
+  die 'direct-share lifecycle changed unselected host content'
 [[ "$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')" == "$SOURCE_CONFIG_SHA256" ]] ||
   die 'native clone preparation mutated the host Git configuration'
 [[ -x "$WORKSPACE/.git/hooks/post-checkout" ]] ||

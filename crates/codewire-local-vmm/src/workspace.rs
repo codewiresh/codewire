@@ -22,6 +22,7 @@ use crate::linux::path::{PrivateRoot, current_uid};
 use crate::linux::state::{MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths};
 use crate::oci::ContentStore;
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
+use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
 
 const GIT: &str = "/usr/bin/git";
 const MAX_GIT_CONTROL_OUTPUT: usize = 16 * 1024 * 1024;
@@ -473,6 +474,23 @@ fn provision_workspace_plan(
                     }
                 }
             }
+            WorkspaceInput::Direct { .. } => {
+                let forbidden_roots = [engine_state_root.to_owned()];
+                input
+                    .direct_source(&forbidden_roots)
+                    .map_err(|_| WorkspaceError::SourceChanged)?
+                    .ok_or(WorkspaceError::InvalidWorkspacePlan)?;
+                fs::create_dir(&destination).map_err(|source| WorkspaceError::Io {
+                    path: destination.clone(),
+                    source,
+                })?;
+                fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).map_err(
+                    |source| WorkspaceError::Io {
+                        path: destination.clone(),
+                        source,
+                    },
+                )?;
+            }
             WorkspaceInput::Repository {
                 source,
                 commit,
@@ -485,6 +503,35 @@ fn provision_workspace_plan(
                 prepare_git_bundle(&bundle, &destination, &staging_dir, source, commit, branch)?;
             }
         }
+    }
+    if let Some(direct_shares) = plan.direct_share_plan()? {
+        let bytes = direct_shares
+            .encode_canonical()
+            .map_err(|_| WorkspaceError::InvalidWorkspacePlan)?;
+        let path = staging_dir.join(DIRECT_SHARE_PLAN_RELATIVE_PATH);
+        let parent = path.parent().ok_or(WorkspaceError::InvalidWorkspacePlan)?;
+        fs::create_dir(parent).map_err(|source| WorkspaceError::Io {
+            path: parent.to_owned(),
+            source,
+        })?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            WorkspaceError::Io {
+                path: parent.to_owned(),
+                source,
+            }
+        })?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o400)
+            .open(&path)
+            .map_err(|source| WorkspaceError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|source| WorkspaceError::Io { path, source })?;
     }
     bounded_staging_regular_bytes(&workspace, workspace_content_limit(disk_bytes))?;
 

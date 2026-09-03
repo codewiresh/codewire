@@ -408,9 +408,31 @@ pub(crate) async fn create_native_environment(
         }
         None => None,
     };
-    if !project.local_mounts.is_empty() {
+    if project
+        .local_mounts
+        .iter()
+        .any(|mount| mount.mode == v1::LocalMountMode::Copy as i32)
+    {
         eprintln!(
             "Warning: copy mounts expose every selected file to the guest, including credentials deliberately stored beneath a selected source."
+        );
+    }
+    let direct_mounts = project
+        .local_mounts
+        .iter()
+        .filter(|mount| mount.mode == v1::LocalMountMode::Direct as i32)
+        .collect::<Vec<_>>();
+    if !direct_mounts.is_empty() {
+        let write_warning = if direct_mounts
+            .iter()
+            .any(|mount| mount.read_only == Some(false))
+        {
+            " Read-write grants let guest root modify or delete that host content."
+        } else {
+            ""
+        };
+        eprintln!(
+            "Warning: direct mounts let guest root inspect every file beneath each selected host directory.{write_warning} The explicit mode: direct and read_only choice acknowledges this grant."
         );
     }
     let NativeProjectPlan {
@@ -1117,11 +1139,15 @@ fn resolve_native_local_mounts(
     mounts
         .iter()
         .map(|mount| {
-            if mount.mode == codewire_project::LocalMountMode::Direct {
-                anyhow::bail!("native local direct mounts are not available yet; use mode: copy");
-            }
-            if mount.read_only.is_some() {
-                anyhow::bail!("copy mounts cannot carry read_only");
+            match mount.mode {
+                codewire_project::LocalMountMode::Copy if mount.read_only.is_none() => {}
+                codewire_project::LocalMountMode::Direct if mount.read_only.is_some() => {}
+                codewire_project::LocalMountMode::Copy => {
+                    anyhow::bail!("copy mounts cannot carry read_only");
+                }
+                codewire_project::LocalMountMode::Direct => {
+                    anyhow::bail!("direct mounts require read_only: true or false");
+                }
             }
             let requested = Path::new(&mount.source);
             let requested = if requested.is_absolute() {
@@ -1142,8 +1168,11 @@ fn resolve_native_local_mounts(
             Ok(v1::LocalMountInput {
                 source_path: source.as_os_str().as_bytes().to_vec(),
                 destination: mount.destination.clone(),
-                mode: v1::LocalMountMode::Copy as i32,
-                read_only: None,
+                mode: match mount.mode {
+                    codewire_project::LocalMountMode::Copy => v1::LocalMountMode::Copy as i32,
+                    codewire_project::LocalMountMode::Direct => v1::LocalMountMode::Direct as i32,
+                },
+                read_only: mount.read_only,
             })
         })
         .collect()
@@ -1704,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn native_yaml_rejects_direct_mounts_until_the_vmm_share_exists() {
+    fn native_yaml_resolves_explicit_direct_mounts_without_an_implicit_workspace() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("fixtures")).unwrap();
         std::fs::write(
@@ -1712,12 +1741,17 @@ mod tests {
             "mounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: direct, read_only: true}]\n",
         )
         .unwrap();
-        let error = native_codewire_yaml(temp.path(), None).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("native local direct mounts are not available yet"),
-            "{error}"
+        let project = native_codewire_yaml(temp.path(), None).unwrap();
+        assert_eq!(project.local_mounts.len(), 1);
+        assert_eq!(
+            project.local_mounts[0].mode,
+            v1::LocalMountMode::Direct as i32
+        );
+        assert_eq!(project.local_mounts[0].read_only, Some(true));
+        assert_eq!(
+            native_workspace_request(temp.path(), &project.spec, &project.local_mounts, None,)
+                .unwrap(),
+            (String::new(), String::new())
         );
     }
 

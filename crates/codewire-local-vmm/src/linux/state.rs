@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{FlockOperation, flock};
 use uuid::Uuid;
 
+use codewire_vmm_guest_probe::MAX_DIRECT_SHARES;
+
 use super::path::{FileIdentity, PathError, PrivateRoot, SocketIdentity};
 use super::process::ProcessIdentity;
 
@@ -26,6 +28,7 @@ pub struct VmPaths {
     pub api_socket: PathBuf,
     pub vsock_dir: PathBuf,
     pub vsock_socket: PathBuf,
+    pub virtiofs_dir: PathBuf,
     pub disks_dir: PathBuf,
     pub state_disk: PathBuf,
     pub generations_dir: PathBuf,
@@ -48,6 +51,7 @@ impl VmPaths {
         let vm_root = PrivateRoot::open(&vm_dir)?;
         let api_dir = vm_root.ensure_dir(Path::new("api"), 0o700)?;
         let vsock_dir = vm_root.ensure_dir(Path::new("vsock"), 0o700)?;
+        let virtiofs_dir = vm_root.ensure_dir(Path::new("fs"), 0o700)?;
         let disks_dir = vm_root.ensure_dir(Path::new("disks"), 0o700)?;
         let generations_dir = vm_root.ensure_dir(Path::new("generations"), 0o700)?;
         let seed_dir = vm_root.ensure_dir(Path::new("seed"), 0o700)?;
@@ -55,6 +59,7 @@ impl VmPaths {
         Ok(Self {
             api_socket: api_dir.join("api.sock"),
             vsock_socket: vsock_dir.join("vsock.sock"),
+            virtiofs_dir,
             state_disk: disks_dir.join("state.raw"),
             seed_disk: seed_dir.join("seed.raw"),
             serial_log: diagnostics_dir.join("serial.log"),
@@ -89,7 +94,23 @@ impl VmPaths {
     pub fn clear_stale_runtime_endpoints(&self) -> Result<(), StateError> {
         PrivateRoot::open(&self.api_dir)?.remove_private_socket(Path::new("api.sock"))?;
         PrivateRoot::open(&self.vsock_dir)?.remove_private_socket(Path::new("vsock.sock"))?;
+        let virtiofs = PrivateRoot::open(&self.virtiofs_dir)?;
+        for index in 0..MAX_DIRECT_SHARES {
+            virtiofs.remove_private_socket_with_permissions(
+                Path::new(&direct_share_socket_name(index)),
+                &[0o600, 0o700],
+            )?;
+            virtiofs
+                .remove_private_regular(Path::new(&direct_share_pid_file_name(index)), 0o600)?;
+        }
         Ok(())
+    }
+
+    pub fn direct_share_socket(&self, index: usize) -> Result<PathBuf, StateError> {
+        if index >= MAX_DIRECT_SHARES {
+            return Err(StateError::InvalidDirectShareIndex(index));
+        }
+        Ok(self.virtiofs_dir.join(direct_share_socket_name(index)))
     }
 
     pub fn prepare_diagnostics(&self) -> Result<(), StateError> {
@@ -403,6 +424,17 @@ pub fn cleanup_trashed_vm(
         vsock.remove_private_socket(Path::new("vsock.sock"))?;
         vm.remove_empty_private_directory(Path::new("vsock"))?;
     }
+    if let Some(virtiofs) = optional_private_directory(&vm, Path::new("fs"))? {
+        for index in 0..MAX_DIRECT_SHARES {
+            virtiofs.remove_private_socket_with_permissions(
+                Path::new(&direct_share_socket_name(index)),
+                &[0o600, 0o700],
+            )?;
+            virtiofs
+                .remove_private_regular(Path::new(&direct_share_pid_file_name(index)), 0o600)?;
+        }
+        vm.remove_empty_private_directory(Path::new("fs"))?;
+    }
     if let Some(disks) = optional_private_directory(&vm, Path::new("disks"))? {
         disks.remove_private_regular(Path::new("state.raw"), 0o600)?;
         vm.remove_empty_private_directory(Path::new("disks"))?;
@@ -490,6 +522,14 @@ fn trash_name(vm_id: Uuid, operation_id: Uuid) -> String {
     format!("delete-{operation_id}-{vm_id}")
 }
 
+fn direct_share_socket_name(index: usize) -> String {
+    format!("{index:02}.sock")
+}
+
+fn direct_share_pid_file_name(index: usize) -> String {
+    format!("{}.pid", direct_share_socket_name(index))
+}
+
 fn optional_private_directory(
     root: &PrivateRoot,
     relative: &Path,
@@ -507,6 +547,7 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
         &[
             "api",
             "vsock",
+            "fs",
             "disks",
             "seed",
             "diagnostics",
@@ -515,6 +556,41 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
             "state.json",
         ],
     )?;
+    if let Some(virtiofs) = optional_private_directory(vm, Path::new("fs"))? {
+        for entry in fs::read_dir(virtiofs.path()).map_err(|source| StateError::Io {
+            path: virtiofs.path().to_owned(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| StateError::Io {
+                path: virtiofs.path().to_owned(),
+                source,
+            })?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|name| StateError::UnexpectedOwnedObject(virtiofs.path().join(name)))?;
+            let socket =
+                (0..MAX_DIRECT_SHARES).any(|index| name == direct_share_socket_name(index));
+            let pid_file =
+                (0..MAX_DIRECT_SHARES).any(|index| name == direct_share_pid_file_name(index));
+            if !socket && !pid_file {
+                return Err(StateError::UnexpectedOwnedObject(entry.path()));
+            }
+            if socket {
+                match SocketIdentity::capture_with_permissions(&entry.path(), &[0o600, 0o700]) {
+                    Ok(_) => {}
+                    Err(error) if path_error_is_not_found(&error) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                match virtiofs.open_regular(Path::new(&name), false, None, false, Some(0o600)) {
+                    Ok(_) => {}
+                    Err(error) if path_error_is_not_found(&error) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+    }
     for (directory, files) in [
         (
             "api",
@@ -680,6 +756,8 @@ pub enum StateError {
     InvalidPersistedState,
     #[error("invalid VM trash identity")]
     InvalidTrashIdentity,
+    #[error("invalid direct-share socket index {0}")]
+    InvalidDirectShareIndex(usize),
     #[error("VM trash destination conflicts with a live environment tree: {0}")]
     TrashConflict(PathBuf),
     #[error("VM tree is absent from both active and trash state: {0}")]
@@ -712,6 +790,7 @@ mod tests {
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::net::UnixListener;
 
     fn private_root() -> (tempfile::TempDir, PrivateRoot) {
         let parent = tempfile::tempdir().unwrap();
@@ -800,6 +879,7 @@ mod tests {
         let directories = [
             &paths.api_dir,
             &paths.vsock_dir,
+            &paths.virtiofs_dir,
             &paths.disks_dir,
             &paths.seed_dir,
             &paths.diagnostics_dir,
@@ -814,6 +894,31 @@ mod tests {
         assert_eq!(paths.state_disk.parent(), Some(paths.disks_dir.as_path()));
         assert_eq!(paths.seed_disk.parent(), Some(paths.seed_dir.as_path()));
         assert_eq!(fs::metadata(&paths.vm_dir).unwrap().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn direct_share_runtime_endpoints_are_private_validated_and_replay_cleaned() {
+        let (_parent, root) = private_root();
+        let paths = VmPaths::create(&root, Uuid::new_v4()).unwrap();
+        let socket = paths.direct_share_socket(0).unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        // virtiofsd publishes its socket as 0700 before the runner normalizes
+        // a healthy endpoint to the steady-state 0600 mode.
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o700)).unwrap();
+        let pid_file = PathBuf::from(format!("{}.pid", socket.display()));
+        fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        fs::set_permissions(&pid_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        validate_owned_vm_tree(&paths.open_vm_root().unwrap()).unwrap();
+        paths.clear_stale_runtime_endpoints().unwrap();
+        assert!(!socket.exists());
+        assert!(!pid_file.exists());
+        drop(listener);
+
+        assert!(matches!(
+            paths.direct_share_socket(MAX_DIRECT_SHARES),
+            Err(StateError::InvalidDirectShareIndex(MAX_DIRECT_SHARES))
+        ));
     }
 
     #[test]

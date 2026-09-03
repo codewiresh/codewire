@@ -3,6 +3,9 @@
 
 mod network;
 
+#[cfg(target_os = "linux")]
+mod direct_share;
+
 /// Codewire-owned persistent Codex home projected into the workspace.
 ///
 /// Provider credentials are never stored here. The directory contains only
@@ -24,6 +27,11 @@ mod setup_verify;
 #[cfg(target_os = "linux")]
 mod workspace_plan;
 
+#[cfg(target_os = "linux")]
+pub use direct_share::{
+    DIRECT_SHARE_PLAN_PATH, DIRECT_SHARE_PLAN_RELATIVE_PATH, DirectShareMount, DirectSharePlan,
+    DirectSharePlanError, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_DIRECT_SHARES,
+};
 pub use network::{
     GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN,
     NETWORK_HOST_HELLO_LEN, NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS,

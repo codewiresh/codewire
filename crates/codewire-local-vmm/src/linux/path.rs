@@ -363,11 +363,19 @@ impl PrivateRoot {
     }
 
     pub fn remove_private_socket(&self, relative: &Path) -> Result<bool, PathError> {
+        self.remove_private_socket_with_permissions(relative, &[0o600])
+    }
+
+    pub(crate) fn remove_private_socket_with_permissions(
+        &self,
+        relative: &Path,
+        exact_permissions: &[u32],
+    ) -> Result<bool, PathError> {
         validate_single_component(relative)?;
         let path = self.path.join(relative);
         match fs::symlink_metadata(&path) {
             Ok(_) => {
-                SocketIdentity::capture(&path)?;
+                SocketIdentity::capture_with_permissions(&path, exact_permissions)?;
                 unlinkat(self.directory.as_fd(), relative, AtFlags::empty()).map_err(|source| {
                     PathError::Openat2 {
                         path: relative.to_owned(),
@@ -510,6 +518,13 @@ pub struct SocketIdentity {
 
 impl SocketIdentity {
     pub fn capture(path: &Path) -> Result<Self, PathError> {
+        Self::capture_with_permissions(path, &[0o600])
+    }
+
+    pub(crate) fn capture_with_permissions(
+        path: &Path,
+        exact_permissions: &[u32],
+    ) -> Result<Self, PathError> {
         let metadata = fs::symlink_metadata(path).map_err(|source| PathError::Io {
             path: path.to_owned(),
             source,
@@ -517,7 +532,7 @@ impl SocketIdentity {
         if !metadata.file_type().is_socket()
             || metadata.uid() != current_uid()
             || metadata.nlink() != 1
-            || metadata.mode() & 0o777 != 0o600
+            || !exact_permissions.contains(&(metadata.mode() & 0o777))
         {
             return Err(PathError::UnsafeSocket(path.to_owned()));
         }

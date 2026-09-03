@@ -425,6 +425,21 @@ message StartVmRequest {
   // Non-secret network identity and immutable guest-port admission for this
   // generation. No enrollment or steady-state credential is allowed.
   MeshAttachment mesh = 14;
+  // Exact host-only direct-share admissions for this generation. Source paths
+  // and filesystem identity never enter the guest-visible plan or VMM argv.
+  repeated DirectShareAttachment direct_shares = 15;
+}
+
+message DirectShareAttachment {
+  bytes source_path = 1;
+  uint32 device_major = 2;
+  uint32 device_minor = 3;
+  uint64 inode = 4;
+  uint64 mount_id = 5;
+  uint32 owner_uid = 6;
+  sint64 filesystem_magic = 7;
+  string destination = 8;
+  bool read_only = 9;
 }
 
 message StopVmRequest {}

@@ -19,6 +19,7 @@ use codewire_local_credentials::{
     AuthorityRuntimeConfig, LocalCredentialControlClient, validate_github_https_source,
 };
 use codewire_project::{ProjectSpec, RepositorySpec};
+use codewire_vmm_guest_probe::{DirectShareMount, DirectSharePlan};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -27,6 +28,9 @@ use tokio::time::timeout;
 use url::Url;
 use uuid::Uuid;
 
+use crate::direct_share::{
+    AdmittedDirectShare, DirectShareIdentity, admit_direct_share, reopen_direct_share,
+};
 use crate::linux::path::{PathError, PrivateRoot, current_uid};
 use crate::oci::{ContentStore, ContentStoreError, Sha256Digest};
 use crate::workspace::{WorkspaceSource, WorkspaceSourceMode};
@@ -53,6 +57,12 @@ pub(crate) enum WorkspaceInput {
         identity: String,
         mode: WorkspaceSourceMode,
         destination: String,
+    },
+    Direct {
+        source_path: Vec<u8>,
+        identity: DirectShareIdentity,
+        destination: String,
+        read_only: bool,
     },
     Repository {
         source: String,
@@ -106,6 +116,16 @@ impl WorkspacePlan {
                         return Err(WorkspacePlanError::InvalidPlan);
                     }
                 }
+                WorkspaceInput::Direct {
+                    source_path,
+                    identity,
+                    ..
+                } => {
+                    let path = PathBuf::from(OsString::from_vec(source_path.clone()));
+                    if !path.is_absolute() || identity.validate().is_err() {
+                        return Err(WorkspacePlanError::InvalidPlan);
+                    }
+                }
                 WorkspaceInput::Repository {
                     source,
                     commit,
@@ -134,6 +154,7 @@ impl WorkspacePlan {
                 return Err(WorkspacePlanError::OverlappingDestinations);
             }
         }
+        self.direct_share_plan()?;
         Ok(())
     }
 
@@ -216,8 +237,35 @@ impl WorkspacePlan {
                 bundle_size,
                 ..
             } => Some((bundle_digest, *bundle_size)),
-            WorkspaceInput::Local { .. } => None,
+            WorkspaceInput::Local { .. } | WorkspaceInput::Direct { .. } => None,
         })
+    }
+
+    pub(crate) fn direct_share_plan(&self) -> Result<Option<DirectSharePlan>, WorkspacePlanError> {
+        let mounts = self
+            .inputs
+            .iter()
+            .filter_map(|input| match input {
+                WorkspaceInput::Direct {
+                    destination,
+                    read_only,
+                    ..
+                } => Some((destination, *read_only)),
+                WorkspaceInput::Local { .. } | WorkspaceInput::Repository { .. } => None,
+            })
+            .enumerate()
+            .map(|(index, (destination, read_only))| {
+                DirectShareMount::for_index(index, destination.clone(), read_only)
+                    .map_err(|_| WorkspacePlanError::InvalidPlan)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if mounts.is_empty() {
+            Ok(None)
+        } else {
+            DirectSharePlan::new(mounts)
+                .map(Some)
+                .map_err(|_| WorkspacePlanError::InvalidPlan)
+        }
     }
 }
 
@@ -231,9 +279,20 @@ impl WorkspaceInput {
         }
     }
 
+    pub(crate) fn direct(source: &AdmittedDirectShare, destination: &str, read_only: bool) -> Self {
+        Self::Direct {
+            source_path: source.path().as_os_str().as_bytes().to_vec(),
+            identity: source.identity().clone(),
+            destination: destination.to_owned(),
+            read_only,
+        }
+    }
+
     pub(crate) fn destination(&self) -> &str {
         match self {
-            Self::Local { destination, .. } | Self::Repository { destination, .. } => destination,
+            Self::Local { destination, .. }
+            | Self::Direct { destination, .. }
+            | Self::Repository { destination, .. } => destination,
         }
     }
 
@@ -250,8 +309,39 @@ impl WorkspaceInput {
                 mode: *mode,
             }),
             Self::Repository { .. } => None,
+            Self::Direct { .. } => None,
         }
     }
+
+    pub(crate) fn direct_source(
+        &self,
+        forbidden_roots: &[PathBuf],
+    ) -> Result<Option<AdmittedDirectShare>, WorkspacePlanError> {
+        let Self::Direct {
+            source_path,
+            identity,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(OsString::from_vec(source_path.clone()));
+        reopen_direct_share(&path, identity, forbidden_roots)
+            .map(Some)
+            .map_err(|_| WorkspacePlanError::DirectShareChanged)
+    }
+}
+
+pub(crate) fn prepare_direct_input(
+    requested_source: &Path,
+    destination: &str,
+    read_only: bool,
+    forbidden_roots: &[PathBuf],
+) -> Result<WorkspaceInput, WorkspacePlanError> {
+    validate_local_mount_destination(destination)?;
+    let admitted = admit_direct_share(requested_source, forbidden_roots)
+        .map_err(|_| WorkspacePlanError::DirectShareInvalid)?;
+    Ok(WorkspaceInput::direct(&admitted, destination, read_only))
 }
 
 pub(crate) fn validate_local_mount_destination(
@@ -900,6 +990,10 @@ pub enum WorkspacePlanError {
     BundleTooLarge,
     #[error("remote Git bundle changed while it was admitted")]
     BundleChanged,
+    #[error("direct-share source is unsafe or unsupported")]
+    DirectShareInvalid,
+    #[error("direct-share source changed after admission")]
+    DirectShareChanged,
     #[error("remote repository preparation path is unsafe: {0}")]
     UnsafePreparation(PathBuf),
     #[error(transparent)]

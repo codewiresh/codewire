@@ -16,6 +16,7 @@ use crate::linux::path::{FileIdentity, PathError, PrivateRoot};
 
 pub const ARTIFACT_LOCK_SCHEMA_VERSION: u32 = 1;
 pub const CLOUD_HYPERVISOR_RELEASE: &str = "v53.0";
+pub const VIRTIOFSD_RELEASE: &str = "v1.14.0";
 const VERSION_OUTPUT_LIMIT: u64 = 4096;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 const ARTIFACT_LOCK_LIMIT: u64 = 1024 * 1024;
@@ -68,6 +69,8 @@ pub struct ExecutableArtifactSpec {
 pub struct ArtifactLock {
     pub schema_version: u32,
     pub cloud_hypervisor: ExecutableArtifactSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtiofsd: Option<ExecutableArtifactSpec>,
     pub kernel: ArtifactSpec,
     pub initramfs: ArtifactSpec,
 }
@@ -168,6 +171,7 @@ impl AdmittedArtifact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedArtifacts {
     pub cloud_hypervisor: AdmittedArtifact,
+    pub virtiofsd: Option<AdmittedArtifact>,
     pub kernel: AdmittedArtifact,
     pub initramfs: AdmittedArtifact,
 }
@@ -175,6 +179,9 @@ pub struct AdmittedArtifacts {
 impl AdmittedArtifacts {
     pub fn revalidate(&self) -> Result<(), ArtifactError> {
         self.cloud_hypervisor.revalidate()?;
+        if let Some(virtiofsd) = &self.virtiofsd {
+            virtiofsd.revalidate()?;
+        }
         self.kernel.revalidate()?;
         self.initramfs.revalidate()?;
         Ok(())
@@ -226,9 +233,11 @@ pub enum ArtifactError {
     InvalidInitramfs(PathBuf),
     #[error("Cloud Hypervisor lock must pin release {expected}")]
     WrongCloudHypervisorRelease { expected: &'static str },
-    #[error("Cloud Hypervisor version probe failed")]
+    #[error("virtiofsd lock must pin release {expected}")]
+    WrongVirtiofsdRelease { expected: &'static str },
+    #[error("runtime executable version probe failed")]
     VersionProbe,
-    #[error("Cloud Hypervisor reported an unexpected version")]
+    #[error("runtime executable reported an unexpected version")]
     VersionMismatch,
 }
 
@@ -252,6 +261,14 @@ impl ArtifactLock {
             &self.initramfs,
         ] {
             validate_spec(spec, architecture)?;
+        }
+        if let Some(virtiofsd) = &self.virtiofsd {
+            validate_spec(&virtiofsd.artifact, architecture)?;
+            if virtiofsd.version != VIRTIOFSD_RELEASE {
+                return Err(ArtifactError::WrongVirtiofsdRelease {
+                    expected: VIRTIOFSD_RELEASE,
+                });
+            }
         }
         if self.cloud_hypervisor.version != CLOUD_HYPERVISOR_RELEASE {
             return Err(ArtifactError::WrongCloudHypervisorRelease {
@@ -304,6 +321,17 @@ impl ArtifactLock {
         })?;
         verify_cloud_hypervisor_version(cloud_hypervisor.path()).await?;
 
+        let virtiofsd = if let Some(spec) = &self.virtiofsd {
+            let artifact = admit_one(&root, &spec.artifact, true)?;
+            with_opened(&root, &artifact, |file| {
+                validate_elf(file, artifact.path(), architecture)
+            })?;
+            verify_virtiofsd_version(artifact.path()).await?;
+            Some(artifact)
+        } else {
+            None
+        };
+
         let kernel = admit_one(&root, &self.kernel, false)?;
         with_opened(&root, &kernel, |file| {
             validate_kernel(file, kernel.path(), architecture)
@@ -316,6 +344,7 @@ impl ArtifactLock {
 
         Ok(AdmittedArtifacts {
             cloud_hypervisor,
+            virtiofsd,
             kernel,
             initramfs,
         })
@@ -692,6 +721,17 @@ fn read_prefix(file: &mut File, path: &Path, limit: usize) -> Result<Vec<u8>, Ar
 }
 
 async fn verify_cloud_hypervisor_version(path: &Path) -> Result<(), ArtifactError> {
+    verify_executable_version(path, expected_cloud_hypervisor_version_output).await
+}
+
+async fn verify_virtiofsd_version(path: &Path) -> Result<(), ArtifactError> {
+    verify_executable_version(path, expected_virtiofsd_version_output).await
+}
+
+async fn verify_executable_version(
+    path: &Path,
+    expected: fn(&[u8]) -> bool,
+) -> Result<(), ArtifactError> {
     let mut command = tokio::process::Command::new(path);
     command
         .arg("--version")
@@ -719,7 +759,7 @@ async fn verify_cloud_hypervisor_version(path: &Path) -> Result<(), ArtifactErro
         if !status.success() {
             return Err(ArtifactError::VersionProbe);
         }
-        if !expected_cloud_hypervisor_version_output(&bytes) {
+        if !expected(&bytes) {
             return Err(ArtifactError::VersionMismatch);
         }
         Ok(())
@@ -732,6 +772,10 @@ async fn verify_cloud_hypervisor_version(path: &Path) -> Result<(), ArtifactErro
         let _ = tokio::time::timeout(VERSION_TIMEOUT, child.wait()).await;
     }
     result
+}
+
+fn expected_virtiofsd_version_output(bytes: &[u8]) -> bool {
+    matches!(bytes, b"virtiofsd 1.14.0" | b"virtiofsd 1.14.0\n")
 }
 
 fn expected_cloud_hypervisor_version_output(bytes: &[u8]) -> bool {
@@ -775,6 +819,7 @@ mod tests {
                 },
                 version: CLOUD_HYPERVISOR_RELEASE.to_owned(),
             },
+            virtiofsd: None,
             kernel: ArtifactSpec {
                 path: "kernel".into(),
                 size: 1,
@@ -806,6 +851,22 @@ mod tests {
             b"cloud-hypervisor v53.0\nunexpected\n".as_slice(),
         ] {
             assert!(!expected_cloud_hypervisor_version_output(rejected));
+        }
+    }
+
+    #[test]
+    fn virtiofsd_version_probe_accepts_only_the_pinned_release() {
+        for accepted in [
+            b"virtiofsd 1.14.0".as_slice(),
+            b"virtiofsd 1.14.0\n".as_slice(),
+        ] {
+            assert!(expected_virtiofsd_version_output(accepted));
+        }
+        for rejected in [
+            b"virtiofsd 1.13.2".as_slice(),
+            b"virtiofsd 1.14.0\nunexpected\n".as_slice(),
+        ] {
+            assert!(!expected_virtiofsd_version_output(rejected));
         }
     }
 

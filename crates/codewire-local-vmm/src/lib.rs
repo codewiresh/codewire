@@ -15,6 +15,8 @@ pub mod ch_api;
 pub mod cloud_hypervisor;
 pub mod control;
 #[cfg(target_os = "linux")]
+mod direct_share;
+#[cfg(target_os = "linux")]
 pub mod egress_broker;
 #[cfg(target_os = "linux")]
 pub mod generation;
@@ -60,6 +62,8 @@ mod uds;
 #[cfg(target_os = "linux")]
 mod workspace_generation;
 
+#[cfg(target_os = "linux")]
+pub use direct_share::DirectShareRequest;
 #[cfg(target_os = "linux")]
 pub use linux::{
     CloudHypervisorRunner, CreateVmRequest, ExitClass, LiveProcess, PreparedVm, ProcessIdentity,

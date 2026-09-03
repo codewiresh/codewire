@@ -69,6 +69,9 @@ impl RuntimeArtifactStore {
             &lock.cloud_hypervisor.artifact,
             true,
         )?;
+        if let (Some(artifact), Some(spec)) = (&admitted.virtiofsd, &lock.virtiofsd) {
+            self.publish_blob(artifact, &spec.artifact, true)?;
+        }
         self.publish_blob(&admitted.kernel, &lock.kernel, false)?;
         self.publish_blob(&admitted.initramfs, &lock.initramfs, false)?;
         self.publish_generation(&generation, &lock)?;
@@ -126,6 +129,9 @@ impl RuntimeArtifactStore {
                 .get(generation)
                 .ok_or_else(|| RuntimeArtifactStoreError::MissingGeneration(generation.clone()))?;
             retain_blob(&mut retained_blobs, &lock.cloud_hypervisor.artifact, true)?;
+            if let Some(virtiofsd) = &lock.virtiofsd {
+                retain_blob(&mut retained_blobs, &virtiofsd.artifact, true)?;
+            }
             retain_blob(&mut retained_blobs, &lock.kernel, false)?;
             retain_blob(&mut retained_blobs, &lock.initramfs, false)?;
         }
@@ -196,6 +202,9 @@ impl RuntimeArtifactStore {
         let mut cached = lock.clone();
         cached.cloud_hypervisor.artifact.path =
             blob_name(&cached.cloud_hypervisor.artifact, true).into();
+        if let Some(virtiofsd) = &mut cached.virtiofsd {
+            virtiofsd.artifact.path = blob_name(&virtiofsd.artifact, true).into();
+        }
         cached.kernel.path = blob_name(&cached.kernel, false).into();
         cached.initramfs.path = blob_name(&cached.initramfs, false).into();
         cached
@@ -1094,11 +1103,15 @@ fn retain_diagnostic_blobs(
     lock: &ArtifactLock,
 ) -> Result<(), ()> {
     let mut next = retained.clone();
-    for (spec, executable) in [
+    let mut specs = vec![
         (&lock.cloud_hypervisor.artifact, true),
         (&lock.kernel, false),
         (&lock.initramfs, false),
-    ] {
+    ];
+    if let Some(virtiofsd) = &lock.virtiofsd {
+        specs.push((&virtiofsd.artifact, true));
+    }
+    for (spec, executable) in specs {
         let name = blob_name(spec, executable);
         let candidate = DiagnosticRetainedBlob {
             size: spec.size,
@@ -1490,6 +1503,7 @@ mod tests {
                 artifact: spec("bin/cloud-hypervisor", b"cloud-hypervisor"),
                 version: crate::artifact::CLOUD_HYPERVISOR_RELEASE.to_owned(),
             },
+            virtiofsd: None,
             kernel: spec("boot/kernel", b"kernel"),
             initramfs: spec("boot/initramfs", b"initramfs"),
         }
@@ -1538,11 +1552,15 @@ mod tests {
     fn assert_generation_intact(store: &RuntimeArtifactStore, lock: &ArtifactLock) {
         let generation = lock.generation().unwrap();
         assert_eq!(store.read_generation(&generation).unwrap(), *lock);
-        for (spec, executable) in [
+        let mut specs = vec![
             (&lock.cloud_hypervisor.artifact, true),
             (&lock.kernel, false),
             (&lock.initramfs, false),
-        ] {
+        ];
+        if let Some(virtiofsd) = &lock.virtiofsd {
+            specs.push((&virtiofsd.artifact, true));
+        }
+        for (spec, executable) in specs {
             store.verify_blob(spec, executable).unwrap();
         }
     }

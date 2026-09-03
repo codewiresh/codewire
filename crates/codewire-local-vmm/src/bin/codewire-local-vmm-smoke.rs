@@ -589,6 +589,9 @@ mod linux {
             ExitClass::VmmFailure(_) => {
                 return Err(failure("OCI provisioning VM required a failure signal"));
             }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("OCI provisioning direct-share server failed"));
+            }
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("OCI provisioning network worker failed"));
             }
@@ -711,6 +714,9 @@ mod linux {
                     "guest-initiated poweroff was classified as VMM failure",
                 ));
             }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("direct-share server failed during guest poweroff"));
+            }
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("network worker failed during guest poweroff"));
             }
@@ -761,6 +767,9 @@ mod linux {
                 return Err(failure(
                     "hard-killed VMM was misclassified as guest shutdown",
                 ));
+            }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("direct-share server failed before hard VMM kill"));
             }
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("network worker failed before hard VMM kill"));
@@ -936,6 +945,9 @@ mod linux {
             ExitClass::VmmFailure(_) => {
                 return Err(failure("final VM stop required a failure signal"));
             }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("final direct-share server failed during stop"));
+            }
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("final network worker failed during stop"));
             }
@@ -1012,6 +1024,9 @@ mod linux {
             ExitClass::StillRunning => return Err(failure("restarted VM stop remained running")),
             ExitClass::VmmFailure(_) => {
                 return Err(failure("restarted VM stop required a failure signal"));
+            }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("restarted direct-share server failed during stop"));
             }
             ExitClass::NetworkWorkerFailure(_) => {
                 return Err(failure("restarted network worker failed during stop"));
@@ -1185,6 +1200,15 @@ mod linux {
             RunnerError::MeshProcessKillTimeout => "mesh-process-kill-timeout",
             RunnerError::ExitedDuringStart => "vmm-exited-during-start",
             RunnerError::StartTimeout => "vmm-start-timeout",
+            RunnerError::VirtiofsdUnavailable => "virtiofsd-unavailable",
+            RunnerError::DirectShareChanged => "direct-share-changed",
+            RunnerError::VirtiofsdSpawn => "virtiofsd-spawn",
+            RunnerError::VirtiofsdConfinement => "virtiofsd-confinement",
+            RunnerError::VirtiofsdExitedDuringStart => "virtiofsd-exited-during-start",
+            RunnerError::VirtiofsdStartTimeout => "virtiofsd-start-timeout",
+            RunnerError::VirtiofsdPidFile => "virtiofsd-pid-file",
+            RunnerError::VirtiofsdWait => "virtiofsd-wait",
+            RunnerError::VirtiofsdKillTimeout => "virtiofsd-kill-timeout",
             RunnerError::Spawn => "vmm-spawn",
             RunnerError::Wait => "vmm-wait",
             RunnerError::KillTimeout => "vmm-kill-timeout",
@@ -1200,6 +1224,7 @@ mod linux {
             Ok(ExitClass::StillRunning) => "running",
             Ok(ExitClass::GuestShutdown) => "guest-shutdown",
             Ok(ExitClass::VmmFailure(_)) => "vmm-failure",
+            Ok(ExitClass::DirectShareFailure(_)) => "direct-share-failure",
             Ok(ExitClass::NetworkWorkerFailure(_)) => "network-worker-failure",
             Ok(ExitClass::EgressBrokerFailure(_)) => "egress-broker-failure",
             Ok(ExitClass::IngressForwarderFailure) => "ingress-forwarder-failure",
@@ -1279,6 +1304,7 @@ mod linux {
             setup: None,
             host_ports: Vec::new(),
             mesh: None,
+            direct_shares: Vec::new(),
         }
     }
 
@@ -1815,6 +1841,11 @@ mod linux {
                             "VMM exited while proving isolated network worker loss",
                         ));
                     }
+                    ExitClass::DirectShareFailure(_) => {
+                        return Err(failure(
+                            "direct-share server exited while proving isolated network worker loss",
+                        ));
+                    }
                     ExitClass::EgressBrokerFailure(_) => {
                         return Err(failure(
                             "egress broker exited while proving isolated network worker loss",
@@ -1850,6 +1881,12 @@ mod linux {
                         observation("vm.egress_broker_loss_exit", "vmm");
                         return Err(failure(
                             "VMM exited while proving isolated egress broker loss",
+                        ));
+                    }
+                    ExitClass::DirectShareFailure(_) => {
+                        observation("vm.egress_broker_loss_exit", "direct-share");
+                        return Err(failure(
+                            "direct-share server exited before egress broker loss was observed",
                         ));
                     }
                     ExitClass::NetworkWorkerFailure(_) => {
@@ -1892,6 +1929,11 @@ mod linux {
                     ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {
                         return Err(failure(
                             "VMM exited while proving isolated Mesh transport loss",
+                        ));
+                    }
+                    ExitClass::DirectShareFailure(_) => {
+                        return Err(failure(
+                            "direct-share server exited before Mesh transport loss was observed",
                         ));
                     }
                     ExitClass::NetworkWorkerFailure(_) => {
@@ -2155,6 +2197,15 @@ mod linux {
                     );
                     return Err(failure(
                         "network worker exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::DirectShareFailure(code) => {
+                    observation(
+                        "direct_share.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure(
+                        "direct-share server exited before guest daemon readiness",
                     ));
                 }
                 ExitClass::EgressBrokerFailure(code) => {
@@ -3710,6 +3761,7 @@ mod linux {
             let vm_dir = PathBuf::from("/state/vms/00000000-0000-4000-8000-000000000001");
             let api_dir = vm_dir.join("api");
             let vsock_dir = vm_dir.join("vsock");
+            let virtiofs_dir = vm_dir.join("fs");
             let disks_dir = vm_dir.join("disks");
             let generations_dir = vm_dir.join("generations");
             let seed_dir = vm_dir.join("seed");
@@ -3717,6 +3769,7 @@ mod linux {
             VmPaths {
                 api_socket: api_dir.join("api.sock"),
                 vsock_socket: vsock_dir.join("vsock.sock"),
+                virtiofs_dir,
                 state_disk: disks_dir.join("state.raw"),
                 generations_dir,
                 seed_disk: seed_dir.join("seed.raw"),

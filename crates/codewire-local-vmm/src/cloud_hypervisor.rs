@@ -4,7 +4,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use codewire_vmm_guest_probe::{
-    ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL, STATE_DISK_SERIAL,
+    MAX_DIRECT_SHARES, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL, STATE_DISK_SERIAL,
 };
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
@@ -18,7 +18,6 @@ const FORBIDDEN_FLAGS: &[&str] = &[
     "--balloon",
     "--device",
     "--firmware",
-    "--fs",
     "--generic-vhost-user",
     "--landlock-rules",
     "--memory-zone",
@@ -40,6 +39,7 @@ const ALLOWED_FLAG_COUNTS: &[(&str, usize)] = &[
     ("--cpus", 1),
     ("--memory", 1),
     ("--disk", 3),
+    ("--fs", 0),
     ("--vsock", 1),
     ("--serial", 1),
     ("--console", 1),
@@ -65,6 +65,13 @@ pub struct CloudHypervisorConfig {
     pub vsock_cid: u32,
     pub vcpus: u8,
     pub memory_mib: u32,
+    pub virtiofs: Vec<VirtioFsConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtioFsConfig {
+    pub tag: String,
+    pub socket: PathBuf,
 }
 
 impl fmt::Debug for CloudHypervisorConfig {
@@ -86,6 +93,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("vsock_cid", &self.vsock_cid)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
+            .field("virtiofs_count", &self.virtiofs.len())
             .finish()
     }
 }
@@ -188,9 +196,19 @@ impl CloudHypervisorConfig {
             vsock_cid,
             vcpus,
             memory_mib,
+            virtiofs: Vec::new(),
         };
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn with_virtiofs(
+        mut self,
+        virtiofs: Vec<VirtioFsConfig>,
+    ) -> Result<Self, CloudHypervisorConfigError> {
+        self.virtiofs = virtiofs;
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), CloudHypervisorConfigError> {
@@ -202,6 +220,9 @@ impl CloudHypervisorConfig {
         }
         if !(128..=65_536).contains(&self.memory_mib) {
             return Err(CloudHypervisorConfigError::InvalidMemorySize);
+        }
+        if self.virtiofs.len() > MAX_DIRECT_SHARES {
+            return Err(CloudHypervisorConfigError::InvalidVirtioFsCount);
         }
         for path in self.paths() {
             if !is_normal_absolute_path(path) {
@@ -233,7 +254,18 @@ impl CloudHypervisorConfig {
         {
             return Err(CloudHypervisorConfigError::AliasedSocketPaths);
         }
-        for socket in [&self.api_socket, &self.vsock_socket] {
+        let mut sockets = vec![&self.api_socket, &self.vsock_socket];
+        sockets.extend(self.virtiofs.iter().map(|share| &share.socket));
+        sockets.sort();
+        if sockets.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(CloudHypervisorConfigError::AliasedSocketPaths);
+        }
+        for (index, share) in self.virtiofs.iter().enumerate() {
+            if share.tag != format!("cw-direct-{index:02}") {
+                return Err(CloudHypervisorConfigError::InvalidVirtioFsTag);
+            }
+        }
+        for socket in sockets {
             if socket.as_os_str().as_bytes().len() >= LINUX_SUN_PATH_BYTES {
                 return Err(CloudHypervisorConfigError::SocketPathTooLong(
                     socket.to_owned(),
@@ -262,7 +294,15 @@ impl CloudHypervisorConfig {
         push_option(
             &mut arguments,
             "--memory",
-            format!("size={}M,shared=off,mergeable=off", self.memory_mib),
+            format!(
+                "size={}M,shared={},mergeable=off",
+                self.memory_mib,
+                if self.virtiofs.is_empty() {
+                    "off"
+                } else {
+                    "on"
+                }
+            ),
         );
         push_option(
             &mut arguments,
@@ -302,6 +342,17 @@ impl CloudHypervisorConfig {
                 ),
             );
         }
+        for (index, share) in self.virtiofs.iter().enumerate() {
+            push_option(
+                &mut arguments,
+                "--fs",
+                format!(
+                    "tag={},socket={},num_queues=1,queue_size=1024,id=cw-fs-{index:02}",
+                    share.tag,
+                    display(&share.socket)?,
+                ),
+            );
+        }
         push_option(
             &mut arguments,
             "--vsock",
@@ -322,10 +373,10 @@ impl CloudHypervisorConfig {
         push_option(&mut arguments, "--rng", "src=/dev/urandom");
         push_option(&mut arguments, "--seccomp", "true");
         // Native v53 Landlock derives its allowlist from the already parsed VM
-        // configuration. Because this command admits only the three durable/
-        // seed disks plus an optional one-boot read-only setup disk, the
-        // kernel/initramfs, bounded diagnostics, API, and dedicated vsock
-        // parent, no explicit
+        // configuration. This command admits only the durable/seed disks, an
+        // optional one-boot read-only setup disk, and exact private virtio-fs
+        // sockets. The kernel/initramfs, bounded diagnostics, API, dedicated
+        // vsock parent, and virtio-fs sockets need no explicit
         // `--landlock-rules` broadening is permitted. This is defense in depth;
         // same-UID host processes and the host kernel remain trusted.
         arguments.push(OsString::from("--landlock"));
@@ -334,6 +385,7 @@ impl CloudHypervisorConfig {
             program: self.executable.clone(),
             arguments,
             expected_disk_count: if self.setup_disk.is_some() { 4 } else { 3 },
+            expected_fs_count: self.virtiofs.len(),
         };
         command.validate_allowlist()?;
         Ok(command)
@@ -356,6 +408,7 @@ impl CloudHypervisorConfig {
         if let Some(setup) = &self.setup_disk {
             paths.push(setup.as_path());
         }
+        paths.extend(self.virtiofs.iter().map(|share| share.socket.as_path()));
         paths
     }
 }
@@ -365,6 +418,7 @@ pub struct CommandSpec {
     program: PathBuf,
     arguments: Vec<OsString>,
     expected_disk_count: usize,
+    expected_fs_count: usize,
 }
 
 impl fmt::Debug for CommandSpec {
@@ -392,6 +446,7 @@ impl CommandSpec {
             program,
             arguments: Vec::new(),
             expected_disk_count: 3,
+            expected_fs_count: 0,
         }
     }
 
@@ -401,6 +456,7 @@ impl CommandSpec {
             program,
             arguments,
             expected_disk_count: 3,
+            expected_fs_count: 0,
         }
     }
 
@@ -439,10 +495,10 @@ impl CommandSpec {
             }
         }
         for (required, expected_count) in ALLOWED_FLAG_COUNTS {
-            let expected_count = if *required == "--disk" {
-                self.expected_disk_count
-            } else {
-                *expected_count
+            let expected_count = match *required {
+                "--disk" => self.expected_disk_count,
+                "--fs" => self.expected_fs_count,
+                _ => *expected_count,
             };
             let actual_count = counts.get(required).copied().unwrap_or_default();
             if actual_count != expected_count {
@@ -465,6 +521,10 @@ pub enum CloudHypervisorConfigError {
     InvalidCpuCount,
     #[error("invalid guest memory size")]
     InvalidMemorySize,
+    #[error("invalid virtio-fs tag")]
+    InvalidVirtioFsTag,
+    #[error("invalid virtio-fs device count")]
+    InvalidVirtioFsCount,
     #[error("Cloud Hypervisor path must be absolute: {0}")]
     NonAbsolutePath(PathBuf),
     #[error(transparent)]
@@ -524,6 +584,7 @@ mod tests {
     fn config() -> CloudHypervisorConfig {
         let artifacts = AdmittedArtifacts {
             cloud_hypervisor: artifact("/artifacts/cloud-hypervisor"),
+            virtiofsd: None,
             kernel: artifact("/artifacts/kernel"),
             initramfs: artifact("/artifacts/initramfs"),
         };
@@ -644,6 +705,45 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(CloudHypervisorConfigError::AliasedDiskPaths)
+        ));
+    }
+
+    #[test]
+    fn direct_shares_enable_shared_memory_and_exact_virtiofs_devices() {
+        let config = config()
+            .with_virtiofs(vec![
+                VirtioFsConfig {
+                    tag: "cw-direct-00".to_owned(),
+                    socket: "/state/virtiofs/share-00.sock".into(),
+                },
+                VirtioFsConfig {
+                    tag: "cw-direct-01".to_owned(),
+                    socket: "/state/virtiofs/share-01.sock".into(),
+                },
+            ])
+            .unwrap();
+        let command = config.command().unwrap();
+        let args = command
+            .arguments()
+            .iter()
+            .map(|argument| argument.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(args.contains(&"size=512M,shared=on,mergeable=off"));
+        assert_eq!(
+            args.iter().filter(|argument| **argument == "--fs").count(),
+            2
+        );
+        assert!(args.iter().any(|argument| {
+            *argument
+                == "tag=cw-direct-00,socket=/state/virtiofs/share-00.sock,num_queues=1,queue_size=1024,id=cw-fs-00"
+        }));
+        command.validate_allowlist().unwrap();
+
+        let mut aliased = config.clone();
+        aliased.virtiofs[1].socket = aliased.virtiofs[0].socket.clone();
+        assert!(matches!(
+            aliased.validate(),
+            Err(CloudHypervisorConfigError::AliasedSocketPaths)
         ));
     }
 
