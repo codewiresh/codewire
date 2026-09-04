@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 readonly SNAPSHOT_ENVIRONMENT='ubuntu24-cft145'
+readonly FIXTURE_RUN_ID='ubuntu24-cft145'
 readonly BASE_IMAGE='docker.io/noeljackson/act-node-docker@sha256:62d111bd4fe0603bddebdc68deddeafefdb04a443ce5cfd048ed86f11d3b8050'
 readonly REFERENCE_RUNNER_IMAGE='nexus-system-cluster.example.invalid/oci-approved/act-node-docker@sha256:2cbc40c091b1e5e3b48214e208d9fdff30a4f0afda5e661b5c6cde977b7f3bca'
 readonly RENDERER_IMAGE='codewire/playwright-snapshot-renderer:ubuntu24-cft145'
@@ -584,6 +585,7 @@ main() {
       --env NO_PROXY=localhost,127.0.0.1 \
       --env CI=1 \
       --env CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV="$SNAPSHOT_ENVIRONMENT" \
+      --env CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID="$FIXTURE_RUN_ID" \
       --env DATABASE_URL="$DATABASE_URL" \
       --env SERVER_URL="$PLAYWRIGHT_BASE_URL" \
       --env PLAYWRIGHT_BASE_URL="$PLAYWRIGHT_BASE_URL" \

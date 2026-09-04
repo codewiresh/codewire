@@ -27,6 +27,8 @@ emit_renderer_dockerfile >"$dockerfile"
   die 'reference ci-heavy runner changed without updating its contract'
 [ "$RENDERER_PATH" = '/opt/acttoolcache/node/24.18.1/x64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin' ] ||
   die 'renderer PATH changed without updating its immutable-base contract'
+[ "$FIXTURE_RUN_ID" = 'ubuntu24-cft145' ] ||
+  die 'Ubuntu snapshot fixture run ID changed without updating its contract'
 [ "$CHROMIUM_SHA256" = "$(sed -n "s/^readonly chromium_sha256='\([^']*\)'/\1/p" "$CHROMIUM_INSTALLER")" ] ||
   die 'snapshot updater Chromium checksum drifted from the pinned installer'
 [ "$(renderer_deb_manifest | wc -l | tr -d '[:space:]')" = 4 ] ||
@@ -73,12 +75,22 @@ for required in \
     '--env HTTP_PROXY= --env HTTPS_PROXY= --env ALL_PROXY=' \
     '--env NO_PROXY=localhost,127.0.0.1' \
     '--env RUN_AI_ANALYSIS_E2E=0' \
+    '--env CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID="$FIXTURE_RUN_ID"' \
     'rm -f -- "$snapshot_stage/$relative"' \
     '--project=dashboard-ssr-desktop' \
     '--project=dashboard-ssr-mobile' \
     '--output /tmp/codewire-run/test-results' \
     '--update-snapshots=changed --retries=0 --workers=1 --reporter=line'; do
   grep -Fq -- "$required" "$RUNNER" || die "runner is missing contract: $required"
+done
+# shellcheck disable=SC2016
+for fixture_id_contract in \
+    'process.env.CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID' \
+    'fixtureRunIdOverride !== undefined' \
+    '/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(fixtureRunIdOverride)' \
+    'fixtureRunIdOverride ?? `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`'; do
+  grep -Fq -- "$fixture_id_contract" "$ENVIRONMENT_SPEC" ||
+    die "environment fixture run ID is missing contract: $fixture_id_contract"
 done
 # shellcheck disable=SC2016
 for dependency_contract in \

@@ -13,7 +13,16 @@ const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const serverUrl = process.env.SERVER_URL || "http://127.0.0.1:8080";
-const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+const fixtureRunIdOverride = process.env.CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID;
+if (
+  fixtureRunIdOverride !== undefined
+  && !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(fixtureRunIdOverride)
+) {
+  throw new Error(
+    "CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID must be 1-32 lowercase letters, digits, or internal hyphens",
+  );
+}
+const runId = fixtureRunIdOverride ?? `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const slug = `ssr-environments-${runId}`;
 const orgName = "SSR Environment Workspace";
 const presetName = "ssr-environment-preset";
