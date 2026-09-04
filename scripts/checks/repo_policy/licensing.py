@@ -94,6 +94,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-udp-relay/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-ui/Cargo.toml": "MIT",
         "crates/codewire-vmm-guest-probe/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-workload-secrets/Cargo.toml": "workspace",
     }
     actual_cargo_manifests = {
         path.relative_to(ROOT).as_posix()
