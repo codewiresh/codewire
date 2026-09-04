@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +15,7 @@ use futures::{Stream, StreamExt as _};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio_util::task::TaskTracker;
 use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -87,6 +89,12 @@ pub trait BrokerLeaseProvider: Send + Sync {
         &self,
         permit: Self::RefreshPermit,
     ) -> Result<(), BrokerRefreshError>;
+
+    /// Wait until every non-cancellable placement operation started by a
+    /// broker request has finished. The bridge calls this only after it has
+    /// stopped admitting requests and aborted the remaining request futures,
+    /// before their authority channel is allowed to close.
+    async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError>;
 }
 
 /// Stable lease failures that never retain authority or protected-store
@@ -224,6 +232,14 @@ where
         codewire_local_credentials::LocalCredentialBrokerLeaseClient::fail_credential_refresh(
             &mut client,
             permit,
+        )
+        .await
+        .map_err(map_local_refresh_error)
+    }
+
+    async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
+        codewire_local_credentials::LocalCredentialBrokerLeaseClient::wait_for_protected_store_operations(
+            self,
         )
         .await
         .map_err(map_local_refresh_error)
@@ -443,11 +459,12 @@ pub enum BrokerRequestError {
 /// Provider broker shared by local and platform placements. Placement-specific
 /// code supplies the lease authority and the broker-local upstream transport.
 pub struct OpenAiBroker<P, U> {
-    leases: P,
-    upstream: U,
+    leases: Arc<P>,
+    upstream: Arc<U>,
     api_key_adapter: OpenAiApiKeyAdapter,
     oauth_adapter: OpenAiChatGptOAuthAdapter,
     oauth_refresh: tokio::sync::Mutex<()>,
+    oauth_refresh_operations: TaskTracker,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -463,16 +480,17 @@ struct PreparedOAuthRequest {
 
 impl<P, U> OpenAiBroker<P, U>
 where
-    P: BrokerLeaseProvider,
-    U: BrokerUpstreamTransport,
+    P: BrokerLeaseProvider + 'static,
+    U: BrokerUpstreamTransport + 'static,
 {
     pub fn new(leases: P, upstream: U) -> Result<Self, BrokerRequestError> {
         Ok(Self {
-            leases,
-            upstream,
+            leases: Arc::new(leases),
+            upstream: Arc::new(upstream),
             api_key_adapter: OpenAiApiKeyAdapter::new().map_err(map_adapter_error)?,
             oauth_adapter: OpenAiChatGptOAuthAdapter::new().map_err(map_adapter_error)?,
             oauth_refresh: tokio::sync::Mutex::new(()),
+            oauth_refresh_operations: TaskTracker::new(),
         })
     }
 
@@ -599,6 +617,15 @@ where
         Ok((upstream, response_policy))
     }
 
+    pub(crate) async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
+        self.oauth_refresh_operations.close();
+        self.oauth_refresh_operations.wait().await;
+        self.leases
+            .wait_for_active_operations()
+            .await
+            .map_err(map_refresh_error)
+    }
+
     async fn prepare_oauth_after_refresh(
         &self,
         request_id: Uuid,
@@ -688,16 +715,42 @@ where
             Err(BrokerRefreshError::InProgress | BrokerRefreshError::Stale) => return Ok(None),
             Err(error) => return Err(map_refresh_error(error)),
         };
-        let tokens = match self.request_oauth_refresh(credential.refresh_token()).await {
+        // A successful begin call owns an authority reservation. Transfer the
+        // entire remaining refresh exchange to the shutdown tracker in this
+        // same poll, before another await can make cancellation observable.
+        // Graceful bridge loss can then abort the guest request while still
+        // waiting for provider parsing and exactly one terminal authority
+        // action: commit, fail, or abort.
+        let leases = Arc::clone(&self.leases);
+        let upstream = Arc::clone(&self.upstream);
+        let refresh = self.oauth_refresh_operations.spawn(async move {
+            Self::complete_oauth_refresh(leases, upstream, credential, permit, refreshed_at_unix)
+                .await
+        });
+        refresh
+            .await
+            .map_err(|_| BrokerRequestError::AuthorityUnavailable)?
+            .map(Some)
+    }
+
+    async fn complete_oauth_refresh(
+        leases: Arc<P>,
+        upstream: Arc<U>,
+        credential: CodexOAuthCredential,
+        permit: P::RefreshPermit,
+        refreshed_at_unix: u64,
+    ) -> Result<CodexOAuthCredential, BrokerRequestError> {
+        let tokens = match Self::request_oauth_refresh(&upstream, credential.refresh_token()).await
+        {
             Ok(tokens) => tokens,
             Err(OAuthRefreshError::Transient(error)) => {
-                return match self.leases.abort_credential_refresh(permit).await {
+                return match leases.abort_credential_refresh(permit).await {
                     Ok(()) => Err(error),
                     Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
                 };
             }
             Err(OAuthRefreshError::Permanent) => {
-                return match self.leases.fail_credential_refresh(permit).await {
+                return match leases.fail_credential_refresh(permit).await {
                     Ok(()) => Err(BrokerRequestError::Denied),
                     Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
                 };
@@ -711,7 +764,7 @@ where
         ) {
             Ok(refreshed) => refreshed,
             Err(_) => {
-                return match self.leases.fail_credential_refresh(permit).await {
+                return match leases.fail_credential_refresh(permit).await {
                     Ok(()) => Err(BrokerRequestError::Denied),
                     Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
                 };
@@ -720,21 +773,21 @@ where
         let bundle = match refreshed.to_bundle() {
             Ok(bundle) => bundle,
             Err(_) => {
-                return match self.leases.fail_credential_refresh(permit).await {
+                return match leases.fail_credential_refresh(permit).await {
                     Ok(()) => Err(BrokerRequestError::Denied),
                     Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
                 };
             }
         };
-        self.leases
+        leases
             .commit_credential_refresh(permit, bundle)
             .await
             .map_err(map_refresh_error)?;
-        Ok(Some(refreshed))
+        Ok(refreshed)
     }
 
     async fn request_oauth_refresh(
-        &self,
+        upstream: &U,
         refresh_token: &str,
     ) -> Result<OAuthRefreshResponse, OAuthRefreshError> {
         let mut body = Zeroizing::new(
@@ -756,8 +809,7 @@ where
             http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        let upstream = self
-            .upstream
+        let upstream = upstream
             .execute(BrokerUpstreamRequest {
                 method: Method::POST,
                 target,
@@ -1029,6 +1081,7 @@ mod tests {
     use codewire_protected_store::{EphemeralProtectedStore, ProtectedValue};
     use futures::{StreamExt as _, stream};
     use serde_json::json;
+    use tokio::sync::{Notify, mpsc};
 
     use super::*;
 
@@ -1092,6 +1145,10 @@ mod tests {
         ) -> Result<(), BrokerRefreshError> {
             Err(BrokerRefreshError::Denied)
         }
+
+        async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
+            Ok(())
+        }
     }
 
     struct TestOAuthRefreshPermit {
@@ -1106,6 +1163,8 @@ mod tests {
         material_generation: Arc<AtomicUsize>,
         refresh_active: Arc<AtomicBool>,
         begin_count: Arc<AtomicUsize>,
+        commit_started: Arc<AtomicBool>,
+        commit_delay: Duration,
         commit_count: Arc<AtomicUsize>,
         abort_count: Arc<AtomicUsize>,
         failure_count: Arc<AtomicUsize>,
@@ -1182,6 +1241,10 @@ mod tests {
             {
                 return Err(BrokerRefreshError::Denied);
             }
+            self.commit_started.store(true, Ordering::Release);
+            if !self.commit_delay.is_zero() {
+                tokio::time::sleep(self.commit_delay).await;
+            }
             let mut bytes = material.into_bytes();
             let value = ProtectedValue::new(std::mem::take(&mut *bytes))
                 .map_err(|_| BrokerRefreshError::InvalidRequest)?;
@@ -1225,6 +1288,10 @@ mod tests {
             self.failure_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+
+        async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
+            Ok(())
+        }
     }
 
     struct SyntheticUpstream;
@@ -1266,10 +1333,17 @@ mod tests {
         refresh_status: StatusCode,
         refresh_response: Arc<Vec<u8>>,
         refresh_delay: Duration,
+        refresh_control: Option<Arc<BlockingRefreshControl>>,
         expected_access_token: Arc<String>,
         unauthorized_access_tokens: Arc<BTreeSet<String>>,
         refresh_count: Arc<AtomicUsize>,
         response_count: Arc<AtomicUsize>,
+    }
+
+    #[derive(Default)]
+    struct BlockingRefreshControl {
+        accepted: AtomicBool,
+        release: Notify,
     }
 
     #[async_trait]
@@ -1293,6 +1367,10 @@ mod tests {
                     assert_eq!(value["client_id"], OPENAI_OAUTH_CLIENT_ID);
                     assert_eq!(value["grant_type"], "refresh_token");
                     assert_eq!(value["refresh_token"], "synthetic-old-refresh-token");
+                    if let Some(control) = &self.refresh_control {
+                        control.accepted.store(true, Ordering::Release);
+                        control.release.notified().await;
+                    }
                     if !self.refresh_delay.is_zero() {
                         tokio::time::sleep(self.refresh_delay).await;
                     }
@@ -1348,7 +1426,9 @@ mod tests {
     }
 
     struct OAuthTestState {
+        material_generation: Arc<AtomicUsize>,
         begin_count: Arc<AtomicUsize>,
+        commit_started: Arc<AtomicBool>,
         commit_count: Arc<AtomicUsize>,
         abort_count: Arc<AtomicUsize>,
         failure_count: Arc<AtomicUsize>,
@@ -1438,6 +1518,32 @@ mod tests {
         OpenAiBroker<OAuthTestLeaseProvider, OAuthSyntheticUpstream>,
         OAuthTestState,
     ) {
+        oauth_broker_with_initial_token_and_commit_delay(
+            initial_access_token,
+            unauthorized_access_tokens,
+            refresh_status,
+            refresh_response,
+            expected_access_token,
+            refresh_delay,
+            Duration::ZERO,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn oauth_broker_with_initial_token_and_commit_delay(
+        initial_access_token: String,
+        unauthorized_access_tokens: BTreeSet<String>,
+        refresh_status: StatusCode,
+        refresh_response: Vec<u8>,
+        expected_access_token: String,
+        refresh_delay: Duration,
+        commit_delay: Duration,
+        refresh_control: Option<Arc<BlockingRefreshControl>>,
+    ) -> (
+        OpenAiBroker<OAuthTestLeaseProvider, OAuthSyntheticUpstream>,
+        OAuthTestState,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.keep().join("authority");
         let authority = Arc::new(
@@ -1479,13 +1585,16 @@ mod tests {
         let material_generation = Arc::new(AtomicUsize::new(1));
         let refresh_active = Arc::new(AtomicBool::new(false));
         let begin_count = Arc::new(AtomicUsize::new(0));
+        let commit_started = Arc::new(AtomicBool::new(false));
         let commit_count = Arc::new(AtomicUsize::new(0));
         let abort_count = Arc::new(AtomicUsize::new(0));
         let failure_count = Arc::new(AtomicUsize::new(0));
         let refresh_count = Arc::new(AtomicUsize::new(0));
         let response_count = Arc::new(AtomicUsize::new(0));
         let state = OAuthTestState {
+            material_generation: Arc::clone(&material_generation),
             begin_count: Arc::clone(&begin_count),
+            commit_started: Arc::clone(&commit_started),
             commit_count: Arc::clone(&commit_count),
             abort_count: Arc::clone(&abort_count),
             failure_count: Arc::clone(&failure_count),
@@ -1500,6 +1609,8 @@ mod tests {
                 material_generation,
                 refresh_active,
                 begin_count,
+                commit_started,
+                commit_delay,
                 commit_count,
                 abort_count,
                 failure_count,
@@ -1508,6 +1619,7 @@ mod tests {
                 refresh_status,
                 refresh_response: Arc::new(refresh_response),
                 refresh_delay,
+                refresh_control,
                 expected_access_token: Arc::new(expected_access_token),
                 unauthorized_access_tokens: Arc::new(unauthorized_access_tokens),
                 refresh_count,
@@ -1707,6 +1819,154 @@ mod tests {
         assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
         assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
         assert_eq!(state.response_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn epoch_shutdown_waits_for_started_oauth_refresh_commit() {
+        let expired_access_token = jwt(json!({
+            "exp": current_unix_time().expect("current time").saturating_sub(1)
+        }));
+        let refreshed_access_token = jwt(json!({
+            "exp": current_unix_time().expect("current time") + 3_600
+        }));
+        let refresh_response = serde_json::to_vec(&json!({
+            "access_token": refreshed_access_token.clone(),
+            "refresh_token": "synthetic-new-refresh-token",
+            "token_type": "bearer"
+        }))
+        .unwrap();
+        let (broker, state) = oauth_broker_with_initial_token_and_commit_delay(
+            expired_access_token,
+            BTreeSet::new(),
+            StatusCode::OK,
+            refresh_response,
+            refreshed_access_token,
+            Duration::ZERO,
+            Duration::from_millis(250),
+            None,
+        );
+        let broker = Arc::new(broker);
+        let execution = tokio::spawn({
+            let broker = Arc::clone(&broker);
+            async move { broker.execute(request()).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.commit_started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        execution.abort();
+        match execution.await {
+            Err(error) => assert!(error.is_cancelled()),
+            Ok(_) => panic!("broker request was not cancelled"),
+        }
+
+        let mut shutdown = tokio::spawn({
+            let broker = Arc::clone(&broker);
+            async move { broker.wait_for_active_operations().await }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+                .await
+                .is_err()
+        );
+        shutdown.await.unwrap().unwrap();
+
+        assert_eq!(state.begin_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.response_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn bridge_shutdown_waits_after_the_refresh_provider_accepts_rotation() {
+        let expired_access_token = jwt(json!({
+            "exp": current_unix_time().expect("current time").saturating_sub(1)
+        }));
+        let refreshed_access_token = jwt(json!({
+            "exp": current_unix_time().expect("current time") + 3_600
+        }));
+        let refresh_response = serde_json::to_vec(&json!({
+            "access_token": refreshed_access_token.clone(),
+            "refresh_token": "synthetic-new-refresh-token",
+            "token_type": "bearer"
+        }))
+        .unwrap();
+        let refresh_control = Arc::new(BlockingRefreshControl::default());
+        let (broker, state) = oauth_broker_with_initial_token_and_commit_delay(
+            expired_access_token,
+            BTreeSet::new(),
+            StatusCode::OK,
+            refresh_response,
+            refreshed_access_token,
+            Duration::ZERO,
+            Duration::ZERO,
+            Some(Arc::clone(&refresh_control)),
+        );
+        let environment_id = Uuid::new_v4();
+        let (input_tx, input_rx) = mpsc::channel(3);
+        let (output_tx, _output_rx) = mpsc::channel(1);
+        let mut bridge = tokio::spawn(crate::bridge::tests::run_channel_test_bridge(
+            Arc::new(broker),
+            input_rx,
+            output_tx,
+            environment_id,
+            4,
+        ));
+        input_tx
+            .send(v1::CredentialBridgeGuestMessage {
+                payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
+                    v1::CredentialBridgeReady {
+                        protocol_version:
+                            codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        environment_id: environment_id.to_string(),
+                        environment_generation: 4,
+                    },
+                )),
+            })
+            .await
+            .unwrap();
+        input_tx
+            .send(v1::CredentialBridgeGuestMessage {
+                payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+                    request(),
+                )),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !refresh_control.accepted.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        drop(input_tx);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut bridge)
+                .await
+                .is_err()
+        );
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.material_generation.load(Ordering::Acquire), 1);
+
+        refresh_control.release.notify_one();
+        assert_eq!(
+            bridge.await.unwrap(),
+            Err(crate::BrokerBridgeError::Unavailable)
+        );
+        assert_eq!(state.begin_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.material_generation.load(Ordering::Acquire), 2);
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.response_count.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

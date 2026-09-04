@@ -14,7 +14,7 @@ use codewire_gateway_proto::{
 };
 use futures::StreamExt as _;
 use thiserror::Error;
-use tokio::task::{AbortHandle, JoinSet};
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::{
@@ -39,28 +39,35 @@ pub struct AdmittedCredentialBridge(CredentialBridgeConnection);
 
 struct ActiveRequest {
     incarnation: u64,
-    abort: AbortHandle,
 }
 
 #[async_trait]
-trait BrokerRequestExecutor: Send + Sync {
+pub(crate) trait BrokerRequestExecutor: Send + Sync {
     async fn execute_request(
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError>;
+
+    async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl<P, U> BrokerRequestExecutor for OpenAiBroker<P, U>
 where
-    P: BrokerLeaseProvider,
-    U: BrokerUpstreamTransport,
+    P: BrokerLeaseProvider + 'static,
+    U: BrokerUpstreamTransport + 'static,
 {
     async fn execute_request(
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         self.execute(request).await
+    }
+
+    async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
+        OpenAiBroker::wait_for_active_operations(self).await
     }
 }
 
@@ -116,7 +123,9 @@ impl GuestResponseSender for CredentialBridgeResponseSender {
 
 /// Run one exact generation-bound bridge until the daemon disconnects or a
 /// response task loses the authenticated stream. Concurrent operations are
-/// bounded and guest cancellation aborts the corresponding upstream future.
+/// bounded. Guest cancellation ends the daemon-side HTTP request, while the
+/// broker retains the request slot until any started credential refresh and
+/// its filtered response stream finish.
 pub async fn run_credential_bridge<P, U>(
     broker: OpenAiBroker<P, U>,
     bridge: CredentialBridgeConnection,
@@ -144,8 +153,8 @@ pub async fn admit_credential_bridge(
 }
 
 /// Run a bridge only after [`admit_credential_bridge`] authenticated its guest
-/// endpoint. Concurrent operations remain bounded and independently
-/// cancellable.
+/// endpoint. Concurrent operations remain bounded, and a cancelled request
+/// remains counted until its broker operation finishes.
 pub async fn run_admitted_credential_bridge<P, U>(
     broker: OpenAiBroker<P, U>,
     bridge: AdmittedCredentialBridge,
@@ -154,7 +163,8 @@ where
     P: BrokerLeaseProvider + 'static,
     U: BrokerUpstreamTransport + 'static,
 {
-    run_admitted_bridge(Arc::new(broker), bridge.0).await
+    let broker = Arc::new(broker);
+    run_managed_bridge(broker, bridge.0).await
 }
 
 #[cfg(test)]
@@ -169,7 +179,25 @@ where
     B: GuestBridge,
 {
     let bridge = admit_bridge(bridge, environment_id, environment_generation).await?;
-    run_admitted_bridge(broker, bridge).await
+    run_managed_bridge(broker, bridge).await
+}
+
+async fn run_managed_bridge<E, B>(broker: Arc<E>, bridge: B) -> Result<(), BrokerBridgeError>
+where
+    E: BrokerRequestExecutor + 'static,
+    B: GuestBridge,
+{
+    let result = run_admitted_bridge(Arc::clone(&broker), bridge).await;
+    // Request futures may be aborted when the whole bridge epoch is lost. Once
+    // a refresh permit has been returned, its complete provider exchange and
+    // terminal action are tracked independently. Drain that work, then any
+    // protected-store worker that cannot itself be cancelled, before allowing
+    // the lease channel to close and reconcile its exact generation.
+    broker
+        .wait_for_active_operations()
+        .await
+        .map_err(|_| BrokerBridgeError::Unavailable)?;
+    result
 }
 
 async fn admit_bridge<B>(
@@ -224,20 +252,24 @@ where
                     }
                     Ok((request_id, incarnation, Err(()))) => {
                         remove_completed_request(&mut active, &request_id, incarnation);
-                        tasks.abort_all();
+                        tasks.shutdown().await;
                         return Err(BrokerBridgeError::Unavailable);
                     }
                     Err(error) if error.is_cancelled() => {}
                     Err(_) => {
-                        tasks.abort_all();
+                        tasks.shutdown().await;
                         return Err(BrokerBridgeError::Unavailable);
                     }
                 }
             }
             message = bridge.receive() => {
-                let message = message
-                    .map_err(|_| BrokerBridgeError::Unavailable)?
-                    .ok_or(BrokerBridgeError::Unavailable)?;
+                let message = match message {
+                    Ok(Some(message)) => message,
+                    Ok(None) | Err(()) => {
+                        tasks.shutdown().await;
+                        return Err(BrokerBridgeError::Unavailable);
+                    }
+                };
                 match message.payload {
                     Some(v1::credential_bridge_guest_message::Payload::Request(request)) => {
                         let request_id = request.request_id.clone();
@@ -245,21 +277,25 @@ where
                             !id.is_nil() && id.to_string() == request_id
                         });
                         if !canonical_request_id || active.contains_key(&request_id) {
-                            tasks.abort_all();
+                            tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
                         if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
-                            send_failure(
+                            if send_failure(
                                 &sender,
                                 request_id,
                                 BrokerRequestError::AuthorityUnavailable,
                             )
                             .await
-                            .map_err(|_| BrokerBridgeError::Unavailable)?;
+                            .is_err()
+                            {
+                                tasks.shutdown().await;
+                                return Err(BrokerBridgeError::Unavailable);
+                            }
                             continue;
                         }
                         let Some(incarnation) = next_incarnation.checked_add(1) else {
-                            tasks.abort_all();
+                            tasks.shutdown().await;
                             return Err(BrokerBridgeError::Unavailable);
                         };
                         next_incarnation = incarnation;
@@ -267,25 +303,27 @@ where
                         let sender = sender.clone();
                         let completed_id = request_id.clone();
                         let response_id = request_id.clone();
-                        let abort = tasks.spawn(async move {
+                        let _request_task = tasks.spawn(async move {
                             let result = serve_request(&*broker, &sender, &response_id, request).await;
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation, abort });
+                        active.insert(request_id, ActiveRequest { incarnation });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Cancel(cancel)) => {
                         if !Uuid::parse_str(&cancel.request_id).is_ok_and(|id| {
                             !id.is_nil() && id.to_string() == cancel.request_id
                         }) {
-                            tasks.abort_all();
+                            tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
-                        if let Some(active) = active.remove(&cancel.request_id) {
-                            active.abort.abort();
-                        }
+                        // The daemon has already cancelled the guest-facing HTTP
+                        // request and deliberately drains late host frames. Keep
+                        // this operation and its bounded in-flight slot alive so
+                        // cancellation cannot strand an OAuth refresh reservation
+                        // or interrupt protected-store staging after rotation.
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Ready(_)) | None => {
-                        tasks.abort_all();
+                        tasks.shutdown().await;
                         return Err(BrokerBridgeError::InvalidProtocol);
                     }
                 }
@@ -438,13 +476,13 @@ async fn send_failure<S: GuestResponseSender>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use bytes::Bytes;
     use futures::stream;
     use http::{HeaderMap, HeaderValue, StatusCode};
-    use tokio::sync::mpsc;
+    use tokio::sync::{Notify, mpsc};
 
     use super::*;
 
@@ -525,6 +563,29 @@ mod tests {
         }
     }
 
+    struct CompletingExecutor {
+        started: Arc<AtomicBool>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl BrokerRequestExecutor for CompletingExecutor {
+        async fn execute_request(
+            &self,
+            _request: v1::CredentialBridgeRequest,
+        ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+            self.started.store(true, Ordering::Release);
+            self.release.notified().await;
+            Ok(BrokerHttpResponse::new(
+                StatusCode::OK,
+                HeaderMap::new(),
+                Box::pin(stream::once(async {
+                    Ok(Bytes::from_static(b"late-filtered-response"))
+                })),
+            ))
+        }
+    }
+
     fn ready(environment_id: Uuid, generation: u64) -> v1::CredentialBridgeGuestMessage {
         v1::CredentialBridgeGuestMessage {
             payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
@@ -554,6 +615,25 @@ mod tests {
                 },
             )),
         }
+    }
+
+    pub(crate) async fn run_channel_test_bridge<E>(
+        broker: Arc<E>,
+        input: mpsc::Receiver<v1::CredentialBridgeGuestMessage>,
+        output: mpsc::Sender<v1::credential_bridge_host_message::Payload>,
+        environment_id: Uuid,
+        environment_generation: u64,
+    ) -> Result<(), BrokerBridgeError>
+    where
+        E: BrokerRequestExecutor + 'static,
+    {
+        run_bridge(
+            broker,
+            FakeBridge { input, output },
+            environment_id,
+            environment_generation,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -605,9 +685,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guest_cancel_aborts_the_exact_in_flight_operation() {
+    async fn guest_cancel_keeps_the_exact_in_flight_slot_reserved() {
         let environment_id = Uuid::new_v4();
-        let (input_tx, input_rx) = mpsc::channel(8);
+        let (input_tx, input_rx) = mpsc::channel(CREDENTIAL_BRIDGE_MAX_IN_FLIGHT + 3);
         let (output_tx, mut output_rx) = mpsc::channel(8);
         let slow_started = Arc::new(AtomicBool::new(false));
         let task = tokio::spawn(run_bridge(
@@ -621,11 +701,75 @@ mod tests {
             environment_id,
             4,
         ));
+        let request_ids = (0..CREDENTIAL_BRIDGE_MAX_IN_FLIGHT)
+            .map(|_| Uuid::new_v4())
+            .collect::<Vec<_>>();
+        input_tx.send(ready(environment_id, 4)).await.unwrap();
+        for request_id in &request_ids {
+            input_tx.send(request(*request_id, "/slow")).await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !slow_started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        input_tx
+            .send(v1::CredentialBridgeGuestMessage {
+                payload: Some(v1::credential_bridge_guest_message::Payload::Cancel(
+                    v1::CredentialBridgeCancel {
+                        request_id: request_ids[0].to_string(),
+                    },
+                )),
+            })
+            .await
+            .unwrap();
+        let overflow_id = Uuid::new_v4();
+        input_tx
+            .send(request(overflow_id, "/upstream-failure"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            output_rx.recv().await,
+            Some(v1::credential_bridge_host_message::Payload::ResponseFailure(
+                v1::CredentialBridgeResponseFailure {
+                    request_id,
+                    reason,
+                }
+            )) if request_id == overflow_id.to_string()
+                && reason == v1::CredentialBridgeFailureReason::Unavailable as i32
+        ));
+        drop(input_tx);
+        assert_eq!(task.await.unwrap(), Err(BrokerBridgeError::Unavailable));
+    }
+
+    #[tokio::test]
+    async fn guest_cancel_drains_late_frames_until_the_operation_finishes() {
+        let environment_id = Uuid::new_v4();
+        let (input_tx, input_rx) = mpsc::channel(3);
+        // Capacity one proves the retained task can make progress only while
+        // the peer continues draining each late frame.
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(Notify::new());
+        let task = tokio::spawn(run_bridge(
+            Arc::new(CompletingExecutor {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+            FakeBridge {
+                input: input_rx,
+                output: output_tx,
+            },
+            environment_id,
+            4,
+        ));
         let request_id = Uuid::new_v4();
         input_tx.send(ready(environment_id, 4)).await.unwrap();
         input_tx.send(request(request_id, "/slow")).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !slow_started.load(Ordering::Acquire) {
+            while !started.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
             }
         })
@@ -641,8 +785,26 @@ mod tests {
             })
             .await
             .unwrap();
-        tokio::task::yield_now().await;
-        assert!(output_rx.try_recv().is_err());
+        release.notify_one();
+
+        assert!(matches!(
+            output_rx.recv().await,
+            Some(v1::credential_bridge_host_message::Payload::ResponseStart(
+                v1::CredentialBridgeResponseStart { request_id: id, .. }
+            )) if id == request_id.to_string()
+        ));
+        assert!(matches!(
+            output_rx.recv().await,
+            Some(v1::credential_bridge_host_message::Payload::ResponseBody(
+                v1::CredentialBridgeResponseBody { request_id: id, data }
+            )) if id == request_id.to_string() && data == b"late-filtered-response"
+        ));
+        assert!(matches!(
+            output_rx.recv().await,
+            Some(v1::credential_bridge_host_message::Payload::ResponseEnd(
+                v1::CredentialBridgeResponseEnd { request_id: id }
+            )) if id == request_id.to_string()
+        ));
         drop(input_tx);
         assert_eq!(task.await.unwrap(), Err(BrokerBridgeError::Unavailable));
     }
@@ -728,15 +890,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_completion_cannot_remove_a_reused_request_id() {
-        let task = tokio::spawn(std::future::pending::<()>());
-        let abort = task.abort_handle();
-        let mut active = HashMap::from([(
-            "request".to_owned(),
-            ActiveRequest {
-                incarnation: 2,
-                abort,
-            },
-        )]);
+        let mut active = HashMap::from([("request".to_owned(), ActiveRequest { incarnation: 2 })]);
         remove_completed_request(&mut active, "request", 1);
         assert_eq!(
             active.get("request").map(|entry| entry.incarnation),
@@ -744,7 +898,6 @@ mod tests {
         );
         remove_completed_request(&mut active, "request", 2);
         assert!(!active.contains_key("request"));
-        task.abort();
     }
 
     #[tokio::test]
