@@ -565,9 +565,12 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/proto/build-rust-descriptors.sh|\
-      scripts/ci/tests/test-admin-proto-boundary.sh)
+      scripts/ci/tests/test-admin-proto-boundary.sh|\
+      scripts/checks/proto_breaking.py|\
+      scripts/checks/contracts/proto-retirements.sha256)
         # The Rust audience-descriptor builder and its CLI dependency-boundary
-        # guard alter generated contract inputs, not runtime behavior.
+        # guard, plus the exact internal-retirement policy, alter contract
+        # verification rather than runtime behavior.
         select_token contracts
         select_token contracts_proto
         recognized=true

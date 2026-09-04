@@ -267,8 +267,6 @@ async fn main() -> anyhow::Result<()> {
         .allow_public(PUBLIC_CONNECT_METHODS)
         .synthetic_user_ids(synthetic_user_ids);
     let connect_admin = codewire_server_core::connect::ConnectAuthLayer::admin(auth.clone());
-    let connect_environment =
-        codewire_server_core::connect::ConnectAuthLayer::environment_token(auth.clone());
     let mesh_authorization = codewire_server_core::connect::MeshAuthorizationLayer::new(
         auth.clone(),
         cfg.session_secret.clone(),
@@ -281,12 +279,6 @@ async fn main() -> anyhow::Result<()> {
     let internal_app = AppBuilder::new("codewire-orchestration-internal")
         .with_connect_routes(
             codewire_orchestration::connect::internal::gateway_binding_router(api_state.clone()),
-        )
-        .with_unary_connect_routes_auth(
-            codewire_orchestration::connect::internal::environment_credentials_router(
-                api_state.clone(),
-            ),
-            connect_environment,
         )
         .with_unary_connect_routes_mesh_authorization(
             codewire_orchestration::connect::mesh_authorization::router(pool.clone()),

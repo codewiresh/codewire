@@ -19,10 +19,8 @@ use crate::runtime_transport::{
 };
 use crate::sandbox::client::{ProbeResult, SandboxClient};
 use crate::worker::gatewayauth::{SCOPE_COORDINATE, issue_token};
-use crate::worker::github::{get_github_token_for_user, get_github_username_for_user};
 
 use super::ApiState;
-use super::detect::{resolve_forge_token, user_secret_path};
 
 #[derive(Debug)]
 struct BindingTarget {
@@ -49,14 +47,6 @@ pub struct GatewayBinding {
     pub workspace_pod_ip: Option<String>,
     pub app_ports: Vec<i32>,
     pub runtime_transport: Option<RuntimeTransportBinding>,
-}
-
-/// Shared service-layer result for `EnvironmentCredentialService`.
-#[derive(Debug, Clone)]
-pub struct IssuedCredentials {
-    pub token: String,
-    pub username: String,
-    pub host: String,
 }
 
 /// Resolves a gateway pod binding and issues its coordinate-scoped token.
@@ -333,85 +323,6 @@ async fn runtime_transport_for_node(
         );
     }
     Ok(Some(zone.binding()))
-}
-
-/// Issues the caller's GitHub credential through the Connect service layer.
-/// The underlying GitHub lookup may refresh stored tokens.
-pub async fn issue_github_credentials_core(
-    state: &ApiState,
-    user_id: &str,
-) -> AppResult<IssuedCredentials> {
-    let token = get_github_token_for_user(&state.pool, &state.github_cfg, user_id).await;
-    if token.is_empty() {
-        return Err(AppError::NotFound("no GitHub token linked".into()));
-    }
-    Ok(IssuedCredentials {
-        token,
-        username: get_github_username_for_user(&state.pool, user_id).await,
-        host: "github.com".to_string(),
-    })
-}
-
-/// Issues a credential for one forge host through the Connect service layer.
-/// An empty host defaults to github.com.
-pub async fn issue_git_credentials_core(
-    state: &ApiState,
-    user_id: &str,
-    host: &str,
-) -> AppResult<IssuedCredentials> {
-    let host = if host.is_empty() {
-        "github.com".to_string()
-    } else {
-        host.to_string()
-    };
-    let token = resolve_forge_token(
-        &state.pool,
-        &state.github_cfg,
-        state.secrets.as_ref(),
-        user_id,
-        &host,
-    )
-    .await;
-    if token.is_empty() {
-        return Err(AppError::NotFound("no token for host".into()));
-    }
-
-    // Resolve username for the host.
-    let username = if host == "github.com" {
-        get_github_username_for_user(&state.pool, user_id).await
-    } else {
-        let mut username = resolve_git_credential_username(&state.pool, user_id, &host).await;
-        // Fall back to the tenant-scoped GITEA_USERNAME value.
-        if username.is_empty()
-            && let Ok(secrets) = state
-                .secrets
-                .get_all_secrets_at_path(&user_secret_path(user_id))
-                .await
-        {
-            username = secrets.get("GITEA_USERNAME").cloned().unwrap_or_default();
-        }
-        username
-    };
-
-    Ok(IssuedCredentials {
-        token,
-        username,
-        host,
-    })
-}
-
-/// Mirrors `resolveGitCredentialUsername`: stored username for a host
-/// from `user_git_credentials`.
-async fn resolve_git_credential_username(pool: &sqlx::PgPool, user_id: &str, host: &str) -> String {
-    let row: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT username FROM user_git_credentials WHERE user_id = $1 AND host = $2",
-    )
-    .bind(user_id)
-    .bind(host)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
-    row.and_then(|(u,)| u).unwrap_or_default()
 }
 
 #[cfg(test)]

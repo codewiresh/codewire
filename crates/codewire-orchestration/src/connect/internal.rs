@@ -8,19 +8,14 @@ use std::sync::Arc;
 
 use codewire_proto::codewire::internal::v1::{
     DirectUdpTransport as ProtoDirectUdpTransport, EndpointList as ProtoEndpointList,
-    EnvironmentCredentialService, GatewayBindingService, IssueGatewayBindingRequest,
-    IssueGatewayBindingResponse, IssueGitCredentialsRequest, IssueGitCredentialsResponse,
-    IssueGitHubCredentialsRequest, IssueGitHubCredentialsResponse,
+    GatewayBindingService, IssueGatewayBindingRequest, IssueGatewayBindingResponse,
     PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
 };
-use codewire_server_core::connect::{environment_identity, rpc_app_error};
+use codewire_server_core::connect::rpc_app_error;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
-use crate::api::internal::{
-    GatewayBinding, issue_gateway_binding_core, issue_git_credentials_core,
-    issue_github_credentials_core,
-};
+use crate::api::internal::{GatewayBinding, issue_gateway_binding_core};
 use crate::runtime_transport::{
     DirectUdpTransport, EndpointList, PeerRelayTransport, RuntimeTransportBinding,
 };
@@ -29,12 +24,6 @@ use crate::runtime_transport::{
 /// resolves `(pod, namespace)` in the shared service layer.
 pub fn gateway_binding_router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(GatewayBindingConnectService { state }))
-}
-
-/// Registers the environment-Bearer credential commands. The caller must
-/// mount this router behind `ConnectAuthLayer::environment_token`.
-pub fn environment_credentials_router(state: ApiState) -> connectrpc::Router {
-    connectrpc::Router::new().add_service(Arc::new(EnvironmentCredentialConnectService { state }))
 }
 
 struct GatewayBindingConnectService {
@@ -53,48 +42,6 @@ impl GatewayBindingService for GatewayBindingConnectService {
             .await
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(proto_gateway_binding(binding))
-    }
-}
-
-struct EnvironmentCredentialConnectService {
-    state: ApiState,
-}
-
-#[allow(refining_impl_trait)]
-impl EnvironmentCredentialService for EnvironmentCredentialConnectService {
-    async fn issue_git_hub_credentials(
-        &self,
-        ctx: RequestContext,
-        _request: ServiceRequest<'_, IssueGitHubCredentialsRequest>,
-    ) -> ServiceResult<IssueGitHubCredentialsResponse> {
-        let user_id = environment_identity(&ctx)?.user_id.clone();
-        let credentials = issue_github_credentials_core(&self.state, &user_id)
-            .await
-            .map_err(|error| rpc_app_error(&error, &ctx))?;
-        connectrpc::Response::ok(IssueGitHubCredentialsResponse {
-            token: credentials.token,
-            username: credentials.username,
-            host: credentials.host,
-            ..Default::default()
-        })
-    }
-
-    async fn issue_git_credentials(
-        &self,
-        ctx: RequestContext,
-        request: ServiceRequest<'_, IssueGitCredentialsRequest>,
-    ) -> ServiceResult<IssueGitCredentialsResponse> {
-        let user_id = environment_identity(&ctx)?.user_id.clone();
-        let host = request.view().host.to_string();
-        let credentials = issue_git_credentials_core(&self.state, &user_id, &host)
-            .await
-            .map_err(|error| rpc_app_error(&error, &ctx))?;
-        connectrpc::Response::ok(IssueGitCredentialsResponse {
-            token: credentials.token,
-            username: credentials.username,
-            host: credentials.host,
-            ..Default::default()
-        })
     }
 }
 

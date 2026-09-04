@@ -14,7 +14,6 @@ fn main() {
         "codewire/console/v1/environment_setup.proto",
         "codewire/console/v1/github.proto",
         "codewire/internal/v1/coordinate.proto",
-        "codewire/internal/v1/environment_credentials.proto",
         "codewire/internal/v1/gateway_binding.proto",
         "codewire/internal/v1/mesh_authorization.proto",
         "codewire/v1/api_key.proto",

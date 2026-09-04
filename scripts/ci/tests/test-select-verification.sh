@@ -523,6 +523,10 @@ run_paths_case google_rpc_python_template pull_request refs/pull/1115/head false
   proto/buf.gen.google-rpc-python.yaml
 run_paths_case edge_ownership pull_request refs/pull/114/head false \
   'contracts contracts_proto edge_kind policy' scripts/checks/contracts/connect-edge-ownership.json
+run_paths_case proto_breaking_policy pull_request refs/pull/1141/head false \
+  'contracts contracts_proto policy' \
+  scripts/checks/proto_breaking.py \
+  scripts/checks/contracts/proto-retirements.sha256
 run_paths_case generated_connect_go pull_request refs/pull/111/head false \
   'contracts contracts_proto go_consumer_interop go_support policy' libs/gen-go/codewire/v1/api_key.pb.go
 run_paths_case retired_generated_connect_oracle_go pull_request refs/pull/1110/head false \
@@ -951,7 +955,8 @@ awk '
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$go_support_runner"
 
 grep -qF 'buf lint' "$contracts_proto_runner"
-grep -qF 'buf breaking' "$contracts_proto_runner"
+grep -qF 'proto_breaking.py --self-test' "$contracts_proto_runner"
+grep -qF 'proto_breaking.py --base-sha "$base_sha"' "$contracts_proto_runner"
 grep -qF 'buf generate --template buf.gen.codewire.yaml' "$contracts_proto_runner"
 grep -qF 'buf generate --template buf.gen.google-rpc-ts.yaml' "$contracts_proto_runner"
 grep -qF 'buf generate --template buf.gen.google-rpc-python.yaml' "$contracts_proto_runner"

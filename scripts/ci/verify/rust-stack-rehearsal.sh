@@ -257,8 +257,8 @@ run_connect_auth_matrix() {
   fi
   local passed_count
   passed_count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
-  if [[ "$passed_count" != "6" ]]; then
-    echo "::error::Connect auth matrix did not report its 6 passing DB-backed tests"
+  if [[ "$passed_count" != "5" ]]; then
+    echo "::error::Connect auth matrix did not report its 5 passing DB-backed tests"
     return 1
   fi
 }

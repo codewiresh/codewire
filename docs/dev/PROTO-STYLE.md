@@ -103,7 +103,14 @@ a bad field name; rename before first release instead.
 |---|---|---|
 | `codewire.v1` | FILE (config) + never break post-publish (process) | Additive evolution only; removals require a deprecation cycle |
 | `codewire.console.v1` | FILE | Breaking allowed with same-PR client flips |
-| `codewire.admin.v1` / `internal.v1` | FILE | Internal discipline, coordinate in-repo |
+| `codewire.admin.v1` | FILE | Internal discipline, coordinate in-repo |
+| `codewire.internal.v1` | FILE for retained files | Coordinate atomic in-repo changes; deletion requires an exact-content retirement entry |
+
+The breaking gate permits no unreviewed deletion. An intentionally removed
+unused internal contract must be listed by its pre-removal SHA-256 digest and
+path in `scripts/checks/contracts/proto-retirements.sha256`; public, console,
+and admin contracts cannot use this mechanism. Buf remains strict for every
+retained file.
 
 ## Authentication
 

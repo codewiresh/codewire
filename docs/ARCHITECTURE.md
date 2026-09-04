@@ -287,9 +287,9 @@ the exact child. Both must reject stale runtime operations.
 
 Current status is narrower: local Codex brokerage and protected-value
 storage/metadata exist. General `cw secrets run`, raw per-child projection, and
-the platform broker boundary do not yet ship. The platform's older environment
-and credential injection paths remain legacy behavior until inputs, runtime,
-and existing-volume handling can change atomically.
+the platform broker boundary do not yet ship. The platform's old raw secret and
+credential bootstrap paths are removed; brokered or exposed bindings fail
+closed until their current runtime path exists.
 
 Saved-state names describe what can actually be restored:
 

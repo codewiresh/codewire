@@ -196,8 +196,9 @@ run_contracts_proto() {
   (
     cd proto
     buf lint
-    buf breaking --against "../.git#commit=${base_sha},subdir=proto"
   )
+  python3 scripts/checks/proto_breaking.py --self-test
+  BUF="$(command -v buf)" python3 scripts/checks/proto_breaking.py --base-sha "$base_sha"
   (
     cd proto
     rm -rf \

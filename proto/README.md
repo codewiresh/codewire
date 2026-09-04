@@ -85,5 +85,8 @@ make proto-drift-check  # CI gate: fails if generated code is stale
 The TypeScript generator (`protoc-gen-es`) comes from `bun install`
 (pinned in the root `package.json` devDependencies).
 
-Breaking changes are checked with `buf breaking` against `main`
-(`cd proto && buf breaking --against '../.git#branch=main,subdir=proto'`).
+Breaking changes are checked against `main` by
+`scripts/checks/proto_breaking.py`. Buf remains strict for every retained
+file. Deleting an unused `codewire.internal.v1` contract additionally requires
+an exact pre-removal content digest in the reviewed retirement ledger; other
+packages and unreviewed deletions fail closed.

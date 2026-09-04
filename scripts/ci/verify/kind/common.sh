@@ -2169,17 +2169,6 @@ SQL
       sleep 2
     done
 
-    curl_settled -X POST -H 'content-type: application/json' -d '{}' \
-      "http://127.0.0.1:${local_port}/codewire.internal.v1.EnvironmentCredentialService/IssueGitHubCredentials"
-    if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
-      echo "::error::ClusterIP environment credentials command did not enforce environment Bearer auth: code=$PROBE_CODE body=$PROBE_BODY"
-      exit 1
-    fi
-    if ! grep -qi '^x-codewire-service: codewire-orchestration-internal' "$PROBE_HEADERS"; then
-      echo "::error::ClusterIP environment credentials command did not reach the internal listener"
-      cat "$PROBE_HEADERS"
-      exit 1
-    fi
   )
 
   log "internal Connect listener isolation probes OK"

@@ -1,0 +1,3 @@
+# Exact pre-removal content digest followed by repository-relative path.
+# Retirements are limited by policy to codewire/internal protobuf contracts.
+f3ca772cd1e0e6c9256365a01b7f9e5213873c432e6d751d3ab6c7d2670abbb1  proto/codewire/internal/v1/environment_credentials.proto
