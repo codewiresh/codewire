@@ -1364,9 +1364,35 @@ struct SupervisorLock(File);
 impl SupervisorLock {
     fn acquire(root: &PrivateRoot) -> Result<Self, SupervisorError> {
         let opened = root.create_regular(Path::new("supervisor.lock"), 0o600, false)?;
-        flock(opened.file(), FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| SupervisorError::AlreadyRunning)?;
-        Ok(Self(opened.into_file()))
+        // A CLOEXEC descriptor is still inherited during the short interval
+        // between fork and exec. Another thread spawning an unrelated process
+        // can therefore transiently retain a just-released lock. Keep the
+        // singleton non-blocking, but tolerate that bounded kernel-level
+        // handoff instead of misclassifying it as a live supervisor.
+        const RETRY_DELAY: Duration = Duration::from_millis(10);
+        const MAX_RETRIES: usize = 25;
+        let mut retries = 0;
+        loop {
+            match flock(opened.file(), FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => return Ok(Self(opened.into_file())),
+                Err(error) if error == rustix::io::Errno::INTR && retries < MAX_RETRIES => {
+                    retries += 1;
+                }
+                Err(error) if error == rustix::io::Errno::WOULDBLOCK && retries < MAX_RETRIES => {
+                    retries += 1;
+                    std::thread::sleep(RETRY_DELAY);
+                }
+                Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
+                    return Err(SupervisorError::AlreadyRunning);
+                }
+                Err(source) => {
+                    return Err(SupervisorError::Io {
+                        path: root.path().join("supervisor.lock"),
+                        source: source.into(),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -10623,6 +10649,23 @@ mod tests {
         ));
         drop(first);
         SupervisorLock::acquire(&root).unwrap();
+    }
+
+    #[test]
+    fn supervisor_lock_tolerates_a_transient_inherited_descriptor() {
+        let parent = tempfile::tempdir().unwrap();
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let root = PrivateRoot::open(parent.path()).unwrap();
+        let first = SupervisorLock::acquire(&root).unwrap();
+        let inherited = first.0.try_clone().unwrap();
+        drop(first);
+
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            drop(inherited);
+        });
+        SupervisorLock::acquire(&root).unwrap();
+        releaser.join().unwrap();
     }
 
     #[test]
