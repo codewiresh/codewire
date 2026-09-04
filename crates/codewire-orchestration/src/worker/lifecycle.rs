@@ -22,7 +22,7 @@ use super::env_log::emit_authoritative_environment_log_for_states;
 use super::gatewayauth::{SCOPE_COORDINATE, issue_token};
 use super::port_dns;
 use super::setup::{
-    handle_post_start_auth_injection, is_setup_activity_cancelled, is_setup_recovery_failed,
+    handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
     jittered_duration, wait_for_sidecar,
 };
 use super::{JobPayload, WorkerContext};
@@ -629,7 +629,7 @@ pub async fn handle_environment_start(
         tracing::warn!(environment_id = env_id, error = %e, "environment.start: schedule shutdown failed");
     }
 
-    // Gateway readiness + credential re-injection are best-effort,
+    // Gateway readiness + post-start configuration are best-effort,
     // post-running steps (the create path runs the equivalent work in the
     // Setup activity, which records errors on the backend row but never
     // flips the env to `error`). The env is already `running`; a transient
@@ -663,7 +663,7 @@ pub async fn handle_environment_start(
                 "environment sidecar ready"
             );
 
-            handle_post_start_auth_injection(
+            handle_post_start_configuration(
                 ctx,
                 payload,
                 authority,
@@ -692,7 +692,7 @@ pub async fn handle_environment_start(
             tracing::warn!(
                 environment_id = env_id,
                 error = %e,
-                "environment.start: gateway not ready yet; env is running, skipping credential re-injection"
+                "environment.start: gateway not ready yet; env is running, skipping post-start configuration"
             );
         }
     }

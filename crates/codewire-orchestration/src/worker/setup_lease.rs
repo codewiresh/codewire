@@ -1205,7 +1205,7 @@ mod tests {
             .await
             .unwrap();
         replacement
-            .complete_phase(1, 2, "inject_secrets", "completed", "", None)
+            .complete_phase(1, 2, "configure_environment", "completed", "", None)
             .await
             .unwrap();
 

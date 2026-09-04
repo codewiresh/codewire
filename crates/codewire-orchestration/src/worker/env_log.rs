@@ -15,7 +15,7 @@ pub fn env_phase_label(phase: &str) -> &str {
         "mark_running" => "Marking running",
         "publish_setup" => "Starting setup",
         "health_check" => "Checking sidecar readiness",
-        "inject_secrets" => "Injecting secrets",
+        "configure_environment" => "Configuring environment",
         "git_clone" => "Cloning repositories",
         "install" => "Running install command",
         "startup_script" => "Running startup script",
@@ -43,7 +43,7 @@ pub fn should_record_worker_checkpoint(phase: &str, status: &str) -> bool {
             | "mark_running"
             | "publish_setup"
             | "health_check"
-            | "inject_secrets"
+            | "configure_environment"
             | "git_clone"
             | "install"
             | "startup_script"

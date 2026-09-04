@@ -1847,7 +1847,6 @@ mod tests {
             auth_token: None,
             ttl_seconds: None,
             setup_config: None,
-            secret_project_id: None,
         };
         // Canonical image + matching SKU → shared warm-pool template.
         let opts = environment_claim_opts(
@@ -1942,7 +1941,6 @@ mod tests {
             auth_token: None,
             ttl_seconds: None,
             setup_config: None,
-            secret_project_id: None,
         };
         let template_base = "codewiresh-workspace-sha256-2058b7f1fd76f6f77b1dba";
         let first_id = "3d6bb495-efac-419f-bf3a-91696e7c7ca4";
@@ -2015,7 +2013,6 @@ mod tests {
             auth_token: None,
             ttl_seconds: None,
             setup_config: None,
-            secret_project_id: None,
         };
         // First-party image: no image command; canonical name swap.
         let opts = environment_template_opts(
@@ -2111,7 +2108,6 @@ mod tests {
             auth_token: None,
             ttl_seconds: None,
             setup_config: None,
-            secret_project_id: None,
         };
 
         let standard_opts = environment_template_opts(
@@ -2204,7 +2200,6 @@ mod tests {
             auth_token: None,
             ttl_seconds: None,
             setup_config: None,
-            secret_project_id: None,
         };
         let cfg = SandboxWorkerCfg {
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
@@ -2270,7 +2265,6 @@ mod tests {
             auth_token: None,
             ttl_seconds: None,
             setup_config: None,
-            secret_project_id: None,
         };
         let cfg = SandboxWorkerCfg {
             runtime_transport_zones_json:

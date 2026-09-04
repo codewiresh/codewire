@@ -127,7 +127,6 @@ pub struct EnvironmentRow {
     pub auth_token: Option<String>,
     pub ttl_seconds: Option<i32>,
     pub setup_config: Option<SetupConfig>,
-    pub secret_project_id: Option<String>,
 }
 
 pub async fn load_environment(pool: &PgPool, env_id: &str) -> anyhow::Result<EnvironmentRow> {
@@ -135,7 +134,7 @@ pub async fn load_environment(pool: &PgPool, env_id: &str) -> anyhow::Result<Env
         r#"SELECT id, org_id, preset_id, type, state, desired_state,
                   external_cleanup_completed_at,
                   cpu_millicores, memory_mb, disk_gb, isolation_tier, auth_token, ttl_seconds,
-                  setup_config, secret_project_id
+                  setup_config
            FROM environments WHERE id = $1"#,
     )
     .bind(env_id)
@@ -173,7 +172,6 @@ pub async fn load_environment(pool: &PgPool, env_id: &str) -> anyhow::Result<Env
         auth_token: row.try_get("auth_token")?,
         ttl_seconds: row.try_get("ttl_seconds")?,
         setup_config,
-        secret_project_id: row.try_get("secret_project_id")?,
     })
 }
 
