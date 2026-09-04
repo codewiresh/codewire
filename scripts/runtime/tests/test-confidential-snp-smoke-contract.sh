@@ -77,6 +77,7 @@ rg -F 'KUBE_CONTEXT="${KUBE_CONTEXT:-dev-cluster}"' "$SMOKE" >/dev/null
 rg -F 'SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"' "$SMOKE" >/dev/null
 rg -F 'NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"' "$SMOKE" >/dev/null
 rg -F './scripts/talos-external-worker verify' "$SMOKE" >/dev/null
+rg -F './scripts/check-talos-runtime-artifacts --stack "$HOST_GATE_STACK"' "$SMOKE" >/dev/null
 rg -F 'confidential profile isolation passed: shared_fs=none host-share-overrides=denied' \
   "$SMOKE" >/dev/null
 if rg -q 'check-node1|node1-codewire-dev|node1\.codewire-dev\.sh|ssh_host\(' "$SMOKE"; then
@@ -642,10 +643,13 @@ touch '$bootstrap_dir/skopeo-was-called'
 exit 88
 EOF
 mkdir -p "$bootstrap_dir/infra/scripts"
-cat >"$bootstrap_dir/infra/scripts/talos-external-worker" <<'EOF'
+cat >"$bootstrap_dir/infra/scripts/check-talos-runtime-artifacts" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$*" == 'verify dev-cluster cw-dev-prod-node-1 1500' ]]
+[[ "$*" == '--stack dev-cluster' ]]
+if [[ -n "${HOST_ARTIFACTS_CALLS:-}" ]]; then
+  printf '%s\n' "$*" >>"$HOST_ARTIFACTS_CALLS"
+fi
 if [[ "${HOST_PROFILE_FIXTURE:-none}" == "none" ]]; then
   printf '%s\n' \
     'check-talos-runtime-artifacts: confidential profile isolation passed: shared_fs=none host-share-overrides=denied'
@@ -654,9 +658,19 @@ else
     "$HOST_PROFILE_FIXTURE"
 fi
 EOF
+cat >"$bootstrap_dir/infra/scripts/talos-external-worker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == 'verify dev-cluster cw-dev-prod-node-1 1500' ]]
+if [[ -n "${HOST_WORKER_CALLS:-}" ]]; then
+  printf '%s\n' "$*" >>"$HOST_WORKER_CALLS"
+fi
+printf '%s\n' 'talos-external-worker: PASS'
+EOF
 chmod +x \
   "$bootstrap_dir/bin/kubectl" \
   "$bootstrap_dir/bin/skopeo" \
+  "$bootstrap_dir/infra/scripts/check-talos-runtime-artifacts" \
   "$bootstrap_dir/infra/scripts/talos-external-worker"
 PATH="$bootstrap_dir/bin:$PATH" \
   KUBECTL_BIN="$bootstrap_dir/bin/kubectl" \
@@ -680,6 +694,8 @@ PATH="$bootstrap_dir/bin:$PATH" \
   KUBE_CONTEXT=mock \
   INFRA_ROOT="$bootstrap_dir/infra" \
   EVIDENCE_DIR="$bootstrap_dir/host-gate-evidence" \
+  HOST_ARTIFACTS_CALLS="$bootstrap_dir/host-artifacts.calls" \
+  HOST_WORKER_CALLS="$bootstrap_dir/host-worker.calls" \
   "$SMOKE" --skip-raw-jobs --skip-guest-attestation --skip-coco \
   >"$bootstrap_dir/host-gate.stdout" 2>"$bootstrap_dir/host-gate.stderr" || {
     sed -n '1,120p' "$bootstrap_dir/host-gate.stderr" >&2
@@ -689,6 +705,9 @@ PATH="$bootstrap_dir/bin:$PATH" \
 rg -Fx \
   'check-talos-runtime-artifacts: confidential profile isolation passed: shared_fs=none host-share-overrides=denied' \
   "$bootstrap_dir/host-gate-evidence/host-runtime-gate.log" >/dev/null
+rg -Fx -- '--stack dev-cluster' "$bootstrap_dir/host-artifacts.calls" >/dev/null
+rg -Fx -- 'verify dev-cluster cw-dev-prod-node-1 1500' \
+  "$bootstrap_dir/host-worker.calls" >/dev/null
 
 for unsafe_shared_fs in \
   missing \

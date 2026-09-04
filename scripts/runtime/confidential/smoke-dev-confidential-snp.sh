@@ -230,6 +230,8 @@ run_host_gate() {
     log "skipping host SNP gate"
     return 0
   }
+  [[ -x "$INFRA_ROOT/scripts/check-talos-runtime-artifacts" ]] || \
+    die "missing Infra Talos runtime-artifact verifier at $INFRA_ROOT/scripts/check-talos-runtime-artifacts"
   [[ -x "$INFRA_ROOT/scripts/talos-external-worker" ]] || \
     die "missing Infra Talos external-worker wrapper at $INFRA_ROOT/scripts/talos-external-worker"
   [[ "$HOST_GATE_STACK" == "dev-cluster" ]] || \
@@ -237,9 +239,10 @@ run_host_gate() {
   [[ "$HOST_GATE_MIN_EPHEMERAL_GIB" =~ ^[0-9]+$ ]] || \
     die "confidential SNP host-gate ephemeral threshold must be an integer"
 
-  log "running Infra Talos external-worker gate for $NODE"
+  log "running Infra Talos runtime-artifact and external-worker gates for $NODE"
   (
     cd "$INFRA_ROOT"
+    ./scripts/check-talos-runtime-artifacts --stack "$HOST_GATE_STACK"
     ./scripts/talos-external-worker verify \
       "$HOST_GATE_STACK" "$NODE" "$HOST_GATE_MIN_EPHEMERAL_GIB"
   ) 2>&1 | tee "$EVIDENCE_DIR/host-runtime-gate.log"
