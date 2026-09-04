@@ -5,25 +5,15 @@
 //! entries; public records and resolution previews never contain values or
 //! protected-store references.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{Read as _, Write as _};
-use std::os::unix::fs::{
-    DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
-};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
 
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
 };
 pub use codewire_workload_secrets::{ResolvedWorkloadSecretMetadata, WorkloadSecretSource};
-use codewire_workload_secrets::{
-    WorkloadSecretBinding, encode_workload_secrets, resolve_workload_secret_metadata,
-    validate_workload_secret_value, workload_secret_delivery_relative_path,
-};
+use codewire_workload_secrets::{resolve_workload_secret_metadata, validate_workload_secret_value};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use crate::{
     JournalOperation, LOCAL_OWNER_ID, LocalCredentialAuthority, LocalCredentialError,
@@ -32,7 +22,6 @@ use crate::{
 
 const MAX_SECRET_KEY_BYTES: usize = 256;
 const MAX_SECRET_PROJECT_NAME_BYTES: usize = 64;
-const TMPFS_MAGIC: rustix::fs::FsWord = 0x0102_1994;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkloadSecretMetadata {
@@ -56,28 +45,6 @@ pub struct WorkloadSecretSelection {
     pub project: Option<String>,
     pub user: bool,
     pub explicit_environment_keys: BTreeSet<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkloadSecretDelivery {
-    pub binding: Option<WorkloadSecretBinding>,
-    pub metadata: Vec<ResolvedWorkloadSecretMetadata>,
-}
-
-pub(crate) struct ResolvedWorkloadSecrets {
-    pub metadata: Vec<ResolvedWorkloadSecretMetadata>,
-    pub values: BTreeMap<String, ProtectedValue>,
-}
-
-impl std::fmt::Debug for ResolvedWorkloadSecrets {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResolvedWorkloadSecrets")
-            .field("metadata", &self.metadata)
-            .field("value_count", &self.values.len())
-            .field("values", &"[REDACTED]")
-            .finish()
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,48 +87,6 @@ struct InternalWorkloadSecret {
 struct WorkloadSecretJournal {
     operation: JournalOperation,
     protected_entry_id: ProtectedEntryId,
-}
-
-struct PendingDeliveryFile {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-    armed: bool,
-}
-
-impl PendingDeliveryFile {
-    fn new(path: PathBuf, metadata: &fs::Metadata) -> Self {
-        Self {
-            path,
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for PendingDeliveryFile {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let exact = fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
-            metadata.is_file()
-                && !metadata.file_type().is_symlink()
-                && metadata.uid() == rustix::process::geteuid().as_raw()
-                && metadata.dev() == self.device
-                && metadata.ino() == self.inode
-                && metadata.nlink() == 1
-                && metadata.permissions().mode() & 0o7777 == 0o400
-        });
-        if exact {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
 }
 
 impl<S: ProtectedStore> LocalCredentialAuthority<S> {
@@ -308,140 +233,35 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         &self,
         selection: &WorkloadSecretSelection,
     ) -> Result<Vec<ResolvedWorkloadSecretMetadata>, LocalCredentialError> {
-        Ok(self.resolve_workload_secrets(selection, false)?.metadata)
-    }
-
-    pub fn prepare_environment_workload_secrets(
-        &self,
-        selection: &WorkloadSecretSelection,
-        environment_id: Uuid,
-        environment_generation: u64,
-        runtime_root: &Path,
-    ) -> Result<WorkloadSecretDelivery, LocalCredentialError> {
-        if environment_id.is_nil() || environment_generation == 0 {
-            return Err(LocalCredentialError::InvalidWorkloadSecret);
-        }
-        validate_private_tmpfs_runtime(runtime_root)?;
-        let resolved = self.resolve_workload_secrets(selection, true)?;
-        if resolved.values.is_empty() {
-            return Ok(WorkloadSecretDelivery {
-                binding: None,
-                metadata: resolved.metadata,
-            });
-        }
-        let encoded = encode_workload_secrets(
-            resolved
-                .values
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.expose_secret())),
-        )
-        .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)?;
-        let relative =
-            workload_secret_delivery_relative_path(environment_id, environment_generation)
-                .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)?;
-        let path = prepare_delivery_parent(runtime_root, &relative)?;
-        let mut options = OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .mode(0o400)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        let mut file = match options.open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                validate_existing_delivery(&path, encoded.bytes())?;
-                return Ok(WorkloadSecretDelivery {
-                    binding: Some(encoded.binding()),
-                    metadata: resolved.metadata,
-                });
-            }
-            Err(_) => return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable),
-        };
-        let initial = file
-            .metadata()
-            .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-        let mut pending = PendingDeliveryFile::new(path, &initial);
-        if !initial.is_file()
-            || initial.uid() != rustix::process::geteuid().as_raw()
-            || initial.permissions().mode() & 0o7777 != 0o400
-            || initial.nlink() != 1
-        {
-            return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-        }
-        file.write_all(encoded.bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-        let metadata = file
-            .metadata()
-            .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-        if !metadata.is_file()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
-            || metadata.permissions().mode() & 0o7777 != 0o400
-            || metadata.nlink() != 1
-            || metadata.len() != encoded.binding().total_bytes()
-        {
-            return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-        }
-        pending.disarm();
-        Ok(WorkloadSecretDelivery {
-            binding: Some(encoded.binding()),
-            metadata: resolved.metadata,
-        })
-    }
-
-    pub(crate) fn resolve_workload_secrets(
-        &self,
-        selection: &WorkloadSecretSelection,
-        include_values: bool,
-    ) -> Result<ResolvedWorkloadSecrets, LocalCredentialError> {
         validate_selection(selection)?;
         if selection.organization {
             return Err(LocalCredentialError::OrganizationSecretsUnsupported);
         }
         let connection = self.connection()?;
         let mut metadata_sources = Vec::<(WorkloadSecretSource, String)>::new();
-        let mut winners: BTreeMap<String, InternalWorkloadSecret> = BTreeMap::new();
 
         if let Some(project_name) = selection.project.as_deref() {
             let project = load_project_by_name(&connection, project_name)?
                 .ok_or(LocalCredentialError::SecretProjectNotFound)?;
             for secret in list_internal_secrets(&connection, SecretScope::Project(&project.id))? {
                 metadata_sources.push((WorkloadSecretSource::Project, secret.metadata.key.clone()));
-                winners.insert(secret.metadata.key.clone(), secret);
             }
         }
         if selection.user {
             for secret in list_internal_secrets(&connection, SecretScope::User)? {
                 metadata_sources.push((WorkloadSecretSource::User, secret.metadata.key.clone()));
-                winners.insert(secret.metadata.key.clone(), secret);
             }
         }
         for key in &selection.explicit_environment_keys {
             metadata_sources.push((WorkloadSecretSource::ExplicitEnvironment, key.clone()));
-            winners.remove(key);
         }
 
-        let metadata = resolve_workload_secret_metadata(
+        resolve_workload_secret_metadata(
             metadata_sources
                 .iter()
                 .map(|(source, key)| (*source, key.as_str())),
         )
-        .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)?;
-        let mut values = BTreeMap::new();
-        if include_values {
-            for (key, secret) in winners {
-                if secret.material_state != MaterialState::Ready {
-                    return Err(LocalCredentialError::CorruptMetadata);
-                }
-                let value = self
-                    .protected_store
-                    .get(&secret.protected_entry_id)?
-                    .ok_or(LocalCredentialError::WorkloadSecretMaterialMissing)?;
-                validate_secret_value(value.expose_secret())?;
-                values.insert(key, value);
-            }
-        }
-        Ok(ResolvedWorkloadSecrets { metadata, values })
+        .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)
     }
 
     pub(crate) fn reconcile_workload_secrets(&self) -> Result<(), LocalCredentialError> {
@@ -1051,109 +871,6 @@ fn from_i64(value: i64) -> Result<u64, LocalCredentialError> {
     u64::try_from(value).map_err(|_| LocalCredentialError::CorruptMetadata)
 }
 
-fn validate_private_tmpfs_runtime(path: &Path) -> Result<(), LocalCredentialError> {
-    if !path.is_absolute()
-        || path.components().any(|component| {
-            !matches!(
-                component,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )
-        })
-    {
-        return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-    }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o077 != 0
-        || fs::canonicalize(path)
-            .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?
-            != path
-    {
-        return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-    }
-    let directory =
-        File::open(path).map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-    if rustix::fs::fstatfs(&directory)
-        .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?
-        .f_type
-        != TMPFS_MAGIC
-    {
-        return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-    }
-    Ok(())
-}
-
-fn prepare_delivery_parent(
-    runtime_root: &Path,
-    relative: &Path,
-) -> Result<PathBuf, LocalCredentialError> {
-    let parent = relative
-        .parent()
-        .ok_or(LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-    let mut current = runtime_root.to_owned();
-    for component in parent.components() {
-        let std::path::Component::Normal(component) = component else {
-            return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-        };
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                DirBuilder::new()
-                    .mode(0o700)
-                    .create(&current)
-                    .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-            }
-            Err(_) => return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable),
-        }
-        let metadata = fs::symlink_metadata(&current)
-            .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
-            || metadata.permissions().mode() & 0o7777 != 0o700
-        {
-            return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-        }
-    }
-    Ok(runtime_root.join(relative))
-}
-
-fn validate_existing_delivery(path: &Path, expected: &[u8]) -> Result<(), LocalCredentialError> {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let mut file = options
-        .open(path)
-        .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o7777 != 0o400
-        || metadata.nlink() != 1
-        || metadata.len() != expected.len() as u64
-        || rustix::fs::fstatfs(&file)
-            .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?
-            .f_type
-            != TMPFS_MAGIC
-    {
-        return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-    }
-    let mut actual = Zeroizing::new(vec![0_u8; expected.len()]);
-    file.read_exact(&mut actual)
-        .map_err(|_| LocalCredentialError::WorkloadSecretDeliveryUnavailable)?;
-    if actual.as_slice() != expected {
-        return Err(LocalCredentialError::WorkloadSecretDeliveryUnavailable);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -1210,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn project_user_and_explicit_environment_overlay_is_deterministic() {
+    fn project_user_and_explicit_environment_metadata_is_deterministic() {
         let temp = TempDir::new().unwrap();
         let authority = LocalCredentialAuthority::open(
             &authority_root(&temp),
@@ -1239,10 +956,10 @@ mod tests {
             explicit_environment_keys: BTreeSet::from(["EXPLICIT".into()]),
         };
         let resolved = authority
-            .resolve_workload_secrets(&selection, true)
+            .resolve_workload_secret_metadata(&selection)
             .unwrap();
         assert_eq!(
-            resolved.metadata,
+            resolved,
             vec![
                 ResolvedWorkloadSecretMetadata {
                     key: "EXPLICIT".into(),
@@ -1261,11 +978,6 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(
-            resolved.values.get("SHARED").unwrap().expose_secret(),
-            b"user-shared"
-        );
-        assert!(!resolved.values.contains_key("EXPLICIT"));
         assert_eq!(format!("{resolved:?}").matches("synthetic").count(), 0);
     }
 

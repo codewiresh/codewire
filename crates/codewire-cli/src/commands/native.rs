@@ -34,6 +34,7 @@ const DEFAULT_NATIVE_DISK_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_NATIVE_DOCKER_DISK_BYTES: u64 =
     codewire_local_vmm::linux::state::DEFAULT_DOCKER_DISK_BYTES;
 const MAX_LEGACY_LOCAL_NAME_INDEX_BYTES: u64 = 1024 * 1024;
+const NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE: &str = "local credential authority is unavailable";
 
 fn legacy_local_name_collides(data_dir: &Path, name: &str) -> anyhow::Result<bool> {
     let state_path = data_dir.join("local_instances.toml");
@@ -113,7 +114,6 @@ pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow:
         mesh_data_dir: args.mesh_data_dir,
         platform_config_dir: args.platform_config_dir,
         credential_authority_root: args.credential_authority_root,
-        workload_secret_runtime_root: args.workload_secret_runtime_root,
         executable,
     })
     .await
@@ -130,7 +130,6 @@ pub(crate) async fn run_native_runner(args: NativeRunnerArgs) -> anyhow::Result<
         artifact_generation: args.artifact_generation,
         mesh_data_dir: args.mesh_data_dir,
         platform_config_dir: args.platform_config_dir,
-        workload_secret_runtime_root: args.workload_secret_runtime_root,
     })
     .await
     .context("run native environment runner")
@@ -477,10 +476,20 @@ pub(crate) async fn create_native_environment(
         args.no_network,
         args.yes,
     )?;
+    let mut credentials = connect_native_credential_authority_if_required(
+        native_project_requires_credential_authority(&project.spec),
+        connect_local_credential_authority,
+    )
+    .await?;
     let access_selection = match project.spec.access.as_ref() {
         Some(access) => {
-            let mut credentials = connect_local_credential_authority().await?;
             let profile = credentials
+                .as_mut()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "local credential authority is required for the selected access profile"
+                    )
+                })?
                 .resolve_profile(&access.profile)
                 .await
                 .context("resolve local access profile")?;
@@ -552,7 +561,14 @@ pub(crate) async fn native_environments() -> anyhow::Result<Vec<v1::Environment>
     if !native_state_exists()? {
         return Ok(Vec::new());
     }
-    native_client().await?.list().await.map_err(native_status)
+    let mut client = native_client().await?;
+    let first = client.list().await;
+    retry_native_rpc_after_authority_unavailable(
+        first,
+        || client.list(),
+        connect_native_credential_authority,
+    )
+    .await
 }
 
 pub(crate) fn native_orphan_report() -> anyhow::Result<NativeOrphanReport> {
@@ -638,16 +654,13 @@ pub(crate) async fn native_selected_environment() -> anyhow::Result<Option<v1::E
 }
 
 pub(crate) async fn get_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
-    native_client()
-        .await?
-        .get(name)
-        .await
-        .map_err(native_status)
+    let mut client = native_client().await?;
+    get_native_environment_with_authority_recovery(&mut client, name).await
 }
 
 pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
-    let environment = client.get(name).await.map_err(native_status)?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
     client
         .select(&environment.name, &environment.id)
         .await
@@ -656,23 +669,19 @@ pub(crate) async fn select_native_environment(name: &str) -> anyhow::Result<v1::
 
 pub(crate) async fn start_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
-    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    ensure_native_access_authority(&environment).await?;
+    get_native_environment_with_required_authority(&mut client, name).await?;
     client.start(name).await.map_err(native_status)
 }
 
 pub(crate) async fn stop_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
-    native_client()
-        .await?
-        .stop(name)
-        .await
-        .map_err(native_status)
+    let mut client = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    client.stop(&environment.name).await.map_err(native_status)
 }
 
 pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
-    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    ensure_native_access_authority(&environment).await?;
+    let environment = get_native_environment_with_required_authority(&mut client, name).await?;
     client
         .restart(name, &environment.id)
         .await
@@ -682,11 +691,9 @@ pub(crate) async fn restart_native_environment(name: &str) -> anyhow::Result<v1:
 pub(crate) async fn refresh_native_environment_skills(
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
-    native_client()
-        .await?
-        .refresh_skills(name)
-        .await
-        .map_err(native_status)
+    let mut client = native_client().await?;
+    get_native_environment_with_required_authority(&mut client, name).await?;
+    client.refresh_skills(name).await.map_err(native_status)
 }
 
 pub(crate) async fn resize_native_environment(
@@ -696,8 +703,7 @@ pub(crate) async fn resize_native_environment(
     disk_bytes: u64,
 ) -> anyhow::Result<v1::Environment> {
     let mut client = native_client().await?;
-    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    ensure_native_access_authority(&environment).await?;
+    get_native_environment_with_required_authority(&mut client, name).await?;
     client
         .resize(name, vcpus, memory_mib, disk_bytes)
         .await
@@ -708,25 +714,67 @@ async fn get_native_environment_with_authority_recovery(
     client: &mut NativeSupervisorClient,
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
-    match client.get(name).await {
-        Ok(environment) => Ok(environment),
-        Err(status) if status.code() == tonic::Code::Unavailable => {
-            drop(connect_local_credential_authority().await?);
-            client.get(name).await.map_err(native_status)
+    let first = client.get(name).await;
+    retry_native_rpc_after_authority_unavailable(
+        first,
+        || client.get(name),
+        connect_native_credential_authority,
+    )
+    .await
+}
+
+fn native_rpc_requires_credential_authority_retry(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unavailable
+        && status.message() == NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE
+}
+
+async fn retry_native_rpc_after_authority_unavailable<T, R, RF, A, AF>(
+    first: Result<T, tonic::Status>,
+    retry: R,
+    connect_authority: A,
+) -> anyhow::Result<T>
+where
+    R: FnOnce() -> RF,
+    RF: Future<Output = Result<T, tonic::Status>>,
+    A: FnOnce() -> AF,
+    AF: Future<Output = anyhow::Result<()>>,
+{
+    match first {
+        Ok(value) => Ok(value),
+        Err(status) if native_rpc_requires_credential_authority_retry(&status) => {
+            connect_authority().await?;
+            retry().await.map_err(native_status)
         }
         Err(status) => Err(native_status(status)),
     }
+}
+
+async fn connect_native_credential_authority() -> anyhow::Result<()> {
+    drop(connect_local_credential_authority().await?);
+    Ok(())
+}
+
+async fn get_native_environment_with_required_authority(
+    client: &mut NativeSupervisorClient,
+    name: &str,
+) -> anyhow::Result<v1::Environment> {
+    let environment = get_native_environment_with_authority_recovery(client, name).await?;
+    ensure_native_credential_authority(&environment).await?;
+    Ok(environment)
 }
 
 pub(crate) async fn delete_native_environment(
     name: &str,
 ) -> anyhow::Result<v1::DeleteEnvironmentResponse> {
     let mut client = native_client().await?;
-    let environment = client.get(name).await.map_err(native_status)?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
     if !environment.access_profile.is_empty() {
-        let _ = connect_local_credential_authority().await;
+        connect_native_credential_authority().await?;
     }
-    client.delete(name).await.map_err(native_status)
+    client
+        .delete(&environment.name)
+        .await
+        .map_err(native_status)
 }
 
 pub(crate) async fn handle_native_environment_access(args: EnvAccessArgs) -> anyhow::Result<()> {
@@ -903,10 +951,32 @@ pub(crate) fn format_native_environment_access(view: &NativeEnvironmentAccessVie
     }
 }
 
-async fn ensure_native_access_authority(environment: &v1::Environment) -> anyhow::Result<()> {
-    if !environment.access_profile.is_empty() {
-        drop(connect_local_credential_authority().await?);
+fn native_project_requires_credential_authority(spec: &codewire_project::ProjectSpec) -> bool {
+    spec.access.is_some() || !spec.secrets.is_empty()
+}
+
+async fn connect_native_credential_authority_if_required<T, C, CF>(
+    required: bool,
+    connect: C,
+) -> anyhow::Result<Option<T>>
+where
+    C: FnOnce() -> CF,
+    CF: Future<Output = anyhow::Result<T>>,
+{
+    if required {
+        return connect().await.map(Some);
     }
+    Ok(None)
+}
+
+async fn ensure_native_credential_authority(environment: &v1::Environment) -> anyhow::Result<()> {
+    drop(
+        connect_native_credential_authority_if_required(
+            environment.requires_credential_authority,
+            connect_local_credential_authority,
+        )
+        .await?,
+    );
     Ok(())
 }
 
@@ -914,8 +984,7 @@ pub(crate) async fn native_environment_session_client(
     name: &str,
 ) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicSessionClient> {
     let mut supervisor = native_client().await?;
-    let environment = get_native_environment_with_authority_recovery(&mut supervisor, name).await?;
-    ensure_native_access_authority(&environment).await?;
+    get_native_environment_with_required_authority(&mut supervisor, name).await?;
     drop(supervisor);
     codewire_local_vmm::public_client::NativePublicSessionClient::connect_or_start(
         &native_runtime_config()?,
@@ -929,8 +998,7 @@ pub(crate) async fn native_environment_data_client(
     name: &str,
 ) -> anyhow::Result<codewire_local_vmm::public_client::NativePublicDataClient> {
     let mut supervisor = native_client().await?;
-    let environment = get_native_environment_with_authority_recovery(&mut supervisor, name).await?;
-    ensure_native_access_authority(&environment).await?;
+    get_native_environment_with_required_authority(&mut supervisor, name).await?;
     drop(supervisor);
     codewire_local_vmm::public_client::NativePublicDataClient::connect_or_start(
         &native_runtime_config()?,
@@ -1117,9 +1185,36 @@ fn format_binary_bytes(bytes: u64) -> String {
 
 async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
     let config = native_runtime_config()?;
-    NativeSupervisorClient::connect_or_start(&config)
-        .await
-        .context("connect to native local supervisor")
+    connect_native_after_authority_admission(
+        || async {
+            // Admit an authority visible at the current credential root before
+            // an existing supervisor can be reused. A live v6 authority is
+            // replaced with v7, an unconnectable existing endpoint fails
+            // closed, and only an absent endpoint avoids starting an authority
+            // for credential-free native operations.
+            admit_existing_local_credential_authority().await
+        },
+        || async {
+            NativeSupervisorClient::connect_or_start(&config)
+                .await
+                .context("connect to native local supervisor")
+        },
+    )
+    .await
+}
+
+async fn connect_native_after_authority_admission<T, A, AF, C, CF>(
+    admit_authority: A,
+    connect_supervisor: C,
+) -> anyhow::Result<T>
+where
+    A: FnOnce() -> AF,
+    AF: std::future::Future<Output = anyhow::Result<()>>,
+    C: FnOnce() -> CF,
+    CF: std::future::Future<Output = anyhow::Result<T>>,
+{
+    admit_authority().await?;
+    connect_supervisor().await
 }
 
 fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
@@ -1143,17 +1238,6 @@ fn native_runtime_config() -> anyhow::Result<NativeRuntimeConfig> {
         mesh_data_dir: paths.mesh_data_dir,
         platform_config_dir: paths.platform_config_dir,
         credential_authority_root: local_credential_root(&env)?,
-        workload_secret_runtime_root: env::var_os("XDG_RUNTIME_DIR")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .map(|path| {
-                if path.is_absolute() {
-                    Ok(path)
-                } else {
-                    anyhow::bail!("XDG_RUNTIME_DIR must be an absolute path")
-                }
-            })
-            .transpose()?,
         executable: canonical_current_executable()?,
     })
 }
@@ -1541,6 +1625,194 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_rpc_authority_recovery_is_exact_and_bounded() {
+        let authority_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retry_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let success_retry_calls = std::sync::Arc::clone(&retry_calls);
+        let success_authority_calls = std::sync::Arc::clone(&authority_calls);
+        let value = retry_native_rpc_after_authority_unavailable(
+            Ok(7_u8),
+            move || async move {
+                success_retry_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(8)
+            },
+            move || async move {
+                success_authority_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(authority_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(retry_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let exact_retry_calls = std::sync::Arc::clone(&retry_calls);
+        let exact_authority_calls = std::sync::Arc::clone(&authority_calls);
+        let value = retry_native_rpc_after_authority_unavailable(
+            Err(tonic::Status::unavailable(
+                NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE,
+            )),
+            move || async move {
+                exact_retry_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(9_u8)
+            },
+            move || async move {
+                exact_authority_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(value, 9);
+        assert_eq!(authority_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(retry_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let unrelated_retry_calls = std::sync::Arc::clone(&retry_calls);
+        let unrelated_authority_calls = std::sync::Arc::clone(&authority_calls);
+        let error = retry_native_rpc_after_authority_unavailable(
+            Err::<u8, _>(tonic::Status::unavailable("supervisor transport failed")),
+            move || async move {
+                unrelated_retry_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(10)
+            },
+            move || async move {
+                unrelated_authority_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "supervisor transport failed");
+        assert_eq!(authority_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(retry_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let bounded_retry_calls = std::sync::Arc::clone(&retry_calls);
+        let bounded_authority_calls = std::sync::Arc::clone(&authority_calls);
+        let error = retry_native_rpc_after_authority_unavailable(
+            Err::<u8, _>(tonic::Status::unavailable(
+                NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE,
+            )),
+            move || async move {
+                bounded_retry_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(tonic::Status::unavailable(
+                    NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE,
+                ))
+            },
+            move || async move {
+                bounded_authority_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE);
+        assert_eq!(authority_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(retry_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn native_project_authority_requirement_excludes_ordinary_environment_values() {
+        let mut spec = codewire_project::ProjectSpec::default();
+        spec.environment
+            .insert("PUBLIC_VALUE".to_owned(), "ordinary-value".to_owned());
+        assert!(!native_project_requires_credential_authority(&spec));
+
+        spec.access = Some(codewire_project::AccessBinding {
+            profile: "user/work".parse().unwrap(),
+        });
+        assert!(native_project_requires_credential_authority(&spec));
+
+        for secrets in [
+            codewire_project::SecretBindings {
+                organization: true,
+                ..Default::default()
+            },
+            codewire_project::SecretBindings {
+                project: "project-alpha".to_owned(),
+                ..Default::default()
+            },
+            codewire_project::SecretBindings {
+                user: true,
+                ..Default::default()
+            },
+        ] {
+            let spec = codewire_project::ProjectSpec {
+                secrets,
+                ..Default::default()
+            };
+            assert!(native_project_requires_credential_authority(&spec));
+        }
+    }
+
+    #[tokio::test]
+    async fn required_native_authority_connection_is_conditional_and_fail_closed() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let skipped_calls = std::sync::Arc::clone(&calls);
+        let skipped = connect_native_credential_authority_if_required(false, || async move {
+            skipped_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(7_u8)
+        })
+        .await
+        .unwrap();
+        assert_eq!(skipped, None);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let required_calls = std::sync::Arc::clone(&calls);
+        let connected = connect_native_credential_authority_if_required(true, || async move {
+            required_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(7_u8)
+        })
+        .await
+        .unwrap();
+        assert_eq!(connected, Some(7));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let error = connect_native_credential_authority_if_required(true, || async {
+            Err::<u8, _>(anyhow::anyhow!("authority unavailable"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "authority unavailable");
+    }
+
+    #[tokio::test]
+    async fn authority_admission_precedes_native_supervisor_reuse() {
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let authority_order = std::sync::Arc::clone(&order);
+        let supervisor_order = std::sync::Arc::clone(&order);
+        let result = connect_native_after_authority_admission(
+            || async move {
+                authority_order.lock().unwrap().push("authority");
+                Ok(())
+            },
+            || async move {
+                supervisor_order.lock().unwrap().push("supervisor");
+                Ok(7_u8)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 7);
+        assert_eq!(*order.lock().unwrap(), ["authority", "supervisor"]);
+
+        let supervisor_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called = std::sync::Arc::clone(&supervisor_called);
+        let error = connect_native_after_authority_admission(
+            || async { anyhow::bail!("authority protocol rejected") },
+            || async move {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "authority protocol rejected");
+        assert!(!supervisor_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn legacy_local_state_is_used_only_as_a_read_only_name_collision_index() {

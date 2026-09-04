@@ -34,7 +34,11 @@ mod tests {
                 false,
             )
             .expect("Kata regorus must evaluate the rendered policy");
-        assert_eq!(result.result.len(), 1, "unexpected policy result: {result:?}");
+        assert_eq!(
+            result.result.len(),
+            1,
+            "unexpected policy result: {result:?}"
+        );
         assert_eq!(
             result.result[0].expressions.len(),
             1,
@@ -48,9 +52,8 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let mount_point = format!(
-            "/run/kata-containers/shared/containers/passthrough/confidential-{digest}"
-        );
+        let mount_point =
+            format!("/run/kata-containers/shared/containers/passthrough/confidential-{digest}");
         serde_json::json!({
             "OCI": {
                 "Annotations": {
@@ -236,11 +239,7 @@ mod tests {
             ("runtime_policy", include_str!("runtime_policy.rs")),
         ];
         for (name, source) in leaves {
-            for forbidden in [
-                "super::gateway",
-                "super::network",
-                "super::workspace",
-            ] {
+            for forbidden in ["super::gateway", "super::network", "super::workspace"] {
                 assert!(
                     !source.contains(forbidden),
                     "{name} leaf imports forbidden renderer {forbidden}"
@@ -272,9 +271,7 @@ mod tests {
     fn workspace_avoids_reapplying_recursive_volume_ownership() {
         let template = render_sandbox_template("dev-sandboxes", &commodity_opts());
         assert_eq!(
-            template.pointer(
-                "/spec/podTemplate/spec/securityContext/fsGroupChangePolicy"
-            ),
+            template.pointer("/spec/podTemplate/spec/securityContext/fsGroupChangePolicy"),
             Some(&json!("OnRootMismatch"))
         );
     }
@@ -549,8 +546,7 @@ mod tests {
             "commodity gateways must retain the Kubernetes progress deadline"
         );
         assert!(
-            gateway["spec"]["template"]["metadata"]["labels"]
-                ["codewire.sh/isolation-tier"]
+            gateway["spec"]["template"]["metadata"]["labels"]["codewire.sh/isolation-tier"]
                 .is_null(),
             "commodity gateways must not gain the confidential Trustee ingress label"
         );
@@ -683,8 +679,8 @@ mod tests {
         let managed_spec = &managed["spec"]["podTemplate"]["spec"];
         let managed_workspace = &managed_spec["containers"][0];
         let managed_command = managed_workspace["command"][2].as_str().unwrap();
-        assert!(managed_command.contains("while [ ! -x /codewire/bin/cw ]"));
-        assert!(managed_command.contains("exec /codewire/bin/cw daemon"));
+        assert!(managed_command.contains("while [ ! -x /codewire/bin/codewire-daemon ]"));
+        assert!(managed_command.contains("exec /codewire/bin/codewire-daemon"));
         assert!(!managed_command.contains("nohup cw node"));
         assert!(
             managed_workspace["env"]
@@ -716,17 +712,39 @@ mod tests {
         let custom_command = custom["spec"]["podTemplate"]["spec"]["containers"][0]["command"][2]
             .as_str()
             .unwrap();
-        assert!(custom_command.contains("/bin/custom-entrypoint --serve & workload_pid=$!"));
-        assert!(custom_command.contains("/codewire/bin/cw daemon & daemon_pid=$!"));
+        assert!(custom_command.contains("'/bin/custom-entrypoint' '--serve' & workload_pid=$!"));
+        assert!(custom_command.contains("/codewire/bin/codewire-daemon & daemon_pid=$!"));
         assert!(custom_command.contains("if ! kill -0 \"$daemon_pid\""));
         assert!(
             custom_command
-                .matches("/codewire/bin/cw daemon & daemon_pid=$!")
+                .matches("/codewire/bin/codewire-daemon & daemon_pid=$!")
                 .count()
                 >= 2,
             "custom supervisor must restart the daemon while the workload remains alive"
         );
         assert!(!custom_command.contains("nohup cw node"));
+    }
+
+    #[test]
+    fn custom_entrypoint_arguments_are_shell_quoted() {
+        let rendered = render_sandbox_template(
+            "codewire-runtime",
+            &TemplateOpts {
+                name: "tmpl-custom-quoted".into(),
+                image: "example.invalid/custom:golden".into(),
+                image_command: vec![
+                    "/bin/custom entrypoint".into(),
+                    "literal $(touch /tmp/not-run) 'quote'".into(),
+                ],
+                environment_id: "env-custom-quoted".into(),
+                ..Default::default()
+            },
+        );
+        let command = rendered["spec"]["podTemplate"]["spec"]["containers"][0]["command"][2]
+            .as_str()
+            .unwrap();
+        assert!(command.contains("'/bin/custom entrypoint'"));
+        assert!(command.contains("'literal $(touch /tmp/not-run) '\\''quote'\\'''"));
     }
 
     #[cfg(unix)]
@@ -1311,10 +1329,10 @@ mod tests {
         let manifest_uri = fixture["declaration"]["workspace"]["manifestUri"]
             .as_str()
             .unwrap();
-        let image = fixture["workload_request"]["OCI"]["Annotations"]
-            ["io.kubernetes.cri.image-name"]
-            .as_str()
-            .unwrap();
+        let image =
+            fixture["workload_request"]["OCI"]["Annotations"]["io.kubernetes.cri.image-name"]
+                .as_str()
+                .unwrap();
         let rendered = render_sandbox_template(
             "codewire-runtime",
             &TemplateOpts {
@@ -1380,6 +1398,35 @@ mod tests {
         opts.confidential_storage_manifest_uri =
             "kbs:///default/codewire-storage-manifests/latest".into();
         assert!(opts.validate_confidential_storage_manifest().is_err());
+    }
+
+    #[test]
+    fn owner_authorization_hashes_the_exact_measured_init_data_bytes() {
+        let opts = TemplateOpts {
+            name: "tmpl-confidential-owner-authorization".into(),
+            image: "ghcr.io/codewiresh/workspace-base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            runtime_profile: RUNTIME_PROFILE_CONFIDENTIAL.into(),
+            environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+            confidential_storage_manifest_uri: CONTENT_ADDRESSED_MANIFEST_URI.into(),
+            disk_gib: 20,
+            kata_coco_init_data_enabled: true,
+            ..Default::default()
+        };
+
+        let authorized = confidential_init_data(&opts).unwrap();
+        let rendered = render_sandbox_template("codewire-runtime", &opts);
+        let measured = decode_gzip_base64(
+            rendered["spec"]["podTemplate"]["metadata"]["annotations"]
+                [KATA_COCO_INIT_DATA_ANNOTATION_KEY]
+                .as_str()
+                .unwrap(),
+        );
+
+        assert_eq!(authorized, measured);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(authorized.as_bytes())),
+            format!("{:x}", Sha256::digest(measured.as_bytes()))
+        );
     }
 
     #[test]
@@ -1463,17 +1510,18 @@ mod tests {
         );
         let confidential_daemon_timeout =
             CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS.to_string();
-        assert!(gateway_container["env"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|env| {
-                env["name"].as_str() == Some(GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV)
-                    && env["value"].as_str() == Some(confidential_daemon_timeout.as_str())
-            }));
+        assert!(
+            gateway_container["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|env| {
+                    env["name"].as_str() == Some(GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV)
+                        && env["value"].as_str() == Some(confidential_daemon_timeout.as_str())
+                })
+        );
         assert_eq!(
-            gateway["spec"]["template"]["metadata"]["labels"]
-                ["codewire.sh/isolation-tier"]
+            gateway["spec"]["template"]["metadata"]["labels"]["codewire.sh/isolation-tier"]
                 .as_str(),
             Some("confidential")
         );
@@ -1518,8 +1566,7 @@ mod tests {
         assert!(gateway_init_data.contains("default CreateContainerRequest := true"));
         assert!(!gateway_init_data.contains("codewire_confidential_storage :="));
         assert_eq!(
-            gateway_annotations[KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY]
-                .as_str(),
+            gateway_annotations[KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY].as_str(),
             Some(want_kernel_params)
         );
 
@@ -1910,11 +1957,13 @@ mod tests {
         );
         let ordinary_workspace = &rendered["spec"]["podTemplate"]["spec"]["containers"][0];
         assert!(ordinary_workspace["volumeDevices"].is_null());
-        assert!(ordinary_workspace["volumeMounts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|mount| mount["name"].as_str() == Some("workspace")));
+        assert!(
+            ordinary_workspace["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|mount| mount["name"].as_str() == Some("workspace"))
+        );
 
         let rendered = render_sandbox_template(
             "codewire-runtime",

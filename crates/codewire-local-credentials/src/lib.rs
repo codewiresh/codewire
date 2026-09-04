@@ -44,8 +44,8 @@ pub use service::{
 };
 pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
 pub use workload_secret::{
-    LocalSecretProject, ResolvedWorkloadSecretMetadata, WorkloadSecretDelivery,
-    WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
+    LocalSecretProject, ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata,
+    WorkloadSecretSelection, WorkloadSecretSource,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -3043,8 +3043,6 @@ pub enum LocalCredentialError {
     OrganizationSecretsUnsupported,
     #[error("local workload secret material is missing from protected storage")]
     WorkloadSecretMaterialMissing,
-    #[error("local workload-secret one-boot delivery is unavailable")]
-    WorkloadSecretDeliveryUnavailable,
     #[error(transparent)]
     Access(#[from] AccessError),
     #[error(transparent)]

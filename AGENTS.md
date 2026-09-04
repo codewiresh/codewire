@@ -56,6 +56,16 @@ push, and review inherit it. Continue independent authorized work while passive
 gates run; future gates are not current blockers. `STOPPED_FOR_REPLAN` stops
 Program mutation except read-only diagnosis and control repair.
 
+For long-running work, use one staged proof loop: confirm canonical control and
+risk; get an independent design/security read before broad implementation;
+build the smallest coherent slice; run focused checks; review the resulting
+diff; then run one exact-tree acceptance gate. Commit and update Program
+control/evidence only after that gate. Parallelize read-only audits and disjoint
+edits, with one owner for each mutation surface. If review invalidates a trust
+boundary, remove or defer that slice before spending the expensive gate. Keep
+the main checkout clean, investigate unexpected dirt before changing it, and
+reconcile `origin/main` immediately before landing.
+
 ## Delivery and verification
 
 Forgejo `origin` is canonical; GitHub is a mirror. Branch from current
@@ -150,3 +160,17 @@ weakening of the required local hardware gate.
 - Search existing users before adding global identifiers; send new packages and
   build inputs to every consumer.
 - Never add PAT or SSH deploy-key credentials for the GitHub mirror.
+- In product language and public APIs, use `snapshot` only for saved state that
+  can be reused or restored. Call child-visible values assembled for one
+  process launch an `environment projection`. Call saved running-VM execution
+  state a `VM checkpoint`.
+- Storing or selecting protected material chooses no delivery mode. A binding
+  may choose a typed proxy, signer, or executor that keeps the value hidden, or
+  may explicitly permit a child-visible environment projection. Never infer
+  that choice from a key name or value, and never create a separate secret
+  generation when the owning environment operation already has an identity.
+- New secret delivery is secret-blind by default. A sandbox may receive a
+  loopback endpoint, public trust material, placeholders, and a bounded runtime
+  capability, but not a provider credential or a general secret-read API. Do
+  not claim brokered or enforced mediation until the placement actually denies
+  credential access and direct provider bypass.

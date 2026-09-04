@@ -221,8 +221,6 @@ pub(crate) struct NativeSupervisorArgs {
     pub(crate) platform_config_dir: PathBuf,
     #[arg(long)]
     pub(crate) credential_authority_root: PathBuf,
-    #[arg(long)]
-    pub(crate) workload_secret_runtime_root: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
@@ -240,8 +238,6 @@ pub(crate) struct NativeRunnerArgs {
     pub(crate) mesh_data_dir: PathBuf,
     #[arg(long)]
     pub(crate) platform_config_dir: PathBuf,
-    #[arg(long)]
-    pub(crate) workload_secret_runtime_root: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]

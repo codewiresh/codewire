@@ -5,8 +5,6 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use codewire_workload_secrets::WorkloadSecretBinding;
-
 use crate::{
     GUEST_PROGRESS_VSOCK_PORT, MAX_SETUP_PACK_BYTES, SETUP_ALIGNMENT, SETUP_HEADER_LEN, Sha256Value,
 };
@@ -23,13 +21,11 @@ const FORMAT_VERSION_V2: u16 = 2;
 const FORMAT_VERSION_V3: u16 = 3;
 const FORMAT_VERSION_V4: u16 = 4;
 const FORMAT_VERSION_V5: u16 = 5;
-const FORMAT_VERSION_V6: u16 = 6;
 const HEADER_LEN_V1: usize = 48;
 const HEADER_LEN_V2: usize = 128;
 const HEADER_LEN_V3: usize = 160;
 const HEADER_LEN_V4: usize = 192;
 const HEADER_LEN_V5: usize = HEADER_LEN_V4;
-const HEADER_LEN_V6: usize = 240;
 const CHECKSUM_LEN: usize = 32;
 const CHECKSUM_OFFSET: usize = SEED_LEN - CHECKSUM_LEN;
 const TOKEN_MAX_LEN: usize = 512;
@@ -51,21 +47,15 @@ const DIRECT_SHARES_SHA256_OFFSET: usize = 120;
 const V3_RESERVED_OFFSET: usize = 152;
 const SKILL_SNAPSHOT_SHA256_OFFSET: usize = 152;
 const V4_RESERVED_OFFSET: usize = 184;
-const WORKLOAD_SECRET_TOTAL_LEN_OFFSET: usize = 184;
-const WORKLOAD_SECRET_SHA256_OFFSET: usize = 192;
-const WORKLOAD_SECRET_ENTRY_COUNT_OFFSET: usize = 224;
-const V6_RESERVED_OFFSET: usize = 228;
 const TOKEN_OFFSET_V1: usize = HEADER_LEN_V1;
 const TOKEN_OFFSET_V2: usize = HEADER_LEN_V2;
 const TOKEN_OFFSET_V3: usize = HEADER_LEN_V3;
 const TOKEN_OFFSET_V4: usize = HEADER_LEN_V4;
 const TOKEN_OFFSET_V5: usize = HEADER_LEN_V5;
-const TOKEN_OFFSET_V6: usize = HEADER_LEN_V6;
 const SETUP_PRESENT_FLAG: u16 = 1;
 const DIRECT_SHARES_PRESENT_FLAG: u16 = 1 << 1;
 const SKILL_SNAPSHOT_PRESENT_FLAG: u16 = 1 << 2;
 const DOCKER_DATA_DISK_PRESENT_FLAG: u16 = 1 << 3;
-const WORKLOAD_SECRET_DISK_PRESENT_FLAG: u16 = 1 << 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetupBinding {
@@ -121,7 +111,6 @@ pub struct Seed {
     direct_shares_sha256: Option<Sha256Value>,
     skill_snapshot_sha256: Option<Sha256Value>,
     docker_data_disk: bool,
-    workload_secrets: Option<WorkloadSecretBinding>,
 }
 
 impl Seed {
@@ -140,7 +129,6 @@ impl Seed {
             direct_shares_sha256: None,
             skill_snapshot_sha256: None,
             docker_data_disk: false,
-            workload_secrets: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -162,7 +150,6 @@ impl Seed {
             direct_shares_sha256: None,
             skill_snapshot_sha256: None,
             docker_data_disk: false,
-            workload_secrets: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -185,7 +172,6 @@ impl Seed {
             direct_shares_sha256,
             skill_snapshot_sha256: None,
             docker_data_disk: false,
-            workload_secrets: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -209,7 +195,6 @@ impl Seed {
             direct_shares_sha256,
             skill_snapshot_sha256,
             docker_data_disk: false,
-            workload_secrets: None,
         };
         seed.validate()?;
         Ok(seed)
@@ -252,15 +237,6 @@ impl Seed {
         self.docker_data_disk
     }
 
-    pub fn with_workload_secrets(mut self, binding: WorkloadSecretBinding) -> Self {
-        self.workload_secrets = Some(binding);
-        self
-    }
-
-    pub fn workload_secrets(&self) -> Option<WorkloadSecretBinding> {
-        self.workload_secrets
-    }
-
     pub fn encode(&self) -> [u8; SEED_LEN] {
         // Construction and decoding are the only ways to obtain a Seed, so
         // these invariants have already been checked.
@@ -268,9 +244,7 @@ impl Seed {
 
         let mut bytes = [0_u8; SEED_LEN];
         bytes[..MAGIC.len()].copy_from_slice(MAGIC);
-        let (version, header_len, token_offset) = if self.workload_secrets.is_some() {
-            (FORMAT_VERSION_V6, HEADER_LEN_V6, TOKEN_OFFSET_V6)
-        } else if self.docker_data_disk {
+        let (version, header_len, token_offset) = if self.docker_data_disk {
             (FORMAT_VERSION_V5, HEADER_LEN_V5, TOKEN_OFFSET_V5)
         } else {
             match (
@@ -313,21 +287,6 @@ impl Seed {
         if self.docker_data_disk {
             flags |= DOCKER_DATA_DISK_PRESENT_FLAG;
         }
-        if let Some(binding) = self.workload_secrets {
-            flags |= WORKLOAD_SECRET_DISK_PRESENT_FLAG;
-            put_u64(
-                &mut bytes,
-                WORKLOAD_SECRET_TOTAL_LEN_OFFSET,
-                binding.total_bytes(),
-            );
-            bytes[WORKLOAD_SECRET_SHA256_OFFSET..WORKLOAD_SECRET_SHA256_OFFSET + 32]
-                .copy_from_slice(&binding.sha256());
-            put_u32(
-                &mut bytes,
-                WORKLOAD_SECRET_ENTRY_COUNT_OFFSET,
-                binding.entry_count(),
-            );
-        }
         put_u16(&mut bytes, FLAGS_OFFSET, flags);
         bytes[token_offset..token_offset + self.auth_token.len()]
             .copy_from_slice(self.auth_token.as_bytes());
@@ -355,14 +314,7 @@ impl Seed {
             return Err(SeedError::ChecksumMismatch);
         }
 
-        let (
-            token_offset,
-            setup,
-            direct_shares_sha256,
-            skill_snapshot_sha256,
-            docker_data_disk,
-            workload_secrets,
-        ) = match get_u16(bytes, VERSION_OFFSET) {
+        let decoded_fields = match get_u16(bytes, VERSION_OFFSET) {
             FORMAT_VERSION_V1 => {
                 if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V1 {
                     return Err(SeedError::InvalidFraming);
@@ -370,7 +322,7 @@ impl Seed {
                 if get_u16(bytes, FLAGS_OFFSET) != 0 {
                     return Err(SeedError::NonZeroReserved);
                 }
-                (TOKEN_OFFSET_V1, None, None, None, false, None)
+                (TOKEN_OFFSET_V1, None, None, None, false)
             }
             FORMAT_VERSION_V2 => {
                 if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V2 {
@@ -398,7 +350,7 @@ impl Seed {
                     root_generation,
                     header_sha256,
                 )?;
-                (TOKEN_OFFSET_V2, Some(setup), None, None, false, None)
+                (TOKEN_OFFSET_V2, Some(setup), None, None, false)
             }
             FORMAT_VERSION_V3 => {
                 if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V3 {
@@ -447,7 +399,6 @@ impl Seed {
                     Some(direct_shares_sha256),
                     None,
                     false,
-                    None,
                 )
             }
             FORMAT_VERSION_V4 => {
@@ -516,7 +467,6 @@ impl Seed {
                     direct_shares_sha256,
                     Some(skill_snapshot_sha256),
                     false,
-                    None,
                 )
             }
             FORMAT_VERSION_V5 => {
@@ -596,102 +546,12 @@ impl Seed {
                     direct_shares_sha256,
                     skill_snapshot_sha256,
                     true,
-                    None,
-                )
-            }
-            FORMAT_VERSION_V6 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V6 {
-                    return Err(SeedError::InvalidFraming);
-                }
-                let flags = get_u16(bytes, FLAGS_OFFSET);
-                if flags & WORKLOAD_SECRET_DISK_PRESENT_FLAG == 0
-                    || flags
-                        & !(SETUP_PRESENT_FLAG
-                            | DIRECT_SHARES_PRESENT_FLAG
-                            | SKILL_SNAPSHOT_PRESENT_FLAG
-                            | DOCKER_DATA_DISK_PRESENT_FLAG
-                            | WORKLOAD_SECRET_DISK_PRESENT_FLAG)
-                        != 0
-                    || bytes[V6_RESERVED_OFFSET..HEADER_LEN_V6]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                let setup = if flags & SETUP_PRESENT_FLAG != 0 {
-                    Some(SetupBinding::new(
-                        get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                    )?)
-                } else {
-                    if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                let direct_shares_sha256 = if flags & DIRECT_SHARES_PRESENT_FLAG != 0 {
-                    Some(Sha256Value::from_bytes(
-                        bytes[DIRECT_SHARES_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET]
-                            .try_into()
-                            .expect("fixed seed direct-share digest"),
-                    ))
-                } else {
-                    if bytes[DIRECT_SHARES_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                let skill_snapshot_sha256 = if flags & SKILL_SNAPSHOT_PRESENT_FLAG != 0 {
-                    Some(Sha256Value::from_bytes(
-                        bytes[SKILL_SNAPSHOT_SHA256_OFFSET..V4_RESERVED_OFFSET]
-                            .try_into()
-                            .expect("fixed seed skill-snapshot digest"),
-                    ))
-                } else {
-                    if bytes[SKILL_SNAPSHOT_SHA256_OFFSET..V4_RESERVED_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                let sha256 = bytes
-                    [WORKLOAD_SECRET_SHA256_OFFSET..WORKLOAD_SECRET_SHA256_OFFSET + 32]
-                    .try_into()
-                    .expect("fixed workload-secret digest");
-                let workload_secrets = WorkloadSecretBinding::new(
-                    get_u64(bytes, WORKLOAD_SECRET_TOTAL_LEN_OFFSET),
-                    sha256,
-                    get_u32(bytes, WORKLOAD_SECRET_ENTRY_COUNT_OFFSET),
-                )
-                .map_err(|_| SeedError::InvalidWorkloadSecretBinding)?;
-                (
-                    TOKEN_OFFSET_V6,
-                    setup,
-                    direct_shares_sha256,
-                    skill_snapshot_sha256,
-                    flags & DOCKER_DATA_DISK_PRESENT_FLAG != 0,
-                    Some(workload_secrets),
                 )
             }
             _ => return Err(SeedError::UnsupportedVersion),
         };
+        let (token_offset, setup, direct_shares_sha256, skill_snapshot_sha256, docker_data_disk) =
+            decoded_fields;
 
         let token_len = usize::from(get_u16(bytes, TOKEN_LEN_OFFSET));
         let token_end = token_offset
@@ -723,11 +583,7 @@ impl Seed {
         } else {
             seed
         };
-        Ok(if let Some(binding) = workload_secrets {
-            seed.with_workload_secrets(binding)
-        } else {
-            seed
-        })
+        Ok(seed)
     }
 
     fn validate(&self) -> Result<(), SeedError> {
@@ -775,7 +631,6 @@ impl fmt::Debug for Seed {
             .field("direct_shares_sha256", &self.direct_shares_sha256)
             .field("skill_snapshot_sha256", &self.skill_snapshot_sha256)
             .field("docker_data_disk", &self.docker_data_disk)
-            .field("workload_secrets", &self.workload_secrets)
             .finish()
     }
 }
@@ -814,8 +669,6 @@ pub enum SeedError {
     InvalidTokenCharacters,
     #[error("seed setup binding is invalid")]
     InvalidSetupBinding,
-    #[error("seed workload-secret binding is invalid")]
-    InvalidWorkloadSecretBinding,
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -1115,34 +968,34 @@ mod tests {
     }
 
     #[test]
-    fn seed_v6_binds_one_boot_workload_secrets_with_optional_docker() {
-        let binding = WorkloadSecretBinding::new(4096, [0x5a; 32], 3).unwrap();
-        for docker in [false, true] {
-            let seed = if docker {
-                sample_seed().with_docker_data_disk()
-            } else {
-                sample_seed()
-            }
-            .with_workload_secrets(binding);
-            let encoded = seed.encode();
-            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION_V6);
-            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN_V6 as u16);
-            assert_ne!(
-                get_u16(&encoded, FLAGS_OFFSET) & WORKLOAD_SECRET_DISK_PRESENT_FLAG,
-                0
-            );
-            assert_eq!(Seed::decode(&encoded).unwrap(), seed);
-            assert_eq!(seed.workload_secrets(), Some(binding));
-            assert_eq!(seed.docker_data_disk(), docker);
-        }
+    fn checksum_valid_retired_v6_seed_is_rejected() {
+        // V6 was the unshipped one-boot workload-secret format. Construct its
+        // historical framing locally so compatibility stays explicitly
+        // fail-closed without restoring a production material decoder.
+        const RETIRED_V6: u16 = 6;
+        const RETIRED_HEADER_LEN: usize = 240;
+        const RETIRED_SECRET_TOTAL_LEN_OFFSET: usize = 184;
+        const RETIRED_SECRET_SHA256_OFFSET: usize = 192;
+        const RETIRED_SECRET_ENTRY_COUNT_OFFSET: usize = 224;
+        const RETIRED_SECRET_PRESENT_FLAG: u16 = 1 << 4;
 
-        let mut corrupt = sample_seed().with_workload_secrets(binding).encode();
-        put_u32(&mut corrupt, WORKLOAD_SECRET_ENTRY_COUNT_OFFSET, 0);
-        let checksum = Sha256::digest(&corrupt[..CHECKSUM_OFFSET]);
-        corrupt[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
-        assert_eq!(
-            Seed::decode(&corrupt),
-            Err(SeedError::InvalidWorkloadSecretBinding)
+        let mut encoded = sample_seed().with_docker_data_disk().encode();
+        encoded[V4_RESERVED_OFFSET..RETIRED_HEADER_LEN + TOKEN.len()].fill(0);
+        put_u16(&mut encoded, VERSION_OFFSET, RETIRED_V6);
+        put_u16(&mut encoded, HEADER_LEN_OFFSET, RETIRED_HEADER_LEN as u16);
+        put_u16(
+            &mut encoded,
+            FLAGS_OFFSET,
+            DOCKER_DATA_DISK_PRESENT_FLAG | RETIRED_SECRET_PRESENT_FLAG,
         );
+        put_u64(&mut encoded, RETIRED_SECRET_TOTAL_LEN_OFFSET, 4096);
+        encoded[RETIRED_SECRET_SHA256_OFFSET..RETIRED_SECRET_SHA256_OFFSET + 32].fill(0x5a);
+        put_u32(&mut encoded, RETIRED_SECRET_ENTRY_COUNT_OFFSET, 1);
+        encoded[RETIRED_HEADER_LEN..RETIRED_HEADER_LEN + TOKEN.len()]
+            .copy_from_slice(TOKEN.as_bytes());
+        let checksum = Sha256::digest(&encoded[..CHECKSUM_OFFSET]);
+        encoded[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
+
+        assert_eq!(Seed::decode(&encoded), Err(SeedError::UnsupportedVersion));
     }
 }

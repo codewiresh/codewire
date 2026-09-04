@@ -57,7 +57,7 @@ pub fn build_workspace_env_script(env_vars: &BTreeMap<String, String>) -> String
 /// Mirrors `buildSSHSetupScript`.
 pub fn build_ssh_setup_script(private_key: &str, public_key: &str) -> String {
     format!(
-        "set -eu\numask 077\nmkdir -p \"$HOME/.ssh\"\ncat > \"$HOME/.ssh/id_ed25519\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/id_ed25519.pub\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/known_hosts\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/config\" << 'CWEOF'\nHost *\n    IdentityFile ~/.ssh/id_ed25519\n    StrictHostKeyChecking accept-new\nCWEOF",
+        "set -eu\numask 077\nmkdir -p \"$HOME/.ssh\"\ncat > \"$HOME/.ssh/id_ed25519\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/id_ed25519.pub\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/known_hosts\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/config\" << 'CWEOF'\nHost *\n    IdentityFile ~/.ssh/id_ed25519\n    StrictHostKeyChecking accept-new\nCWEOF\n",
         private_key.trim(),
         public_key.trim(),
         KNOWN_HOSTS.trim(),
@@ -136,7 +136,7 @@ pub fn build_codex_bootstrap_script(mode: &str, value: &str) -> String {
 /// Mirrors `buildGhCliAuthScript`.
 pub fn build_gh_cli_auth_script(token: &str, username: &str) -> String {
     format!(
-        "set -eu\nmkdir -p \"$HOME/.config/gh\"\ncat > \"$HOME/.config/gh/hosts.yml\" << 'CWEOF'\ngithub.com:\n    oauth_token: \"{}\"\n    user: \"{}\"\n    git_protocol: ssh\nCWEOF",
+        "set -eu\nmkdir -p \"$HOME/.config/gh\"\ncat > \"$HOME/.config/gh/hosts.yml\" << 'CWEOF'\ngithub.com:\n    oauth_token: \"{}\"\n    user: \"{}\"\n    git_protocol: ssh\nCWEOF\n",
         token, username
     )
 }

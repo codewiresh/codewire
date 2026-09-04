@@ -163,16 +163,28 @@ async fn reconciler_loop(
 ) {
     let mut ticker = tokio::time::interval(RECONCILER_INTERVAL);
     ticker.tick().await; // align with Go's NewTicker (first fire after interval)
+    let mut startup_recovery_observed = false;
     loop {
         tokio::select! {
             _ = leader_notify.notified() => {
                 if is_leader.load(Ordering::SeqCst) {
                     recover_on_startup(&ctx).await;
+                    startup_recovery_observed = true;
                 }
             }
             _ = ticker.tick() => {
                 if is_leader.load(Ordering::SeqCst) {
+                    // Notify does not retain a permit when leadership is won
+                    // before this task begins waiting. The first leader tick
+                    // is therefore the fallback that makes startup recovery,
+                    // including CPV authorization migration, deterministic.
+                    if !startup_recovery_observed {
+                        recover_on_startup(&ctx).await;
+                        startup_recovery_observed = true;
+                    }
                     run_reconciliation(&ctx).await;
+                } else {
+                    startup_recovery_observed = false;
                 }
             }
         }
@@ -418,6 +430,7 @@ async fn reconcile_stuck_environments(ctx: &WorkerContext) {
 /// Mirrors `recoverOnStartup` + `recoverInterruptedEnvironments`.
 async fn recover_on_startup(ctx: &WorkerContext) {
     reconcile_pending_organization_deletions(ctx).await;
+    enqueue_running_confidential_authorization_backfill(ctx).await;
 
     let kinds: Vec<String> = RECOVERY_JOURNAL_KINDS
         .iter()
@@ -462,6 +475,47 @@ async fn recover_on_startup(ctx: &WorkerContext) {
         tracing::info!(recovered, "reconciler: startup recovery complete");
     } else {
         tracing::debug!("reconciler: startup recovery — no interrupted environments found");
+    }
+}
+
+/// Preauthorize the source-rendered init-data for confidential sandboxes that
+/// were already running before the owner-authorization contract was deployed.
+/// The stable environment workflow supplies the same durable generation and
+/// row-lock fence as every ordinary lifecycle mutation. Repeated leader
+/// acquisition is intentionally idempotent and also repairs retained RVPS
+/// state before a later policy rollout selects the authorization record.
+async fn enqueue_running_confidential_authorization_backfill(ctx: &WorkerContext) {
+    if ctx.confidential_storage.is_none() {
+        return;
+    }
+    let ids: Vec<(String,)> = match sqlx::query_as(
+        r#"SELECT id
+             FROM environments
+            WHERE state = 'running'
+              AND desired_state = 'started'
+              AND isolation_tier = 'confidential'"#,
+    )
+    .fetch_all(&ctx.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(error = %error, "reconciler: query confidential authorization backfill");
+            return;
+        }
+    };
+
+    for (id,) in ids {
+        if let Err(error) = enqueue_environment_reconcile(
+            ctx,
+            &id,
+            true,
+            "confidential init-data authorization backfill",
+        )
+        .await
+        {
+            tracing::error!(environment_id = id, error = %error, "reconciler: enqueue confidential authorization backfill failed");
+        }
     }
 }
 
@@ -865,13 +919,50 @@ async fn reconcile_single_sandbox_liveness(
         }
     };
 
-    if !probe.pod_name.is_empty() || !probe.pod_ip.is_empty() {
-        sync_sandbox_backend_pod_info(ctx, &row, &probe).await;
+    if running_runtime_recovery_required(&row, &probe) {
+        if let Err(error) = enqueue_environment_reconcile(
+            ctx,
+            &row.id,
+            true,
+            "workspace Pod runtime identity is not current",
+        )
+        .await
+        {
+            tracing::warn!(
+                environment_id = row.id,
+                error = %error,
+                "sandbox liveness: enqueue runtime identity reconcile failed"
+            );
+        }
+        return;
     }
 
     if let Some(reason) = sandbox_liveness_reason(now, &row, &probe) {
         mark_sandbox_env_error(ctx, &row, &reason).await;
+        return;
     }
+
+    if !probe.pod_name.is_empty() || !probe.pod_ip.is_empty() {
+        sync_sandbox_backend_pod_info(ctx, &row, &probe).await;
+    }
+}
+
+fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> bool {
+    if row.state != "running"
+        || row.desired_state != "started"
+        || !probe.claim_exists
+        || is_terminal_claim_reason(&probe.claim_reason)
+        || matches!(probe.pod_phase.as_str(), "Failed" | "Succeeded")
+    {
+        return false;
+    }
+    !probe.claim_ready
+        || !probe.pod_exists
+        || probe.pod_name.is_empty()
+        || probe.pod_uid.is_empty()
+        || probe.pod_ip.is_empty()
+        || probe.pod_name != row.pod_name
+        || probe.pod_ip != row.pod_ip
 }
 
 fn setup_activity_active(row: &LivenessRow) -> bool {
@@ -921,6 +1012,8 @@ fn sandbox_liveness_reason(
                 }
             } else if !probe.pod_exists {
                 Some("sandbox pod missing".to_string())
+            } else if probe.pod_uid.is_empty() {
+                Some("sandbox pod missing UID".to_string())
             } else if probe.pod_phase == "Failed" || probe.pod_phase == "Succeeded" {
                 Some(format!(
                     "sandbox pod entered {} unexpectedly",
@@ -1131,10 +1224,10 @@ mod tests {
     #[test]
     fn warm_pool_revision_hash_matches_checked_in_goldens() {
         let isol8 = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&isol8), "1651238f");
+        assert_eq!(warm_pool_revision_hash(&isol8), "2944e433");
 
         let plain = warm_pool_template_opts(&warm_cfg(""), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&plain), "5c281c85");
+        assert_eq!(warm_pool_revision_hash(&plain), "bc913c68");
     }
 
     #[test]
@@ -1179,9 +1272,28 @@ mod tests {
             claim_reason: reason.into(),
             pod_exists: pod,
             pod_phase: phase.into(),
+            pod_uid: if pod { "pod-uid" } else { "" }.into(),
             pod_ip: ip.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn running_replacement_recovers_before_liveness_marks_error() {
+        let mut running = row("running", 300);
+        running.pod_name = "old-pod".into();
+        running.pod_ip = "10.1.1.1".into();
+
+        let pending = probe(true, false, "", false, "", "");
+        assert!(running_runtime_recovery_required(&running, &pending));
+
+        let mut replacement = probe(true, true, "", true, "Running", "10.1.1.2");
+        replacement.pod_name = "new-pod".into();
+        replacement.pod_uid = "new-pod-uid".into();
+        assert!(running_runtime_recovery_required(&running, &replacement));
+
+        let terminal = probe(true, false, "PodFailed", false, "", "");
+        assert!(!running_runtime_recovery_required(&running, &terminal));
     }
 
     #[test]

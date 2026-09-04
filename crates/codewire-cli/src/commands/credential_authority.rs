@@ -73,6 +73,18 @@ pub(crate) async fn connect_local_credential_authority() -> anyhow::Result<Local
         .context("connect to local credential authority")
 }
 
+pub(crate) async fn admit_existing_local_credential_authority() -> anyhow::Result<()> {
+    let env = OsEnv;
+    let root = local_credential_root(&env)?;
+    let config = authority_config(root)?;
+    drop(
+        LocalCredentialClient::admit_existing_or_replace_with(&config, spawn_authority)
+            .await
+            .context("admit existing local credential authority")?,
+    );
+    Ok(())
+}
+
 pub(crate) fn local_credential_root(env: &impl Env) -> anyhow::Result<PathBuf> {
     if let Some(value) = env.var(LOCAL_CREDENTIAL_ROOT_ENV) {
         let root = PathBuf::from(value);

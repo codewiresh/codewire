@@ -80,6 +80,10 @@ pub enum DaemonClientError {
     Status(#[from] tonic::Status),
     #[error("daemon session request stream is closed")]
     RequestClosed,
+    #[error("daemon {0} session ended before an exit frame")]
+    UnexpectedEof(&'static str),
+    #[error("daemon returned an invalid {0} frame")]
+    InvalidFrame(&'static str),
     #[error("{0}")]
     Unsupported(&'static str),
 }
@@ -370,12 +374,12 @@ impl ExecDaemonSession {
     }
 
     pub async fn next_output(&mut self) -> Result<Option<DaemonSessionOutput>, DaemonClientError> {
-        while let Some(message) = self.output.message().await? {
-            if let Some(output) = exec_output_from_message(message) {
-                return Ok(Some(output));
-            }
-        }
-        Ok(None)
+        let message = self
+            .output
+            .message()
+            .await?
+            .ok_or(DaemonClientError::UnexpectedEof("exec"))?;
+        exec_output_from_message(message).map(Some)
     }
 }
 
@@ -391,12 +395,12 @@ impl PtyDaemonSession {
     }
 
     pub async fn next_output(&mut self) -> Result<Option<DaemonSessionOutput>, DaemonClientError> {
-        while let Some(message) = self.output.message().await? {
-            if let Some(output) = pty_output_from_message(message) {
-                return Ok(Some(output));
-            }
-        }
-        Ok(None)
+        let message = self
+            .output
+            .message()
+            .await?
+            .ok_or(DaemonClientError::UnexpectedEof("PTY"))?;
+        pty_output_from_message(message).map(Some)
     }
 }
 
@@ -478,28 +482,38 @@ pub fn pty_input_message(input: PtySessionInput) -> v1::PtyMessage {
     }
 }
 
-pub fn exec_output_from_message(message: v1::ExecMessage) -> Option<DaemonSessionOutput> {
-    match message.payload? {
-        v1::exec_message::Payload::Stdout(data) => Some(DaemonSessionOutput::Stdout(data)),
-        v1::exec_message::Payload::Stderr(data) => Some(DaemonSessionOutput::Stderr(data)),
-        v1::exec_message::Payload::Exit(exit) => Some(DaemonSessionOutput::Exit(exit.code)),
-        v1::exec_message::Payload::Error(error) => Some(DaemonSessionOutput::Error(error)),
-        v1::exec_message::Payload::Start(_)
-        | v1::exec_message::Payload::Stdin(_)
-        | v1::exec_message::Payload::CloseStdin(()) => None,
+pub fn exec_output_from_message(
+    message: v1::ExecMessage,
+) -> Result<DaemonSessionOutput, DaemonClientError> {
+    match message.payload {
+        Some(v1::exec_message::Payload::Stdout(data)) => Ok(DaemonSessionOutput::Stdout(data)),
+        Some(v1::exec_message::Payload::Stderr(data)) => Ok(DaemonSessionOutput::Stderr(data)),
+        Some(v1::exec_message::Payload::Exit(exit)) => Ok(DaemonSessionOutput::Exit(exit.code)),
+        Some(v1::exec_message::Payload::Error(error)) => Ok(DaemonSessionOutput::Error(error)),
+        Some(
+            v1::exec_message::Payload::Start(_)
+            | v1::exec_message::Payload::Stdin(_)
+            | v1::exec_message::Payload::CloseStdin(()),
+        )
+        | None => Err(DaemonClientError::InvalidFrame("exec session output")),
     }
 }
 
-pub fn pty_output_from_message(message: v1::PtyMessage) -> Option<DaemonSessionOutput> {
-    match message.payload? {
-        v1::pty_message::Payload::Stdout(data) => Some(DaemonSessionOutput::Stdout(data)),
-        v1::pty_message::Payload::Stderr(data) => Some(DaemonSessionOutput::Stderr(data)),
-        v1::pty_message::Payload::Exit(exit) => Some(DaemonSessionOutput::Exit(exit.code)),
-        v1::pty_message::Payload::Error(error) => Some(DaemonSessionOutput::Error(error)),
-        v1::pty_message::Payload::Start(_)
-        | v1::pty_message::Payload::Stdin(_)
-        | v1::pty_message::Payload::Resize(_)
-        | v1::pty_message::Payload::CloseStdin(()) => None,
+pub fn pty_output_from_message(
+    message: v1::PtyMessage,
+) -> Result<DaemonSessionOutput, DaemonClientError> {
+    match message.payload {
+        Some(v1::pty_message::Payload::Stdout(data)) => Ok(DaemonSessionOutput::Stdout(data)),
+        Some(v1::pty_message::Payload::Stderr(data)) => Ok(DaemonSessionOutput::Stderr(data)),
+        Some(v1::pty_message::Payload::Exit(exit)) => Ok(DaemonSessionOutput::Exit(exit.code)),
+        Some(v1::pty_message::Payload::Error(error)) => Ok(DaemonSessionOutput::Error(error)),
+        Some(
+            v1::pty_message::Payload::Start(_)
+            | v1::pty_message::Payload::Stdin(_)
+            | v1::pty_message::Payload::Resize(_)
+            | v1::pty_message::Payload::CloseStdin(()),
+        )
+        | None => Err(DaemonClientError::InvalidFrame("PTY session output")),
     }
 }
 
@@ -618,33 +632,37 @@ mod tests {
         assert_eq!(
             exec_output_from_message(v1::ExecMessage {
                 payload: Some(v1::exec_message::Payload::Stdout(b"out".to_vec())),
-            }),
-            Some(DaemonSessionOutput::Stdout(b"out".to_vec()))
+            })
+            .expect("valid exec stdout"),
+            DaemonSessionOutput::Stdout(b"out".to_vec())
         );
         assert_eq!(
             exec_output_from_message(v1::ExecMessage {
                 payload: Some(v1::exec_message::Payload::Stderr(b"err".to_vec())),
-            }),
-            Some(DaemonSessionOutput::Stderr(b"err".to_vec()))
+            })
+            .expect("valid exec stderr"),
+            DaemonSessionOutput::Stderr(b"err".to_vec())
         );
         assert_eq!(
             exec_output_from_message(v1::ExecMessage {
                 payload: Some(v1::exec_message::Payload::Exit(v1::ExitStatus { code: 7 })),
-            }),
-            Some(DaemonSessionOutput::Exit(7))
+            })
+            .expect("valid exec exit"),
+            DaemonSessionOutput::Exit(7)
         );
         assert_eq!(
             exec_output_from_message(v1::ExecMessage {
                 payload: Some(v1::exec_message::Payload::Error("boom".into())),
-            }),
-            Some(DaemonSessionOutput::Error("boom".into()))
+            })
+            .expect("valid exec error"),
+            DaemonSessionOutput::Error("boom".into())
         );
-        assert_eq!(
+        assert!(matches!(
             exec_output_from_message(v1::ExecMessage {
                 payload: Some(v1::exec_message::Payload::CloseStdin(())),
             }),
-            None
-        );
+            Err(DaemonClientError::InvalidFrame("exec session output"))
+        ));
     }
 
     #[test]
@@ -652,36 +670,40 @@ mod tests {
         assert_eq!(
             pty_output_from_message(v1::PtyMessage {
                 payload: Some(v1::pty_message::Payload::Stdout(b"out".to_vec())),
-            }),
-            Some(DaemonSessionOutput::Stdout(b"out".to_vec()))
+            })
+            .expect("valid PTY stdout"),
+            DaemonSessionOutput::Stdout(b"out".to_vec())
         );
         assert_eq!(
             pty_output_from_message(v1::PtyMessage {
                 payload: Some(v1::pty_message::Payload::Stderr(b"err".to_vec())),
-            }),
-            Some(DaemonSessionOutput::Stderr(b"err".to_vec()))
+            })
+            .expect("valid PTY stderr"),
+            DaemonSessionOutput::Stderr(b"err".to_vec())
         );
         assert_eq!(
             pty_output_from_message(v1::PtyMessage {
                 payload: Some(v1::pty_message::Payload::Exit(v1::ExitStatus { code: 7 })),
-            }),
-            Some(DaemonSessionOutput::Exit(7))
+            })
+            .expect("valid PTY exit"),
+            DaemonSessionOutput::Exit(7)
         );
         assert_eq!(
             pty_output_from_message(v1::PtyMessage {
                 payload: Some(v1::pty_message::Payload::Error("boom".into())),
-            }),
-            Some(DaemonSessionOutput::Error("boom".into()))
+            })
+            .expect("valid PTY error"),
+            DaemonSessionOutput::Error("boom".into())
         );
-        assert_eq!(
+        assert!(matches!(
             pty_output_from_message(v1::PtyMessage {
                 payload: Some(v1::pty_message::Payload::Resize(v1::ResizeRequest {
                     width: 80,
                     height: 24,
                 })),
             }),
-            None
-        );
+            Err(DaemonClientError::InvalidFrame("PTY session output"))
+        ));
     }
 
     #[test]
@@ -1045,11 +1067,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn grpc_sessions_reject_eof_without_an_exit_frame() {
+        let daemon = RecordingDaemon {
+            close_exec_before_exit: true,
+            close_pty_before_exit: true,
+            ..Default::default()
+        };
+        let addr = spawn_recording_daemon(daemon).await;
+        let client = DaemonSessionClient::connect_endpoint(format!("http://{addr}"))
+            .await
+            .unwrap();
+
+        let mut exec = client
+            .exec_session(SessionStart {
+                command: vec!["true".into()],
+                working_dir: String::new(),
+                env: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            exec.next_output().await,
+            Ok(Some(DaemonSessionOutput::Stdout(_)))
+        ));
+        assert!(matches!(
+            exec.next_output().await,
+            Err(DaemonClientError::UnexpectedEof("exec"))
+        ));
+
+        let mut pty = client
+            .pty_session(PtyStart {
+                command: vec!["sh".into()],
+                working_dir: String::new(),
+                env: Vec::new(),
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            pty.next_output().await,
+            Ok(Some(DaemonSessionOutput::Stdout(_)))
+        ));
+        assert!(matches!(
+            pty.next_output().await,
+            Err(DaemonClientError::UnexpectedEof("PTY"))
+        ));
+    }
+
     #[derive(Clone, Default)]
     struct RecordingDaemon {
         exec_frames: Arc<Mutex<Vec<v1::ExecMessage>>>,
         pty_frames: Arc<Mutex<Vec<v1::PtyMessage>>>,
         file_requests: Arc<Mutex<RecordingFileRequests>>,
+        close_exec_before_exit: bool,
+        close_pty_before_exit: bool,
     }
 
     #[derive(Clone, Default)]
@@ -1115,6 +1189,8 @@ mod tests {
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
+        type CredentialBridgeStream =
+            ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
 
         async fn get_capabilities(
             &self,
@@ -1128,6 +1204,13 @@ mod tests {
             _request: Request<v1::GetHealthRequest>,
         ) -> Result<Response<v1::GetHealthResponse>, Status> {
             Err(Status::unimplemented("get health"))
+        }
+
+        async fn credential_bridge(
+            &self,
+            _request: Request<tonic::Streaming<v1::CredentialBridgeHostMessage>>,
+        ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
+            Err(Status::unimplemented("credential bridge"))
         }
 
         async fn launch_session(
@@ -1203,11 +1286,13 @@ mod tests {
             }))
             .await
             .unwrap();
-            tx.send(Ok(v1::ExecMessage {
-                payload: Some(v1::exec_message::Payload::Exit(v1::ExitStatus { code: 0 })),
-            }))
-            .await
-            .unwrap();
+            if !self.close_exec_before_exit {
+                tx.send(Ok(v1::ExecMessage {
+                    payload: Some(v1::exec_message::Payload::Exit(v1::ExitStatus { code: 0 })),
+                }))
+                .await
+                .unwrap();
+            }
             Ok(Response::new(ReceiverStream::new(rx)))
         }
 
@@ -1235,11 +1320,13 @@ mod tests {
             }))
             .await
             .unwrap();
-            tx.send(Ok(v1::PtyMessage {
-                payload: Some(v1::pty_message::Payload::Exit(v1::ExitStatus { code: 0 })),
-            }))
-            .await
-            .unwrap();
+            if !self.close_pty_before_exit {
+                tx.send(Ok(v1::PtyMessage {
+                    payload: Some(v1::pty_message::Payload::Exit(v1::ExitStatus { code: 0 })),
+                }))
+                .await
+                .unwrap();
+            }
             Ok(Response::new(ReceiverStream::new(rx)))
         }
 

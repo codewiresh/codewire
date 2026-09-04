@@ -867,16 +867,73 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     let client = connect_when_ready(&config).await;
     drop(client);
 
+    let admitted = LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+        panic!("an admitted authority must not spawn a replacement")
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(admitted.info().protocol_version, 7);
+    drop(admitted);
+
     let client = LocalCredentialClient::connect_or_start_with(&config, |_| {
         panic!("an admitted authority must not spawn a replacement")
     })
     .await
     .unwrap();
-    assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
+    assert_eq!(AUTHORITY_PROTOCOL_VERSION, 7);
+    assert_eq!(client.info().protocol_version, 7);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     drop(shutdown);
     assert!(!config.socket().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_authority_admission_skips_an_absent_socket_without_spawning() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    assert!(
+        LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+            panic!("an absent authority must not spawn")
+        })
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(!config.root.exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_authority_admission_fails_closed_for_a_dead_socket_without_spawning() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    config.prepare_root().unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(config.socket()).unwrap();
+    fs::set_permissions(config.socket(), fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    let error = LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+        panic!("an unadmitted authority socket must not spawn")
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AuthorityRuntimeError::Connect));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_authority_admission_rejects_an_invalid_socket_without_spawning() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    config.prepare_root().unwrap();
+    fs::write(config.socket(), b"not a socket").unwrap();
+    fs::set_permissions(config.socket(), fs::Permissions::from_mode(0o600)).unwrap();
+
+    let error = LocalCredentialClient::admit_existing_or_replace_with(&config, |_| {
+        panic!("an invalid authority socket must not spawn")
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AuthorityRuntimeError::InvalidPrivateSocket));
 }
 
 #[tokio::test(flavor = "multi_thread")]

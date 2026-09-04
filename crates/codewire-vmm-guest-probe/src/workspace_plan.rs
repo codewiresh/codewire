@@ -13,7 +13,6 @@ use std::io::{self, Read as _};
 use std::path::Path;
 
 use codewire_project::ProjectSpec;
-use codewire_workload_secrets::DecodedWorkloadSecrets;
 use oci_spec::image::ImageConfiguration;
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
@@ -210,43 +209,6 @@ impl WorkspacePlan {
             startup_script: project.startup_script,
             skills_selected: !project.skills.is_empty(),
         };
-        plan.validate()?;
-        Ok(plan)
-    }
-
-    pub(crate) fn with_workload_secrets(
-        &self,
-        secrets: &DecodedWorkloadSecrets,
-    ) -> Result<Self, WorkspacePlanError> {
-        let explicit = self
-            .explicit_environment_keys
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        let mut environment = self
-            .environment
-            .iter()
-            .map(|entry| {
-                entry
-                    .split_once('=')
-                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                    .ok_or(WorkspacePlanError::Plan)
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        for (key, value) in secrets.entries() {
-            if explicit.contains(key.as_str()) {
-                return Err(WorkspacePlanError::Plan);
-            }
-            let value = std::str::from_utf8(value)
-                .map_err(|_| WorkspacePlanError::Plan)?
-                .to_owned();
-            environment.insert(key.clone(), value);
-        }
-        let mut plan = self.clone();
-        plan.environment = environment
-            .into_iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect();
         plan.validate()?;
         Ok(plan)
     }
@@ -771,7 +733,6 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use codewire_project::ProjectSpec;
-    use codewire_workload_secrets::{decode_workload_secrets, encode_workload_secrets};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -992,39 +953,6 @@ mod tests {
         ] {
             assert!(!debug.contains(canary));
         }
-    }
-
-    #[test]
-    fn workload_secrets_override_image_values_but_not_explicit_project_values() {
-        let root = root();
-        let config = config(json!({}));
-        let header = setup(&config);
-        let plan =
-            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
-        assert_eq!(plan.explicit_environment_keys, vec!["PROJECT"]);
-
-        let encoded = encode_workload_secrets([
-            ("IMAGE", b"secret-image".as_slice()),
-            ("TOKEN", b"synthetic-token".as_slice()),
-        ])
-        .unwrap();
-        let secrets = decode_workload_secrets(encoded.bytes(), encoded.binding()).unwrap();
-        let active = plan.with_workload_secrets(&secrets).unwrap();
-        assert!(
-            active
-                .environment
-                .contains(&"IMAGE=secret-image".to_owned())
-        );
-        assert!(
-            active
-                .environment
-                .contains(&"TOKEN=synthetic-token".to_owned())
-        );
-        assert!(active.environment.contains(&"PROJECT=yes".to_owned()));
-
-        let encoded = encode_workload_secrets([("PROJECT", b"must-not-win".as_slice())]).unwrap();
-        let secrets = decode_workload_secrets(encoded.bytes(), encoded.binding()).unwrap();
-        assert!(plan.with_workload_secrets(&secrets).is_err());
     }
 
     #[test]

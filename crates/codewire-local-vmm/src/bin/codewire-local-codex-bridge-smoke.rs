@@ -82,10 +82,12 @@ mod linux {
         state_root: PathBuf,
         artifact_root: PathBuf,
         artifact_lock: PathBuf,
+        mesh_data_dir: PathBuf,
+        platform_config_dir: PathBuf,
+        credential_authority_root: PathBuf,
         cw_bin: PathBuf,
         target: String,
         managed_broker: bool,
-        credential_authority_root: Option<PathBuf>,
         credential_id: Option<String>,
     }
 
@@ -105,19 +107,14 @@ mod linux {
 
     pub(super) async fn run() -> SmokeResult<()> {
         let args = Args::parse(std::env::args().skip(1))?;
-        let credential_authority_root = args
-            .credential_authority_root
-            .clone()
-            .unwrap_or_else(|| args.state_root.join("credential-authority"));
         stage("supervisor-connect");
         let mut supervisor = NativeSupervisorClient::connect_or_start(&NativeRuntimeConfig {
             root: args.state_root.clone(),
             artifact_root: args.artifact_root.clone(),
             artifact_lock: args.artifact_lock.clone(),
-            mesh_data_dir: args.state_root.join("unused-mesh-auth"),
-            platform_config_dir: args.state_root.join("unused-platform-auth"),
-            credential_authority_root,
-            workload_secret_runtime_root: None,
+            mesh_data_dir: args.mesh_data_dir.clone(),
+            platform_config_dir: args.platform_config_dir.clone(),
+            credential_authority_root: args.credential_authority_root.clone(),
             executable: args.cw_bin.clone(),
         })
         .await?;
@@ -195,7 +192,7 @@ mod linux {
         daemon: &SessionClient,
         environment: &local_v1::Environment,
     ) -> SmokeResult<()> {
-        let credential_root = args.credential_authority_root.as_ref().ok_or_else(failed)?;
+        let credential_root = &args.credential_authority_root;
         let credential_id =
             CredentialId::parse(args.credential_id.as_ref().ok_or_else(failed)?.clone())?;
         let environment_id = EnvironmentId::parse(environment.id.clone())?;
@@ -575,9 +572,7 @@ socket.on('error',()=>process.exit(1));"#;
         let Ok(metadata) = fs::metadata(&process) else {
             return false;
         };
-        let Some(expected_argv) = expected_authority_argv(args) else {
-            return false;
-        };
+        let expected_argv = expected_authority_argv(args);
         metadata.uid() == unsafe { libc::geteuid() }
             && fs::read_link(process.join("exe")).ok().as_deref() == Some(args.cw_bin.as_path())
             && exact_process_argv(&process, &expected_argv)
@@ -612,16 +607,13 @@ socket.on('error',()=>process.exit(1));"#;
         parents.next().is_none().then_some(parent)
     }
 
-    fn expected_authority_argv(args: &Args) -> Option<Vec<OsString>> {
-        Some(vec![
+    fn expected_authority_argv(args: &Args) -> Vec<OsString> {
+        vec![
             args.cw_bin.as_os_str().to_owned(),
             "__local-credential-authority".into(),
             "--root".into(),
-            args.credential_authority_root
-                .as_ref()?
-                .as_os_str()
-                .to_owned(),
-        ])
+            args.credential_authority_root.as_os_str().to_owned(),
+        ]
     }
 
     fn expected_broker_argv(args: &Args, environment: &local_v1::Environment) -> Vec<OsString> {
@@ -958,10 +950,12 @@ socket.on('error',()=>process.exit(1));"#;
             let mut state_root = None;
             let mut artifact_root = None;
             let mut artifact_lock = None;
+            let mut mesh_data_dir = None;
+            let mut platform_config_dir = None;
+            let mut credential_authority_root = None;
             let mut cw_bin = None;
             let mut target = None;
             let mut managed_broker = false;
-            let mut credential_authority_root = None;
             let mut credential_id = None;
             while let Some(flag) = arguments.next() {
                 if flag == "--managed-broker" {
@@ -976,9 +970,11 @@ socket.on('error',()=>process.exit(1));"#;
                     "--state-root" => &mut state_root,
                     "--artifact-root" => &mut artifact_root,
                     "--artifact-lock" => &mut artifact_lock,
+                    "--mesh-data-dir" => &mut mesh_data_dir,
+                    "--platform-config-dir" => &mut platform_config_dir,
+                    "--credential-authority-root" => &mut credential_authority_root,
                     "--cw-bin" => &mut cw_bin,
                     "--target" => &mut target,
-                    "--credential-authority-root" => &mut credential_authority_root,
                     "--credential-id" => &mut credential_id,
                     _ => return Err(failed()),
                 };
@@ -986,24 +982,20 @@ socket.on('error',()=>process.exit(1));"#;
                     return Err(failed());
                 }
             }
-            let credential_authority_root = credential_authority_root
-                .map(|value| absolute_path(Some(value)))
-                .transpose()?;
             let credential_id = credential_id.filter(|value| !value.is_empty());
-            require(match managed_broker {
-                true => credential_authority_root.is_some() && credential_id.is_some(),
-                false => credential_authority_root.is_none() && credential_id.is_none(),
-            })?;
+            require(managed_broker == credential_id.is_some())?;
             Ok(Self {
                 state_root: absolute_path(state_root)?,
                 artifact_root: absolute_path(artifact_root)?,
                 artifact_lock: absolute_path(artifact_lock)?,
+                mesh_data_dir: absolute_path(mesh_data_dir)?,
+                platform_config_dir: absolute_path(platform_config_dir)?,
+                credential_authority_root: absolute_path(credential_authority_root)?,
                 cw_bin: absolute_path(cw_bin)?,
                 target: target
                     .filter(|value| !value.is_empty())
                     .ok_or_else(failed)?,
                 managed_broker,
-                credential_authority_root,
                 credential_id,
             })
         }
@@ -1067,6 +1059,12 @@ socket.on('error',()=>process.exit(1));"#;
                 "/artifacts",
                 "--artifact-lock",
                 "/artifacts.lock.json",
+                "--mesh-data-dir",
+                "/mesh",
+                "--platform-config-dir",
+                "/platform",
+                "--credential-authority-root",
+                "/credentials",
                 "--cw-bin",
                 "/bin/cw",
                 "--target",
@@ -1081,14 +1079,14 @@ socket.on('error',()=>process.exit(1));"#;
         fn direct_mode_rejects_managed_arguments() {
             let direct = Args::parse(required_arguments()).unwrap();
             assert!(!direct.managed_broker);
-            assert!(direct.credential_authority_root.is_none());
+            assert_eq!(
+                direct.credential_authority_root,
+                std::path::Path::new("/credentials")
+            );
             assert!(direct.credential_id.is_none());
 
             let mut incomplete = required_arguments();
-            incomplete.extend([
-                "--credential-authority-root".to_owned(),
-                "/credentials".to_owned(),
-            ]);
+            incomplete.extend(["--credential-id".to_owned(), "credential-id".to_owned()]);
             assert!(Args::parse(incomplete).is_err());
         }
 
@@ -1097,16 +1095,14 @@ socket.on('error',()=>process.exit(1));"#;
             let mut managed = required_arguments();
             managed.extend([
                 "--managed-broker".to_owned(),
-                "--credential-authority-root".to_owned(),
-                "/credentials".to_owned(),
                 "--credential-id".to_owned(),
                 "credential-id".to_owned(),
             ]);
             let parsed = Args::parse(managed.clone()).unwrap();
             assert!(parsed.managed_broker);
             assert_eq!(
-                parsed.credential_authority_root.as_deref(),
-                Some(std::path::Path::new("/credentials"))
+                parsed.credential_authority_root,
+                std::path::Path::new("/credentials")
             );
             assert_eq!(parsed.credential_id.as_deref(), Some("credential-id"));
 

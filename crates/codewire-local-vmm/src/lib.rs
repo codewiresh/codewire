@@ -70,7 +70,6 @@ pub use direct_share::DirectShareRequest;
 pub use linux::{
     CloudHypervisorRunner, CreateVmRequest, ExitClass, LiveProcess, PreparedVm, ProcessIdentity,
     RecoveredVm, RecoveryError, RunnerConfig, RunnerError, RunningVm, StateDiskIdentity, VmPaths,
-    WorkloadSecretDiskRequest,
 };
 
 #[cfg(not(target_os = "linux"))]

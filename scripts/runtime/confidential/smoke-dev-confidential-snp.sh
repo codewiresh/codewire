@@ -12,6 +12,7 @@ NODE="${CONFIDENTIAL_SNP_NODE:-cw-dev-prod-node-1}"
 INFRA_ROOT="${INFRA_ROOT:-$HOME/src/infra}"
 HOST_GATE_STACK="${CONFIDENTIAL_SNP_HOST_GATE_STACK:-dev-cluster}"
 HOST_GATE_MIN_EPHEMERAL_GIB="${CONFIDENTIAL_SNP_HOST_GATE_MIN_EPHEMERAL_GIB:-1500}"
+HOST_PROFILE_ISOLATION_RECEIPT='check-talos-runtime-artifacts: confidential profile isolation passed: shared_fs=none host-share-overrides=denied'
 PROBE_NAMESPACE="${CONFIDENTIAL_SNP_PROBE_NAMESPACE:-codewire-runtime-probes}"
 CODEWIRE_SERVER_NAMESPACE="${CODEWIRE_SERVER_NAMESPACE:-dev}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-dev-sandboxes}"
@@ -242,6 +243,9 @@ run_host_gate() {
     ./scripts/talos-external-worker verify \
       "$HOST_GATE_STACK" "$NODE" "$HOST_GATE_MIN_EPHEMERAL_GIB"
   ) 2>&1 | tee "$EVIDENCE_DIR/host-runtime-gate.log"
+  grep -Fxq -- "$HOST_PROFILE_ISOLATION_RECEIPT" \
+    "$EVIDENCE_DIR/host-runtime-gate.log" || \
+    die "Infra host gate did not prove the rendered QEMU-SNP shared_fs=none isolation contract"
 }
 
 check_runtime_contract() {

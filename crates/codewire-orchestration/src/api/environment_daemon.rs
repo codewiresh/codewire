@@ -23,6 +23,7 @@ use codewire_server_core::org_deletion::{
 use codewire_server_core::{AppError, AppResult};
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
+use sqlx::Row;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
@@ -30,9 +31,14 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Streaming};
 
 use super::ApiState;
-use super::proxy::{huma_error, resolve_running_sandbox_target};
+use super::proxy::{
+    huma_error, resolve_running_sandbox_target, resolve_running_sandbox_target_for_repair,
+};
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::template::{WORKSPACE_DAEMON_PORT, workspace_daemon_service_name};
+use crate::worker::activity_authority::{
+    ActivityAuthority, await_external_mutation, is_authority_lost,
+};
 use crate::worker::gatewayauth::{SCOPE_COORDINATE, issue_token};
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,6 +47,10 @@ const DAEMON_STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DAEMON_LOG_TAIL_LINES: i64 = 500;
 const MAXIMUM_TEST_ENDPOINT_CONFIG_BYTES: usize = 16 * 1024;
 const MAXIMUM_TEST_ENDPOINTS: usize = 64;
+
+#[derive(Debug, thiserror::Error)]
+#[error("environment setup or recovery is in progress")]
+struct DaemonRepairSetupBusy;
 
 pub const TEST_DAEMON_ENDPOINTS_ENV: &str = "CODEWIRE_TEST_ENVIRONMENT_DAEMON_ENDPOINTS_JSON";
 
@@ -491,21 +501,116 @@ pub async fn repair_environment_daemon_core(
     org_id: &str,
     environment_id: &str,
 ) -> AppResult<EnvironmentDaemonRepair> {
-    let target = resolve_target(state, user, org_id, environment_id).await?;
+    let target = resolve_running_sandbox_target_for_repair(state, user, org_id, environment_id)
+        .await
+        .map_err(|(status, message)| huma_error(status, message))?;
     let kube = state
         .kube
         .as_ref()
         .ok_or_else(|| AppError::ServiceUnavailable("sandbox client not configured".into()))?;
     let sandbox = SandboxClient::new(kube.clone(), &target.namespace);
+    // No database connection is pinned across the long replacement wait.
+    // Concurrent callers may observe the same incarnation, but deletion is
+    // UID-fenced, replacement wait is keyed by that old UID, and the final
+    // database update is generation-authorized. Those operations converge on
+    // the same replacement without risking pool exhaustion or deleting a
+    // newer Pod.
+    let mut setup_check = state.pool.begin().await.map_err(AppError::from)?;
+    let current: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT state, desired_state, environment_operation_generation \
+           FROM environments WHERE id = $1 FOR UPDATE",
+    )
+    .bind(&target.environment_id)
+    .fetch_optional(&mut *setup_check)
+    .await
+    .map_err(AppError::from)?;
+    let generation = match current.as_ref() {
+        Some((state, desired, generation))
+            if state == "running" && desired == "started" && *generation > 0 =>
+        {
+            *generation
+        }
+        _ => {
+            return Err(AppError::Conflict(
+                "environment state changed during daemon repair".into(),
+            ));
+        }
+    };
+    let setup = sqlx::query(
+        "SELECT COALESCE(setup_complete, false) AS setup_complete, setup_owner_status \
+           FROM sandbox_environment_backend \
+          WHERE environment_id = $1 FOR UPDATE",
+    )
+    .bind(&target.environment_id)
+    .fetch_optional(&mut *setup_check)
+    .await
+    .map_err(AppError::from)?
+    .ok_or_else(|| AppError::ServiceUnavailable("sandbox backend not found".into()))?;
+    let setup_complete: bool = setup.get("setup_complete");
+    let setup_owner_status: Option<String> = setup.get("setup_owner_status");
+    if !daemon_repair_setup_is_idle(setup_complete, setup_owner_status.as_deref()) {
+        return Err(AppError::Conflict(
+            "environment setup or recovery is in progress".into(),
+        ));
+    }
+    setup_check.commit().await.map_err(AppError::from)?;
+    let authority = ActivityAuthority::capture_required(
+        &state.pool,
+        &target.environment_id,
+        "started",
+        generation,
+    )
+    .await
+    .map_err(|_| AppError::Conflict("environment state changed during daemon repair".into()))?;
+    let current = sandbox
+        .get_workspace_pod_identity(&target.environment_id)
+        .await
+        .map_err(|_| AppError::ServiceUnavailable("workspace Pod is unavailable".into()))?
+        .ok_or_else(|| AppError::ServiceUnavailable("workspace Pod is unavailable".into()))?;
     let lease =
         acquire_environment_runtime_mutation_lease(&state.pool, org_id, &target.environment_id)
             .await?;
 
-    let replacement = match sandbox
-        .delete_and_wait_for_replacement_workspace_pod(
-            &target.environment_id,
-            Some(&target.pod_name),
-            DAEMON_REPAIR_TIMEOUT,
+    if let Err(error) = delete_workspace_pod_while_setup_idle(
+        &authority,
+        &sandbox,
+        &target.environment_id,
+        &current.name,
+        &current.uid,
+    )
+    .await
+    {
+        if error.downcast_ref::<DaemonRepairSetupBusy>().is_some() {
+            release_organization_mutation_lease(&state.pool, &lease.id).await?;
+            return Err(AppError::Conflict(
+                "environment setup or recovery is in progress".into(),
+            ));
+        }
+        if is_authority_lost(&error) {
+            release_organization_mutation_lease(&state.pool, &lease.id).await?;
+            return Err(AppError::Conflict(
+                "environment state changed during daemon repair".into(),
+            ));
+        }
+        mark_organization_mutation_resolution_required(
+            &state.pool,
+            &lease.id,
+            "environment_daemon_repair_ambiguous",
+        )
+        .await?;
+        tracing::warn!(environment_id, %error, "environment daemon repair failed");
+        return Err(AppError::Upstream(
+            "environment daemon repair did not converge".into(),
+        ));
+    }
+    let replacement = match authority
+        .run_while_authoritative_for_states(
+            &["running"],
+            sandbox.wait_for_replacement_workspace_pod(
+                &current.name,
+                &current.uid,
+                DAEMON_REPAIR_TIMEOUT,
+            ),
         )
         .await
     {
@@ -527,10 +632,21 @@ pub async fn repair_environment_daemon_core(
             ));
         }
     };
-    release_organization_mutation_lease(&state.pool, &lease.id).await?;
-
     let deadline = tokio::time::Instant::now() + DAEMON_REPAIR_TIMEOUT;
-    loop {
+    let status = loop {
+        if let Err(error) = authority.ensure_for_states(&["running"]).await {
+            mark_organization_mutation_resolution_required(
+                &state.pool,
+                &lease.id,
+                "environment_daemon_repair_readiness_ambiguous",
+            )
+            .await?;
+            return Err(if is_authority_lost(&error) {
+                AppError::Conflict("environment state changed during daemon repair".into())
+            } else {
+                AppError::Upstream("environment daemon repair did not converge".into())
+            });
+        }
         match daemon_status_for_target(
             state,
             &target.namespace,
@@ -548,23 +664,144 @@ pub async fn repair_environment_daemon_core(
                         | v1::DaemonState::Unhealthy
                 ) =>
             {
-                return Ok(EnvironmentDaemonRepair {
-                    status,
-                    replaced_pod_name: replacement.name,
-                });
+                break status;
             }
             Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(DAEMON_STATUS_RETRY_INTERVAL).await;
             }
             Ok(status) => {
-                return Ok(EnvironmentDaemonRepair {
-                    status,
-                    replaced_pod_name: replacement.name,
-                });
+                break status;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                mark_organization_mutation_resolution_required(
+                    &state.pool,
+                    &lease.id,
+                    "environment_daemon_repair_readiness_ambiguous",
+                )
+                .await?;
+                return Err(error);
+            }
         }
+    };
+    let probe = match authority
+        .run_while_authoritative_for_states(
+            &["running"],
+            sandbox.probe_environment(&target.environment_id),
+        )
+        .await
+    {
+        Ok(probe)
+            if probe.pod_exists
+                && probe.pod_name == replacement.name
+                && probe.pod_uid == replacement.uid
+                && !probe.pod_ip.is_empty() =>
+        {
+            probe
+        }
+        Ok(_) => {
+            mark_organization_mutation_resolution_required(
+                &state.pool,
+                &lease.id,
+                "environment_daemon_repair_backend_ambiguous",
+            )
+            .await?;
+            return Err(AppError::Upstream(
+                "environment daemon repair did not converge".into(),
+            ));
+        }
+        Err(error) => {
+            mark_organization_mutation_resolution_required(
+                &state.pool,
+                &lease.id,
+                "environment_daemon_repair_backend_ambiguous",
+            )
+            .await?;
+            tracing::warn!(environment_id, %error, "environment daemon repair backend did not converge");
+            return Err(if is_authority_lost(&error) {
+                AppError::Conflict("environment state changed during daemon repair".into())
+            } else {
+                AppError::Upstream("environment daemon repair did not converge".into())
+            });
+        }
+    };
+    let backend_update = authority
+        .execute_for_states(
+            &["running"],
+            sqlx::query(
+                "UPDATE sandbox_environment_backend SET pod_name = $1, pod_ip = $2 \
+                 WHERE environment_id = $3",
+            )
+            .bind(&probe.pod_name)
+            .bind(&probe.pod_ip)
+            .bind(&target.environment_id),
+        )
+        .await;
+    if !matches!(backend_update, Ok(ref result) if result.rows_affected() == 1) {
+        mark_organization_mutation_resolution_required(
+            &state.pool,
+            &lease.id,
+            "environment_daemon_repair_backend_ambiguous",
+        )
+        .await?;
+        return Err(AppError::Upstream(
+            "environment daemon repair did not converge".into(),
+        ));
     }
+    release_organization_mutation_lease(&state.pool, &lease.id).await?;
+    Ok(EnvironmentDaemonRepair {
+        status,
+        replaced_pod_name: replacement.name,
+    })
+}
+
+fn daemon_repair_setup_is_idle(setup_complete: bool, setup_owner_status: Option<&str>) -> bool {
+    setup_complete && setup_owner_status.is_none()
+}
+
+async fn delete_workspace_pod_while_setup_idle(
+    authority: &ActivityAuthority,
+    sandbox: &SandboxClient,
+    environment_id: &str,
+    pod_name: &str,
+    pod_uid: &str,
+) -> anyhow::Result<()> {
+    let mut guard = authority.begin_external_mutation(&["running"]).await?;
+    // Setup lease transitions use this same lock order: environment first,
+    // backend second. The fresh check and UID-fenced deletion therefore share
+    // one serialization boundary with every setup claim and exec attachment.
+    let setup = sqlx::query(
+        "SELECT COALESCE(setup_complete, false) AS setup_complete, setup_owner_status \
+           FROM sandbox_environment_backend \
+          WHERE environment_id = $1 \
+          FOR UPDATE",
+    )
+    .bind(environment_id)
+    .fetch_optional(&mut **guard.transaction())
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("sandbox backend not found"))?;
+    let setup_complete: bool = setup.get("setup_complete");
+    let setup_owner_status: Option<String> = setup.get("setup_owner_status");
+    await_external_mutation(delete_workspace_pod_after_setup_recheck(
+        setup_complete,
+        setup_owner_status,
+        sandbox.delete_workspace_pod_if_uid(pod_name, pod_uid),
+    ))
+    .await?;
+    guard.commit().await
+}
+
+async fn delete_workspace_pod_after_setup_recheck<F, T>(
+    setup_complete: bool,
+    setup_owner_status: Option<String>,
+    delete: F,
+) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    if !daemon_repair_setup_is_idle(setup_complete, setup_owner_status.as_deref()) {
+        return Err(DaemonRepairSetupBusy.into());
+    }
+    delete.await
 }
 
 async fn resolve_target(
@@ -867,6 +1104,36 @@ mod tests {
     use tokio::time::{Duration as TokioDuration, timeout};
 
     use super::*;
+
+    #[test]
+    fn daemon_repair_requires_completed_idle_setup() {
+        assert!(daemon_repair_setup_is_idle(true, None));
+        assert!(!daemon_repair_setup_is_idle(false, None));
+        for status in ["claimed", "running", "reaping"] {
+            assert!(!daemon_repair_setup_is_idle(true, Some(status)));
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_repair_busy_recheck_skips_pod_deletion() {
+        let delete_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&delete_called);
+        let result =
+            delete_workspace_pod_after_setup_recheck(true, Some("running".into()), async move {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<DaemonRepairSetupBusy>())
+                .is_some()
+        );
+        assert!(!delete_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     const TEST_DAEMON_TOKEN: &str = "daemon-proxy-test-token";
 

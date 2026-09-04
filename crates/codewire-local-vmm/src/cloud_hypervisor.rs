@@ -7,7 +7,6 @@ use codewire_vmm_guest_probe::{
     DOCKER_DISK_SERIAL, MAX_DIRECT_SHARES, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL,
     STATE_DISK_SERIAL,
 };
-use codewire_workload_secrets::WORKLOAD_SECRET_DISK_SERIAL;
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
 
@@ -60,7 +59,6 @@ pub struct CloudHypervisorConfig {
     pub root_disk: PathBuf,
     pub seed_disk: PathBuf,
     pub setup_disk: Option<PathBuf>,
-    pub workload_secret_disk: Option<PathBuf>,
     pub api_socket: PathBuf,
     pub event_monitor: PathBuf,
     pub vsock_socket: PathBuf,
@@ -90,7 +88,6 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("root_disk", &self.root_disk)
             .field("seed_disk", &self.seed_disk)
             .field("setup_disk", &self.setup_disk)
-            .field("workload_secret_disk", &self.workload_secret_disk)
             .field("api_socket", &self.api_socket)
             .field("event_monitor", &self.event_monitor)
             .field("vsock_socket", &self.vsock_socket)
@@ -195,7 +192,6 @@ impl CloudHypervisorConfig {
             root_disk,
             seed_disk,
             setup_disk,
-            workload_secret_disk: None,
             api_socket,
             event_monitor,
             vsock_socket,
@@ -228,15 +224,6 @@ impl CloudHypervisorConfig {
         Ok(self)
     }
 
-    pub fn with_workload_secret_disk(
-        mut self,
-        workload_secret_disk: Option<PathBuf>,
-    ) -> Result<Self, CloudHypervisorConfigError> {
-        self.workload_secret_disk = workload_secret_disk;
-        self.validate()?;
-        Ok(self)
-    }
-
     pub fn validate(&self) -> Result<(), CloudHypervisorConfigError> {
         if self.vsock_cid < 3 || self.vsock_cid == u32::MAX {
             return Err(CloudHypervisorConfigError::InvalidVsockCid);
@@ -262,9 +249,6 @@ impl CloudHypervisorConfig {
         }
         if let Some(setup) = &self.setup_disk {
             disks.push(setup);
-        }
-        if let Some(workload_secrets) = &self.workload_secret_disk {
-            disks.push(workload_secrets);
         }
         disks.sort();
         if disks.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -385,17 +369,6 @@ impl CloudHypervisorConfig {
                 ),
             );
         }
-        if let Some(workload_secret_disk) = &self.workload_secret_disk {
-            push_option(
-                &mut arguments,
-                "--disk",
-                format!(
-                    "path={},readonly=on,direct=off,id=cw-workload-secrets,serial={},image_type=raw,backing_files=off,sparse=off,lock_granularity=full",
-                    display(workload_secret_disk)?,
-                    WORKLOAD_SECRET_DISK_SERIAL,
-                ),
-            );
-        }
         for (index, share) in self.virtiofs.iter().enumerate() {
             push_option(
                 &mut arguments,
@@ -428,7 +401,7 @@ impl CloudHypervisorConfig {
         push_option(&mut arguments, "--seccomp", "true");
         // Native v53 Landlock derives its allowlist from the already parsed VM
         // configuration. This command admits only the durable/seed disks, an
-        // optional one-boot read-only setup/workload-secret disks, and exact
+        // optional one-boot read-only setup disk, and exact
         // private virtio-fs sockets. The kernel/initramfs, bounded diagnostics,
         // API, dedicated vsock parent, and virtio-fs sockets need no explicit
         // `--landlock-rules` broadening is permitted. This is defense in depth;
@@ -440,8 +413,7 @@ impl CloudHypervisorConfig {
             arguments,
             expected_disk_count: 3
                 + usize::from(self.docker_disk.is_some())
-                + usize::from(self.setup_disk.is_some())
-                + usize::from(self.workload_secret_disk.is_some()),
+                + usize::from(self.setup_disk.is_some()),
             expected_fs_count: self.virtiofs.len(),
         };
         command.validate_allowlist()?;
@@ -467,9 +439,6 @@ impl CloudHypervisorConfig {
         }
         if let Some(setup) = &self.setup_disk {
             paths.push(setup.as_path());
-        }
-        if let Some(workload_secrets) = &self.workload_secret_disk {
-            paths.push(workload_secrets.as_path());
         }
         paths.extend(self.virtiofs.iter().map(|share| share.socket.as_path()));
         paths
@@ -787,28 +756,6 @@ mod tests {
         for flag in FORBIDDEN_FLAGS {
             assert!(!args.contains(flag), "forbidden flag {flag}");
         }
-    }
-
-    #[test]
-    fn workload_secrets_are_an_exact_optional_read_only_disk() {
-        let config = config()
-            .with_workload_secret_disk(Some("/run/user/1000/codewire/secrets.raw".into()))
-            .unwrap();
-        let command = config.command().unwrap();
-        command.validate_allowlist().unwrap();
-        let args = command
-            .arguments()
-            .iter()
-            .map(|argument| argument.to_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(args.iter().filter(|value| **value == "--disk").count(), 4);
-        assert!(args.iter().any(|argument| {
-            argument.contains("id=cw-workload-secrets")
-                && argument.contains("serial=CWSECRET1")
-                && argument.contains("readonly=on")
-                && argument.contains("sparse=off")
-                && argument.contains("lock_granularity=full")
-        }));
     }
 
     #[test]

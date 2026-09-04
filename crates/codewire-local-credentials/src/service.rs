@@ -43,8 +43,8 @@ use crate::{
     CredentialRecord, EnvironmentAccessBindingRecord, EnvironmentBrokerRuntime,
     LocalBrokerProcessConfig, LocalBrokerProcessSpawner, LocalCredentialAuthority,
     LocalCredentialError, LocalSecretProject, NewCredential, RepositoryCredentialLeaseRequest,
-    ResolvedWorkloadSecretMetadata, WorkloadSecretDelivery, WorkloadSecretMetadata,
-    WorkloadSecretSelection, WorkloadSecretSource,
+    ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata, WorkloadSecretSelection,
+    WorkloadSecretSource,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -1035,33 +1035,6 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         }))
     }
 
-    async fn prepare_environment_workload_secrets(
-        &self,
-        request: Request<v1::PrepareEnvironmentWorkloadSecretsRequest>,
-    ) -> Result<Response<v1::PrepareEnvironmentWorkloadSecretsResponse>, Status> {
-        let request = request.into_inner();
-        let environment_id = local_environment_uuid(&request.environment_id)?;
-        if request.environment_generation == 0 {
-            return Err(Status::invalid_argument("invalid environment generation"));
-        }
-        let selection =
-            workload_secret_selection_from_proto(request.selection.ok_or_else(|| {
-                Status::invalid_argument("workload-secret selection is required")
-            })?)?;
-        let runtime_root = admitted_workload_secret_runtime_root(&request.runtime_root)?;
-        let authority = Arc::clone(&self.authority);
-        let delivery = run_blocking(move || {
-            authority.prepare_environment_workload_secrets(
-                &selection,
-                environment_id,
-                request.environment_generation,
-                &runtime_root,
-            )
-        })
-        .await?;
-        Ok(Response::new(workload_secret_delivery_to_proto(delivery)))
-    }
-
     async fn create_access_profile(
         &self,
         request: Request<v1::CreateAccessProfileRequest>,
@@ -1450,30 +1423,6 @@ fn local_secret_project_id(value: &str) -> Result<Uuid, Status> {
     Ok(id)
 }
 
-fn local_environment_uuid(value: &str) -> Result<Uuid, Status> {
-    let id = Uuid::parse_str(value)
-        .map_err(|_| Status::invalid_argument("invalid local environment identity"))?;
-    if id.is_nil() || id.to_string() != value {
-        return Err(Status::invalid_argument(
-            "invalid local environment identity",
-        ));
-    }
-    Ok(id)
-}
-
-fn admitted_workload_secret_runtime_root(value: &str) -> Result<PathBuf, Status> {
-    let requested = PathBuf::from(value);
-    let expected = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| Status::unavailable("local workload-secret runtime is unavailable"))?;
-    if value.is_empty() || requested != expected {
-        return Err(Status::invalid_argument(
-            "invalid local workload-secret runtime root",
-        ));
-    }
-    Ok(requested)
-}
-
 fn secret_project_to_proto(project: LocalSecretProject) -> v1::LocalSecretProject {
     v1::LocalSecretProject {
         id: project.id.to_string(),
@@ -1511,25 +1460,6 @@ fn resolved_secret_to_proto(
             .overridden_sources
             .into_iter()
             .map(|source| workload_secret_source_to_proto(source) as i32)
-            .collect(),
-    }
-}
-
-fn workload_secret_delivery_to_proto(
-    delivery: WorkloadSecretDelivery,
-) -> v1::PrepareEnvironmentWorkloadSecretsResponse {
-    v1::PrepareEnvironmentWorkloadSecretsResponse {
-        binding: delivery
-            .binding
-            .map(|binding| v1::WorkloadSecretDiskBinding {
-                total_bytes: binding.total_bytes(),
-                sha256: binding.sha256().to_vec(),
-                entry_count: binding.entry_count(),
-            }),
-        secrets: delivery
-            .metadata
-            .into_iter()
-            .map(resolved_secret_to_proto)
             .collect(),
     }
 }
@@ -1786,9 +1716,7 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         // AccessError is deliberately material-free and carries the stable
         // provider/profile diagnostic needed to repair a rejected selection.
         LocalCredentialError::Access(error) => Status::failed_precondition(error.to_string()),
-        LocalCredentialError::DatabaseUnavailable
-        | LocalCredentialError::ProtectedStore(_)
-        | LocalCredentialError::WorkloadSecretDeliveryUnavailable => {
+        LocalCredentialError::DatabaseUnavailable | LocalCredentialError::ProtectedStore(_) => {
             Status::unavailable("local credential authority storage is unavailable")
         }
         LocalCredentialError::AlreadyRunning => {

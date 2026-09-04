@@ -24,7 +24,6 @@ use codewire_vmm_guest_probe::{
     PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressError, ProgressFrame, ProgressRequest,
     SetupBinding, Sha256Value,
 };
-use codewire_workload_secrets::{WorkloadSecretBinding, workload_secret_delivery_relative_path};
 
 use crate::artifact_store::RuntimeArtifactStore;
 use crate::control::v1;
@@ -39,9 +38,7 @@ use crate::linux::path::PrivateRoot;
 use crate::linux::runner::ExitClass;
 use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
-use crate::{
-    CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm, WorkloadSecretDiskRequest,
-};
+use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
 
 // A cached restart still cold-boots the kernel, trusted init, the OCI
 // workspace, and its daemon. Keep that path bounded, but give authenticated
@@ -52,6 +49,10 @@ const DAEMON_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis
 const PROGRESS_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 const MAXIMUM_GUEST_PROGRESS_FRAMES: usize = 64;
 const RUNNER_WATCH_BUFFER: usize = 8;
+// Bump for every detached-runner behavior change, even if the protobuf
+// message layout itself remains wire-compatible.
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 1;
+const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct RunnerEntrypointConfig {
@@ -61,7 +62,6 @@ pub struct RunnerEntrypointConfig {
     pub artifact_generation: String,
     pub mesh_data_dir: PathBuf,
     pub platform_config_dir: PathBuf,
-    pub workload_secret_runtime_root: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -72,9 +72,21 @@ pub struct RunnerClient {
 impl RunnerClient {
     pub async fn connect(socket: &std::path::Path) -> Result<Self, RunnerServiceError> {
         let channel = connect_owner_only(socket).await?;
-        Ok(Self {
+        let mut client = Self {
             inner: EnvironmentRunnerServiceClient::new(channel),
-        })
+        };
+        let info = tokio::time::timeout(
+            RUNNER_PROTOCOL_INFO_TIMEOUT,
+            client
+                .inner
+                .get_runner_protocol_info(v1::GetRunnerProtocolInfoRequest {}),
+        )
+        .await
+        .map_err(|_| RunnerServiceError::RunnerProtocolInfoUnavailable)?
+        .map_err(runner_protocol_info_rpc_error)?
+        .into_inner();
+        admit_runner_protocol_info(&info)?;
+        Ok(client)
     }
 
     pub async fn adopt(&mut self, environment_id: Uuid) -> Result<v1::RunnerInfo, Status> {
@@ -146,6 +158,24 @@ impl RunnerClient {
             .await?
             .into_inner())
     }
+}
+
+fn runner_protocol_info_rpc_error(status: Status) -> RunnerServiceError {
+    if status.code() == tonic::Code::Unimplemented {
+        RunnerServiceError::RunnerProtocolUnavailable
+    } else {
+        RunnerServiceError::RunnerProtocolInfoUnavailable
+    }
+}
+
+fn admit_runner_protocol_info(info: &v1::RunnerProtocolInfo) -> Result<(), RunnerServiceError> {
+    if info.protocol_version != NATIVE_RUNNER_PROTOCOL_VERSION {
+        return Err(RunnerServiceError::RunnerProtocolMismatch {
+            expected: NATIVE_RUNNER_PROTOCOL_VERSION,
+            actual: info.protocol_version,
+        });
+    }
+    Ok(())
 }
 
 struct RunnerEvents {
@@ -253,13 +283,7 @@ fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
 }
 
 pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerServiceError> {
-    if !config.mesh_data_dir.is_absolute()
-        || !config.platform_config_dir.is_absolute()
-        || config
-            .workload_secret_runtime_root
-            .as_ref()
-            .is_some_and(|path| !path.is_absolute())
-    {
+    if !config.mesh_data_dir.is_absolute() || !config.platform_config_dir.is_absolute() {
         return Err(RunnerServiceError::Configuration);
     }
     let engine = PrivateRoot::open(&config.engine_state_root).map_err(RunnerError::from)?;
@@ -294,7 +318,6 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             adopted: false,
             mesh_data_dir: config.mesh_data_dir,
             platform_config_dir: config.platform_config_dir,
-            workload_secret_runtime_root: config.workload_secret_runtime_root,
         })),
         adoption: adoption_tx,
         events,
@@ -328,7 +351,6 @@ struct RunnerState {
     adopted: bool,
     mesh_data_dir: PathBuf,
     platform_config_dir: PathBuf,
-    workload_secret_runtime_root: Option<PathBuf>,
 }
 
 impl RunnerState {
@@ -434,6 +456,15 @@ struct AdoptionRequest {
 
 #[tonic::async_trait]
 impl EnvironmentRunnerService for RunnerRpc {
+    async fn get_runner_protocol_info(
+        &self,
+        _request: Request<v1::GetRunnerProtocolInfoRequest>,
+    ) -> Result<Response<v1::RunnerProtocolInfo>, Status> {
+        Ok(Response::new(v1::RunnerProtocolInfo {
+            protocol_version: NATIVE_RUNNER_PROTOCOL_VERSION,
+        }))
+    }
+
     async fn adopt_runner(
         &self,
         request: Request<v1::AdoptRunnerRequest>,
@@ -536,7 +567,6 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mesh = parse_mesh_attachment(&request)?;
         let direct_shares = parse_direct_shares(&request)?;
         let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
-        let workload_secret_binding = parse_workload_secret_binding(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
@@ -554,23 +584,6 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state.state = v1::EnvironmentState::Starting;
         state.error_code = None;
-        let workload_secrets = workload_secret_binding
-            .map(|binding| {
-                let runtime_root =
-                    state.workload_secret_runtime_root.as_ref().ok_or_else(|| {
-                        Status::failed_precondition(
-                            "workload-secret runtime directory is unavailable",
-                        )
-                    })?;
-                let relative =
-                    workload_secret_delivery_relative_path(environment_id, request.generation)
-                        .map_err(|_| Status::invalid_argument("invalid workload-secret binding"))?;
-                Ok::<_, Status>(WorkloadSecretDiskRequest {
-                    path: runtime_root.join(relative),
-                    binding,
-                })
-            })
-            .transpose()?;
         self.events.publish(
             v1::EnvironmentState::Starting,
             request.generation,
@@ -597,7 +610,6 @@ impl EnvironmentRunnerService for RunnerRpc {
                 mesh,
                 direct_shares,
                 skill_snapshot_sha256,
-                workload_secrets,
             })
             .await
         {
@@ -1038,29 +1050,6 @@ fn parse_skill_snapshot(request: &v1::StartVmRequest) -> Result<Option<Sha256Val
     }
 }
 
-fn parse_workload_secret_binding(
-    request: &v1::StartVmRequest,
-) -> Result<Option<WorkloadSecretBinding>, Status> {
-    let absent = request.workload_secret_total_bytes == 0
-        && request.workload_secret_sha256.is_empty()
-        && request.workload_secret_entry_count == 0;
-    if absent {
-        return Ok(None);
-    }
-    let sha256: [u8; 32] = request
-        .workload_secret_sha256
-        .as_slice()
-        .try_into()
-        .map_err(|_| Status::invalid_argument("invalid workload-secret binding"))?;
-    WorkloadSecretBinding::new(
-        request.workload_secret_total_bytes,
-        sha256,
-        request.workload_secret_entry_count,
-    )
-    .map(Some)
-    .map_err(|_| Status::invalid_argument("invalid workload-secret binding"))
-}
-
 fn map_start_error(error: RunnerError) -> Status {
     Status::failed_precondition(error.to_string())
 }
@@ -1387,15 +1376,34 @@ pub enum RunnerServiceError {
     Adoption,
     #[error("private environment runner configuration is invalid")]
     Configuration,
+    #[error("the native environment runner does not implement the required compatibility protocol")]
+    RunnerProtocolUnavailable,
+    #[error(
+        "native environment runner protocol version mismatch: expected {expected}, running runner reported {actual}"
+    )]
+    RunnerProtocolMismatch { expected: u32, actual: u32 },
+    #[error("query native environment runner compatibility failed")]
+    RunnerProtocolInfoUnavailable,
+}
+
+impl RunnerServiceError {
+    pub(crate) fn incompatible_protocol(&self) -> bool {
+        matches!(
+            self,
+            Self::RunnerProtocolUnavailable | Self::RunnerProtocolMismatch { .. }
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::atomic::AtomicUsize;
 
     use tokio::net::UnixListener;
 
     use super::*;
+    use crate::uds::bind_owner_only_listener;
 
     const PROGRESS_TOKEN: &str = "runner-progress-test-token-0123456789abcdef";
 
@@ -1417,6 +1425,102 @@ mod tests {
             generation,
             token: Zeroizing::new(PROGRESS_TOKEN.to_owned()),
         }
+    }
+
+    #[test]
+    fn runner_protocol_requires_the_exact_current_version() {
+        admit_runner_protocol_info(&v1::RunnerProtocolInfo {
+            protocol_version: NATIVE_RUNNER_PROTOCOL_VERSION,
+        })
+        .unwrap();
+
+        for actual in [0, NATIVE_RUNNER_PROTOCOL_VERSION + 1] {
+            let error = admit_runner_protocol_info(&v1::RunnerProtocolInfo {
+                protocol_version: actual,
+            })
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                RunnerServiceError::RunnerProtocolMismatch {
+                    expected: NATIVE_RUNNER_PROTOCOL_VERSION,
+                    actual: reported,
+                } if reported == actual
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn runner_client_rejects_an_old_runner_before_adoption() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("runtime");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = root.join("runner.sock");
+        let (listener, socket_identity) = bind_owner_only_listener(&socket).unwrap();
+        let adoption_calls = Arc::new(AtomicUsize::new(0));
+        let adoption_counter = Arc::clone(&adoption_calls);
+        let app = axum::Router::new()
+            .route(
+                "/codewire.local.v1.EnvironmentRunnerService/GetRunnerProtocolInfo",
+                axum::routing::post(|| async {
+                    let mut response = axum::response::Response::new(axum::body::Body::empty());
+                    response.headers_mut().insert(
+                        http::header::CONTENT_TYPE,
+                        http::HeaderValue::from_static("application/grpc"),
+                    );
+                    response.headers_mut().insert(
+                        http::HeaderName::from_static("grpc-status"),
+                        http::HeaderValue::from_static("12"),
+                    );
+                    response
+                }),
+            )
+            .route(
+                "/codewire.local.v1.EnvironmentRunnerService/AdoptRunner",
+                axum::routing::post(move || {
+                    let adoption_counter = Arc::clone(&adoption_counter);
+                    async move {
+                        adoption_counter.fetch_add(1, Ordering::Relaxed);
+                        let mut response = axum::response::Response::new(axum::body::Body::empty());
+                        response.headers_mut().insert(
+                            http::header::CONTENT_TYPE,
+                            http::HeaderValue::from_static("application/grpc"),
+                        );
+                        response.headers_mut().insert(
+                            http::HeaderName::from_static("grpc-status"),
+                            http::HeaderValue::from_static("12"),
+                        );
+                        response
+                    }
+                }),
+            );
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let error = match RunnerClient::connect(&socket).await {
+            Ok(_) => panic!("old runner was admitted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            RunnerServiceError::RunnerProtocolUnavailable
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the native environment runner does not implement the required compatibility protocol"
+        );
+        assert_eq!(adoption_calls.load(Ordering::Relaxed), 0);
+
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &socket_identity).unwrap();
     }
 
     #[test]
@@ -1600,43 +1704,6 @@ mod tests {
             parse_skill_snapshot(&invalid).unwrap_err().code(),
             tonic::Code::InvalidArgument
         );
-    }
-
-    #[test]
-    fn workload_secret_binding_is_exact_and_optional() {
-        let request = v1::StartVmRequest {
-            workload_secret_total_bytes: 4096,
-            workload_secret_sha256: vec![0x4a; 32],
-            workload_secret_entry_count: 2,
-            ..Default::default()
-        };
-        let binding = parse_workload_secret_binding(&request).unwrap().unwrap();
-        assert_eq!(binding.total_bytes(), 4096);
-        assert_eq!(binding.sha256(), [0x4a; 32]);
-        assert_eq!(binding.entry_count(), 2);
-        assert!(
-            parse_workload_secret_binding(&v1::StartVmRequest::default())
-                .unwrap()
-                .is_none()
-        );
-
-        for invalid in [
-            v1::StartVmRequest {
-                workload_secret_total_bytes: 4096,
-                ..Default::default()
-            },
-            v1::StartVmRequest {
-                workload_secret_total_bytes: 4096,
-                workload_secret_sha256: vec![0; 31],
-                workload_secret_entry_count: 1,
-                ..Default::default()
-            },
-        ] {
-            assert_eq!(
-                parse_workload_secret_binding(&invalid).unwrap_err().code(),
-                tonic::Code::InvalidArgument
-            );
-        }
     }
 
     #[test]

@@ -33,7 +33,6 @@ codewire-egress-policy = { workspace = true }
 codewire-netstack = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
-codewire-workload-secrets = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 futures = { workspace = true }
 hmac = { workspace = true }
@@ -60,6 +59,7 @@ zeroize = { workspace = true }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
+codewire-protected-store = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }
 prost-types = { workspace = true }

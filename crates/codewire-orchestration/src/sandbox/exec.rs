@@ -8,10 +8,13 @@ use futures::SinkExt;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Status;
 use kube::api::{Api, AttachParams, AttachedProcess, TerminalSize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use zeroize::Zeroizing;
 
 use super::client::SandboxClient;
 use crate::worker::scripts::shell_quote;
+
+const WORKSPACE_EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 
 /// Mirrors `sandbox.WorkspaceExecResult`.
 #[derive(Debug, Default, Clone)]
@@ -36,6 +39,10 @@ pub struct WorkspaceTerminalHandle {
     attached: AttachedProcess,
 }
 
+struct BoundedOutput {
+    bytes: Zeroizing<Vec<u8>>,
+}
+
 impl WorkspaceExecHandle {
     pub async fn wait(mut self) -> anyhow::Result<WorkspaceExecResult> {
         let stdout: anyhow::Result<Vec<u8>>;
@@ -43,27 +50,22 @@ impl WorkspaceExecHandle {
         let mut out_reader = self.attached.stdout();
         let mut err_reader = self.attached.stderr();
         let status_fut = self.attached.take_status();
-
         let out_task = async {
             if let Some(reader) = out_reader.as_mut() {
-                let mut buffer = Vec::new();
-                reader
-                    .read_to_end(&mut buffer)
+                read_bounded(reader, WORKSPACE_EXEC_CAPTURE_BYTES)
                     .await
-                    .map_err(|error| anyhow::anyhow!("workspace exec stdout: {error}"))?;
-                Ok(buffer)
+                    .map(|output| output.bytes.to_vec())
+                    .map_err(|error| anyhow::anyhow!("workspace exec stdout: {error}"))
             } else {
                 Ok(Vec::new())
             }
         };
         let err_task = async {
             if let Some(reader) = err_reader.as_mut() {
-                let mut buffer = Vec::new();
-                reader
-                    .read_to_end(&mut buffer)
+                read_bounded(reader, WORKSPACE_EXEC_CAPTURE_BYTES)
                     .await
-                    .map_err(|error| anyhow::anyhow!("workspace exec stderr: {error}"))?;
-                Ok(buffer)
+                    .map(|output| output.bytes.to_vec())
+                    .map_err(|error| anyhow::anyhow!("workspace exec stderr: {error}"))
             } else {
                 Ok(Vec::new())
             }
@@ -96,7 +98,7 @@ impl WorkspaceExecHandle {
 
     pub async fn stream(
         mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<(bool, Vec<u8>)>,
+        tx: tokio::sync::mpsc::Sender<(bool, Vec<u8>)>,
     ) -> anyhow::Result<i32> {
         let status_fut = self.attached.take_status();
         let mut out_reader = self.attached.stdout();
@@ -104,45 +106,60 @@ impl WorkspaceExecHandle {
 
         let out_tx = tx.clone();
         let out_task = async move {
+            let mut receiver_open = true;
             if let Some(reader) = out_reader.as_mut() {
                 let mut buffer = [0u8; 32 * 1024];
                 loop {
-                    match reader.read(&mut buffer).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(count) => {
-                            if out_tx.send((false, buffer[..count].to_vec())).is_err() {
-                                break;
-                            }
-                        }
+                    let count = reader.read(&mut buffer).await?;
+                    if count == 0 {
+                        break;
+                    }
+                    if receiver_open
+                        && out_tx
+                            .send((false, buffer[..count].to_vec()))
+                            .await
+                            .is_err()
+                    {
+                        receiver_open = false;
                     }
                 }
             }
+            Ok::<(), std::io::Error>(())
         };
         let err_tx = tx.clone();
         let err_task = async move {
+            let mut receiver_open = true;
             if let Some(reader) = err_reader.as_mut() {
                 let mut buffer = [0u8; 32 * 1024];
                 loop {
-                    match reader.read(&mut buffer).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(count) => {
-                            if err_tx.send((true, buffer[..count].to_vec())).is_err() {
-                                break;
-                            }
-                        }
+                    let count = reader.read(&mut buffer).await?;
+                    if count == 0 {
+                        break;
+                    }
+                    if receiver_open && err_tx.send((true, buffer[..count].to_vec())).await.is_err()
+                    {
+                        receiver_open = false;
                     }
                 }
             }
+            Ok::<(), std::io::Error>(())
         };
-        tokio::join!(out_task, err_task);
-
-        Ok(match status_fut {
-            Some(future) => match future.await {
-                Some(status) => exit_code_from_status(&status).unwrap_or(0),
-                None => 0,
-            },
-            None => 0,
-        })
+        let (out, err, status) = if let Some(future) = status_fut {
+            let (out, err, status) = tokio::join!(out_task, err_task, future);
+            (out, err, status)
+        } else {
+            let (out, err) = tokio::join!(out_task, err_task);
+            (out, err, None)
+        };
+        let completion = self
+            .attached
+            .join()
+            .await
+            .map_err(|error| anyhow::anyhow!("workspace exec completion: {error}"));
+        completion?;
+        out.map_err(|error| anyhow::anyhow!("workspace exec stdout: {error}"))?;
+        err.map_err(|error| anyhow::anyhow!("workspace exec stderr: {error}"))?;
+        Ok(status.as_ref().and_then(exit_code_from_status).unwrap_or(0))
     }
 }
 
@@ -343,14 +360,15 @@ impl SandboxClient {
     /// to the caller as they arrive (each side tagged), returning the
     /// exit code (0 on success, the real code on nonzero, error only on
     /// transport failure). Chunks are sent as `(is_stderr, bytes)` on
-    /// `tx`; the caller frames them. Closing the receiver ends the run.
+    /// `tx`; the caller frames them. Closing the receiver stops forwarding,
+    /// while this side continues draining the attachment through remote exit.
     pub async fn exec_workspace_stream_on_pod(
         &self,
         pod_name: &str,
         command: &[String],
         work_dir: &str,
         env: &BTreeMap<String, String>,
-        tx: tokio::sync::mpsc::UnboundedSender<(bool, Vec<u8>)>,
+        tx: tokio::sync::mpsc::Sender<(bool, Vec<u8>)>,
     ) -> anyhow::Result<i32> {
         self.start_workspace_exec_on_pod(pod_name, command, work_dir, env)
             .await?
@@ -358,8 +376,8 @@ impl SandboxClient {
             .await
     }
 
-    /// Mirrors `ExecWorkspace`: error on nonzero exit, with stderr
-    /// (falling back to stdout) in the message.
+    /// Mirrors `ExecWorkspace`: error on nonzero exit without copying opaque
+    /// child output into an error that may be logged or persisted.
     pub async fn exec_workspace(
         &self,
         env_id: &str,
@@ -371,17 +389,27 @@ impl SandboxClient {
             .exec_workspace_result(env_id, command, work_dir, env)
             .await?;
         if result.exit_code != 0 {
-            let mut msg = String::from_utf8_lossy(&result.stderr).trim().to_string();
-            if msg.is_empty() {
-                msg = String::from_utf8_lossy(&result.stdout).trim().to_string();
-            }
-            if msg.is_empty() {
-                anyhow::bail!("workspace exec exited {}", result.exit_code);
-            }
-            anyhow::bail!("workspace exec exited {}: {msg}", result.exit_code);
+            anyhow::bail!("workspace exec exited {}", result.exit_code);
         }
         Ok(())
     }
+}
+
+async fn read_bounded<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> std::io::Result<BoundedOutput> {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(limit.min(8 * 1024)));
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        let retain = count.min(limit.saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&buffer[..retain]);
+    }
+    Ok(BoundedOutput { bytes })
 }
 
 fn classify_workspace_exec_status(
@@ -399,18 +427,12 @@ fn classify_workspace_exec_status(
         return Ok(result);
     }
 
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let combined = combined.trim();
-    let reason = status.message.unwrap_or_else(|| "exec failed".to_string());
-    if combined.is_empty() {
-        Err(anyhow::anyhow!("workspace exec: {reason}"))
-    } else {
-        Err(anyhow::anyhow!("workspace exec: {reason}: {combined}"))
-    }
+    // An unclassified Kubernetes status and the captured child streams are
+    // opaque, so none of this content is safe to retain in an error, Temporal
+    // failure, or log record.
+    Err(anyhow::anyhow!(
+        "workspace exec returned an unclassified failure status"
+    ))
 }
 
 fn exit_code_from_status(s: &Status) -> Option<i32> {
@@ -467,9 +489,21 @@ mod tests {
         env.insert("Z_LAST".to_string(), "with 'single' quotes".to_string());
         env.insert("A_FIRST".to_string(), "plain".to_string());
         env.insert("B_META".to_string(), "$HOME `cmd` \"dq\"".to_string());
+        let argv = build_workspace_exec_command(&cmd, "/workspace/my repo", &env);
+        assert_eq!(argv, golden_argv("execcommand-full.golden.json"));
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_drains_but_retains_only_the_limit() {
+        let input = vec![0x41; WORKSPACE_EXEC_CAPTURE_BYTES + 137];
+        let mut reader = std::io::Cursor::new(input);
+        let output = read_bounded(&mut reader, WORKSPACE_EXEC_CAPTURE_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(output.bytes.len(), WORKSPACE_EXEC_CAPTURE_BYTES);
         assert_eq!(
-            build_workspace_exec_command(&cmd, "/workspace/my repo", &env),
-            golden_argv("execcommand-full.golden.json")
+            reader.position(),
+            (WORKSPACE_EXEC_CAPTURE_BYTES + 137) as u64
         );
     }
 
@@ -547,15 +581,16 @@ mod tests {
 
     #[test]
     fn unclassified_failure_status_remains_an_error() {
+        let marker = "synthetic-secret-marker";
         let status = Status {
             status: Some("Failure".into()),
             reason: Some("InternalError".into()),
-            message: Some("remote failure".into()),
+            message: Some(format!("remote failure containing {marker}")),
             ..Default::default()
         };
         let result = WorkspaceExecResult {
-            stdout: Vec::new(),
-            stderr: b"stderr detail".to_vec(),
+            stdout: marker.as_bytes().to_vec(),
+            stderr: marker.as_bytes().to_vec(),
             exit_code: 0,
         };
 
@@ -563,7 +598,8 @@ mod tests {
             .expect_err("unclassified failure must stay an error");
         assert_eq!(
             error.to_string(),
-            "workspace exec: remote failure: stderr detail"
+            "workspace exec returned an unclassified failure status"
         );
+        assert!(!format!("{error:?}").contains(marker));
     }
 }

@@ -5,6 +5,9 @@ package codewire.local.v1;
 // This package is a private host-process contract. It is deliberately not
 // part of codewire.v1 and carries no platform compatibility promise.
 service LocalSupervisorService {
+  // Mandatory compatibility fence. Clients call this before every other
+  // supervisor RPC and reject anything except their exact private protocol.
+  rpc GetSupervisorInfo(GetSupervisorInfoRequest) returns (SupervisorInfo);
   rpc CreateEnvironment(CreateEnvironmentRequest) returns (Operation);
   rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
   rpc GetEnvironment(EnvironmentSelector) returns (Environment);
@@ -25,7 +28,18 @@ service LocalSupervisorService {
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
 }
 
+message GetSupervisorInfoRequest {}
+
+message SupervisorInfo {
+  uint32 protocol_version = 1;
+  // SHA-256 of the supervisor's exact NativeRuntimeConfig path bytes.
+  bytes configuration_sha256 = 2;
+}
+
 service EnvironmentRunnerService {
+  // Mandatory immutable compatibility fence. Supervisors call this before
+  // adoption or any RPC that can observe or change runner/VM state.
+  rpc GetRunnerProtocolInfo(GetRunnerProtocolInfoRequest) returns (RunnerProtocolInfo);
   rpc AdoptRunner(AdoptRunnerRequest) returns (RunnerInfo);
   rpc GetRunnerInfo(GetRunnerInfoRequest) returns (RunnerInfo);
   rpc WatchRunner(WatchRunnerRequest) returns (stream RunnerEvent);
@@ -36,6 +50,12 @@ service EnvironmentRunnerService {
   // never removes environment storage; only the supervisor may tombstone it.
   rpc PrepareRetireRunner(PrepareRetireRunnerRequest) returns (PrepareRetireRunnerResponse);
   rpc GetDaemonAccess(GetDaemonAccessRequest) returns (DaemonAccess);
+}
+
+message GetRunnerProtocolInfoRequest {}
+
+message RunnerProtocolInfo {
+  uint32 protocol_version = 1;
 }
 
 enum EnvironmentState {
@@ -296,6 +316,10 @@ message Environment {
   uint32 skill_snapshot_count = 22;
   // Dedicated guest-local Docker data disk. Zero means Docker is disabled.
   uint64 docker_disk_bytes = 23;
+  // Material-free startup hint. True when lifecycle/session operations need
+  // the local credential authority for an access profile or protected secret
+  // selection.
+  bool requires_credential_authority = 24;
 }
 
 message ListEnvironmentsRequest {}
@@ -446,12 +470,8 @@ message StartVmRequest {
   // Dedicated preformatted Docker data disk. Zero means no Docker device is
   // attached and the guest must not start dockerd.
   uint64 docker_disk_bytes = 17;
-  // Optional one-boot workload-secret disk binding. All fields must be zero/
-  // empty or valid together. The runner derives its exact owner-tmpfs path;
-  // neither this contract nor supervisor state carries secret values.
-  uint64 workload_secret_total_bytes = 18;
-  bytes workload_secret_sha256 = 19;
-  uint32 workload_secret_entry_count = 20;
+  reserved 18, 19, 20;
+  reserved "workload_secret_total_bytes", "workload_secret_sha256", "workload_secret_entry_count";
 }
 
 message DirectShareAttachment {

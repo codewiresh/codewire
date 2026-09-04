@@ -13,7 +13,6 @@ use codewire_access::{
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
 };
-use codewire_workload_secrets::WorkloadSecretBinding;
 use tonic::Status;
 use uuid::Uuid;
 
@@ -29,8 +28,8 @@ use crate::{
     AccessProfileRecord, AccessProfileRevisionRecord, BrokerLeaseAuditDecision,
     BrokerLeaseAuditEvent, CredentialRecord, EnvironmentAccessBindingRecord,
     EnvironmentBrokerRuntime, LOCAL_OWNER_ID, LocalSecretProject, NewCredential,
-    ResolvedWorkloadSecretMetadata, WorkloadSecretDelivery, WorkloadSecretMetadata,
-    WorkloadSecretSelection, WorkloadSecretSource,
+    ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata, WorkloadSecretSelection,
+    WorkloadSecretSource, ensure_private_root,
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
@@ -57,9 +56,10 @@ pub struct LocalCredentialClient {
 
 /// Material-free authority client for lifecycle supervisors.
 ///
-/// This deliberately exposes only exact environment/profile binding controls.
-/// The VM supervisor cannot use this type to submit or retrieve provider
-/// material, mutate credentials, or edit access profiles.
+/// This deliberately exposes only material-free lifecycle operations, including
+/// exact environment/profile binding controls and workload-secret metadata
+/// resolution. The VM supervisor cannot use this type to submit or retrieve
+/// provider material, mutate credentials, or edit access profiles.
 #[derive(Clone)]
 pub struct LocalCredentialControlClient {
     inner: LocalCredentialAuthorityServiceClient<tonic::transport::Channel>,
@@ -145,6 +145,38 @@ impl std::fmt::Debug for LocalCredentialClient {
 }
 
 impl LocalCredentialClient {
+    /// Admit a currently running authority without starting one when its
+    /// endpoint is absent. An unconnectable existing endpoint fails closed;
+    /// an incompatible live authority is shut down and replaced through
+    /// `spawn` before this returns.
+    pub async fn admit_existing_or_replace_with<F>(
+        config: &AuthorityRuntimeConfig,
+        spawn: F,
+    ) -> Result<Option<Self>, AuthorityRuntimeError>
+    where
+        F: FnOnce(&AuthorityRuntimeConfig) -> Result<Child, AuthorityRuntimeError>,
+    {
+        config.validate()?;
+        match fs::symlink_metadata(&config.root) {
+            Ok(_) => {
+                ensure_private_root(&config.root).map_err(AuthorityRuntimeError::Credential)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(AuthorityRuntimeError::InvalidPrivatePath),
+        }
+        if !socket_exists(config)? {
+            return Ok(None);
+        }
+        match Self::connect(config).await {
+            Ok(client) => Ok(Some(client)),
+            Err(AuthorityRuntimeError::ProtocolMismatch) => {
+                shutdown_incompatible_authority(config).await?;
+                Self::connect_or_start_with(config, spawn).await.map(Some)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn connect_or_start_with<F>(
         config: &AuthorityRuntimeConfig,
         spawn: F,
@@ -748,55 +780,30 @@ impl LocalCredentialControlClient {
         self.info
     }
 
-    pub async fn prepare_environment_workload_secrets(
+    pub async fn resolve_workload_secret_metadata(
         &mut self,
-        environment_id: &EnvironmentId,
-        environment_generation: u64,
-        selection: &WorkloadSecretSelection,
-        runtime_root: &Path,
-    ) -> Result<WorkloadSecretDelivery, Status> {
-        if environment_generation == 0 || !runtime_root.is_absolute() {
-            return Err(Status::invalid_argument(
-                "invalid local workload-secret preparation request",
-            ));
-        }
-        let runtime_root = runtime_root.to_str().ok_or_else(|| {
-            Status::invalid_argument("invalid local workload-secret runtime root")
-        })?;
+        selection: WorkloadSecretSelection,
+    ) -> Result<Vec<ResolvedWorkloadSecretMetadata>, Status> {
         let response = self
             .inner
-            .prepare_environment_workload_secrets(v1::PrepareEnvironmentWorkloadSecretsRequest {
-                environment_id: environment_id.to_string(),
-                environment_generation,
+            .resolve_workload_secret_metadata(v1::ResolveWorkloadSecretMetadataRequest {
                 selection: Some(v1::WorkloadSecretSelection {
                     organization: selection.organization,
-                    project: selection.project.clone(),
+                    project: selection.project,
                     user: selection.user,
                     explicit_environment_keys: selection
                         .explicit_environment_keys
-                        .iter()
-                        .cloned()
+                        .into_iter()
                         .collect(),
                 }),
-                runtime_root: runtime_root.to_owned(),
             })
             .await?
             .into_inner();
-        let binding = response
-            .binding
-            .map(|binding| {
-                let sha256: [u8; 32] = binding.sha256.try_into().map_err(|_| data_loss(()))?;
-                WorkloadSecretBinding::new(binding.total_bytes, sha256, binding.entry_count)
-                    .map_err(data_loss)
-            })
-            .transpose()?;
-        let metadata = response
+        response
             .secrets
             .into_iter()
             .map(resolved_workload_secret_from_proto)
-            .collect::<Result<Vec<_>, _>>()?;
-        validate_workload_secret_delivery(binding, &metadata)?;
-        Ok(WorkloadSecretDelivery { binding, metadata })
+            .collect()
     }
 
     pub async fn prepare_git_repository(
@@ -1356,25 +1363,6 @@ fn workload_secret_source_from_proto(value: i32) -> Result<WorkloadSecretSource,
     }
 }
 
-fn validate_workload_secret_delivery(
-    binding: Option<WorkloadSecretBinding>,
-    metadata: &[ResolvedWorkloadSecretMetadata],
-) -> Result<(), Status> {
-    let delivered_count = metadata
-        .iter()
-        .filter(|secret| secret.source != WorkloadSecretSource::ExplicitEnvironment)
-        .count();
-    if metadata.windows(2).any(|pair| pair[0].key >= pair[1].key)
-        || binding.is_some() != (delivered_count != 0)
-        || binding.is_some_and(|binding| {
-            usize::try_from(binding.entry_count()).ok() != Some(delivered_count)
-        })
-    {
-        return Err(data_loss(()));
-    }
-    Ok(())
-}
-
 fn valid_secret_project_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     !name.is_empty()
@@ -1564,28 +1552,5 @@ mod tests {
         let non_utf8 = PathBuf::from(OsString::from_vec(bytes));
         assert!(broker_supervisor_socket(&non_utf8).is_err());
         assert!(broker_supervisor_socket(Path::new("relative/supervisor.sock")).is_err());
-    }
-
-    #[test]
-    fn workload_secret_delivery_requires_a_binding_for_every_material_source() {
-        let project = ResolvedWorkloadSecretMetadata {
-            key: "PROJECT_TOKEN".to_owned(),
-            source: WorkloadSecretSource::Project,
-            overridden_sources: Vec::new(),
-        };
-        let explicit = ResolvedWorkloadSecretMetadata {
-            key: "EXPLICIT_TOKEN".to_owned(),
-            source: WorkloadSecretSource::ExplicitEnvironment,
-            overridden_sources: Vec::new(),
-        };
-        let binding = WorkloadSecretBinding::new(4096, [0x5a; 32], 1).unwrap();
-
-        assert!(validate_workload_secret_delivery(None, std::slice::from_ref(&project)).is_err());
-        assert!(
-            validate_workload_secret_delivery(Some(binding), std::slice::from_ref(&explicit))
-                .is_err()
-        );
-        assert!(validate_workload_secret_delivery(None, &[explicit]).is_ok());
-        assert!(validate_workload_secret_delivery(Some(binding), &[project]).is_ok());
     }
 }

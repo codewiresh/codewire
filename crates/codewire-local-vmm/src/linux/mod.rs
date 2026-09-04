@@ -9,6 +9,6 @@ pub use preflight::{PreflightError, PreflightReport, preflight};
 pub use process::{LiveProcess, ProcessIdentity, RecoveryError};
 pub use runner::{
     CloudHypervisorRunner, CreateVmRequest, ExitClass, PreparedVm, RecoveredVm, RunnerConfig,
-    RunnerError, RunningVm, WorkloadSecretDiskRequest,
+    RunnerError, RunningVm,
 };
 pub use state::{PersistedVmState, StateDiskIdentity, VmPaths, VmPhase};

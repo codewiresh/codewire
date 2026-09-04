@@ -35,6 +35,7 @@ use super::setup_lease::{
 use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{effective_repository_mount, validate_repository_mounts};
 use crate::sandbox::client::{SandboxClient, WorkspacePodIdentity};
+use crate::sandbox::exec::WorkspaceExecResult;
 use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
 
 const DEFAULT_SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -45,6 +46,7 @@ const SETUP_EXEC_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_EXEC_QUIESCENCE: Duration = Duration::from_secs(6);
 const SETUP_POD_RECOVERY_TIMEOUT: Duration = Duration::from_secs(180);
 const SETUP_POD_RECOVERY_POLL: Duration = Duration::from_millis(500);
+const SETUP_MUTATION_STATES: &[&str] = &["running"];
 
 macro_rules! setup_fencing_evidence {
     ($event:expr) => {{
@@ -676,6 +678,13 @@ fn resolve_codex_auth(sc: &SetupConfig) -> (&'static str, String) {
     ("", String::new())
 }
 
+fn require_workspace_exec_success(result: &WorkspaceExecResult) -> anyhow::Result<()> {
+    if result.exit_code != 0 {
+        anyhow::bail!("workspace exec exited {}", result.exit_code);
+    }
+    Ok(())
+}
+
 pub(crate) struct SshInjectionResult {
     pub(crate) created_by: String,
     pub(crate) public_key: String,
@@ -952,7 +961,7 @@ impl WorkerSetupOps<'_> {
             }
         }
 
-        let _replacement = match self
+        let replacement = match self
             .wait_for_replacement_pod(&sandbox, input, old_uid)
             .await
         {
@@ -961,10 +970,64 @@ impl WorkerSetupOps<'_> {
                 return self.settle_failed_recovery(input, old_owner, error).await;
             }
         };
+        let replacement_probe = match self
+            .authority
+            .run_while_authoritative_for_states(
+                SETUP_MUTATION_STATES,
+                sandbox.probe_environment(&input.environment_id),
+            )
+            .await
+        {
+            Ok(probe)
+                if probe.claim_exists
+                    && probe.claim_ready
+                    && probe.pod_exists
+                    && probe.pod_phase == "Running"
+                    && probe.pod_name == replacement.name
+                    && probe.pod_uid == replacement.uid
+                    && !probe.pod_ip.is_empty() =>
+            {
+                probe
+            }
+            Ok(_) => {
+                return self
+                    .settle_failed_recovery(
+                        input,
+                        old_owner,
+                        anyhow::anyhow!("setup recovery replacement Pod identity is not current"),
+                    )
+                    .await;
+            }
+            Err(error) => {
+                return self.settle_failed_recovery(input, old_owner, error).await;
+            }
+        };
+        let backend_update = self
+            .authority
+            .execute_for_states(
+                SETUP_MUTATION_STATES,
+                sqlx::query(
+                    "UPDATE sandbox_environment_backend SET pod_name = $1, pod_ip = $2 \
+                     WHERE environment_id = $3",
+                )
+                .bind(&replacement_probe.pod_name)
+                .bind(&replacement_probe.pod_ip)
+                .bind(&input.environment_id),
+            )
+            .await;
+        if !matches!(backend_update, Ok(ref result) if result.rows_affected() == 1) {
+            return self
+                .settle_failed_recovery(
+                    input,
+                    old_owner,
+                    anyhow::anyhow!("setup recovery backend update did not converge"),
+                )
+                .await;
+        }
         setup_fencing_evidence!(SetupFencingEvidence::ReplacementReady {
             environment_id: self.phase_authority.environment_id().to_string(),
             old_pod_uid: old_uid.to_string(),
-            new_pod_uid: _replacement.uid.clone(),
+            new_pod_uid: replacement.uid.clone(),
         });
         if let Err(error) = self.phase_authority.finish_recovery(old_owner).await {
             match self.suspend_and_observe(input, old_owner).await {
@@ -1249,20 +1312,7 @@ impl WorkerSetupOps<'_> {
                 return Err(classify_setup_recovery_error(error));
             }
         };
-        if exec_result.exit_code != 0 {
-            let mut message = String::from_utf8_lossy(&exec_result.stderr)
-                .trim()
-                .to_string();
-            if message.is_empty() {
-                message = String::from_utf8_lossy(&exec_result.stdout)
-                    .trim()
-                    .to_string();
-            }
-            if message.is_empty() {
-                anyhow::bail!("workspace exec exited {}", exec_result.exit_code);
-            }
-            anyhow::bail!("workspace exec exited {}: {message}", exec_result.exit_code);
-        }
+        require_workspace_exec_success(&exec_result)?;
         #[cfg(feature = "kind-e2e")]
         if super::fencing_evidence::fail_once_after_exec(env_id, self.active_phase, &pod.uid) {
             return Err(SetupRecoveryFailed {
@@ -1551,15 +1601,38 @@ impl WorkerSetupOps<'_> {
             Some(email) if !email.is_empty() => email.to_string(),
             _ => email,
         };
-        let git_cmd = format!(
-            "git config --global user.email {:?} && git config --global user.name {:?}",
-            resolved_email, resolved_name
-        );
-        let cmd = vec!["sh".to_string(), "-c".to_string(), git_cmd];
-        match self
-            .workspace_exec(namespace, env_id, &cmd, "", &BTreeMap::new())
+        let git_config_result: anyhow::Result<()> = async {
+            self.workspace_exec(
+                namespace,
+                env_id,
+                &[
+                    "git".to_string(),
+                    "config".to_string(),
+                    "--global".to_string(),
+                    "user.email".to_string(),
+                    resolved_email.clone(),
+                ],
+                "",
+                &BTreeMap::new(),
+            )
+            .await?;
+            self.workspace_exec(
+                namespace,
+                env_id,
+                &[
+                    "git".to_string(),
+                    "config".to_string(),
+                    "--global".to_string(),
+                    "user.name".to_string(),
+                    resolved_name.clone(),
+                ],
+                "",
+                &BTreeMap::new(),
+            )
             .await
-        {
+        }
+        .await;
+        match git_config_result {
             Err(error) if is_setup_control_flow(&error) => {
                 return Err(error);
             }
@@ -2766,5 +2839,18 @@ mod tests {
         assert_eq!(resolve_codex_auth(&sc), ("oauth", "t".to_string()));
         let sc: SetupConfig = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(resolve_codex_auth(&sc).0, "");
+    }
+
+    #[test]
+    fn workspace_exec_failure_never_retains_child_output() {
+        let marker = "synthetic-secret-output-must-not-persist";
+        let result = WorkspaceExecResult {
+            stdout: marker.as_bytes().to_vec(),
+            stderr: marker.as_bytes().to_vec(),
+            exit_code: 23,
+        };
+        let error = require_workspace_exec_success(&result).unwrap_err();
+        assert_eq!(error.to_string(), "workspace exec exited 23");
+        assert!(!format!("{error:?}").contains(marker));
     }
 }

@@ -2003,7 +2003,7 @@ pub enum WorkspaceError {
     #[error("workspace input plan is invalid")]
     InvalidWorkspacePlan,
     #[error(
-        "workspace has local Git changes; commit them, use --path-mode copy for a point-in-time directory snapshot, or declare an explicit direct mount"
+        "workspace has local Git changes; commit them, use --path-mode copy for a point-in-time directory copy, or declare an explicit direct mount"
     )]
     DirtyWorktree,
     #[error("Git submodules are not supported by the native preview")]

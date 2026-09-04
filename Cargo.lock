@@ -1509,6 +1509,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1729,10 +1730,10 @@ dependencies = [
  "codewire-local-credentials",
  "codewire-netstack",
  "codewire-project",
+ "codewire-protected-store",
  "codewire-proto",
  "codewire-tailnet",
  "codewire-vmm-guest-probe",
- "codewire-workload-secrets",
  "connectrpc",
  "futures",
  "hmac 0.12.1",
@@ -2035,7 +2036,6 @@ dependencies = [
  "codewire-daemon",
  "codewire-gateway-proto",
  "codewire-project",
- "codewire-workload-secrets",
  "flate2",
  "hmac 0.12.1",
  "libc",
@@ -2058,10 +2058,7 @@ dependencies = [
 name = "codewire-workload-secrets"
 version = "0.1.0"
 dependencies = [
- "sha2 0.10.9",
  "thiserror 2.0.18",
- "uuid",
- "zeroize",
 ]
 
 [[package]]

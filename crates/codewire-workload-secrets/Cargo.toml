@@ -5,10 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Bounded one-boot workload-secret delivery codec"
+description = "Bounded workload-secret metadata resolution and validation"
 
 [dependencies]
-sha2 = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true }
-zeroize = { workspace = true }

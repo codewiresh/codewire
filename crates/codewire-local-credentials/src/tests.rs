@@ -1689,16 +1689,13 @@ fn workload_secret_write_rotation_and_delete_reconcile_exact_effects() {
     store.clear_faults();
     drop(authority);
     let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
-    let resolved = authority
-        .resolve_workload_secrets(
-            &WorkloadSecretSelection {
-                user: true,
-                ..WorkloadSecretSelection::default()
-            },
-            true,
-        )
-        .unwrap();
-    assert_eq!(resolved.values["ROTATED"].expose_secret(), b"synthetic-old");
+    let stored_values = store.state.lock().unwrap();
+    assert_eq!(stored_values.entries.len(), 1);
+    assert_eq!(
+        stored_values.entries.values().next().unwrap(),
+        b"synthetic-old"
+    );
+    drop(stored_values);
     assert_eq!(store.entry_count(), 1);
 
     store.set_delete_fault(Fault::AfterEffect);

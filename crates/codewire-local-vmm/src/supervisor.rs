@@ -86,6 +86,12 @@ use crate::workspace_plan::{
 };
 
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 3;
+// Bump for every detached-supervisor behavior change, even if the protobuf
+// message layout itself remains wire-compatible.
+const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 1;
+const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
+    b"codewire.native-supervisor.runtime-config.sha256.v1";
+const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNNER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OPERATION_WATCH_BUFFER: usize = 8;
@@ -106,7 +112,6 @@ struct PreparedWorkspaceBoot {
     setup_total_bytes: u64,
     setup_header_sha256: String,
     skill_snapshot_sha256: String,
-    workload_secret_selection: WorkloadSecretSelection,
 }
 
 #[derive(Clone)]
@@ -147,7 +152,6 @@ pub struct NativeRuntimeConfig {
     pub mesh_data_dir: PathBuf,
     pub platform_config_dir: PathBuf,
     pub credential_authority_root: PathBuf,
-    pub workload_secret_runtime_root: Option<PathBuf>,
     pub executable: PathBuf,
 }
 
@@ -180,13 +184,6 @@ impl NativeRuntimeConfig {
                 return Err(SupervisorError::InvalidConfiguration);
             }
         }
-        if self
-            .workload_secret_runtime_root
-            .as_ref()
-            .is_some_and(|path| !path.is_absolute())
-        {
-            return Err(SupervisorError::InvalidConfiguration);
-        }
         if self.artifact_root.parent() != self.artifact_lock.parent() {
             return Err(SupervisorError::InvalidConfiguration);
         }
@@ -217,6 +214,50 @@ impl NativeRuntimeConfig {
             self.platform_config_dir.clone(),
         ]
     }
+
+    fn configuration_digest(&self) -> [u8; 32] {
+        // Keep this exhaustive so adding any runtime path fails compilation
+        // until its supervisor-identity semantics are decided explicitly.
+        let Self {
+            root,
+            artifact_root,
+            artifact_lock,
+            mesh_data_dir,
+            platform_config_dir,
+            credential_authority_root,
+            executable,
+        } = self;
+        let mut digest = Sha256::new();
+        update_supervisor_config_digest(
+            &mut digest,
+            b"domain",
+            NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN,
+        );
+        for (field, path) in [
+            (b"root".as_slice(), root),
+            (b"artifact_root".as_slice(), artifact_root),
+            (b"artifact_lock".as_slice(), artifact_lock),
+            (b"mesh_data_dir".as_slice(), mesh_data_dir),
+            (b"platform_config_dir".as_slice(), platform_config_dir),
+            (
+                b"credential_authority_root".as_slice(),
+                credential_authority_root,
+            ),
+            (b"executable".as_slice(), executable),
+        ] {
+            update_supervisor_config_digest(&mut digest, field, path.as_os_str().as_bytes());
+        }
+        digest.finalize().into()
+    }
+}
+
+fn update_supervisor_config_digest(digest: &mut Sha256, field: &[u8], value: &[u8]) {
+    for component in [field, value] {
+        let length = u64::try_from(component.len())
+            .expect("native supervisor configuration component exceeds u64");
+        digest.update(length.to_be_bytes());
+        digest.update(component);
+    }
 }
 
 #[derive(Clone)]
@@ -234,16 +275,22 @@ impl NativeSupervisorClient {
             // A killed supervisor leaves a mode-0600 socket name behind. A
             // replacement singleton owns the lock and performs the exact
             // nofollow removal; the CLI never unlinks a control endpoint.
-            if let Ok(client) = Self::connect(&socket).await {
-                return Ok(client.with_restart_config(config));
+            match Self::connect_for_config(&socket, config).await {
+                Ok(client) => return Ok(client.with_restart_config(config)),
+                Err(error) if error.incompatible_supervisor() => return Err(error),
+                Err(_) => {}
             }
         }
         let mut child = spawn_supervisor(config)?;
         let deadline = tokio::time::Instant::now() + RUNNER_START_TIMEOUT;
         loop {
             if fs::symlink_metadata(&socket).is_ok() {
-                match Self::connect(&socket).await {
+                match Self::connect_for_config(&socket, config).await {
                     Ok(client) => return Ok(client.with_restart_config(config)),
+                    Err(error) if error.incompatible_supervisor() => {
+                        terminate_unadmitted_child(&mut child);
+                        return Err(error);
+                    }
                     Err(error) if tokio::time::Instant::now() < deadline => {
                         let _ = error;
                     }
@@ -270,11 +317,37 @@ impl NativeSupervisorClient {
     }
 
     pub async fn connect(socket: &Path) -> Result<Self, SupervisorError> {
+        Self::connect_admitted(socket, None).await
+    }
+
+    async fn connect_for_config(
+        socket: &Path,
+        config: &NativeRuntimeConfig,
+    ) -> Result<Self, SupervisorError> {
+        Self::connect_admitted(socket, Some(config.configuration_digest())).await
+    }
+
+    async fn connect_admitted(
+        socket: &Path,
+        expected_configuration_digest: Option<[u8; 32]>,
+    ) -> Result<Self, SupervisorError> {
         let channel = connect_owner_only(socket).await?;
-        Ok(Self {
+        let mut client = Self {
             inner: LocalSupervisorServiceClient::new(channel),
             restart_config: None,
-        })
+        };
+        let info = tokio::time::timeout(
+            SUPERVISOR_INFO_TIMEOUT,
+            client
+                .inner
+                .get_supervisor_info(v1::GetSupervisorInfoRequest {}),
+        )
+        .await
+        .map_err(|_| SupervisorError::SupervisorInfoUnavailable)?
+        .map_err(supervisor_info_rpc_error)?
+        .into_inner();
+        admit_supervisor_info(&info, expected_configuration_digest.as_ref())?;
+        Ok(client)
     }
 
     fn with_restart_config(mut self, config: &NativeRuntimeConfig) -> Self {
@@ -536,6 +609,44 @@ impl NativeSupervisorClient {
     }
 }
 
+fn supervisor_info_rpc_error(status: Status) -> SupervisorError {
+    if status.code() == tonic::Code::Unimplemented {
+        SupervisorError::SupervisorProtocolUnavailable
+    } else {
+        SupervisorError::SupervisorInfoUnavailable
+    }
+}
+
+fn admit_supervisor_info(
+    info: &v1::SupervisorInfo,
+    expected_configuration_digest: Option<&[u8; 32]>,
+) -> Result<(), SupervisorError> {
+    if info.protocol_version != NATIVE_SUPERVISOR_PROTOCOL_VERSION {
+        return Err(SupervisorError::SupervisorProtocolMismatch {
+            expected: NATIVE_SUPERVISOR_PROTOCOL_VERSION,
+            actual: info.protocol_version,
+        });
+    }
+    let reported_configuration_digest: [u8; 32] =
+        info.configuration_sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| SupervisorError::InvalidSupervisorInfo)?;
+    if expected_configuration_digest
+        .is_some_and(|expected| expected != &reported_configuration_digest)
+    {
+        return Err(SupervisorError::SupervisorConfigurationMismatch);
+    }
+    Ok(())
+}
+
+fn supervisor_info(config: &NativeRuntimeConfig) -> v1::SupervisorInfo {
+    v1::SupervisorInfo {
+        protocol_version: NATIVE_SUPERVISOR_PROTOCOL_VERSION,
+        configuration_sha256: config.configuration_digest().to_vec(),
+    }
+}
+
 fn operation_watch_failure(operation_id: &str, failure: Status) -> Status {
     Status::new(
         failure.code(),
@@ -621,6 +732,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
     };
     core.recover_host_reboot_workspace_transitions()?;
     let service = SupervisorRpc {
+        info: supervisor_info(&config),
         core: Arc::new(Mutex::new(core)),
         shutdown: shutdown_tx,
         operation_reader: Arc::new(Mutex::new(operation_reader)),
@@ -806,6 +918,12 @@ impl EnvironmentRecord {
             skill_snapshot_count: skill_snapshot
                 .and_then(|snapshot| u32::try_from(snapshot.skills().len()).ok())
                 .unwrap_or_default(),
+            requires_credential_authority: self.access_profile.is_some()
+                || project.as_ref().is_some_and(|project| {
+                    project.secrets.organization
+                        || !project.secrets.project.is_empty()
+                        || project.secrets.user
+                }),
             host_ports: host_ports_to_proto(&self.host_ports),
             mesh: mesh_attachment_to_proto(self.mesh.as_ref()),
             error_code: self
@@ -1289,6 +1407,30 @@ impl SupervisorCore {
         LocalCredentialControlClient::connect(&self.config.credential_authority_config())
             .await
             .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)
+    }
+
+    async fn validate_workload_secret_metadata(
+        &mut self,
+        selection: &WorkloadSecretSelection,
+    ) -> Result<(), SupervisorError> {
+        if !workload_secret_selection_has_protected_sources(selection) {
+            return Ok(());
+        }
+        self.access_control_client()
+            .await?
+            .resolve_workload_secret_metadata(selection.clone())
+            .await
+            .map(|_| ())
+            .map_err(workload_secret_resolution_error)
+    }
+
+    async fn validate_environment_workload_secret_metadata(
+        &mut self,
+        name: &str,
+        staging: bool,
+    ) -> Result<(), SupervisorError> {
+        let selection = workload_secret_selection_for_boot(self.environment(name)?, staging)?;
+        self.validate_workload_secret_metadata(&selection).await
     }
 
     async fn bind_environment_access(
@@ -1893,12 +2035,15 @@ impl SupervisorCore {
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
                 }
                 LifecycleEffect::EnsureRunner => {
-                    let environment = self.environment(&request.name)?;
-                    let artifact_generation = artifact_generation_for_boot(
-                        environment,
-                        environment.staging_workspace_generation.is_some(),
-                    )?
-                    .to_owned();
+                    let staging = self
+                        .environment(&request.name)?
+                        .staging_workspace_generation
+                        .is_some();
+                    self.validate_environment_workload_secret_metadata(&request.name, staging)
+                        .await?;
+                    let artifact_generation =
+                        artifact_generation_for_boot(self.environment(&request.name)?, staging)?
+                            .to_owned();
                     let _ = self
                         .runner_client_for_artifact(&request.name, &artifact_generation)
                         .await?;
@@ -1951,6 +2096,11 @@ impl SupervisorCore {
                 let (_, operation) = match self.create(&request, &workspace_plan, &operation).await
                 {
                     Ok(result) => result,
+                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                        // The owner-side CLI starts the authority. Preserve the
+                        // latest durable checkpoint for its next worker run.
+                        return Err(SupervisorError::CredentialAuthorityUnavailable);
+                    }
                     Err(_) => {
                         let error_code = if recovering {
                             "create_interrupted"
@@ -1978,6 +2128,9 @@ impl SupervisorCore {
             if operation.kind == OperationKind::Start {
                 let (_, operation) = match self.start(name, &operation).await {
                     Ok(result) => result,
+                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                        return Err(SupervisorError::CredentialAuthorityUnavailable);
+                    }
                     Err(_) => {
                         let error_code = if recovering {
                             "start_interrupted"
@@ -2030,6 +2183,9 @@ impl SupervisorCore {
             ) {
                 let operation = match self.resize(name, &operation).await {
                     Ok(operation) => operation,
+                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                        return Err(SupervisorError::CredentialAuthorityUnavailable);
+                    }
                     Err(_) => {
                         let error_code = if recovering {
                             "resize_interrupted"
@@ -2055,6 +2211,9 @@ impl SupervisorCore {
             ) {
                 let operation = match self.workspace_transition(name, &operation).await {
                     Ok(operation) => operation,
+                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
+                        return Err(SupervisorError::CredentialAuthorityUnavailable);
+                    }
                     Err(_) => {
                         let error_code = match operation.kind {
                             OperationKind::UpdateWorkspace if recovering => {
@@ -2445,7 +2604,19 @@ impl SupervisorCore {
             self.mark_orphaned(name)?;
             return Ok(());
         }
-        let mut client = RunnerClient::connect(&expected_socket).await?;
+        let mut client = match RunnerClient::connect(&expected_socket).await {
+            Ok(client) => client,
+            Err(error) if error.incompatible_protocol() => {
+                // Process and socket identity were both revalidated above.
+                // An incompatible runner must never survive for later reuse,
+                // but transient transport failures are deliberately not a
+                // license to kill it.
+                self.terminate_recorded_runner(name).await?;
+                self.mark_runner_dead(name)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let info = client
             .info()
             .await
@@ -2675,11 +2846,6 @@ impl SupervisorCore {
             .arg("--platform-config-dir")
             .arg(&self.config.platform_config_dir)
             .env_clear();
-        if let Some(runtime_root) = &self.config.workload_secret_runtime_root {
-            command
-                .arg("--workload-secret-runtime-root")
-                .arg(runtime_root);
-        }
         command
             .current_dir(&self.config.root)
             .stdin(Stdio::null())
@@ -2741,7 +2907,7 @@ impl SupervisorCore {
         };
         let runner_record = RunnerRecord {
             process: live.identity().clone(),
-            socket: socket_identity,
+            socket: socket_identity.clone(),
             artifact_generation: artifact_generation.to_owned(),
             error_code: None,
         };
@@ -2750,6 +2916,7 @@ impl SupervisorCore {
             self.environment_mut(name)?.runner = None;
             let _ = live.signal(Signal::KILL);
             let _ = child.wait();
+            let _ = remove_bound_socket(&socket, &socket_identity);
             return Err(error);
         }
         let mut client = match RunnerClient::connect(&socket).await {
@@ -2759,6 +2926,7 @@ impl SupervisorCore {
                 let _ = child.wait();
                 self.environment_mut(name)?.runner = None;
                 self.save()?;
+                let _ = remove_bound_socket(&socket, &socket_identity);
                 return Err(error.into());
             }
         };
@@ -2772,6 +2940,7 @@ impl SupervisorCore {
             let _ = child.wait();
             self.environment_mut(name)?.runner = None;
             self.save()?;
+            let _ = remove_bound_socket(&socket, &socket_identity);
             return Err(SupervisorError::RunnerAdoption);
         }
         self.live_runners.insert(environment_id, live);
@@ -2789,6 +2958,9 @@ impl SupervisorCore {
         let staging = environment.staging_workspace_generation.is_some();
         let expected_artifact_generation =
             artifact_generation_for_boot(&environment, staging)?.to_owned();
+        let workload_secret_selection = workload_secret_selection_for_boot(&environment, staging)?;
+        self.validate_workload_secret_metadata(&workload_secret_selection)
+            .await?;
         let mut client = self
             .runner_client_for_artifact(name, &expected_artifact_generation)
             .await?;
@@ -2822,36 +2994,6 @@ impl SupervisorCore {
         })
         .await
         .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
-        let workload_secret_binding = if workspace.workload_secret_selection.organization
-            || workspace.workload_secret_selection.user
-            || workspace.workload_secret_selection.project.is_some()
-        {
-            let runtime_root = self
-                .config
-                .workload_secret_runtime_root
-                .clone()
-                .ok_or_else(|| {
-                    SupervisorError::WorkloadSecretResolution(
-                        "XDG_RUNTIME_DIR is unavailable".to_owned(),
-                    )
-                })?;
-            let environment_id = access_environment_id(environment.id)?;
-            self.access_control_client()
-                .await?
-                .prepare_environment_workload_secrets(
-                    &environment_id,
-                    generation,
-                    &workspace.workload_secret_selection,
-                    &runtime_root,
-                )
-                .await
-                .map_err(|status| {
-                    SupervisorError::WorkloadSecretResolution(status.message().to_owned())
-                })?
-                .binding
-        } else {
-            None
-        };
         let runner_events = client
             .watch(environment.id)
             .await
@@ -2889,15 +3031,6 @@ impl SupervisorCore {
                 mesh: mesh_attachment_to_proto(environment.mesh.as_ref()),
                 direct_shares: direct_share_attachments_to_proto(&environment.workspace_plan)?,
                 skill_snapshot_sha256: workspace.skill_snapshot_sha256,
-                workload_secret_total_bytes: workload_secret_binding
-                    .map(|binding| binding.total_bytes())
-                    .unwrap_or_default(),
-                workload_secret_sha256: workload_secret_binding
-                    .map(|binding| binding.sha256().to_vec())
-                    .unwrap_or_default(),
-                workload_secret_entry_count: workload_secret_binding
-                    .map(|binding| binding.entry_count())
-                    .unwrap_or_default(),
             })
             .await;
         let relay_result = match tokio::time::timeout(RUNNER_EVENT_DRAIN_TIMEOUT, &mut relay).await
@@ -3021,12 +3154,14 @@ impl SupervisorCore {
                     operation = self.checkpoint_state_operation(&operation, next_state)?;
                 }
                 LifecycleEffect::EnsureRunner => {
-                    let environment = self.environment(name)?;
-                    let artifact_generation = artifact_generation_for_boot(
-                        environment,
-                        environment.staging_workspace_generation.is_some(),
-                    )?
-                    .to_owned();
+                    let staging = self
+                        .environment(name)?
+                        .staging_workspace_generation
+                        .is_some();
+                    self.validate_environment_workload_secret_metadata(name, staging)
+                        .await?;
+                    let artifact_generation =
+                        artifact_generation_for_boot(self.environment(name)?, staging)?.to_owned();
                     let _ = self
                         .runner_client_for_artifact(name, &artifact_generation)
                         .await?;
@@ -3103,9 +3238,9 @@ impl SupervisorCore {
         }
         let environment = self.environment(name)?;
         let environment_id = environment.id;
-        let Some(runner) = environment.runner.clone() else {
+        if environment.runner.is_none() {
             return Ok(());
-        };
+        }
         let socket = self.config.runner_socket(environment_id);
         let mut client = RunnerClient::connect(&socket).await?;
         client
@@ -3114,25 +3249,39 @@ impl SupervisorCore {
             .map_err(|_| SupervisorError::RunnerRetirement)?;
         drop(client);
 
-        let mut child = self.children.remove(&environment_id);
-        let live = match self.live_runners.remove(&environment_id) {
-            Some(live) => Some(live),
-            None => match LiveProcess::recover(&runner.process) {
-                Ok(live) => Some(live),
-                Err(RecoveryError::ReadProcess(error))
-                    if error.kind() == io::ErrorKind::NotFound =>
-                {
-                    None
-                }
-                Err(RecoveryError::ProcessExited | RecoveryError::IdentityMismatch) => None,
-                Err(error) => return Err(error.into()),
-            },
-        };
-        if let Some(live) = live.as_ref()
-            && !live.is_exited()?
-        {
+        self.terminate_recorded_runner(name).await?;
+        let environment = self.environment_mut(name)?;
+        environment.runner = None;
+        environment.state = StoredEnvironmentState::Stopped;
+        self.save()
+    }
+
+    /// Terminate the exact process and remove the exact socket recorded for a
+    /// runner without trusting the runner protocol. Every caller must first
+    /// reconcile process and socket identity; identity mismatches remain
+    /// orphaned and never reach this helper. Runner-owned VMM and auxiliary
+    /// processes carry a parent-death signal, so killing this exact runner
+    /// also closes its pre-upgrade guest boundary; a replacement runner still
+    /// performs tracked-process cleanup before accepting lifecycle work.
+    async fn terminate_recorded_runner(&mut self, name: &str) -> Result<(), SupervisorError> {
+        let environment = self.environment(name)?;
+        let environment_id = environment.id;
+        let runner = environment
+            .runner
+            .clone()
+            .ok_or(SupervisorError::InvalidState)?;
+        let socket = self.config.runner_socket(environment_id);
+        let live = self
+            .live_runners
+            .get(&environment_id)
+            .ok_or(SupervisorError::InvalidState)?;
+        if live.identity() != &runner.process {
+            return Err(SupervisorError::InvalidState);
+        }
+        if !live.is_exited()? {
             live.signal(Signal::KILL)?;
         }
+        let mut child = self.children.remove(&environment_id);
         let exited = if let Some(mut owned_child) = child.take() {
             matches!(
                 tokio::time::timeout(
@@ -3142,14 +3291,13 @@ impl SupervisorCore {
                 .await,
                 Ok(Ok(Ok(_)))
             )
-        } else if let Some(live) = live.as_ref() {
-            live.wait_exited(RUNNER_EXIT_TIMEOUT).await?
         } else {
-            true
+            live.wait_exited(RUNNER_EXIT_TIMEOUT).await?
         };
         if !exited {
             return Err(SupervisorError::RunnerExitTimeout);
         }
+        self.live_runners.remove(&environment_id);
         match fs::symlink_metadata(&socket) {
             Ok(_) => remove_bound_socket(&socket, &runner.socket)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -3160,10 +3308,7 @@ impl SupervisorCore {
                 });
             }
         }
-        let environment = self.environment_mut(name)?;
-        environment.runner = None;
-        environment.state = StoredEnvironmentState::Stopped;
-        self.save()
+        Ok(())
     }
 
     async fn prepare_environment_for_delete(&mut self, name: &str) -> Result<(), SupervisorError> {
@@ -3236,6 +3381,8 @@ impl SupervisorCore {
                         return Err(SupervisorError::InvalidRequest);
                     }
                     if disk_bytes > current_disk_bytes {
+                        self.validate_environment_workload_secret_metadata(name, false)
+                            .await?;
                         let artifact_generation =
                             artifact_generation_for_boot(self.environment(name)?, false)?
                                 .to_owned();
@@ -3378,12 +3525,15 @@ impl SupervisorCore {
                 }
                 LifecycleEffect::EnsureRunner => {
                     if workspace_transition_requires_boot(self.environment(name)?, &parameters)? {
-                        let environment = self.environment(name)?;
-                        let artifact_generation = artifact_generation_for_boot(
-                            environment,
-                            environment.staging_workspace_generation.is_some(),
-                        )?
-                        .to_owned();
+                        let staging = self
+                            .environment(name)?
+                            .staging_workspace_generation
+                            .is_some();
+                        self.validate_environment_workload_secret_metadata(name, staging)
+                            .await?;
+                        let artifact_generation =
+                            artifact_generation_for_boot(self.environment(name)?, staging)?
+                                .to_owned();
                         let _ = self
                             .runner_client_for_artifact(name, &artifact_generation)
                             .await?;
@@ -3747,6 +3897,7 @@ fn credential_broker_runtime_proto(runtime: AuthorityBrokerRuntime) -> v1::Crede
 
 #[derive(Clone)]
 struct SupervisorRpc {
+    info: v1::SupervisorInfo,
     core: Arc<Mutex<SupervisorCore>>,
     shutdown: watch::Sender<bool>,
     operation_reader: Arc<Mutex<SupervisorOperationReader>>,
@@ -3798,6 +3949,13 @@ impl SupervisorRpc {
 
 #[tonic::async_trait]
 impl LocalSupervisorService for SupervisorRpc {
+    async fn get_supervisor_info(
+        &self,
+        _request: Request<v1::GetSupervisorInfoRequest>,
+    ) -> Result<Response<v1::SupervisorInfo>, Status> {
+        Ok(Response::new(self.info.clone()))
+    }
+
     async fn create_environment(
         &self,
         request: Request<v1::CreateEnvironmentRequest>,
@@ -3809,6 +3967,9 @@ impl LocalSupervisorService for SupervisorRpc {
             canonicalize_mesh_attachment_proto(request.mesh.as_ref()).map_err(Status::from)?;
         let request_id = validate_create(&request).map_err(Status::from)?;
         let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
         let operation = match core
             .store
             .operation_by_request(request_id)
@@ -3930,6 +4091,9 @@ impl LocalSupervisorService for SupervisorRpc {
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
         let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
         core.reconcile(&name).await.map_err(Status::from)?;
         let environment = core.environment(&name).map_err(Status::from)?.clone();
         require_expected_environment(&environment, expected_environment_id)?;
@@ -3983,7 +4147,10 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let core = self.core.lock().await;
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
         let environment = core.environment(&name).map_err(Status::from)?;
         require_expected_environment(environment, expected_environment_id)?;
         let environment_id = environment.id;
@@ -4012,6 +4179,9 @@ impl LocalSupervisorService for SupervisorRpc {
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
         let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
         core.reconcile(&name).await.map_err(Status::from)?;
         let environment = core.environment(&name).map_err(Status::from)?.clone();
         require_expected_environment(&environment, expected_environment_id)?;
@@ -4085,6 +4255,9 @@ impl LocalSupervisorService for SupervisorRpc {
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
         let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
         core.reconcile(&name).await.map_err(Status::from)?;
         let environment = core.environment(&name).map_err(Status::from)?.clone();
         require_expected_environment(&environment, expected_environment_id)?;
@@ -4166,7 +4339,10 @@ impl LocalSupervisorService for SupervisorRpc {
         let request_id = validate_resize(&request).map_err(Status::from)?;
         let expected_environment_id =
             parse_optional_environment_id(&request.environment_id).map_err(Status::from)?;
-        let core = self.core.lock().await;
+        let mut core = self.core.lock().await;
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
         let environment = core
             .environment(&request.name)
             .map_err(Status::from)?
@@ -4343,7 +4519,37 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         let (name, request_id, expected_environment_id) = mutation_selection(request.into_inner())?;
-        let core = self.core.lock().await;
+        let mut core = self.core.lock().await;
+        // Preserve the selector's stable-identity precondition before replaying
+        // any durable work. A replay may remove this environment (including
+        // when this request ID names the pending delete itself), but it must
+        // not turn a stale caller's NotFound into an effect or replay error.
+        match core
+            .store
+            .operation_by_request(request_id)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?
+        {
+            Some(operation) => {
+                if operation.kind != OperationKind::Delete
+                    || delete_operation_revoke_access(&operation, &name).is_err()
+                {
+                    return Err(Status::aborted("local lifecycle request ID collision"));
+                }
+                if expected_environment_id.is_some()
+                    && operation.environment_id != expected_environment_id
+                {
+                    return Err(Status::not_found("local environment was not found"));
+                }
+            }
+            None => {
+                let environment = core.environment(&name).map_err(Status::from)?;
+                require_expected_environment(environment, expected_environment_id)?;
+            }
+        }
+        core.replay_pending_operations()
+            .await
+            .map_err(Status::from)?;
         let existing = core
             .store
             .operation_by_request(request_id)
@@ -5574,6 +5780,15 @@ fn credential_control_error(status: Status) -> SupervisorError {
     }
 }
 
+fn workload_secret_resolution_error(status: Status) -> SupervisorError {
+    match status.code() {
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Unknown => {
+            SupervisorError::CredentialAuthorityUnavailable
+        }
+        _ => SupervisorError::WorkloadSecretResolution(status.message().to_owned()),
+    }
+}
+
 fn parse_implicit_path_mode(value: &str) -> Result<WorkspaceSourceMode, SupervisorError> {
     match value {
         "clone" => Ok(WorkspaceSourceMode::Clone),
@@ -5955,16 +6170,6 @@ fn prepare_workspace_boot(
         .transpose()
         .map_err(|_| SupervisorError::WorkspaceGeneration)?
         .unwrap_or_default();
-    let project: codewire_project::ProjectSpec =
-        serde_json::from_slice(workspace.project_spec_json()?)
-            .map_err(|_| SupervisorError::InvalidState)?;
-    let workload_secret_selection = WorkloadSecretSelection {
-        organization: project.secrets.organization,
-        project: (!project.secrets.project.is_empty()).then_some(project.secrets.project),
-        user: project.secrets.user,
-        explicit_environment_keys: project.environment.keys().cloned().collect(),
-    };
-
     // Provision at the replayable start boundary, not only during create.
     // An active generation normally reuses its admitted root without needing
     // the CAS. If its root was removed, rebuilding it still uses the exact
@@ -6039,8 +6244,46 @@ fn prepare_workspace_boot(
             .map(|pack| pack.header_sha256.to_string())
             .unwrap_or_default(),
         skill_snapshot_sha256,
-        workload_secret_selection,
     })
+}
+
+fn workload_secret_selection_for_boot(
+    environment: &EnvironmentRecord,
+    staging: bool,
+) -> Result<WorkloadSecretSelection, SupervisorError> {
+    let workspace = if staging {
+        environment.staging_workspace_generation.as_ref()
+    } else {
+        environment.active_workspace_generation.as_ref()
+    }
+    .ok_or(SupervisorError::InvalidState)?;
+    if staging {
+        workspace.validate()?;
+    } else {
+        workspace.validate_for_project_intent(
+            environment
+                .project_spec_json
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?,
+            environment
+                .project_spec_sha256
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?,
+        )?;
+    }
+    let project: codewire_project::ProjectSpec =
+        serde_json::from_slice(workspace.project_spec_json()?)
+            .map_err(|_| SupervisorError::InvalidState)?;
+    Ok(WorkloadSecretSelection {
+        organization: project.secrets.organization,
+        project: (!project.secrets.project.is_empty()).then_some(project.secrets.project),
+        user: project.secrets.user,
+        explicit_environment_keys: project.environment.into_keys().collect(),
+    })
+}
+
+fn workload_secret_selection_has_protected_sources(selection: &WorkloadSecretSelection) -> bool {
+    selection.organization || selection.project.is_some() || selection.user
 }
 
 fn runner_artifact_identity_matches(recorded: &str, reported: &str) -> bool {
@@ -6719,11 +6962,6 @@ fn spawn_supervisor(config: &NativeRuntimeConfig) -> Result<Child, SupervisorErr
         .arg("--credential-authority-root")
         .arg(&config.credential_authority_root)
         .env_clear();
-    if let Some(runtime_root) = &config.workload_secret_runtime_root {
-        command
-            .arg("--workload-secret-runtime-root")
-            .arg(runtime_root);
-    }
     command
         .current_dir(&config.root)
         .stdin(Stdio::null())
@@ -6805,14 +7043,12 @@ impl From<SupervisorError> for Status {
             | SupervisorError::Orphaned
             | SupervisorError::OperationTerminal
             | SupervisorError::ArtifactGenerationChanged
-            | SupervisorError::EnvironmentAccessUnavailable => {
+            | SupervisorError::EnvironmentAccessUnavailable
+            | SupervisorError::WorkloadSecretResolution(_) => {
                 Status::failed_precondition(error.to_string())
             }
             SupervisorError::CredentialAuthorityUnavailable => {
                 Status::unavailable(error.to_string())
-            }
-            SupervisorError::WorkloadSecretResolution(_) => {
-                Status::failed_precondition(error.to_string())
             }
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
@@ -6852,7 +7088,7 @@ pub enum SupervisorError {
     SecretInState,
     #[error("local credential authority is unavailable")]
     CredentialAuthorityUnavailable,
-    #[error("local workload-secret resolution failed: {0}")]
+    #[error("local workload-secret selection cannot be resolved: {0}")]
     WorkloadSecretResolution(String),
     #[error("local environment access binding is unavailable")]
     EnvironmentAccessUnavailable,
@@ -6868,6 +7104,18 @@ pub enum SupervisorError {
     SpawnSupervisor,
     #[error("native supervisor startup timed out")]
     SupervisorStartTimeout,
+    #[error("the running native supervisor does not implement the required compatibility protocol")]
+    SupervisorProtocolUnavailable,
+    #[error(
+        "native supervisor protocol version mismatch: expected {expected}, running supervisor reported {actual}"
+    )]
+    SupervisorProtocolMismatch { expected: u32, actual: u32 },
+    #[error("the running native supervisor returned invalid compatibility information")]
+    InvalidSupervisorInfo,
+    #[error("query running native supervisor compatibility failed")]
+    SupervisorInfoUnavailable,
+    #[error("the running native supervisor uses a different runtime configuration")]
+    SupervisorConfigurationMismatch,
     #[error("spawn native environment runner failed")]
     SpawnRunner,
     #[error("native environment runner startup timed out")]
@@ -6940,6 +7188,19 @@ pub enum SupervisorError {
     Io { path: PathBuf, source: io::Error },
 }
 
+impl SupervisorError {
+    fn incompatible_supervisor(&self) -> bool {
+        matches!(
+            self,
+            Self::SupervisorProtocolUnavailable
+                | Self::SupervisorProtocolMismatch { .. }
+                | Self::InvalidSupervisorInfo
+                | Self::SupervisorInfoUnavailable
+                | Self::SupervisorConfigurationMismatch
+        )
+    }
+}
+
 impl From<WorkspaceGenerationError> for SupervisorError {
     fn from(_: WorkspaceGenerationError) -> Self {
         Self::WorkspaceGeneration
@@ -6948,12 +7209,18 @@ impl From<WorkspaceGenerationError> for SupervisorError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
     use crate::artifact::{
         ARTIFACT_LOCK_SCHEMA_VERSION, ArtifactArchitecture, ArtifactLock, ArtifactSpec,
         CLOUD_HYPERVISOR_RELEASE, ExecutableArtifactSpec,
     };
     use crate::oci::{OciArchitecture, ResolvedDescriptor, ResolvedImage, Sha256Digest};
+    use crate::uds::bind_owner_only;
+    use codewire_access::builtin_provider_catalog;
+    use codewire_local_credentials::{LocalCredentialClient, serve_local_credential_authority};
+    use codewire_protected_store::{EphemeralProtectedStore, ProtectedValue};
 
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
@@ -7147,6 +7414,56 @@ mod tests {
         }
     }
 
+    fn project_environment_with_secret_selection(
+        secrets: codewire_project::SecretBindings,
+        environment_values: BTreeMap<String, String>,
+    ) -> EnvironmentRecord {
+        let mut environment = project_environment();
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        project.secrets = secrets;
+        project.environment = environment_values;
+        let project_spec_json = project.canonical_json().unwrap();
+        let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
+        environment.project_spec_json = Some(project_spec_json.clone());
+        environment.project_spec_sha256 = Some(project_spec_sha256.clone());
+        environment.active_workspace_generation = Some(test_workspace_generation(
+            &project_spec_json,
+            &project_spec_sha256,
+            b"workload-secret-selection",
+        ));
+        environment.validate("dev").unwrap();
+        environment
+    }
+
+    async fn start_test_credential_authority(
+        core: &SupervisorCore,
+    ) -> (
+        LocalCredentialClient,
+        tokio::task::JoinHandle<Result<(), codewire_local_credentials::AuthorityRuntimeError>>,
+    ) {
+        let config = core.config.credential_authority_config();
+        let server_config = config.clone();
+        let server = tokio::spawn(async move {
+            serve_local_credential_authority(
+                server_config,
+                EphemeralProtectedStore::default(),
+                builtin_provider_catalog(),
+            )
+            .await
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match LocalCredentialClient::connect(&config).await {
+                Ok(client) => return (client, server),
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("test credential authority did not start: {error}"),
+            }
+        }
+    }
+
     fn project_environment_with_access() -> EnvironmentRecord {
         let mut environment = project_environment();
         let mut project: codewire_project::ProjectSpec =
@@ -7278,7 +7595,6 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
-                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -7296,8 +7612,10 @@ mod tests {
         let operation_reader = SupervisorOperationReader::open(&core.root).unwrap();
         let operation_events = core.store.operation_events();
         let operation_progress = core.operation_progress.clone();
+        let info = supervisor_info(&core.config);
         let (shutdown, _shutdown_rx) = watch::channel(false);
         SupervisorRpc {
+            info,
             core: Arc::new(Mutex::new(core)),
             shutdown,
             operation_reader: Arc::new(Mutex::new(operation_reader)),
@@ -7305,6 +7623,185 @@ mod tests {
             operation_progress,
             worker_running: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn spawn_test_supervisor_server(
+        socket: &Path,
+        service: SupervisorRpc,
+    ) -> (
+        SocketIdentity,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (listener, socket_identity) = bind_owner_only_listener(socket).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, public_api::supervisor_router(service))
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        (socket_identity, shutdown_tx, server)
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestRunnerProtocolReply {
+        Version(u32),
+        Failure(tonic::Code),
+    }
+
+    #[derive(Clone)]
+    struct TestRunnerProtocolService {
+        reply: TestRunnerProtocolReply,
+        useful_calls: Arc<AtomicUsize>,
+    }
+
+    impl TestRunnerProtocolService {
+        fn unexpected_use<T>(&self) -> Result<Response<T>, Status> {
+            self.useful_calls.fetch_add(1, Ordering::Relaxed);
+            Err(Status::unimplemented("test runner RPC is not implemented"))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerService
+        for TestRunnerProtocolService
+    {
+        async fn get_runner_protocol_info(
+            &self,
+            _request: Request<v1::GetRunnerProtocolInfoRequest>,
+        ) -> Result<Response<v1::RunnerProtocolInfo>, Status> {
+            match self.reply {
+                TestRunnerProtocolReply::Version(protocol_version) => {
+                    Ok(Response::new(v1::RunnerProtocolInfo { protocol_version }))
+                }
+                TestRunnerProtocolReply::Failure(code) => {
+                    Err(Status::new(code, "untrusted test peer detail"))
+                }
+            }
+        }
+
+        async fn adopt_runner(
+            &self,
+            _request: Request<v1::AdoptRunnerRequest>,
+        ) -> Result<Response<v1::RunnerInfo>, Status> {
+            self.unexpected_use()
+        }
+
+        async fn get_runner_info(
+            &self,
+            _request: Request<v1::GetRunnerInfoRequest>,
+        ) -> Result<Response<v1::RunnerInfo>, Status> {
+            self.unexpected_use()
+        }
+
+        type WatchRunnerStream =
+            Pin<Box<dyn Stream<Item = Result<v1::RunnerEvent, Status>> + Send + 'static>>;
+
+        async fn watch_runner(
+            &self,
+            _request: Request<v1::WatchRunnerRequest>,
+        ) -> Result<Response<Self::WatchRunnerStream>, Status> {
+            self.unexpected_use()
+        }
+
+        async fn start_vm(
+            &self,
+            _request: Request<v1::StartVmRequest>,
+        ) -> Result<Response<v1::RunnerInfo>, Status> {
+            self.unexpected_use()
+        }
+
+        async fn stop_vm(
+            &self,
+            _request: Request<v1::StopVmRequest>,
+        ) -> Result<Response<v1::RunnerInfo>, Status> {
+            self.unexpected_use()
+        }
+
+        async fn grow_state_disk(
+            &self,
+            _request: Request<v1::GrowStateDiskRequest>,
+        ) -> Result<Response<v1::GrowStateDiskResponse>, Status> {
+            self.unexpected_use()
+        }
+
+        async fn prepare_retire_runner(
+            &self,
+            _request: Request<v1::PrepareRetireRunnerRequest>,
+        ) -> Result<Response<v1::PrepareRetireRunnerResponse>, Status> {
+            self.unexpected_use()
+        }
+
+        async fn get_daemon_access(
+            &self,
+            _request: Request<v1::GetDaemonAccessRequest>,
+        ) -> Result<Response<v1::DaemonAccess>, Status> {
+            self.unexpected_use()
+        }
+    }
+
+    fn spawn_test_runner_protocol_server(
+        socket: &Path,
+        reply: TestRunnerProtocolReply,
+    ) -> (
+        SocketIdentity,
+        Arc<AtomicUsize>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (incoming, socket_identity) = bind_owner_only(socket).unwrap();
+        let useful_calls = Arc::new(AtomicUsize::new(0));
+        let service = TestRunnerProtocolService {
+            reply,
+            useful_calls: Arc::clone(&useful_calls),
+        };
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    crate::control::v1::environment_runner_service_server::EnvironmentRunnerServiceServer::new(
+                        service,
+                    ),
+                )
+                .serve_with_incoming_shutdown(incoming, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        (socket_identity, useful_calls, shutdown_tx, server)
+    }
+
+    fn attach_test_runner_process(
+        core: &mut SupervisorCore,
+        socket_identity: SocketIdentity,
+    ) -> (Uuid, ProcessIdentity) {
+        let executable = fs::canonicalize("/bin/sleep").unwrap();
+        let child = Command::new(&executable).arg("60").spawn().unwrap();
+        let environment_id = core.environment("dev").unwrap().id;
+        let live = LiveProcess::capture_child(child.id(), &executable).unwrap();
+        let process_identity = live.identity().clone();
+        let runner = RunnerRecord {
+            process: process_identity.clone(),
+            socket: socket_identity,
+            artifact_generation: core
+                .environment("dev")
+                .unwrap()
+                .active_artifact_generation
+                .clone()
+                .unwrap(),
+            error_code: None,
+        };
+        let environment = core.environment_mut("dev").unwrap();
+        environment.state = StoredEnvironmentState::Running;
+        environment.runner = Some(runner);
+        core.save().unwrap();
+        core.live_runners.insert(environment_id, live);
+        core.children.insert(environment_id, child);
+        (environment_id, process_identity)
     }
 
     fn test_supervisor_core_after_host_reboot(
@@ -7358,7 +7855,6 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
-                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -8527,6 +9023,185 @@ mod tests {
         assert!(!engine.path().join("content").exists());
     }
 
+    #[tokio::test]
+    async fn protected_secret_metadata_failures_precede_runner_side_effects() {
+        async fn assert_rejected(
+            secrets: codewire_project::SecretBindings,
+            expected_message: &str,
+        ) {
+            let environment = project_environment_with_secret_selection(secrets, BTreeMap::new());
+            let (_parent, mut core) = test_supervisor_core(environment);
+            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+            let (artifact_generation, _) =
+                install_test_artifact_generation(&engine, b"metadata-preflight-kernel");
+            let environment = core.environment_mut("dev").unwrap();
+            environment.active_artifact_generation = Some(artifact_generation.clone());
+            environment
+                .active_workspace_generation
+                .as_mut()
+                .unwrap()
+                .artifact_generation = artifact_generation;
+            core.save().unwrap();
+            let (_authority, server) = start_test_credential_authority(&core).await;
+            let environment_id = core.environment("dev").unwrap().id;
+            let operation = core
+                .store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment_id),
+                    OperationKind::Start,
+                    &serde_json::json!({"name": "dev", "generation": 2}),
+                )
+                .unwrap();
+
+            // Exercise the real Start effect order from its first checkpoint:
+            // metadata admission must stop at EnsureRunner, before an idle
+            // runner can be spawned and durably adopted.
+            let error = core.start("dev", &operation).await.unwrap_err();
+            match error {
+                SupervisorError::WorkloadSecretResolution(message) => {
+                    assert_eq!(message, expected_message);
+                }
+                other => panic!("unexpected workload-secret preflight failure: {other}"),
+            }
+            assert!(core.environment("dev").unwrap().runner.is_none());
+            assert!(core.children.is_empty());
+            assert!(core.live_runners.is_empty());
+            let pending = core.store.pending_operations().unwrap();
+            let pending = pending
+                .iter()
+                .find(|pending| pending.operation_id == operation.operation_id)
+                .unwrap();
+            assert_eq!(
+                supervisor_effect(pending.kind, pending.checkpoint).unwrap(),
+                Some(LifecycleEffect::EnsureRunner)
+            );
+            assert!(
+                fs::read_dir(core.config.root.join("runners"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+
+            server.abort();
+            let _ = server.await;
+        }
+
+        assert_rejected(
+            codewire_project::SecretBindings {
+                organization: true,
+                ..Default::default()
+            },
+            "organization workload secrets are unsupported locally",
+        )
+        .await;
+        assert_rejected(
+            codewire_project::SecretBindings {
+                project: "missing-project".to_owned(),
+                ..Default::default()
+            },
+            "local credential record was not found",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn user_secret_metadata_preflight_succeeds_and_discards_metadata() {
+        let environment = project_environment_with_secret_selection(
+            codewire_project::SecretBindings {
+                user: true,
+                ..Default::default()
+            },
+            BTreeMap::from([("EXPLICIT".to_owned(), "ordinary-value".to_owned())]),
+        );
+        let (_parent, mut core) = test_supervisor_core(environment.clone());
+        let (mut authority, server) = start_test_credential_authority(&core).await;
+        authority
+            .set_user_workload_secret(
+                "USER_ONLY".to_owned(),
+                ProtectedValue::from_slice(b"synthetic-user-secret").unwrap(),
+            )
+            .await
+            .unwrap();
+        authority
+            .set_user_workload_secret(
+                "EXPLICIT".to_owned(),
+                ProtectedValue::from_slice(b"synthetic-overridden-secret").unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let selection = workload_secret_selection_for_boot(&environment, false).unwrap();
+        assert_eq!(
+            selection.explicit_environment_keys,
+            BTreeSet::from(["EXPLICIT".to_owned()])
+        );
+        core.validate_workload_secret_metadata(&selection)
+            .await
+            .unwrap();
+        assert!(core.environment("dev").unwrap().runner.is_none());
+
+        drop(authority);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_environment_keys_do_not_require_the_credential_authority() {
+        let environment = project_environment_with_secret_selection(
+            codewire_project::SecretBindings::default(),
+            BTreeMap::from([("PUBLIC_VALUE".to_owned(), "ordinary-value".to_owned())]),
+        );
+        let (_parent, mut core) = test_supervisor_core(environment.clone());
+        let selection = workload_secret_selection_for_boot(&environment, false).unwrap();
+        assert!(!workload_secret_selection_has_protected_sources(&selection));
+        core.validate_workload_secret_metadata(&selection)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn environment_proto_reports_when_the_credential_authority_is_required() {
+        assert!(
+            !project_environment()
+                .proto(false)
+                .requires_credential_authority
+        );
+        assert!(
+            project_environment_with_access()
+                .proto(false)
+                .requires_credential_authority
+        );
+        for secrets in [
+            codewire_project::SecretBindings {
+                organization: true,
+                ..Default::default()
+            },
+            codewire_project::SecretBindings {
+                project: "project-secrets".to_owned(),
+                ..Default::default()
+            },
+            codewire_project::SecretBindings {
+                user: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                project_environment_with_secret_selection(secrets, BTreeMap::new())
+                    .proto(false)
+                    .requires_credential_authority
+            );
+        }
+        assert!(
+            !project_environment_with_secret_selection(
+                codewire_project::SecretBindings::default(),
+                BTreeMap::from([("PUBLIC_VALUE".to_owned(), "ordinary-value".to_owned())]),
+            )
+            .proto(false)
+            .requires_credential_authority
+        );
+    }
+
     #[test]
     fn staging_workspace_never_boots_when_exact_cached_content_is_absent() {
         let engine = tempfile::tempdir().unwrap();
@@ -9379,7 +10054,6 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
-                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -9632,6 +10306,221 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovering_start_waits_for_the_owner_authority_without_losing_intent() {
+        let environment = project_environment_with_access();
+        let environment_id = environment.id;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Start,
+                &serde_json::json!({"name": "dev", "generation": 2}),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            core.replay_pending_operations().await,
+            Err(SupervisorError::CredentialAuthorityUnavailable)
+        ));
+        let pending = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.phase, OperationPhase::Intent);
+        assert_eq!(pending.checkpoint, 0);
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn recovering_create_waits_at_its_latest_checkpoint_for_the_owner_authority() {
+        let mut environment = project_environment_with_access();
+        environment.state = StoredEnvironmentState::Starting;
+        environment.generation = 0;
+        let environment_id = environment.id;
+        let workspace_plan = environment.workspace_plan.clone();
+        let request = v1::CreateEnvironmentRequest {
+            name: environment.name.clone(),
+            source_path: "/workspace/source".to_owned(),
+            vcpus: u32::from(environment.vcpus),
+            memory_mib: environment.memory_mib,
+            disk_bytes: environment.disk_bytes,
+            docker_disk_bytes: environment.docker_disk_bytes,
+            request_id: Uuid::new_v4().to_string(),
+            project_spec_json: environment.project_spec_json.clone().unwrap(),
+            project_spec_sha256: environment.project_spec_sha256.clone().unwrap(),
+            implicit_path_mode: "clone".to_owned(),
+            local_mounts: Vec::new(),
+            host_ports: Vec::new(),
+            mesh: None,
+            access_profile_id: "profile-work".to_owned(),
+            access_profile_revision: 7,
+        };
+        let payload = create_operation_payload(&request, &workspace_plan).unwrap();
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let operation = begin_and_advance_test_operation(
+            &core.store,
+            environment_id,
+            OperationKind::Create,
+            &payload,
+            1,
+        );
+
+        assert!(matches!(
+            core.replay_pending_operations().await,
+            Err(SupervisorError::CredentialAuthorityUnavailable)
+        ));
+        let pending = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.phase, OperationPhase::EffectApplied);
+        assert_eq!(pending.checkpoint, 1);
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Starting
+        );
+    }
+
+    #[tokio::test]
+    async fn recovering_restart_waits_for_the_owner_authority_without_losing_intent() {
+        let mut environment = project_environment_with_access();
+        environment.state = StoredEnvironmentState::Running;
+        let environment_id = environment.id;
+        let payload = serde_json::json!({
+            "name": "dev",
+            "vcpus": environment.vcpus,
+            "memory_mib": environment.memory_mib,
+            "disk_bytes": environment.disk_bytes,
+            "was_running": true,
+            "target_generation": environment.generation + 1,
+        });
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::Restart,
+                &payload,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            core.replay_pending_operations().await,
+            Err(SupervisorError::CredentialAuthorityUnavailable)
+        ));
+        let pending = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.phase, OperationPhase::Intent);
+        assert_eq!(pending.checkpoint, 0);
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn recovering_workspace_update_is_not_aborted_while_the_authority_is_absent() {
+        let mut environment = project_environment_with_access();
+        let project_spec_json = environment.project_spec_json.clone().unwrap();
+        let project_spec_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = test_workspace_generation(
+            &project_spec_json,
+            &project_spec_sha256,
+            b"authority-recovery",
+        );
+        environment.active_workspace_generation = Some(active.clone());
+        environment.state = StoredEnvironmentState::Running;
+        environment.validate("dev").unwrap();
+        let environment_id = environment.id;
+        let payload =
+            workspace_update_payload(&environment, &project_spec_json, &project_spec_sha256, true);
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::UpdateWorkspace,
+                &payload,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            core.replay_pending_operations().await,
+            Err(SupervisorError::CredentialAuthorityUnavailable)
+        ));
+        let pending = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.phase, OperationPhase::Intent);
+        assert_eq!(pending.checkpoint, 0);
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.state, StoredEnvironmentState::Running);
+        assert_eq!(environment.active_workspace_generation, Some(active));
+        assert!(environment.staging_workspace_generation.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_new_mutation_cannot_terminalize_an_authority_deferred_recovery() {
+        let environment = project_environment_with_access();
+        let environment_id = environment.id;
+        let (_parent, core) = test_supervisor_core(environment);
+        let pending_request_id = Uuid::new_v4();
+        core.store
+            .begin_operation(
+                pending_request_id,
+                Some(environment_id),
+                OperationKind::Start,
+                &serde_json::json!({"name": "dev", "generation": 2}),
+            )
+            .unwrap();
+        let service = test_supervisor_service(core);
+        let new_request_id = Uuid::new_v4();
+
+        let error = service
+            .stop_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: new_request_id.to_string(),
+                environment_id: environment_id.to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "local credential authority is unavailable");
+        let core = service.core.lock().await;
+        assert!(
+            core.store
+                .operation_by_request(new_request_id)
+                .unwrap()
+                .is_none()
+        );
+        let pending = core
+            .store
+            .operation_by_request(pending_request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.phase, OperationPhase::Intent);
+        assert_eq!(pending.checkpoint, 0);
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Stopped
+        );
+    }
+
+    #[tokio::test]
     async fn delete_replay_preserves_the_stable_environment_precondition() {
         let environment = project_environment();
         let environment_id = environment.id;
@@ -9657,6 +10546,15 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::NotFound);
         assert_eq!(error.message(), "local environment was not found");
+        let core = service.core.lock().await;
+        let pending = core
+            .store
+            .operation_by_request(request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.phase, OperationPhase::Intent);
+        assert_eq!(pending.checkpoint, 0);
+        assert_eq!(core.environment("dev").unwrap().id, environment_id);
     }
 
     #[tokio::test]
@@ -9720,6 +10618,272 @@ mod tests {
         shutdown_tx.send(()).unwrap();
         server.await.unwrap();
         remove_bound_socket(&socket, &socket_identity).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_client_admits_the_current_protocol_and_configuration() {
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let config = core.config.clone();
+        let socket = config.supervisor_socket();
+        let service = test_supervisor_service(core);
+        let (socket_identity, shutdown_tx, server) = spawn_test_supervisor_server(&socket, service);
+
+        let mut client = NativeSupervisorClient::connect_for_config(&socket, &config)
+            .await
+            .unwrap();
+        assert_eq!(client.list().await.unwrap().len(), 1);
+
+        drop(client);
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &socket_identity).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_client_rejects_an_old_supervisor_without_the_info_rpc() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("runtime");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = root.join("supervisor.sock");
+        let (listener, socket_identity) = bind_owner_only_listener(&socket).unwrap();
+        let app = axum::Router::new().route(
+            "/codewire.local.v1.LocalSupervisorService/GetSupervisorInfo",
+            axum::routing::post(|| async {
+                let mut response = axum::response::Response::new(axum::body::Body::empty());
+                response.headers_mut().insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("application/grpc"),
+                );
+                response.headers_mut().insert(
+                    http::HeaderName::from_static("grpc-status"),
+                    http::HeaderValue::from_static("12"),
+                );
+                response
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let error = match NativeSupervisorClient::connect(&socket).await {
+            Ok(_) => panic!("old supervisor was admitted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            SupervisorError::SupervisorProtocolUnavailable
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the running native supervisor does not implement the required compatibility protocol"
+        );
+
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &socket_identity).unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_or_start_rejects_a_live_supervisor_with_different_configuration() {
+        let (parent, core) = test_supervisor_core(project_environment());
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let config = core.config.clone();
+        let socket = config.supervisor_socket();
+        let service = test_supervisor_service(core);
+        let (socket_identity, shutdown_tx, server) = spawn_test_supervisor_server(&socket, service);
+        let mut wrong_config = config.clone();
+        wrong_config.credential_authority_root = config
+            .credential_authority_root
+            .with_file_name("different-credentials");
+
+        let error = match NativeSupervisorClient::connect_or_start(&wrong_config).await {
+            Ok(_) => panic!("differently configured supervisor was admitted"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(&error, SupervisorError::SupervisorConfigurationMismatch),
+            "unexpected compatibility error: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "the running native supervisor uses a different runtime configuration"
+        );
+        // The incompatible live process remains available; only this reuse
+        // attempt failed, and no replacement was started over its socket.
+        assert!(NativeSupervisorClient::connect(&socket).await.is_ok());
+
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &socket_identity).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_kills_and_clears_an_exact_incompatible_runner() {
+        for reply in [
+            TestRunnerProtocolReply::Version(0),
+            TestRunnerProtocolReply::Failure(tonic::Code::Unimplemented),
+        ] {
+            let (_parent, mut core) = test_supervisor_core(project_environment());
+            let socket = core
+                .config
+                .runner_socket(core.environment("dev").unwrap().id);
+            let (socket_identity, useful_calls, shutdown_tx, server) =
+                spawn_test_runner_protocol_server(&socket, reply);
+            let (environment_id, process_identity) =
+                attach_test_runner_process(&mut core, socket_identity);
+
+            core.reconcile("dev").await.unwrap();
+
+            let environment = core.environment("dev").unwrap();
+            assert_eq!(environment.state, StoredEnvironmentState::Error);
+            assert!(environment.runner.is_none());
+            assert!(!core.live_runners.contains_key(&environment_id));
+            assert!(!core.children.contains_key(&environment_id));
+            assert!(!socket.exists());
+            assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
+            assert!(matches!(
+                LiveProcess::recover(&process_identity),
+                Err(RecoveryError::ProcessExited | RecoveryError::ReadProcess(_))
+            ));
+
+            shutdown_tx.send(()).unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_does_not_kill_a_runner_for_a_transient_protocol_query_failure() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let socket = core
+            .config
+            .runner_socket(core.environment("dev").unwrap().id);
+        let (socket_identity, useful_calls, shutdown_tx, server) =
+            spawn_test_runner_protocol_server(
+                &socket,
+                TestRunnerProtocolReply::Failure(tonic::Code::Unavailable),
+            );
+        let (environment_id, _process_identity) =
+            attach_test_runner_process(&mut core, socket_identity);
+
+        let error = core.reconcile("dev").await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            SupervisorError::RunnerService(RunnerServiceError::RunnerProtocolInfoUnavailable)
+        ));
+        assert!(!error.to_string().contains("untrusted test peer detail"));
+        assert!(core.environment("dev").unwrap().runner.is_some());
+        assert!(core.live_runners.contains_key(&environment_id));
+        assert!(
+            core.children
+                .get_mut(&environment_id)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        assert!(socket.exists());
+        assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
+
+        core.terminate_recorded_runner("dev").await.unwrap();
+        core.mark_runner_dead("dev").unwrap();
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn supervisor_info_requires_the_exact_protocol_and_valid_digest_shape() {
+        let config = test_supervisor_core(project_environment()).1.config;
+        let mut info = supervisor_info(&config);
+        info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1;
+        let error = admit_supervisor_info(&info, None).unwrap_err();
+        assert!(matches!(
+            error,
+            SupervisorError::SupervisorProtocolMismatch {
+                expected: NATIVE_SUPERVISOR_PROTOCOL_VERSION,
+                actual,
+            } if actual == NATIVE_SUPERVISOR_PROTOCOL_VERSION + 1
+        ));
+        assert!(error.to_string().contains("protocol version mismatch"));
+
+        info.protocol_version = NATIVE_SUPERVISOR_PROTOCOL_VERSION;
+        info.configuration_sha256.pop();
+        assert!(matches!(
+            admit_supervisor_info(&info, None),
+            Err(SupervisorError::InvalidSupervisorInfo)
+        ));
+    }
+
+    #[test]
+    fn supervisor_configuration_digest_binds_each_raw_unix_path() {
+        let vector = NativeRuntimeConfig {
+            root: PathBuf::from("/runtime"),
+            artifact_root: PathBuf::from("/artifacts"),
+            artifact_lock: PathBuf::from("/config/artifacts.lock"),
+            mesh_data_dir: PathBuf::from("/config/mesh"),
+            platform_config_dir: PathBuf::from("/config/platform"),
+            credential_authority_root: PathBuf::from("/authority"),
+            executable: PathBuf::from("/bin/codewire"),
+        };
+        assert_eq!(
+            vector.configuration_digest(),
+            [
+                0xbb, 0x55, 0x18, 0x7d, 0x67, 0x5f, 0x63, 0xf6, 0x64, 0x36, 0x2d, 0x06, 0xbd, 0x4a,
+                0xb5, 0xc9, 0xe2, 0x07, 0x70, 0x1b, 0xa1, 0xbd, 0xd1, 0xb2, 0xeb, 0x86, 0xa5, 0x0c,
+                0x04, 0x4d, 0x88, 0x87,
+            ]
+        );
+
+        let (_parent, core) = test_supervisor_core(project_environment());
+        let config = core.config;
+        let expected = config.configuration_digest();
+        for changed in [
+            NativeRuntimeConfig {
+                root: config.root.join("changed"),
+                ..config.clone()
+            },
+            NativeRuntimeConfig {
+                artifact_root: config.artifact_root.join("changed"),
+                ..config.clone()
+            },
+            NativeRuntimeConfig {
+                artifact_lock: config.artifact_lock.with_file_name("changed.lock"),
+                ..config.clone()
+            },
+            NativeRuntimeConfig {
+                mesh_data_dir: config.mesh_data_dir.join("changed"),
+                ..config.clone()
+            },
+            NativeRuntimeConfig {
+                platform_config_dir: config.platform_config_dir.join("changed"),
+                ..config.clone()
+            },
+            NativeRuntimeConfig {
+                credential_authority_root: config.credential_authority_root.join("changed"),
+                ..config.clone()
+            },
+            NativeRuntimeConfig {
+                executable: config.executable.with_file_name("changed"),
+                ..config.clone()
+            },
+        ] {
+            assert_ne!(changed.configuration_digest(), expected);
+        }
+
+        let mut raw = config.clone();
+        raw.credential_authority_root = PathBuf::from(OsString::from_vec(
+            b"/tmp/codewire-credentials-\xff".to_vec(),
+        ));
+        let raw_digest = raw.configuration_digest();
+        raw.credential_authority_root = PathBuf::from("/tmp/codewire-credentials-�");
+        assert_ne!(raw.configuration_digest(), raw_digest);
     }
 
     #[tokio::test]
@@ -10159,7 +11323,6 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
-                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
@@ -10226,7 +11389,6 @@ mod tests {
                 mesh_data_dir: parent.path().join("mesh-auth"),
                 platform_config_dir: parent.path().join("platform-auth"),
                 credential_authority_root: parent.path().join("credentials"),
-                workload_secret_runtime_root: None,
                 executable: PathBuf::from("/usr/bin/true"),
             },
             root,
