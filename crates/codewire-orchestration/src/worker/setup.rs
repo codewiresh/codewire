@@ -34,7 +34,7 @@ use super::setup_lease::{
 };
 use super::{JobPayload, WorkerContext};
 use crate::repository_mount::{effective_repository_mount, validate_repository_mounts};
-use crate::sandbox::client::{SandboxClient, WorkspacePodIdentity};
+use crate::sandbox::client::{ProbeResult, SandboxClient};
 use crate::sandbox::exec::WorkspaceExecResult;
 use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
 
@@ -685,6 +685,22 @@ fn require_workspace_exec_success(result: &WorkspaceExecResult) -> anyhow::Resul
     Ok(())
 }
 
+fn replacement_runtime_is_current(
+    expected_pod_name: &str,
+    old_pod_uid: &str,
+    probe: &ProbeResult,
+) -> bool {
+    probe.claim_exists
+        && probe.claim_ready
+        && probe.replicas == 1
+        && probe.pod_exists
+        && probe.pod_phase == "Running"
+        && probe.pod_name == expected_pod_name
+        && !probe.pod_uid.is_empty()
+        && probe.pod_uid != old_pod_uid
+        && !probe.pod_ip.is_empty()
+}
+
 pub(crate) struct SshInjectionResult {
     pub(crate) created_by: String,
     pub(crate) public_key: String,
@@ -847,12 +863,12 @@ impl WorkerSetupOps<'_> {
         }
     }
 
-    async fn wait_for_replacement_pod(
+    async fn wait_for_replacement_runtime(
         &self,
         sandbox: &SandboxClient,
         input: &Inputs,
         old_uid: &str,
-    ) -> anyhow::Result<WorkspacePodIdentity> {
+    ) -> anyhow::Result<ProbeResult> {
         let pod_name = if input.pod_name.trim().is_empty() {
             sandbox.get_pod_name(&input.environment_id).await?
         } else {
@@ -863,12 +879,13 @@ impl WorkerSetupOps<'_> {
             if self.cancellation_requested() {
                 return Err(SetupActivityCancelled.into());
             }
-            if let Some(identity) = sandbox
-                .get_workspace_pod_identity_by_name(&pod_name)
-                .await?
-                && !identity.uid.trim().is_empty()
-                && identity.uid != old_uid
-            {
+            // Sandbox, Pod, and Claim status converge independently after a
+            // resume. A newly allocated UID is not yet a usable replacement;
+            // retain the strict identity boundary and wait through ordinary
+            // Pending/not-Ready observations within the one recovery bound.
+            let probe = sandbox.probe_environment(&input.environment_id).await?;
+            if replacement_runtime_is_current(&pod_name, old_uid, &probe) {
+                let replacement_uid = probe.pod_uid.clone();
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     anyhow::bail!(
@@ -888,16 +905,17 @@ impl WorkerSetupOps<'_> {
                     Ok(())
                 })
                 .await?;
-                if sandbox
-                    .get_workspace_pod_identity_by_name(&pod_name)
-                    .await?
-                    .is_some_and(|ready_identity| ready_identity.uid == identity.uid)
+                let final_probe = sandbox.probe_environment(&input.environment_id).await?;
+                if final_probe.pod_uid == replacement_uid
+                    && replacement_runtime_is_current(&pod_name, old_uid, &final_probe)
                 {
-                    return Ok(identity);
+                    return Ok(final_probe);
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                anyhow::bail!("setup recovery timed out waiting for replacement Pod {pod_name}");
+                anyhow::bail!(
+                    "setup recovery timed out waiting for current replacement Pod {pod_name}"
+                );
             }
             tokio::time::sleep(SETUP_POD_RECOVERY_POLL).await;
         }
@@ -961,43 +979,25 @@ impl WorkerSetupOps<'_> {
             }
         }
 
-        let replacement = match self
-            .wait_for_replacement_pod(&sandbox, input, old_uid)
-            .await
-        {
-            Ok(identity) => identity,
-            Err(error) => {
-                return self.settle_failed_recovery(input, old_owner, error).await;
-            }
-        };
-        let replacement_probe = match self
-            .authority
-            .run_while_authoritative_for_states(
-                SETUP_MUTATION_STATES,
-                sandbox.probe_environment(&input.environment_id),
+        let replacement_probe = match await_setup_or_cancel(&self.activity_ctx, async {
+            tokio::time::timeout(
+                SETUP_POD_RECOVERY_TIMEOUT,
+                self.authority.run_while_authoritative_for_states(
+                    SETUP_MUTATION_STATES,
+                    self.wait_for_replacement_runtime(&sandbox, input, old_uid),
+                ),
             )
             .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "setup recovery exceeded the replacement runtime deadline for {}",
+                    input.environment_id
+                )
+            })?
+        })
+        .await
         {
-            Ok(probe)
-                if probe.claim_exists
-                    && probe.claim_ready
-                    && probe.pod_exists
-                    && probe.pod_phase == "Running"
-                    && probe.pod_name == replacement.name
-                    && probe.pod_uid == replacement.uid
-                    && !probe.pod_ip.is_empty() =>
-            {
-                probe
-            }
-            Ok(_) => {
-                return self
-                    .settle_failed_recovery(
-                        input,
-                        old_owner,
-                        anyhow::anyhow!("setup recovery replacement Pod identity is not current"),
-                    )
-                    .await;
-            }
+            Ok(probe) => probe,
             Err(error) => {
                 return self.settle_failed_recovery(input, old_owner, error).await;
             }
@@ -1027,7 +1027,7 @@ impl WorkerSetupOps<'_> {
         setup_fencing_evidence!(SetupFencingEvidence::ReplacementReady {
             environment_id: self.phase_authority.environment_id().to_string(),
             old_pod_uid: old_uid.to_string(),
-            new_pod_uid: replacement.uid.clone(),
+            new_pod_uid: replacement_probe.pod_uid.clone(),
         });
         if let Err(error) = self.phase_authority.finish_recovery(old_owner).await {
             match self.suspend_and_observe(input, old_owner).await {
@@ -2852,5 +2852,66 @@ mod tests {
         let error = require_workspace_exec_success(&result).unwrap_err();
         assert_eq!(error.to_string(), "workspace exec exited 23");
         assert!(!format!("{error:?}").contains(marker));
+    }
+
+    fn current_replacement_probe() -> ProbeResult {
+        ProbeResult {
+            claim_exists: true,
+            claim_ready: true,
+            replicas: 1,
+            pod_exists: true,
+            pod_phase: "Running".into(),
+            pod_name: "workspace-current".into(),
+            pod_uid: "uid-new".into(),
+            pod_ip: "10.0.0.9".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replacement_runtime_requires_exact_ready_incarnation() {
+        let current = current_replacement_probe();
+        assert!(replacement_runtime_is_current(
+            "workspace-current",
+            "uid-old",
+            &current
+        ));
+
+        let mut cases = Vec::new();
+        let mut probe = current.clone();
+        probe.claim_exists = false;
+        cases.push(probe);
+        let mut probe = current.clone();
+        probe.claim_ready = false;
+        cases.push(probe);
+        let mut probe = current.clone();
+        probe.replicas = 0;
+        cases.push(probe);
+        let mut probe = current.clone();
+        probe.pod_exists = false;
+        cases.push(probe);
+        let mut probe = current.clone();
+        probe.pod_phase = "Pending".into();
+        cases.push(probe);
+        let mut probe = current.clone();
+        probe.pod_name = "workspace-other".into();
+        cases.push(probe);
+        let mut probe = current.clone();
+        probe.pod_uid.clear();
+        cases.push(probe);
+        let mut probe = current.clone();
+        probe.pod_uid = "uid-old".into();
+        cases.push(probe);
+        let mut probe = current;
+        probe.pod_ip.clear();
+        cases.push(probe);
+
+        for probe in cases {
+            assert!(!replacement_runtime_is_current(
+                "workspace-current",
+                "uid-old",
+                &probe
+            ));
+        }
     }
 }
