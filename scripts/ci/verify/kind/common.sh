@@ -1979,20 +1979,98 @@ internal_connect_listener_probes() {
     exit 1
   fi
 
+  # The binding service rejects database-only runtime identities: the
+  # referenced SandboxClaim and workspace Pod must both be live and current.
+  # Install the checked-in claim CRD before the full controller deployment so this
+  # listener probe can build that exact fixture without a controller racing
+  # its synthetic status.
+  kubectl_apply --validate=false \
+    -f "$ROOT/deployments/k8s/agent-sandbox/base/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml"
+  kubectl wait --for=condition=established --timeout=60s \
+    crd/sandboxclaims.extensions.agents.x-k8s.io
+
   (
     # Reuse the existing UUID-addressed coordinator fixture. The binding
     # endpoint must mint a token the real coordinator accepts, rather than
     # merely returning a syntactically plausible token from its own process.
     local bound_environment_id=00000000-0000-4000-8000-000000000501
-    local bound_pod=kind-internal-bound
-    local bound_pod_ip=10.244.0.251
+    local bound_pod="sandbox-${bound_environment_id}"
+    local bound_pod_ip
     local bound_port_id=port_internal_connect_kind
     local port_forward_log port_forward_pid local_port i sidecar_token in_cluster_probe
     port_forward_log="$(mktemp)"
+    port_forward_pid=""
+
+    # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+    cleanup_internal_connect_fixture() {
+      set +e
+      if [ -n "$port_forward_pid" ]; then
+        kill "$port_forward_pid" >/dev/null 2>&1 || true
+        wait "$port_forward_pid" 2>/dev/null || true
+      fi
+      kubectl -n "$NS" exec -i deploy/postgres -- \
+        psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || true
+DELETE FROM environment_ports WHERE id = '$bound_port_id';
+DELETE FROM sandbox_environment_backend WHERE environment_id = '$bound_environment_id';
+SQL
+      kubectl -n "$NS" delete sandboxclaim "$bound_pod" \
+        --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
+      kubectl -n "$NS" delete pod "$bound_pod" \
+        --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
+      rm -f "$port_forward_log"
+    }
+    trap cleanup_internal_connect_fixture EXIT
+
+    kubectl -n "$NS" delete sandboxclaim "$bound_pod" \
+      --ignore-not-found=true --wait=true >/dev/null
+    kubectl -n "$NS" delete pod "$bound_pod" \
+      --ignore-not-found=true --wait=true >/dev/null
+    kubectl_apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${bound_pod}
+  namespace: ${NS}
+  labels:
+    codewire.sh/environment-id: ${bound_environment_id}
+    codewire.sh/type: workspace
+spec:
+  restartPolicy: Always
+  containers:
+    - name: workspace
+      image: ${KIND_POSTGRES_LOCAL_IMAGE}
+      imagePullPolicy: Never
+      command: ["sleep", "600"]
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: ${bound_pod}
+  namespace: ${NS}
+spec:
+  warmPoolRef:
+    name: kind-internal-ready-fixture
+EOF
+    kubectl -n "$NS" wait "pod/${bound_pod}" \
+      --for=condition=Ready --timeout=60s
+    kubectl -n "$NS" patch sandboxclaim "$bound_pod" \
+      --subresource=status --type=merge \
+      -p '{"status":{"conditions":[{"lastTransitionTime":"2026-01-01T00:00:00Z","message":"Kind internal binding fixture is ready","reason":"Ready","status":"True","type":"Ready"}]}}'
+    bound_pod_ip="$(
+      kubectl -n "$NS" get pod "$bound_pod" -o jsonpath='{.status.podIP}'
+    )"
+    if [ -z "$bound_pod_ip" ]; then
+      echo "::error::internal Connect fixture Pod has no IP"
+      exit 1
+    fi
+
     kubectl -n "$NS" exec -i deploy/postgres -- \
       psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
 DELETE FROM sandbox_environment_backend WHERE environment_id = '$bound_environment_id';
 DELETE FROM environment_ports WHERE id = '$bound_port_id';
+UPDATE environments
+SET state = 'running', desired_state = 'started'
+WHERE id = '$bound_environment_id';
 INSERT INTO sandbox_environment_backend (environment_id, namespace, pod_name, pod_ip)
 VALUES ('$bound_environment_id', '$NS', '$bound_pod', '$bound_pod_ip');
 INSERT INTO environment_ports (id, environment_id, port, label, access)
@@ -2003,12 +2081,11 @@ SQL
     # kube-proxy's 8085 Service leg or the in-cluster caller boundary. Use the
     # bound fixture because BusyBox wget intentionally discards non-2xx bodies,
     # making an unbound typed-not_found response impossible to inspect here.
-    in_cluster_probe="$(kubectl -n "$NS" exec deploy/postgres -- sh -ceu '
+    in_cluster_probe="$(kubectl -n "$NS" exec deploy/postgres -- \
       wget -q -O - \
         --header="content-type: application/json" \
-        --post-data="{\"pod\":\"kind-internal-bound\",\"namespace\":\"codewire-e2e\"}" \
-        http://codewire-orchestration:8085/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding
-    ')"
+        --post-data="{\"pod\":\"${bound_pod}\",\"namespace\":\"${NS}\"}" \
+        http://codewire-orchestration:8085/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding)"
     if ! jq -e --arg environment_id "$bound_environment_id" --arg pod_ip "$bound_pod_ip" \
       '(.environmentId // .environment_id) == $environment_id
        and (.workspacePodIp // .workspace_pod_ip) == $pod_ip
@@ -2022,17 +2099,6 @@ SQL
     kubectl -n "$NS" port-forward --address=127.0.0.1 \
       service/codewire-orchestration :8085 >"$port_forward_log" 2>&1 &
     port_forward_pid=$!
-    cleanup_internal_connect_port_forward() {
-      kubectl -n "$NS" exec -i deploy/postgres -- \
-        psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || true
-DELETE FROM environment_ports WHERE id = '$bound_port_id';
-DELETE FROM sandbox_environment_backend WHERE environment_id = '$bound_environment_id';
-SQL
-      kill "$port_forward_pid" >/dev/null 2>&1 || true
-      wait "$port_forward_pid" 2>/dev/null || true
-      rm -f "$port_forward_log"
-    }
-    trap cleanup_internal_connect_port_forward EXIT
 
     for i in $(seq 1 30); do
       local_port="$(sed -nE 's/.*127\.0\.0\.1:([0-9]+) -> 8085.*/\1/p' "$port_forward_log" | head -n 1)"
