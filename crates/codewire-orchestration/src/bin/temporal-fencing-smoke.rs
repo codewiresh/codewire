@@ -1023,8 +1023,12 @@ mod enabled {
             anyhow::ensure!(!old_uid.is_empty() && !new_uid.is_empty() && old_uid != new_uid);
             let error = self.wait_setup_error(&env_id, &handle, &evidence).await?;
             anyhow::ensure!(
-                error.contains("injected-clone-failure"),
+                error.ends_with("workspace exec exited 42"),
                 "unexpected clone error: {error}"
+            );
+            anyhow::ensure!(
+                !error.contains("injected-clone-failure"),
+                "clone error retained opaque child output"
             );
             let pods = self.sandbox.list_workspace_pod_identities(&env_id).await?;
             anyhow::ensure!(pods.iter().all(|pod| pod.uid != old_uid));
