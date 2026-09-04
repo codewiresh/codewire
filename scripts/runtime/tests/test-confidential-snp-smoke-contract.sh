@@ -273,16 +273,16 @@ rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/nu
   printf 'confidential attestation probe does not declare its measured guest-pull groups\n' >&2
   exit 1
 }
-rg -F 'name: codewire-commodity-runtime-smoke-v71' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
-  printf 'commodity runtime probe generation is not v71\n' >&2
+rg -F 'name: codewire-commodity-runtime-smoke-v72' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
+  printf 'commodity runtime probe generation is not v72\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-runtime-smoke-v71' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
-  printf 'confidential runtime probe generation is not v71\n' >&2
+rg -F 'name: codewire-confidential-runtime-smoke-v72' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
+  printf 'confidential runtime probe generation is not v72\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-snp-attestation-v71' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
-  printf 'confidential attestation probe generation is not v71\n' >&2
+rg -F 'name: codewire-confidential-snp-attestation-v72' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
+  printf 'confidential attestation probe generation is not v72\n' >&2
   exit 1
 }
 
