@@ -2319,8 +2319,8 @@ exec_service_connect_smoke() {
 environment_setup_terminal_smoke() (
   local environment_id=env-terminal-ticket-smoke
   local claim_name=sandbox-env-terminal-ticket-smoke
-  local pod_name=terminal-ticket-workspace
-  local original_replicas ready
+  local pod_name=sandbox-env-terminal-ticket-smoke
+  local original_replicas pod_ip ready
 
   original_replicas="$(
     kubectl -n agent-sandbox-system get deploy/agent-sandbox-controller \
@@ -2389,6 +2389,13 @@ spec:
 EOF
   kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" \
     --for=condition=Ready --timeout=60s
+  pod_ip="$(
+    kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.podIP}'
+  )"
+  if [ -z "$pod_ip" ]; then
+    echo "::error::terminal fixture Pod has no IP"
+    return 1
+  fi
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
@@ -2404,12 +2411,12 @@ VALUES (
 );
 
 INSERT INTO sandbox_environment_backend (
-  environment_id, namespace, pod_name,
+  environment_id, namespace, pod_name, pod_ip,
   setup_owner_generation, setup_owner_activity_id, setup_owner_attempt,
   setup_owner_phase, setup_owner_status, setup_owner_pod_uid
 )
 VALUES (
-  '$environment_id', '$SANDBOX_NS', '$pod_name',
+  '$environment_id', '$SANDBOX_NS', '$pod_name', '$pod_ip',
   1, 'kind-terminal-ticket-smoke', 1, 0, 'claimed', NULL
 );
 SQL
@@ -2444,12 +2451,76 @@ EOF
   log "EnvironmentSetupService ticket-to-WebSocket path green"
 )
 
-file_service_smoke() {
+file_service_smoke() (
   log "running daemon-native FileService client/server streaming and Connect contract smoke"
   local environment_id=env-crd-smoke
+  local claim_name=sandbox-env-crd-smoke
   local daemon_pod=crd-smoke-workspace-daemon
-  local daemon_token
+  local daemon_token original_replicas pod_ip pod_uid ready
   daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
+
+  original_replicas="$(
+    kubectl -n agent-sandbox-system get deploy/agent-sandbox-controller \
+      -o jsonpath='{.spec.replicas}'
+  )"
+  if [[ ! "$original_replicas" =~ ^[0-9]+$ ]]; then
+    echo "::error::agent-sandbox controller replica count is invalid: ${original_replicas:-missing}"
+    return 1
+  fi
+
+  # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
+  cleanup_file_service_binding() {
+    set +e
+    kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
+      --ignore-not-found=true --wait=true >/dev/null
+    kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
+      --replicas="$original_replicas" >/dev/null
+    if [ "$original_replicas" -gt 0 ]; then
+      kubectl -n agent-sandbox-system rollout status \
+        deploy/agent-sandbox-controller --timeout=180s
+    fi
+  }
+  trap cleanup_file_service_binding EXIT
+
+  kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller --replicas=0
+  if [ "$original_replicas" -gt 0 ]; then
+    kubectl -n agent-sandbox-system wait pod -l app=agent-sandbox-controller \
+      --for=delete --timeout=60s
+  fi
+
+  pod_ip="$(
+    kubectl -n "$SANDBOX_NS" get pod "$daemon_pod" -o jsonpath='{.status.podIP}'
+  )"
+  pod_uid="$(
+    kubectl -n "$SANDBOX_NS" get pod "$daemon_pod" -o jsonpath='{.metadata.uid}'
+  )"
+  if [ -z "$pod_ip" ] || [ -z "$pod_uid" ]; then
+    echo "::error::file-service fixture Pod has no current IP/UID"
+    return 1
+  fi
+  kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
+    --ignore-not-found=true --wait=true >/dev/null
+  kubectl_apply -f - <<EOF
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: ${claim_name}
+  namespace: ${SANDBOX_NS}
+spec:
+  warmPoolRef:
+    name: kind-file-service-ready-fixture
+EOF
+  kubectl -n "$SANDBOX_NS" patch sandboxclaim "$claim_name" \
+    --subresource=status --type=merge \
+    -p "{\"status\":{\"sandbox\":{\"name\":\"${daemon_pod}\",\"podIPs\":[\"${pod_ip}\"]},\"conditions\":[{\"lastTransitionTime\":\"2026-01-01T00:00:00Z\",\"message\":\"Kind file-service fixture is ready\",\"reason\":\"Ready\",\"status\":\"True\",\"type\":\"Ready\"}]}}"
+  ready="$(
+    kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+  )"
+  if [ "$ready" != "True" ]; then
+    echo "::error::file-service fixture SandboxClaim Ready status is ${ready:-missing}"
+    return 1
+  fi
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
@@ -2469,11 +2540,11 @@ SET state = 'running', desired_state = 'started', error_reason = NULL,
     state_changed_at = NOW();
 
 INSERT INTO sandbox_environment_backend (
-  environment_id, namespace, pod_name,
+  environment_id, namespace, pod_name, pod_ip,
   setup_owner_generation, setup_owner_activity_id, setup_owner_attempt,
   setup_owner_phase, setup_owner_status, setup_owner_pod_uid
 )
-SELECT '$environment_id', '$SANDBOX_NS', '$daemon_pod',
+SELECT '$environment_id', '$SANDBOX_NS', '$daemon_pod', '$pod_ip',
        environment_operation_generation, 'kind-file-service-smoke', 1,
        0, 'claimed', NULL
 FROM environments
@@ -2481,6 +2552,7 @@ WHERE id = '$environment_id'
 ON CONFLICT (environment_id) DO UPDATE
 SET namespace = EXCLUDED.namespace,
     pod_name = EXCLUDED.pod_name,
+    pod_ip = EXCLUDED.pod_ip,
     setup_owner_generation = EXCLUDED.setup_owner_generation,
     setup_owner_activity_id = EXCLUDED.setup_owner_activity_id,
     setup_owner_attempt = EXCLUDED.setup_owner_attempt,
@@ -2507,6 +2579,15 @@ DELETE FROM sandbox_environment_backend
 WHERE environment_id = '$environment_id';
 DELETE FROM environments WHERE id = '$environment_id';
 SQL
+  kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
+    --ignore-not-found=true --wait=true >/dev/null
+  kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
+    --replicas="$original_replicas" >/dev/null
+  if [ "$original_replicas" -gt 0 ]; then
+    kubectl -n agent-sandbox-system rollout status \
+      deploy/agent-sandbox-controller --timeout=180s
+  fi
+  trap - EXIT
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
@@ -2516,9 +2597,8 @@ SQL
     "$CARGO_CI_DIR/crd-smoke"
   kubectl -n "$SANDBOX_NS" delete pod "$daemon_pod" --wait=true >/dev/null
   rm -rf "$GATEWAY_SMOKE_TMPDIR"
-  GATEWAY_SMOKE_TMPDIR=""
   log "daemon-native FileService streaming and black-box Connect contract green"
-}
+)
 
 platform_run_connect_smoke() {
   local environment_id="$1"
