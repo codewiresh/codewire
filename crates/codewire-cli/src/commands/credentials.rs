@@ -1454,16 +1454,9 @@ mod tests {
             .expect("private tmpfs test root");
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("make tmpfs test root private");
-        let executable_root = tempfile::Builder::new()
-            .prefix("codewire-codex-executable-test-")
-            .tempdir_in(
-                std::env::current_exe()
-                    .expect("current executable")
-                    .parent()
-                    .expect("test executable directory"),
-            )
-            .expect("synthetic executable root");
-        let executable = executable_root.path().join("synthetic-codex");
+        // A stable fixture avoids a write-then-execute race with concurrent test tooling.
+        let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/synthetic-codex-login.sh");
         let auth = serde_json::to_string(&serde_json::json!({
             "auth_mode": "chatgpt",
             "OPENAI_API_KEY": null,
@@ -1482,34 +1475,9 @@ mod tests {
         }))
         .unwrap();
         assert!(!auth.contains('\''));
-        let script = format!(
-            concat!(
-                "#!/bin/sh\n",
-                "case \"$1\" in\n",
-                "login)\n",
-                "  [ \"$2\" = \"--device-auth\" ] || exit 20\n",
-                "  [ \"$3\" = \"-c\" ] || exit 21\n",
-                "  [ \"$4\" = 'cli_auth_credentials_store=\"file\"' ] || exit 22\n",
-                "  [ \"$HOME\" = \"$CODEX_HOME\" ] || exit 23\n",
-                "  [ \"$XDG_CONFIG_HOME\" = \"$CODEX_HOME\" ] || exit 24\n",
-                "  [ \"$XDG_CACHE_HOME\" = \"$CODEX_HOME\" ] || exit 25\n",
-                "  [ \"$TMPDIR\" = \"$CODEX_HOME\" ] || exit 26\n",
-                "  [ -z \"${{OPENAI_API_KEY+x}}\" ] || exit 27\n",
-                "  umask 077\n",
-                "  printf '%s' '{auth}' > \"$CODEX_HOME/auth.json\"\n",
-                "  ;;\n",
-                "logout)\n",
-                "  rm -f \"$CODEX_HOME/auth.json\"\n",
-                "  ;;\n",
-                "*) exit 28 ;;\n",
-                "esac\n"
-            ),
-            auth = auth,
-        );
-        std::fs::write(&executable, script).expect("write synthetic Codex executable");
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
-            .expect("make synthetic Codex executable private");
         let login_home = CodexLoginHome::create_in(root.path()).expect("isolated login home");
+        std::fs::write(login_home.path().join("synthetic-auth.fixture.json"), auth)
+            .expect("write synthetic Codex auth fixture");
         let completed = run_isolated_codex_login_with(
             login_home,
             executable,
@@ -1552,52 +1520,9 @@ mod tests {
             .expect("private tmpfs test root");
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("make tmpfs test root private");
-        let executable_root = tempfile::Builder::new()
-            .prefix("codewire-github-executable-test-")
-            .tempdir_in(
-                std::env::current_exe()
-                    .expect("current executable")
-                    .parent()
-                    .expect("test executable directory"),
-            )
-            .expect("synthetic executable root");
-        let executable = executable_root.path().join("synthetic-gh");
-        let script = concat!(
-            "#!/bin/sh\n",
-            "case \"${1-}:${2-}\" in\n",
-            "auth:login)\n",
-            "  [ \"$#\" -eq 9 ] || exit 20\n",
-            "  [ \"$3\" = '--hostname' ] || exit 21\n",
-            "  [ \"$4\" = 'github.com' ] || exit 22\n",
-            "  [ \"$5\" = '--git-protocol' ] || exit 23\n",
-            "  [ \"$6\" = 'https' ] || exit 24\n",
-            "  [ \"$7\" = '--web' ] || exit 25\n",
-            "  [ \"$8\" = '--insecure-storage' ] || exit 26\n",
-            "  [ \"$9\" = '--skip-ssh-key' ] || exit 27\n",
-            "  [ \"$HOME\" = \"$GH_CONFIG_DIR\" ] || exit 28\n",
-            "  [ \"$XDG_CONFIG_HOME\" = \"$GH_CONFIG_DIR\" ] || exit 29\n",
-            "  [ \"$XDG_CACHE_HOME\" = \"$GH_CONFIG_DIR\" ] || exit 30\n",
-            "  [ \"$TMPDIR\" = \"$GH_CONFIG_DIR\" ] || exit 31\n",
-            "  [ \"$(pwd -P)\" = \"$GH_CONFIG_DIR\" ] || exit 32\n",
-            "  [ \"$PATH\" = '/usr/bin:/bin' ] || exit 33\n",
-            "  [ -z \"${GH_TOKEN+x}\" ] || exit 34\n",
-            "  [ -z \"${GITHUB_TOKEN+x}\" ] || exit 35\n",
-            "  umask 077\n",
-            "  printf '%s' 'isolated-login' >\"$GH_CONFIG_DIR/hosts.yml\"\n",
-            "  ;;\n",
-            "auth:token)\n",
-            "  [ \"$#\" -eq 4 ] || exit 36\n",
-            "  [ \"$3\" = '--hostname' ] || exit 37\n",
-            "  [ \"$4\" = 'github.com' ] || exit 38\n",
-            "  [ -f \"$GH_CONFIG_DIR/hosts.yml\" ] || exit 39\n",
-            "  printf '%s\\n' 'synthetic-github-oauth-material'\n",
-            "  ;;\n",
-            "*) exit 40 ;;\n",
-            "esac\n",
-        );
-        std::fs::write(&executable, script).expect("write synthetic GitHub executable");
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
-            .expect("make synthetic GitHub executable private");
+        // A stable fixture avoids a write-then-execute race with concurrent test tooling.
+        let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/synthetic-github-login.sh");
         let login_home = GitHubLoginHome::create_in(root.path()).expect("isolated login home");
         let completed = run_isolated_github_login_with(
             login_home,
