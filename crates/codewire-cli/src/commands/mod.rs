@@ -584,10 +584,6 @@ pub(crate) struct InitArgs {
     env: Vec<String>,
     #[arg(long = "secrets", help = "Secret project to bind")]
     secret_project: Option<String>,
-    #[arg(long, help = "Do not inject org-level secrets")]
-    no_org_secrets: bool,
-    #[arg(long, help = "Do not inject user-level secrets")]
-    no_user_secrets: bool,
     #[arg(long, default_value = "codewire.yaml", help = "Path to write")]
     file: PathBuf,
     #[arg(long, help = "Overwrite the target file if it exists")]
@@ -806,10 +802,6 @@ pub(crate) struct EnvCreateArgs {
         help = "Local access profile, for example user/work"
     )]
     access_profile: Option<String>,
-    #[arg(long, help = "Do not inject org-level secrets")]
-    no_org_secrets: bool,
-    #[arg(long, help = "Do not inject user-level secrets")]
-    no_user_secrets: bool,
     #[arg(long, help = "Join a specific mesh network on boot")]
     network: Option<String>,
     #[arg(long, help = "Do not join the selected private mesh network")]

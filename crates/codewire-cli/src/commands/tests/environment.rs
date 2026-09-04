@@ -551,8 +551,6 @@
             "FOO=bar",
             "--secrets",
             "prod",
-            "--no-org-secrets",
-            "--no-user-secrets",
             "--no-wait",
             "--yes",
         ])
@@ -578,10 +576,24 @@
         assert_eq!(args.disk.as_deref(), Some("40gb"));
         assert_eq!(args.image.as_deref(), Some("workspace"));
         assert_eq!(args.coding_agent.as_deref(), Some("codex"));
-        assert!(args.no_org_secrets);
-        assert!(args.no_user_secrets);
         assert!(args.no_wait);
         assert!(args.yes);
+
+        for unsupported in [
+            "--no-org-secrets",
+            "--no-user-secrets",
+            "--organization-secrets",
+            "--user-secrets",
+        ] {
+            assert!(
+                Cli::try_parse_from(["cw", "env", "create", unsupported]).is_err(),
+                "unsupported secret-scope flag {unsupported:?} must fail closed"
+            );
+            assert!(
+                Cli::try_parse_from(["cw", "init", unsupported]).is_err(),
+                "unsupported init secret-scope flag {unsupported:?} must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -617,8 +629,6 @@
             "FOO=bar",
             "--secrets",
             "prod",
-            "--no-org-secrets",
-            "--no-user-secrets",
         ])
         .unwrap();
         let Command::Env(EnvArgs { command, .. }) = cli.command else {
@@ -648,8 +658,11 @@
         assert_eq!(request.agents[0].agent_type, "codex");
         assert_eq!(request.agent, "codex");
         assert_eq!(request.secret_project, "prod");
-        assert_eq!(request.include_org_secrets, Some(false));
-        assert_eq!(request.include_user_secrets, Some(false));
+        assert_eq!(request.include_org_secrets, None);
+        assert_eq!(request.include_user_secrets, None);
+        let secrets = &request.project_spec.as_ref().unwrap().secrets;
+        assert!(!secrets.organization);
+        assert!(!secrets.user);
     }
 
     #[test]
@@ -700,6 +713,11 @@
         assert!(request.preset_id.is_none());
         assert!(request.preset_slug.is_empty());
         assert!(request.repo_url.is_empty());
+        assert_eq!(request.include_org_secrets, None);
+        assert_eq!(request.include_user_secrets, None);
+        let secrets = &request.project_spec.as_ref().unwrap().secrets;
+        assert!(!secrets.organization);
+        assert!(!secrets.user);
     }
 
     #[test]
@@ -721,8 +739,6 @@
             "RUST_LOG=info",
             "--secrets",
             "development",
-            "--no-org-secrets",
-            "--no-user-secrets",
             "--cpu",
             "2000",
             "--memory",
@@ -832,7 +848,6 @@ secrets: {project: development, organization: false, user: false}
             "FOO=bar",
             "--secrets",
             "prod",
-            "--no-user-secrets",
             "--file",
             "project/codewire.yaml",
             "--force",
@@ -850,7 +865,6 @@ secrets: {project: development, organization: false, user: false}
         assert_eq!(args.coding_agent.as_deref(), Some("codex"));
         assert_eq!(args.env, vec!["FOO=bar"]);
         assert_eq!(args.secret_project.as_deref(), Some("prod"));
-        assert!(args.no_user_secrets);
         assert_eq!(args.file, PathBuf::from("project/codewire.yaml"));
         assert!(args.force);
         assert!(args.yes);
@@ -881,7 +895,6 @@ secrets: {project: development, organization: false, user: false}
             "4096".to_string(),
             "--disk".to_string(),
             "40".to_string(),
-            "--no-user-secrets".to_string(),
             "--file".to_string(),
             path.display().to_string(),
         ])
@@ -907,6 +920,7 @@ secrets: {project: development, organization: false, user: false}
         assert_eq!(spec.resources.memory_mib, Some(4096));
         assert_eq!(spec.resources.disk_gib, Some(40));
         assert_eq!(spec.secrets.project, "prod");
+        assert!(!spec.secrets.organization);
         assert!(!spec.secrets.user);
         assert_eq!(spec.agents.tools, vec!["claude-code".to_string()]);
     }
@@ -967,7 +981,6 @@ secrets: {project: development, organization: false, user: false}
             "FOO=bar",
             "--secrets",
             "prod",
-            "--no-user-secrets",
         ])
         .unwrap();
         let Command::Init(args) = cli.command else {
@@ -999,7 +1012,8 @@ secrets: {project: development, organization: false, user: false}
         assert_eq!(request.draft.env_vars["FOO"], "bar");
         assert_eq!(request.draft.agents[0].agent_type, "codex");
         assert_eq!(request.draft.secret_project, "prod");
-        assert_eq!(request.draft.include_user_secrets, Some(false));
+        assert_eq!(request.draft.include_org_secrets, None);
+        assert_eq!(request.draft.include_user_secrets, None);
     }
 
     #[test]
@@ -1100,7 +1114,7 @@ secrets: {project: development, organization: false, user: false}
                 agent_type: "claude-code".to_string(),
             }],
             secret_project: "prod".to_string(),
-            include_user_secrets: Some(false),
+            include_user_secrets: Some(true),
             app_ports: vec![crate::presentation::AppPort {
                 port: 8080,
                 label: "web".to_string(),
@@ -1124,8 +1138,8 @@ secrets: {project: development, organization: false, user: false}
         assert_eq!(spec.application_ports[0].label, "web");
         assert_eq!(spec.agents.tools, vec!["claude-code".to_string()]);
         let secrets = spec.secrets;
-        assert!(secrets.organization);
-        assert!(!secrets.user);
+        assert!(!secrets.organization);
+        assert!(secrets.user);
         assert_eq!(secrets.project, "prod");
     }
 
@@ -1144,6 +1158,8 @@ secrets: {project: development, organization: false, user: false}
         let parsed = config::load_project_document(&path).unwrap();
         assert_eq!(parsed.spec.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
         assert_eq!(parsed.spec.install_command, "go mod download");
+        assert!(!parsed.spec.secrets.organization);
+        assert!(!parsed.spec.secrets.user);
     }
 
     #[test]

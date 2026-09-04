@@ -1525,7 +1525,7 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
     if !args.env.is_empty() {
         unsupported.push("--env");
     }
-    if args.secret_project.is_some() || args.no_org_secrets || args.no_user_secrets {
+    if args.secret_project.is_some() {
         unsupported.push("secrets");
     }
     if !args.follow || args.no_wait {

@@ -2088,8 +2088,8 @@ pub(crate) fn env_create_request_from_args(
         agent_env: BTreeMap::new(),
         secret_project: trimmed_optional(args.secret_project.clone()).unwrap_or_default(),
         app_ports: Vec::new(),
-        include_org_secrets: args.no_org_secrets.then_some(false),
-        include_user_secrets: args.no_user_secrets.then_some(false),
+        include_org_secrets: None,
+        include_user_secrets: None,
         isolation_tier: args.isolation.clone().unwrap_or_default(),
         project_spec: None,
     };
@@ -2334,8 +2334,8 @@ pub(crate) fn codewire_yaml_from_request(
         install: request.install_command.clone(),
         startup: request.startup_script.clone(),
         secrets: Some(ResolvedCodewireSecretsYaml {
-            organization: request.include_org_secrets.unwrap_or(true),
-            user: request.include_user_secrets.unwrap_or(true),
+            organization: request.include_org_secrets.unwrap_or(false),
+            user: request.include_user_secrets.unwrap_or(false),
             project: request.secret_project.clone(),
         }),
         env: request.env_vars.clone(),

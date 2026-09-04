@@ -321,8 +321,6 @@ pub(crate) fn init_has_direct_yaml_inputs(args: &InitArgs) -> bool {
             .as_deref()
             .and_then(trimmed_str)
             .is_some()
-        || args.no_org_secrets
-        || args.no_user_secrets
 }
 
 pub(crate) fn env_create_request_from_init_args(
@@ -363,8 +361,6 @@ pub(crate) fn env_create_request_from_init_args(
         env: args.env.clone(),
         secret_project: args.secret_project.clone(),
         access_profile: None,
-        no_org_secrets: args.no_org_secrets,
-        no_user_secrets: args.no_user_secrets,
         network: None,
         no_network: false,
         follow: true,
