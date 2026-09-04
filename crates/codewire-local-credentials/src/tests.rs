@@ -71,6 +71,16 @@ impl TestProtectedStore {
         self.state.lock().expect("store lock").entries.len()
     }
 
+    fn entry_values(&self) -> Vec<Vec<u8>> {
+        self.state
+            .lock()
+            .expect("store lock")
+            .entries
+            .values()
+            .cloned()
+            .collect()
+    }
+
     fn delete_call_count(&self) -> usize {
         self.state.lock().expect("store lock").delete_calls
     }
@@ -165,6 +175,33 @@ fn catalog() -> ProviderCatalog {
         .collect(),
     }])
     .expect("provider catalog")
+}
+
+fn workload_secret_rows(
+    authority: &LocalCredentialAuthority<TestProtectedStore>,
+) -> Vec<(String, i64, String)> {
+    let connection = authority.connection().expect("credential database");
+    let mut statement = connection
+        .prepare(
+            "SELECT key, material_generation, material_state
+             FROM workload_secrets ORDER BY key, id",
+        )
+        .expect("prepare workload-secret state query");
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("query workload-secret state")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read workload-secret state")
+}
+
+fn workload_secret_journal_count(authority: &LocalCredentialAuthority<TestProtectedStore>) -> i64 {
+    authority
+        .connection()
+        .expect("credential database")
+        .query_row("SELECT COUNT(*) FROM workload_secret_journal", [], |row| {
+            row.get(0)
+        })
+        .expect("count workload-secret journals")
 }
 
 fn catalog_with_incompatible_api_key_slot() -> ProviderCatalog {
@@ -1659,50 +1696,273 @@ fn failed_adjacent_schema_migration_rolls_back_atomically() {
 }
 
 #[test]
-fn workload_secret_write_rotation_and_delete_reconcile_exact_effects() {
-    let temp = TempDir::new().expect("temporary directory");
-    let root = authority_root(&temp);
-    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
-    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+fn workload_secret_initial_write_recovers_in_live_authority_for_both_fault_timings() {
+    for fault in [Fault::BeforeEffect, Fault::AfterEffect] {
+        let temp = TempDir::new().expect("temporary directory");
+        let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+        let authority =
+            LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+                .unwrap();
 
-    store.set_put_fault(Fault::AfterEffect);
-    assert!(
-        authority
-            .set_user_workload_secret("ROLLED_BACK", material(b"synthetic-pending"))
-            .is_err()
-    );
-    store.clear_faults();
-    drop(authority);
-    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
-    assert!(authority.list_user_workload_secrets().unwrap().is_empty());
-    assert_eq!(store.entry_count(), 0);
+        store.set_put_fault(fault);
+        assert!(
+            authority
+                .set_user_workload_secret("PENDING", material(b"synthetic-pending"))
+                .is_err()
+        );
+        assert_eq!(
+            workload_secret_rows(&authority),
+            vec![("PENDING".into(), 1, "pending_write".into())]
+        );
+        assert_eq!(workload_secret_journal_count(&authority), 1);
+        let expected_values = match fault {
+            Fault::BeforeEffect => Vec::new(),
+            Fault::AfterEffect => vec![b"synthetic-pending".to_vec()],
+            Fault::None => unreachable!(),
+        };
+        assert_eq!(store.entry_values(), expected_values);
 
-    authority
-        .set_user_workload_secret("ROTATED", material(b"synthetic-old"))
-        .unwrap();
-    store.set_put_fault(Fault::AfterEffect);
-    assert!(
+        store.clear_faults();
+        assert!(authority.list_user_workload_secrets().unwrap().is_empty());
+        assert!(workload_secret_rows(&authority).is_empty());
+        assert_eq!(workload_secret_journal_count(&authority), 0);
+        assert!(store.entry_values().is_empty());
+    }
+}
+
+#[test]
+fn workload_secret_rotation_write_recovers_in_live_authority_for_both_fault_timings() {
+    for fault in [Fault::BeforeEffect, Fault::AfterEffect] {
+        let temp = TempDir::new().expect("temporary directory");
+        let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+        let authority =
+            LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+                .unwrap();
         authority
+            .set_user_workload_secret("ROTATED", material(b"synthetic-old"))
+            .unwrap();
+
+        store.set_put_fault(fault);
+        assert!(
+            authority
+                .set_user_workload_secret("ROTATED", material(b"synthetic-uncommitted"))
+                .is_err()
+        );
+        assert_eq!(
+            workload_secret_rows(&authority),
+            vec![("ROTATED".into(), 1, "ready".into())]
+        );
+        assert_eq!(workload_secret_journal_count(&authority), 1);
+        let expected_values = match fault {
+            Fault::BeforeEffect => vec![b"synthetic-old".to_vec()],
+            Fault::AfterEffect => {
+                vec![b"synthetic-old".to_vec(), b"synthetic-uncommitted".to_vec()]
+            }
+            Fault::None => unreachable!(),
+        };
+        assert_eq!(store.entry_values(), expected_values);
+
+        store.clear_faults();
+        let recovered = authority.list_user_workload_secrets().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert!(!recovered[0].protected_store_cleanup_pending);
+        assert_eq!(
+            workload_secret_rows(&authority),
+            vec![("ROTATED".into(), 1, "ready".into())]
+        );
+        assert_eq!(workload_secret_journal_count(&authority), 0);
+        assert_eq!(store.entry_values(), vec![b"synthetic-old".to_vec()]);
+    }
+}
+
+#[test]
+fn committed_workload_secret_rotation_reports_cleanup_pending_for_both_fault_timings() {
+    for fault in [Fault::BeforeEffect, Fault::AfterEffect] {
+        let temp = TempDir::new().expect("temporary directory");
+        let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+        let authority =
+            LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+                .unwrap();
+        authority
+            .set_user_workload_secret("ROTATED", material(b"synthetic-old"))
+            .unwrap();
+
+        store.set_delete_fault(fault);
+        let rotated = authority
             .set_user_workload_secret("ROTATED", material(b"synthetic-new"))
+            .expect("committed rotation remains successful");
+        assert!(rotated.protected_store_cleanup_pending);
+        assert_eq!(
+            workload_secret_rows(&authority),
+            vec![("ROTATED".into(), 2, "ready".into())]
+        );
+        assert_eq!(workload_secret_journal_count(&authority), 1);
+        let expected_values = match fault {
+            Fault::BeforeEffect => {
+                vec![b"synthetic-old".to_vec(), b"synthetic-new".to_vec()]
+            }
+            Fault::AfterEffect => vec![b"synthetic-new".to_vec()],
+            Fault::None => unreachable!(),
+        };
+        assert_eq!(store.entry_values(), expected_values);
+
+        store.clear_faults();
+        let recovered = authority.list_user_workload_secrets().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert!(!recovered[0].protected_store_cleanup_pending);
+        assert_eq!(
+            workload_secret_rows(&authority),
+            vec![("ROTATED".into(), 2, "ready".into())]
+        );
+        assert_eq!(workload_secret_journal_count(&authority), 0);
+        assert_eq!(store.entry_values(), vec![b"synthetic-new".to_vec()]);
+    }
+}
+
+#[test]
+fn workload_secret_delete_recovers_in_live_authority_for_both_fault_timings() {
+    for fault in [Fault::BeforeEffect, Fault::AfterEffect] {
+        let temp = TempDir::new().expect("temporary directory");
+        let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+        let authority =
+            LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog())
+                .unwrap();
+        authority
+            .set_user_workload_secret("DELETED", material(b"synthetic-delete"))
+            .unwrap();
+
+        store.set_delete_fault(fault);
+        assert!(authority.delete_user_workload_secret("DELETED").is_err());
+        assert_eq!(
+            workload_secret_rows(&authority),
+            vec![("DELETED".into(), 1, "pending_delete".into())]
+        );
+        assert_eq!(workload_secret_journal_count(&authority), 1);
+        let expected_values = match fault {
+            Fault::BeforeEffect => vec![b"synthetic-delete".to_vec()],
+            Fault::AfterEffect => Vec::new(),
+            Fault::None => unreachable!(),
+        };
+        assert_eq!(store.entry_values(), expected_values);
+
+        store.clear_faults();
+        assert!(authority.list_user_workload_secrets().unwrap().is_empty());
+        assert!(workload_secret_rows(&authority).is_empty());
+        assert_eq!(workload_secret_journal_count(&authority), 0);
+        assert!(store.entry_values().is_empty());
+    }
+}
+
+#[test]
+fn ready_workload_secret_metadata_reads_do_not_access_protected_values() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let project = authority.create_secret_project("project").unwrap();
+    authority
+        .set_user_workload_secret("USER_SECRET", material(b"synthetic-user"))
+        .unwrap();
+    authority
+        .set_project_workload_secret(project.id, "PROJECT_SECRET", material(b"synthetic-project"))
+        .unwrap();
+
+    store.set_get_fault(Fault::BeforeEffect);
+    assert_eq!(authority.list_secret_projects().unwrap().len(), 1);
+    assert_eq!(authority.list_user_workload_secrets().unwrap().len(), 1);
+    assert_eq!(
+        authority
+            .list_project_workload_secrets(project.id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        authority
+            .resolve_workload_secret_metadata(&WorkloadSecretSelection {
+                project: Some("project".into()),
+                user: true,
+                ..WorkloadSecretSelection::default()
+            })
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn invalid_workload_secret_requests_do_not_trigger_pending_reconciliation() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let project = authority.create_secret_project("project").unwrap();
+
+    store.set_put_fault(Fault::AfterEffect);
+    assert!(
+        authority
+            .set_user_workload_secret("PENDING", material(b"synthetic-pending"))
             .is_err()
     );
     store.clear_faults();
-    drop(authority);
-    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
-    let stored_values = store.state.lock().unwrap();
-    assert_eq!(stored_values.entries.len(), 1);
-    assert_eq!(
-        stored_values.entries.values().next().unwrap(),
-        b"synthetic-old"
-    );
-    drop(stored_values);
-    assert_eq!(store.entry_count(), 1);
+    let delete_calls = store.delete_call_count();
 
-    store.set_delete_fault(Fault::AfterEffect);
-    assert!(authority.delete_user_workload_secret("ROTATED").is_err());
-    store.clear_faults();
-    drop(authority);
-    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
-    assert!(authority.list_user_workload_secrets().unwrap().is_empty());
-    assert_eq!(store.entry_count(), 0);
+    assert_eq!(
+        authority.set_user_workload_secret("INVALID-KEY", material(b"synthetic-value")),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.set_user_workload_secret("VALID_KEY", material(&[0xff])),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.delete_user_workload_secret("INVALID-KEY"),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.rename_user_workload_secret("PENDING", "INVALID-KEY"),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.set_project_workload_secret(
+            project.id,
+            "INVALID-KEY",
+            material(b"synthetic-value"),
+        ),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.delete_project_workload_secret(project.id, "INVALID-KEY"),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.rename_project_workload_secret(project.id, "VALID_KEY", "INVALID-KEY"),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.create_secret_project("invalid project"),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.resolve_workload_secret_metadata(&WorkloadSecretSelection {
+            explicit_environment_keys: BTreeSet::from(["INVALID-KEY".into()]),
+            ..WorkloadSecretSelection::default()
+        }),
+        Err(LocalCredentialError::InvalidWorkloadSecret)
+    );
+    assert_eq!(
+        authority.resolve_workload_secret_metadata(&WorkloadSecretSelection {
+            organization: true,
+            ..WorkloadSecretSelection::default()
+        }),
+        Err(LocalCredentialError::OrganizationSecretsUnsupported)
+    );
+
+    assert_eq!(store.delete_call_count(), delete_calls);
+    assert_eq!(
+        workload_secret_rows(&authority),
+        vec![("PENDING".into(), 1, "pending_write".into())]
+    );
+    assert_eq!(workload_secret_journal_count(&authority), 1);
+    assert_eq!(store.entry_values(), vec![b"synthetic-pending".to_vec()]);
 }

@@ -29,6 +29,9 @@ pub struct WorkloadSecretMetadata {
     pub key: String,
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
+    /// A retired protected-store generation still needs exact deletion. The
+    /// active value is already committed and remains usable while this is true.
+    pub protected_store_cleanup_pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +102,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         let id = Uuid::new_v4();
         let now = unix_millis()?;
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         connection
             .execute(
                 "INSERT INTO secret_projects(id, owner_id, name, created_at_unix_ms, updated_at_unix_ms)
@@ -111,6 +115,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 
     pub fn list_secret_projects(&self) -> Result<Vec<LocalSecretProject>, LocalCredentialError> {
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         let mut statement = connection
             .prepare(
                 "SELECT id FROM secret_projects WHERE owner_id = ?1
@@ -132,6 +137,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 
     pub fn delete_secret_project(&self, id: Uuid) -> Result<(), LocalCredentialError> {
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         require_project(&connection, &id)?;
         let secret_ids = list_secret_ids(&connection, SecretScope::Project(&id))?;
         for secret_id in secret_ids {
@@ -153,6 +159,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         &self,
     ) -> Result<Vec<WorkloadSecretMetadata>, LocalCredentialError> {
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         list_secret_metadata(&connection, SecretScope::User)
     }
 
@@ -161,12 +168,17 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         key: &str,
         value: ProtectedValue,
     ) -> Result<WorkloadSecretMetadata, LocalCredentialError> {
+        validate_secret_key(key)?;
+        validate_secret_value(value.expose_secret())?;
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         set_secret_locked(self, &connection, SecretScope::User, key, value)
     }
 
     pub fn delete_user_workload_secret(&self, key: &str) -> Result<(), LocalCredentialError> {
+        validate_secret_key(key)?;
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         let secret = load_secret_by_key(&connection, SecretScope::User, key)?
             .ok_or(LocalCredentialError::WorkloadSecretNotFound)?;
         delete_secret_locked(self, &connection, secret.id)
@@ -177,7 +189,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         key: &str,
         new_key: &str,
     ) -> Result<WorkloadSecretMetadata, LocalCredentialError> {
+        validate_secret_key(key)?;
+        validate_secret_key(new_key)?;
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         rename_secret_locked(&connection, SecretScope::User, key, new_key)
     }
 
@@ -186,6 +201,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         project_id: Uuid,
     ) -> Result<Vec<WorkloadSecretMetadata>, LocalCredentialError> {
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         require_project(&connection, &project_id)?;
         list_secret_metadata(&connection, SecretScope::Project(&project_id))
     }
@@ -196,7 +212,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         key: &str,
         value: ProtectedValue,
     ) -> Result<WorkloadSecretMetadata, LocalCredentialError> {
+        validate_secret_key(key)?;
+        validate_secret_value(value.expose_secret())?;
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         require_project(&connection, &project_id)?;
         set_secret_locked(
             self,
@@ -212,7 +231,9 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         project_id: Uuid,
         key: &str,
     ) -> Result<(), LocalCredentialError> {
+        validate_secret_key(key)?;
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         require_project(&connection, &project_id)?;
         let secret = load_secret_by_key(&connection, SecretScope::Project(&project_id), key)?
             .ok_or(LocalCredentialError::WorkloadSecretNotFound)?;
@@ -225,7 +246,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         key: &str,
         new_key: &str,
     ) -> Result<WorkloadSecretMetadata, LocalCredentialError> {
+        validate_secret_key(key)?;
+        validate_secret_key(new_key)?;
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         require_project(&connection, &project_id)?;
         rename_secret_locked(&connection, SecretScope::Project(&project_id), key, new_key)
     }
@@ -239,6 +263,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             return Err(LocalCredentialError::OrganizationSecretsUnsupported);
         }
         let connection = self.connection()?;
+        reconcile_pending_workload_secrets_locked(self, &connection)?;
         let mut metadata_sources = Vec::<(WorkloadSecretSource, String)>::new();
 
         if let Some(project_name) = selection.project.as_deref() {
@@ -267,20 +292,48 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 
     pub(crate) fn reconcile_workload_secrets(&self) -> Result<(), LocalCredentialError> {
         let connection = self.connection()?;
-        let mut statement = connection
-            .prepare("SELECT id FROM workload_secrets ORDER BY id")
-            .map_err(database_error)?;
-        let ids = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(database_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        drop(statement);
-        for id in ids {
-            reconcile_secret(self, &connection, parse_uuid(&id)?)?;
-        }
-        Ok(())
+        let ids = list_workload_secret_ids(&connection, false)?;
+        reconcile_workload_secret_ids(self, &connection, ids)
     }
+}
+
+fn reconcile_pending_workload_secrets_locked<S: ProtectedStore>(
+    authority: &LocalCredentialAuthority<S>,
+    connection: &Connection,
+) -> Result<(), LocalCredentialError> {
+    let ids = list_workload_secret_ids(connection, true)?;
+    reconcile_workload_secret_ids(authority, connection, ids)
+}
+
+fn list_workload_secret_ids(
+    connection: &Connection,
+    pending_only: bool,
+) -> Result<Vec<String>, LocalCredentialError> {
+    let query = if pending_only {
+        "SELECT s.id FROM workload_secrets s
+         LEFT JOIN workload_secret_journal j ON j.secret_id = s.id
+         WHERE s.material_state <> 'ready' OR j.secret_id IS NOT NULL
+         ORDER BY s.id"
+    } else {
+        "SELECT id FROM workload_secrets ORDER BY id"
+    };
+    let mut statement = connection.prepare(query).map_err(database_error)?;
+    statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)
+}
+
+fn reconcile_workload_secret_ids<S: ProtectedStore>(
+    authority: &LocalCredentialAuthority<S>,
+    connection: &Connection,
+    ids: Vec<String>,
+) -> Result<(), LocalCredentialError> {
+    for id in ids {
+        reconcile_secret(authority, connection, parse_uuid(&id)?)?;
+    }
+    Ok(())
 }
 
 fn set_secret_locked<S: ProtectedStore>(
@@ -391,15 +444,18 @@ fn set_secret_locked<S: ProtectedStore>(
                 return Err(LocalCredentialError::CorruptMetadata);
             }
             transaction.commit().map_err(database_error)?;
-            authority
+            if authority
                 .protected_store
-                .delete(&current.protected_entry_id)?;
-            delete_journal(
-                connection,
-                current.id,
-                JournalOperation::DeleteRetired,
-                &current.protected_entry_id,
-            )?;
+                .delete(&current.protected_entry_id)
+                .is_ok()
+            {
+                delete_journal(
+                    connection,
+                    current.id,
+                    JournalOperation::DeleteRetired,
+                    &current.protected_entry_id,
+                )?;
+            }
             Ok(load_secret_by_id(connection, current.id)?.metadata)
         }
     }
@@ -717,19 +773,31 @@ fn load_secret_by_id(
     validate_secret_key(&row.0)?;
     let generation = from_i64(row.1)?;
     let entry = ProtectedEntryId::parse(row.2)?;
+    let material_state = MaterialState::parse(&row.3)?;
     if entry != secret_entry_id(id, generation)? {
         return Err(LocalCredentialError::CorruptMetadata);
     }
+    let protected_store_cleanup_pending = matches!(
+        (material_state, load_journal(connection, id)?),
+        (
+            MaterialState::Ready,
+            Some(WorkloadSecretJournal {
+                operation: JournalOperation::DeleteRetired,
+                protected_entry_id,
+            })
+        ) if protected_entry_id != entry
+    );
     Ok(InternalWorkloadSecret {
         id,
         metadata: WorkloadSecretMetadata {
             key: row.0,
             created_at_unix_ms: from_i64(row.4)?,
             updated_at_unix_ms: from_i64(row.5)?,
+            protected_store_cleanup_pending,
         },
         material_generation: generation,
         protected_entry_id: entry,
-        material_state: MaterialState::parse(&row.3)?,
+        material_state,
     })
 }
 

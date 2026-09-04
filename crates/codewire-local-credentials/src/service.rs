@@ -1438,6 +1438,7 @@ fn workload_secret_to_proto(secret: WorkloadSecretMetadata) -> v1::WorkloadSecre
         key: secret.key,
         created_at_unix_ms: secret.created_at_unix_ms,
         updated_at_unix_ms: secret.updated_at_unix_ms,
+        protected_store_cleanup_pending: secret.protected_store_cleanup_pending,
     }
 }
 
