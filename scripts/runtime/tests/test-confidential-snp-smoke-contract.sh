@@ -273,16 +273,20 @@ rg -F 'privileged: true' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/nu
   printf 'confidential attestation probe does not declare its measured guest-pull groups\n' >&2
   exit 1
 }
-rg -F 'name: codewire-commodity-runtime-smoke-v72' "$SMOKE_DIR/commodity-smoke-job.yaml" >/dev/null || {
-  printf 'commodity runtime probe generation is not v72\n' >&2
+commodity_job_name="$(yq -er '.metadata.name' "$SMOKE_DIR/commodity-smoke-job.yaml")"
+[[ "$commodity_job_name" =~ ^codewire-commodity-runtime-smoke-(v[1-9][0-9]*)$ ]] || {
+  printf 'commodity runtime probe name has an invalid generation\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-runtime-smoke-v72' "$SMOKE_DIR/confidential-smoke-job.yaml" >/dev/null || {
-  printf 'confidential runtime probe generation is not v72\n' >&2
+probe_generation="${BASH_REMATCH[1]}"
+[[ "$(yq -er '.metadata.name' "$SMOKE_DIR/confidential-smoke-job.yaml")" == \
+  "codewire-confidential-runtime-smoke-$probe_generation" ]] || {
+  printf 'confidential runtime probe generation does not match the commodity probe\n' >&2
   exit 1
 }
-rg -F 'name: codewire-confidential-snp-attestation-v72' "$SMOKE_DIR/confidential-attestation-job.yaml" >/dev/null || {
-  printf 'confidential attestation probe generation is not v72\n' >&2
+[[ "$(yq -er '.metadata.name' "$SMOKE_DIR/confidential-attestation-job.yaml")" == \
+  "codewire-confidential-snp-attestation-$probe_generation" ]] || {
+  printf 'confidential attestation probe generation does not match the commodity probe\n' >&2
   exit 1
 }
 
@@ -379,6 +383,21 @@ validate_policy_stream_contract() {
   [[ "$request_defaults" == \
     '{"ReadStreamRequest":true,"WriteStreamRequest":false,"CloseStdinRequest":false}' ]]
 }
+validate_policy_sandbox_name() {
+  local policy="$1"
+  local manifest="$2"
+  local job_name expected sandbox_names
+
+  job_name="$(yq -er '.metadata.name' "$manifest")" || return 1
+  expected="^${job_name}(-[0-9]+)?-[bcdfghjklmnpqrstvwxz2456789]+$"
+  sandbox_names="$(
+    sed -n '/^policy_data := /,$p' "$policy" |
+      sed '1s/^policy_data := //' |
+      jq -er '.. | objects | .["io.kubernetes.cri.sandbox-name"]? // empty' |
+      sort -u
+  )" || return 1
+  [[ "$sandbox_names" == "$expected" ]]
+}
 validate_probe_initdata() {
   local manifest="$1"
   local container_name="$2"
@@ -397,6 +416,7 @@ validate_probe_initdata() {
   rg -Fx 'package agent_policy' "$policy" >/dev/null || return 1
   rg -F "$probe_digest" "$policy" >/dev/null || return 1
   rg -F "\"$container_name\"" "$policy" >/dev/null || return 1
+  validate_policy_sandbox_name "$policy" "$manifest" || return 1
   validate_policy_oci_version "$policy" "$expected_oci_version" || return 1
   validate_policy_privileged_caps "$policy" || return 1
   validate_policy_stream_contract "$policy" || return 1
@@ -443,16 +463,23 @@ done
 
 missing_initdata="$initdata_dir/missing.yaml"
 malformed_initdata="$initdata_dir/malformed.yaml"
+wrong_generation_initdata="$initdata_dir/wrong-generation.yaml"
 cp "$SMOKE_DIR/confidential-smoke-job.yaml" "$missing_initdata"
 cp "$SMOKE_DIR/confidential-smoke-job.yaml" "$malformed_initdata"
+cp "$SMOKE_DIR/confidential-smoke-job.yaml" "$wrong_generation_initdata"
 yq -i "del(.spec.template.metadata.annotations.\"$annotation_key\")" "$missing_initdata"
 yq -i ".spec.template.metadata.annotations.\"$annotation_key\" = \"not-gzip-base64\"" "$malformed_initdata"
+yq -i '.metadata.name = "codewire-confidential-runtime-smoke-v999"' "$wrong_generation_initdata"
 if validate_probe_initdata "$missing_initdata" smoke 2>/dev/null; then
   printf 'confidential probe contract accepted missing Init-Data\n' >&2
   exit 1
 fi
 if validate_probe_initdata "$malformed_initdata" smoke 2>/dev/null; then
   printf 'confidential probe contract accepted malformed Init-Data\n' >&2
+  exit 1
+fi
+if validate_probe_initdata "$wrong_generation_initdata" smoke 2>/dev/null; then
+  printf 'confidential probe contract accepted a Job generation absent from its measured policy\n' >&2
   exit 1
 fi
 rm -rf "$initdata_dir"
@@ -467,6 +494,7 @@ rg -F 'drop-in-examples/$settings_drop_in_name' "$PROBE_POLICY_GENERATOR" >/dev/
 rg -F '30-talos-privileged-capabilities.json' "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F '40-probe-read-stream.json' "$PROBE_POLICY_GENERATOR" >/dev/null
 rg -F '/request_defaults/ReadStreamRequest' "$PROBE_POLICY_GENERATOR" >/dev/null
+rg -F 'all Job names and Init-Data updated' "$PROBE_POLICY_GENERATOR" >/dev/null
 
 runtime_configmap="$({
   jq -n '{
