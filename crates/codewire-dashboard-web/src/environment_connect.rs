@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderValue;
 use codewire_proto::codewire::{
@@ -16,11 +13,9 @@ use codewire_proto::codewire::{
         EnvironmentResizeOperationState, EnvironmentResizePlan, EnvironmentResources,
         EnvironmentServiceClient, EnvironmentState, GetEnvironmentRequest,
         GetEnvironmentResizeOperationRequest, GetEnvironmentTrustReportRequest,
-        ListEnvironmentsRequest, ListPortsRequest, ListUserSecretsRequest,
-        PlanEnvironmentResizeRequest, Port, PortAccess, PortServiceClient,
-        ResizeEnvironmentRequest, SecretServiceClient, SetUserSecretRequest,
-        StartEnvironmentRequest, StopEnvironmentRequest, WatchEnvironmentCreateRequest,
-        watch_environment_create_response,
+        ListEnvironmentsRequest, ListPortsRequest, PlanEnvironmentResizeRequest, Port, PortAccess,
+        PortServiceClient, ResizeEnvironmentRequest, SetupConfig, StartEnvironmentRequest,
+        StopEnvironmentRequest, WatchEnvironmentCreateRequest, watch_environment_create_response,
     },
 };
 use connectrpc::{ConnectError, ErrorCode, client::ClientConfig};
@@ -30,10 +25,9 @@ use crate::{
     state::AppState,
     transport::BrowserTransport,
     view::{
-        EnvironmentAgentSecretView, EnvironmentAgentView, EnvironmentDetectionView,
-        EnvironmentPortRow, EnvironmentPresetOption, EnvironmentResizeConfirmationView,
-        EnvironmentResizeOperationView, EnvironmentRow, EnvironmentSecretProjectOption,
-        EnvironmentTrustSummaryView, GitHubRepositoryOption,
+        EnvironmentAgentView, EnvironmentDetectionView, EnvironmentPortRow,
+        EnvironmentPresetOption, EnvironmentResizeConfirmationView, EnvironmentResizeOperationView,
+        EnvironmentRow, EnvironmentTrustSummaryView, GitHubRepositoryOption,
     },
 };
 
@@ -46,7 +40,6 @@ pub(crate) struct EnvironmentCreateOptions {
     pub(crate) github_repositories_available: bool,
     pub(crate) github_repositories: Vec<GitHubRepositoryOption>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
-    pub(crate) secret_projects: Vec<EnvironmentSecretProjectOption>,
     pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) confidential_available: bool,
     pub(crate) confidential_price: String,
@@ -228,21 +221,6 @@ pub(crate) async fn create_options(
         (Vec::new(), false)
     };
 
-    let configured_user_secrets: HashSet<String> = SecretServiceClient::new(
-        transport(state, cookie.clone()),
-        client_config(state, UNARY_TIMEOUT),
-    )
-    .list_user_secrets(ListUserSecretsRequest {
-        page_size: 100,
-        ..Default::default()
-    })
-    .await?
-    .into_owned()
-    .secrets
-    .into_iter()
-    .map(|secret| secret.key)
-    .collect();
-
     // The catalog is public to organization members.  Failure to read it does
     // not block the create form; the server still performs authoritative,
     // atomic admission when a confidential environment is submitted.
@@ -282,25 +260,14 @@ pub(crate) async fn create_options(
         _ => (false, String::new()),
     };
 
-    let secret_projects = setup
-        .secret_projects
-        .into_iter()
-        .map(|project| EnvironmentSecretProjectOption {
-            id: project.id,
-            name: project.name,
-            secret_count: project.secret_count,
-        })
-        .collect::<Vec<_>>();
     let presets = setup
         .presets
         .into_iter()
         .map(|preset| {
-            let secret_project = preset
-                .secret_project_id
-                .as_deref()
-                .and_then(|id| secret_projects.iter().find(|project| project.id == id))
-                .map(|project| project.name.clone())
-                .unwrap_or_default();
+            let uses_legacy_secret_sources = preset_uses_legacy_secret_sources(
+                preset.secret_project_id.as_deref(),
+                preset.default_setup_config.as_option(),
+            );
             let defaults = preset
                 .default_setup_config
                 .into_option()
@@ -332,9 +299,7 @@ pub(crate) async fn create_options(
                         access: port.access,
                     })
                     .collect(),
-                default_include_org_secrets: defaults.include_org_secrets.unwrap_or(true),
-                default_include_user_secrets: defaults.include_user_secrets.unwrap_or(true),
-                secret_project,
+                uses_legacy_secret_sources,
                 official: preset.official,
             }
         })
@@ -346,11 +311,38 @@ pub(crate) async fn create_options(
         github_repositories_available,
         github_repositories,
         presets,
-        secret_projects,
-        agents: agent_catalog(&configured_user_secrets),
+        agents: agent_catalog(),
         confidential_available,
         confidential_price,
     })
+}
+
+fn preset_uses_legacy_secret_sources(
+    secret_project_id: Option<&str>,
+    defaults: Option<&SetupConfig>,
+) -> bool {
+    if secret_project_id.is_some_and(|id| !id.trim().is_empty()) {
+        return true;
+    }
+    let Some(defaults) = defaults else {
+        return false;
+    };
+    if defaults.include_org_secrets.unwrap_or(false)
+        || defaults.include_user_secrets.unwrap_or(false)
+    {
+        return true;
+    }
+    defaults
+        .project_spec
+        .as_option()
+        .and_then(|spec| spec.secrets.as_option())
+        .is_some_and(|secrets| {
+            !secrets.project.trim().is_empty()
+                || secrets.organization
+                || secrets.user
+                || secrets.include_org.unwrap_or(false)
+                || secrets.include_user.unwrap_or(false)
+        })
 }
 
 pub(crate) async fn prepare_events(
@@ -444,27 +436,6 @@ pub(crate) async fn create_environment(
         .into_option()
         .map(|environment| environment.id)
         .ok_or_else(|| ConnectError::internal("environment creation omitted its environment"))
-}
-
-pub(crate) async fn set_user_secrets(
-    state: &AppState,
-    cookie: HeaderValue,
-    secrets: Vec<(String, String)>,
-) -> Result<(), ConnectError> {
-    let client = SecretServiceClient::new(
-        transport(state, cookie),
-        client_config(state, UNARY_TIMEOUT),
-    );
-    for (key, value) in secrets {
-        client
-            .set_user_secret(SetUserSecretRequest {
-                key,
-                value,
-                ..Default::default()
-            })
-            .await?;
-    }
-    Ok(())
 }
 
 pub(crate) async fn start_environment(
@@ -784,52 +755,17 @@ fn port_row(port: Port) -> EnvironmentPortRow {
     }
 }
 
-fn agent_catalog(configured: &HashSet<String>) -> Vec<EnvironmentAgentView> {
+fn agent_catalog() -> Vec<EnvironmentAgentView> {
     [
-        (
-            "claude-code",
-            "Claude Code",
-            &[
-                ("ANTHROPIC_API_KEY", "Anthropic API Key", "sk-ant-..."),
-                (
-                    "CLAUDE_CODE_OAUTH_TOKEN",
-                    "Claude Code OAuth Token",
-                    "Claude auth token",
-                ),
-            ][..],
-        ),
-        (
-            "codex",
-            "OpenAI Codex",
-            &[("OPENAI_API_KEY", "OpenAI API Key", "sk-...")][..],
-        ),
-        (
-            "gemini-cli",
-            "Gemini CLI",
-            &[("GEMINI_API_KEY", "Gemini API Key", "AIza...")][..],
-        ),
-        ("kimi-code", "Kimi Code", &[][..]),
-        ("pi", "Pi", &[][..]),
-        (
-            "aider",
-            "Aider",
-            &[("OPENAI_API_KEY", "OpenAI API Key", "sk-...")][..],
-        ),
+        ("claude-code", "Claude Code"),
+        ("codex", "OpenAI Codex"),
+        ("gemini-cli", "Gemini CLI"),
+        ("kimi-code", "Kimi Code"),
+        ("pi", "Pi"),
+        ("aider", "Aider"),
     ]
     .into_iter()
-    .map(|(id, label, secrets)| EnvironmentAgentView {
-        id,
-        label,
-        secrets: secrets
-            .iter()
-            .map(|(key, label, placeholder)| EnvironmentAgentSecretView {
-                key,
-                label,
-                placeholder,
-                configured: configured.contains(*key),
-            })
-            .collect(),
-    })
+    .map(|(id, label)| EnvironmentAgentView { id, label })
     .collect()
 }
 
@@ -913,15 +849,90 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_catalog_exposes_only_configured_metadata() {
-        let catalog = agent_catalog(&HashSet::from(["OPENAI_API_KEY".to_owned()]));
-        let openai = catalog
-            .iter()
-            .flat_map(|agent| &agent.secrets)
-            .find(|secret| secret.key == "OPENAI_API_KEY")
-            .expect("OpenAI metadata");
-        assert!(openai.configured);
-        assert!(!openai.placeholder.is_empty());
+    fn agent_catalog_contains_only_selectable_tools() {
+        let catalog = agent_catalog();
+        assert_eq!(
+            catalog
+                .iter()
+                .map(|agent| (agent.id, agent.label))
+                .collect::<Vec<_>>(),
+            vec![
+                ("claude-code", "Claude Code"),
+                ("codex", "OpenAI Codex"),
+                ("gemini-cli", "Gemini CLI"),
+                ("kimi-code", "Kimi Code"),
+                ("pi", "Pi"),
+                ("aider", "Aider"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preset_secret_source_detection_defaults_missing_selectors_off() {
+        assert!(!preset_uses_legacy_secret_sources(None, None));
+        assert!(!preset_uses_legacy_secret_sources(
+            Some(""),
+            Some(&SetupConfig {
+                include_org_secrets: Some(false),
+                include_user_secrets: Some(false),
+                ..Default::default()
+            }),
+        ));
+        assert!(preset_uses_legacy_secret_sources(
+            None,
+            Some(&SetupConfig {
+                include_org_secrets: Some(true),
+                ..Default::default()
+            }),
+        ));
+        assert!(preset_uses_legacy_secret_sources(Some("project-id"), None));
+    }
+
+    #[test]
+    fn preset_secret_source_detection_includes_canonical_nested_bindings() {
+        let bindings = [
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                project: "development".to_owned(),
+                ..Default::default()
+            },
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                organization: true,
+                ..Default::default()
+            },
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                user: true,
+                ..Default::default()
+            },
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                include_org: Some(true),
+                ..Default::default()
+            },
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                include_user: Some(true),
+                ..Default::default()
+            },
+        ];
+        for secrets in bindings {
+            let defaults = SetupConfig {
+                project_spec: Some(codewire_proto::codewire::v1::ProjectSpec {
+                    secrets: Some(secrets).into(),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            };
+            assert!(preset_uses_legacy_secret_sources(None, Some(&defaults)));
+        }
+
+        let empty = SetupConfig {
+            project_spec: Some(codewire_proto::codewire::v1::ProjectSpec {
+                secrets: Some(Default::default()).into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        assert!(!preset_uses_legacy_secret_sources(None, Some(&empty)));
     }
 
     #[test]

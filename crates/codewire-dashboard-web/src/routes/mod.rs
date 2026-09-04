@@ -236,10 +236,6 @@ pub(crate) fn router() -> Router<AppState> {
             post(environments::create),
         )
         .route(
-            "/{slug}/_actions/sandboxes/secret-projects/create",
-            post(environments::create_secret_project),
-        )
-        .route(
             "/{slug}/_actions/sandboxes/start",
             post(environments::start),
         )
