@@ -674,13 +674,38 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_errors_are_flattened_without_sources_or_payloads() {
-        let mapped = map_linux_secret_service_error(secret_service::Error::Crypto(
-            "synthetic-secret-that-must-not-escape",
-        ));
-        assert_eq!(mapped, ProtectedStoreError::Unavailable);
-        assert!(!format!("{mapped:?} {mapped}").contains("synthetic-secret"));
-        assert!(std::error::Error::source(&mapped).is_none());
+    fn linux_errors_are_classified_and_flattened_without_sources_or_payloads() {
+        for (error, expected) in [
+            (
+                secret_service::Error::Locked,
+                ProtectedStoreError::AccessDenied,
+            ),
+            (
+                secret_service::Error::Prompt,
+                ProtectedStoreError::AccessDenied,
+            ),
+            (
+                secret_service::Error::Unavailable,
+                ProtectedStoreError::Unavailable,
+            ),
+            (
+                secret_service::Error::NoResult,
+                ProtectedStoreError::Unavailable,
+            ),
+            (
+                secret_service::Error::PromptDisconnected,
+                ProtectedStoreError::Unavailable,
+            ),
+            (
+                secret_service::Error::Crypto("synthetic-secret-that-must-not-escape"),
+                ProtectedStoreError::Unavailable,
+            ),
+        ] {
+            let mapped = map_linux_secret_service_error(error);
+            assert_eq!(mapped, expected);
+            assert!(!format!("{mapped:?} {mapped}").contains("synthetic-secret"));
+            assert!(std::error::Error::source(&mapped).is_none());
+        }
     }
 
     #[cfg(target_os = "linux")]
