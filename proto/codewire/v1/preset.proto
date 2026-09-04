@@ -66,6 +66,9 @@ message ListPresetsResponse {
 }
 
 message CreatePresetRequest {
+  reserved 16;
+  reserved "agent_env";
+
   string org_id = 1;
   string name = 2;
   string slug = 3;
@@ -81,7 +84,6 @@ message CreatePresetRequest {
   repeated SetupAgent agents = 13;
   optional bool install_agents = 14;
   string agent = 15;
-  map<string, string> agent_env = 16;
   repeated AppPort app_ports = 17;
   optional bool include_org_secrets = 18;
   optional bool include_user_secrets = 19;
@@ -114,15 +116,14 @@ message AgentList {
   repeated SetupAgent values = 1;
 }
 
-message AgentEnvMap {
-  map<string, string> values = 1;
-}
-
 message AppPortList {
   repeated AppPort values = 1;
 }
 
 message UpdatePresetRequest {
+  reserved 17;
+  reserved "agent_env";
+
   string org_id = 1;
   string preset_id = 2;
   optional string name = 3;
@@ -139,7 +140,6 @@ message UpdatePresetRequest {
   optional AgentList agents = 14;
   optional bool install_agents = 15;
   optional string agent = 16;
-  optional AgentEnvMap agent_env = 17;
   optional AppPortList app_ports = 18;
   optional bool include_org_secrets = 19;
   optional bool include_user_secrets = 20;

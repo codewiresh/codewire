@@ -103,8 +103,6 @@ pub struct ProjectSpec {
     pub environment: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "AgentsSpec::is_empty")]
     pub agents: AgentsSpec,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_environment: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -129,7 +127,6 @@ impl Default for ProjectSpec {
             startup_script: String::new(),
             environment: BTreeMap::new(),
             agents: AgentsSpec::default(),
-            agent_environment: BTreeMap::new(),
             skills: Vec::new(),
             application_ports: Vec::new(),
             resources: ResourceSpec::default(),
@@ -303,8 +300,6 @@ struct RawProject {
     agent: String,
     #[serde(default)]
     install_agents: Option<bool>,
-    #[serde(default)]
-    agent_env: BTreeMap<String, String>,
     #[serde(default)]
     skills: Vec<RawSkill>,
     #[serde(default, alias = "app_ports")]

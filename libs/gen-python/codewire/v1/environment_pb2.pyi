@@ -247,15 +247,8 @@ class ListEnvironmentsResponse(_message.Message):
     def __init__(self, environments: _Optional[_Iterable[_Union[Environment, _Mapping]]] = ..., next_page_token: _Optional[str] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentRequest(_message.Message):
-    __slots__ = ("org_id", "preset_id", "name", "cpu_millicores", "memory_mb", "disk_gb", "ttl_seconds", "preset_slug", "repo_url", "branch", "repos", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "agent_env", "secret_project", "app_ports", "include_org_secrets", "include_user_secrets", "isolation_tier", "project_spec")
+    __slots__ = ("org_id", "preset_id", "name", "cpu_millicores", "memory_mb", "disk_gb", "ttl_seconds", "preset_slug", "repo_url", "branch", "repos", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "secret_project", "app_ports", "include_org_secrets", "include_user_secrets", "isolation_tier", "project_spec")
     class EnvVarsEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
-    class AgentEnvEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -280,7 +273,6 @@ class CreateEnvironmentRequest(_message.Message):
     AGENTS_FIELD_NUMBER: _ClassVar[int]
     INSTALL_AGENTS_FIELD_NUMBER: _ClassVar[int]
     AGENT_FIELD_NUMBER: _ClassVar[int]
-    AGENT_ENV_FIELD_NUMBER: _ClassVar[int]
     SECRET_PROJECT_FIELD_NUMBER: _ClassVar[int]
     APP_PORTS_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_ORG_SECRETS_FIELD_NUMBER: _ClassVar[int]
@@ -305,14 +297,13 @@ class CreateEnvironmentRequest(_message.Message):
     agents: _containers.RepeatedCompositeFieldContainer[_common_pb2.SetupAgent]
     install_agents: bool
     agent: str
-    agent_env: _containers.ScalarMap[str, str]
     secret_project: str
     app_ports: _containers.RepeatedCompositeFieldContainer[_common_pb2.AppPort]
     include_org_secrets: bool
     include_user_secrets: bool
     isolation_tier: IsolationTier
     project_spec: _common_pb2.ProjectSpec
-    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., ttl_seconds: _Optional[int] = ..., preset_slug: _Optional[str] = ..., repo_url: _Optional[str] = ..., branch: _Optional[str] = ..., repos: _Optional[_Iterable[_Union[_common_pb2.RepoEntry, _Mapping]]] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., agent_env: _Optional[_Mapping[str, str]] = ..., secret_project: _Optional[str] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
+    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., ttl_seconds: _Optional[int] = ..., preset_slug: _Optional[str] = ..., repo_url: _Optional[str] = ..., branch: _Optional[str] = ..., repos: _Optional[_Iterable[_Union[_common_pb2.RepoEntry, _Mapping]]] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., secret_project: _Optional[str] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentResponse(_message.Message):
     __slots__ = ("environment",)

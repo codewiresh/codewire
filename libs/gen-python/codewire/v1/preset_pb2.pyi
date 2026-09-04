@@ -67,15 +67,8 @@ class ListPresetsResponse(_message.Message):
     def __init__(self, presets: _Optional[_Iterable[_Union[Preset, _Mapping]]] = ..., next_page_token: _Optional[str] = ...) -> None: ...
 
 class CreatePresetRequest(_message.Message):
-    __slots__ = ("org_id", "name", "slug", "description", "default_cpu_millicores", "default_memory_mb", "default_disk_gb", "default_ttl_seconds", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "agent_env", "app_ports", "include_org_secrets", "include_user_secrets", "secret_project_id")
+    __slots__ = ("org_id", "name", "slug", "description", "default_cpu_millicores", "default_memory_mb", "default_disk_gb", "default_ttl_seconds", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "app_ports", "include_org_secrets", "include_user_secrets", "secret_project_id")
     class EnvVarsEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
-    class AgentEnvEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -97,7 +90,6 @@ class CreatePresetRequest(_message.Message):
     AGENTS_FIELD_NUMBER: _ClassVar[int]
     INSTALL_AGENTS_FIELD_NUMBER: _ClassVar[int]
     AGENT_FIELD_NUMBER: _ClassVar[int]
-    AGENT_ENV_FIELD_NUMBER: _ClassVar[int]
     APP_PORTS_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_ORG_SECRETS_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_USER_SECRETS_FIELD_NUMBER: _ClassVar[int]
@@ -117,12 +109,11 @@ class CreatePresetRequest(_message.Message):
     agents: _containers.RepeatedCompositeFieldContainer[_common_pb2.SetupAgent]
     install_agents: bool
     agent: str
-    agent_env: _containers.ScalarMap[str, str]
     app_ports: _containers.RepeatedCompositeFieldContainer[_common_pb2.AppPort]
     include_org_secrets: bool
     include_user_secrets: bool
     secret_project_id: str
-    def __init__(self, org_id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., description: _Optional[str] = ..., default_cpu_millicores: _Optional[int] = ..., default_memory_mb: _Optional[int] = ..., default_disk_gb: _Optional[int] = ..., default_ttl_seconds: _Optional[int] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., agent_env: _Optional[_Mapping[str, str]] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., secret_project_id: _Optional[str] = ...) -> None: ...
+    def __init__(self, org_id: _Optional[str] = ..., name: _Optional[str] = ..., slug: _Optional[str] = ..., description: _Optional[str] = ..., default_cpu_millicores: _Optional[int] = ..., default_memory_mb: _Optional[int] = ..., default_disk_gb: _Optional[int] = ..., default_ttl_seconds: _Optional[int] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., secret_project_id: _Optional[str] = ...) -> None: ...
 
 class CreatePresetResponse(_message.Message):
     __slots__ = ("preset",)
@@ -163,19 +154,6 @@ class AgentList(_message.Message):
     values: _containers.RepeatedCompositeFieldContainer[_common_pb2.SetupAgent]
     def __init__(self, values: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ...) -> None: ...
 
-class AgentEnvMap(_message.Message):
-    __slots__ = ("values",)
-    class ValuesEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
-    VALUES_FIELD_NUMBER: _ClassVar[int]
-    values: _containers.ScalarMap[str, str]
-    def __init__(self, values: _Optional[_Mapping[str, str]] = ...) -> None: ...
-
 class AppPortList(_message.Message):
     __slots__ = ("values",)
     VALUES_FIELD_NUMBER: _ClassVar[int]
@@ -183,7 +161,7 @@ class AppPortList(_message.Message):
     def __init__(self, values: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ...) -> None: ...
 
 class UpdatePresetRequest(_message.Message):
-    __slots__ = ("org_id", "preset_id", "name", "description", "slug", "default_cpu_millicores", "default_memory_mb", "default_disk_gb", "default_ttl_seconds", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "agent_env", "app_ports", "include_org_secrets", "include_user_secrets", "secret_project_id")
+    __slots__ = ("org_id", "preset_id", "name", "description", "slug", "default_cpu_millicores", "default_memory_mb", "default_disk_gb", "default_ttl_seconds", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "app_ports", "include_org_secrets", "include_user_secrets", "secret_project_id")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     PRESET_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
@@ -200,7 +178,6 @@ class UpdatePresetRequest(_message.Message):
     AGENTS_FIELD_NUMBER: _ClassVar[int]
     INSTALL_AGENTS_FIELD_NUMBER: _ClassVar[int]
     AGENT_FIELD_NUMBER: _ClassVar[int]
-    AGENT_ENV_FIELD_NUMBER: _ClassVar[int]
     APP_PORTS_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_ORG_SECRETS_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_USER_SECRETS_FIELD_NUMBER: _ClassVar[int]
@@ -221,12 +198,11 @@ class UpdatePresetRequest(_message.Message):
     agents: AgentList
     install_agents: bool
     agent: str
-    agent_env: AgentEnvMap
     app_ports: AppPortList
     include_org_secrets: bool
     include_user_secrets: bool
     secret_project_id: str
-    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., description: _Optional[str] = ..., slug: _Optional[str] = ..., default_cpu_millicores: _Optional[int] = ..., default_memory_mb: _Optional[int] = ..., default_disk_gb: _Optional[int] = ..., default_ttl_seconds: _Optional[int] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Union[EnvVarMap, _Mapping]] = ..., agents: _Optional[_Union[AgentList, _Mapping]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., agent_env: _Optional[_Union[AgentEnvMap, _Mapping]] = ..., app_ports: _Optional[_Union[AppPortList, _Mapping]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., secret_project_id: _Optional[str] = ...) -> None: ...
+    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., description: _Optional[str] = ..., slug: _Optional[str] = ..., default_cpu_millicores: _Optional[int] = ..., default_memory_mb: _Optional[int] = ..., default_disk_gb: _Optional[int] = ..., default_ttl_seconds: _Optional[int] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Union[EnvVarMap, _Mapping]] = ..., agents: _Optional[_Union[AgentList, _Mapping]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., app_ports: _Optional[_Union[AppPortList, _Mapping]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., secret_project_id: _Optional[str] = ...) -> None: ...
 
 class UpdatePresetResponse(_message.Message):
     __slots__ = ("preset",)

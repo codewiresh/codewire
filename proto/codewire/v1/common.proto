@@ -37,6 +37,9 @@ message SetupAgent {
 
 // SetupConfig is the reusable environment/preset setup configuration.
 message SetupConfig {
+  reserved 10;
+  reserved "agent_env";
+
   string repo_url = 1;
   string branch = 2;
   repeated RepoEntry repos = 3;
@@ -46,7 +49,6 @@ message SetupConfig {
   repeated SetupAgent agents = 7;
   optional bool install_agents = 8;
   string agent = 9;
-  map<string, string> agent_env = 10;
   repeated AppPort app_ports = 11;
   optional bool include_org_secrets = 12;
   optional bool include_user_secrets = 13;
@@ -119,6 +121,9 @@ message ProjectAccessBinding {
 // paths, secret values, provider tokens, platform credentials, VMM state, and
 // backend sockets are intentionally absent.
 message ProjectSpec {
+  reserved 10;
+  reserved "agent_environment";
+
   uint32 schema_version = 1;
   string preset = 2;
   string image = 3;
@@ -128,7 +133,6 @@ message ProjectSpec {
   string startup_script = 7;
   map<string, string> environment = 8;
   ProjectAgents agents = 9;
-  map<string, string> agent_environment = 10;
   repeated ProjectSkillSelection skills = 11;
   repeated AppPort application_ports = 12;
   ProjectResources resources = 13;

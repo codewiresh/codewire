@@ -240,7 +240,6 @@ impl OrganizationClient {
                     .context("decode preset agents")?,
                 install_agents: request.install_agents,
                 agent: request.agent.clone(),
-                agent_env: request.agent_env.clone().into_iter().collect(),
                 app_ports: request
                     .app_ports
                     .iter()
@@ -431,8 +430,6 @@ pub struct CreatePresetRequest {
     pub install_agents: Option<bool>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub agent: String,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_env: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub app_ports: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]

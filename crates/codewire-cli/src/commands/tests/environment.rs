@@ -1178,7 +1178,6 @@ secrets: {project: development, organization: false, user: false}
             }],
             install_agents: Some(true),
             agent: "claude-code".to_string(),
-            agent_env: BTreeMap::from([("ANTHROPIC_MODEL".to_string(), "opus".to_string())]),
             app_ports: vec![crate::presentation::AppPort {
                 port: 8080,
                 label: "web".to_string(),

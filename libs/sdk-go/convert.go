@@ -306,7 +306,6 @@ func fromProtoSetupConfig(config *codewirev1.SetupConfig) (*SetupConfig, error) 
 	}
 	converted := &SetupConfig{
 		Agent:              stringPointer(config.GetAgent()),
-		AgentEnv:           stringMapPointer(config.GetAgentEnv()),
 		AppPorts:           fromProtoAppPorts(config.GetAppPorts()),
 		Branch:             stringPointer(config.GetBranch()),
 		EnvVars:            stringMapPointer(config.GetEnvVars()),
@@ -398,7 +397,7 @@ func createPresetRequest(orgID string, body CreatePresetBody, secretProjectID *s
 		DefaultCpuMillicores: cpu, DefaultMemoryMb: memory, DefaultDiskGb: disk, DefaultTtlSeconds: ttl,
 		Image: valueOrEmpty(body.Image), InstallCommand: valueOrEmpty(body.InstallCommand), StartupScript: valueOrEmpty(body.StartupScript),
 		EnvVars: copyStringMapPointer(body.EnvVars), Agents: agents, InstallAgents: copyBoolPointer(body.InstallAgents),
-		Agent: valueOrEmpty(body.Agent), AgentEnv: copyStringMapPointer(body.AgentEnv), AppPorts: ports,
+		Agent: valueOrEmpty(body.Agent), AppPorts: ports,
 		IncludeOrgSecrets: copyBoolPointer(body.IncludeOrgSecrets), IncludeUserSecrets: copyBoolPointer(body.IncludeUserSecrets),
 		SecretProjectId: copyStringPointer(secretProjectID),
 	}, nil
@@ -442,9 +441,6 @@ func updatePresetRequest(orgID, presetID string, body UpdatePresetBody, secretPr
 	}
 	if body.Agents != nil {
 		request.Agents = &codewirev1.AgentList{Values: agents}
-	}
-	if body.AgentEnv != nil {
-		request.AgentEnv = &codewirev1.AgentEnvMap{Values: copyStringMap(*body.AgentEnv)}
 	}
 	if body.AppPorts != nil {
 		request.AppPorts = &codewirev1.AppPortList{Values: ports}
@@ -509,7 +505,6 @@ func fromProtoProjectSpec(value *codewirev1.ProjectSpec) *ProjectSpec {
 		InstallCommand:   value.GetInstallCommand(),
 		StartupScript:    value.GetStartupScript(),
 		Environment:      copyStringMap(value.GetEnvironment()),
-		AgentEnvironment: copyStringMap(value.GetAgentEnvironment()),
 	}
 	if repositories := fromProtoRepoEntries(value.GetRepositories()); repositories != nil {
 		result.Repositories = *repositories
@@ -560,7 +555,6 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 		InstallCommand:   value.InstallCommand,
 		StartupScript:    value.StartupScript,
 		Environment:      copyStringMap(value.Environment),
-		AgentEnvironment: copyStringMap(value.AgentEnvironment),
 		ApplicationPorts: applicationPorts,
 	}
 	repositories := value.Repositories
@@ -660,7 +654,7 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 		Repos: toProtoRepoEntries(body.Repos), Image: valueOrEmpty(body.Image),
 		InstallCommand: valueOrEmpty(body.InstallCommand), StartupScript: valueOrEmpty(body.StartupScript),
 		EnvVars: copyStringMapPointer(body.EnvVars), Agents: agents, InstallAgents: copyBoolPointer(body.InstallAgents),
-		Agent: valueOrEmpty(body.Agent), AgentEnv: copyStringMapPointer(body.AgentEnv),
+		Agent: valueOrEmpty(body.Agent),
 		SecretProject: valueOrEmpty(body.SecretProject), AppPorts: ports,
 		IncludeOrgSecrets: copyBoolPointer(body.IncludeOrgSecrets), IncludeUserSecrets: copyBoolPointer(body.IncludeUserSecrets),
 		IsolationTier: isolation,
@@ -1105,7 +1099,7 @@ func ensureSetupConfigConverterCoverage() error {
 		return err
 	}
 	if err := ensureDescriptorCoverage("setup config", messages.ByName("SetupConfig"), map[protoreflect.FieldNumber]protoreflect.Name{
-		1: "repo_url", 2: "branch", 3: "repos", 4: "install_command", 5: "startup_script", 6: "env_vars", 7: "agents", 8: "install_agents", 9: "agent", 10: "agent_env", 11: "app_ports", 12: "include_org_secrets", 13: "include_user_secrets", 14: "project_spec",
+		1: "repo_url", 2: "branch", 3: "repos", 4: "install_command", 5: "startup_script", 6: "env_vars", 7: "agents", 8: "install_agents", 9: "agent", 11: "app_ports", 12: "include_org_secrets", 13: "include_user_secrets", 14: "project_spec",
 	}); err != nil {
 		return err
 	}
@@ -1128,7 +1122,7 @@ func ensureProjectSpecConverterCoverage() error {
 		"ProjectCredentialReference": {1: "provider", 2: "account"}, // Deprecated wire tombstone; not exposed by the ergonomic SDK.
 		"ProjectAccessBinding":       {1: "profile"},
 		"ProjectSpec": {
-			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 10: "agent_environment", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 15: "credentials", 16: "workspace_mode", 17: "access",
+			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 15: "credentials", 16: "workspace_mode", 17: "access",
 		},
 	} {
 		if err := ensureDescriptorCoverage("project "+name, messages.ByName(protoreflect.Name(name)), fields); err != nil {
@@ -1151,7 +1145,7 @@ func ensureEnvironmentConverterCoverage() error {
 			return
 		}
 		environmentCoverageErr = ensureDescriptorCoverage("create environment request", codewirev1.File_codewire_v1_environment_proto.Messages().ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
-			1: "org_id", 2: "preset_id", 3: "name", 4: "cpu_millicores", 5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug", 9: "repo_url", 10: "branch", 11: "repos", 12: "image", 13: "install_command", 14: "startup_script", 15: "env_vars", 16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env", 20: "secret_project", 21: "app_ports", 22: "include_org_secrets", 23: "include_user_secrets", 24: "isolation_tier", 25: "project_spec",
+			1: "org_id", 2: "preset_id", 3: "name", 4: "cpu_millicores", 5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug", 9: "repo_url", 10: "branch", 11: "repos", 12: "image", 13: "install_command", 14: "startup_script", 15: "env_vars", 16: "agents", 17: "install_agents", 18: "agent", 20: "secret_project", 21: "app_ports", 22: "include_org_secrets", 23: "include_user_secrets", 24: "isolation_tier", 25: "project_spec",
 		})
 	})
 	return environmentCoverageErr

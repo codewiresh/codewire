@@ -19,7 +19,6 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
 
     enforce_count("repositories", raw.repositories.len(), MAX_REPOSITORIES)?;
     enforce_count("environment", raw.environment.len(), MAX_ENVIRONMENT_VALUES)?;
-    enforce_count("agent_env", raw.agent_env.len(), MAX_ENVIRONMENT_VALUES)?;
     enforce_count("ports", raw.ports.len(), MAX_APPLICATION_PORTS)?;
     enforce_count("skills", raw.skills.len(), MAX_SKILLS)?;
     enforce_count("mounts", raw.mounts.len(), MAX_LOCAL_MOUNTS)?;
@@ -43,7 +42,6 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     });
     validate_workspace_input_destinations(&repositories, &mounts)?;
     let environment = normalize_environment("environment", raw.environment)?;
-    let agent_environment = normalize_environment("agent_env", raw.agent_env)?;
 
     let document = ProjectDocument {
         spec: ProjectSpec {
@@ -56,7 +54,6 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             startup_script: command_value("startup_script", &raw.startup_script)?,
             environment,
             agents,
-            agent_environment,
             skills,
             application_ports,
             resources,
@@ -80,11 +77,6 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
         spec.environment.len(),
         MAX_ENVIRONMENT_VALUES,
     )?;
-    enforce_count(
-        "agent_env",
-        spec.agent_environment.len(),
-        MAX_ENVIRONMENT_VALUES,
-    )?;
     enforce_count("agents", spec.agents.tools.len(), MAX_AGENTS)?;
     enforce_count("skills", spec.skills.len(), MAX_SKILLS)?;
     enforce_count("ports", spec.application_ports.len(), MAX_APPLICATION_PORTS)?;
@@ -94,7 +86,6 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
     ensure_command_value("install_command", &spec.install_command)?;
     ensure_command_value("startup_script", &spec.startup_script)?;
     normalize_environment("environment", spec.environment.clone())?;
-    normalize_environment("agent_env", spec.agent_environment.clone())?;
 
     let repositories = normalize_repositories(
         spec.repositories

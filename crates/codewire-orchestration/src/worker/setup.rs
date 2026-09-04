@@ -628,30 +628,6 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
     input
 }
 
-/// Mirrors `inheritClaudeAgentEnv`.
-pub fn inherit_claude_agent_env(sc: &mut SetupConfig) {
-    if !sc.has_configured_agent("claude-code") || sc.agent_env.is_empty() {
-        return;
-    }
-    if let Some(token) = sc.agent_env.get("CLAUDE_CODE_OAUTH_TOKEN").cloned()
-        && !token.is_empty()
-    {
-        sc.env_vars
-            .entry("CLAUDE_CODE_OAUTH_TOKEN".to_string())
-            .or_insert_with(|| token.clone());
-        sc.env_vars
-            .entry("ANTHROPIC_AUTH_TOKEN".to_string())
-            .or_insert(token);
-    }
-    if let Some(api_key) = sc.agent_env.get("ANTHROPIC_API_KEY").cloned()
-        && !api_key.is_empty()
-    {
-        sc.env_vars
-            .entry("ANTHROPIC_API_KEY".to_string())
-            .or_insert(api_key);
-    }
-}
-
 /// Mirrors `shouldBootstrapClaude`.
 fn should_bootstrap_claude(sc: &SetupConfig) -> bool {
     [
@@ -1731,9 +1707,6 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
-        if let Some(sc) = self.env.setup_config.as_mut() {
-            inherit_claude_agent_env(sc);
-        }
         let activity_ctx = self.activity_ctx.clone();
         await_setup_or_cancel(&activity_ctx, async {
             if input.include_user_secrets {
@@ -2784,37 +2757,13 @@ mod tests {
     }
 
     #[test]
-    fn inherit_claude_agent_env_mirrors_go() {
-        let mut sc: SetupConfig = serde_json::from_str(
-            r#"{"agents":[{"type":"claude-code"}],
-                "agent_env":{"CLAUDE_CODE_OAUTH_TOKEN":"tok","ANTHROPIC_API_KEY":"key"},
-                "env_vars":{"ANTHROPIC_API_KEY":"existing"}}"#,
-        )
-        .unwrap();
-        inherit_claude_agent_env(&mut sc);
-        assert_eq!(
-            sc.env_vars
-                .get("CLAUDE_CODE_OAUTH_TOKEN")
-                .map(String::as_str),
-            Some("tok")
+    fn removed_agent_env_is_rejected() {
+        assert!(
+            serde_json::from_str::<SetupConfig>(
+                r#"{"agent_env":{"CLAUDE_CODE_OAUTH_TOKEN":"synthetic"}}"#,
+            )
+            .is_err()
         );
-        assert_eq!(
-            sc.env_vars.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
-            Some("tok")
-        );
-        // Existing explicit value wins.
-        assert_eq!(
-            sc.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
-            Some("existing")
-        );
-
-        // No claude agent configured → untouched.
-        let mut sc: SetupConfig = serde_json::from_str(
-            r#"{"agents":[{"type":"codex"}],"agent_env":{"CLAUDE_CODE_OAUTH_TOKEN":"tok"}}"#,
-        )
-        .unwrap();
-        inherit_claude_agent_env(&mut sc);
-        assert!(sc.env_vars.is_empty());
     }
 
     #[test]

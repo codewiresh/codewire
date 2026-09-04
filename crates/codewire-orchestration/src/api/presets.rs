@@ -68,6 +68,7 @@ fn valid_agent_type(agent: &str) -> bool {
 
 /// Mirrors `api.CreatePresetBody`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePresetBody {
     pub name: String,
     #[serde(default)]
@@ -96,8 +97,6 @@ pub struct CreatePresetBody {
     pub install_agents: Option<bool>,
     #[serde(default)]
     pub agent: String,
-    #[serde(default)]
-    pub agent_env: BTreeMap<String, String>,
     #[serde(default)]
     pub app_ports: Vec<AppPort>,
     #[serde(default)]
@@ -199,7 +198,6 @@ pub(crate) async fn create_preset_core(
         || !body.agents.is_empty()
         || body.install_agents.is_some()
         || !body.agent.is_empty()
-        || !body.agent_env.is_empty()
         || !body.app_ports.is_empty()
         || body.include_org_secrets.is_some()
         || body.include_user_secrets.is_some();
@@ -210,7 +208,6 @@ pub(crate) async fn create_preset_core(
         agents: body.agents.clone(),
         install_agents: body.install_agents,
         agent: body.agent.clone(),
-        agent_env: body.agent_env.clone(),
         app_ports: body.app_ports.clone(),
         include_org_secrets: body.include_org_secrets,
         include_user_secrets: body.include_user_secrets,
@@ -364,6 +361,7 @@ pub(crate) async fn get_preset_core(
 /// Mirrors `api.UpdatePresetBody` (all-optional PATCH semantics; for
 /// maps/slices "present" means replace, mirroring Go nil-vs-empty).
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePresetBody {
     #[serde(default)]
     pub name: Option<String>,
@@ -393,8 +391,6 @@ pub struct UpdatePresetBody {
     pub install_agents: Option<bool>,
     #[serde(default)]
     pub agent: Option<String>,
-    #[serde(default)]
-    pub agent_env: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub app_ports: Option<Vec<AppPort>>,
     #[serde(default)]
@@ -466,7 +462,6 @@ async fn update_preset_db(
         || body.agents.is_some()
         || body.install_agents.is_some()
         || body.agent.is_some()
-        || body.agent_env.is_some()
         || body.app_ports.is_some()
         || body.include_org_secrets.is_some()
         || body.include_user_secrets.is_some()
@@ -500,9 +495,6 @@ async fn update_preset_db(
         }
         if let Some(v) = &body.agent {
             cfg.agent = v.clone();
-        }
-        if let Some(v) = &body.agent_env {
-            cfg.agent_env = v.clone();
         }
         if let Some(v) = &body.app_ports {
             cfg.app_ports = v.clone();
@@ -763,6 +755,23 @@ mod tests {
 
         assert_eq!(parsed.name, "Default");
         assert!(parsed.image.is_empty());
+    }
+
+    #[test]
+    fn preset_mutations_reject_removed_agent_env() {
+        assert!(
+            validate_value::<CreatePresetBody>(serde_json::json!({
+                "name": "Default",
+                "agent_env": {"TOKEN": "synthetic"}
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_value::<UpdatePresetBody>(serde_json::json!({
+                "agent_env": {"TOKEN": "synthetic"}
+            }))
+            .is_err()
+        );
     }
 
     #[test]

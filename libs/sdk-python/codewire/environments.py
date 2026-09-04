@@ -102,7 +102,6 @@ class Environments:
         install_command: str | None = None,
         env_vars: dict[str, str] | None = None,
         agent: str | None = None,
-        agent_env: dict[str, str] | None = None,
         app_ports: list[dict] | None = None,
         include_org_secrets: bool | None = None,
         include_user_secrets: bool | None = None,
@@ -149,8 +148,6 @@ class Environments:
             request.env_vars.update(env_vars)
         if agent is not None:
             request.agent = agent
-        if agent_env is not None:
-            request.agent_env.update(agent_env)
         if app_ports is not None:
             request.app_ports.extend(
                 AppPort(

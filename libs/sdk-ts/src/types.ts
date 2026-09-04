@@ -69,7 +69,6 @@ export interface ProjectSpec {
   startup_script?: string;
   environment?: { [key: string]: string };
   agents?: ProjectAgents;
-  agent_environment?: { [key: string]: string };
   skills?: ProjectSkillSelection[];
   application_ports?: AppPort[];
   resources?: ProjectResources;
@@ -87,7 +86,6 @@ interface SetupAgent {
 
 interface SetupConfig {
   agent?: string;
-  agent_env?: { [key: string]: string };
   agents?: SetupAgent[];
   app_ports?: AppPort[];
   branch?: string;
@@ -231,7 +229,6 @@ export interface APIKeyData {
 
 export interface CreateEnvironmentRequest {
   agent?: string;
-  agent_env?: { [key: string]: string };
   agents?: SetupAgentInput[];
   app_ports?: AppPortInput[];
   branch?: string;
@@ -258,7 +255,6 @@ export interface CreateEnvironmentRequest {
 
 export interface CreateTemplateRequest {
   agent?: string;
-  agent_env?: { [key: string]: string };
   agents?: SetupAgentInput[];
   app_ports?: AppPortInput[];
   default_cpu_millicores?: number | null;
@@ -280,7 +276,6 @@ export interface CreateTemplateRequest {
 
 export interface UpdateTemplateRequest {
   agent?: string | null;
-  agent_env?: { [key: string]: string } | null;
   agents?: SetupAgentInput[] | null;
   app_ports?: AppPortInput[] | null;
   default_cpu_millicores?: number | null;

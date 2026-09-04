@@ -311,16 +311,6 @@ fn schema_and_input_bounds_fail_closed() {
             ),
         ),
         (
-            "agent_env",
-            format!(
-                "agent_env: {{{}}}\n",
-                (0..=MAX_ENVIRONMENT_VALUES)
-                    .map(|index| format!("V{index}: value"))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-        ),
-        (
             "agents",
             format!("agents: [{}]\n", vec!["codex"; MAX_AGENTS + 1].join(",")),
         ),
@@ -424,6 +414,14 @@ fn typed_specs_validate_before_crossing_adapter_boundaries() {
         r#"{"schema_version":1,"working_directory":"/workspace","host_path":"/tmp/x"}"#,
     );
     assert!(unknown.is_err());
+
+    assert!(parse_project_yaml("agent_env: {TOKEN: value}\n").is_err());
+    assert!(
+        serde_json::from_str::<ProjectSpec>(
+            r#"{"schema_version":1,"working_directory":"/workspace","agent_environment":{"TOKEN":"value"}}"#,
+        )
+        .is_err()
+    );
 }
 
 #[test]

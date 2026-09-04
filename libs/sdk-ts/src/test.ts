@@ -704,7 +704,6 @@ async function runTests() {
     secretProjectId: "sp_1",
     defaultSetupConfig: {
       agent: "claude",
-      agentEnv: { MODE: "test" },
       agents: [{ type: "claude" }],
       appPorts: [{ access: "public", label: "web", port: 8080 }],
       branch: "main",
@@ -729,7 +728,6 @@ async function runTests() {
   }));
   assert(convertedPreset.default_cpu_millicores === 4000, "preset numbers keep SDK values");
   assert(convertedPreset.default_setup_config?.app_ports?.[0]?.access === "public", "preset nested ports preserve values");
-  assert(convertedPreset.default_setup_config?.agent_env?.MODE === "test", "preset nested maps preserve values");
   assert(convertedPreset.default_setup_config?.repos?.[0]?.mount_path === "/workspace/repo", "preset repository mount paths are retained");
   assert(convertedPreset.default_setup_config?.project_spec?.skills?.[0]?.source === "user", "preset project skill sources use ergonomic values");
   assert(convertedPreset.secret_project_id === "sp_1", "preset optional IDs are retained");
@@ -1136,7 +1134,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 109;
+  const expectedAssertions = 108;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

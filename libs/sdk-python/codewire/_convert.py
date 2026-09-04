@@ -28,7 +28,7 @@ _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug",
     9: "repo_url", 10: "branch", 11: "repos", 12: "image",
     13: "install_command", 14: "startup_script", 15: "env_vars",
-    16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env",
+    16: "agents", 17: "install_agents", 18: "agent",
     20: "secret_project", 21: "app_ports", 22: "include_org_secrets",
     23: "include_user_secrets", 24: "isolation_tier", 25: "project_spec",
 }

@@ -77,7 +77,7 @@ func TestFromProtoPresetGolden(t *testing.T) {
 		Repos:          []*codewirev1.RepoEntry{{Url: "https://example.test/extra", Branch: "dev", MountPath: "/workspace/extra"}},
 		InstallCommand: "bun install", StartupScript: "bun run dev",
 		EnvVars: map[string]string{"A": "1"}, Agents: []*codewirev1.SetupAgent{{Type: "codex"}},
-		InstallAgents: testBoolPointer(true), Agent: "codex", AgentEnv: map[string]string{"B": "2"},
+		InstallAgents: testBoolPointer(true), Agent: "codex",
 		AppPorts:          []*codewirev1.AppPort{{Port: 3000, Label: "web", Access: "public"}},
 		IncludeOrgSecrets: testBoolPointer(true), IncludeUserSecrets: testBoolPointer(false),
 	}
@@ -104,7 +104,7 @@ func TestFromProtoPresetGolden(t *testing.T) {
 			Repos:          testRepoEntriesPointer([]RepoEntry{{Url: "https://example.test/extra", Branch: testStringPointer("dev"), MountPath: testStringPointer("/workspace/extra")}}),
 			InstallCommand: testStringPointer("bun install"), StartupScript: testStringPointer("bun run dev"),
 			EnvVars: testStringMapPointer(map[string]string{"A": "1"}), Agents: testSetupAgentsPointer([]SetupAgent{{Type: "codex"}}),
-			InstallAgents: testBoolPointer(true), Agent: testStringPointer("codex"), AgentEnv: testStringMapPointer(map[string]string{"B": "2"}),
+			InstallAgents: testBoolPointer(true), Agent: testStringPointer("codex"),
 			AppPorts:          testAppPortsPointer([]AppPort{{Port: 3000, Label: "web", Access: testStringPointer("public")}}),
 			IncludeOrgSecrets: testBoolPointer(true), IncludeUserSecrets: testBoolPointer(false),
 		},
@@ -128,7 +128,7 @@ func TestFromProtoPresetUnsetOptionalsAndEmptySetupConfig(t *testing.T) {
 		t.Fatal("default setup config = nil, want present empty config")
 	}
 	setup := got.DefaultSetupConfig
-	if setup.RepoUrl != nil || setup.Branch != nil || setup.Repos != nil || setup.InstallCommand != nil || setup.StartupScript != nil || setup.EnvVars != nil || setup.Agents != nil || setup.InstallAgents != nil || setup.Agent != nil || setup.AgentEnv != nil || setup.AppPorts != nil || setup.IncludeOrgSecrets != nil || setup.IncludeUserSecrets != nil {
+	if setup.RepoUrl != nil || setup.Branch != nil || setup.Repos != nil || setup.InstallCommand != nil || setup.StartupScript != nil || setup.EnvVars != nil || setup.Agents != nil || setup.InstallAgents != nil || setup.Agent != nil || setup.AppPorts != nil || setup.IncludeOrgSecrets != nil || setup.IncludeUserSecrets != nil {
 		t.Errorf("empty setup config did not preserve nil optional fields: %#v", setup)
 	}
 
@@ -152,7 +152,7 @@ func TestPresetRequestPresenceAndOverflow(t *testing.T) {
 		Name: "preset", Description: &empty, DefaultCpuMillicores: &zero, DefaultMemoryMb: &zero,
 		DefaultDiskGb: &zero, DefaultTtlSeconds: &zero, Image: &empty, InstallCommand: &empty,
 		StartupScript: &empty, EnvVars: &emptyMap, Agents: &emptyAgents, InstallAgents: &falseValue,
-		Agent: &empty, AgentEnv: &emptyMap, AppPorts: &emptyPorts, IncludeOrgSecrets: &falseValue,
+		Agent: &empty, AppPorts: &emptyPorts, IncludeOrgSecrets: &falseValue,
 		IncludeUserSecrets: &falseValue,
 	}, testStringPointer("project_1"))
 	if err != nil {
@@ -164,7 +164,7 @@ func TestPresetRequestPresenceAndOverflow(t *testing.T) {
 	if create.GetDefaultCpuMillicores() != 0 || create.GetImage() != "" || create.GetInstallCommand() != "" || create.GetStartupScript() != "" || create.GetSecretProjectId() != "project_1" {
 		t.Errorf("create request changed optional values: %#v", create)
 	}
-	if create.EnvVars == nil || create.AgentEnv == nil || create.Agents == nil || create.AppPorts == nil {
+	if create.EnvVars == nil || create.Agents == nil || create.AppPorts == nil {
 		t.Errorf("create request lost empty collection values: %#v", create)
 	}
 
@@ -172,7 +172,7 @@ func TestPresetRequestPresenceAndOverflow(t *testing.T) {
 		Name: &empty, Description: &empty, DefaultCpuMillicores: &zero, DefaultMemoryMb: &zero,
 		DefaultDiskGb: &zero, DefaultTtlSeconds: &zero, Image: &empty, InstallCommand: &empty,
 		StartupScript: &empty, EnvVars: &emptyMap, Agents: &emptyAgents, InstallAgents: &falseValue,
-		Agent: &empty, AgentEnv: &emptyMap, AppPorts: &emptyPorts, IncludeOrgSecrets: &falseValue,
+		Agent: &empty, AppPorts: &emptyPorts, IncludeOrgSecrets: &falseValue,
 		IncludeUserSecrets: &falseValue,
 	}, testStringPointer(""))
 	if err != nil {
@@ -181,10 +181,10 @@ func TestPresetRequestPresenceAndOverflow(t *testing.T) {
 	if update.Name == nil || update.Description == nil || update.DefaultCpuMillicores == nil || update.DefaultMemoryMb == nil || update.DefaultDiskGb == nil || update.DefaultTtlSeconds == nil || update.Image == nil || update.InstallCommand == nil || update.StartupScript == nil || update.InstallAgents == nil || update.Agent == nil || update.IncludeOrgSecrets == nil || update.IncludeUserSecrets == nil || update.SecretProjectId == nil {
 		t.Errorf("update request lost scalar optional presence: %#v", update)
 	}
-	if update.EnvVars == nil || update.Agents == nil || update.AgentEnv == nil || update.AppPorts == nil {
+	if update.EnvVars == nil || update.Agents == nil || update.AppPorts == nil {
 		t.Errorf("update request lost empty collection presence: %#v", update)
 	}
-	if len(update.EnvVars.GetValues()) != 0 || len(update.Agents.GetValues()) != 0 || len(update.AgentEnv.GetValues()) != 0 || len(update.AppPorts.GetValues()) != 0 || update.GetSecretProjectId() != "" {
+	if len(update.EnvVars.GetValues()) != 0 || len(update.Agents.GetValues()) != 0 || len(update.AppPorts.GetValues()) != 0 || update.GetSecretProjectId() != "" {
 		t.Errorf("update request changed empty values: %#v", update)
 	}
 
@@ -274,7 +274,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	mountPath := "/workspace/repo"
 	repos := []RepoEntry{{Url: "https://example.test/repo", Branch: &empty, MountPath: &mountPath}}
 	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{
-		Agent: &empty, AgentEnv: &emptyMap, Agents: &agents, AppPorts: &ports, Branch: &empty,
+		Agent: &empty, Agents: &agents, AppPorts: &ports, Branch: &empty,
 		CpuMillicores: &zero, DiskGb: &zero, EnvVars: &emptyMap, Image: &empty, IncludeOrgSecrets: &falseValue,
 		IncludeUserSecrets: &falseValue, InstallAgents: &falseValue, InstallCommand: &empty, IsolationTier: &confidential, MemoryMb: &zero,
 		Name: &empty, PresetId: &empty, PresetSlug: &empty, RepoUrl: &empty, Repos: &repos, SecretProject: &empty,
@@ -286,7 +286,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	if request.PresetId == nil || request.Name == nil || request.CpuMillicores == nil || request.MemoryMb == nil || request.DiskGb == nil || request.TtlSeconds == nil || request.InstallAgents == nil || request.IncludeOrgSecrets == nil || request.IncludeUserSecrets == nil {
 		t.Errorf("request lost scalar presence: %#v", request)
 	}
-	if request.EnvVars == nil || request.AgentEnv == nil || len(request.Agents) != 1 || len(request.AppPorts) != 1 || len(request.Repos) != 1 {
+	if request.EnvVars == nil || len(request.Agents) != 1 || len(request.AppPorts) != 1 || len(request.Repos) != 1 {
 		t.Errorf("request lost collection values: %#v", request)
 	}
 	if request.GetIsolationTier() != codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL {

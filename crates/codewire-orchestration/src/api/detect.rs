@@ -1332,7 +1332,6 @@ install: cargo fetch
 startup: cargo test
 env: {RUST_LOG: info}
 agents: [claude, codex]
-agent_env: {CODEWIRE_AGENT_MODE: test}
 skills:
   - {path: .agents/skills/rust, agents: [codex]}
   - user:personal

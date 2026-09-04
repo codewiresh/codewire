@@ -368,7 +368,6 @@ class TransportTestCase(unittest.TestCase):
                     agents=[SetupAgent(type="claude")],
                     install_agents=True,
                     agent="claude",
-                    agent_env={"MODE": "test"},
                     app_ports=[AppPort(port=8080, label="web", access="public")],
                     include_org_secrets=True,
                     include_user_secrets=False,
@@ -403,7 +402,6 @@ class TransportTestCase(unittest.TestCase):
         self.assertEqual(preset_value["agents"], [{"type": "claude"}])
         self.assertTrue(preset_value["install_agents"])
         self.assertEqual(preset_value["agent"], "claude")
-        self.assertEqual(preset_value["agent_env"], {"MODE": "test"})
         self.assertEqual(
             preset_value["app_ports"],
             [{"port": 8080, "label": "web", "access": "public"}],

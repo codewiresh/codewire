@@ -2085,7 +2085,6 @@ pub(crate) fn env_create_request_from_args(
         agents,
         install_agents: None,
         agent,
-        agent_env: BTreeMap::new(),
         secret_project: trimmed_optional(args.secret_project.clone()).unwrap_or_default(),
         app_ports: Vec::new(),
         include_org_secrets: None,
@@ -2152,7 +2151,6 @@ fn project_spec_from_create_request(
                 .map(|agent| agent.agent_type.clone())
                 .collect(),
         },
-        agent_environment: request.agent_env.clone(),
         application_ports,
         resources: codewire_project::ResourceSpec {
             cpu_millicores: request.cpu_millicores.map(|value| value as u32),
@@ -2409,7 +2407,6 @@ pub(crate) fn create_preset_request_from_environment(
             .collect::<Result<Vec<_>, _>>()?,
         install_agents: request.install_agents,
         agent: request.agent.clone(),
-        agent_env: request.agent_env.clone(),
         app_ports: request
             .app_ports
             .iter()

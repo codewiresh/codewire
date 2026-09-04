@@ -88,7 +88,6 @@ pub fn from_proto(
             install: agents.install,
             tools: agents.tools,
         },
-        agent_environment: ordered_map(value.agent_environment),
         skills,
         application_ports: value
             .application_ports
@@ -157,7 +156,6 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
         startup_script: value.startup_script,
         environment: value.environment.into_iter().collect(),
         agents: agents.into(),
-        agent_environment: value.agent_environment.into_iter().collect(),
         skills: value
             .skills
             .into_iter()

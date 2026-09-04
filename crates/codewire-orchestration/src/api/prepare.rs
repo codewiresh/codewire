@@ -318,9 +318,6 @@ fn apply_setup_config_defaults(
     if body.agent.is_empty() {
         body.agent = cfg.agent;
     }
-    if body.agent_env.is_empty() && !cfg.agent_env.is_empty() {
-        body.agent_env = cfg.agent_env;
-    }
     if body.app_ports.is_empty() && !cfg.app_ports.is_empty() {
         body.app_ports = cfg.app_ports;
     }

@@ -5857,7 +5857,6 @@ fn validate_project_intent(
         || !spec.install_command.is_empty()
         || !spec.startup_script.is_empty()
         || spec.agents.install == Some(true)
-        || !spec.agent_environment.is_empty()
     {
         return Err(());
     }

@@ -148,6 +148,9 @@ message ListEnvironmentsResponse {
 }
 
 message CreateEnvironmentRequest {
+  reserved 19;
+  reserved "agent_env";
+
   string org_id = 1;
   optional string preset_id = 2;
   optional string name = 3;
@@ -166,7 +169,6 @@ message CreateEnvironmentRequest {
   repeated SetupAgent agents = 16;
   optional bool install_agents = 17;
   string agent = 18;
-  map<string, string> agent_env = 19;
   string secret_project = 20;
   repeated AppPort app_ports = 21;
   optional bool include_org_secrets = 22;

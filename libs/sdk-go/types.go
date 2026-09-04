@@ -65,7 +65,6 @@ type ProjectSpec struct {
 	StartupScript    string                  `json:"startup_script,omitempty"`
 	Environment      map[string]string       `json:"environment,omitempty"`
 	Agents           *ProjectAgents          `json:"agents,omitempty"`
-	AgentEnvironment map[string]string       `json:"agent_environment,omitempty"`
 	Skills           []ProjectSkillSelection `json:"skills,omitempty"`
 	ApplicationPorts []AppPort               `json:"application_ports,omitempty"`
 	Resources        *ProjectResources       `json:"resources,omitempty"`
@@ -76,7 +75,6 @@ type ProjectSpec struct {
 // SetupConfig describes the setup configuration embedded in a preset.
 type SetupConfig struct {
 	Agent              *string            `json:"agent,omitempty"`
-	AgentEnv           *map[string]string `json:"agent_env,omitempty"`
 	Agents             *[]SetupAgent      `json:"agents,omitempty"`
 	AppPorts           *[]AppPort         `json:"app_ports,omitempty"`
 	Branch             *string            `json:"branch,omitempty"`
@@ -183,7 +181,6 @@ type EnvironmentResizeOperation struct {
 type CreateEnvironmentBody struct {
 	Schema             *string            `json:"$schema,omitempty"`
 	Agent              *string            `json:"agent,omitempty"`
-	AgentEnv           *map[string]string `json:"agent_env,omitempty"`
 	Agents             *[]SetupAgent      `json:"agents,omitempty"`
 	AppPorts           *[]AppPort         `json:"app_ports,omitempty"`
 	Branch             *string            `json:"branch,omitempty"`
@@ -278,7 +275,6 @@ type Preset struct {
 type CreatePresetBody struct {
 	Schema               *string            `json:"$schema,omitempty"`
 	Agent                *string            `json:"agent,omitempty"`
-	AgentEnv             *map[string]string `json:"agent_env,omitempty"`
 	Agents               *[]SetupAgent      `json:"agents,omitempty"`
 	AppPorts             *[]AppPort         `json:"app_ports,omitempty"`
 	DefaultCpuMillicores *int64             `json:"default_cpu_millicores,omitempty"`
@@ -302,7 +298,6 @@ type CreatePresetBody struct {
 type UpdatePresetBody struct {
 	Schema               *string            `json:"$schema,omitempty"`
 	Agent                *string            `json:"agent,omitempty"`
-	AgentEnv             *map[string]string `json:"agent_env,omitempty"`
 	Agents               *[]SetupAgent      `json:"agents,omitempty"`
 	AppPorts             *[]AppPort         `json:"app_ports,omitempty"`
 	DefaultCpuMillicores *int64             `json:"default_cpu_millicores,omitempty"`

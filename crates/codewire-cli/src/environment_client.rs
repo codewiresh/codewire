@@ -776,7 +776,6 @@ fn proto_create_environment_request(
             .collect(),
         install_agents: request.install_agents,
         agent: request.agent.clone(),
-        agent_env: request.agent_env.clone().into_iter().collect(),
         secret_project: request.secret_project.clone(),
         app_ports: request
             .app_ports
@@ -900,7 +899,6 @@ fn legacy_create_environment_request(
             .collect(),
         install_agents: value.install_agents,
         agent: value.agent,
-        agent_env: value.agent_env.into_iter().collect(),
         secret_project: value.secret_project,
         app_ports: value
             .app_ports

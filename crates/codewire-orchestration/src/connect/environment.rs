@@ -686,7 +686,6 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvi
             .collect(),
         install_agents: request.install_agents,
         agent: request.agent,
-        agent_env: ordered_map(request.agent_env),
         secret_project: request.secret_project,
         app_ports: request
             .app_ports
@@ -906,7 +905,6 @@ fn proto_create_request(
             .collect(),
         install_agents: body.install_agents,
         agent: body.agent,
-        agent_env: body.agent_env.into_iter().collect(),
         secret_project: body.secret_project,
         app_ports: body
             .app_ports

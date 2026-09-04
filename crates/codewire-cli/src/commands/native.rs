@@ -1355,7 +1355,7 @@ fn native_unsupported_project_fields(
     if !spec.startup_script.is_empty() {
         unsupported.push("startup");
     }
-    if spec.agents.install == Some(true) || !spec.agent_environment.is_empty() {
+    if spec.agents.install == Some(true) {
         unsupported.push("agents");
     }
     unsupported

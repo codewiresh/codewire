@@ -160,7 +160,6 @@ fn create_body(request: CreatePresetRequest) -> (CreatePresetBody, Option<Secret
             agents: request.agents.into_iter().map(api_setup_agent).collect(),
             install_agents: request.install_agents,
             agent: request.agent,
-            agent_env: string_map(request.agent_env),
             app_ports: request.app_ports.into_iter().map(api_app_port).collect(),
             include_org_secrets: request.include_org_secrets,
             include_user_secrets: request.include_user_secrets,
@@ -200,10 +199,6 @@ fn update_body(request: UpdatePresetRequest) -> (UpdatePresetBody, Option<Secret
                 .map(|list| list.values.into_iter().map(api_setup_agent).collect()),
             install_agents: request.install_agents,
             agent: request.agent,
-            agent_env: request
-                .agent_env
-                .into_option()
-                .map(|map| string_map(map.values)),
             app_ports: request
                 .app_ports
                 .into_option()
@@ -297,7 +292,6 @@ fn proto_setup_config(config: SetupConfig) -> ProtoSetupConfig {
         agents: config.agents.into_iter().map(proto_setup_agent).collect(),
         install_agents: config.install_agents,
         agent: config.agent,
-        agent_env: config.agent_env.into_iter().collect(),
         app_ports: config.app_ports.into_iter().map(proto_app_port).collect(),
         include_org_secrets: config.include_org_secrets,
         include_user_secrets: config.include_user_secrets,
@@ -348,7 +342,7 @@ fn proto_timestamp(value: &str) -> AppResult<Timestamp> {
 
 #[cfg(test)]
 mod tests {
-    use codewire_proto::codewire::v1::{AgentEnvMap, AgentList, AppPortList, EnvVarMap};
+    use codewire_proto::codewire::v1::{AgentList, AppPortList, EnvVarMap};
 
     use super::*;
     use codewire_server_core::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
@@ -359,7 +353,6 @@ mod tests {
         assert!(absent.slug.is_none());
         assert!(absent.env_vars.is_none());
         assert!(absent.agents.is_none());
-        assert!(absent.agent_env.is_none());
         assert!(absent.app_ports.is_none());
         assert!(selection.is_none());
 
@@ -367,7 +360,6 @@ mod tests {
             slug: Some(String::new()),
             env_vars: Some(EnvVarMap::default()).into(),
             agents: Some(AgentList::default()).into(),
-            agent_env: Some(AgentEnvMap::default()).into(),
             app_ports: Some(AppPortList::default()).into(),
             secret_project_id: Some(String::new()),
             ..Default::default()
@@ -375,7 +367,6 @@ mod tests {
         assert_eq!(empty.slug.as_deref(), Some(""));
         assert_eq!(empty.env_vars, Some(BTreeMap::new()));
         assert!(empty.agents.is_some_and(|agents| agents.is_empty()));
-        assert_eq!(empty.agent_env, Some(BTreeMap::new()));
         assert!(empty.app_ports.is_some_and(|ports| ports.is_empty()));
         assert_eq!(selection, Some(SecretProjectSelection::Clear));
     }

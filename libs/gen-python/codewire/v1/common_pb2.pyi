@@ -62,15 +62,8 @@ class SetupAgent(_message.Message):
     def __init__(self, type: _Optional[str] = ...) -> None: ...
 
 class SetupConfig(_message.Message):
-    __slots__ = ("repo_url", "branch", "repos", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "agent_env", "app_ports", "include_org_secrets", "include_user_secrets", "project_spec")
+    __slots__ = ("repo_url", "branch", "repos", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "app_ports", "include_org_secrets", "include_user_secrets", "project_spec")
     class EnvVarsEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
-    class AgentEnvEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -86,7 +79,6 @@ class SetupConfig(_message.Message):
     AGENTS_FIELD_NUMBER: _ClassVar[int]
     INSTALL_AGENTS_FIELD_NUMBER: _ClassVar[int]
     AGENT_FIELD_NUMBER: _ClassVar[int]
-    AGENT_ENV_FIELD_NUMBER: _ClassVar[int]
     APP_PORTS_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_ORG_SECRETS_FIELD_NUMBER: _ClassVar[int]
     INCLUDE_USER_SECRETS_FIELD_NUMBER: _ClassVar[int]
@@ -100,12 +92,11 @@ class SetupConfig(_message.Message):
     agents: _containers.RepeatedCompositeFieldContainer[SetupAgent]
     install_agents: bool
     agent: str
-    agent_env: _containers.ScalarMap[str, str]
     app_ports: _containers.RepeatedCompositeFieldContainer[AppPort]
     include_org_secrets: bool
     include_user_secrets: bool
     project_spec: ProjectSpec
-    def __init__(self, repo_url: _Optional[str] = ..., branch: _Optional[str] = ..., repos: _Optional[_Iterable[_Union[RepoEntry, _Mapping]]] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., agent_env: _Optional[_Mapping[str, str]] = ..., app_ports: _Optional[_Iterable[_Union[AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., project_spec: _Optional[_Union[ProjectSpec, _Mapping]] = ...) -> None: ...
+    def __init__(self, repo_url: _Optional[str] = ..., branch: _Optional[str] = ..., repos: _Optional[_Iterable[_Union[RepoEntry, _Mapping]]] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., app_ports: _Optional[_Iterable[_Union[AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., project_spec: _Optional[_Union[ProjectSpec, _Mapping]] = ...) -> None: ...
 
 class ProjectAgents(_message.Message):
     __slots__ = ("install", "tools")
@@ -164,15 +155,8 @@ class ProjectAccessBinding(_message.Message):
     def __init__(self, profile: _Optional[str] = ...) -> None: ...
 
 class ProjectSpec(_message.Message):
-    __slots__ = ("schema_version", "preset", "image", "repositories", "working_directory", "install_command", "startup_script", "environment", "agents", "agent_environment", "skills", "application_ports", "resources", "secrets", "credentials", "workspace_mode", "access")
+    __slots__ = ("schema_version", "preset", "image", "repositories", "working_directory", "install_command", "startup_script", "environment", "agents", "skills", "application_ports", "resources", "secrets", "credentials", "workspace_mode", "access")
     class EnvironmentEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
-    class AgentEnvironmentEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -195,7 +179,6 @@ class ProjectSpec(_message.Message):
     STARTUP_SCRIPT_FIELD_NUMBER: _ClassVar[int]
     ENVIRONMENT_FIELD_NUMBER: _ClassVar[int]
     AGENTS_FIELD_NUMBER: _ClassVar[int]
-    AGENT_ENVIRONMENT_FIELD_NUMBER: _ClassVar[int]
     SKILLS_FIELD_NUMBER: _ClassVar[int]
     APPLICATION_PORTS_FIELD_NUMBER: _ClassVar[int]
     RESOURCES_FIELD_NUMBER: _ClassVar[int]
@@ -212,7 +195,6 @@ class ProjectSpec(_message.Message):
     startup_script: str
     environment: _containers.ScalarMap[str, str]
     agents: ProjectAgents
-    agent_environment: _containers.ScalarMap[str, str]
     skills: _containers.RepeatedCompositeFieldContainer[ProjectSkillSelection]
     application_ports: _containers.RepeatedCompositeFieldContainer[AppPort]
     resources: ProjectResources
@@ -220,4 +202,4 @@ class ProjectSpec(_message.Message):
     credentials: _containers.MessageMap[str, ProjectCredentialReference]
     workspace_mode: ProjectWorkspaceMode
     access: ProjectAccessBinding
-    def __init__(self, schema_version: _Optional[int] = ..., preset: _Optional[str] = ..., image: _Optional[str] = ..., repositories: _Optional[_Iterable[_Union[RepoEntry, _Mapping]]] = ..., working_directory: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., environment: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Union[ProjectAgents, _Mapping]] = ..., agent_environment: _Optional[_Mapping[str, str]] = ..., skills: _Optional[_Iterable[_Union[ProjectSkillSelection, _Mapping]]] = ..., application_ports: _Optional[_Iterable[_Union[AppPort, _Mapping]]] = ..., resources: _Optional[_Union[ProjectResources, _Mapping]] = ..., secrets: _Optional[_Union[ProjectSecretBindings, _Mapping]] = ..., credentials: _Optional[_Mapping[str, ProjectCredentialReference]] = ..., workspace_mode: _Optional[_Union[ProjectWorkspaceMode, str]] = ..., access: _Optional[_Union[ProjectAccessBinding, _Mapping]] = ...) -> None: ...
+    def __init__(self, schema_version: _Optional[int] = ..., preset: _Optional[str] = ..., image: _Optional[str] = ..., repositories: _Optional[_Iterable[_Union[RepoEntry, _Mapping]]] = ..., working_directory: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., environment: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Union[ProjectAgents, _Mapping]] = ..., skills: _Optional[_Iterable[_Union[ProjectSkillSelection, _Mapping]]] = ..., application_ports: _Optional[_Iterable[_Union[AppPort, _Mapping]]] = ..., resources: _Optional[_Union[ProjectResources, _Mapping]] = ..., secrets: _Optional[_Union[ProjectSecretBindings, _Mapping]] = ..., credentials: _Optional[_Mapping[str, ProjectCredentialReference]] = ..., workspace_mode: _Optional[_Union[ProjectWorkspaceMode, str]] = ..., access: _Optional[_Union[ProjectAccessBinding, _Mapping]] = ...) -> None: ...

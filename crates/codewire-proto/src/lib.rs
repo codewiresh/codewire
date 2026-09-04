@@ -37,9 +37,9 @@ mod tests {
         ResolveMeshAuthorizationResponse,
     };
     use super::codewire::v1::{
-        AgentEnvMap, AgentList, ApiKey, AppPort, AppPortList, CreateApiKeyResponse,
-        CreateMeshInviteResponse, CreateMeshNodeEnrollmentResponse, CreatePortRequest, EnvVarMap,
-        GetOrganizationResponse, InvitationStatus, ListSecretProjectsResponse, ListSecretsResponse,
+        AgentList, ApiKey, AppPort, AppPortList, CreateApiKeyResponse, CreateMeshInviteResponse,
+        CreateMeshNodeEnrollmentResponse, CreatePortRequest, EnvVarMap, GetOrganizationResponse,
+        InvitationStatus, ListSecretProjectsResponse, ListSecretsResponse,
         MESH_GROUP_SERVICE_SERVICE_NAME, MESH_INVITE_SERVICE_SERVICE_NAME,
         MESH_KEY_VALUE_SERVICE_SERVICE_NAME, MESH_NETWORK_SERVICE_SERVICE_NAME,
         MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshNetwork, MeshNode, MeshNodeEnrollment,
@@ -532,14 +532,7 @@ mod tests {
 
         let absent = serde_json::to_value(UpdatePresetRequest::default())
             .expect("absent preset patch serialization");
-        for field in [
-            "slug",
-            "secretProjectId",
-            "envVars",
-            "agents",
-            "agentEnv",
-            "appPorts",
-        ] {
+        for field in ["slug", "secretProjectId", "envVars", "agents", "appPorts"] {
             assert!(absent.get(field).is_none(), "unexpected {field}: {absent}");
         }
 
@@ -548,14 +541,13 @@ mod tests {
             secret_project_id: Some(String::new()),
             env_vars: Some(EnvVarMap::default()).into(),
             agents: Some(AgentList::default()).into(),
-            agent_env: Some(AgentEnvMap::default()).into(),
             app_ports: Some(AppPortList::default()).into(),
             ..Default::default()
         })
         .expect("present-empty preset patch serialization");
         assert_eq!(empty["slug"], "");
         assert_eq!(empty["secretProjectId"], "");
-        for field in ["envVars", "agents", "agentEnv", "appPorts"] {
+        for field in ["envVars", "agents", "appPorts"] {
             assert!(empty.get(field).is_some(), "missing {field}: {empty}");
         }
     }

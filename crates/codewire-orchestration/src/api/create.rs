@@ -73,6 +73,7 @@ pub struct SetupAgent {
 /// Mirrors `api.SetupConfig` (stored as JSONB; all fields omitempty —
 /// BTreeMaps keep key order sorted like Go's map marshaling).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetupConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub repo_url: String,
@@ -92,8 +93,6 @@ pub struct SetupConfig {
     pub install_agents: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_ports: Vec<AppPort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +106,7 @@ pub struct SetupConfig {
 
 /// Mirrors `api.CreateEnvironmentBody`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateEnvironmentBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
@@ -142,8 +142,6 @@ pub struct CreateEnvironmentBody {
     pub install_agents: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub secret_project: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -369,9 +367,6 @@ pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> A
     if body.install_agents.is_none() {
         body.install_agents = spec.agents.install;
     }
-    if body.agent_env.is_empty() {
-        body.agent_env = spec.agent_environment.clone();
-    }
     if body.app_ports.is_empty() {
         body.app_ports = spec
             .application_ports
@@ -485,7 +480,6 @@ pub(crate) fn synchronize_project_spec(body: &mut CreateEnvironmentBody) -> AppR
             .map(|agent| agent.agent_type.clone())
             .collect(),
     };
-    spec.agent_environment = body.agent_env.clone();
     spec.application_ports = body
         .app_ports
         .iter()
@@ -1243,7 +1237,6 @@ pub(crate) async fn create_environment_core(
                 agents: body.agents.clone(),
                 install_agents: body.install_agents,
                 agent: body.agent.clone(),
-                agent_env: body.agent_env.clone(),
                 app_ports: body.app_ports.clone(),
                 include_org_secrets: body.include_org_secrets,
                 include_user_secrets: body.include_user_secrets,
@@ -1310,7 +1303,6 @@ fn create_needs_setup_config(body: &CreateEnvironmentBody) -> bool {
         || !body.agents.is_empty()
         || body.install_agents.is_some()
         || !body.agent.is_empty()
-        || !body.agent_env.is_empty()
         || !body.app_ports.is_empty()
         || body.include_org_secrets.is_some()
         || body.include_user_secrets.is_some()
@@ -2232,6 +2224,16 @@ access: {profile: user/work}
         assert!(parsed.preset_slug.is_empty());
         assert!(parsed.repo_url.is_empty());
         assert!(parsed.repos.is_empty());
+    }
+
+    #[test]
+    fn create_environment_rejects_removed_agent_env() {
+        assert!(
+            validate_value::<CreateEnvironmentBody>(serde_json::json!({
+                "agent_env": {"TOKEN": "synthetic"}
+            }))
+            .is_err()
+        );
     }
 
     #[test]

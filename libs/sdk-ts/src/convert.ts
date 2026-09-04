@@ -341,7 +341,6 @@ function fromProtoSetupConfig(
   if (!value) return undefined;
   return {
     agent: optionalString(value.agent),
-    agent_env: copyStringMap(value.agentEnv),
     agents: fromProtoSetupAgents(value.agents),
     app_ports: fromProtoAppPorts(value.appPorts),
     branch: optionalString(value.branch),
@@ -396,7 +395,6 @@ function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec 
     agents: value.agents
       ? { install: value.agents.install, tools: value.agents.tools.length ? [...value.agents.tools] : undefined }
       : undefined,
-    agent_environment: copyStringMap(value.agentEnvironment),
     skills: value.skills.length
       ? value.skills.map((skill) => ({
           source: skill.source === ProjectSkillSource.REPOSITORY
@@ -447,7 +445,6 @@ function toProtoProjectSpec(value: ProjectSpec | undefined) {
     startupScript: value.startup_script ?? "",
     environment: value.environment ? { ...value.environment } : {},
     agents: value.agents ? { install: value.agents.install, tools: [...(value.agents.tools ?? [])] } : undefined,
-    agentEnvironment: value.agent_environment ? { ...value.agent_environment } : {},
     skills: (value.skills ?? []).map((skill) => ({
       source: toProtoProjectSkillSource(skill.source),
       reference: skill.reference,
@@ -738,7 +735,6 @@ export function toProtoCreateEnvironmentRequest(
     agents: toProtoAgents(body.agents),
     installAgents: body.install_agents ?? undefined,
     agent: body.agent ?? "",
-    agentEnv: body.agent_env ? { ...body.agent_env } : {},
     secretProject: body.secret_project ?? "",
     appPorts: toProtoAppPorts(body.app_ports),
     includeOrgSecrets: body.include_org_secrets ?? undefined,
@@ -808,7 +804,6 @@ export function toProtoCreatePresetRequest(
     agents: toProtoAgents(body.agents),
     installAgents: body.install_agents ?? undefined,
     agent: body.agent ?? "",
-    agentEnv: body.agent_env ? { ...body.agent_env } : {},
     appPorts: toProtoAppPorts(body.app_ports),
     includeOrgSecrets: body.include_org_secrets ?? undefined,
     includeUserSecrets: body.include_user_secrets ?? undefined,
@@ -839,7 +834,6 @@ export function toProtoUpdatePresetRequest(
     agents: body.agents === undefined ? undefined : { values: toProtoAgents(body.agents) },
     installAgents: body.install_agents ?? undefined,
     agent: optionalUpdateString(body.agent),
-    agentEnv: body.agent_env === undefined ? undefined : { values: body.agent_env ?? {} },
     appPorts: body.app_ports === undefined ? undefined : { values: toProtoAppPorts(body.app_ports) },
     includeOrgSecrets: body.include_org_secrets ?? undefined,
     includeUserSecrets: body.include_user_secrets ?? undefined,
@@ -876,7 +870,7 @@ export function assertAPIKeyConverterCoverage(): void {
 /** Throws when a future runtime proto field has no owned SDK conversion. */
 export function assertRuntimeConverterCoverage(): void {
   assertDescriptorCoverage("setup config", SetupConfigSchema.fields, new Map([
-    [1, "repo_url"], [2, "branch"], [3, "repos"], [4, "install_command"], [5, "startup_script"], [6, "env_vars"], [7, "agents"], [8, "install_agents"], [9, "agent"], [10, "agent_env"], [11, "app_ports"], [12, "include_org_secrets"], [13, "include_user_secrets"], [14, "project_spec"],
+    [1, "repo_url"], [2, "branch"], [3, "repos"], [4, "install_command"], [5, "startup_script"], [6, "env_vars"], [7, "agents"], [8, "install_agents"], [9, "agent"], [11, "app_ports"], [12, "include_org_secrets"], [13, "include_user_secrets"], [14, "project_spec"],
   ]));
   assertDescriptorCoverage("repo entry", RepoEntrySchema.fields, new Map([
     [1, "url"], [2, "branch"], [3, "mount_path"], [4, "revision"],
@@ -905,13 +899,13 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "profile"],
   ]));
   assertDescriptorCoverage("project spec", ProjectSpecSchema.fields, new Map([
-    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [10, "agent_environment"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [15, "credentials"], [16, "workspace_mode"], [17, "access"],
+    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [15, "credentials"], [16, "workspace_mode"], [17, "access"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"],
   ]));
   assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
-    [1, "org_id"], [2, "preset_id"], [3, "name"], [4, "cpu_millicores"], [5, "memory_mb"], [6, "disk_gb"], [7, "ttl_seconds"], [8, "preset_slug"], [9, "repo_url"], [10, "branch"], [11, "repos"], [12, "image"], [13, "install_command"], [14, "startup_script"], [15, "env_vars"], [16, "agents"], [17, "install_agents"], [18, "agent"], [19, "agent_env"], [20, "secret_project"], [21, "app_ports"], [22, "include_org_secrets"], [23, "include_user_secrets"], [24, "isolation_tier"], [25, "project_spec"],
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [4, "cpu_millicores"], [5, "memory_mb"], [6, "disk_gb"], [7, "ttl_seconds"], [8, "preset_slug"], [9, "repo_url"], [10, "branch"], [11, "repos"], [12, "image"], [13, "install_command"], [14, "startup_script"], [15, "env_vars"], [16, "agents"], [17, "install_agents"], [18, "agent"], [20, "secret_project"], [21, "app_ports"], [22, "include_org_secrets"], [23, "include_user_secrets"], [24, "isolation_tier"], [25, "project_spec"],
   ]));
   assertDescriptorCoverage("environment port", PortSchema.fields, new Map([
     [1, "id"], [2, "environment_id"], [3, "port"], [4, "label"], [5, "access"], [6, "preview_url"], [7, "created_at"],

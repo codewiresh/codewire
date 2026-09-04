@@ -42,6 +42,7 @@ pub struct SetupAgent {
 /// consumer of the env vars (scripts, exec env) sorts keys, exactly
 /// like the Go builders do before emitting.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetupConfig {
     #[serde(default)]
     pub repo_url: String,
@@ -61,8 +62,6 @@ pub struct SetupConfig {
     pub install_agents: Option<bool>,
     #[serde(default)]
     pub agent: String,
-    #[serde(default)]
-    pub agent_env: BTreeMap<String, String>,
     #[serde(default)]
     pub app_ports: Vec<AppPort>,
     #[serde(default)]
