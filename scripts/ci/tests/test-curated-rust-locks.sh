@@ -62,7 +62,7 @@ assert_stale_log_contains_any \
   'cannot update the lock file'
 
 fake_cargo="$EXEC_TMP/fake-cargo"
-fake_state="$TMP/fake-cargo-state"
+fake_state="$TMP/fake-cargo-git-state"
 cat >"$fake_cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -71,8 +71,14 @@ printf '%s\n' "$*" >>"$FAKE_CARGO_STATE.calls"
 case "${1:-}" in
   metadata)
     if [ ! -f "$FAKE_CARGO_STATE.fetched" ]; then
-      printf '%s\n' \
-        "can't checkout from 'https://example.invalid/exact.git': you are in the offline mode (--offline)" >&2
+      if [ "${FAKE_CARGO_OFFLINE_ERROR:-git}" = registry ]; then
+        printf '%s\n\n%s\n' \
+          'error: failed to download `exact-registry-crate v1.2.3`' \
+          'Caused by: attempting to make an HTTP request, but --offline was specified' >&2
+      else
+        printf '%s\n' \
+          "can't checkout from 'https://example.invalid/exact.git': you are in the offline mode (--offline)" >&2
+      fi
       exit 101
     fi
     ;;
@@ -103,4 +109,22 @@ grep -qF 'fetch --locked' "$fake_state.calls"
 test "$(grep -cF 'metadata --locked --offline' "$fake_state.calls")" -eq 2
 test "$(grep -cF 'fetch --locked' "$fake_state.calls")" -eq 1
 
-printf 'curated Rust workspace lock fixtures: stale gateway rejected; current derp/gateway green\n'
+fake_state="$TMP/fake-cargo-registry-state"
+cold_registry_dir="$TMP/cold-registry"
+mkdir -p "$cold_registry_dir"
+cp "$ROOT/deployments/docker/gateway.Cargo.toml" "$cold_registry_dir/cold-registry.Cargo.toml"
+cp "$ROOT/deployments/docker/gateway.Cargo.lock" "$cold_registry_dir/cold-registry.Cargo.lock"
+cold_registry_log="$TMP/cold-registry.log"
+FAKE_CARGO_STATE="$fake_state" \
+  FAKE_CARGO_OFFLINE_ERROR=registry \
+  CARGO_BIN="$fake_cargo" \
+  CURATED_RUST_MANIFEST_DIR="$cold_registry_dir" \
+  "$GUARD" >"$cold_registry_log"
+grep -qF '[curated-rust-locks] cold-registry: populating exact locked Cargo inputs' "$cold_registry_log"
+grep -qF '[curated-rust-locks] cold-registry: OK' "$cold_registry_log"
+grep -qF 'metadata --locked --offline' "$fake_state.calls"
+grep -qF 'fetch --locked' "$fake_state.calls"
+test "$(grep -cF 'metadata --locked --offline' "$fake_state.calls")" -eq 2
+test "$(grep -cF 'fetch --locked' "$fake_state.calls")" -eq 1
+
+printf 'curated Rust workspace lock fixtures: stale gateway rejected; current derp/gateway and cold-cache forms green\n'
