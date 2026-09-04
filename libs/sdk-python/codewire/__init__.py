@@ -8,17 +8,6 @@ from codewire.client import Codewire
 from codewire.environment import Environment
 from codewire.errors import CodewireError
 from codewire.files import Files
-from codewire.local import (
-    LocalError,
-    LocalExecResult,
-    LocalInstance,
-    LocalMount,
-    LocalPort,
-    LocalService,
-    LocalSpec,
-    LocalSpecMount,
-    LocalSpecPort,
-)
 from codewire.mesh import (
     MeshClient,
     MeshEnrollment,
@@ -42,15 +31,6 @@ __all__ = [
     "Environment",
     "CodewireError",
     "Files",
-    "LocalError",
-    "LocalExecResult",
-    "LocalInstance",
-    "LocalMount",
-    "LocalPort",
-    "LocalService",
-    "LocalSpec",
-    "LocalSpecMount",
-    "LocalSpecPort",
     "MeshClient",
     "MeshEnrollment",
     "MeshGroup",

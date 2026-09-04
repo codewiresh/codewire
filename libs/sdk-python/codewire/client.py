@@ -7,7 +7,6 @@ from codewire._context import ConnectContext
 from codewire._transport import ConnectTransport
 from codewire.api_keys import APIKeys
 from codewire.environments import Environments
-from codewire.local import LocalService
 from codewire.secrets import SecretProjects, Secrets
 from codewire.templates import Templates
 
@@ -23,8 +22,8 @@ class Codewire:
         timeout: float = 30,
         http_client: Any | None = None,
     ):
-        # API key is lazy so callers using only ``client.local`` can construct
-        # a client without a control-plane credential.
+        # Missing credentials fail only when a generated Connect service sends
+        # a request, so constructing the client does not access the platform.
         key = api_key or os.environ.get("CODEWIRE_API_KEY", "") or ""
         url = (
             base_url or os.environ.get("CODEWIRE_BASE_URL") or DEFAULT_BASE_URL
@@ -42,7 +41,6 @@ class Codewire:
         self.api_keys = APIKeys(self._context)
         self.secrets = Secrets(self._context)
         self.secret_projects = SecretProjects(self._context)
-        self.local = LocalService()
 
     def close(self) -> None:
         """Release generated SDK clients without closing a caller-owned client."""

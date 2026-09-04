@@ -26,7 +26,6 @@ type Client struct {
 	APIKeys        *APIKeyService
 	Secrets        *SecretService
 	SecretProjects *SecretProjectService
-	Local          *LocalService
 
 	baseURL      string
 	apiKey       string
@@ -94,7 +93,6 @@ func New(apiKey string, opts ...Option) *Client {
 	c.APIKeys = &APIKeyService{c}
 	c.Secrets = &SecretService{c}
 	c.SecretProjects = &SecretProjectService{c}
-	c.Local = newLocalService()
 	return c
 }
 

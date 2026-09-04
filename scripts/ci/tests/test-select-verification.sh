@@ -157,7 +157,7 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/verify/integration-postgres.sh \
   scripts/ci/verify/resolve-cargo-target-dir.sh \
   scripts/ci/verify/run-product-verification.sh \
-  scripts/ci/tests/test-sdk-local-cli-contract.sh \
+  scripts/ci/tests/test-retired-local-sdk-contract.sh \
   scripts/checks/security/audit-rust-only-runtime.sh \
   scripts/ci/verify/rust-stack-rehearsal.sh \
   scripts/ci/tests/test-integration-postgres.sh \
@@ -625,8 +625,8 @@ run_paths_case sdk_ts_runner pull_request refs/pull/1511/head false \
   'policy sdk_ts' \
   scripts/runtime/dev/run-sdk-ts-e2e.sh \
   scripts/runtime/tests/test-run-sdk-ts-e2e.sh
-run_paths_case sdk_examples pull_request refs/pull/1512/head false \
-  'go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
+run_paths_case retired_sdk_examples pull_request refs/pull/1512/head false \
+  'policy' \
   libs/sdk-examples/run-claude/README.md \
   libs/sdk-examples/run-claude/go/main.go \
   libs/sdk-examples/run-claude/python/run_claude.py \
@@ -795,17 +795,13 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   docs/runbooks/runtime-coco-trustee-test-resource.md \
   docs/runbooks/runtime-dev-commodity-smoke.md \
   docs/runbooks/rust-release-candidate-staging.md \
-  libs/sdk-examples/run-claude/README.md \
-  libs/sdk-examples/run-claude/go/main.go \
-  libs/sdk-examples/run-claude/python/run_claude.py \
-  libs/sdk-examples/run-claude/typescript/run_claude.ts \
   libs/sdk-go/local.go \
   libs/sdk-go/local_files.go \
   libs/sdk-python/codewire/__init__.py \
   libs/sdk-python/codewire/local.py \
   libs/sdk-ts/src/index.ts \
   libs/sdk-ts/src/local.ts \
-  scripts/ci/tests/test-sdk-local-cli-contract.sh \
+  scripts/ci/tests/test-retired-local-sdk-contract.sh \
   scripts/ci/verify/smoke-prod.sh \
   scripts/runtime/dev/measure-dev-commodity-overhead.sh \
   scripts/runtime/dev/smoke-dev-commodity.sh
@@ -2189,7 +2185,7 @@ bash -n \
   "$ROOT/scripts/ci/tests/test-verify-release-tag-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" \
-  "$ROOT/scripts/ci/tests/test-sdk-local-cli-contract.sh" \
+  "$ROOT/scripts/ci/tests/test-retired-local-sdk-contract.sh" \
   "$ROOT/scripts/ci/verify/integration-postgres.sh" \
   "$ROOT/scripts/ci/verify/run-integration-verification.sh" \
   "$ROOT/scripts/ci/tests/test-integration-postgres.sh" \

@@ -419,7 +419,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/verify/run-product-verification.sh|\
-      scripts/ci/tests/test-sdk-local-cli-contract.sh|\
+      scripts/ci/tests/test-retired-local-sdk-contract.sh|\
       scripts/checks/security/audit-rust-only-runtime.sh|\
       scripts/ci/setup/*.sh|scripts/ci/verify/*.sh|\
       scripts/ci/verify/rust-stack-rehearsal.sh)
@@ -659,24 +659,23 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      libs/sdk-go/*|\
-      libs/sdk-examples/run-claude/go/*)
+      libs/sdk-go/*)
         select_token sdk_go
         select_token go_support
         select_token go_consumer_interop
         recognized=true
         ;;
-      libs/sdk-ts/*|\
-      libs/sdk-examples/run-claude/typescript/*)
+      libs/sdk-ts/*)
         select_token sdk_ts
         recognized=true
         ;;
-      libs/sdk-python/*|libs/sdk-examples/run-claude/python/*)
+      libs/sdk-python/*)
         select_token sdk_python
         recognized=true
         ;;
-      libs/sdk-examples/run-claude/.gitignore|\
-      libs/sdk-examples/run-claude/README.md)
+      libs/sdk-examples/run-claude/*)
+        # Deletion-only tombstone for the retired Docker/Lima SDK example.
+        # The policy guard fails if this source tree is reintroduced.
         recognized=true
         ;;
     esac
@@ -696,9 +695,7 @@ if [ "$event_selected" = false ]; then
         ;;
       apps/dashboard/package.json|\
       packages/*/package.json|\
-      libs/sdk-ts/package.json|libs/sdk-ts/package-lock.json|\
-      libs/sdk-examples/run-claude/typescript/package.json|\
-      libs/sdk-examples/run-claude/typescript/package-lock.json)
+      libs/sdk-ts/package.json|libs/sdk-ts/package-lock.json)
         select_js_security
         recognized=true
         ;;

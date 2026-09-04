@@ -21,7 +21,6 @@ libs/
   gateway-proto/      internal gateway/daemon Connect contract
   gen-go/, gen-python/  generated public Connect clients
   sdk-go/, sdk-ts/, sdk-python/  public language SDKs
-  sdk-examples/       end-to-end SDK parity smoke (run-claude)
   tailnet/            bounded Tailscale interoperability support
 
 crates/        Rust workspace for services, web UI, CLI, desktop, and shared clients

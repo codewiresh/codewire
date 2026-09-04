@@ -133,7 +133,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
     npm_licenses = {
         "package.json": "AGPL-3.0-only",
         "apps/dashboard/package.json": "AGPL-3.0-only",
-        "libs/sdk-examples/run-claude/typescript/package.json": "MIT",
         "libs/sdk-ts/package.json": "MIT",
         "packages/codewire-proto-ts/package.json": "MIT",
     }
@@ -193,7 +192,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
 
     go_licenses = {
         "libs/gen-go/go.mod": "MIT",
-        "libs/sdk-examples/run-claude/go/go.mod": "MIT",
         "libs/sdk-go/go.mod": "MIT",
         "libs/tailnet/go.mod": "BSD-3-Clause",
         "tests/contract/go.mod": "AGPL-3.0-only",

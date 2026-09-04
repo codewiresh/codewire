@@ -2,7 +2,6 @@ go 1.26.6
 
 use (
 	./libs/gen-go
-	./libs/sdk-examples/run-claude/go
 	./libs/sdk-go
 	./libs/tailnet
 	./tests/contract
