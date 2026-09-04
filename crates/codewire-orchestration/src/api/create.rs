@@ -26,7 +26,7 @@ use super::ApiState;
 use super::detect::{
     self, DetectionResult, apply_detection_workspace_defaults, call_claude_detect,
     call_claude_detect_multi_repo, fetch_all_repo_contexts, fetch_repo_context,
-    fixup_detection_result, parse_repo_url, resolve_forge_token,
+    fixup_detection_result, parse_repo_url,
 };
 use super::environments::{
     ENV_SELECT_COLS, ENV_SELECT_JOINS, Environment, check_quota, check_rate_limit, coded,
@@ -1180,10 +1180,7 @@ pub(crate) async fn create_environment_core(
                         );
                         p
                     }
-                    None => {
-                        detect_preset_for_repo(state, pool, org_id, &user.user_id, &mut body)
-                            .await?
-                    }
+                    None => detect_preset_for_repo(state, pool, org_id, &mut body).await?,
                 }
             } else {
                 return Err(coded(
@@ -1316,7 +1313,6 @@ async fn detect_preset_for_repo(
     state: &ApiState,
     pool: &PgPool,
     org_id: &str,
-    user_id: &str,
     body: &mut CreateEnvironmentBody,
 ) -> Result<Preset, AppError> {
     if state.anthropic_api_key.is_empty() {
@@ -1328,14 +1324,7 @@ async fn detect_preset_for_repo(
     }
 
     let result: DetectionResult = if body.repos.len() > 1 {
-        let entries = fetch_all_repo_contexts(
-            pool,
-            &state.github_cfg,
-            state.secrets.as_ref(),
-            user_id,
-            &body.repos,
-        )
-        .await;
+        let entries = fetch_all_repo_contexts(&body.repos).await;
         if !entries
             .iter()
             .any(|e| e.error.is_none() && e.context.is_some())
@@ -1367,30 +1356,20 @@ async fn detect_preset_for_repo(
                 format!("invalid repo URL: {e}"),
             )
         })?;
-        let forge_token = resolve_forge_token(
-            pool,
-            &state.github_cfg,
-            state.secrets.as_ref(),
-            user_id,
-            &r.host,
-        )
-        .await;
-        let repo_ctx = fetch_repo_context(&r, &body.branch, &forge_token)
-            .await
-            .map_err(|e| {
-                tracing::warn!(error = %e, "smart create: failed to fetch repo context");
-                let msg = e.to_string();
-                let code = if msg.contains("404") {
-                    "repo_not_found"
-                } else {
-                    "repo_not_accessible"
-                };
-                super::environments::coded_owned(
-                    StatusCode::BAD_GATEWAY,
-                    code,
-                    format!("failed to fetch repo: {msg}"),
-                )
-            })?;
+        let repo_ctx = fetch_repo_context(&r, &body.branch).await.map_err(|e| {
+            tracing::warn!(error = %e, "smart create: failed to fetch repo context");
+            let msg = e.to_string();
+            let code = if msg.contains("404") {
+                "repo_not_found"
+            } else {
+                "repo_not_accessible"
+            };
+            super::environments::coded_owned(
+                StatusCode::BAD_GATEWAY,
+                code,
+                format!("failed to fetch repo: {msg}"),
+            )
+        })?;
         let mut detected =
             call_claude_detect(&state.anthropic_api_key, &r.owner, &r.repo, &repo_ctx)
                 .await

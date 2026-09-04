@@ -78,18 +78,14 @@ impl EnvironmentSetupService for EnvironmentSetupConnectService {
         ctx: RequestContext,
         request: ServiceRequest<'_, DetectRepoRequest>,
     ) -> ServiceResult<DetectRepoResponse> {
-        let user = auth_user(&ctx)?.clone();
+        auth_user(&ctx)?;
         let request = request.to_owned_message();
         let invalid_repo_url = parse_repo_url(&request.repo_url).is_err();
         let result = detect_environment_repo_core(
             &self.state,
-            &user,
             DetectRequest {
                 repo_url: request.repo_url,
                 branch: request.branch,
-                // Connect deliberately exposes no caller-supplied raw-token
-                // field. The shared core resolves stored credentials.
-                github_token: String::new(),
             },
         )
         .await

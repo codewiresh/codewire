@@ -10,10 +10,6 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
-
-use crate::worker::github::{GitHubAppConfig, get_github_token_for_user};
-use crate::worker::secrets::SecretStore;
 
 use super::create::{AppPort, RepoEntry, SetupAgent};
 
@@ -233,12 +229,11 @@ fn truncate_with(s: String, max_len: usize, suffix: &str) -> String {
     }
 }
 
-async fn forge_get(client: &reqwest::Client, url: &str, token: &str) -> anyhow::Result<Vec<u8>> {
-    let mut req = forge_request(client, url).header("Accept", "application/json");
-    if !token.is_empty() {
-        req = req.header("Authorization", format!("Bearer {token}"));
-    }
-    let resp = req.send().await?;
+async fn forge_get(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<u8>> {
+    let resp = forge_request(client, url)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
     let status = resp.status();
     let body = resp.bytes().await?;
     if status.as_u16() >= 400 {
@@ -256,7 +251,6 @@ async fn forge_get_file_content(
     r: &RepoRef,
     file_path: &str,
     branch_ref: &str,
-    token: &str,
 ) -> anyhow::Result<String> {
     let mut api_url = r.api_url(&format!(
         "/repos/{}/{}/contents/{}",
@@ -265,7 +259,7 @@ async fn forge_get_file_content(
     if !branch_ref.is_empty() && branch_ref != "HEAD" {
         api_url.push_str(&format!("?ref={branch_ref}"));
     }
-    let data = forge_get(client, &api_url, token).await?;
+    let data = forge_get(client, &api_url).await?;
 
     #[derive(Deserialize)]
     struct FileResp {
@@ -284,13 +278,11 @@ async fn forge_get_file_content(
     Ok(file.content)
 }
 
-/// Mirrors `fetchRepoContext`: tree (≤2 levels) + README (3000 chars) +
-/// known config files (2000 chars each) + the first CI workflow file.
-pub async fn fetch_repo_context(
-    r: &RepoRef,
-    branch: &str,
-    token: &str,
-) -> anyhow::Result<RepoContext> {
+/// Fetches public repository context anonymously: tree (≤2 levels), README
+/// (3000 chars), known config files (2000 chars each), and the first CI
+/// workflow file. Private repository access belongs to the typed repository
+/// executor; this path deliberately cannot accept credential material.
+pub async fn fetch_repo_context(r: &RepoRef, branch: &str) -> anyhow::Result<RepoContext> {
     let client = forge_client()?;
 
     let branch_ref = if branch.is_empty() { "HEAD" } else { branch };
@@ -300,7 +292,6 @@ pub async fn fetch_repo_context(
             "/repos/{}/{}/git/trees/{}?recursive=1",
             r.owner, r.repo, branch_ref
         )),
-        token,
     )
     .await
     .map_err(|e| anyhow::anyhow!("fetch tree: {e}"))?;
@@ -335,12 +326,12 @@ pub async fn fetch_repo_context(
     }
     rc.file_tree = tree_paths.join("\n");
 
-    if let Ok(readme) = forge_get_file_content(&client, r, "README.md", branch_ref, token).await {
+    if let Ok(readme) = forge_get_file_content(&client, r, "README.md", branch_ref).await {
         rc.readme = truncate_with(readme, 3000, "\n... (truncated)");
     }
 
     for name in CONFIG_FILE_NAMES {
-        if let Ok(content) = forge_get_file_content(&client, r, name, branch_ref, token).await {
+        if let Ok(content) = forge_get_file_content(&client, r, name, branch_ref).await {
             rc.config_files.insert(
                 name.to_string(),
                 truncate_with(content, 2000, "\n... (truncated)"),
@@ -355,9 +346,7 @@ pub async fn fetch_repo_context(
                 || item.path.starts_with(".gitea/workflows/"))
             && (item.path.ends_with(".yml") || item.path.ends_with(".yaml"))
         {
-            if let Ok(content) =
-                forge_get_file_content(&client, r, &item.path, branch_ref, token).await
-            {
+            if let Ok(content) = forge_get_file_content(&client, r, &item.path, branch_ref).await {
                 rc.config_files.insert(
                     item.path.clone(),
                     truncate_with(content, 1000, "\n... (truncated)"),
@@ -916,134 +905,6 @@ pub fn parse_compose_ports(content: &str) -> Vec<AppPort> {
     out
 }
 
-// ── Forge token lookup ───────────────────────────────────────────────
-
-/// Mirrors `userSecretPath`.
-pub fn user_secret_path(user_id: &str) -> String {
-    format!("/users/{user_id}")
-}
-
-/// Mirrors `orgSecretPath`.
-pub fn org_secret_path(org_id: &str) -> String {
-    format!("/org-secrets/{org_id}")
-}
-
-/// Mirrors `forgeTokenKey`.
-fn forge_token_key(host: &str) -> &'static str {
-    if host == "github.com" {
-        "GITHUB_TOKEN"
-    } else {
-        "GITEA_TOKEN"
-    }
-}
-
-/// Mirrors `normalizeHostKey` (git_credential_routes.go): uppercase,
-/// non-alphanumerics → `_`, prefixed `GIT_TOKEN_`.
-fn normalize_host_key(host: &str) -> String {
-    let mapped: String = host
-        .to_uppercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_uppercase() || c.is_ascii_digit() {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("GIT_TOKEN_{mapped}")
-}
-
-/// Mirrors `resolveForgeToken`: GitHub OAuth DB → user_git_credentials
-/// + secret store → legacy user-level secrets → org-level secrets.
-pub async fn resolve_forge_token(
-    pool: &PgPool,
-    github_cfg: &GitHubAppConfig,
-    secrets: &SecretStore,
-    user_id: &str,
-    host: &str,
-) -> String {
-    if host == "github.com" {
-        let token = get_github_token_for_user(pool, github_cfg, user_id).await;
-        if !token.is_empty() {
-            return token;
-        }
-    }
-
-    if let Some(token) = resolve_git_credential_token(pool, secrets, user_id, host).await
-        && !token.is_empty()
-    {
-        return token;
-    }
-
-    let secret_key = forge_token_key(host);
-    if let Ok(user_secrets) = secrets
-        .get_all_secrets_at_path(&user_secret_path(user_id))
-        .await
-        && let Some(token) = user_secrets.get(secret_key)
-        && !token.is_empty()
-    {
-        return token.clone();
-    }
-
-    find_org_forge_token(pool, secrets, user_id, secret_key).await
-}
-
-async fn resolve_git_credential_token(
-    pool: &PgPool,
-    secrets: &SecretStore,
-    user_id: &str,
-    host: &str,
-) -> Option<String> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM user_git_credentials WHERE user_id = $1 AND host = $2)",
-    )
-    .bind(user_id)
-    .bind(host)
-    .fetch_one(pool)
-    .await
-    .ok()?;
-    if !exists {
-        return None;
-    }
-    let secret_key = normalize_host_key(host);
-    let user_secrets = secrets
-        .get_all_secrets_at_path(&user_secret_path(user_id))
-        .await
-        .ok()?;
-    user_secrets.get(&secret_key).cloned()
-}
-
-/// Mirrors `findOrgForgeToken`.
-async fn find_org_forge_token(
-    pool: &PgPool,
-    secrets: &SecretStore,
-    user_id: &str,
-    secret_key: &str,
-) -> String {
-    let org_ids: Vec<(String,)> = sqlx::query_as(
-        r#"SELECT o.id FROM organizations o
-           JOIN organization_members om ON om.organization_id = o.id
-           WHERE om.user_id = $1 LIMIT 5"#,
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-
-    for (org_id,) in org_ids {
-        if let Ok(org_secrets) = secrets
-            .get_all_secrets_at_path(&org_secret_path(&org_id))
-            .await
-            && let Some(token) = org_secrets.get(secret_key)
-            && !token.is_empty()
-        {
-            return token.clone();
-        }
-    }
-    String::new()
-}
-
 // ── Multi-repo context fan-out ───────────────────────────────────────
 
 /// Mirrors `api.repoContextEntry`.
@@ -1057,13 +918,7 @@ pub struct RepoContextEntry {
 
 /// Mirrors `fetchAllRepoContexts` (concurrent fetch; per-repo errors
 /// recorded, not fatal).
-pub async fn fetch_all_repo_contexts(
-    pool: &PgPool,
-    github_cfg: &GitHubAppConfig,
-    secrets: &SecretStore,
-    user_id: &str,
-    repos: &[RepoEntry],
-) -> Vec<RepoContextEntry> {
+pub async fn fetch_all_repo_contexts(repos: &[RepoEntry]) -> Vec<RepoContextEntry> {
     let mut futures = Vec::new();
     for repo in repos {
         let url = repo.url.clone();
@@ -1080,9 +935,7 @@ pub async fn fetch_all_repo_contexts(
                     return entry;
                 }
             };
-            let forge_token =
-                resolve_forge_token(pool, github_cfg, secrets, user_id, &r.host).await;
-            match fetch_repo_context(&r, &branch, &forge_token).await {
+            match fetch_repo_context(&r, &branch).await {
                 Ok(rc) => entry.context = Some(rc),
                 Err(e) => {
                     tracing::warn!(url, error = %e, "multi-repo: failed to fetch context");
@@ -1224,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn forge_client_identifies_codewire_to_public_forge_apis() {
+    fn forge_client_uses_anonymous_public_forge_requests() {
         let client = forge_client().unwrap();
         let request = forge_request(&client, "https://api.github.com/repos/codewire/codewire")
             .build()
@@ -1235,6 +1088,12 @@ mod tests {
                 .get(reqwest::header::USER_AGENT)
                 .and_then(|value| value.to_str().ok()),
             Some(FORGE_USER_AGENT)
+        );
+        assert!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none()
         );
     }
 
@@ -1401,15 +1260,5 @@ access: {profile: user/work}
         let r = unmarshal_detection_result(&v).unwrap();
         assert!(r.app_ports.is_empty());
         assert_eq!(r.install_command, "npm install");
-    }
-
-    #[test]
-    fn host_key_normalization_mirrors_go() {
-        assert_eq!(
-            normalize_host_key("gitea.example-host.com"),
-            "GIT_TOKEN_GITEA_EXAMPLE_HOST_COM"
-        );
-        assert_eq!(forge_token_key("github.com"), "GITHUB_TOKEN");
-        assert_eq!(forge_token_key("gitea.io"), "GITEA_TOKEN");
     }
 }

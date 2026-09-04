@@ -5,7 +5,6 @@
 //! fallback. Organization teardown deletes only names and paths, never values,
 //! and re-enumerates before it can call a namespace absent.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::Deserialize;
@@ -126,15 +125,6 @@ impl SecretStore {
         self.0
             .get_secret_metadata_at_path_bounded(secret_path, maximum_rows)
             .await
-    }
-
-    /// Mirrors `GetAllSecretsAtPath`.
-    pub async fn get_all_secrets_at_path(
-        &self,
-        secret_path: &str,
-    ) -> anyhow::Result<BTreeMap<String, String>> {
-        let secrets = self.get_secrets_raw_at_path(secret_path).await?;
-        Ok(secrets.into_iter().map(|s| (s.key, s.value)).collect())
     }
 
     /// Mirrors `CreateFolderAtPath` (idempotent — "already exists" is OK).

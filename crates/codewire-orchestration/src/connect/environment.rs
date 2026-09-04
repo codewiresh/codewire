@@ -582,13 +582,8 @@ impl proto::EnvironmentService for EnvironmentConnectService {
 
         let org_id = request.org_id;
         let draft = create_body(draft).map_err(|error| environment_rpc_error(&error, &ctx))?;
-        let events = start_prepare_stream(
-            self.state.clone(),
-            org_id.clone(),
-            user.user_id,
-            draft,
-            request.analyze,
-        );
+        let events =
+            start_prepare_stream(self.state.clone(), org_id.clone(), draft, request.analyze);
         let request_id = request_id(&ctx).map(str::to_owned);
         let stream = futures::stream::unfold(events, move |mut events| {
             let org_id = org_id.clone();

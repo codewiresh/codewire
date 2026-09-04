@@ -18,7 +18,7 @@ use super::create::{
 use super::detect::{
     self, DetectionResult, apply_detection_workspace_defaults, call_claude_detect,
     call_claude_detect_multi_repo, fetch_all_repo_contexts, fetch_repo_context,
-    fixup_detection_result, parse_repo_url, resolve_forge_token,
+    fixup_detection_result, parse_repo_url,
 };
 use super::environments::{coded, coded_owned, format_time, require_org_member};
 use super::secret_projects::SecretProject;
@@ -404,7 +404,6 @@ fn emit_repo_fetched(progress: &ProgressTx, index: i32, repo: &str, ok: bool) {
 async fn prepare_draft(
     state: &ApiState,
     org_id: &str,
-    user_id: &str,
     mut body: CreateEnvironmentBody,
     analyze: bool,
     progress: &ProgressTx,
@@ -516,14 +515,7 @@ async fn prepare_draft(
             Some(i32::try_from(body.repos.len()).unwrap_or(i32::MAX)),
             None,
         );
-        let entries = fetch_all_repo_contexts(
-            pool,
-            &state.github_cfg,
-            state.secrets.as_ref(),
-            user_id,
-            &body.repos,
-        )
-        .await;
+        let entries = fetch_all_repo_contexts(&body.repos).await;
         for (index, e) in entries.iter().enumerate() {
             emit_repo_fetched(
                 progress,
@@ -578,29 +570,19 @@ async fn prepare_draft(
                 format!("invalid repo URL: {e}"),
             )
         })?;
-        let forge_token = resolve_forge_token(
-            pool,
-            &state.github_cfg,
-            state.secrets.as_ref(),
-            user_id,
-            &r.host,
-        )
-        .await;
-        let repo_ctx = fetch_repo_context(&r, &body.branch, &forge_token)
-            .await
-            .map_err(|e| {
-                let msg = e.to_string();
-                let code: &'static str = if is_repo_not_found(&msg) {
-                    "repo_not_found"
-                } else {
-                    "repo_not_accessible"
-                };
-                coded_owned(
-                    StatusCode::BAD_GATEWAY,
-                    code,
-                    format!("failed to fetch repo: {msg}"),
-                )
-            })?;
+        let repo_ctx = fetch_repo_context(&r, &body.branch).await.map_err(|e| {
+            let msg = e.to_string();
+            let code: &'static str = if is_repo_not_found(&msg) {
+                "repo_not_found"
+            } else {
+                "repo_not_accessible"
+            };
+            coded_owned(
+                StatusCode::BAD_GATEWAY,
+                code,
+                format!("failed to fetch repo: {msg}"),
+            )
+        })?;
 
         emit_progress(progress, "analyzing", "Analyzing repository...", None, None);
         let mut detected =
@@ -643,7 +625,6 @@ fn is_repo_not_found(msg: &str) -> bool {
 pub(crate) fn start_prepare_stream(
     state: ApiState,
     org_id: String,
-    user_id: String,
     body: CreateEnvironmentBody,
     analyze: Option<bool>,
 ) -> PrepareStreamRx {
@@ -651,7 +632,7 @@ pub(crate) fn start_prepare_stream(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PrepareStreamItem>();
     let progress: ProgressTx = Some(tx.clone());
     tokio::spawn(async move {
-        let item = match prepare_draft(&state, &org_id, &user_id, body, analyze, &progress).await {
+        let item = match prepare_draft(&state, &org_id, body, analyze, &progress).await {
             Ok(response) => Ok(PrepareStreamEvent::Complete(Box::new(response))),
             Err(error) => Err(error),
         };
@@ -686,11 +667,9 @@ pub(crate) fn json_response(status: StatusCode, value: &impl Serialize) -> Respo
 pub struct DetectRequest {
     pub repo_url: String,
     pub branch: String,
-    pub github_token: String,
 }
 pub(crate) async fn detect_environment_repo_core(
     state: &ApiState,
-    user: &AuthUser,
     input: DetectRequest,
 ) -> AppResult<DetectionResult> {
     if state.anthropic_api_key.is_empty() {
@@ -702,21 +681,7 @@ pub(crate) async fn detect_environment_repo_core(
     let r = parse_repo_url(&input.repo_url)
         .map_err(|e| AppError::BadRequest(format!("invalid repo URL: {e}").into()))?;
 
-    // Client-supplied token > user-stored > org-level secrets.
-    let forge_token = if input.github_token.is_empty() {
-        resolve_forge_token(
-            &state.pool,
-            &state.github_cfg,
-            state.secrets.as_ref(),
-            &user.user_id,
-            &r.host,
-        )
-        .await
-    } else {
-        input.github_token
-    };
-
-    let repo_ctx = fetch_repo_context(&r, &input.branch, &forge_token).await.map_err(|e| {
+    let repo_ctx = fetch_repo_context(&r, &input.branch).await.map_err(|e| {
         tracing::warn!(error = %e, owner = r.owner, repo = r.repo, "detect: failed to fetch repo context");
         AppError::Upstream(format!("failed to fetch repo: {e}").into())
     })?;
