@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{self, Read as _};
 use std::path::Path;
 
-use codewire_project::ProjectSpec;
+use codewire_project::{ProjectSpec, is_valid_environment_key};
 use oci_spec::image::ImageConfiguration;
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
@@ -356,13 +356,7 @@ fn merge_environment(
 }
 
 fn validate_environment_key(key: &str) -> Result<(), WorkspacePlanError> {
-    let mut bytes = key.bytes();
-    if key.len() > 256
-        || !bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
+    if !is_valid_environment_key(key) {
         return Err(WorkspacePlanError::Environment);
     }
     Ok(())
@@ -738,6 +732,24 @@ mod tests {
 
     use super::*;
     use crate::{LayerEncoding, SetupBlob, SetupLayerBlob, Sha256Value, oci_root_generation};
+
+    #[test]
+    fn guest_environment_names_use_the_canonical_project_boundary() {
+        let maximum = format!(
+            "A{}",
+            "_".repeat(codewire_project::MAX_ENVIRONMENT_KEY_BYTES - 1)
+        );
+        let too_long = format!(
+            "A{}",
+            "_".repeat(codewire_project::MAX_ENVIRONMENT_KEY_BYTES)
+        );
+
+        assert!(validate_environment_key(&maximum).is_ok());
+        assert!(matches!(
+            validate_environment_key(&too_long),
+            Err(WorkspacePlanError::Environment)
+        ));
+    }
 
     fn root() -> TempDir {
         let root = tempfile::tempdir().unwrap();

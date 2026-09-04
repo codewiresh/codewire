@@ -28,8 +28,8 @@ use codewire_proto::codewire::v1::{
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
 use codewire_workload_secrets::{
-    MAX_WORKLOAD_SECRET_VALUE_BYTES, ResolvedWorkloadSecretMetadata, WorkloadSecretSource,
-    validate_workload_secret_value,
+    MAX_WORKLOAD_SECRET_KEY_BYTES, MAX_WORKLOAD_SECRET_VALUE_BYTES, ResolvedWorkloadSecretMetadata,
+    WorkloadSecretSource, validate_workload_secret_value,
 };
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
@@ -415,9 +415,9 @@ fn secret_key_validation(error: AppError, key: &str) -> AppError {
         AppError::Validation {
             errors: vec![ValidationIssue {
                 path: Cow::Borrowed("/key"),
-                message: Cow::Borrowed(
-                    "secret key must contain only ASCII letters, digits, or underscores",
-                ),
+                message: Cow::Owned(format!(
+                    "secret key must be 1 to {MAX_WORKLOAD_SECRET_KEY_BYTES} bytes and contain only ASCII letters, digits, or underscores"
+                )),
             }],
         }
     } else {
@@ -574,18 +574,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_secret_key_names_the_key_proto_field() {
-        let error = secret_key_validation(
-            AppError::BadRequest("invalid secret key".into()),
-            "unsafe/path",
-        );
-        let rendered = ConnectError::from_app_error(&error, None);
-        assert_eq!(rendered.code, ConnectCode::InvalidArgument);
-        let ConnectErrorDetail::BadRequest(detail) = &rendered.details[0] else {
-            panic!("missing BadRequest detail");
-        };
-        assert_eq!(detail.field_violations[0].field, "key");
-        assert!(!detail.field_violations[0].description.is_empty());
+    fn invalid_secret_keys_name_the_key_proto_field() {
+        for key in [
+            "unsafe/path".to_owned(),
+            "A".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES + 1),
+        ] {
+            let error =
+                secret_key_validation(AppError::BadRequest("invalid secret key".into()), &key);
+            let rendered = ConnectError::from_app_error(&error, None);
+            assert_eq!(rendered.code, ConnectCode::InvalidArgument);
+            let ConnectErrorDetail::BadRequest(detail) = &rendered.details[0] else {
+                panic!("missing BadRequest detail");
+            };
+            assert_eq!(detail.field_violations[0].field, "key");
+            assert!(!detail.field_violations[0].description.is_empty());
+        }
     }
 
     #[test]

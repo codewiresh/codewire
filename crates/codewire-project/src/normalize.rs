@@ -818,11 +818,7 @@ fn normalize_environment(
     environment: BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, ProjectError> {
     for (key, value) in &environment {
-        let valid_key = !key.is_empty()
-            && key.chars().enumerate().all(|(index, ch)| {
-                ch == '_' || ch.is_ascii_alphabetic() || index > 0 && ch.is_ascii_digit()
-            });
-        if !valid_key {
+        if !is_valid_environment_key(key) {
             return invalid(field, format!("invalid environment name {key:?}"));
         }
         if value.len() > MAX_ENVIRONMENT_VALUE_BYTES {

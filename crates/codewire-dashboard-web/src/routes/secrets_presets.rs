@@ -5,6 +5,9 @@ use axum::{
     response::Response,
 };
 use codewire_proto::codewire::v1::UpdatePresetRequest;
+use codewire_workload_secrets::{
+    MAX_WORKLOAD_SECRET_KEY_BYTES, validate_workload_secret_metadata_key,
+};
 use connectrpc::{ConnectError, ErrorCode};
 use serde::Deserialize;
 
@@ -711,7 +714,9 @@ async fn render_preset_form_error(
 
 fn validate_secret_form(form: &mut SecretFormView, value: &str) {
     if !valid_secret_key(&form.key) {
-        form.key_error = "Use 1–256 ASCII letters, numbers, or underscores for the key".to_owned();
+        form.key_error = format!(
+            "Use 1–{MAX_WORKLOAD_SECRET_KEY_BYTES} ASCII letters, numbers, or underscores for the key"
+        );
     }
     if value.is_empty() {
         form.form_error = "Enter a secret value. Values are never shown again.".to_owned();
@@ -719,11 +724,7 @@ fn validate_secret_form(form: &mut SecretFormView, value: &str) {
 }
 
 fn valid_secret_key(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    validate_workload_secret_metadata_key(value).is_ok()
 }
 
 fn bucket_scope(bucket: &str) -> SecretBucket<'_> {
@@ -912,6 +913,27 @@ mod tests {
     use codewire_proto::google::rpc::BadRequest;
 
     #[test]
+    fn secret_keys_use_the_shared_storage_boundary() {
+        let maximum = format!("1{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 1));
+        let too_long = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES));
+
+        assert_eq!(maximum.len(), 255);
+        assert_eq!(too_long.len(), 256);
+        assert!(valid_secret_key(&maximum));
+        assert!(!valid_secret_key(&too_long));
+
+        let mut form = SecretFormView {
+            key: too_long,
+            ..Default::default()
+        };
+        validate_secret_form(&mut form, "synthetic");
+        assert_eq!(
+            form.key_error,
+            "Use 1–255 ASCII letters, numbers, or underscores for the key"
+        );
+    }
+
+    #[test]
     fn secret_validation_never_retains_the_value() {
         let marker = "must-never-enter-the-view";
         let mut form = SecretFormView {
@@ -999,6 +1021,8 @@ mod tests {
         .render()
         .expect("render secret bucket");
         assert!(!secret_body.contains("<script>secret-key</script>"));
+        assert_eq!(secret_body.matches("maxlength=\"255\"").count(), 2);
+        assert!(!secret_body.contains("maxlength=\"256\""));
 
         let preset_page = PresetsPageView {
             presets: vec![crate::view::PresetRow {

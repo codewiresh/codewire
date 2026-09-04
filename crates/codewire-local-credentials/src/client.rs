@@ -13,6 +13,7 @@ use codewire_access::{
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
 };
+use codewire_workload_secrets::validate_workload_secret_key;
 use tonic::Status;
 use uuid::Uuid;
 
@@ -1374,13 +1375,7 @@ fn valid_secret_project_name(name: &str) -> bool {
 }
 
 fn valid_workload_secret_key(key: &str) -> bool {
-    let mut bytes = key.bytes();
-    !key.is_empty()
-        && key.len() <= 256
-        && bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    validate_workload_secret_key(key).is_ok()
 }
 
 fn profile_record_from_proto(
@@ -1537,6 +1532,39 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn workload_secret_response_keys_use_the_shared_storage_boundary() {
+        let maximum = format!(
+            "A{}",
+            "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES - 1)
+        );
+        let too_long = format!(
+            "A{}",
+            "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES)
+        );
+
+        assert!(valid_workload_secret_key(&maximum));
+        assert!(!valid_workload_secret_key(&too_long));
+        assert!(
+            workload_secret_from_proto(v1::WorkloadSecretMetadata {
+                key: maximum,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+            })
+            .is_ok()
+        );
+        assert_eq!(
+            workload_secret_from_proto(v1::WorkloadSecretMetadata {
+                key: too_long,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+            })
+            .unwrap_err()
+            .code(),
+            tonic::Code::DataLoss
+        );
+    }
 
     #[test]
     fn broker_supervisor_socket_never_uses_a_lossy_wire_identity() {

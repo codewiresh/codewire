@@ -355,6 +355,25 @@ export interface SecretMetadata {
   updated_at?: string;
 }
 
+export type WorkloadSecretSource =
+  | "organization"
+  | "project"
+  | "user"
+  | "explicit_environment";
+
+export interface WorkloadSecretPreviewInput {
+  organization?: boolean;
+  secret_project_id?: string;
+  user?: boolean;
+  explicit_environment_keys?: string[];
+}
+
+export interface ResolvedWorkloadSecretMetadata {
+  key: string;
+  source: WorkloadSecretSource;
+  overridden_sources: WorkloadSecretSource[];
+}
+
 export interface SecretProject {
   created_at: string;
   id: string;

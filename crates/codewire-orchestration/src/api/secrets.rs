@@ -9,9 +9,9 @@ use codewire_server_core::org_deletion::{
 };
 use codewire_server_core::{AppError, AppResult};
 use codewire_workload_secrets::{
-    MAX_WORKLOAD_SECRET_VALUE_BYTES, MAX_WORKLOAD_SECRETS, ResolvedWorkloadSecretMetadata,
-    WorkloadSecretCodecError, WorkloadSecretSource, resolve_workload_secret_metadata,
-    validate_workload_secret_key, validate_workload_secret_value,
+    MAX_WORKLOAD_SECRET_KEY_BYTES, MAX_WORKLOAD_SECRET_VALUE_BYTES, MAX_WORKLOAD_SECRETS,
+    ResolvedWorkloadSecretMetadata, WorkloadSecretCodecError, WorkloadSecretSource,
+    resolve_workload_secret_metadata, validate_workload_secret_key, validate_workload_secret_value,
 };
 
 use super::ApiState;
@@ -50,7 +50,10 @@ fn user_secret_path(user_id: &str) -> String {
 pub(super) fn validate_secret_key(key: &str) -> AppResult<()> {
     if !crate::worker::secrets::is_valid_secret_key(key) {
         return Err(AppError::BadRequest(
-            "secret key must contain only ASCII letters, digits, or underscores".into(),
+            format!(
+                "secret key must be 1 to {MAX_WORKLOAD_SECRET_KEY_BYTES} bytes and contain only ASCII letters, digits, or underscores"
+            )
+            .into(),
         ));
     }
     Ok(())
@@ -523,6 +526,15 @@ pub(crate) async fn rename_user_secret_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_secret_keys_use_the_shared_storage_boundary() {
+        let maximum = format!("1{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 1));
+        let too_long = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES));
+
+        assert!(validate_secret_key(&maximum).is_ok());
+        assert!(validate_secret_key(&too_long).is_err());
+    }
 
     #[test]
     fn workload_secret_values_use_the_shared_bounds_without_rendering_material() {

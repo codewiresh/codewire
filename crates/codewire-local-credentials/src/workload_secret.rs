@@ -11,7 +11,9 @@ use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
 };
 pub use codewire_workload_secrets::{ResolvedWorkloadSecretMetadata, WorkloadSecretSource};
-use codewire_workload_secrets::{resolve_workload_secret_metadata, validate_workload_secret_value};
+use codewire_workload_secrets::{
+    resolve_workload_secret_metadata, validate_workload_secret_key, validate_workload_secret_value,
+};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use uuid::Uuid;
 
@@ -20,7 +22,6 @@ use crate::{
     MaterialState, database_error, map_insert_error, unix_millis,
 };
 
-const MAX_SECRET_KEY_BYTES: usize = 256;
 const MAX_SECRET_PROJECT_NAME_BYTES: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -838,17 +839,7 @@ fn validate_project_name(name: &str) -> Result<(), LocalCredentialError> {
 }
 
 fn validate_secret_key(key: &str) -> Result<(), LocalCredentialError> {
-    let mut bytes = key.bytes();
-    if key.is_empty()
-        || key.len() > MAX_SECRET_KEY_BYTES
-        || !bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err(LocalCredentialError::InvalidWorkloadSecret);
-    }
-    Ok(())
+    validate_workload_secret_key(key).map_err(|_| LocalCredentialError::InvalidWorkloadSecret)
 }
 
 fn validate_secret_value(value: &[u8]) -> Result<(), LocalCredentialError> {
@@ -882,6 +873,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn local_secret_keys_use_the_shared_storage_boundary() {
+        let maximum = format!(
+            "A{}",
+            "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES - 1)
+        );
+        let too_long = format!(
+            "A{}",
+            "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES)
+        );
+
+        assert!(validate_secret_key(&maximum).is_ok());
+        assert_eq!(
+            validate_secret_key(&too_long),
+            Err(LocalCredentialError::InvalidWorkloadSecret)
+        );
+    }
 
     fn authority_root(temp: &TempDir) -> std::path::PathBuf {
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();

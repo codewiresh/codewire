@@ -11,6 +11,8 @@ use std::fmt;
 use serde::Deserialize;
 use sqlx::PgPool;
 
+use codewire_workload_secrets::validate_workload_secret_metadata_key;
+
 /// Legacy SSH material is consumed by setup's dedicated SSH path and must
 /// never be resolved into the workload environment from user secrets.
 pub const SSH_PRIVATE_KEY_SECRET_KEY: &str = "SSH_PRIVATE_KEY";
@@ -227,10 +229,7 @@ fn split_folder_path(secret_path: &str) -> anyhow::Result<(String, String)> {
 /// than a general URL segment keeps the storage path sink unambiguous and
 /// matches the dashboard's environment-variable-style key input.
 pub fn is_valid_secret_key(key: &str) -> bool {
-    !key.is_empty()
-        && key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    validate_workload_secret_metadata_key(key).is_ok()
 }
 
 /// Mirrors `mergeSecrets`: existing keys win, optional skip set,

@@ -60,6 +60,15 @@ fn accepts_human_gigabyte_resource_quantities() {
 }
 
 #[test]
+fn environment_names_use_the_workload_secret_key_boundary() {
+    let maximum = format!("A{}", "_".repeat(MAX_ENVIRONMENT_KEY_BYTES - 1));
+    let too_long = format!("A{}", "_".repeat(MAX_ENVIRONMENT_KEY_BYTES));
+
+    assert!(parse_project_yaml(&format!("environment:\n  {maximum}: value\n")).is_ok());
+    assert!(parse_project_yaml(&format!("environment:\n  {too_long}: value\n")).is_err());
+}
+
+#[test]
 fn normalizes_repositories_workdir_skills_and_access_profile() {
     let document = parse_project_yaml(
         r#"

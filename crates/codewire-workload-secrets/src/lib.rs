@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const MAX_WORKLOAD_SECRETS: usize = 256;
-pub const MAX_WORKLOAD_SECRET_KEY_BYTES: usize = 256;
+pub const MAX_WORKLOAD_SECRET_KEY_BYTES: usize = 255;
 pub const MAX_WORKLOAD_SECRET_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -121,6 +121,23 @@ pub enum WorkloadSecretCodecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workload_secret_key_validation_uses_the_shared_storage_boundary() {
+        let below_maximum = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 2));
+        let maximum = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 1));
+        let too_long = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES));
+
+        assert_eq!(below_maximum.len(), 254);
+        assert_eq!(maximum.len(), 255);
+        assert_eq!(too_long.len(), 256);
+        for valid in [&below_maximum, &maximum] {
+            assert!(validate_workload_secret_key(valid).is_ok());
+            assert!(validate_workload_secret_metadata_key(valid).is_ok());
+        }
+        assert!(validate_workload_secret_key(&too_long).is_err());
+        assert!(validate_workload_secret_metadata_key(&too_long).is_err());
+    }
 
     #[test]
     fn shared_value_validation_is_bounded_and_content_preserving() {

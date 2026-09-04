@@ -1,7 +1,14 @@
-import { fromProtoSecretMetadata } from "./convert.js";
+import {
+  fromProtoResolvedWorkloadSecretMetadata,
+  fromProtoSecretMetadata,
+} from "./convert.js";
 import type { SecretClient } from "./transport.js";
 import { mapConnectError } from "./types.js";
-import type { SecretMetadata } from "./types.js";
+import type {
+  ResolvedWorkloadSecretMetadata,
+  SecretMetadata,
+  WorkloadSecretPreviewInput,
+} from "./types.js";
 
 function resolveOrgId(orgId: string): string {
   if (!orgId) {
@@ -110,6 +117,24 @@ export class Secrets {
   async renameUser(oldKey: string, newKey: string): Promise<void> {
     try {
       await this.client.renameUserSecret({ key: oldKey, newKey });
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Resolve selected workload-secret key precedence without reading values. */
+  async preview(
+    input: WorkloadSecretPreviewInput = {},
+  ): Promise<ResolvedWorkloadSecretMetadata[]> {
+    try {
+      const response = await this.client.previewWorkloadSecretResolution({
+        orgId: resolveOrgId(this.orgId),
+        organization: input.organization ?? false,
+        secretProjectId: input.secret_project_id ?? "",
+        user: input.user ?? false,
+        explicitEnvironmentKeys: [...(input.explicit_environment_keys ?? [])],
+      });
+      return response.secrets.map(fromProtoResolvedWorkloadSecretMetadata);
     } catch (error) {
       throw mapConnectError(error);
     }

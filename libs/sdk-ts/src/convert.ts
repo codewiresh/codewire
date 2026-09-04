@@ -50,8 +50,10 @@ import {
   type Preset as ProtoPreset,
 } from "@codewire/proto-ts/gen/codewire/v1/preset_pb";
 import {
+  WorkloadSecretSource as ProtoWorkloadSecretSource,
   SecretMetadataSchema,
   SecretProjectSchema,
+  type ResolvedWorkloadSecretMetadata as ProtoResolvedWorkloadSecretMetadata,
   type SecretMetadata as ProtoSecretMetadata,
   type SecretProject as ProtoSecretProject,
 } from "@codewire/proto-ts/gen/codewire/v1/secret_pb";
@@ -71,10 +73,12 @@ import type {
   ListEnvironmentsParams,
   ProjectSkillSelection,
   ProjectSpec,
+  ResolvedWorkloadSecretMetadata,
   SecretMetadata,
   SecretProject,
   TemplateData,
   UpdateTemplateRequest,
+  WorkloadSecretSource,
 } from "./types.js";
 
 const apiKeyDescriptorFields = new Map([
@@ -673,6 +677,31 @@ export function fromProtoSecretMetadata(value: ProtoSecretMetadata): SecretMetad
     key: value.key,
     created_at: timestampString(value.createdAt),
     updated_at: timestampString(value.updatedAt),
+  };
+}
+
+function workloadSecretSource(value: ProtoWorkloadSecretSource): WorkloadSecretSource {
+  switch (value) {
+    case ProtoWorkloadSecretSource.ORGANIZATION:
+      return "organization";
+    case ProtoWorkloadSecretSource.PROJECT:
+      return "project";
+    case ProtoWorkloadSecretSource.USER:
+      return "user";
+    case ProtoWorkloadSecretSource.EXPLICIT_ENVIRONMENT:
+      return "explicit_environment";
+    default:
+      throw new Error(`codewire: invalid workload-secret source ${value}`);
+  }
+}
+
+export function fromProtoResolvedWorkloadSecretMetadata(
+  value: ProtoResolvedWorkloadSecretMetadata,
+): ResolvedWorkloadSecretMetadata {
+  return {
+    key: value.key,
+    source: workloadSecretSource(value.source),
+    overridden_sources: value.overriddenSources.map(workloadSecretSource),
   };
 }
 

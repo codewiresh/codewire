@@ -21,6 +21,14 @@ pub const MAX_APPLICATION_PORTS: usize = 128;
 pub const MAX_AGENTS: usize = 32;
 pub const MAX_SKILLS: usize = 256;
 pub const MAX_LOCAL_MOUNTS: usize = 64;
+/// Maximum key size accepted by canonical project and guest workload boundaries.
+pub const MAX_ENVIRONMENT_KEY_BYTES: usize =
+    codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES;
+
+/// Returns whether a name is valid across project, guest, and secret-resolution boundaries.
+pub fn is_valid_environment_key(key: &str) -> bool {
+    codewire_workload_secrets::validate_workload_secret_key(key).is_ok()
+}
 
 const WORKSPACE_ROOT: &str = "/workspace";
 const MAX_SHORT_VALUE_BYTES: usize = 1024;

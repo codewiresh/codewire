@@ -390,7 +390,7 @@ impl PostgresSecretStore {
                 if row.scope != context.scope.as_str() || row.scope_id != context.scope_id {
                     return Err(store_error("secret-metadata-scope-mismatch"));
                 }
-                if !is_valid_secret_key(&row.key) || row.key.len() > 255 {
+                if !is_valid_secret_key(&row.key) {
                     return Err(store_error("invalid-persisted-secret-key"));
                 }
                 Ok(StoredSecretMetadata {
@@ -409,7 +409,7 @@ impl PostgresSecretStore {
         value: &str,
     ) -> anyhow::Result<()> {
         let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
-        if !is_valid_secret_key(key) || key.len() > 255 {
+        if !is_valid_secret_key(key) {
             return Err(store_error("invalid-secret-key"));
         }
         validate_workload_secret_value(value.as_bytes())
@@ -472,7 +472,7 @@ impl PostgresSecretStore {
 
     pub async fn delete_secret_at_path(&self, secret_path: &str, key: &str) -> anyhow::Result<()> {
         let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
-        if !is_valid_secret_key(key) || key.len() > 255 {
+        if !is_valid_secret_key(key) {
             return Err(store_error("invalid-secret-key"));
         }
         let mut tx = self
@@ -570,7 +570,7 @@ impl PostgresSecretStore {
         let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
         if [old_key, new_key]
             .into_iter()
-            .any(|key| !is_valid_secret_key(key) || key.len() > 255)
+            .any(|key| !is_valid_secret_key(key))
         {
             return Err(store_error("invalid-secret-key"));
         }
@@ -816,6 +816,28 @@ mod tests {
                 assert!(!error.to_string().contains(&invalid));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn oversized_workload_secret_keys_fail_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy test pool");
+        let store = PostgresSecretStore::new(pool, Arc::new(TestKekProvider));
+        let key = format!(
+            "A{}",
+            "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES)
+        );
+
+        let error = store
+            .set_secret_at_path("/users/synthetic", &key, "synthetic")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failure_class=invalid-secret-key")
+        );
     }
 
     #[tokio::test]
