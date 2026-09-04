@@ -486,11 +486,7 @@ fn validate_secret_free_draft(
         .as_option()
         .and_then(|project| project.secrets.as_option())
         .is_some_and(|secrets| {
-            !secrets.project.trim().is_empty()
-                || secrets.organization
-                || secrets.user
-                || secrets.include_org.unwrap_or(false)
-                || secrets.include_user.unwrap_or(false)
+            !secrets.project.trim().is_empty() || secrets.organization || secrets.user
         });
     let preset_is_safe = match draft
         .preset_id
@@ -2489,14 +2485,6 @@ mod tests {
             },
             codewire_proto::codewire::v1::ProjectSecretBindings {
                 user: true,
-                ..Default::default()
-            },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
-                include_org: Some(true),
-                ..Default::default()
-            },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
-                include_user: Some(true),
                 ..Default::default()
             },
         ] {

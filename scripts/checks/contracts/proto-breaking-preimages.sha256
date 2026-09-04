@@ -1,0 +1,7 @@
+# Mode, exact pre-change content digest, and repository-relative path.
+# Append-only: each new entry permits one reviewed clean break on its exact base.
+# Historical replacements return to strict Buf checks; deletions stay absent.
+delete   f3ca772cd1e0e6c9256365a01b7f9e5213873c432e6d751d3ab6c7d2670abbb1  proto/codewire/internal/v1/environment_credentials.proto
+replace  066ee940ab3e4e601bcbf361d71ba1720147c3580101a3f960c324fb8649512a  proto/codewire/v1/common.proto
+replace  961dc29759c2e7739734470045b849001879fada50db232393c5b291591d42db  proto/codewire/v1/environment.proto
+replace  85781e80015bbb0c1ef14119ffc1d54a900d12d0aa28fad6949bc49fa30225a5  proto/codewire/v1/preset.proto

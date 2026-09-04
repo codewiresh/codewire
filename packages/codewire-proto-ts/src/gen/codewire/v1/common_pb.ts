@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/common.proto.
  */
 export const file_codewire_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("Chhjb2Rld2lyZS92MS9jb21tb24ucHJvdG8SC2NvZGV3aXJlLnYxIicKE1NjYWZmb2xkUGxhY2Vob2xkZXISDAoEbm90ZRgBIAEoCToCGAEiTgoJUmVwb0VudHJ5EgsKA3VybBgBIAEoCRIOCgZicmFuY2gYAiABKAkSEgoKbW91bnRfcGF0aBgDIAEoCRIQCghyZXZpc2lvbhgEIAEoCSI2CgdBcHBQb3J0EgwKBHBvcnQYASABKAUSDQoFbGFiZWwYAiABKAkSDgoGYWNjZXNzGAMgASgJIhoKClNldHVwQWdlbnQSDAoEdHlwZRgBIAEoCSK4BAoLU2V0dXBDb25maWcSEAoIcmVwb191cmwYASABKAkSDgoGYnJhbmNoGAIgASgJEiUKBXJlcG9zGAMgAygLMhYuY29kZXdpcmUudjEuUmVwb0VudHJ5EhcKD2luc3RhbGxfY29tbWFuZBgEIAEoCRIWCg5zdGFydHVwX3NjcmlwdBgFIAEoCRI3CghlbnZfdmFycxgGIAMoCzIlLmNvZGV3aXJlLnYxLlNldHVwQ29uZmlnLkVudlZhcnNFbnRyeRInCgZhZ2VudHMYByADKAsyFy5jb2Rld2lyZS52MS5TZXR1cEFnZW50EhsKDmluc3RhbGxfYWdlbnRzGAggASgISACIAQESDQoFYWdlbnQYCSABKAkSJwoJYXBwX3BvcnRzGAsgAygLMhQuY29kZXdpcmUudjEuQXBwUG9ydBIgChNpbmNsdWRlX29yZ19zZWNyZXRzGAwgASgISAGIAQESIQoUaW5jbHVkZV91c2VyX3NlY3JldHMYDSABKAhIAogBARIuCgxwcm9qZWN0X3NwZWMYDiABKAsyGC5jb2Rld2lyZS52MS5Qcm9qZWN0U3BlYxouCgxFbnZWYXJzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIRCg9faW5zdGFsbF9hZ2VudHNCFgoUX2luY2x1ZGVfb3JnX3NlY3JldHNCFwoVX2luY2x1ZGVfdXNlcl9zZWNyZXRzSgQIChALUglhZ2VudF9lbnYiQAoNUHJvamVjdEFnZW50cxIUCgdpbnN0YWxsGAEgASgISACIAQESDQoFdG9vbHMYAiADKAlCCgoIX2luc3RhbGwiawoVUHJvamVjdFNraWxsU2VsZWN0aW9uEi8KBnNvdXJjZRgBIAEoDjIfLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNvdXJjZRIRCglyZWZlcmVuY2UYAiABKAkSDgoGYWdlbnRzGAMgAygJIo4BChBQcm9qZWN0UmVzb3VyY2VzEhsKDmNwdV9taWxsaWNvcmVzGAEgASgNSACIAQESFwoKbWVtb3J5X21pYhgCIAEoBEgBiAEBEhUKCGRpc2tfZ2liGAMgASgESAKIAQFCEQoPX2NwdV9taWxsaWNvcmVzQg0KC19tZW1vcnlfbWliQgsKCV9kaXNrX2dpYiKqAQoVUHJvamVjdFNlY3JldEJpbmRpbmdzEg8KB3Byb2plY3QYASABKAkSHAoLaW5jbHVkZV9vcmcYAiABKAhCAhgBSACIAQESHQoMaW5jbHVkZV91c2VyGAMgASgIQgIYAUgBiAEBEhQKDG9yZ2FuaXphdGlvbhgEIAEoCBIMCgR1c2VyGAUgASgIQg4KDF9pbmNsdWRlX29yZ0IPCg1faW5jbHVkZV91c2VyIkMKGlByb2plY3RDcmVkZW50aWFsUmVmZXJlbmNlEhAKCHByb3ZpZGVyGAEgASgJEg8KB2FjY291bnQYAiABKAk6AhgBIicKFFByb2plY3RBY2Nlc3NCaW5kaW5nEg8KB3Byb2ZpbGUYASABKAki1gYKC1Byb2plY3RTcGVjEhYKDnNjaGVtYV92ZXJzaW9uGAEgASgNEg4KBnByZXNldBgCIAEoCRINCgVpbWFnZRgDIAEoCRIsCgxyZXBvc2l0b3JpZXMYBCADKAsyFi5jb2Rld2lyZS52MS5SZXBvRW50cnkSGQoRd29ya2luZ19kaXJlY3RvcnkYBSABKAkSFwoPaW5zdGFsbF9jb21tYW5kGAYgASgJEhYKDnN0YXJ0dXBfc2NyaXB0GAcgASgJEj4KC2Vudmlyb25tZW50GAggAygLMikuY29kZXdpcmUudjEuUHJvamVjdFNwZWMuRW52aXJvbm1lbnRFbnRyeRIqCgZhZ2VudHMYCSABKAsyGi5jb2Rld2lyZS52MS5Qcm9qZWN0QWdlbnRzEjIKBnNraWxscxgLIAMoCzIiLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNlbGVjdGlvbhIvChFhcHBsaWNhdGlvbl9wb3J0cxgMIAMoCzIULmNvZGV3aXJlLnYxLkFwcFBvcnQSMAoJcmVzb3VyY2VzGA0gASgLMh0uY29kZXdpcmUudjEuUHJvamVjdFJlc291cmNlcxIzCgdzZWNyZXRzGA4gASgLMiIuY29kZXdpcmUudjEuUHJvamVjdFNlY3JldEJpbmRpbmdzEkIKC2NyZWRlbnRpYWxzGA8gAygLMikuY29kZXdpcmUudjEuUHJvamVjdFNwZWMuQ3JlZGVudGlhbHNFbnRyeUICGAESPQoOd29ya3NwYWNlX21vZGUYECABKA4yIS5jb2Rld2lyZS52MS5Qcm9qZWN0V29ya3NwYWNlTW9kZUICGAESMQoGYWNjZXNzGBEgASgLMiEuY29kZXdpcmUudjEuUHJvamVjdEFjY2Vzc0JpbmRpbmcaMgoQRW52aXJvbm1lbnRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGlsKEENyZWRlbnRpYWxzRW50cnkSCwoDa2V5GAEgASgJEjYKBXZhbHVlGAIgASgLMicuY29kZXdpcmUudjEuUHJvamVjdENyZWRlbnRpYWxSZWZlcmVuY2U6AjgBSgQIChALUhFhZ2VudF9lbnZpcm9ubWVudCqoAQoUUHJvamVjdFdvcmtzcGFjZU1vZGUSJgoiUFJPSkVDVF9XT1JLU1BBQ0VfTU9ERV9VTlNQRUNJRklFRBAAEh8KG1BST0pFQ1RfV09SS1NQQUNFX01PREVfQVVUTxABEiAKHFBST0pFQ1RfV09SS1NQQUNFX01PREVfQ0xPTkUQAhIhCh1QUk9KRUNUX1dPUktTUEFDRV9NT0RFX0RJUkVDVBADGgIYASp+ChJQcm9qZWN0U2tpbGxTb3VyY2USJAogUFJPSkVDVF9TS0lMTF9TT1VSQ0VfVU5TUEVDSUZJRUQQABIjCh9QUk9KRUNUX1NLSUxMX1NPVVJDRV9SRVBPU0lUT1JZEAESHQoZUFJPSkVDVF9TS0lMTF9TT1VSQ0VfVVNFUhACQq4BCg9jb20uY29kZXdpcmUudjFCC0NvbW1vblByb3RvUAFaQWdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS92MTtjb2Rld2lyZXYxogIDQ1hYqgILQ29kZXdpcmUuVjHKAgtDb2Rld2lyZVxWMeICF0NvZGV3aXJlXFYxXEdQQk1ldGFkYXRh6gIMQ29kZXdpcmU6OlYxYgZwcm90bzM");
+  fileDesc("Chhjb2Rld2lyZS92MS9jb21tb24ucHJvdG8SC2NvZGV3aXJlLnYxIicKE1NjYWZmb2xkUGxhY2Vob2xkZXISDAoEbm90ZRgBIAEoCToCGAEiTgoJUmVwb0VudHJ5EgsKA3VybBgBIAEoCRIOCgZicmFuY2gYAiABKAkSEgoKbW91bnRfcGF0aBgDIAEoCRIQCghyZXZpc2lvbhgEIAEoCSI2CgdBcHBQb3J0EgwKBHBvcnQYASABKAUSDQoFbGFiZWwYAiABKAkSDgoGYWNjZXNzGAMgASgJIhoKClNldHVwQWdlbnQSDAoEdHlwZRgBIAEoCSK4BAoLU2V0dXBDb25maWcSEAoIcmVwb191cmwYASABKAkSDgoGYnJhbmNoGAIgASgJEiUKBXJlcG9zGAMgAygLMhYuY29kZXdpcmUudjEuUmVwb0VudHJ5EhcKD2luc3RhbGxfY29tbWFuZBgEIAEoCRIWCg5zdGFydHVwX3NjcmlwdBgFIAEoCRI3CghlbnZfdmFycxgGIAMoCzIlLmNvZGV3aXJlLnYxLlNldHVwQ29uZmlnLkVudlZhcnNFbnRyeRInCgZhZ2VudHMYByADKAsyFy5jb2Rld2lyZS52MS5TZXR1cEFnZW50EhsKDmluc3RhbGxfYWdlbnRzGAggASgISACIAQESDQoFYWdlbnQYCSABKAkSJwoJYXBwX3BvcnRzGAsgAygLMhQuY29kZXdpcmUudjEuQXBwUG9ydBIgChNpbmNsdWRlX29yZ19zZWNyZXRzGAwgASgISAGIAQESIQoUaW5jbHVkZV91c2VyX3NlY3JldHMYDSABKAhIAogBARIuCgxwcm9qZWN0X3NwZWMYDiABKAsyGC5jb2Rld2lyZS52MS5Qcm9qZWN0U3BlYxouCgxFbnZWYXJzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIRCg9faW5zdGFsbF9hZ2VudHNCFgoUX2luY2x1ZGVfb3JnX3NlY3JldHNCFwoVX2luY2x1ZGVfdXNlcl9zZWNyZXRzSgQIChALUglhZ2VudF9lbnYiQAoNUHJvamVjdEFnZW50cxIUCgdpbnN0YWxsGAEgASgISACIAQESDQoFdG9vbHMYAiADKAlCCgoIX2luc3RhbGwiawoVUHJvamVjdFNraWxsU2VsZWN0aW9uEi8KBnNvdXJjZRgBIAEoDjIfLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNvdXJjZRIRCglyZWZlcmVuY2UYAiABKAkSDgoGYWdlbnRzGAMgAygJIo4BChBQcm9qZWN0UmVzb3VyY2VzEhsKDmNwdV9taWxsaWNvcmVzGAEgASgNSACIAQESFwoKbWVtb3J5X21pYhgCIAEoBEgBiAEBEhUKCGRpc2tfZ2liGAMgASgESAKIAQFCEQoPX2NwdV9taWxsaWNvcmVzQg0KC19tZW1vcnlfbWliQgsKCV9kaXNrX2dpYiJzChVQcm9qZWN0U2VjcmV0QmluZGluZ3MSDwoHcHJvamVjdBgBIAEoCRIUCgxvcmdhbml6YXRpb24YBCABKAgSDAoEdXNlchgFIAEoCEoECAIQA0oECAMQBFILaW5jbHVkZV9vcmdSDGluY2x1ZGVfdXNlciInChRQcm9qZWN0QWNjZXNzQmluZGluZxIPCgdwcm9maWxlGAEgASgJIp8FCgtQcm9qZWN0U3BlYxIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIOCgZwcmVzZXQYAiABKAkSDQoFaW1hZ2UYAyABKAkSLAoMcmVwb3NpdG9yaWVzGAQgAygLMhYuY29kZXdpcmUudjEuUmVwb0VudHJ5EhkKEXdvcmtpbmdfZGlyZWN0b3J5GAUgASgJEhcKD2luc3RhbGxfY29tbWFuZBgGIAEoCRIWCg5zdGFydHVwX3NjcmlwdBgHIAEoCRI+CgtlbnZpcm9ubWVudBgIIAMoCzIpLmNvZGV3aXJlLnYxLlByb2plY3RTcGVjLkVudmlyb25tZW50RW50cnkSKgoGYWdlbnRzGAkgASgLMhouY29kZXdpcmUudjEuUHJvamVjdEFnZW50cxIyCgZza2lsbHMYCyADKAsyIi5jb2Rld2lyZS52MS5Qcm9qZWN0U2tpbGxTZWxlY3Rpb24SLwoRYXBwbGljYXRpb25fcG9ydHMYDCADKAsyFC5jb2Rld2lyZS52MS5BcHBQb3J0EjAKCXJlc291cmNlcxgNIAEoCzIdLmNvZGV3aXJlLnYxLlByb2plY3RSZXNvdXJjZXMSMwoHc2VjcmV0cxgOIAEoCzIiLmNvZGV3aXJlLnYxLlByb2plY3RTZWNyZXRCaW5kaW5ncxIxCgZhY2Nlc3MYESABKAsyIS5jb2Rld2lyZS52MS5Qcm9qZWN0QWNjZXNzQmluZGluZxoyChBFbnZpcm9ubWVudEVudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAFKBAgKEAtKBAgPEBBKBAgQEBFSEWFnZW50X2Vudmlyb25tZW50UgtjcmVkZW50aWFsc1IOd29ya3NwYWNlX21vZGUqfgoSUHJvamVjdFNraWxsU291cmNlEiQKIFBST0pFQ1RfU0tJTExfU09VUkNFX1VOU1BFQ0lGSUVEEAASIwofUFJPSkVDVF9TS0lMTF9TT1VSQ0VfUkVQT1NJVE9SWRABEh0KGVBST0pFQ1RfU0tJTExfU09VUkNFX1VTRVIQAkKuAQoPY29tLmNvZGV3aXJlLnYxQgtDb21tb25Qcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z");
 
 /**
  * ScaffoldPlaceholder proved the initial codegen path. It remains deprecated
@@ -291,21 +291,6 @@ export type ProjectSecretBindings = Message<"codewire.v1.ProjectSecretBindings">
   project: string;
 
   /**
-   * Deprecated preview fields retained only for wire compatibility. Runtime
-   * adapters reject their presence; new clients use organization and user.
-   *
-   * @generated from field: optional bool include_org = 2 [deprecated = true];
-   * @deprecated
-   */
-  includeOrg?: boolean | undefined;
-
-  /**
-   * @generated from field: optional bool include_user = 3 [deprecated = true];
-   * @deprecated
-   */
-  includeUser?: boolean | undefined;
-
-  /**
    * @generated from field: bool organization = 4;
    */
   organization: boolean;
@@ -322,33 +307,6 @@ export type ProjectSecretBindings = Message<"codewire.v1.ProjectSecretBindings">
  */
 export const ProjectSecretBindingsSchema: GenMessage<ProjectSecretBindings> = /*@__PURE__*/
   messageDesc(file_codewire_v1_common, 8);
-
-/**
- * Deprecated wire tombstone for the unpublished preview credential map. New
- * code must use ProjectAccessBinding.
- *
- * @generated from message codewire.v1.ProjectCredentialReference
- * @deprecated
- */
-export type ProjectCredentialReference = Message<"codewire.v1.ProjectCredentialReference"> & {
-  /**
-   * @generated from field: string provider = 1;
-   */
-  provider: string;
-
-  /**
-   * @generated from field: string account = 2;
-   */
-  account: string;
-};
-
-/**
- * Describes the message codewire.v1.ProjectCredentialReference.
- * Use `create(ProjectCredentialReferenceSchema)` to create a new message.
- * @deprecated
- */
-export const ProjectCredentialReferenceSchema: GenMessage<ProjectCredentialReference> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 9);
 
 /**
  * ProjectAccessBinding selects one scope-qualified access profile. It carries
@@ -368,7 +326,7 @@ export type ProjectAccessBinding = Message<"codewire.v1.ProjectAccessBinding"> &
  * Use `create(ProjectAccessBindingSchema)` to create a new message.
  */
 export const ProjectAccessBindingSchema: GenMessage<ProjectAccessBinding> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 10);
+  messageDesc(file_codewire_v1_common, 9);
 
 /**
  * ProjectSpec is the deterministic, placement-neutral codewire.yaml model.
@@ -445,22 +403,6 @@ export type ProjectSpec = Message<"codewire.v1.ProjectSpec"> & {
   secrets?: ProjectSecretBindings | undefined;
 
   /**
-   * Deprecated preview fields retained only for wire compatibility. Runtime
-   * adapters reject their use; new clients use access and local workspace
-   * directives outside this portable message.
-   *
-   * @generated from field: map<string, codewire.v1.ProjectCredentialReference> credentials = 15 [deprecated = true];
-   * @deprecated
-   */
-  credentials: { [key: string]: ProjectCredentialReference };
-
-  /**
-   * @generated from field: codewire.v1.ProjectWorkspaceMode workspace_mode = 16 [deprecated = true];
-   * @deprecated
-   */
-  workspaceMode: ProjectWorkspaceMode;
-
-  /**
    * @generated from field: codewire.v1.ProjectAccessBinding access = 17;
    */
   access?: ProjectAccessBinding | undefined;
@@ -471,44 +413,7 @@ export type ProjectSpec = Message<"codewire.v1.ProjectSpec"> & {
  * Use `create(ProjectSpecSchema)` to create a new message.
  */
 export const ProjectSpecSchema: GenMessage<ProjectSpec> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 11);
-
-/**
- * Deprecated wire tombstone for the retired top-level workspace mode. New
- * writers leave the field below unspecified; placement-specific filesystem
- * behavior is expressed outside the portable project contract.
- *
- * @generated from enum codewire.v1.ProjectWorkspaceMode
- * @deprecated
- */
-export enum ProjectWorkspaceMode {
-  /**
-   * @generated from enum value: PROJECT_WORKSPACE_MODE_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: PROJECT_WORKSPACE_MODE_AUTO = 1;
-   */
-  AUTO = 1,
-
-  /**
-   * @generated from enum value: PROJECT_WORKSPACE_MODE_CLONE = 2;
-   */
-  CLONE = 2,
-
-  /**
-   * @generated from enum value: PROJECT_WORKSPACE_MODE_DIRECT = 3;
-   */
-  DIRECT = 3,
-}
-
-/**
- * Describes the enum codewire.v1.ProjectWorkspaceMode.
- * @deprecated
- */
-export const ProjectWorkspaceModeSchema: GenEnum<ProjectWorkspaceMode> = /*@__PURE__*/
-  enumDesc(file_codewire_v1_common, 0);
+  messageDesc(file_codewire_v1_common, 10);
 
 /**
  * @generated from enum codewire.v1.ProjectSkillSource
@@ -534,5 +439,5 @@ export enum ProjectSkillSource {
  * Describes the enum codewire.v1.ProjectSkillSource.
  */
 export const ProjectSkillSourceSchema: GenEnum<ProjectSkillSource> = /*@__PURE__*/
-  enumDesc(file_codewire_v1_common, 1);
+  enumDesc(file_codewire_v1_common, 0);
 

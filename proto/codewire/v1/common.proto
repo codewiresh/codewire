@@ -57,17 +57,6 @@ message SetupConfig {
   ProjectSpec project_spec = 14;
 }
 
-// Deprecated wire tombstone for the retired top-level workspace mode. New
-// writers leave the field below unspecified; placement-specific filesystem
-// behavior is expressed outside the portable project contract.
-enum ProjectWorkspaceMode {
-  option deprecated = true;
-  PROJECT_WORKSPACE_MODE_UNSPECIFIED = 0;
-  PROJECT_WORKSPACE_MODE_AUTO = 1;
-  PROJECT_WORKSPACE_MODE_CLONE = 2;
-  PROJECT_WORKSPACE_MODE_DIRECT = 3;
-}
-
 enum ProjectSkillSource {
   PROJECT_SKILL_SOURCE_UNSPECIFIED = 0;
   PROJECT_SKILL_SOURCE_REPOSITORY = 1;
@@ -92,22 +81,12 @@ message ProjectResources {
 }
 
 message ProjectSecretBindings {
+  reserved 2, 3;
+  reserved "include_org", "include_user";
+
   string project = 1;
-  // Deprecated preview fields retained only for wire compatibility. Runtime
-  // adapters reject their presence; new clients use organization and user.
-  optional bool include_org = 2 [deprecated = true];
-  optional bool include_user = 3 [deprecated = true];
   bool organization = 4;
   bool user = 5;
-}
-
-// Deprecated wire tombstone for the unpublished preview credential map. New
-// code must use ProjectAccessBinding.
-message ProjectCredentialReference {
-  option deprecated = true;
-
-  string provider = 1;
-  string account = 2;
 }
 
 // ProjectAccessBinding selects one scope-qualified access profile. It carries
@@ -121,8 +100,8 @@ message ProjectAccessBinding {
 // paths, secret values, provider tokens, platform credentials, VMM state, and
 // backend sockets are intentionally absent.
 message ProjectSpec {
-  reserved 10;
-  reserved "agent_environment";
+  reserved 10, 15, 16;
+  reserved "agent_environment", "credentials", "workspace_mode";
 
   uint32 schema_version = 1;
   string preset = 2;
@@ -137,10 +116,5 @@ message ProjectSpec {
   repeated AppPort application_ports = 12;
   ProjectResources resources = 13;
   ProjectSecretBindings secrets = 14;
-  // Deprecated preview fields retained only for wire compatibility. Runtime
-  // adapters reject their use; new clients use access and local workspace
-  // directives outside this portable message.
-  map<string, ProjectCredentialReference> credentials = 15 [deprecated = true];
-  ProjectWorkspaceMode workspace_mode = 16 [deprecated = true];
   ProjectAccessBinding access = 17;
 }

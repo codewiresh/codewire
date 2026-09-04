@@ -567,9 +567,10 @@ if [ "$event_selected" = false ]; then
       scripts/ci/proto/build-rust-descriptors.sh|\
       scripts/ci/tests/test-admin-proto-boundary.sh|\
       scripts/checks/proto_breaking.py|\
-      scripts/checks/contracts/proto-retirements.sha256)
+      scripts/checks/contracts/proto-retirements.sha256|\
+      scripts/checks/contracts/proto-breaking-preimages.sha256)
         # The Rust audience-descriptor builder and its CLI dependency-boundary
-        # guard, plus the exact internal-retirement policy, alter contract
+        # guard, plus the exact clean-break preimage policy, alter contract
         # verification rather than runtime behavior.
         select_token contracts
         select_token contracts_proto
@@ -622,12 +623,31 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      proto/codewire/v1/environment.proto)
-        # The public environment adapters are hand-owned in every SDK. Run all
-        # three whenever their canonical request/response schema changes.
+      proto/codewire/v1/common.proto|proto/codewire/v1/environment.proto)
+        # These public adapters are hand-owned in every SDK. Run all three
+        # whenever their canonical request/response schema changes.
         select_token sdk_go
         select_token sdk_python
         select_token sdk_ts
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
+      proto/codewire/v1/common.proto)
+        # The shared setup and project messages also have handwritten Rust and
+        # dashboard consumers outside the generated-proto crate.
+        select_token rust
+        select_token rust_pkg_codewire_cli
+        select_token rust_pkg_codewire_client
+        select_token rust_pkg_codewire_dashboard_web
+        select_token rust_pkg_codewire_orchestration
+        select_token rust_pkg_codewire_project_proto
+        select_token rust_pkg_codewire_proto
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        select_token web
         recognized=true
         ;;
     esac

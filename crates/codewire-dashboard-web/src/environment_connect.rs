@@ -337,11 +337,7 @@ fn preset_uses_legacy_secret_sources(
         .as_option()
         .and_then(|spec| spec.secrets.as_option())
         .is_some_and(|secrets| {
-            !secrets.project.trim().is_empty()
-                || secrets.organization
-                || secrets.user
-                || secrets.include_org.unwrap_or(false)
-                || secrets.include_user.unwrap_or(false)
+            !secrets.project.trim().is_empty() || secrets.organization || secrets.user
         })
 }
 
@@ -901,14 +897,6 @@ mod tests {
             },
             codewire_proto::codewire::v1::ProjectSecretBindings {
                 user: true,
-                ..Default::default()
-            },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
-                include_org: Some(true),
-                ..Default::default()
-            },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
-                include_user: Some(true),
                 ..Default::default()
             },
         ];

@@ -10,31 +10,9 @@ use codewire_proto::codewire::v1 as proto;
 pub fn from_proto(
     value: proto::ProjectSpec,
 ) -> Result<project::ProjectSpec, project::ProjectError> {
-    if !value.credentials.is_empty() {
-        return invalid(
-            "project_spec.credentials",
-            "is retired; select one scope-qualified access profile",
-        );
-    }
-    match value.workspace_mode.as_known() {
-        Some(proto::ProjectWorkspaceMode::Unspecified) => {}
-        Some(_) => {
-            return invalid(
-                "project_spec.workspace_mode",
-                "is retired; use portable repositories or placement-specific mounts",
-            );
-        }
-        None => return invalid("project_spec.workspace_mode", "contains an unknown value"),
-    }
     let agents = value.agents.into_option().unwrap_or_default();
     let resources = value.resources.into_option().unwrap_or_default();
     let secrets = value.secrets.into_option().unwrap_or_default();
-    if secrets.include_org.is_some() || secrets.include_user.is_some() {
-        return invalid(
-            "project_spec.secrets",
-            "preview include_org/include_user fields are retired; use organization/user",
-        );
-    }
     let access = value
         .access
         .into_option()
@@ -248,31 +226,6 @@ access: {profile: user/work}
             ..Default::default()
         };
         assert!(from_proto(proto).is_err());
-
-        let retired = proto::ProjectSpec {
-            schema_version: project::PROJECT_SCHEMA_VERSION,
-            secrets: Some(proto::ProjectSecretBindings {
-                include_user: Some(false),
-                ..Default::default()
-            })
-            .into(),
-            ..Default::default()
-        };
-        assert!(from_proto(retired).is_err());
-
-        let mut retired = proto::ProjectSpec {
-            schema_version: project::PROJECT_SCHEMA_VERSION,
-            ..Default::default()
-        };
-        retired.credentials.insert(
-            "work".to_string(),
-            proto::ProjectCredentialReference {
-                provider: "openai".to_string(),
-                account: "acct-work".to_string(),
-                ..Default::default()
-            },
-        );
-        assert!(from_proto(retired).is_err());
 
         let descriptor_json = serde_json::to_string(&to_proto(project::ProjectSpec::default()))
             .expect("serialize public project spec");

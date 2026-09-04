@@ -507,6 +507,9 @@ run_paths_case derp_contract pull_request refs/pull/101/head false \
 run_paths_case proto pull_request refs/pull/11/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
   proto/codewire/v1/api_key.proto
+run_paths_case common_proto pull_request refs/pull/109/head false \
+  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
+  proto/codewire/v1/common.proto
 run_paths_case environment_proto pull_request refs/pull/110/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
   proto/codewire/v1/environment.proto
@@ -526,6 +529,9 @@ run_paths_case edge_ownership pull_request refs/pull/114/head false \
 run_paths_case proto_breaking_policy pull_request refs/pull/1141/head false \
   'contracts contracts_proto policy' \
   scripts/checks/proto_breaking.py \
+  scripts/checks/contracts/proto-breaking-preimages.sha256
+run_paths_case proto_retirement_ledger_transition pull_request refs/pull/1142/head false \
+  'contracts contracts_proto policy' \
   scripts/checks/contracts/proto-retirements.sha256
 run_paths_case generated_connect_go pull_request refs/pull/111/head false \
   'contracts contracts_proto go_consumer_interop go_support policy' libs/gen-go/codewire/v1/api_key.pb.go
@@ -1198,7 +1204,7 @@ printf '%s\n' proto/codewire/v1/common.proto > "$paths_file"
 GITHUB_OUTPUT="$output_file" GITHUB_EVENT_NAME=pull_request \
   "$SELECTOR" "$paths_file" >/dev/null
 assert_tokens github_output \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
+  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
   "$(cat "$output_file")"
 
 # Exercise changed-range discovery, including fail-closed missing PR state.

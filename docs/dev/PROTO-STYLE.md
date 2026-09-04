@@ -104,13 +104,16 @@ a bad field name; rename before first release instead.
 | `codewire.v1` | FILE (config) + never break post-publish (process) | Additive evolution only; removals require a deprecation cycle |
 | `codewire.console.v1` | FILE | Breaking allowed with same-PR client flips |
 | `codewire.admin.v1` | FILE | Internal discipline, coordinate in-repo |
-| `codewire.internal.v1` | FILE for retained files | Coordinate atomic in-repo changes; deletion requires an exact-content retirement entry |
+| `codewire.internal.v1` | FILE | Coordinate atomic in-repo changes |
 
-The breaking gate permits no unreviewed deletion. An intentionally removed
-unused internal contract must be listed by its pre-removal SHA-256 digest and
-path in `scripts/checks/contracts/proto-retirements.sha256`; public, console,
-and admin contracts cannot use this mechanism. Buf remains strict for every
-retained file.
+During the prelaunch clean cutover, an intentional break must list the exact
+pre-change SHA-256 digest and path in
+`scripts/checks/contracts/proto-breaking-preimages.sha256`. The same change
+must update every generated and handwritten consumer. The ledger is
+append-only: only entries added relative to the checked base authorize that
+exact change, historical replacements return to strict Buf checking, and a
+deleted contract cannot be recreated. This mechanism keeps no compatibility
+shim.
 
 ## Authentication
 

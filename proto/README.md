@@ -33,7 +33,7 @@ are compiled for Rust at build time by `crates/codewire-proto`.
 
 | Package | Service | Consumers |
 |---|---|---|
-| `codewire.internal.v1` | `CoordinatorService`, `MeshCoordinatorService`, environment credentials, gateway binding, and Mesh authorization. | First-party runtime clients only |
+| `codewire.internal.v1` | `CoordinatorService`, `MeshCoordinatorService`, gateway binding, and Mesh authorization. | First-party runtime clients only |
 
 `libs/gateway-proto/proto/` holds the Rust-consumed daemon/gateway protocol.
 It has no independent Go module or generated Go copy. New client-facing
@@ -86,7 +86,9 @@ The TypeScript generator (`protoc-gen-es`) comes from `bun install`
 (pinned in the root `package.json` devDependencies).
 
 Breaking changes are checked against `main` by
-`scripts/checks/proto_breaking.py`. Buf remains strict for every retained
-file. Deleting an unused `codewire.internal.v1` contract additionally requires
-an exact pre-removal content digest in the reviewed retirement ledger; other
-packages and unreviewed deletions fail closed.
+`scripts/checks/proto_breaking.py`. During the prelaunch clean cutover, every
+intentional exception is pinned to the exact pre-change file digest in the
+append-only preimage ledger and must update all generated consumers in the
+same change. Only entries added relative to the checked base are active;
+historical replacements return to strict Buf checking, and deleted contracts
+stay absent.

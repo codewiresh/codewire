@@ -8,7 +8,6 @@ import {
   AppPortSchema,
   ProjectAccessBindingSchema,
   ProjectAgentsSchema,
-  ProjectCredentialReferenceSchema,
   ProjectResourcesSchema,
   ProjectSecretBindingsSchema,
   ProjectSkillSelectionSchema,
@@ -888,18 +887,13 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "cpu_millicores"], [2, "memory_mib"], [3, "disk_gib"],
   ]));
   assertDescriptorCoverage("project secrets", ProjectSecretBindingsSchema.fields, new Map([
-    [1, "project"], [2, "include_org"], [3, "include_user"], [4, "organization"], [5, "user"],
-  ]));
-  // Deprecated preview descriptors remain as wire tombstones but are not part
-  // of the ergonomic SDK model or its outbound conversion.
-  assertDescriptorCoverage("project credential tombstone", ProjectCredentialReferenceSchema.fields, new Map([
-    [1, "provider"], [2, "account"],
+    [1, "project"], [4, "organization"], [5, "user"],
   ]));
   assertDescriptorCoverage("project access", ProjectAccessBindingSchema.fields, new Map([
     [1, "profile"],
   ]));
   assertDescriptorCoverage("project spec", ProjectSpecSchema.fields, new Map([
-    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [15, "credentials"], [16, "workspace_mode"], [17, "access"],
+    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [17, "access"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"],
