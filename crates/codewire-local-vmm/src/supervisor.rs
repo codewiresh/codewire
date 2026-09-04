@@ -24,7 +24,7 @@ use codewire_access::{
 };
 use codewire_local_credentials::{
     AuthorityRuntimeConfig, EnvironmentBrokerRuntime as AuthorityBrokerRuntime,
-    LocalCredentialControlClient, WorkloadSecretSelection,
+    LocalCredentialControlClient,
 };
 use futures::Stream;
 use rustix::fs::{FlockOperation, flock};
@@ -981,12 +981,7 @@ impl EnvironmentRecord {
             skill_snapshot_count: skill_snapshot
                 .and_then(|snapshot| u32::try_from(snapshot.skills().len()).ok())
                 .unwrap_or_default(),
-            requires_credential_authority: self.access_profile.is_some()
-                || project.as_ref().is_some_and(|project| {
-                    project.secrets.organization
-                        || !project.secrets.project.is_empty()
-                        || project.secrets.user
-                }),
+            requires_credential_authority: self.access_profile.is_some(),
             host_ports: host_ports_to_proto(&self.host_ports),
             mesh: mesh_attachment_to_proto(self.mesh.as_ref()),
             error_code: self
@@ -1496,30 +1491,6 @@ impl SupervisorCore {
         LocalCredentialControlClient::connect(&self.config.credential_authority_config())
             .await
             .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)
-    }
-
-    async fn validate_workload_secret_metadata(
-        &mut self,
-        selection: &WorkloadSecretSelection,
-    ) -> Result<(), SupervisorError> {
-        if !workload_secret_selection_has_protected_sources(selection) {
-            return Ok(());
-        }
-        self.access_control_client()
-            .await?
-            .resolve_workload_secret_metadata(selection.clone())
-            .await
-            .map(|_| ())
-            .map_err(workload_secret_resolution_error)
-    }
-
-    async fn validate_environment_workload_secret_metadata(
-        &mut self,
-        name: &str,
-        staging: bool,
-    ) -> Result<(), SupervisorError> {
-        let selection = workload_secret_selection_for_boot(self.environment(name)?, staging)?;
-        self.validate_workload_secret_metadata(&selection).await
     }
 
     async fn bind_environment_access(
@@ -2274,8 +2245,10 @@ impl SupervisorCore {
                         .environment(&request.name)?
                         .staging_workspace_generation
                         .is_some();
-                    self.validate_environment_workload_secret_metadata(&request.name, staging)
-                        .await?;
+                    validate_environment_workload_secret_delivery(
+                        self.environment(&request.name)?,
+                        staging,
+                    )?;
                     let artifact_generation =
                         artifact_generation_for_boot(self.environment(&request.name)?, staging)?
                             .to_owned();
@@ -3255,9 +3228,7 @@ impl SupervisorCore {
         let staging = environment.staging_workspace_generation.is_some();
         let expected_artifact_generation =
             artifact_generation_for_boot(&environment, staging)?.to_owned();
-        let workload_secret_selection = workload_secret_selection_for_boot(&environment, staging)?;
-        self.validate_workload_secret_metadata(&workload_secret_selection)
-            .await?;
+        validate_environment_workload_secret_delivery(&environment, staging)?;
         let mut client = self
             .runner_client_for_artifact(name, &expected_artifact_generation)
             .await?;
@@ -3457,8 +3428,10 @@ impl SupervisorCore {
                         .environment(name)?
                         .staging_workspace_generation
                         .is_some();
-                    self.validate_environment_workload_secret_metadata(name, staging)
-                        .await?;
+                    validate_environment_workload_secret_delivery(
+                        self.environment(name)?,
+                        staging,
+                    )?;
                     let artifact_generation =
                         artifact_generation_for_boot(self.environment(name)?, staging)?.to_owned();
                     let _ = self
@@ -3733,8 +3706,10 @@ impl SupervisorCore {
                         return Err(SupervisorError::InvalidRequest);
                     }
                     if disk_bytes > current_disk_bytes {
-                        self.validate_environment_workload_secret_metadata(name, false)
-                            .await?;
+                        validate_environment_workload_secret_delivery(
+                            self.environment(name)?,
+                            false,
+                        )?;
                         let artifact_generation =
                             artifact_generation_for_boot(self.environment(name)?, false)?
                                 .to_owned();
@@ -3824,6 +3799,7 @@ impl SupervisorCore {
             return Err(SupervisorError::InvalidState);
         }
         let parameters = workspace_transition_parameters(operation, self.environment(name)?)?;
+        reject_workspace_transition_workload_secrets(self.environment(name)?, &parameters)?;
         self.revalidate_environment_workspace_plan_for_boot(name)
             .await?;
         let mut operation = operation.clone();
@@ -3883,8 +3859,10 @@ impl SupervisorCore {
                             .environment(name)?
                             .staging_workspace_generation
                             .is_some();
-                        self.validate_environment_workload_secret_metadata(name, staging)
-                            .await?;
+                        validate_environment_workload_secret_delivery(
+                            self.environment(name)?,
+                            staging,
+                        )?;
                         let artifact_generation =
                             artifact_generation_for_boot(self.environment(name)?, staging)?
                                 .to_owned();
@@ -4456,6 +4434,7 @@ impl LocalSupervisorService for SupervisorRpc {
         core.reconcile(&name).await.map_err(Status::from)?;
         let environment = core.environment(&name).map_err(Status::from)?.clone();
         require_expected_environment(&environment, expected_environment_id)?;
+        reject_environment_workload_secrets(&environment).map_err(Status::from)?;
         let existing = core
             .store
             .operation_by_request(request_id)
@@ -4544,6 +4523,7 @@ impl LocalSupervisorService for SupervisorRpc {
         core.reconcile(&name).await.map_err(Status::from)?;
         let environment = core.environment(&name).map_err(Status::from)?.clone();
         require_expected_environment(&environment, expected_environment_id)?;
+        reject_environment_workload_secrets(&environment).map_err(Status::from)?;
         if !matches!(
             environment.state,
             StoredEnvironmentState::Running | StoredEnvironmentState::Error
@@ -4620,6 +4600,7 @@ impl LocalSupervisorService for SupervisorRpc {
         core.reconcile(&name).await.map_err(Status::from)?;
         let environment = core.environment(&name).map_err(Status::from)?.clone();
         require_expected_environment(&environment, expected_environment_id)?;
+        reject_environment_workload_secrets(&environment).map_err(Status::from)?;
         if !matches!(
             environment.state,
             StoredEnvironmentState::Running | StoredEnvironmentState::Stopped
@@ -4707,6 +4688,7 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(Status::from)?
             .clone();
         require_expected_environment(&environment, expected_environment_id)?;
+        reject_environment_workload_secrets(&environment).map_err(Status::from)?;
 
         let existing = core
             .store
@@ -5779,6 +5761,7 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
     }
     let project: codewire_project::ProjectSpec = serde_json::from_slice(&request.project_spec_json)
         .map_err(|_| SupervisorError::InvalidRequest)?;
+    reject_undeliverable_workload_secrets(&project)?;
     validate_host_ports_for_project(&host_ports_from_proto(&request.host_ports)?, &project)?;
     if let Some(mesh) = mesh_attachment_from_proto(request.mesh.as_ref())?.as_ref() {
         if mesh.node_name != request.name {
@@ -6160,15 +6143,6 @@ fn credential_control_error(status: Status) -> SupervisorError {
             SupervisorError::CredentialAuthorityUnavailable
         }
         _ => SupervisorError::EnvironmentAccessUnavailable,
-    }
-}
-
-fn workload_secret_resolution_error(status: Status) -> SupervisorError {
-    match status.code() {
-        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Unknown => {
-            SupervisorError::CredentialAuthorityUnavailable
-        }
-        _ => SupervisorError::WorkloadSecretResolution(status.message().to_owned()),
     }
 }
 
@@ -6630,10 +6604,33 @@ fn prepare_workspace_boot(
     })
 }
 
-fn workload_secret_selection_for_boot(
+fn reject_undeliverable_workload_secrets(
+    project: &codewire_project::ProjectSpec,
+) -> Result<(), SupervisorError> {
+    if project.secrets.is_empty() {
+        Ok(())
+    } else {
+        Err(SupervisorError::WorkloadSecretDeliveryUnavailable)
+    }
+}
+
+fn reject_environment_workload_secrets(
+    environment: &EnvironmentRecord,
+) -> Result<(), SupervisorError> {
+    let project: codewire_project::ProjectSpec = serde_json::from_slice(
+        environment
+            .project_spec_json
+            .as_deref()
+            .ok_or(SupervisorError::InvalidState)?,
+    )
+    .map_err(|_| SupervisorError::InvalidState)?;
+    reject_undeliverable_workload_secrets(&project)
+}
+
+fn validate_environment_workload_secret_delivery(
     environment: &EnvironmentRecord,
     staging: bool,
-) -> Result<WorkloadSecretSelection, SupervisorError> {
+) -> Result<(), SupervisorError> {
     let workspace = if staging {
         environment.staging_workspace_generation.as_ref()
     } else {
@@ -6657,16 +6654,43 @@ fn workload_secret_selection_for_boot(
     let project: codewire_project::ProjectSpec =
         serde_json::from_slice(workspace.project_spec_json()?)
             .map_err(|_| SupervisorError::InvalidState)?;
-    Ok(WorkloadSecretSelection {
-        organization: project.secrets.organization,
-        project: (!project.secrets.project.is_empty()).then_some(project.secrets.project),
-        user: project.secrets.user,
-        explicit_environment_keys: project.environment.into_keys().collect(),
-    })
+    reject_undeliverable_workload_secrets(&project)
 }
 
-fn workload_secret_selection_has_protected_sources(selection: &WorkloadSecretSelection) -> bool {
-    selection.organization || selection.project.is_some() || selection.user
+fn reject_workspace_transition_workload_secrets(
+    environment: &EnvironmentRecord,
+    parameters: &WorkspaceTransitionParameters,
+) -> Result<(), SupervisorError> {
+    let project_json = match &parameters.intent {
+        WorkspaceTransitionIntent::Update {
+            project_spec_json, ..
+        } => project_spec_json.as_slice(),
+        WorkspaceTransitionIntent::Rollback {
+            rollback_storage_generation,
+        } => {
+            let mut target = None;
+            for candidate in [
+                environment.active_workspace_generation.as_ref(),
+                environment.staging_workspace_generation.as_ref(),
+                environment.rollback_workspace_generation.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if workspace_storage_generation(candidate)? == *rollback_storage_generation
+                    && target.replace(candidate).is_some()
+                {
+                    return Err(SupervisorError::InvalidState);
+                }
+            }
+            target
+                .ok_or(SupervisorError::InvalidState)?
+                .project_spec_json()?
+        }
+    };
+    let project: codewire_project::ProjectSpec =
+        serde_json::from_slice(project_json).map_err(|_| SupervisorError::InvalidState)?;
+    reject_undeliverable_workload_secrets(&project)
 }
 
 fn runner_artifact_identity_matches(recorded: &str, reported: &str) -> bool {
@@ -7506,7 +7530,7 @@ impl From<SupervisorError> for Status {
             | SupervisorError::OperationTerminal
             | SupervisorError::ArtifactGenerationChanged
             | SupervisorError::EnvironmentAccessUnavailable
-            | SupervisorError::WorkloadSecretResolution(_) => {
+            | SupervisorError::WorkloadSecretDeliveryUnavailable => {
                 Status::failed_precondition(error.to_string())
             }
             SupervisorError::CredentialAuthorityUnavailable => {
@@ -7550,8 +7574,8 @@ pub enum SupervisorError {
     SecretInState,
     #[error("local credential authority is unavailable")]
     CredentialAuthorityUnavailable,
-    #[error("local workload-secret selection cannot be resolved: {0}")]
-    WorkloadSecretResolution(String),
+    #[error("native local workload-secret delivery is unavailable")]
+    WorkloadSecretDeliveryUnavailable,
     #[error("local environment access binding is unavailable")]
     EnvironmentAccessUnavailable,
     #[error("local environment {0:?} was not found")]
@@ -7682,7 +7706,7 @@ mod tests {
     use crate::uds::bind_owner_only;
     use codewire_access::builtin_provider_catalog;
     use codewire_local_credentials::{LocalCredentialClient, serve_local_credential_authority};
-    use codewire_protected_store::{EphemeralProtectedStore, ProtectedValue};
+    use codewire_protected_store::EphemeralProtectedStore;
 
     fn project_intent(vcpus: u32, memory_mib: u32, disk_gib: u64) -> (Vec<u8>, String) {
         let spec = codewire_project::ProjectSpec {
@@ -8714,6 +8738,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_update_rejects_a_secret_binding_before_staging() {
+        let mut environment = project_environment();
+        let active_project_json = environment.project_spec_json.clone().unwrap();
+        let active_project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = test_workspace_generation(
+            &active_project_json,
+            &active_project_sha256,
+            b"active-before-secret-update",
+        );
+        environment.active_workspace_generation = Some(active.clone());
+        let mut target_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&active_project_json).unwrap();
+        target_project.secrets.user = true;
+        let target_project_json = target_project.canonical_json().unwrap();
+        let target_project_sha256 = format!("{:x}", Sha256::digest(&target_project_json));
+        let payload = workspace_update_payload(
+            &environment,
+            &target_project_json,
+            &target_project_sha256,
+            false,
+        );
+        let environment_id = environment.id;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let credential_root = core.config.credential_authority_root.clone();
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::UpdateWorkspace,
+                &payload,
+            )
+            .unwrap();
+
+        let error = core
+            .workspace_transition("dev", &operation)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SupervisorError::WorkloadSecretDeliveryUnavailable
+        ));
+        let pending = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.checkpoint, 0);
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.active_workspace_generation, Some(active));
+        assert!(environment.staging_workspace_generation.is_none());
+        assert!(!credential_root.exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_rollback_rejects_a_secret_binding_before_staging() {
+        let mut environment = project_environment();
+        let active_project_json = environment.project_spec_json.clone().unwrap();
+        let active_project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        let active = test_workspace_generation(
+            &active_project_json,
+            &active_project_sha256,
+            b"active-before-secret-rollback",
+        );
+        let mut rollback_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&active_project_json).unwrap();
+        rollback_project.secrets.project = "project-secrets".to_owned();
+        let rollback_project_json = rollback_project.canonical_json().unwrap();
+        let rollback_project_sha256 = format!("{:x}", Sha256::digest(&rollback_project_json));
+        let rollback = test_workspace_generation(
+            &rollback_project_json,
+            &rollback_project_sha256,
+            b"secret-rollback",
+        );
+        environment.active_workspace_generation = Some(active.clone());
+        environment.rollback_workspace_generation = Some(rollback.clone());
+        environment.validate("dev").unwrap();
+        let payload = workspace_rollback_payload(&environment, false);
+        let environment_id = environment.id;
+        let (_parent, mut core) = test_supervisor_core(environment);
+        let credential_root = core.config.credential_authority_root.clone();
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(environment_id),
+                OperationKind::RollbackWorkspace,
+                &payload,
+            )
+            .unwrap();
+
+        let error = core
+            .workspace_transition("dev", &operation)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SupervisorError::WorkloadSecretDeliveryUnavailable
+        ));
+        let pending = core
+            .store
+            .operation_by_request(operation.request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.checkpoint, 0);
+        let environment = core.environment("dev").unwrap();
+        assert_eq!(environment.active_workspace_generation, Some(active));
+        assert_eq!(environment.rollback_workspace_generation, Some(rollback));
+        assert!(environment.staging_workspace_generation.is_none());
+        assert!(!credential_root.exists());
+    }
+
+    #[tokio::test]
     async fn exact_noop_update_replays_without_reboot_or_rollback_rotation() {
         let mut environment = project_environment();
         let project_json = environment.project_spec_json.clone().unwrap();
@@ -9544,144 +9683,148 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_secret_metadata_failures_precede_runner_side_effects() {
-        async fn assert_rejected(
-            secrets: codewire_project::SecretBindings,
-            expected_message: &str,
-        ) {
-            let environment = project_environment_with_secret_selection(secrets, BTreeMap::new());
-            let (_parent, mut core) = test_supervisor_core(environment);
-            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
-            let (artifact_generation, _) =
-                install_test_artifact_generation(&engine, b"metadata-preflight-kernel");
-            let environment = core.environment_mut("dev").unwrap();
-            environment.active_artifact_generation = Some(artifact_generation.clone());
-            environment
-                .active_workspace_generation
-                .as_mut()
-                .unwrap()
-                .artifact_generation = artifact_generation;
-            core.save().unwrap();
-            let (_authority, server) = start_test_credential_authority(&core).await;
-            let environment_id = core.environment("dev").unwrap().id;
-            let operation = core
-                .store
-                .begin_operation(
-                    Uuid::new_v4(),
-                    Some(environment_id),
-                    OperationKind::Start,
-                    &serde_json::json!({"name": "dev", "generation": 2}),
-                )
-                .unwrap();
-
-            // Exercise the real Start effect order from its first checkpoint:
-            // metadata admission must stop at EnsureRunner, before an idle
-            // runner can be spawned and durably adopted.
-            let error = core.start("dev", &operation).await.unwrap_err();
-            match error {
-                SupervisorError::WorkloadSecretResolution(message) => {
-                    assert_eq!(message, expected_message);
-                }
-                other => panic!("unexpected workload-secret preflight failure: {other}"),
-            }
-            assert!(core.environment("dev").unwrap().runner.is_none());
-            assert!(core.children.is_empty());
-            assert!(core.live_runners.is_empty());
-            let pending = core.store.pending_operations().unwrap();
-            let pending = pending
-                .iter()
-                .find(|pending| pending.operation_id == operation.operation_id)
-                .unwrap();
-            assert_eq!(
-                supervisor_effect(pending.kind, pending.checkpoint).unwrap(),
-                Some(LifecycleEffect::EnsureRunner)
-            );
-            assert!(
-                fs::read_dir(core.config.root.join("runners"))
-                    .unwrap()
-                    .next()
-                    .is_none()
-            );
-
-            server.abort();
-            let _ = server.await;
-        }
-
-        assert_rejected(
+    async fn native_create_rejects_each_workload_secret_source_before_state_mutation() {
+        for (index, secrets) in [
             codewire_project::SecretBindings {
                 organization: true,
                 ..Default::default()
             },
-            "organization workload secrets are unsupported locally",
-        )
-        .await;
-        assert_rejected(
             codewire_project::SecretBindings {
-                project: "missing-project".to_owned(),
+                project: "project-secrets".to_owned(),
                 ..Default::default()
             },
-            "local credential record was not found",
-        )
-        .await;
+            codewire_project::SecretBindings {
+                user: true,
+                ..Default::default()
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let selected = project_environment_with_secret_selection(secrets, BTreeMap::new());
+            let name = format!("secret-{index}");
+            let request_id = Uuid::new_v4();
+            let request = v1::CreateEnvironmentRequest {
+                name: name.clone(),
+                source_path: "/workspace/source".to_owned(),
+                vcpus: u32::from(selected.vcpus),
+                memory_mib: selected.memory_mib,
+                disk_bytes: selected.disk_bytes,
+                docker_disk_bytes: 0,
+                request_id: request_id.to_string(),
+                project_spec_json: selected.project_spec_json.unwrap(),
+                project_spec_sha256: selected.project_spec_sha256.unwrap(),
+                implicit_path_mode: "clone".to_owned(),
+                local_mounts: Vec::new(),
+                host_ports: Vec::new(),
+                mesh: None,
+                access_profile_id: String::new(),
+                access_profile_revision: 0,
+            };
+            let (_parent, core) = test_supervisor_core(project_environment());
+            let credential_root = core.config.credential_authority_root.clone();
+            let service = test_supervisor_service(core);
+
+            let error = service
+                .create_environment(Request::new(request))
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                error.message(),
+                "native local workload-secret delivery is unavailable"
+            );
+            let core = service.core.lock().await;
+            assert!(
+                core.store
+                    .operation_by_request(request_id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(!core.state.environments.contains_key(&name));
+            assert!(!credential_root.exists());
+        }
     }
 
     #[tokio::test]
-    async fn user_secret_metadata_preflight_succeeds_and_discards_metadata() {
+    async fn native_start_rejects_an_undeliverable_secret_without_journaling() {
         let environment = project_environment_with_secret_selection(
             codewire_project::SecretBindings {
                 user: true,
                 ..Default::default()
             },
-            BTreeMap::from([("EXPLICIT".to_owned(), "ordinary-value".to_owned())]),
+            BTreeMap::new(),
         );
-        let (_parent, mut core) = test_supervisor_core(environment.clone());
-        let (mut authority, server) = start_test_credential_authority(&core).await;
-        authority
-            .set_user_workload_secret(
-                "USER_ONLY".to_owned(),
-                ProtectedValue::from_slice(b"synthetic-user-secret").unwrap(),
-            )
-            .await
-            .unwrap();
-        authority
-            .set_user_workload_secret(
-                "EXPLICIT".to_owned(),
-                ProtectedValue::from_slice(b"synthetic-overridden-secret").unwrap(),
-            )
-            .await
-            .unwrap();
+        let environment_id = environment.id;
+        let (_parent, core) = test_supervisor_core(environment);
+        let credential_root = core.config.credential_authority_root.clone();
+        let service = test_supervisor_service(core);
+        let request_id = Uuid::new_v4();
 
-        let selection = workload_secret_selection_for_boot(&environment, false).unwrap();
+        let error = service
+            .start_environment(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: request_id.to_string(),
+                environment_id: environment_id.to_string(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert_eq!(
-            selection.explicit_environment_keys,
-            BTreeSet::from(["EXPLICIT".to_owned()])
+            error.message(),
+            "native local workload-secret delivery is unavailable"
         );
-        core.validate_workload_secret_metadata(&selection)
-            .await
-            .unwrap();
-        assert!(core.environment("dev").unwrap().runner.is_none());
-
-        drop(authority);
-        server.abort();
-        let _ = server.await;
+        let core = service.core.lock().await;
+        assert!(
+            core.store
+                .operation_by_request(request_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Stopped
+        );
+        assert!(!credential_root.exists());
     }
 
-    #[tokio::test]
-    async fn ordinary_environment_keys_do_not_require_the_credential_authority() {
+    #[test]
+    fn every_workload_secret_source_is_rejected_at_the_boot_boundary() {
+        for secrets in [
+            codewire_project::SecretBindings {
+                organization: true,
+                ..Default::default()
+            },
+            codewire_project::SecretBindings {
+                project: "project-secrets".to_owned(),
+                ..Default::default()
+            },
+            codewire_project::SecretBindings {
+                user: true,
+                ..Default::default()
+            },
+        ] {
+            let environment = project_environment_with_secret_selection(secrets, BTreeMap::new());
+            assert!(matches!(
+                validate_environment_workload_secret_delivery(&environment, false),
+                Err(SupervisorError::WorkloadSecretDeliveryUnavailable)
+            ));
+        }
+    }
+
+    #[test]
+    fn ordinary_environment_keys_do_not_require_the_credential_authority() {
         let environment = project_environment_with_secret_selection(
             codewire_project::SecretBindings::default(),
             BTreeMap::from([("PUBLIC_VALUE".to_owned(), "ordinary-value".to_owned())]),
         );
-        let (_parent, mut core) = test_supervisor_core(environment.clone());
-        let selection = workload_secret_selection_for_boot(&environment, false).unwrap();
-        assert!(!workload_secret_selection_has_protected_sources(&selection));
-        core.validate_workload_secret_metadata(&selection)
-            .await
-            .unwrap();
+        validate_environment_workload_secret_delivery(&environment, false).unwrap();
     }
 
     #[test]
-    fn environment_proto_reports_when_the_credential_authority_is_required() {
+    fn environment_proto_requires_the_credential_authority_only_for_access_profiles() {
         assert!(
             !project_environment()
                 .proto(false)
@@ -9707,7 +9850,7 @@ mod tests {
             },
         ] {
             assert!(
-                project_environment_with_secret_selection(secrets, BTreeMap::new())
+                !project_environment_with_secret_selection(secrets, BTreeMap::new())
                     .proto(false)
                     .requires_credential_authority
             );

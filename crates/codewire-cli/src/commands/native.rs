@@ -947,7 +947,7 @@ pub(crate) fn format_native_environment_access(view: &NativeEnvironmentAccessVie
 }
 
 fn native_project_requires_credential_authority(spec: &codewire_project::ProjectSpec) -> bool {
-    spec.access.is_some() || !spec.secrets.is_empty()
+    spec.access.is_some()
 }
 
 async fn connect_native_credential_authority_if_required<T, C, CF>(
@@ -1358,6 +1358,9 @@ fn native_unsupported_project_fields(
     if spec.agents.install == Some(true) || !spec.agent_environment.is_empty() {
         unsupported.push("agents");
     }
+    if !spec.secrets.is_empty() {
+        unsupported.push("secrets");
+    }
     unsupported
 }
 
@@ -1710,7 +1713,7 @@ mod tests {
     }
 
     #[test]
-    fn native_project_authority_requirement_excludes_ordinary_environment_values() {
+    fn native_project_authority_requirement_is_limited_to_access_profiles() {
         let mut spec = codewire_project::ProjectSpec::default();
         spec.environment
             .insert("PUBLIC_VALUE".to_owned(), "ordinary-value".to_owned());
@@ -1739,7 +1742,7 @@ mod tests {
                 secrets,
                 ..Default::default()
             };
-            assert!(native_project_requires_credential_authority(&spec));
+            assert!(!native_project_requires_credential_authority(&spec));
         }
     }
 
@@ -2154,7 +2157,7 @@ mod tests {
     }
 
     #[test]
-    fn native_yaml_preserves_explicit_workload_secret_selection() {
+    fn native_yaml_rejects_workload_secret_selection_until_delivery_exists() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("codewire.yaml"),
@@ -2162,11 +2165,11 @@ mod tests {
         )
         .unwrap();
 
-        let project = native_codewire_yaml(temp.path(), None).unwrap();
-        assert!(project.spec.secrets.user);
-        assert!(!project.spec.secrets.organization);
-        assert_eq!(project.spec.secrets.project, "development");
-        assert_eq!(project.spec.environment["EXPLICIT"], "wins");
+        let error = native_codewire_yaml(temp.path(), None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native local preview does not yet support codewire.yaml fields: secrets"
+        );
     }
 
     #[test]
