@@ -1832,7 +1832,7 @@ secrets: {project: development, organization: false, user: false}
     }
 
     #[test]
-    fn env_access_parsers_accept_profile_inspection_apply_and_collaboration_commands() {
+    fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
         let cli = Cli::try_parse_from([
             "cw", "env", "--local", "access", "builder", "--output", "json",
         ])
@@ -1889,17 +1889,39 @@ secrets: {project: development, organization: false, user: false}
             .is_err()
         );
 
-        let cli =
-            Cli::try_parse_from(["cw", "env", "access", "list", "builder", "--output", "json"])
-                .unwrap();
-        let Command::Env(EnvArgs { command, .. }) = cli.command else {
+        for retired in ["list", "grant", "revoke"] {
+            assert!(
+                Cli::try_parse_from(["cw", "env", "access", retired, "builder"]).is_err(),
+                "retired environment-access collaborator command {retired:?} must fail closed"
+            );
+        }
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--platform",
+            "share",
+            "list",
+            "builder",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            local,
+            platform,
+            command,
+        }) = cli.command
+        else {
             panic!("expected env command");
         };
-        let EnvCommand::Access(args) = command else {
-            panic!("expected env access command");
+        assert!(!local);
+        assert!(platform);
+        let EnvCommand::Share(args) = command else {
+            panic!("expected env share command");
         };
-        let Some(EnvAccessCommand::List(args)) = args.command else {
-            panic!("expected env access list command");
+        let EnvShareCommand::List(args) = args.command else {
+            panic!("expected env share list command");
         };
         assert_eq!(args.environment, "builder");
         assert!(matches!(args.output, OutputFormat::Json));
@@ -1907,7 +1929,7 @@ secrets: {project: development, organization: false, user: false}
         let cli = Cli::try_parse_from([
             "cw",
             "env",
-            "access",
+            "share",
             "grant",
             "builder",
             "--user",
@@ -1919,31 +1941,52 @@ secrets: {project: development, organization: false, user: false}
         let Command::Env(EnvArgs { command, .. }) = cli.command else {
             panic!("expected env command");
         };
-        let EnvCommand::Access(args) = command else {
-            panic!("expected env access command");
+        let EnvCommand::Share(args) = command else {
+            panic!("expected env share command");
         };
-        let Some(EnvAccessCommand::Grant(args)) = args.command else {
-            panic!("expected env access grant command");
+        let EnvShareCommand::Grant(args) = args.command else {
+            panic!("expected env share grant command");
         };
         assert_eq!(args.environment, "builder");
         assert_eq!(args.user, "user-2");
         assert_eq!(args.permission, "operator");
 
         let cli = Cli::try_parse_from([
-            "cw", "env", "access", "revoke", "builder", "--user", "user-2",
+            "cw", "env", "share", "revoke", "builder", "--user", "user-2",
         ])
         .unwrap();
         let Command::Env(EnvArgs { command, .. }) = cli.command else {
             panic!("expected env command");
         };
-        let EnvCommand::Access(args) = command else {
-            panic!("expected env access command");
+        let EnvCommand::Share(args) = command else {
+            panic!("expected env share command");
         };
-        let Some(EnvAccessCommand::Revoke(args)) = args.command else {
-            panic!("expected env access revoke command");
+        let EnvShareCommand::Revoke(args) = args.command else {
+            panic!("expected env share revoke command");
         };
         assert_eq!(args.environment, "builder");
         assert_eq!(args.user, "user-2");
+
+        assert!(Cli::try_parse_from(["cw", "env", "share", "ls", "builder"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn env_share_rejects_local_before_platform_resolution() {
+        let cli =
+            Cli::try_parse_from(["cw", "env", "--local", "share", "list", "builder"]).unwrap();
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
+        };
+        let globals = Globals {
+            server: None,
+            token: None,
+        };
+
+        let error = handle_env_command(&globals, args).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "environment sharing is available only with --platform"
+        );
     }
 
     #[test]
@@ -2125,7 +2168,7 @@ secrets: {project: development, organization: false, user: false}
     }
 
     #[test]
-    fn env_access_text_matches_go_messages() {
+    fn env_share_text_preserves_platform_access_grant_messages() {
         assert_eq!(
             format_env_access_list_text(&[]),
             "No explicit access grants (creator has implicit owner access).\n"

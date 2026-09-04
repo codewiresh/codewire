@@ -698,8 +698,10 @@ pub(crate) enum EnvCommand {
     CancelDelete(EnvTargetArgs),
     #[command(about = "Extend the TTL of an environment")]
     Extend(EnvExtendArgs),
-    #[command(about = "Manage environment access")]
+    #[command(about = "Inspect or apply an environment access profile")]
     Access(EnvAccessArgs),
+    #[command(about = "Manage platform environment collaborators")]
+    Share(EnvShareArgs),
     #[command(about = "Manage environment ports")]
     Port(EnvPortArgs),
     #[command(about = "Show environment setup logs")]
@@ -972,12 +974,6 @@ pub(crate) struct EnvAccessArgs {
 pub(crate) enum EnvAccessCommand {
     #[command(about = "Apply an access-profile revision to an environment")]
     Apply(EnvAccessApplyArgs),
-    #[command(about = "List access grants for an environment")]
-    List(EnvAccessTargetArgs),
-    #[command(about = "Grant a user access to an environment")]
-    Grant(EnvAccessGrantArgs),
-    #[command(about = "Revoke a user's access to an environment")]
-    Revoke(EnvAccessRevokeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1004,7 +1000,23 @@ pub(crate) struct EnvAccessApplyArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct EnvAccessTargetArgs {
+pub(crate) struct EnvShareArgs {
+    #[command(subcommand)]
+    command: EnvShareCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum EnvShareCommand {
+    #[command(about = "List collaborators for an environment")]
+    List(EnvShareTargetArgs),
+    #[command(about = "Share an environment with a user")]
+    Grant(EnvShareGrantArgs),
+    #[command(about = "Remove a user's access to an environment")]
+    Revoke(EnvShareRevokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvShareTargetArgs {
     #[arg(value_name = "ID_OR_NAME")]
     environment: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
@@ -1012,7 +1024,7 @@ pub(crate) struct EnvAccessTargetArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct EnvAccessGrantArgs {
+pub(crate) struct EnvShareGrantArgs {
     #[arg(value_name = "ID_OR_NAME")]
     environment: String,
     #[arg(long, required = true, help = "User ID to grant access to")]
@@ -1028,7 +1040,7 @@ pub(crate) struct EnvAccessGrantArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct EnvAccessRevokeArgs {
+pub(crate) struct EnvShareRevokeArgs {
     #[arg(value_name = "ID_OR_NAME")]
     environment: String,
     #[arg(long, required = true, help = "User ID to revoke access from")]

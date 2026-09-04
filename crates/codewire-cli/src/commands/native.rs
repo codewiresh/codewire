@@ -833,11 +833,6 @@ pub(crate) async fn handle_native_environment_access(args: EnvAccessArgs) -> any
             let view = inspect_native_environment_access(&updated, &mut credentials).await?;
             print_native_environment_access(&view, apply.output)
         }
-        Some(
-            EnvAccessCommand::List(_) | EnvAccessCommand::Grant(_) | EnvAccessCommand::Revoke(_),
-        ) => {
-            anyhow::bail!("collaborator access commands require --platform")
-        }
     }
 }
 

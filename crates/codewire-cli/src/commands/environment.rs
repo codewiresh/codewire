@@ -167,6 +167,9 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         EnvCommand::Access(access) => {
             handle_unified_environment_access(globals, placement, access).await
         }
+        EnvCommand::Share(share) => {
+            handle_unified_environment_share(globals, placement, share).await
+        }
         EnvCommand::Daemon(args) => {
             handle_unified_environment_daemon_command(globals, placement, args.command).await
         }
@@ -174,7 +177,7 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, list, info, start, stop, restart, refresh-skills, rm, cp, access, and daemon diagnostics"
+                    "--local and --platform currently support only create, list, info, start, stop, restart, refresh-skills, rm, cp, access, share, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
@@ -262,6 +265,21 @@ async fn handle_unified_environment_access(
         }
         Some(EnvironmentPlacement::Platform) | None => {
             handle_platform_env_command(globals, EnvCommand::Access(args)).await
+        }
+    }
+}
+
+async fn handle_unified_environment_share(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvShareArgs,
+) -> anyhow::Result<()> {
+    match placement {
+        Some(EnvironmentPlacement::Local) => {
+            anyhow::bail!("environment sharing is available only with --platform")
+        }
+        Some(EnvironmentPlacement::Platform) | None => {
+            handle_platform_env_command(globals, EnvCommand::Share(args)).await
         }
     }
 }
@@ -553,18 +571,16 @@ pub(crate) async fn handle_platform_env_command(
                 .context("extend TTL")?;
             print_env_extend_status(&args.environment, &response, hours, args.output)?;
         }
-        EnvCommand::Access(args) => {
-            let command = args.command.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "environment access-profile inspection is not yet available for platform environments"
-                )
-            })?;
-            if matches!(&command, EnvAccessCommand::Apply(_)) {
-                anyhow::bail!(
-                    "environment access-profile apply is not yet available for platform environments"
-                );
-            }
-            handle_env_access_command(&environment_client, &org_id, command).await?;
+        EnvCommand::Access(args) => match args.command {
+            None => anyhow::bail!(
+                "environment access-profile inspection is not yet available for platform environments"
+            ),
+            Some(EnvAccessCommand::Apply(_)) => anyhow::bail!(
+                "environment access-profile apply is not yet available for platform environments"
+            ),
+        },
+        EnvCommand::Share(args) => {
+            handle_env_share_command(&environment_client, &org_id, args.command).await?;
         }
         EnvCommand::Port(args) => {
             handle_env_port_command(
@@ -2486,18 +2502,13 @@ pub(crate) fn format_env_create_text(environment: &Environment) -> String {
     )
 }
 
-pub(crate) async fn handle_env_access_command(
+pub(crate) async fn handle_env_share_command(
     client: &EnvironmentClient,
     org_id: &str,
-    command: EnvAccessCommand,
+    command: EnvShareCommand,
 ) -> anyhow::Result<()> {
     match command {
-        EnvAccessCommand::Apply(_) => {
-            anyhow::bail!(
-                "environment access-profile apply is not yet available for platform environments"
-            )
-        }
-        EnvAccessCommand::List(args) => {
+        EnvShareCommand::List(args) => {
             let environment_id = resolve_environment_id(client, org_id, &args.environment).await?;
             let grants = client
                 .list_environment_access(org_id, &environment_id)
@@ -2505,7 +2516,7 @@ pub(crate) async fn handle_env_access_command(
                 .context("list access")?;
             print_env_access_list(&grants, args.output)?;
         }
-        EnvAccessCommand::Grant(args) => {
+        EnvShareCommand::Grant(args) => {
             let user_id = trimmed_str(&args.user)
                 .ok_or_else(|| anyhow::anyhow!("--user is required"))?
                 .to_string();
@@ -2532,7 +2543,7 @@ pub(crate) async fn handle_env_access_command(
                 args.output,
             )?;
         }
-        EnvAccessCommand::Revoke(args) => {
+        EnvShareCommand::Revoke(args) => {
             let user_id =
                 trimmed_str(&args.user).ok_or_else(|| anyhow::anyhow!("--user is required"))?;
             let environment_id = resolve_environment_id(client, org_id, &args.environment).await?;
