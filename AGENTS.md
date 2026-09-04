@@ -10,6 +10,16 @@ work through merge and closure. Read-only work needs no tracker or claim. Carry
 an authorized landing objective through its safe in-scope steps unless the
 owner asks to stop or checkpoint.
 
+An authorized landing objective includes repository-selected checked-in
+verification and regeneration of intended derived or golden artifacts,
+including Kind, renderer-specific browser snapshots, and exact-head CI when
+selected; these are not separate authority gates. An explicit named exclusion
+applies only to the exact run or effect it names and must not be generalized to
+adjacent verification. This inheritance never authorizes access to real
+secrets or credentials or bypassing a selected gate: use synthetic credentials
+for verification unless direct access is separately authorized, and preserve
+the checked-in topology and assertions.
+
 Preserve unrelated changes and worktrees. Never commit known-bad work, weaken a
 gate for momentum, or use destructive Git/filesystem operations without an
 explicit request. A Forgejo outage permits only collision-free local work until
