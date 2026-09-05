@@ -27,6 +27,18 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into());
     let repo_url = std::env::var("SMOKE_REPO_URL")
         .unwrap_or_else(|_| "https://github.com/codewiresh/example".into());
+    let project_spec = codewire_project::ProjectSpec {
+        image,
+        repositories: vec![codewire_project::RepositorySpec {
+            source: repo_url,
+            destination: "/workspace".to_owned(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    project_spec
+        .validate()
+        .context("validate TTL smoke project specification")?;
 
     let pool = PgPoolOptions::new()
         .max_connections(2)
@@ -50,8 +62,7 @@ async fn main() -> anyhow::Result<()> {
                 "rust-ttl-smoke-{}",
                 &Uuid::new_v4().to_string()[..8]
             )),
-            image,
-            repo_url,
+            project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
             ..Default::default()
         })
         .await

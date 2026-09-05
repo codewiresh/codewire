@@ -29,10 +29,8 @@ mod enabled {
         organization_deletion_workflow_id,
     };
     use codewire_orchestration::worker;
-    use codewire_orchestration::worker::create::{
-        SandboxWorkerCfg, environment_per_env_template_name,
-    };
-    use codewire_orchestration::worker::env_data::{load_backend_row, load_environment};
+    use codewire_orchestration::worker::create::environment_per_env_template_name;
+    use codewire_orchestration::worker::env_data::load_backend_row;
     use codewire_orchestration::worker::fencing_evidence::{
         CLONE_FAIL_FIXTURE_URL, CLONE_SIBLING_FIXTURE_URL,
     };
