@@ -610,28 +610,32 @@ fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
         .lease_environment_credential_operation(&request)
         .expect("lease first generation");
     let material_generation = lease.material_generation();
-    let revocation_generation = lease.credential.metadata.revocation_generation;
+    let grant = lease.grant.clone();
     let channel_id = Uuid::new_v4();
     let refresh_id = Uuid::new_v4();
-    let permit = authority
+    let request_id = Uuid::new_v4();
+    let CredentialRefreshAdmission::Reserved(permit) = authority
         .begin_environment_credential_refresh(
             channel_id,
             refresh_id,
+            request_id,
             &request,
-            &credential.metadata.id,
-            revocation_generation,
+            &grant,
             material_generation,
         )
-        .expect("begin refresh");
+        .expect("begin refresh")
+    else {
+        panic!("expected reservation");
+    };
     assert_eq!(permit.current_material_generation, 1);
     assert_eq!(permit.next_material_generation, 2);
     assert_eq!(
         authority.begin_environment_credential_refresh(
             Uuid::new_v4(),
             Uuid::new_v4(),
+            Uuid::new_v4(),
             &request,
-            &credential.metadata.id,
-            revocation_generation,
+            &grant,
             material_generation,
         ),
         Err(LocalCredentialError::CredentialRefreshInProgress)
@@ -650,11 +654,18 @@ fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
     );
 
     let next_entry = protected_entry_id(&credential.metadata.id, 2).expect("next entry");
+    assert!(matches!(
+        authority.commit_environment_credential_refresh(channel_id, refresh_id, request_id),
+        Err(LocalCredentialError::StaleCredentialRefresh)
+    ));
+    authority
+        .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .expect("durable start precedes provider request and staging");
     store
         .put(&next_entry, &material(b"refreshed-oauth-bundle"))
         .expect("write refreshed bundle");
     let (refreshed, committed_material_generation) = authority
-        .commit_environment_credential_refresh(channel_id, refresh_id)
+        .commit_environment_credential_refresh(channel_id, refresh_id, request_id)
         .expect("commit refresh");
     assert_eq!(refreshed.metadata.revocation_generation, 2);
     assert_eq!(committed_material_generation, 2);
@@ -688,16 +699,22 @@ fn oauth_refresh_recovers_a_rotated_provider_token_after_authority_crash() {
                 .expect("add credential");
             credential_id = credential.metadata.id.clone();
             bind_credential(&authority, &environment_id, &credential_id);
+            let request = operation_lease_request(&environment_id);
+            let grant = authority
+                .admit_environment_credential_operation(&request)
+                .unwrap()
+                .grant;
+            let channel_id = Uuid::new_v4();
+            let refresh_id = Uuid::new_v4();
+            let request_id = Uuid::new_v4();
             authority
                 .begin_environment_credential_refresh(
-                    Uuid::new_v4(),
-                    Uuid::new_v4(),
-                    &operation_lease_request(&environment_id),
-                    &credential_id,
-                    1,
-                    1,
+                    channel_id, refresh_id, request_id, &request, &grant, 1,
                 )
                 .expect("begin refresh");
+            authority
+                .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+                .expect("durable start before provider output");
             store
                 .put(
                     &protected_entry_id(&credential_id, 2).expect("next entry"),
@@ -747,6 +764,500 @@ fn orphaned_oauth_refresh_marker_fails_authority_restart() {
         LocalCredentialAuthority::open(&root, store, catalog()),
         Err(LocalCredentialError::CorruptMetadata)
     ));
+}
+
+#[test]
+fn oauth_refresh_lost_start_ack_and_started_without_output_never_reopen_old_token() {
+    for start in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let root = authority_root(&temp);
+        let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+        let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+        let credential = authority
+            .add_credential(
+                new_credential("work"),
+                material(b"synthetic-old-token-canary"),
+            )
+            .unwrap();
+        let environment_id = environment("env-lost-start");
+        bind_credential(&authority, &environment_id, &credential.metadata.id);
+        let request = operation_lease_request(&environment_id);
+        let grant = authority
+            .admit_environment_credential_operation(&request)
+            .unwrap()
+            .grant;
+        let channel_id = Uuid::new_v4();
+        let refresh_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        authority
+            .begin_environment_credential_refresh(
+                channel_id, refresh_id, request_id, &request, &grant, 1,
+            )
+            .unwrap();
+        for (wrong_channel, wrong_request) in
+            [(Uuid::new_v4(), request_id), (channel_id, Uuid::new_v4())]
+        {
+            assert_eq!(
+                authority.start_environment_credential_refresh(
+                    wrong_channel,
+                    refresh_id,
+                    wrong_request
+                ),
+                Err(LocalCredentialError::StaleCredentialRefresh)
+            );
+        }
+        if start {
+            let deadline = authority
+                .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+                .unwrap();
+            assert!(deadline > unix_millis().unwrap());
+            // Model a lost Start acknowledgement: the caller has no usable
+            // Started value and must not retry either Start or cancellation.
+            assert_eq!(
+                authority.start_environment_credential_refresh(channel_id, refresh_id, request_id),
+                Err(LocalCredentialError::StaleCredentialRefresh)
+            );
+            assert_eq!(
+                authority.abort_environment_credential_refresh(channel_id, refresh_id, request_id),
+                Err(LocalCredentialError::StaleCredentialRefresh)
+            );
+        }
+        let marker = load_credential_refresh_marker(
+            &authority.connection().unwrap(),
+            &credential.metadata.id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(marker.permit.request_id, request_id);
+        assert_eq!(*marker.permit.grant, grant);
+        assert!(
+            !serde_json::to_string(&marker)
+                .unwrap()
+                .contains("synthetic-old-token-canary")
+        );
+        drop(authority);
+
+        let authority = LocalCredentialAuthority::open(&root, store, catalog()).unwrap();
+        let recovered = authority.get_credential(&credential.metadata.id).unwrap();
+        if start {
+            assert_eq!(recovered.metadata.status, CredentialStatus::RefreshFailed);
+            assert_eq!(recovered.metadata.revocation_generation, 2);
+            assert!(
+                authority
+                    .lease_environment_credential_operation(&request)
+                    .is_err()
+            );
+            assert!(
+                authority
+                    .begin_environment_credential_refresh(
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        request_id,
+                        &request,
+                        &grant,
+                        1
+                    )
+                    .is_err()
+            );
+        } else {
+            assert_eq!(recovered.metadata.status, CredentialStatus::Active);
+            assert_eq!(recovered.metadata.revocation_generation, 1);
+            assert!(matches!(
+                authority.begin_environment_credential_refresh(
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    request_id,
+                    &request,
+                    &grant,
+                    1
+                ),
+                Ok(CredentialRefreshAdmission::Reserved(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn oauth_refresh_start_rechecks_binding_and_hard_expiry_after_reservation() {
+    for expire in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let authority = LocalCredentialAuthority::open(
+            &authority_root(&temp),
+            TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+            catalog(),
+        )
+        .unwrap();
+        let credential = authority
+            .add_credential(new_credential("work"), material(b"synthetic-work-token"))
+            .unwrap();
+        let environment_id = environment("env-refresh-binding");
+        bind_credential(&authority, &environment_id, &credential.metadata.id);
+        let request = operation_lease_request(&environment_id);
+        let grant = authority
+            .admit_environment_credential_operation(&request)
+            .unwrap()
+            .grant;
+        let channel_id = Uuid::new_v4();
+        let refresh_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        authority
+            .begin_environment_credential_refresh(
+                channel_id, refresh_id, request_id, &request, &grant, 1,
+            )
+            .unwrap();
+        if expire {
+            authority
+                .connection()
+                .unwrap()
+                .execute(
+                    "UPDATE credentials SET expires_at_unix = 1 WHERE id = ?1",
+                    [credential.metadata.id.as_str()],
+                )
+                .unwrap();
+        } else {
+            let other = authority
+                .add_credential(new_credential("other"), material(b"synthetic-other-token"))
+                .unwrap();
+            let replacement = authority
+                .create_profile(
+                    AccessProfileName::parse("other").unwrap(),
+                    BTreeMap::from([(CapabilitySlot::codex(), other.metadata.id)]),
+                )
+                .unwrap();
+            authority
+                .replace_environment_access_binding(
+                    &environment_id,
+                    &grant.profile_id,
+                    grant.profile_revision,
+                    replacement.profile.id,
+                    replacement.profile.revision,
+                )
+                .unwrap();
+        }
+        assert!(
+            authority
+                .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+                .is_err()
+        );
+        let marker = load_credential_refresh_marker(
+            &authority.connection().unwrap(),
+            &credential.metadata.id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(marker.phase, CredentialRefreshPhase::Reserved);
+        assert_eq!(*marker.permit.grant, grant);
+        authority
+            .abort_environment_credential_refresh(channel_id, refresh_id, request_id)
+            .unwrap();
+    }
+}
+
+#[test]
+fn oauth_refresh_attempt_id_cannot_alias_another_credential_after_rebind() {
+    let temp = TempDir::new().unwrap();
+    let authority = LocalCredentialAuthority::open(
+        &authority_root(&temp),
+        TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+        catalog(),
+    )
+    .unwrap();
+    let first = authority
+        .add_credential(new_credential("first"), material(b"synthetic-first-token"))
+        .unwrap();
+    let second = authority
+        .add_credential(
+            new_credential("second"),
+            material(b"synthetic-second-token"),
+        )
+        .unwrap();
+    let environment_id = environment("env-refresh-attempt-alias");
+    bind_credential(&authority, &environment_id, &first.metadata.id);
+    let request = operation_lease_request(&environment_id);
+    let first_grant = authority
+        .admit_environment_credential_operation(&request)
+        .unwrap()
+        .grant;
+    let channel_id = Uuid::new_v4();
+    let refresh_id = Uuid::new_v4();
+    let request_id = Uuid::new_v4();
+    authority
+        .begin_environment_credential_refresh(
+            channel_id,
+            refresh_id,
+            request_id,
+            &request,
+            &first_grant,
+            1,
+        )
+        .unwrap();
+    let replacement = authority
+        .create_profile(
+            AccessProfileName::parse("second").unwrap(),
+            BTreeMap::from([(CapabilitySlot::codex(), second.metadata.id.clone())]),
+        )
+        .unwrap();
+    authority
+        .replace_environment_access_binding(
+            &environment_id,
+            &first_grant.profile_id,
+            first_grant.profile_revision,
+            replacement.profile.id,
+            replacement.profile.revision,
+        )
+        .unwrap();
+    let second_grant = authority
+        .admit_environment_credential_operation(&request)
+        .unwrap()
+        .grant;
+    for (candidate_channel, candidate_request) in [
+        (channel_id, request_id),
+        (channel_id, Uuid::new_v4()),
+        (Uuid::new_v4(), request_id),
+    ] {
+        assert_eq!(
+            authority.begin_environment_credential_refresh(
+                candidate_channel,
+                refresh_id,
+                candidate_request,
+                &request,
+                &second_grant,
+                1,
+            ),
+            Err(LocalCredentialError::StaleCredentialRefresh)
+        );
+    }
+    assert_eq!(authority.active_refreshes.lock().unwrap().len(), 1);
+    {
+        let connection = authority.connection().unwrap();
+        let first_marker = load_credential_refresh_marker(&connection, &first.metadata.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_marker.permit.refresh_id, refresh_id);
+        assert_eq!(first_marker.permit.request_id, request_id);
+        assert_eq!(*first_marker.permit.grant, first_grant);
+        assert!(
+            load_credential_refresh_marker(&connection, &second.metadata.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            load_protected_entry_journal(&connection, &second.metadata.id)
+                .unwrap()
+                .is_none()
+        );
+    }
+    let second_refresh_id = Uuid::new_v4();
+    assert!(matches!(
+        authority.begin_environment_credential_refresh(
+            channel_id,
+            second_refresh_id,
+            request_id,
+            &request,
+            &second_grant,
+            1,
+        ),
+        Ok(CredentialRefreshAdmission::Reserved(_))
+    ));
+    authority
+        .abort_environment_credential_refresh(channel_id, second_refresh_id, request_id)
+        .unwrap();
+    authority
+        .abort_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .unwrap();
+    assert!(authority.active_refreshes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn oauth_refresh_elapsed_deadline_does_not_steal_live_owner_and_staged_output_is_recoverable() {
+    let temp = TempDir::new().unwrap();
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"synthetic-old"))
+        .unwrap();
+    let environment_id = environment("env-live-owner");
+    bind_credential(&authority, &environment_id, &credential.metadata.id);
+    let request = operation_lease_request(&environment_id);
+    let grant = authority
+        .admit_environment_credential_operation(&request)
+        .unwrap()
+        .grant;
+    let channel_id = Uuid::new_v4();
+    let refresh_id = Uuid::new_v4();
+    let request_id = Uuid::new_v4();
+    authority
+        .begin_environment_credential_refresh(
+            channel_id, refresh_id, request_id, &request, &grant, 1,
+        )
+        .unwrap();
+    authority
+        .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .unwrap();
+    {
+        let connection = authority.connection().unwrap();
+        let mut marker = load_credential_refresh_marker(&connection, &credential.metadata.id)
+            .unwrap()
+            .unwrap();
+        marker.phase = CredentialRefreshPhase::Started {
+            execution_deadline_unix_ms: 1,
+        };
+        connection
+            .execute(
+                "UPDATE authority_metadata SET value = ?2 WHERE key = ?1",
+                params![
+                    credential_refresh_marker_key(&credential.metadata.id),
+                    serde_json::to_string(&marker).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        authority.begin_environment_credential_refresh(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &request,
+            &grant,
+            1
+        ),
+        Err(LocalCredentialError::CredentialRefreshInProgress)
+    );
+    store
+        .put(
+            &protected_entry_id(&credential.metadata.id, 2).unwrap(),
+            &material(b"synthetic-late-staged-output"),
+        )
+        .unwrap();
+    authority
+        .release_channel_credential_refreshes(channel_id)
+        .unwrap();
+    assert_eq!(
+        authority.begin_environment_credential_refresh(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &request,
+            &grant,
+            1
+        ),
+        Ok(CredentialRefreshAdmission::Recovered)
+    );
+    let lease = authority
+        .lease_environment_credential_operation(&request)
+        .unwrap();
+    assert_eq!(lease.material_generation(), 2);
+    assert_eq!(
+        lease.with_material(<[u8]>::to_vec),
+        b"synthetic-late-staged-output"
+    );
+}
+
+#[test]
+fn oauth_refresh_rejects_prior_schema_and_scalar_markers_without_fallback() {
+    for old_schema in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let root = authority_root(&temp);
+        let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+        let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+        let credential = authority
+            .add_credential(new_credential("work"), material(b"synthetic-old"))
+            .unwrap();
+        let environment_id = environment("env-old-refresh-journal");
+        bind_credential(&authority, &environment_id, &credential.metadata.id);
+        let request = operation_lease_request(&environment_id);
+        let grant = authority
+            .admit_environment_credential_operation(&request)
+            .unwrap()
+            .grant;
+        authority
+            .begin_environment_credential_refresh(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &request,
+                &grant,
+                1,
+            )
+            .unwrap();
+        {
+            let connection = authority.connection().unwrap();
+            if old_schema {
+                connection.pragma_update(None, "user_version", 2).unwrap();
+            } else {
+                connection
+                    .execute(
+                        "UPDATE authority_metadata SET value = '2' WHERE key = ?1",
+                        [credential_refresh_marker_key(&credential.metadata.id)],
+                    )
+                    .unwrap();
+            }
+        }
+        drop(authority);
+        assert!(matches!(
+            LocalCredentialAuthority::open(&root, store, catalog()),
+            Err(LocalCredentialError::UnsupportedSchema | LocalCredentialError::CorruptMetadata)
+        ));
+    }
+}
+
+#[test]
+fn oauth_refresh_start_accepts_only_attenuated_live_request_deadlines() {
+    let temp = TempDir::new().unwrap();
+    let authority = LocalCredentialAuthority::open(
+        &authority_root(&temp),
+        TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+        catalog(),
+    )
+    .unwrap();
+    let now = unix_seconds().unwrap();
+    let mut input = new_credential("work");
+    input.expires_at_unix = Some(now + 600);
+    let credential = authority
+        .add_credential(input, material(b"synthetic-oauth"))
+        .unwrap();
+    let environment_id = environment("env-attenuated-deadline");
+    bind_credential(&authority, &environment_id, &credential.metadata.id);
+    let request = operation_lease_request(&environment_id);
+    let current_grant = authority
+        .admit_environment_credential_operation(&request)
+        .unwrap()
+        .grant;
+    for deadline in [None, Some(now - 1), Some(now + 601)] {
+        let mut invalid_grant = current_grant.clone();
+        invalid_grant.expires_at_unix = deadline;
+        assert!(
+            authority
+                .begin_environment_credential_refresh(
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    &request,
+                    &invalid_grant,
+                    1
+                )
+                .is_err()
+        );
+    }
+    let mut pinned = current_grant;
+    pinned.expires_at_unix = Some(now + 300);
+    let channel_id = Uuid::new_v4();
+    let refresh_id = Uuid::new_v4();
+    let request_id = Uuid::new_v4();
+    authority
+        .begin_environment_credential_refresh(
+            channel_id, refresh_id, request_id, &request, &pinned, 1,
+        )
+        .unwrap();
+    authority
+        .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .unwrap();
+    let marker =
+        load_credential_refresh_marker(&authority.connection().unwrap(), &credential.metadata.id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(marker.permit.grant.expires_at_unix, pinned.expires_at_unix);
 }
 
 #[test]

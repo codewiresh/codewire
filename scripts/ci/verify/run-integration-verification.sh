@@ -186,7 +186,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test refresh \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential refresh matrix" "$logfile" 12
+  assert_passed_count "platform credential refresh matrix" "$logfile" 13
 
   logfile="$RUN_DIR/session-hash-only.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

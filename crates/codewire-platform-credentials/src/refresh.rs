@@ -8,7 +8,9 @@
 
 use std::fmt;
 
-use codewire_access::{CredentialId, CredentialStatus, Owner};
+use codewire_access::{
+    CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CredentialId, CredentialStatus, Owner,
+};
 use codewire_protected_store::ProtectedValue;
 use codewire_protected_store::secret_envelope::{
     GeneratedDek, SECRET_FORMAT_V1, SecretCoordinates, decrypt_secret, encrypt_secret,
@@ -35,6 +37,20 @@ pub enum OAuthRefreshState {
     Committed,
     Unknown,
     Cancelled,
+}
+
+/// Material-free discovery for a trusted placement authority on any replica.
+/// Neither an attempt ID nor a live deadline reconstructs a provider-send
+/// permit. Live flags describe only the corresponding Reserved/Started phase
+/// at the database-clock admission point; callers must use the mutation APIs
+/// to recheck them. A committed attempt remains only a publication receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OAuthRefreshAttemptInfo {
+    pub attempt_id: Uuid,
+    pub expected: CredentialVersion,
+    pub state: OAuthRefreshState,
+    pub reservation_live: bool,
+    pub execution_live: bool,
 }
 
 impl OAuthRefreshState {
@@ -222,14 +238,25 @@ impl PlatformCredentialStore {
         if attempt.state()? != OAuthRefreshState::Reserved || !attempt.reservation_live {
             return Err(Error::StaleRefresh);
         }
-        sqlx::query("UPDATE platform_credential_refresh_attempts SET state='started',started_at=clock_timestamp(),updated_at=clock_timestamp() WHERE credential_id=$1")
-            .bind(identity.credential_id.as_str()).execute(&mut *tx).await.map_err(database_error)?;
+        let changed = sqlx::query("WITH admission_time AS (SELECT clock_timestamp() AS admitted_at) \
+            UPDATE platform_credential_refresh_attempts SET state='started',started_at=admission_time.admitted_at, \
+            started_until=admission_time.admitted_at+($2::bigint * interval '1 second'),updated_at=admission_time.admitted_at FROM admission_time \
+            WHERE credential_id=$1 AND state='reserved' AND reserved_until>admission_time.admitted_at")
+            .bind(identity.credential_id.as_str())
+            .bind(i64::try_from(CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS).map_err(|_| Error::InvalidInput)?)
+            .execute(&mut *tx).await.map_err(database_error)?.rows_affected();
+        if changed != 1 {
+            return Err(Error::StaleRefresh);
+        }
         tx.commit().await.map_err(database_error)?;
         Ok(StartedOAuthRefresh(prepared))
     }
 
     /// Durably retain an exact encrypted result. Same-result retries are
     /// harmless; another envelope for the same attempt cannot replace it.
+    /// Initial staging rechecks the durable execution deadline at its final
+    /// state-transition fence. Already staged results remain recoverable after
+    /// that horizon.
     pub async fn stage_oauth_refresh(
         &self,
         result: &PreparedOAuthRefreshResult,
@@ -253,6 +280,9 @@ impl PlatformCredentialStore {
                 }
             }
             OAuthRefreshState::Started => {
+                if !attempt.execution_live {
+                    return Err(Error::StaleRefresh);
+                }
                 let wrapped = &result.material.wrapped;
                 let changed = sqlx::query("UPDATE platform_credential_refresh_material SET ciphertext=$2,nonce=$3,format=$4 \
                     WHERE attempt_id=$1 AND ciphertext IS NULL AND nonce IS NULL AND format IS NULL \
@@ -265,8 +295,12 @@ impl PlatformCredentialStore {
                 if changed != 1 {
                     return Err(Error::CorruptRecord);
                 }
-                sqlx::query("UPDATE platform_credential_refresh_attempts SET state='staged',updated_at=clock_timestamp() WHERE credential_id=$1")
-                    .bind(identity.credential_id.as_str()).execute(&mut *tx).await.map_err(database_error)?;
+                let changed = sqlx::query("UPDATE platform_credential_refresh_attempts SET state='staged',updated_at=clock_timestamp() \
+                    WHERE credential_id=$1 AND state='started' AND started_until>clock_timestamp()")
+                    .bind(identity.credential_id.as_str()).execute(&mut *tx).await.map_err(database_error)?.rows_affected();
+                if changed != 1 {
+                    return Err(Error::StaleRefresh);
+                }
             }
             OAuthRefreshState::Unknown => return Err(Error::RefreshOutcomeUnknown),
             _ => return Err(Error::StaleRefresh),
@@ -357,6 +391,26 @@ impl PlatformCredentialStore {
         Ok(current.version)
     }
 
+    /// Discover the current durable attempt without a caller-supplied UUID or
+    /// any material/KEK access. The owner and credential fences match mutation
+    /// lock order. This is not a general metadata-reader or send capability;
+    /// terminal and hard-expired records remain discoverable for recovery.
+    pub async fn current_oauth_refresh_attempt(
+        &self,
+        owner: &Owner,
+        id: &CredentialId,
+    ) -> Result<Option<OAuthRefreshAttemptInfo>, Error> {
+        let mut tx = self.pool().begin().await.map_err(database_error)?;
+        check_owner(&mut *tx, owner, true).await?;
+        load_record(&mut *tx, owner, id, true, self.catalog()).await?;
+        let info = load_attempt(&mut tx, id)
+            .await?
+            .map(|attempt| attempt.info())
+            .transpose()?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(info)
+    }
+
     /// Read material-free attempt state through the trusted authority. This
     /// query does not reconstruct a send permit or reopen a failed attempt.
     pub async fn oauth_refresh_state(
@@ -404,11 +458,24 @@ impl PlatformCredentialStore {
         Ok(())
     }
 
-    /// Fail closed after a possibly transmitted request with no durable result.
-    /// This is not an abort or a timeout-based replay permission. The owner must
-    /// explicitly replace the current failed version before further brokerage.
-    /// Expiry does not prevent safely closing the failed operation.
-    pub async fn mark_oauth_refresh_unknown(
+    /// Consume the exact process-local send-owner permit after an unsuccessful
+    /// or ambiguous exchange with no durable result. Unlike another replica,
+    /// this caller need not wait for the execution deadline. A lost database
+    /// acknowledgement never reconstructs the permit: discover the attempt and
+    /// use deadline-gated abandonment if it is still Started.
+    pub async fn fail_oauth_refresh(&self, started: StartedOAuthRefresh) -> Result<(), Error> {
+        self.fail_oauth_refresh_identity(&started.0.identity, false)
+            .await
+    }
+
+    /// Fail closed on a Started attempt only after its durable database-clock
+    /// execution deadline. Expiry is an abandonment fence, not proof of process
+    /// death or permission to repeat the provider request. A concurrent stage
+    /// wins permanently once durable; it must be promoted, never discarded.
+    /// Exact Unknown acknowledgements are idempotent. Hard credential expiry
+    /// does not prevent closing an unknown outcome; explicit owner replacement
+    /// is required before further brokerage.
+    pub async fn fail_abandoned_oauth_refresh(
         &self,
         owner: &Owner,
         id: &CredentialId,
@@ -416,9 +483,20 @@ impl PlatformCredentialStore {
         attempt_id: Uuid,
     ) -> Result<(), Error> {
         let identity = Identity::new(owner, id, expected, attempt_id)?;
+        self.fail_oauth_refresh_identity(&identity, true).await
+    }
+
+    async fn fail_oauth_refresh_identity(
+        &self,
+        identity: &Identity,
+        require_expired: bool,
+    ) -> Result<(), Error> {
+        let id = &identity.credential_id;
+        let expected = identity.expected;
+        let attempt_id = identity.attempt_id;
         let mut tx = self.pool().begin().await.map_err(database_error)?;
-        let current = lock_record(self, &mut tx, &identity).await?;
-        let attempt = exact_attempt(&mut tx, &identity).await?;
+        let current = lock_record(self, &mut tx, identity).await?;
+        let attempt = exact_attempt(&mut tx, identity).await?;
         if attempt.state()? == OAuthRefreshState::Unknown {
             if current.version != expected.revoked()?
                 || current.metadata.status != CredentialStatus::RefreshFailed
@@ -432,13 +510,21 @@ impl PlatformCredentialStore {
             {
                 return Err(Error::StaleRefresh);
             }
+            if require_expired && attempt.execution_live {
+                return Err(Error::RefreshInProgress);
+            }
+            let changed = sqlx::query("UPDATE platform_credential_refresh_attempts SET state='unknown',updated_at=clock_timestamp() \
+                WHERE credential_id=$1 AND state='started' AND (NOT $2::boolean OR started_until<=clock_timestamp())")
+                .bind(id.as_str()).bind(require_expired)
+                .execute(&mut *tx).await.map_err(database_error)?.rows_affected();
+            if changed != 1 {
+                return Err(Error::RefreshInProgress);
+            }
             delete_material(&mut tx, id).await?;
             delete_attempt_material(&mut tx, attempt_id).await?;
             sqlx::query("UPDATE platform_credentials SET status='refresh_failed',revocation_generation=$2,updated_at=clock_timestamp() WHERE id=$1")
                 .bind(id.as_str()).bind(generation(expected.revoked()?.revocation_generation)?)
                 .execute(&mut *tx).await.map_err(database_error)?;
-            sqlx::query("UPDATE platform_credential_refresh_attempts SET state='unknown',updated_at=clock_timestamp() WHERE credential_id=$1")
-                .bind(id.as_str()).execute(&mut *tx).await.map_err(database_error)?;
         }
         tx.commit().await.map_err(database_error)?;
         Ok(())
@@ -452,11 +538,36 @@ struct AttemptRow {
     expected_material_generation: i64,
     state: String,
     reservation_live: bool,
+    execution_live: bool,
 }
 
 impl AttemptRow {
     fn state(&self) -> Result<OAuthRefreshState, Error> {
         OAuthRefreshState::parse(&self.state)
+    }
+
+    fn info(&self) -> Result<OAuthRefreshAttemptInfo, Error> {
+        let expected = CredentialVersion {
+            revocation_generation: self
+                .expected_revocation_generation
+                .try_into()
+                .map_err(|_| Error::CorruptRecord)?,
+            material_generation: self
+                .expected_material_generation
+                .try_into()
+                .map_err(|_| Error::CorruptRecord)?,
+        };
+        expected.replaced().map_err(|_| Error::CorruptRecord)?;
+        if self.attempt_id.is_nil() {
+            return Err(Error::CorruptRecord);
+        }
+        Ok(OAuthRefreshAttemptInfo {
+            attempt_id: self.attempt_id,
+            expected,
+            state: self.state()?,
+            reservation_live: self.reservation_live,
+            execution_live: self.execution_live,
+        })
     }
 }
 
@@ -480,9 +591,16 @@ async fn load_attempt(
     tx: &mut Transaction<'_, Postgres>,
     id: &CredentialId,
 ) -> Result<Option<AttemptRow>, Error> {
-    sqlx::query_as("SELECT attempt_id,expected_revocation_generation,expected_material_generation,state, \
-        reserved_until > clock_timestamp() AS reservation_live FROM platform_credential_refresh_attempts WHERE credential_id=$1 FOR UPDATE")
-        .bind(id.as_str()).fetch_optional(&mut **tx).await.map_err(database_error)
+    sqlx::query_as(
+        "SELECT attempt_id,expected_revocation_generation,expected_material_generation,state, \
+        state='reserved' AND reserved_until>clock_timestamp() AS reservation_live, \
+        state='started' AND COALESCE(started_until>clock_timestamp(),false) AS execution_live \
+        FROM platform_credential_refresh_attempts WHERE credential_id=$1 FOR UPDATE",
+    )
+    .bind(id.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)
 }
 
 async fn exact_attempt(

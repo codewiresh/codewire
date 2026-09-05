@@ -14,11 +14,13 @@ CREATE TABLE public.platform_credential_refresh_attempts (
     state text NOT NULL CHECK (state IN ('reserved', 'started', 'staged', 'committed', 'unknown', 'cancelled')),
     reserved_until timestamptz NOT NULL,
     started_at timestamptz,
+    started_until timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT platform_credential_refresh_attempts_started_check CHECK (
-        (state IN ('reserved', 'cancelled') AND started_at IS NULL)
-        OR (state IN ('started', 'staged', 'committed', 'unknown') AND started_at IS NOT NULL)
+        (state IN ('reserved', 'cancelled') AND started_at IS NULL AND started_until IS NULL)
+        OR (state IN ('started', 'staged', 'committed', 'unknown')
+            AND started_at IS NOT NULL AND started_until IS NOT NULL AND started_until > started_at)
     )
 );
 

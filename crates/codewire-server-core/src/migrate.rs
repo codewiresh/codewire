@@ -54,7 +54,7 @@ mod tests {
     // Computed by the synthetic 18->20 upgrade fixture and shared fresh-schema
     // gate; accepted applied migration history remains independently pinned.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "022961777e7ce3c81dd413e51b0f47c5e43e9bbbce86b1ba753acdbfb052cc6a";
+        "7ed7e45a11b90ab2953ef0df92613cee949638a47631fabf490d988fc278c309";
     const ACCEPTED_CREDENTIAL_STORAGE_SCHEMA_FINGERPRINT: &str =
         "ab823697675ec3b378dddda17d3de6bd7f62c2d6070977409158a9d42f97b10b";
     // SHA-384 of concatenated migration checksums 1..=18 from canonical

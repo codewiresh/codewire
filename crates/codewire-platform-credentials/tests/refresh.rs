@@ -12,11 +12,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, ensure};
 use codewire_access::{
-    CredentialAuthKind as Kind, CredentialId, CredentialStatus, Owner, builtin_provider_catalog,
+    CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CredentialAuthKind as Kind, CredentialId,
+    CredentialStatus, Owner, builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
-    CredentialMetadataReader, CredentialRecord, CredentialVersion, OAuthRefreshState as State,
-    PlatformCredentialError as Error, PlatformCredentialStore, StartedOAuthRefresh,
+    CredentialMetadataReader, CredentialRecord, CredentialVersion, OAuthRefreshAttemptInfo,
+    OAuthRefreshState as State, PlatformCredentialError as Error, PlatformCredentialStore,
+    StartedOAuthRefresh,
 };
 use codewire_protected_store::secret_envelope::{
     DEK_BYTES, DekContext, GeneratedDek, KekProvider, KekProviderKind, SecretEnvelopeError,
@@ -114,6 +116,18 @@ async fn expire(pool: &PgPool, id: &CredentialId) -> Result<()> {
     Ok(())
 }
 
+async fn expire_execution(pool: &PgPool, id: &CredentialId) -> Result<()> {
+    // Move only this synthetic attempt's clock coordinates. Preserve the
+    // schema's strict started_at < started_until invariant and exact duration.
+    sqlx::query("WITH expired AS (SELECT clock_timestamp()-interval '1 second' AS at) \
+        UPDATE platform_credential_refresh_attempts SET started_until=expired.at, \
+        started_at=expired.at-($2::bigint * interval '1 second') FROM expired WHERE credential_id=$1")
+        .bind(id.as_str())
+        .bind(i64::try_from(CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS)?)
+        .execute(pool).await?;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn two_replicas_reserve_one_provider_operation_and_publish_one_exact_version() -> Result<()> {
@@ -124,6 +138,7 @@ async fn two_replicas_reserve_one_provider_operation_and_publish_one_exact_versi
         let first = db.store(provider.clone());
         let (second_pool, second) = replica(&db, provider.clone()).await?;
         let record = create(&first, &owner, "Concurrent").await?;
+        ensure!(second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await?.is_none());
         let first_id = Uuid::new_v4();
         let second_id = Uuid::new_v4();
         let (a, b) = tokio::join!(
@@ -136,7 +151,19 @@ async fn two_replicas_reserve_one_provider_operation_and_publish_one_exact_versi
             _ => anyhow::bail!("independent replicas did not select exactly one refresh owner"),
         };
         ensure!(counts(&db.pool, &record.metadata.id).await? == (1, 1));
+        ensure!(second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await? == Some(OAuthRefreshAttemptInfo {
+            attempt_id: attempt, expected: record.version, state: State::Reserved,
+            reservation_live: true, execution_live: false,
+        }));
         let permit = second.start_oauth_refresh(prepared).await?;
+        ensure!(first.current_oauth_refresh_attempt(&owner, &record.metadata.id).await? == Some(OAuthRefreshAttemptInfo {
+            attempt_id: attempt, expected: record.version, state: State::Started,
+            reservation_live: false, execution_live: true,
+        }));
+        let duration: i64 = sqlx::query_scalar("SELECT extract(epoch FROM started_until-started_at)::bigint FROM platform_credential_refresh_attempts WHERE credential_id=$1")
+            .bind(record.metadata.id.as_str()).fetch_one(&db.pool).await?;
+        ensure!(duration == i64::try_from(CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS)?);
+        ensure!(duration == 90, "the durable abandonment horizon is part of the shared contract");
         let oauth = SyntheticOAuthProvider::default();
         let encrypted = permit.prepare_result(&oauth.exchange(&permit)?)?;
         let generated = provider.generate_calls.load(Ordering::SeqCst);
@@ -189,12 +216,20 @@ async fn only_expired_unstarted_reservations_can_be_reclaimed_and_old_permits_fa
         ensure!(matches!(second.begin_oauth_refresh(&owner, &record.metadata.id, record.version, old_id).await, Err(Error::StaleRefresh)));
         sqlx::query("UPDATE platform_credential_refresh_attempts SET reserved_until=clock_timestamp()-interval '1 second' WHERE credential_id=$1")
             .bind(record.metadata.id.as_str()).execute(&db.pool).await?;
+        ensure!(second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await? == Some(OAuthRefreshAttemptInfo {
+            attempt_id: old_id, expected: record.version, state: State::Reserved,
+            reservation_live: false, execution_live: false,
+        }));
         let new_id = Uuid::new_v4();
         let new = second.begin_oauth_refresh(&owner, &record.metadata.id, record.version, new_id).await?;
         ensure!(matches!(first.start_oauth_refresh(old).await, Err(Error::StaleRefresh)));
         ensure!(first.cancel_oauth_refresh(&owner, &record.metadata.id, record.version, old_id).await == Err(Error::StaleRefresh));
         second.cancel_oauth_refresh(&owner, &record.metadata.id, record.version, new_id).await?;
         first.cancel_oauth_refresh(&owner, &record.metadata.id, record.version, new_id).await?;
+        ensure!(first.current_oauth_refresh_attempt(&owner, &record.metadata.id).await? == Some(OAuthRefreshAttemptInfo {
+            attempt_id: new_id, expected: record.version, state: State::Cancelled,
+            reservation_live: false, execution_live: false,
+        }));
         ensure!(matches!(second.start_oauth_refresh(new).await, Err(Error::StaleRefresh)));
         ensure!(counts(&db.pool, &record.metadata.id).await? == (1, 0));
         ensure!(first.read_for_broker(&owner, &record.metadata.id, record.version).await?.expose_secret() == OLD_VALUE);
@@ -213,27 +248,57 @@ async fn ambiguous_start_and_provider_acceptance_never_allow_timeout_replay() ->
         let provider = Arc::new(SyntheticKek::default());
         let first = db.store(provider.clone());
         let (second_pool, second) = replica(&db, provider).await?;
-        for accepted in [false, true] {
-            let record = create(&first, &owner, if accepted { "Provider accepted" } else { "Start ACK lost" }).await?;
+        for outcome in ["Start ACK lost", "Provider accepted", "Owner reports failure", "Failure SQL rollback"] {
+            let record = create(&first, &owner, outcome).await?;
+            let original = envelope_bytes(&db.pool, record.metadata.id.as_str()).await?;
             let (attempt, permit) = started(&first, &owner, &record).await?;
             let oauth = SyntheticOAuthProvider::default();
+            let accepted = outcome != "Start ACK lost";
             if accepted {
                 // The fake provider consumed the old token; lose the returned
                 // replacement before any result reaches durable staging.
                 drop(oauth.exchange(&permit)?);
             }
-            // Losing the successful start result before sending and crashing
-            // after provider acceptance are indistinguishable in durable state.
-            drop(permit);
             sqlx::query("UPDATE platform_credential_refresh_attempts SET reserved_until=clock_timestamp()-interval '1 hour' WHERE credential_id=$1")
                 .bind(record.metadata.id.as_str()).execute(&db.pool).await?;
-            ensure!(second.oauth_refresh_state(&owner, &record.metadata.id, record.version, attempt).await? == State::Started);
+            let discovered = second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await?.context("replica failed to discover started attempt")?;
+            ensure!(discovered.attempt_id == attempt && discovered.expected == record.version);
+            ensure!(discovered.state == State::Started && discovered.execution_live && !discovered.reservation_live);
             ensure!(matches!(second.begin_oauth_refresh(&owner, &record.metadata.id, record.version, Uuid::new_v4()).await, Err(Error::RefreshInProgress)));
             ensure!(second.cancel_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await == Err(Error::RefreshOutcomeUnknown));
-            second.mark_oauth_refresh_unknown(&owner, &record.metadata.id, record.version, attempt).await?;
-            first.mark_oauth_refresh_unknown(&owner, &record.metadata.id, record.version, attempt).await?;
+            ensure!(second.fail_abandoned_oauth_refresh(&owner, &record.metadata.id, discovered.expected, discovered.attempt_id).await == Err(Error::RefreshInProgress));
+            ensure!(first.record(&owner, &record.metadata.id).await? == record);
+            ensure!(envelope_bytes(&db.pool, record.metadata.id.as_str()).await? == original);
+
+            match outcome {
+                "Owner reports failure" => first.fail_oauth_refresh(permit).await?,
+                "Failure SQL rollback" => {
+                    sqlx::raw_sql("CREATE FUNCTION reject_refresh_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status='refresh_failed' THEN RAISE EXCEPTION 'synthetic refresh failure never public'; END IF; RETURN NEW; END $$; \
+                        CREATE TRIGGER reject_refresh_failure BEFORE UPDATE ON platform_credentials FOR EACH ROW EXECUTE FUNCTION reject_refresh_failure()")
+                        .execute(&db.pool).await?;
+                    ensure!(first.fail_oauth_refresh(permit).await == Err(Error::DatabaseUnavailable));
+                    ensure!(first.record(&owner, &record.metadata.id).await? == record);
+                    ensure!(counts(&db.pool, &record.metadata.id).await? == (1, 1));
+                    ensure!(envelope_bytes(&db.pool, record.metadata.id.as_str()).await? == original);
+                    ensure!(second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await? == Some(discovered));
+                    ensure!(second.fail_abandoned_oauth_refresh(&owner, &record.metadata.id, discovered.expected, discovered.attempt_id).await == Err(Error::RefreshInProgress));
+                    sqlx::query("DROP TRIGGER reject_refresh_failure ON platform_credentials").execute(&db.pool).await?;
+                    expire_execution(&db.pool, &record.metadata.id).await?;
+                }
+                _ => {
+                    // Lost start ACK and lost provider result leave no send
+                    // permit on a new replica. A reserved timeout is not enough.
+                    drop(permit);
+                    expire_execution(&db.pool, &record.metadata.id).await?;
+                }
+            }
+            second.fail_abandoned_oauth_refresh(&owner, &record.metadata.id, discovered.expected, discovered.attempt_id).await?;
+            first.fail_abandoned_oauth_refresh(&owner, &record.metadata.id, discovered.expected, discovered.attempt_id).await?;
             ensure!(oauth.requests.load(Ordering::SeqCst) == usize::from(accepted));
             ensure!(second.oauth_refresh_state(&owner, &record.metadata.id, record.version, attempt).await? == State::Unknown);
+            ensure!(second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await? == Some(OAuthRefreshAttemptInfo {
+                state: State::Unknown, execution_live: false, ..discovered
+            }));
             let failed = second.record(&owner, &record.metadata.id).await?;
             ensure!(failed.metadata.status == CredentialStatus::RefreshFailed);
             ensure!(failed.version.revocation_generation == record.version.revocation_generation + 1);
@@ -245,8 +310,31 @@ async fn ambiguous_start_and_provider_acceptance_never_allow_timeout_replay() ->
             let replaced = first.replace(&owner, &record.metadata.id, failed.version, &value(NEW_VALUE), record.metadata.expires_at_unix).await?;
             ensure!(replaced.metadata.status == CredentialStatus::Active);
             ensure!(counts(&db.pool, &record.metadata.id).await? == (0, 0));
+            ensure!(second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await?.is_none());
             ensure!(second.promote_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await == Err(Error::StaleRefresh));
         }
+
+        // An alive sender cannot stage late. The execution horizon does not
+        // detect process death; another replica can safely close only the
+        // unknown result, never claim another provider-send permit.
+        let record = create(&first, &owner, "Alive beyond deadline").await?;
+        let (attempt, permit) = started(&first, &owner, &record).await?;
+        let encrypted = permit.prepare_result(&value(NEW_VALUE))?;
+        expire_execution(&db.pool, &record.metadata.id).await?;
+        ensure!(first.stage_oauth_refresh(&encrypted).await == Err(Error::StaleRefresh));
+        ensure!(second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await? == Some(OAuthRefreshAttemptInfo {
+            attempt_id: attempt, expected: record.version, state: State::Started,
+            reservation_live: false, execution_live: false,
+        }));
+        ensure!(counts(&db.pool, &record.metadata.id).await? == (1, 1));
+        ensure!(first.read_for_broker(&owner, &record.metadata.id, record.version).await?.expose_secret() == OLD_VALUE);
+        ensure!(matches!(second.begin_oauth_refresh(&owner, &record.metadata.id, record.version, Uuid::new_v4()).await, Err(Error::RefreshInProgress)));
+        // Hard expiry must not prevent terminal fail-closed cleanup either.
+        expire(&db.pool, &record.metadata.id).await?;
+        second.fail_abandoned_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await?;
+        first.fail_oauth_refresh(permit).await?;
+        ensure!(first.stage_oauth_refresh(&encrypted).await.is_err());
+        ensure!(counts(&db.pool, &record.metadata.id).await? == (1, 0));
         second_pool.close().await;
         Ok(())
     }.await;
@@ -265,25 +353,82 @@ async fn staged_result_and_lost_promotion_ack_recover_on_an_independent_replica(
         let (attempt, permit) = started(&first, &owner, &record).await?;
         let encrypted = permit.prepare_result(&value(NEW_VALUE))?;
         first.stage_oauth_refresh(&encrypted).await?;
+        expire_execution(&db.pool, &record.metadata.id).await?;
+        // A durable stage is a recovery asset, not a timed-out reservation.
+        first.stage_oauth_refresh(&encrypted).await?;
         drop(encrypted);
         drop(permit);
         drop(first);
         first_pool.close().await;
         let (second_pool, second) = replica(&db, provider.clone()).await?;
         let generated = provider.generate_calls.load(Ordering::SeqCst);
+        let unwraps = provider.unwrap_calls.load(Ordering::SeqCst);
+        // Recovery supplies only trusted owner + credential identity. The
+        // failed replica's process-local UUID/version are not required inputs.
+        let recovered = second
+            .current_oauth_refresh_attempt(&owner, &record.metadata.id)
+            .await?
+            .context("missing durable stage")?;
+        ensure!(
+            recovered
+                == OAuthRefreshAttemptInfo {
+                    attempt_id: attempt,
+                    expected: record.version,
+                    state: State::Staged,
+                    reservation_live: false,
+                    execution_live: false,
+                }
+        );
+        ensure!(provider.unwrap_calls.load(Ordering::SeqCst) == unwraps);
         ensure!(
             second
-                .oauth_refresh_state(&owner, &record.metadata.id, record.version, attempt)
-                .await?
-                == State::Staged
+                .fail_abandoned_oauth_refresh(
+                    &owner,
+                    &record.metadata.id,
+                    recovered.expected,
+                    recovered.attempt_id
+                )
+                .await
+                == Err(Error::StaleRefresh)
         );
+        ensure!(matches!(
+            second
+                .begin_oauth_refresh(&owner, &record.metadata.id, record.version, Uuid::new_v4())
+                .await,
+            Err(Error::RefreshInProgress)
+        ));
+        // Reservation preparation intentionally happens before DB locks; the
+        // denied new attempt therefore prepares one DEK but publishes nothing.
+        ensure!(provider.generate_calls.load(Ordering::SeqCst) == generated + 1);
+        let generated = provider.generate_calls.load(Ordering::SeqCst);
         let _lost_ack = second
-            .promote_oauth_refresh(&owner, &record.metadata.id, record.version, attempt)
+            .promote_oauth_refresh(
+                &owner,
+                &record.metadata.id,
+                recovered.expected,
+                recovered.attempt_id,
+            )
             .await?;
         let third = db.store(provider.clone());
+        let receipt = third
+            .current_oauth_refresh_attempt(&owner, &record.metadata.id)
+            .await?
+            .context("missing publication receipt")?;
+        ensure!(
+            receipt
+                == OAuthRefreshAttemptInfo {
+                    state: State::Committed,
+                    ..recovered
+                }
+        );
         ensure!(
             third
-                .promote_oauth_refresh(&owner, &record.metadata.id, record.version, attempt)
+                .promote_oauth_refresh(
+                    &owner,
+                    &record.metadata.id,
+                    receipt.expected,
+                    receipt.attempt_id
+                )
                 .await?
                 == promoted(record.version)
         );
@@ -354,9 +499,94 @@ async fn stage_failure_is_atomic_and_only_identical_result_retries_are_accepted(
         let conflicting = permit.prepare_result(&value(b"synthetic-conflicting-result"))?;
         ensure!(store.stage_oauth_refresh(&conflicting).await == Err(Error::StaleRefresh));
         ensure!(store.cancel_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await == Err(Error::StaleRefresh));
-        ensure!(store.mark_oauth_refresh_unknown(&owner, &record.metadata.id, record.version, attempt).await == Err(Error::StaleRefresh));
+        ensure!(store.fail_oauth_refresh(permit).await == Err(Error::StaleRefresh));
+        expire_execution(&db.pool, &record.metadata.id).await?;
+        ensure!(store.fail_abandoned_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await == Err(Error::StaleRefresh));
         store.promote_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await?;
         ensure!(store.read_for_broker(&owner, &record.metadata.id, promoted(record.version)).await?.expose_secret() == NEW_VALUE);
+        Ok(())
+    }.await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn stage_and_abandonment_serialize_and_execution_deadline_is_rechecked_after_sql_wait()
+-> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        const BARRIER: i32 = 19_220_021;
+        let owner = db.user("stage-abandonment-fence").await?;
+        let provider = Arc::new(SyntheticKek::default());
+        let first = db.store(provider.clone());
+        let (second_pool, second) = replica(&db, provider).await?;
+        sqlx::raw_sql(&format!("CREATE FUNCTION pause_refresh_staging() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock({BARRIER}::bigint); RETURN NEW; END $$; \
+            CREATE TRIGGER pause_refresh_staging BEFORE UPDATE ON platform_credential_refresh_material FOR EACH ROW EXECUTE FUNCTION pause_refresh_staging()"))
+            .execute(&db.pool).await?;
+
+        for deadline_passes in [false, true] {
+            let record = create(&first, &owner, if deadline_passes { "Expired during staging" } else { "Durable stage wins" }).await?;
+            let (attempt, permit) = started(&first, &owner, &record).await?;
+            let oauth = SyntheticOAuthProvider::default();
+            let encrypted = permit.prepare_result(&oauth.exchange(&permit)?)?;
+            if deadline_passes {
+                // Keep the exact 90-second durable interval, but advance only
+                // this fixture's start to leave one second for the SQL gate.
+                sqlx::query("WITH shortened AS (SELECT clock_timestamp()+interval '1 second' AS at) \
+                    UPDATE platform_credential_refresh_attempts SET started_until=shortened.at, \
+                    started_at=shortened.at-($2::bigint * interval '1 second') FROM shortened WHERE credential_id=$1")
+                    .bind(record.metadata.id.as_str())
+                    .bind(i64::try_from(CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS)?)
+                    .execute(&db.pool).await?;
+            }
+            let mut blocker = db.pool.begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock($1::bigint)")
+                .bind(i64::from(BARRIER)).execute(&mut *blocker).await?;
+            let staging = {
+                let first = first.clone();
+                tokio::spawn(async move { first.stage_oauth_refresh(&encrypted).await })
+            };
+            wait_for_advisory_waiter(&db.pool, BARRIER).await?;
+            let mut abandonment = {
+                let second = second.clone(); let owner = owner.clone(); let record = record.clone();
+                tokio::spawn(async move { second.fail_abandoned_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await })
+            };
+            ensure!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut abandonment).await.is_err(), "abandonment bypassed the credential fence");
+            if deadline_passes {
+                tokio::time::timeout(TIMEOUT, async {
+                    loop {
+                        let expired: bool = sqlx::query_scalar("SELECT started_until<=clock_timestamp() FROM platform_credential_refresh_attempts WHERE credential_id=$1")
+                            .bind(record.metadata.id.as_str()).fetch_one(&db.pool).await?;
+                        if expired {
+                            break Ok::<_, anyhow::Error>(());
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                }).await??;
+            }
+            blocker.commit().await?;
+            let staged = tokio::time::timeout(TIMEOUT, staging).await??;
+            let abandoned = tokio::time::timeout(TIMEOUT, abandonment).await??;
+            ensure!(oauth.requests.load(Ordering::SeqCst) == 1);
+            if deadline_passes {
+                ensure!(staged == Err(Error::StaleRefresh));
+                ensure!(abandoned == Ok(()));
+                ensure!(counts(&db.pool, &record.metadata.id).await? == (1, 0));
+                ensure!(material_count(&db.pool, record.metadata.id.as_str()).await? == 0);
+                ensure!(second.current_oauth_refresh_attempt(&owner, &record.metadata.id).await?.context("missing failed attempt")?.state == State::Unknown);
+                first.fail_oauth_refresh(permit).await?;
+            } else {
+                ensure!(staged == Ok(()));
+                ensure!(abandoned == Err(Error::StaleRefresh));
+                ensure!(counts(&db.pool, &record.metadata.id).await? == (1, 1));
+                ensure!(first.fail_oauth_refresh(permit).await == Err(Error::StaleRefresh));
+                expire_execution(&db.pool, &record.metadata.id).await?;
+                ensure!(second.fail_abandoned_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await == Err(Error::StaleRefresh));
+                second.promote_oauth_refresh(&owner, &record.metadata.id, record.version, attempt).await?;
+                ensure!(second.read_for_broker(&owner, &record.metadata.id, promoted(record.version)).await?.expose_secret() == NEW_VALUE);
+            }
+        }
+        second_pool.close().await;
         Ok(())
     }.await;
     db.finish(result).await
@@ -447,6 +677,12 @@ async fn live_attempts_fence_replacement_but_revoke_and_delete_win_in_every_phas
                 .revoke(&owner, &record.metadata.id, record.version)
                 .await?;
             ensure!(counts(&db.pool, &record.metadata.id).await? == (0, 0));
+            ensure!(
+                store
+                    .current_oauth_refresh_attempt(&owner, &record.metadata.id)
+                    .await?
+                    .is_none()
+            );
             ensure!(material_count(&db.pool, record.metadata.id.as_str()).await? == 0);
             if let Some(staged) = staged {
                 ensure!(store.stage_oauth_refresh(&staged).await.is_err());
@@ -561,6 +797,14 @@ async fn hard_expiry_fences_prepare_start_stage_and_promotion_without_extending_
                     == phase
             );
         }
+        let record = create(&store, &owner, "Expired send owner").await?;
+        let (_, permit) = started(&store, &owner, &record).await?;
+        expire(&db.pool, &record.metadata.id).await?;
+        store.fail_oauth_refresh(permit).await?;
+        let failed = store.record(&owner, &record.metadata.id).await?;
+        ensure!(failed.metadata.status == CredentialStatus::RefreshFailed);
+        ensure!(failed.metadata.expires_at_unix == Some(0));
+        ensure!(material_count(&db.pool, record.metadata.id.as_str()).await? == 0);
         Ok(())
     }
     .await;
@@ -605,6 +849,12 @@ async fn owner_deletion_during_wrapped_dek_preparation_prevents_reservation() ->
         ));
         ensure!(counts(&db.pool, &record.metadata.id).await? == (0, 0));
         ensure!(store.record(&owner, &record.metadata.id).await == Err(Error::NotFound));
+        ensure!(
+            store
+                .current_oauth_refresh_attempt(&owner, &record.metadata.id)
+                .await
+                == Err(Error::NotFound)
+        );
         Ok(())
     }
     .await;
@@ -666,6 +916,18 @@ async fn refresh_identity_scope_and_private_material_are_not_metadata_reader_cap
         let provider = Arc::new(SyntheticKek::default());
         let store = db.store(provider.clone());
         let record = create(&store, &owner, "Private refresh").await?;
+        ensure!(
+            store
+                .current_oauth_refresh_attempt(&owner, &record.metadata.id)
+                .await?
+                .is_none()
+        );
+        ensure!(
+            store
+                .current_oauth_refresh_attempt(&other_kind, &record.metadata.id)
+                .await
+                == Err(Error::NotFound)
+        );
         let attempt = Uuid::new_v4();
         ensure!(matches!(
             store
@@ -697,6 +959,39 @@ async fn refresh_identity_scope_and_private_material_are_not_metadata_reader_cap
             .await?;
         ensure!(format!("{reserved:?}") == "PreparedOAuthRefresh([REDACTED])");
         let permit = store.start_oauth_refresh(reserved).await?;
+        ensure!(
+            store
+                .fail_abandoned_oauth_refresh(
+                    &owner,
+                    &record.metadata.id,
+                    record.version,
+                    Uuid::new_v4()
+                )
+                .await
+                == Err(Error::StaleRefresh)
+        );
+        ensure!(
+            store
+                .fail_abandoned_oauth_refresh(
+                    &owner,
+                    &record.metadata.id,
+                    promoted(record.version),
+                    attempt
+                )
+                .await
+                == Err(Error::StaleRefresh)
+        );
+        ensure!(
+            store
+                .fail_abandoned_oauth_refresh(
+                    &other_kind,
+                    &record.metadata.id,
+                    record.version,
+                    attempt
+                )
+                .await
+                == Err(Error::NotFound)
+        );
         let encrypted = permit.prepare_result(&value(NEW_VALUE))?;
         ensure!(format!("{permit:?}") == "StartedOAuthRefresh([REDACTED])");
         ensure!(format!("{encrypted:?}") == "PreparedOAuthRefreshResult([REDACTED])");
@@ -728,6 +1023,22 @@ async fn refresh_identity_scope_and_private_material_are_not_metadata_reader_cap
         let reader = CredentialMetadataReader::new(pool.clone(), builtin_provider_catalog());
         ensure!(reader.get(&owner, &record.metadata.id).await? == record.metadata);
         let unwraps = provider.unwrap_calls.load(Ordering::SeqCst);
+        let discovery = store
+            .current_oauth_refresh_attempt(&owner, &record.metadata.id)
+            .await?
+            .context("missing metadata-only discovery")?;
+        ensure!(discovery.state == State::Staged);
+        let restricted_store = PlatformCredentialStore::new(
+            pool.clone(),
+            provider.clone(),
+            builtin_provider_catalog(),
+        );
+        ensure!(
+            restricted_store
+                .current_oauth_refresh_attempt(&owner, &record.metadata.id)
+                .await
+                == Err(Error::DatabaseUnavailable)
+        );
         for table in [
             "platform_credential_refresh_attempts",
             "platform_credential_refresh_material",

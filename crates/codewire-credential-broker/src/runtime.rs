@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
-    DerivedGrant,
+    DerivedGrant, PROVIDER_REFRESH_TIMEOUT_SECONDS,
 };
 use codewire_gateway_proto::daemon::v1;
 #[cfg(feature = "local-broker-synthetic-smoke")]
@@ -42,19 +42,26 @@ const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrokerCredentialRefreshRequest {
     pub refresh_id: Uuid,
-    pub capability_slot: CapabilitySlot,
+    pub request_id: Uuid,
+    pub grant: DerivedGrant,
     pub operation: BrokerOperationId,
     pub route: BrokerRouteId,
-    pub credential_id: CredentialId,
-    pub credential_revocation_generation: u64,
     pub material_generation: u64,
+}
+
+/// Refresh ownership or completion of a previously staged result.
+/// Recovery carries no material or authority to execute a provider operation.
+pub enum BrokerRefreshAdmission<R> {
+    Reserved(R),
+    Recovered,
 }
 
 /// Placement-specific admission for one exact provider operation.
 #[async_trait]
 pub trait BrokerLeaseProvider: Send + Sync {
     type Lease: BrokerCredentialLease + Send;
-    type RefreshPermit: Send;
+    type RefreshReservation: Send;
+    type StartedRefresh: Send;
 
     async fn lease_operation(
         &self,
@@ -69,7 +76,15 @@ pub trait BrokerLeaseProvider: Send + Sync {
     async fn begin_credential_refresh(
         &self,
         request: BrokerCredentialRefreshRequest,
-    ) -> Result<Self::RefreshPermit, BrokerRefreshError>;
+    ) -> Result<BrokerRefreshAdmission<Self::RefreshReservation>, BrokerRefreshError>;
+
+    /// Durably mark the exact reservation as possibly sent, rechecking its
+    /// original request/grant binding before provider work. An uncertain Start
+    /// acknowledgement must never release a possibly started attempt to retry.
+    async fn start_credential_refresh(
+        &self,
+        reservation: Self::RefreshReservation,
+    ) -> Result<Self::StartedRefresh, BrokerRefreshError>;
 
     /// Store and promote a validated provider bundle without returning it to
     /// the guest or a material-free authority RPC.
@@ -78,20 +93,22 @@ pub trait BrokerLeaseProvider: Send + Sync {
     /// after this call before preparing the original provider request.
     async fn commit_credential_refresh(
         &self,
-        permit: Self::RefreshPermit,
+        permit: Self::StartedRefresh,
         material: CanonicalCodexOAuthBundle,
     ) -> Result<(), BrokerRefreshError>;
 
-    /// Release a refresh reservation when no replacement bundle was written.
+    /// Release a reservation only before Start. Absence of replacement material
+    /// does not prove that a started provider request was safe to replay.
     async fn abort_credential_refresh(
         &self,
-        permit: Self::RefreshPermit,
+        reservation: Self::RefreshReservation,
     ) -> Result<(), BrokerRefreshError>;
 
-    /// Invalidate the admitted generation after a terminal provider rejection.
+    /// Invalidate the admitted generation after rejection or an ambiguous
+    /// possibly-sent exchange. This must never make the old token retryable.
     async fn fail_credential_refresh(
         &self,
-        permit: Self::RefreshPermit,
+        permit: Self::StartedRefresh,
     ) -> Result<(), BrokerRefreshError>;
 
     /// Wait until every non-cancellable placement operation started by a
@@ -140,7 +157,8 @@ where
     S: codewire_protected_store::ProtectedStore + Clone + 'static,
 {
     type Lease = codewire_local_credentials::CredentialOperationLease;
-    type RefreshPermit = codewire_local_credentials::BrokerCredentialRefreshPermit;
+    type RefreshReservation = codewire_local_credentials::BrokerCredentialRefreshReservation;
+    type StartedRefresh = codewire_local_credentials::StartedBrokerCredentialRefresh;
 
     async fn lease_operation(
         &self,
@@ -181,17 +199,37 @@ where
     async fn begin_credential_refresh(
         &self,
         request: BrokerCredentialRefreshRequest,
-    ) -> Result<Self::RefreshPermit, BrokerRefreshError> {
+    ) -> Result<BrokerRefreshAdmission<Self::RefreshReservation>, BrokerRefreshError> {
         let mut client = self.clone();
         codewire_local_credentials::LocalCredentialBrokerLeaseClient::begin_credential_refresh(
             &mut client,
             request.refresh_id,
-            request.capability_slot,
+            request.request_id,
+            request.grant,
             request.operation,
             request.route,
-            request.credential_id,
-            request.credential_revocation_generation,
             request.material_generation,
+        )
+        .await
+        .map(|admission| match admission {
+            codewire_local_credentials::BrokerCredentialRefreshAdmission::Reserved(reservation) => {
+                BrokerRefreshAdmission::Reserved(reservation)
+            }
+            codewire_local_credentials::BrokerCredentialRefreshAdmission::Recovered => {
+                BrokerRefreshAdmission::Recovered
+            }
+        })
+        .map_err(map_local_refresh_error)
+    }
+
+    async fn start_credential_refresh(
+        &self,
+        reservation: Self::RefreshReservation,
+    ) -> Result<Self::StartedRefresh, BrokerRefreshError> {
+        let mut client = self.clone();
+        codewire_local_credentials::LocalCredentialBrokerLeaseClient::start_credential_refresh(
+            &mut client,
+            reservation,
         )
         .await
         .map_err(map_local_refresh_error)
@@ -199,7 +237,7 @@ where
 
     async fn commit_credential_refresh(
         &self,
-        permit: Self::RefreshPermit,
+        permit: Self::StartedRefresh,
         material: CanonicalCodexOAuthBundle,
     ) -> Result<(), BrokerRefreshError> {
         let mut bytes = material.into_bytes();
@@ -217,7 +255,7 @@ where
 
     async fn abort_credential_refresh(
         &self,
-        permit: Self::RefreshPermit,
+        permit: Self::RefreshReservation,
     ) -> Result<(), BrokerRefreshError> {
         let mut client = self.clone();
         codewire_local_credentials::LocalCredentialBrokerLeaseClient::abort_credential_refresh(
@@ -230,7 +268,7 @@ where
 
     async fn fail_credential_refresh(
         &self,
-        permit: Self::RefreshPermit,
+        permit: Self::StartedRefresh,
     ) -> Result<(), BrokerRefreshError> {
         let mut client = self.clone();
         codewire_local_credentials::LocalCredentialBrokerLeaseClient::fail_credential_refresh(
@@ -688,11 +726,20 @@ where
             };
             let refresh_request = BrokerCredentialRefreshRequest {
                 refresh_id: Uuid::new_v4(),
-                capability_slot: CapabilitySlot::codex(),
+                request_id,
+                grant: {
+                    let mut grant = lease.grant().clone();
+                    // Rotation may advance credential versions, but it cannot
+                    // extend the deadline of the original admitted request.
+                    grant.expires_at_unix =
+                        match (grant.expires_at_unix, admitted_grant.expires_at_unix) {
+                            (Some(current), Some(original)) => Some(current.min(original)),
+                            (current, original) => current.or(original),
+                        };
+                    grant
+                },
                 operation: operation.clone(),
                 route: route.clone(),
-                credential_id: lease.credential_metadata().id.clone(),
-                credential_revocation_generation: lease.credential_metadata().revocation_generation,
                 material_generation: lease.material_generation(),
             };
             let credential = self
@@ -760,7 +807,8 @@ where
     ) -> Result<Option<()>, BrokerRequestError> {
         let refreshed_at_unix = current_unix_time()?;
         let permit = match self.leases.begin_credential_refresh(refresh_request).await {
-            Ok(permit) => permit,
+            Ok(BrokerRefreshAdmission::Reserved(reservation)) => reservation,
+            Ok(BrokerRefreshAdmission::Recovered) => return Ok(Some(())),
             Err(BrokerRefreshError::InProgress | BrokerRefreshError::Stale) => return Ok(None),
             Err(error) => return Err(map_refresh_error(error)),
         };
@@ -769,7 +817,8 @@ where
         // same poll, before another await can make cancellation observable.
         // Graceful bridge loss can then abort the guest request while still
         // waiting for provider parsing and exactly one terminal authority
-        // action: commit, fail, or abort.
+        // action. Start and the possibly-sent exchange share this tracked
+        // lifetime; guest cancellation never returns a started token to retry.
         let leases = Arc::clone(&self.leases);
         let upstream = Arc::clone(&self.upstream);
         let refresh = self.oauth_refresh_operations.spawn(async move {
@@ -786,21 +835,39 @@ where
         leases: Arc<P>,
         upstream: Arc<U>,
         credential: CodexOAuthCredential,
-        permit: P::RefreshPermit,
+        reservation: P::RefreshReservation,
         refreshed_at_unix: u64,
     ) -> Result<(), BrokerRequestError> {
-        let tokens = match Self::request_oauth_refresh(&upstream, credential.refresh_token()).await
-        {
-            Ok(tokens) => tokens,
-            Err(OAuthRefreshError::Transient(error)) => {
-                return match leases.abort_credential_refresh(permit).await {
+        let permit = leases
+            .start_credential_refresh(reservation)
+            .await
+            // Start consumed the reservation. Even definite denial must end
+            // this epoch so a still-Reserved attempt cannot retain an owner
+            // that no caller can release. An uncertain ACK takes the same
+            // drain path, but recovery never retries a Started attempt.
+            .map_err(|_| BrokerRequestError::AuthorityUnavailable)?;
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS),
+            Self::request_oauth_refresh(&upstream, credential.refresh_token()),
+        )
+        .await;
+        let tokens = match exchange {
+            Ok(Ok(tokens)) => tokens,
+            Ok(Err(OAuthRefreshError::Uncertain(error))) => {
+                return match leases.fail_credential_refresh(permit).await {
                     Ok(()) => Err(error),
                     Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
                 };
             }
-            Err(OAuthRefreshError::Permanent) => {
+            Ok(Err(OAuthRefreshError::Permanent)) => {
                 return match leases.fail_credential_refresh(permit).await {
                     Ok(()) => Err(BrokerRequestError::Denied),
+                    Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
+                };
+            }
+            Err(_) => {
+                return match leases.fail_credential_refresh(permit).await {
+                    Ok(()) => Err(BrokerRequestError::UpstreamFailed),
                     Err(_) => Err(BrokerRequestError::AuthorityUnavailable),
                 };
             }
@@ -866,7 +933,7 @@ where
                 body: std::mem::take(&mut *body),
             })
             .await
-            .map_err(|error| OAuthRefreshError::Transient(map_upstream_error(error)))?;
+            .map_err(|error| OAuthRefreshError::Uncertain(map_upstream_error(error)))?;
         let (status, _headers, mut response_body) = upstream.into_parts();
         let mut response = Zeroizing::new(Vec::new());
         while let Some(chunk) = response_body.next().await {
@@ -874,7 +941,7 @@ where
                 if status.is_success() {
                     OAuthRefreshError::Permanent
                 } else {
-                    OAuthRefreshError::Transient(map_upstream_error(error))
+                    OAuthRefreshError::Uncertain(map_upstream_error(error))
                 }
             })?;
             let next_len = response
@@ -884,14 +951,14 @@ where
                 .ok_or(if status.is_success() {
                     OAuthRefreshError::Permanent
                 } else {
-                    OAuthRefreshError::Transient(BrokerRequestError::ResponseTooLarge)
+                    OAuthRefreshError::Uncertain(BrokerRequestError::ResponseTooLarge)
                 })?;
             let additional = next_len.saturating_sub(response.len());
             response.try_reserve(additional).map_err(|_| {
                 if status.is_success() {
                     OAuthRefreshError::Permanent
                 } else {
-                    OAuthRefreshError::Transient(BrokerRequestError::ResponseTooLarge)
+                    OAuthRefreshError::Uncertain(BrokerRequestError::ResponseTooLarge)
                 }
             })?;
             response.extend_from_slice(&chunk);
@@ -900,7 +967,7 @@ where
             return Err(if oauth_refresh_rejection_is_permanent(status, &response) {
                 OAuthRefreshError::Permanent
             } else {
-                OAuthRefreshError::Transient(BrokerRequestError::UpstreamFailed)
+                OAuthRefreshError::Uncertain(BrokerRequestError::UpstreamFailed)
             });
         }
         let parsed = serde_json::from_slice::<OAuthRefreshResponse>(&response)
@@ -916,7 +983,7 @@ where
 #[derive(Clone, Copy)]
 enum OAuthRefreshError {
     Permanent,
-    Transient(BrokerRequestError),
+    Uncertain(BrokerRequestError),
 }
 
 #[derive(Serialize)]
@@ -1149,7 +1216,8 @@ mod tests {
     #[async_trait]
     impl BrokerLeaseProvider for TestLeaseProvider {
         type Lease = codewire_local_credentials::CredentialOperationLease;
-        type RefreshPermit = ();
+        type RefreshReservation = ();
+        type StartedRefresh = ();
 
         async fn lease_operation(
             &self,
@@ -1173,13 +1241,20 @@ mod tests {
         async fn begin_credential_refresh(
             &self,
             _request: BrokerCredentialRefreshRequest,
-        ) -> Result<Self::RefreshPermit, BrokerRefreshError> {
+        ) -> Result<BrokerRefreshAdmission<Self::RefreshReservation>, BrokerRefreshError> {
+            Err(BrokerRefreshError::Denied)
+        }
+
+        async fn start_credential_refresh(
+            &self,
+            _reservation: Self::RefreshReservation,
+        ) -> Result<Self::StartedRefresh, BrokerRefreshError> {
             Err(BrokerRefreshError::Denied)
         }
 
         async fn commit_credential_refresh(
             &self,
-            _permit: Self::RefreshPermit,
+            _permit: Self::StartedRefresh,
             _material: CanonicalCodexOAuthBundle,
         ) -> Result<(), BrokerRefreshError> {
             Err(BrokerRefreshError::Denied)
@@ -1187,14 +1262,14 @@ mod tests {
 
         async fn abort_credential_refresh(
             &self,
-            _permit: Self::RefreshPermit,
+            _permit: Self::RefreshReservation,
         ) -> Result<(), BrokerRefreshError> {
             Err(BrokerRefreshError::Denied)
         }
 
         async fn fail_credential_refresh(
             &self,
-            _permit: Self::RefreshPermit,
+            _permit: Self::StartedRefresh,
         ) -> Result<(), BrokerRefreshError> {
             Err(BrokerRefreshError::Denied)
         }
@@ -1204,7 +1279,9 @@ mod tests {
         }
     }
 
-    struct TestOAuthRefreshPermit {
+    struct TestOAuthRefreshReservation(BrokerCredentialRefreshRequest);
+
+    struct TestStartedOAuthRefresh {
         credential_id: CredentialId,
         material_generation: u64,
     }
@@ -1261,6 +1338,10 @@ mod tests {
         material_generation: Arc<AtomicUsize>,
         refresh_active: Arc<AtomicBool>,
         begin_count: Arc<AtomicUsize>,
+        start_count: Arc<AtomicUsize>,
+        start_control: Option<Arc<BlockingRefreshControl>>,
+        fail_start: bool,
+        recovered_material: std::sync::Mutex<Option<CanonicalCodexOAuthBundle>>,
         commit_started: Arc<AtomicBool>,
         commit_delay: Duration,
         commit_count: Arc<AtomicUsize>,
@@ -1274,7 +1355,8 @@ mod tests {
     #[async_trait]
     impl BrokerLeaseProvider for OAuthTestLeaseProvider {
         type Lease = codewire_local_credentials::CredentialOperationLease;
-        type RefreshPermit = TestOAuthRefreshPermit;
+        type RefreshReservation = TestOAuthRefreshReservation;
+        type StartedRefresh = TestStartedOAuthRefresh;
 
         async fn lease_operation(
             &self,
@@ -1298,8 +1380,26 @@ mod tests {
         async fn begin_credential_refresh(
             &self,
             request: BrokerCredentialRefreshRequest,
-        ) -> Result<Self::RefreshPermit, BrokerRefreshError> {
+        ) -> Result<BrokerRefreshAdmission<Self::RefreshReservation>, BrokerRefreshError> {
             self.begin_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(material) = self.recovered_material.lock().unwrap().take() {
+                let hard_deadline = self
+                    .authority
+                    .get_credential(&self.credential_id)
+                    .map_err(|_| BrokerRefreshError::Unavailable)?
+                    .metadata
+                    .expires_at_unix;
+                let mut bytes = material.into_bytes();
+                self.authority
+                    .rotate_credential_material(
+                        &self.credential_id,
+                        ProtectedValue::new(std::mem::take(&mut *bytes)).unwrap(),
+                        hard_deadline,
+                    )
+                    .map_err(|_| BrokerRefreshError::Unavailable)?;
+                self.material_generation.fetch_add(1, Ordering::AcqRel);
+                return Ok(BrokerRefreshAdmission::Recovered);
+            }
             if let Some(control) = &self.begin_control
                 && !control.accepted.swap(true, Ordering::AcqRel)
             {
@@ -1322,26 +1422,65 @@ mod tests {
             let expected_material_generation =
                 self.material_generation.load(Ordering::Acquire) as u64;
             if request.refresh_id.is_nil()
-                || request.capability_slot != CapabilitySlot::codex()
+                || request.request_id.is_nil()
+                || request.grant.capability_slot != CapabilitySlot::codex()
                 || request.operation.as_str() != OPENAI_OPERATION
                 || request.route.as_str() != OPENAI_ROUTE
-                || request.credential_id != self.credential_id
-                || request.credential_revocation_generation
+                || request.grant.credential_id != self.credential_id
+                || request.grant.credential_revocation_generation
                     != current.metadata.revocation_generation
                 || request.material_generation != expected_material_generation
             {
                 self.refresh_active.store(false, Ordering::Release);
                 return Err(BrokerRefreshError::Denied);
             }
-            Ok(TestOAuthRefreshPermit {
-                credential_id: request.credential_id,
+            Ok(BrokerRefreshAdmission::Reserved(
+                TestOAuthRefreshReservation(request),
+            ))
+        }
+
+        async fn start_credential_refresh(
+            &self,
+            reservation: Self::RefreshReservation,
+        ) -> Result<Self::StartedRefresh, BrokerRefreshError> {
+            if let Some(control) = &self.start_control {
+                control.accepted.store(true, Ordering::Release);
+                control.release.notified().await;
+            }
+            let request = reservation.0;
+            let current = self
+                .authority
+                .lease_environment_credential_operation(&CredentialOperationLeaseRequest {
+                    environment_id: self.environment_id.clone(),
+                    environment_generation: 11,
+                    capability_slot: request.grant.capability_slot.clone(),
+                    operation: request.operation.clone(),
+                    route: request.route.clone(),
+                })
+                .map_err(|_| BrokerRefreshError::Denied)?;
+            validate_request_binding(current.grant(), &request.grant)
+                .map_err(|_| BrokerRefreshError::Denied)?;
+            if current.grant().credential_revocation_generation
+                != request.grant.credential_revocation_generation
+                || current.material_generation() != request.material_generation
+            {
+                return Err(BrokerRefreshError::Stale);
+            }
+            self.start_count.fetch_add(1, Ordering::Release);
+            if self.fail_start {
+                // Model a lost acknowledgement after durable Start. The
+                // reservation must not be aborted, nor may the provider run.
+                return Err(BrokerRefreshError::Unavailable);
+            }
+            Ok(TestStartedOAuthRefresh {
+                credential_id: request.grant.credential_id,
                 material_generation: request.material_generation,
             })
         }
 
         async fn commit_credential_refresh(
             &self,
-            permit: Self::RefreshPermit,
+            permit: Self::StartedRefresh,
             material: CanonicalCodexOAuthBundle,
         ) -> Result<(), BrokerRefreshError> {
             if !self.refresh_active.load(Ordering::Acquire)
@@ -1384,9 +1523,9 @@ mod tests {
 
         async fn abort_credential_refresh(
             &self,
-            permit: Self::RefreshPermit,
+            permit: Self::RefreshReservation,
         ) -> Result<(), BrokerRefreshError> {
-            if permit.credential_id != self.credential_id
+            if permit.0.grant.credential_id != self.credential_id
                 || !self.refresh_active.swap(false, Ordering::AcqRel)
             {
                 return Err(BrokerRefreshError::Denied);
@@ -1397,7 +1536,7 @@ mod tests {
 
         async fn fail_credential_refresh(
             &self,
-            permit: Self::RefreshPermit,
+            permit: Self::StartedRefresh,
         ) -> Result<(), BrokerRefreshError> {
             if permit.credential_id != self.credential_id
                 || !self.refresh_active.swap(false, Ordering::AcqRel)
@@ -1455,6 +1594,9 @@ mod tests {
         refresh_status: StatusCode,
         refresh_response: Arc<Vec<u8>>,
         refresh_delay: Duration,
+        refresh_body_delay: Duration,
+        refresh_error: Option<BrokerUpstreamError>,
+        start_count: Arc<AtomicUsize>,
         refresh_control: Option<Arc<BlockingRefreshControl>>,
         unauthorized_control: Option<Arc<BlockingRefreshControl>>,
         expected_access_token: Arc<String>,
@@ -1491,6 +1633,10 @@ mod tests {
             assert_eq!(method, Method::POST);
             match target.as_str() {
                 OPENAI_OAUTH_REFRESH_URL => {
+                    assert!(
+                        self.start_count.load(Ordering::Acquire) > 0,
+                        "provider exchange preceded Start"
+                    );
                     self.refresh_count.fetch_add(1, Ordering::Relaxed);
                     assert!(!headers.contains_key(http::header::AUTHORIZATION));
                     assert_eq!(
@@ -1509,11 +1655,18 @@ mod tests {
                     if !self.refresh_delay.is_zero() {
                         tokio::time::sleep(self.refresh_delay).await;
                     }
+                    if let Some(error) = self.refresh_error {
+                        return Err(error);
+                    }
                     let refresh_response = Arc::clone(&self.refresh_response);
+                    let body_delay = self.refresh_body_delay;
                     Ok(BrokerUpstreamResponse::new(
                         self.refresh_status,
                         HeaderMap::new(),
                         Box::pin(stream::once(async move {
+                            if !body_delay.is_zero() {
+                                tokio::time::sleep(body_delay).await;
+                            }
                             Ok(Bytes::copy_from_slice(&refresh_response))
                         })),
                     ))
@@ -1802,6 +1955,7 @@ mod tests {
         let material_generation = Arc::new(AtomicUsize::new(1));
         let refresh_active = Arc::new(AtomicBool::new(false));
         let begin_count = Arc::new(AtomicUsize::new(0));
+        let start_count = Arc::new(AtomicUsize::new(0));
         let commit_started = Arc::new(AtomicBool::new(false));
         let commit_count = Arc::new(AtomicUsize::new(0));
         let abort_count = Arc::new(AtomicUsize::new(0));
@@ -1836,6 +1990,10 @@ mod tests {
                 material_generation,
                 refresh_active,
                 begin_count,
+                start_count: Arc::clone(&start_count),
+                start_control: None,
+                fail_start: false,
+                recovered_material: std::sync::Mutex::new(None),
                 commit_started,
                 commit_delay,
                 commit_count,
@@ -1849,6 +2007,9 @@ mod tests {
                 refresh_status,
                 refresh_response: Arc::new(refresh_response),
                 refresh_delay,
+                refresh_body_delay: Duration::ZERO,
+                refresh_error: None,
+                start_count,
                 refresh_control,
                 unauthorized_control: None,
                 expected_access_token: Arc::new(expected_access_token),
@@ -2660,7 +2821,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aborts_transient_oauth_refresh_for_a_later_retry() {
+    async fn ambiguous_provider_failure_invalidates_without_retrying_the_old_token() {
         let (broker, state) = oauth_broker(
             StatusCode::SERVICE_UNAVAILABLE,
             br#"{"error":"synthetic-unavailable"}"#.to_vec(),
@@ -2672,9 +2833,14 @@ mod tests {
             Err(BrokerRequestError::UpstreamFailed)
         ));
         assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
-        assert_eq!(state.abort_count.load(Ordering::Relaxed), 1);
-        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
         assert_eq!(state.response_count.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::Denied)
+        ));
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -2708,5 +2874,187 @@ mod tests {
         assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
         assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
         assert_eq!(state.response_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn post_send_transport_failure_never_aborts_into_a_retry() {
+        let (mut broker, state) =
+            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
+        Arc::get_mut(&mut broker.upstream).unwrap().refresh_error =
+            Some(BrokerUpstreamError::Connect);
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::UpstreamFailed)
+        ));
+        assert_eq!(broker.leases.start_count.load(Ordering::Acquire), 1);
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::Denied)
+        ));
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+    }
+
+    async fn assert_refresh_timeout(header_delay: Duration, body_delay: Duration) {
+        let (mut broker, state) =
+            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
+        let upstream = Arc::get_mut(&mut broker.upstream).unwrap();
+        upstream.refresh_body_delay = body_delay;
+        upstream.refresh_delay = header_delay;
+        let started_at = tokio::time::Instant::now();
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::UpstreamFailed)
+        ));
+        assert_eq!(
+            started_at.elapsed(),
+            Duration::from_secs(PROVIDER_REFRESH_TIMEOUT_SECONDS)
+        );
+        broker.wait_for_active_operations().await.unwrap();
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.response_count.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::Denied)
+        ));
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_timeout_bounds_waiting_for_provider_headers() {
+        assert_refresh_timeout(Duration::from_secs(90), Duration::ZERO).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_timeout_bounds_the_entire_provider_body() {
+        assert_refresh_timeout(Duration::ZERO, Duration::from_secs(90)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_headers_and_body_share_one_timeout_budget() {
+        assert_refresh_timeout(Duration::from_secs(20), Duration::from_secs(20)).await;
+    }
+
+    #[tokio::test]
+    async fn lost_start_acknowledgement_neither_sends_nor_aborts() {
+        let (mut broker, state) =
+            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
+        Arc::get_mut(&mut broker.leases).unwrap().fail_start = true;
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::AuthorityUnavailable)
+        ));
+        assert_eq!(broker.leases.start_count.load(Ordering::Acquire), 1);
+        assert!(broker.leases.refresh_active.load(Ordering::Acquire));
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn binding_change_during_start_admission_denies_before_provider_send() {
+        let (mut broker, state) =
+            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
+        let control = Arc::new(BlockingRefreshControl::default());
+        Arc::get_mut(&mut broker.leases).unwrap().start_control = Some(Arc::clone(&control));
+        let execution = tokio::spawn(async move { broker.execute(request()).await });
+        control.wait_accepted().await;
+        state.replace_binding_revision();
+        control.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(BrokerRequestError::AuthorityUnavailable)
+        ));
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn start_wait_preserves_original_deadline_even_when_current_grant_lives_longer() {
+        let (mut broker, state) =
+            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
+        let control = Arc::new(BlockingRefreshControl::default());
+        Arc::get_mut(&mut broker.leases).unwrap().start_control = Some(Arc::clone(&control));
+        let guest = ValidatedGuestRequest::parse(request()).unwrap();
+        let provider_request = broker
+            .api_key_adapter
+            .validate_request(
+                &guest.method,
+                &guest.path,
+                guest.query.as_deref(),
+                guest.headers,
+                guest.body,
+            )
+            .unwrap();
+        let mut original = state.current_grant();
+        let original_deadline = current_unix_time().unwrap() + 2;
+        original.expires_at_unix = Some(original_deadline);
+        let preparation = tokio::spawn(async move {
+            broker
+                .prepare_oauth_after_refresh(
+                    guest.request_id,
+                    BrokerOperationId::parse(OPENAI_OPERATION).unwrap(),
+                    BrokerRouteId::parse(OPENAI_ROUTE).unwrap(),
+                    provider_request,
+                    None,
+                    &original,
+                )
+                .await
+        });
+        control.wait_accepted().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while current_unix_time().unwrap() < original_deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(state.current_grant().expires_at_unix.unwrap() > original_deadline);
+        control.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(2), preparation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(BrokerRequestError::AuthorityUnavailable)
+        ));
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn recovered_short_lived_material_requires_a_fresh_lease_not_another_refresh() {
+        let access_token = jwt(json!({
+            "exp": current_unix_time().unwrap() + 30
+        }));
+        let (broker, state) = oauth_broker(
+            StatusCode::OK,
+            Vec::new(),
+            access_token.clone(),
+            Duration::ZERO,
+        );
+        *broker.leases.recovered_material.lock().unwrap() = Some(oauth_material(&access_token));
+        let mut response = broker.execute(request()).await.unwrap();
+        while let Some(chunk) = response.body.next().await {
+            chunk.unwrap();
+        }
+        assert_eq!(state.lease_count.load(Ordering::Relaxed), 3);
+        assert_eq!(state.material_generation.load(Ordering::Relaxed), 2);
+        assert_eq!(state.begin_count.load(Ordering::Relaxed), 1);
+        assert_eq!(broker.leases.start_count.load(Ordering::Acquire), 0);
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.response_count.load(Ordering::Relaxed), 1);
     }
 }

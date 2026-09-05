@@ -179,14 +179,22 @@ cascades are covered by database tests.
 
 OAuth rotation has one durable attempt per credential. A reservation expires
 after 60 database-clock seconds only if the provider request has not started.
-Starting consumes a non-cloneable permit. A possibly started request is never
-reassigned or replayed after timeout. An uncertain result marks the credential
+Starting consumes a non-cloneable permit and sets a 90-second database-clock
+execution deadline. Only that permit can report failure before the deadline;
+another replica may fail an unstaged attempt closed after the deadline. Staging
+rechecks the deadline after SQL waits, so a late writer cannot win against
+abandonment. This is a write fence, not process-death detection. A possibly
+started request is never reassigned or replayed after timeout. An uncertain
+result marks the credential
 refresh-failed until explicit owner replacement. A fresh wrapped DEK is
 prepared before request start; encryption and durable result staging need no
 further OpenBao call. Recovery authenticates the staged envelope outside DB
 locks, then rechecks exact owner, versions, hard deadline and envelope bytes
 before atomic promotion. An OpenBao outage retains staging for later recovery.
 Neither staging nor a publication receipt authorizes a workload request.
+Metadata-only discovery lets a new replica find the exact saved attempt without
+knowing its UUID in advance. Staged and published outcomes remain recoverable
+after the execution deadline; recovery never creates a new send permit.
 This coordinates provider operations; it cannot make an external OAuth server
 and PostgreSQL one atomic transaction or guarantee exactly-once delivery.
 

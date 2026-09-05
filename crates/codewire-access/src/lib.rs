@@ -28,6 +28,16 @@ pub use projection::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection, Projection
 
 use thiserror::Error;
 
+/// Maximum duration of a provider refresh exchange, including its response body.
+pub const PROVIDER_REFRESH_TIMEOUT_SECONDS: u64 = 30;
+
+/// Durable fence on a started refresh owner's ability to stage a result.
+///
+/// Expiry permits failing an unstaged attempt closed, never resending the old
+/// refresh token. Already staged results remain recoverable. Local authorities
+/// also retain ownership until active protected-store writes have drained.
+pub const CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS: u64 = 90;
+
 /// Stable policy failures safe to return through local or platform adapters.
 ///
 /// Error variants contain identifiers and metadata only. Provider responses,

@@ -27,8 +27,9 @@ pub use openai::{
 pub use runtime::SyntheticOpenAiSmokeTransport;
 pub use runtime::{
     BrokerCredentialRefreshRequest, BrokerHttpResponse, BrokerLeaseError, BrokerLeaseProvider,
-    BrokerRefreshError, BrokerRequestError, BrokerResponseBody, BrokerUpstreamError,
-    BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport, OpenAiBroker,
+    BrokerRefreshAdmission, BrokerRefreshError, BrokerRequestError, BrokerResponseBody,
+    BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
+    OpenAiBroker,
 };
 
 use codewire_access::{CredentialMetadata, DerivedGrant, GrantPermission};
