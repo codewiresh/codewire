@@ -340,8 +340,7 @@ async fn concurrent_replacement_cas_revocation_and_deliberate_reactivation() -> 
                     &owner,
                     &current.metadata.id,
                     revoked.version,
-                    &value(NEW_VALUE),
-                    None
+                    &value(NEW_VALUE)
                 )
                 .await
                 == Err(Error::Inactive)
@@ -396,22 +395,56 @@ async fn concurrent_replacement_cas_revocation_and_deliberate_reactivation() -> 
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn oauth_refresh_allows_expired_access_token_but_only_active_exact_oauth_version()
+async fn oauth_refresh_preserves_hard_deadline_and_requires_active_unexpired_exact_oauth_version()
 -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {
         let owner = db.user("refresh-owner").await?;
-        let store = db.store(Arc::new(SyntheticKek::default()));
-        let mut input = registration("Expired access token", Kind::OAuth);
+        let provider = Arc::new(SyntheticKek::default());
+        let store = db.store(provider.clone());
+        let mut input = registration("Expired hard deadline", Kind::OAuth);
         input.expires_at_unix = Some(0);
-        let original = store.create(&owner, input, &value(OLD_VALUE)).await?;
+        let expired = store.create(&owner, input, &value(OLD_VALUE)).await?;
+        let generated = provider.generate_calls.load(Ordering::SeqCst);
         ensure!(
             store
-                .read_for_broker(&owner, &original.metadata.id, original.version)
+                .read_for_broker(&owner, &expired.metadata.id, expired.version)
                 .await
                 .err()
                 == Some(Error::Expired)
         );
+        ensure!(
+            store
+                .read_for_oauth_refresh(&owner, &expired.metadata.id, expired.version)
+                .await
+                .err()
+                == Some(Error::Expired)
+        );
+        ensure!(
+            store
+                .publish_oauth_refresh(
+                    &owner,
+                    &expired.metadata.id,
+                    expired.version,
+                    &value(NEW_VALUE)
+                )
+                .await
+                == Err(Error::Expired)
+        );
+        ensure!(provider.generate_calls.load(Ordering::SeqCst) == generated);
+        ensure!(provider.unwrap_calls.load(Ordering::SeqCst) == 0);
+        ensure!(store.record(&owner, &expired.metadata.id).await? == expired);
+
+        // The owner deadline is metadata; provider access-token expiry belongs
+        // inside the opaque protected bundle and grants no deadline override.
+        let hard_deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            .checked_add(3600)
+            .context("synthetic hard deadline overflow")?;
+        let mut input = registration("Unexpired hard deadline", Kind::OAuth);
+        input.expires_at_unix = Some(hard_deadline);
+        let original = store.create(&owner, input, &value(OLD_VALUE)).await?;
         ensure!(
             store
                 .read_for_oauth_refresh(&owner, &original.metadata.id, original.version)
@@ -424,8 +457,8 @@ async fn oauth_refresh_allows_expired_access_token_but_only_active_exact_oauth_v
         // These are already-obtained results: this deliberately makes no claim
         // that concurrent external provider refreshes have been serialized.
         let (a_result, b_result) = tokio::join!(
-            store.publish_oauth_refresh(&owner, &original.metadata.id, original.version, &a, None),
-            store.publish_oauth_refresh(&owner, &original.metadata.id, original.version, &b, None),
+            store.publish_oauth_refresh(&owner, &original.metadata.id, original.version, &a),
+            store.publish_oauth_refresh(&owner, &original.metadata.id, original.version, &b),
         );
         let refreshed = match (a_result, b_result) {
             (Ok(record), Err(Error::StaleVersion)) | (Err(Error::StaleVersion), Ok(record)) => {
@@ -441,6 +474,18 @@ async fn oauth_refresh_allows_expired_access_token_but_only_active_exact_oauth_v
                 }
         );
         ensure!(refreshed.metadata.id == original.metadata.id);
+        ensure!(
+            refreshed.metadata.expires_at_unix == Some(hard_deadline),
+            "refresh changed the owner's hard deadline"
+        );
+        ensure!(
+            store
+                .record(&owner, &refreshed.metadata.id)
+                .await?
+                .metadata
+                .expires_at_unix
+                == Some(hard_deadline)
+        );
         let api_key = store
             .create(
                 &owner,
@@ -461,13 +506,12 @@ async fn oauth_refresh_allows_expired_access_token_but_only_active_exact_oauth_v
                     &owner,
                     &api_key.metadata.id,
                     api_key.version,
-                    &value(NEW_VALUE),
-                    None
+                    &value(NEW_VALUE)
                 )
                 .await
                 == Err(Error::UnsupportedCredential)
         );
-        for status in ["expired", "refresh_failed"] {
+        for status in ["expired", "refresh_failed", "revoked"] {
             sqlx::query("UPDATE platform_credentials SET status=$2 WHERE id=$1")
                 .bind(refreshed.metadata.id.as_str())
                 .bind(status)
@@ -486,8 +530,7 @@ async fn oauth_refresh_allows_expired_access_token_but_only_active_exact_oauth_v
                         &owner,
                         &refreshed.metadata.id,
                         refreshed.version,
-                        &value(NEW_VALUE),
-                        None
+                        &value(NEW_VALUE)
                     )
                     .await
                     == Err(Error::Inactive)
@@ -639,6 +682,7 @@ async fn paused_unwrap_rechecks_revoke_replace_expiry_and_owner_deletion() -> Re
             ("revoke", Error::StaleVersion),
             ("replace", Error::StaleVersion),
             ("expiry", Error::Expired),
+            ("refresh-expiry", Error::Expired),
             ("owner-delete", Error::NotFound),
         ] {
             let owner = db.user(&format!("unwrap-{case}")).await?;
@@ -653,9 +697,15 @@ async fn paused_unwrap_rechecks_revoke_replace_expiry_and_owner_deletion() -> Re
                 let owner = owner.clone();
                 let record = record.clone();
                 tokio::spawn(async move {
-                    store
-                        .read_for_broker(&owner, &record.metadata.id, record.version)
-                        .await
+                    if case == "refresh-expiry" {
+                        store
+                            .read_for_oauth_refresh(&owner, &record.metadata.id, record.version)
+                            .await
+                    } else {
+                        store
+                            .read_for_broker(&owner, &record.metadata.id, record.version)
+                            .await
+                    }
                 })
             };
             provider.unwrap_gate.wait().await?;
@@ -680,7 +730,7 @@ async fn paused_unwrap_rechecks_revoke_replace_expiry_and_owner_deletion() -> Re
                         )
                         .await?;
                 }
-                "expiry" => {
+                "expiry" | "refresh-expiry" => {
                     sqlx::query("UPDATE platform_credentials SET expires_at_unix=0 WHERE id=$1")
                         .bind(record.metadata.id.as_str())
                         .execute(&db.pool)
@@ -748,6 +798,52 @@ async fn paused_preparation_cannot_resurrect_after_revoke_or_organization_deleti
         ensure!(tokio::time::timeout(TIMEOUT, task).await?? == Err(Error::StaleVersion));
         ensure!(store.record(&owner, &original.metadata.id).await? == revoked);
         ensure!(material_count(&db.pool, original.metadata.id.as_str()).await? == 0);
+
+        let mut refresh_input = registration("Pending refresh expiry", Kind::OAuth);
+        refresh_input.expires_at_unix = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs()
+                .checked_add(3600)
+                .context("synthetic hard deadline overflow")?,
+        );
+        let refresh = store
+            .create(&owner, refresh_input, &value(OLD_VALUE))
+            .await?;
+        let prior_envelope = envelope_bytes(&db.pool, refresh.metadata.id.as_str()).await?;
+        provider.generate_gate.arm();
+        let task = {
+            let store = store.clone();
+            let owner = owner.clone();
+            let refresh = refresh.clone();
+            tokio::spawn(async move {
+                store
+                    .publish_oauth_refresh(
+                        &owner,
+                        &refresh.metadata.id,
+                        refresh.version,
+                        &value(NEW_VALUE),
+                    )
+                    .await
+            })
+        };
+        provider.generate_gate.wait().await?;
+        sqlx::query("UPDATE platform_credentials SET expires_at_unix=0 WHERE id=$1")
+            .bind(refresh.metadata.id.as_str())
+            .execute(&db.pool)
+            .await?;
+        provider.generate_gate.release();
+        ensure!(tokio::time::timeout(TIMEOUT, task).await?? == Err(Error::Expired));
+        let after_expiry = store.record(&owner, &refresh.metadata.id).await?;
+        ensure!(after_expiry.version == refresh.version);
+        ensure!(
+            after_expiry.metadata.expires_at_unix == Some(0),
+            "late refresh cleared the hard deadline"
+        );
+        ensure!(
+            envelope_bytes(&db.pool, refresh.metadata.id.as_str()).await? == prior_envelope,
+            "expired refresh changed the old envelope"
+        );
 
         let org = db.organization("prepare-deletion-org").await?;
         provider.generate_gate.arm();

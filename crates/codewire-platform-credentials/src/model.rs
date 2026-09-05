@@ -53,6 +53,8 @@ pub struct CredentialRegistration {
     pub authentication_kind: CredentialAuthKind,
     pub display_name: String,
     pub account_hint: Option<String>,
+    /// Hard credential-use deadline, not the OAuth access-token expiry stored
+    /// inside protected material. Refresh cannot clear or extend this deadline.
     pub expires_at_unix: Option<u64>,
 }
 

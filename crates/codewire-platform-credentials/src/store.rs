@@ -157,16 +157,17 @@ impl PlatformCredentialStore {
     /// Publish an already obtained OAuth refresh result, not a provider refresh
     /// operation or a cross-replica refresh lock. A broker must serialize its
     /// external refresh operation separately. Stale results never reactivate a
-    /// revoked identity or replace a newer owner-selected value.
+    /// revoked identity or replace a newer owner-selected value. Refresh keeps
+    /// the owner's hard credential deadline; only explicit replacement can
+    /// change it. Access-token expiry is private to the protected OAuth bundle.
     pub async fn publish_oauth_refresh(
         &self,
         owner: &Owner,
         id: &CredentialId,
         expected: CredentialVersion,
         material: &ProtectedValue,
-        expires_at_unix: Option<u64>,
     ) -> Result<CredentialRecord, Error> {
-        self.replace_inner(owner, id, expected, material, expires_at_unix, true)
+        self.replace_inner(owner, id, expected, material, None, true)
             .await
     }
 
@@ -188,7 +189,9 @@ impl PlatformCredentialStore {
         next.version = expected.replaced()?;
         next.metadata.revocation_generation = next.version.revocation_generation;
         next.metadata.status = CredentialStatus::Active;
-        next.metadata.expires_at_unix = expires_at_unix;
+        if !refresh {
+            next.metadata.expires_at_unix = expires_at_unix;
+        }
         next.validate(&self.reader.catalog)?;
         let prepared = self.prepare(&next, material).await?;
 
@@ -212,7 +215,7 @@ impl PlatformCredentialStore {
              revocation_generation=$3, material_generation=$4, updated_at=now() WHERE id=$1",
         )
         .bind(id.as_str())
-        .bind(optional_time(expires_at_unix)?)
+        .bind(optional_time(next.metadata.expires_at_unix)?)
         .bind(generation(next.version.revocation_generation)?)
         .bind(generation(next.version.material_generation)?)
         .execute(&mut *tx)
@@ -291,8 +294,9 @@ impl PlatformCredentialStore {
         self.read_material(owner, id, expected, false).await
     }
 
-    /// Access-token expiry does not invalidate the OAuth refresh token. Only
-    /// the trusted, grant-checking refresh authority may use this operation.
+    /// Read active OAuth material for the trusted, grant-checking refresh
+    /// authority. The hard credential deadline still applies before and after
+    /// unwrap; access-token expiry is private to the protected OAuth bundle.
     pub async fn read_for_oauth_refresh(
         &self,
         owner: &Owner,
@@ -611,10 +615,7 @@ fn require_oauth_refresh(record: &CredentialRecord) -> Result<(), Error> {
     if record.metadata.authentication_kind != CredentialAuthKind::OAuth {
         return Err(Error::UnsupportedCredential);
     }
-    if record.metadata.status != CredentialStatus::Active {
-        return Err(Error::Inactive);
-    }
-    Ok(())
+    record.active(unix_now()?)
 }
 
 fn generation(value: u64) -> Result<i64, Error> {
