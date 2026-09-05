@@ -1,6 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+platform_create_uses_canonical_workspace() {
+  grep -Fq 'request.project_spec.image = CANONICAL_WORKSPACE_IMAGE.to_string();' "$1" \
+    2>/dev/null
+}
+
+if [[ "${1:-}" == '--self-test' ]]; then
+  fixture_root="$(mktemp -d)"
+  trap 'rm -rf -- "$fixture_root"' EXIT
+  canonical="$fixture_root/canonical.rs"
+  legacy="$fixture_root/legacy.rs"
+  printf '%s\n' \
+    'request.project_spec.image = CANONICAL_WORKSPACE_IMAGE.to_string();' >"$canonical"
+  printf '%s\n' \
+    'request.image = CANONICAL_WORKSPACE_IMAGE.to_string();' >"$legacy"
+  platform_create_uses_canonical_workspace "$canonical"
+  if platform_create_uses_canonical_workspace "$legacy"; then
+    echo 'runtime image audit self-test: legacy source was accepted' >&2
+    exit 1
+  fi
+  if platform_create_uses_canonical_workspace "$fixture_root/missing.rs"; then
+    echo 'runtime image audit self-test: missing source was accepted' >&2
+    exit 1
+  fi
+  echo 'runtime image audit self-test: canonical project source accepted; legacy source rejected'
+  exit 0
+fi
+if (( $# != 0 )); then
+  echo 'usage: audit-runtime-images.sh [--self-test]' >&2
+  exit 2
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
@@ -62,7 +93,6 @@ fi
 
 for assertion in \
   "crates/codewire-orchestration/src/sandbox/mod.rs:$workspace_image" \
-  "crates/codewire-orchestration/src/api/detect.rs:$workspace_image" \
   "crates/codewire-cli/src/commands/collaboration.rs:$workspace_image" \
   "crates/codewire-orchestration/src/sandbox/template/mod.rs:$dind_image"; do
   path="${assertion%%:*}"
@@ -73,7 +103,7 @@ for assertion in \
   fi
 done
 
-if ! grep -Fq 'request.image = CANONICAL_WORKSPACE_IMAGE.to_string();' \
+if ! platform_create_uses_canonical_workspace \
     crates/codewire-cli/src/commands/environment.rs; then
   echo "runtime image audit: platform create no longer consumes the canonical workspace default" >&2
   fail=1

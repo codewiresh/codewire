@@ -279,6 +279,7 @@ run_web() {
     --config apps/dashboard/playwright.config.ts --list
   scripts/ci/tests/test-dashboard-browser-gate.sh
   scripts/checks/security/audit-js-supply-chain.sh
+  scripts/checks/security/audit-runtime-images.sh --self-test
   scripts/checks/security/audit-runtime-images.sh
   if selected kind; then
     echo 'dashboard image verification deferred to the exact-image Kind transaction'
