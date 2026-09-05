@@ -161,6 +161,45 @@ databases/schemas, credentials and external OpenBao key material are outside
 this reset boundary. This documents the boundary; it does not authorize a live
 database reset or a migration-ledger rewrite.
 
+### Platform access profiles and OAuth refresh coordination
+
+Migrations `0019_platform_access_profiles.sql` and
+`0020_platform_credential_refresh_attempts.sql` extend version 18 without
+changing its accepted bytes or translating any previous access model.
+
+Profiles contain only credential identities and explicit capability slots.
+Editing a profile creates a new immutable revision; an environment retains
+its selected revision until explicitly rebound. Binding admission uses the
+existing environment operation generation, not a new secret generation.
+The profile store checks exact authorized user/organization scope and locks
+the owner, environment and selected credential rows through publication.
+Only current profiles and bound revisions prevent credential deletion; unused
+history can retain a non-secret identity. Owner and environment teardown
+cascades are covered by database tests.
+
+OAuth rotation has one durable attempt per credential. A reservation expires
+after 60 database-clock seconds only if the provider request has not started.
+Starting consumes a non-cloneable permit. A possibly started request is never
+reassigned or replayed after timeout. An uncertain result marks the credential
+refresh-failed until explicit owner replacement. A fresh wrapped DEK is
+prepared before request start; encryption and durable result staging need no
+further OpenBao call. Recovery authenticates the staged envelope outside DB
+locks, then rechecks exact owner, versions, hard deadline and envelope bytes
+before atomic promotion. An OpenBao outage retains staging for later recovery.
+Neither staging nor a publication receipt authorizes a workload request.
+This coordinates provider operations; it cannot make an external OAuth server
+and PostgreSQL one atomic transaction or guarantee exactly-once delivery.
+
+The upgrade fixture pins the complete accepted versions 1–18 from canonical
+`69ee44b90badf36ddfb39751ced2f95aa78e4d62` and its schema fingerprint. It proves
+18→20 retains existing metadata and encrypted material, creates empty access
+tables and leaves a second startup unchanged. There is no down migration or
+legacy writer. Rollback to version 18 requires stopping new writers and
+recreating only the disposable application `public` schema using that prior
+source's immutable history. It discards new records and leaves other schemas,
+databases and external OpenBao keys outside the reset boundary. This is a
+documented/tested recovery boundary, not authorization to reset live data.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

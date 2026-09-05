@@ -90,6 +90,18 @@ pub struct PlatformCredentialStore {
 }
 
 impl PlatformCredentialStore {
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.reader.pool
+    }
+
+    pub(crate) fn catalog(&self) -> &ProviderCatalog {
+        &self.reader.catalog
+    }
+
+    pub(crate) fn provider(&self) -> &Arc<dyn KekProvider> {
+        &self.provider
+    }
+
     pub fn new(pool: PgPool, provider: Arc<dyn KekProvider>, catalog: ProviderCatalog) -> Self {
         Self {
             reader: CredentialMetadataReader::new(pool, catalog),
@@ -202,6 +214,10 @@ impl PlatformCredentialStore {
         if refresh {
             require_oauth_refresh(&current)?;
         }
+        // Publication CAS alone must not bypass another replica's durable
+        // provider operation. Owner replacement can clear only terminal or
+        // never-started, expired attempts, within this same transaction.
+        crate::refresh::fence_refresh_mutation(&mut tx, id).await?;
         // These coordinates are immutable through this API. Reject corruption
         // or an unexpected writer instead of publishing under a changed key.
         if current.metadata.provider != next.metadata.provider
@@ -243,11 +259,13 @@ impl PlatformCredentialStore {
             if current.version != expected && Some(current.version) != expected.revoked().ok() {
                 return Err(Error::StaleVersion);
             }
+            crate::refresh::delete_refresh_attempt(&mut tx, id).await?;
             tx.commit().await.map_err(database_error)?;
             return Ok(current);
         }
         compare_version(&current, expected)?;
         let next = expected.revoked()?;
+        crate::refresh::delete_refresh_attempt(&mut tx, id).await?;
         delete_material(&mut tx, id).await?;
         sqlx::query("UPDATE platform_credentials SET status='revoked', revocation_generation=$2, updated_at=now() WHERE id=$1")
             .bind(id.as_str()).bind(generation(next.revocation_generation)?)
@@ -272,6 +290,24 @@ impl PlatformCredentialStore {
         compare_version(&current, expected)?;
         if current.metadata.status != CredentialStatus::Revoked {
             return Err(Error::Inactive);
+        }
+        // Profile writes hold credential SHARE while selecting references.
+        // This UPDATE lock makes deletion and current/bound references atomic;
+        // historical unbound revisions deliberately remain metadata-only.
+        let referenced: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM platform_access_profile_entries e \
+             WHERE e.credential_id=$1 AND ( \
+               EXISTS (SELECT 1 FROM platform_access_profiles p \
+                       WHERE p.id=e.profile_id AND p.current_revision=e.revision) \
+               OR EXISTS (SELECT 1 FROM platform_environment_access_bindings b \
+                          WHERE b.profile_id=e.profile_id AND b.profile_revision=e.revision)))",
+        )
+        .bind(id.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if referenced {
+            return Err(Error::CredentialInUse);
         }
         sqlx::query("DELETE FROM platform_credentials WHERE id=$1")
             .bind(id.as_str())
@@ -447,7 +483,7 @@ impl MetadataRow {
 }
 
 #[derive(sqlx::FromRow)]
-struct MaterialRow {
+pub(crate) struct MaterialRow {
     kek_provider: String,
     key_name: String,
     key_version: i64,
@@ -458,13 +494,13 @@ struct MaterialRow {
     format: i16,
 }
 
-struct PreparedMaterial {
-    envelope: EncryptedTenantSecret,
-    wrapped: WrappedDek,
+pub(crate) struct PreparedMaterial {
+    pub(crate) envelope: EncryptedTenantSecret,
+    pub(crate) wrapped: WrappedDek,
 }
 
 impl MaterialRow {
-    fn prepared(self, provider: KekProviderKind) -> Result<PreparedMaterial, Error> {
+    pub(crate) fn prepared(self, provider: KekProviderKind) -> Result<PreparedMaterial, Error> {
         let wrapped = WrappedDek {
             provider: KekProviderKind::from_persisted(&self.kek_provider)
                 .ok_or(Error::CorruptRecord)?,
@@ -486,7 +522,10 @@ impl MaterialRow {
     }
 }
 
-fn validate_wrapper(wrapped: &WrappedDek, provider: KekProviderKind) -> Result<(), Error> {
+pub(crate) fn validate_wrapper(
+    wrapped: &WrappedDek,
+    provider: KekProviderKind,
+) -> Result<(), Error> {
     if wrapped.provider != provider
         || wrapped.key_version == 0
         || wrapped.format != WRAPPED_DEK_FORMAT_V1
@@ -502,7 +541,7 @@ fn validate_wrapper(wrapped: &WrappedDek, provider: KekProviderKind) -> Result<(
     Ok(())
 }
 
-async fn load_record<'e, E: Executor<'e, Database = Postgres>>(
+pub(crate) async fn load_record<'e, E: Executor<'e, Database = Postgres>>(
     executor: E,
     owner: &Owner,
     id: &CredentialId,
@@ -524,7 +563,7 @@ async fn load_record<'e, E: Executor<'e, Database = Postgres>>(
     row.record(catalog)
 }
 
-async fn check_owner<'e, E: Executor<'e, Database = Postgres>>(
+pub(crate) async fn check_owner<'e, E: Executor<'e, Database = Postgres>>(
     executor: E,
     owner: &Owner,
     lock: bool,
@@ -550,7 +589,7 @@ async fn check_owner<'e, E: Executor<'e, Database = Postgres>>(
     Ok(())
 }
 
-async fn insert_material(
+pub(crate) async fn insert_material(
     tx: &mut Transaction<'_, Postgres>,
     record: &CredentialRecord,
     prepared: PreparedMaterial,
@@ -577,7 +616,7 @@ async fn insert_material(
     Ok(())
 }
 
-async fn delete_material(
+pub(crate) async fn delete_material(
     tx: &mut Transaction<'_, Postgres>,
     id: &CredentialId,
 ) -> Result<(), Error> {
@@ -603,7 +642,10 @@ fn owner_columns(owner: &Owner) -> (Option<&str>, Option<&str>) {
     }
 }
 
-fn compare_version(record: &CredentialRecord, expected: CredentialVersion) -> Result<(), Error> {
+pub(crate) fn compare_version(
+    record: &CredentialRecord,
+    expected: CredentialVersion,
+) -> Result<(), Error> {
     if record.version == expected {
         Ok(())
     } else {
@@ -611,14 +653,14 @@ fn compare_version(record: &CredentialRecord, expected: CredentialVersion) -> Re
     }
 }
 
-fn require_oauth_refresh(record: &CredentialRecord) -> Result<(), Error> {
+pub(crate) fn require_oauth_refresh(record: &CredentialRecord) -> Result<(), Error> {
     if record.metadata.authentication_kind != CredentialAuthKind::OAuth {
         return Err(Error::UnsupportedCredential);
     }
     record.active(unix_now()?)
 }
 
-fn generation(value: u64) -> Result<i64, Error> {
+pub(crate) fn generation(value: u64) -> Result<i64, Error> {
     if value == 0 {
         return Err(Error::InvalidInput);
     }
@@ -639,7 +681,7 @@ fn unix_now() -> Result<u64, Error> {
         .map_err(|_| Error::ClockUnavailable)
 }
 
-fn database_error(error: sqlx::Error) -> Error {
+pub(crate) fn database_error(error: sqlx::Error) -> Error {
     if error
         .as_database_error()
         .and_then(|error| error.code())
@@ -651,7 +693,7 @@ fn database_error(error: sqlx::Error) -> Error {
     }
 }
 
-async fn provider_call<T>(
+pub(crate) async fn provider_call<T>(
     operation: impl Future<Output = Result<T, SecretEnvelopeError>>,
 ) -> Result<T, Error> {
     tokio::time::timeout(PROVIDER_TIMEOUT, operation)

@@ -51,10 +51,15 @@ mod tests {
 
     use super::*;
 
-    // Replace only after the synthetic database gate computes migration 18's
-    // complete schema fingerprint; preparation must not claim accepted proof.
+    // Computed by the synthetic 18->20 upgrade fixture and shared fresh-schema
+    // gate; accepted applied migration history remains independently pinned.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "022961777e7ce3c81dd413e51b0f47c5e43e9bbbce86b1ba753acdbfb052cc6a";
+    const ACCEPTED_CREDENTIAL_STORAGE_SCHEMA_FINGERPRINT: &str =
         "ab823697675ec3b378dddda17d3de6bd7f62c2d6070977409158a9d42f97b10b";
+    // SHA-384 of concatenated migration checksums 1..=18 from canonical
+    // 69ee44b90badf36ddfb39751ced2f95aa78e4d62, independent of this branch.
+    const APPLIED_CREDENTIAL_STORAGE_HISTORY_CHECKSUM: &str = "91821fa8a91fe123b17fb2908a66878b5d15083c3c299b43da8854543c5844b14a8a80fd39657add1e797d69804e63a1";
     const ACCEPTED_PRE_PLATFORM_SCHEMA_FINGERPRINT: &str =
         "89054bb58aa891438dc98b13dc89a353480982506e91c43ce1ad5d5047377ce8";
     const APPLIED_BASELINE_CHECKSUM: &str = "3c739196dff29f03ccbe05af6dc45b0be2327bca39dbafaa9d29601ba3873aa99affe0492bfb4f0e3de7579d2e5da8fb";
@@ -70,6 +75,7 @@ mod tests {
     const PROJECT_SPEC_CUTOVER_VERSION: i64 = 16;
     const OPAQUE_AUTH_CAPABILITIES_VERSION: i64 = 17;
     const PLATFORM_CREDENTIALS_VERSION: i64 = 18;
+    const PLATFORM_ACCESS_PROFILES_VERSION: i64 = 19;
     const LEGACY_USER_CREDENTIAL_SECRET_ERROR: &str =
         "credential product cutover requires legacy user credential secrets to be absent";
 
@@ -85,6 +91,150 @@ mod tests {
     #[test]
     fn embedded_pre_platform_history_matches_the_accepted_release() -> anyhow::Result<()> {
         assert_applied_pre_platform_history()
+    }
+
+    #[test]
+    fn embedded_credential_storage_history_matches_the_accepted_release() -> anyhow::Result<()> {
+        assert_applied_credential_storage_history()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_access_upgrade_preserves_accepted_credentials_and_second_run_is_noop()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, PLATFORM_ACCESS_PROFILES_VERSION).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let before = applied_migrations(&pool).await?;
+            anyhow::ensure!(before.len() == 18 && before[17].0 == 18);
+            let fingerprint: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            ))
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                fingerprint == ACCEPTED_CREDENTIAL_STORAGE_SCHEMA_FINGERPRINT,
+                "accepted version-18 schema changed: {fingerprint}"
+            );
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_credential(&pool, "retained", Some("credential-user-a"), None, "Work")
+                .await?;
+            seed_platform_credential_material(&pool, "retained", 1).await?;
+            let material_before: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            pool.close().await;
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let after = applied_migrations(&pool).await?;
+            anyhow::ensure!(
+                after.len() == 20
+                    && after[..18] == before
+                    && after[18].0 == 19
+                    && after[19].0 == 20
+            );
+            let material_after: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                material_before == material_after,
+                "additive access migration changed credential material"
+            );
+            for table in [
+                "platform_access_profiles",
+                "platform_access_profile_revisions",
+                "platform_access_profile_entries",
+                "platform_environment_access_bindings",
+                "platform_credential_refresh_attempts",
+                "platform_credential_refresh_material",
+            ] {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                    .fetch_one(&pool)
+                    .await?;
+                anyhow::ensure!(count == 0, "migration imported access records into {table}");
+            }
+            let fingerprint: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            ))
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
+                "application schema fingerprint changed: {fingerprint}"
+            );
+            pool.close().await;
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            anyhow::ensure!(applied_migrations(&pool).await? == after);
+            let material_noop: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(material_noop == material_before);
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_access_rollback_recreates_only_the_disposable_application_schema()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            sqlx::raw_sql("CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep (id integer); \
+                INSERT INTO rollback_boundary.keep VALUES (1);").execute(&pool).await?;
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_credential(&pool, "discarded", Some("credential-user-a"), None, "Work").await?;
+            seed_platform_credential_material(&pool, "discarded", 1).await?;
+            // This database was generated by this test. No external schema,
+            // cluster, key provider or live credential is in the reset scope.
+            sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").execute(&pool).await?;
+            pool.close().await;
+            apply_migrations_before(&test_db.url, PLATFORM_ACCESS_PROFILES_VERSION).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            let history = applied_migrations(&pool).await?;
+            anyhow::ensure!(history.len() == 18 && history[17].0 == 18);
+            let fingerprint: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            )).fetch_one(&pool).await?;
+            anyhow::ensure!(fingerprint == ACCEPTED_CREDENTIAL_STORAGE_SCHEMA_FINGERPRINT);
+            let retained: i32 = sqlx::query_scalar("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await?;
+            anyhow::ensure!(retained == 1);
+            let credentials: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_credentials").fetch_one(&pool).await?;
+            anyhow::ensure!(credentials == 0);
+            pool.close().await;
+            anyhow::Ok(())
+        }.await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
     }
 
     #[tokio::test]
@@ -208,8 +358,10 @@ mod tests {
             assert_platform_credential_schema(&pool).await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == 18 && after[..17] == before && after[17].0 == 18,
-                "migration 18 did not append to the exact accepted prior ledger"
+                after.len() == MIGRATOR.iter().count()
+                    && after[..17] == before
+                    && after[17].0 == 18,
+                "migration history did not append to the exact accepted version-17 ledger"
             );
             let owners_after: Vec<(String, String)> =
                 sqlx::query_as("SELECT id, email FROM users ORDER BY id")
@@ -2947,11 +3099,34 @@ mod tests {
         Ok(())
     }
 
+    fn assert_applied_credential_storage_history() -> anyhow::Result<()> {
+        let mut digest = Sha384::new();
+        let mut count = 0;
+        for migration in MIGRATOR
+            .iter()
+            .filter(|migration| migration.version < PLATFORM_ACCESS_PROFILES_VERSION)
+        {
+            count += 1;
+            anyhow::ensure!(
+                migration.version == count,
+                "accepted storage migration ordering changed"
+            );
+            digest.update(Sha384::digest(migration.sql.as_bytes()));
+        }
+        anyhow::ensure!(count == 18, "accepted version-18 history is incomplete");
+        anyhow::ensure!(
+            format!("{:x}", digest.finalize()) == APPLIED_CREDENTIAL_STORAGE_HISTORY_CHECKSUM,
+            "migrations 1 through 18 no longer match canonical accepted history"
+        );
+        Ok(())
+    }
+
     async fn apply_migrations_before(database_url: &str, version: i64) -> anyhow::Result<()> {
         // Do not manufacture an apparently valid old ledger from a baseline
         // rewritten by the same branch whose upgrade is being tested.
         assert_applied_baseline_checksum()?;
         assert_applied_pre_platform_history()?;
+        assert_applied_credential_storage_history()?;
         anyhow::ensure!(
             MIGRATOR.version_exists(version),
             "embedded migration {version} is missing"
