@@ -1483,7 +1483,7 @@ cleanup() {
   trap - EXIT HUP INT TERM
   ALLOW_REGISTRY_EGRESS=0
   CW_COMMAND_TIMEOUT_SECONDS=180
-  if [[ "$ENV_CREATED" -eq 1 && ( -f "$STATE_ROOT/supervisor.db" || -f "$STATE_ROOT/state.json" ) ]]; then
+  if [[ "$ENV_CREATED" -eq 1 && -f "$STATE_ROOT/supervisor.db" ]]; then
     if [[ "$status" -eq 0 ]]; then
       log 'cleaning native environment after incomplete smoke'
       if ! cw_isolated env rm --local "$NAME" --yes >/dev/null 2>&1; then
@@ -1664,9 +1664,9 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     die 'synthetic protected GitHub credential ID is invalid'
   run_cw credentials --local profile create "$CREDENTIAL_PROFILE_NAME"
   run_cw credentials --local profile set \
-    "$CREDENTIAL_PROFILE_NAME" codex "$CREDENTIAL_ID"
+    "$CREDENTIAL_PROFILE_NAME" codex "id:$CREDENTIAL_ID"
   run_cw credentials --local profile set \
-    "$CREDENTIAL_PROFILE_NAME" github "$GITHUB_CREDENTIAL_ID"
+    "$CREDENTIAL_PROFILE_NAME" github "id:$GITHUB_CREDENTIAL_ID"
   run_cw credentials --local profile get "$CREDENTIAL_PROFILE_NAME" --output json
   jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" '
     length == 1 and
@@ -1816,7 +1816,7 @@ run_cw run --no-tty -- /bin/sh -lc \
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
   run_managed_credential_broker_smoke
-  run_cw credentials --local get "$CREDENTIAL_ID" --output json
+  run_cw credentials --local get "id:$CREDENTIAL_ID" --output json
   jq -e '
     length == 1 and
     .[0].status == "revoked" and
@@ -1863,8 +1863,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
      "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
     die 'environment deletion changed acknowledged direct-share host content'
   run_cw credentials --local profile delete "$CREDENTIAL_PROFILE_NAME" --yes
-  run_cw credentials --local delete "$CREDENTIAL_ID" --yes
-  run_cw credentials --local delete "$GITHUB_CREDENTIAL_ID" --yes
+  run_cw credentials --local delete "id:$CREDENTIAL_ID" --yes
+  run_cw credentials --local delete "id:$GITHUB_CREDENTIAL_ID" --yes
   run_cw secrets --local user delete CW_NATIVE_SMOKE_SECRET
   run_cw secrets --local list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
