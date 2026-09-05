@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use av_credential_proxy::{
     CredentialSource, ProxyInjectionConfig, ProxyResponseMode, ProxyRouteConfig, RedactionSet,
     StreamingRedactor, ValidatedProxyRequest, build_target_url, is_websocket_attempt,
     prepare_credentials, prepare_outbound_headers, validate_proxy_request, validate_proxy_route,
 };
-use codewire_access::{CapabilitySlot, CredentialAuthKind};
+use codewire_access::{CapabilitySlot, CredentialAuthKind, CredentialStatus};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use url::Url;
 
@@ -342,6 +343,7 @@ impl CredentialSource for OpenAiApiKey<'_> {
 }
 
 fn validate_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBrokerError> {
+    validate_current_lease(lease)?;
     let metadata = lease.credential_metadata();
     let grant = lease.grant();
     let permission = lease.permission();
@@ -359,6 +361,7 @@ fn validate_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBr
 }
 
 fn validate_oauth_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBrokerError> {
+    validate_current_lease(lease)?;
     let metadata = lease.credential_metadata();
     let grant = lease.grant();
     let permission = lease.permission();
@@ -369,6 +372,26 @@ fn validate_oauth_lease(lease: &impl BrokerCredentialLease) -> Result<(), Creden
         || permission.operation.as_str() != OPERATION_NAME
         || permission.route.as_str() != ROUTE_NAME
         || !grant.permissions.contains(permission)
+    {
+        return Err(CredentialBrokerError::UnsupportedLease);
+    }
+    Ok(())
+}
+
+/// Placement reads may block after authority admission. Enforce both hard
+/// deadlines when consuming the returned lease, before borrowing material.
+fn validate_current_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBrokerError> {
+    let metadata = lease.credential_metadata();
+    let grant = lease.grant();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CredentialBrokerError::UnsupportedLease)?
+        .as_secs();
+    if metadata.status != CredentialStatus::Active
+        || metadata.revocation_generation == 0
+        || metadata.revocation_generation != grant.credential_revocation_generation
+        || metadata.expires_at_unix.is_some_and(|expiry| expiry <= now)
+        || grant.expires_at_unix.is_some_and(|expiry| expiry <= now)
     {
         return Err(CredentialBrokerError::UnsupportedLease);
     }
@@ -682,6 +705,59 @@ mod tests {
         fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T {
             self.material_accessed.set(true);
             self.inner.with_material(operation)
+        }
+    }
+
+    #[test]
+    fn rejects_stale_or_expired_leases_before_borrowing_material() {
+        for kind in [CredentialAuthKind::ApiKey, CredentialAuthKind::OAuth] {
+            for case in [
+                "credential expiry",
+                "grant expiry",
+                "revocation",
+                "generation",
+            ] {
+                let mut inner = lease("openai", kind, SYNTHETIC_KEY.as_bytes());
+                match case {
+                    "credential expiry" => inner.credential.metadata.expires_at_unix = Some(0),
+                    "grant expiry" => inner.grant.expires_at_unix = Some(0),
+                    "revocation" => inner.credential.metadata.status = CredentialStatus::Revoked,
+                    "generation" => inner.grant.credential_revocation_generation += 1,
+                    _ => unreachable!(),
+                }
+                let material_accessed = Rc::new(Cell::new(false));
+                let lease = TrackingLease {
+                    inner,
+                    material_accessed: Rc::clone(&material_accessed),
+                };
+                let error = match kind {
+                    CredentialAuthKind::ApiKey => OpenAiApiKeyAdapter::new()
+                        .expect("adapter")
+                        .prepare(
+                            lease,
+                            &Method::POST,
+                            "/responses",
+                            None,
+                            &request_headers(),
+                            br#"{"model":"synthetic-model","input":"hello"}"#,
+                        )
+                        .err(),
+                    CredentialAuthKind::OAuth => OpenAiChatGptOAuthAdapter::new()
+                        .expect("adapter")
+                        .credential_from_lease(lease)
+                        .err(),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    error,
+                    Some(CredentialBrokerError::UnsupportedLease),
+                    "{case}"
+                );
+                assert!(
+                    !material_accessed.get(),
+                    "{case} borrowed protected material"
+                );
+            }
         }
     }
 
