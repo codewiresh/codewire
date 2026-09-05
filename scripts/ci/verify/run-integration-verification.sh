@@ -194,6 +194,12 @@ run_database() {
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
   assert_passed_count "platform credential restricted-role matrix" "$logfile" 8
 
+  logfile="$RUN_DIR/platform-broker-admission.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker admission matrix" "$logfile" 14
+
   logfile="$RUN_DIR/session-hash-only.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --test session_auth -- --nocapture | tee "$logfile"

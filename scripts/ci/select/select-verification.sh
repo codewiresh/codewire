@@ -903,8 +903,10 @@ if [ "$event_selected" = false ]; then
         # Shared primitives retain both placement-store and orchestration
         # consumer proof, including their exposing feature gates.
         select_token rust
+        select_token rust_pkg_codewire_credential_broker
         select_token rust_pkg_codewire_orchestration
         select_token rust_pkg_codewire_platform_credentials
+        select_token database
         select_token service_integration
         select_token service_orchestration
         ;;
@@ -920,10 +922,21 @@ if [ "$event_selected" = false ]; then
         # Compilation cannot prove owner fencing, atomic material publication,
         # least-privilege metadata access or deletion races in PostgreSQL.
         select_token database
+        select_token rust_pkg_codewire_credential_broker
+        ;;
+      crates/codewire-credential-broker/src/platform.rs|\
+      crates/codewire-credential-broker/src/platform/*|\
+      crates/codewire-credential-broker/src/runtime.rs|\
+      crates/codewire-credential-broker/src/lib.rs|\
+      crates/codewire-credential-broker/Cargo.toml)
+        # Optional platform admission and the shared runtime are exercised
+        # against restricted PostgreSQL roles, not by default local tests.
+        select_token database
         ;;
       crates/codewire-access/*)
         # The shared credential model is also interpreted by platform storage.
         select_token rust
+        select_token rust_pkg_codewire_credential_broker
         select_token rust_pkg_codewire_platform_credentials
         select_token database
         ;;

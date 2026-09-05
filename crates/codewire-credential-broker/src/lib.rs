@@ -12,6 +12,8 @@ mod bridge;
 mod codex_oauth;
 mod network;
 mod openai;
+#[cfg(feature = "platform")]
+pub mod platform;
 mod runtime;
 
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
@@ -54,7 +56,7 @@ pub trait BrokerCredentialLease: Sized {
     fn with_material<T>(self, operation: impl FnOnce(&[u8]) -> T) -> T;
 }
 
-#[cfg(feature = "local")]
+#[cfg(any(test, feature = "local"))]
 impl BrokerCredentialLease for codewire_local_credentials::CredentialOperationLease {
     fn credential_metadata(&self) -> &CredentialMetadata {
         &self.credential.metadata

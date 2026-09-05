@@ -18,7 +18,7 @@ readonly -a ALLOWED=(
 
 check_production_primitive_features() {
   local production_tree primitive_features
-  production_tree="$(cargo tree --locked -p codewire-orchestration \
+  production_tree="$(cargo tree --locked "$@" \
     --edges normal,build --depth 1 --prefix none --format '{p}|{f}')"
   primitive_features="$(sed -n 's/^codewire-protected-store .*|//p' <<<"$production_tree")"
   if [[ -z "$primitive_features" ]] \
@@ -32,13 +32,25 @@ check_production_primitive_features() {
 # Shared policy needs only static source and rendered-manifest checks. Cargo's
 # resolved graph belongs to the separately provisioned Rust capability.
 if [[ "$#" -gt 0 ]]; then
-  if [[ "$#" -ne 1 || "$1" != --production-features ]]; then
-    printf 'usage: %s [--production-features]\n' "$SELF" >&2
+  if [[ "$#" -ne 1 ]]; then
+    printf 'usage: %s [--production-features|--production-broker-features]\n' "$SELF" >&2
     exit 2
   fi
   # Resolver-v2 normal/build edges exclude dev feature unification and expose
   # any transitive feature that would enable the synthetic provider.
-  check_production_primitive_features
+  case "$1" in
+    --production-features)
+      check_production_primitive_features -p codewire-orchestration
+      ;;
+    --production-broker-features)
+      check_production_primitive_features -p codewire-credential-broker \
+        --no-default-features --features platform
+      ;;
+    *)
+      printf 'usage: %s [--production-features|--production-broker-features]\n' "$SELF" >&2
+      exit 2
+      ;;
+  esac
   printf 'Production protected-store feature graph: OK\n'
   exit 0
 fi
@@ -143,12 +155,16 @@ import tomllib
 root = Path.cwd()
 protected = tomllib.loads((root / "crates/codewire-protected-store/Cargo.toml").read_text())
 orchestration = tomllib.loads((root / "crates/codewire-orchestration/Cargo.toml").read_text())
+broker = tomllib.loads((root / "crates/codewire-credential-broker/Cargo.toml").read_text())
 assert protected["features"]["default"] == []
 assert protected["features"]["platform-test-support"] == ["platform"]
 assert all(feature.startswith("dep:") for feature in protected["features"]["platform"])
 assert orchestration["dependencies"]["codewire-protected-store"]["features"] == ["platform"]
 assert orchestration["dev-dependencies"]["codewire-protected-store"]["features"] == ["platform-test-support"]
 assert orchestration["features"]["kind-e2e"].count("codewire-protected-store/platform-test-support") == 1
+assert broker["features"]["default"] == ["local"]
+assert set(broker["features"]["platform"]) == {"dep:codewire-platform-credentials", "dep:codewire-protected-store"}
+assert broker["dependencies"]["codewire-platform-credentials"]["optional"] is True
 
 manifests = [root / "Cargo.toml", *sorted((root / "crates").glob("*/Cargo.toml"))]
 for path in manifests:
