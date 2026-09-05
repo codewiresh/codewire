@@ -115,50 +115,6 @@ impl fmt::Debug for TokenResponse {
     }
 }
 
-#[cfg(test)]
-mod secret_debug_tests {
-    use super::*;
-
-    #[test]
-    fn authorize_outcome_debug_redacts_redirect_material() {
-        let authorization_code = "authorization-code-marker";
-        let request_id = "auth-request-marker";
-        let success = AuthorizeOutcome::Redirect(format!(
-            "https://client.example/callback?code={authorization_code}&state=opaque-state"
-        ));
-        let login =
-            AuthorizeOutcome::RedirectToLogin(format!("https://idp.example/login?id={request_id}"));
-
-        let success_diagnostic = format!("{success:?}");
-        let login_diagnostic = format!("{login:?}");
-        assert!(!success_diagnostic.contains(authorization_code));
-        assert!(!success_diagnostic.contains("opaque-state"));
-        assert!(!login_diagnostic.contains(request_id));
-        assert!(success_diagnostic.contains("[REDACTED"));
-        assert!(login_diagnostic.contains("[REDACTED"));
-    }
-
-    #[test]
-    fn token_response_debug_redacts_all_tokens() {
-        let response = TokenResponse {
-            access_token: "access-token-marker".into(),
-            token_type: "Bearer".into(),
-            expires_in: 3600,
-            id_token: Some("id-token-marker".into()),
-            refresh_token: Some("refresh-token-marker".into()),
-            scope: "openid profile".into(),
-        };
-
-        let diagnostic = format!("{response:?}");
-        assert!(!diagnostic.contains("access-token-marker"));
-        assert!(!diagnostic.contains("id-token-marker"));
-        assert!(!diagnostic.contains("refresh-token-marker"));
-        assert!(diagnostic.contains("Bearer"));
-        assert!(diagnostic.contains("openid profile"));
-        assert!(diagnostic.contains("[REDACTED]"));
-    }
-}
-
 impl Provider {
     /// Validate an authorization request, resolve the end-user, and (on
     /// success) issue an authorization code.
@@ -606,4 +562,48 @@ pub(crate) fn enc(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::*;
+
+    #[test]
+    fn authorize_outcome_debug_redacts_redirect_material() {
+        let authorization_code = "authorization-code-marker";
+        let request_id = "auth-request-marker";
+        let success = AuthorizeOutcome::Redirect(format!(
+            "https://client.example/callback?code={authorization_code}&state=opaque-state"
+        ));
+        let login =
+            AuthorizeOutcome::RedirectToLogin(format!("https://idp.example/login?id={request_id}"));
+
+        let success_diagnostic = format!("{success:?}");
+        let login_diagnostic = format!("{login:?}");
+        assert!(!success_diagnostic.contains(authorization_code));
+        assert!(!success_diagnostic.contains("opaque-state"));
+        assert!(!login_diagnostic.contains(request_id));
+        assert!(success_diagnostic.contains("[REDACTED"));
+        assert!(login_diagnostic.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn token_response_debug_redacts_all_tokens() {
+        let response = TokenResponse {
+            access_token: "access-token-marker".into(),
+            token_type: "Bearer".into(),
+            expires_in: 3600,
+            id_token: Some("id-token-marker".into()),
+            refresh_token: Some("refresh-token-marker".into()),
+            scope: "openid profile".into(),
+        };
+
+        let diagnostic = format!("{response:?}");
+        assert!(!diagnostic.contains("access-token-marker"));
+        assert!(!diagnostic.contains("id-token-marker"));
+        assert!(!diagnostic.contains("refresh-token-marker"));
+        assert!(diagnostic.contains("Bearer"));
+        assert!(diagnostic.contains("openid profile"));
+        assert!(diagnostic.contains("[REDACTED]"));
+    }
 }
