@@ -515,12 +515,6 @@ ports:
   - host_port: $HOST_PORT
     guest_port: 3000
 EOF
-if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
-  cat >>"$WORKSPACE/codewire.yaml" <<'EOF'
-secrets:
-  user: true
-EOF
-fi
 
 cw_isolated() {
   (
@@ -1804,7 +1798,7 @@ RUNNER_PID="$(native_database_value runner_pid)"
   die 'credential-free one-boot setup pack remained after readiness'
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ ! -e "$KEYRING_RUNTIME/codewire/workload-secrets-v1" ]] ||
-    die 'selection alone materialized a workload-secret delivery'
+    die 'stored workload-secret inventory materialized a guest delivery'
   run_cw run --no-tty -- /bin/sh -lc 'test -z "${CW_NATIVE_SMOKE_SECRET+x}"'
 fi
 

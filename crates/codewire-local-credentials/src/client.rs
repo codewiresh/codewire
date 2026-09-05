@@ -1325,6 +1325,7 @@ fn workload_secret_from_proto(
         key: value.key,
         created_at_unix_ms: value.created_at_unix_ms,
         updated_at_unix_ms: value.updated_at_unix_ms,
+        protected_store_cleanup_pending: value.protected_store_cleanup_pending,
     })
 }
 
@@ -1556,19 +1557,20 @@ mod tests {
             .code(),
             tonic::Code::DataLoss
         );
-        assert!(
-            workload_secret_from_proto(v1::WorkloadSecretMetadata {
-                key: maximum,
-                created_at_unix_ms: 1,
-                updated_at_unix_ms: 1,
-            })
-            .is_ok()
-        );
+        let decoded = workload_secret_from_proto(v1::WorkloadSecretMetadata {
+            key: maximum,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            protected_store_cleanup_pending: true,
+        })
+        .expect("valid workload-secret metadata");
+        assert!(decoded.protected_store_cleanup_pending);
         assert_eq!(
             workload_secret_from_proto(v1::WorkloadSecretMetadata {
                 key: too_long,
                 created_at_unix_ms: 1,
                 updated_at_unix_ms: 1,
+                protected_store_cleanup_pending: false,
             })
             .unwrap_err()
             .code(),

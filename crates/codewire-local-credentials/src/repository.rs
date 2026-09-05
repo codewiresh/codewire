@@ -1376,22 +1376,13 @@ mod tests {
 
     #[derive(Default)]
     struct SyntheticGitSpawner {
-        credential_channels: std::sync::Mutex<Vec<std::os::unix::net::UnixStream>>,
+        tokens: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
         invocations: std::sync::Mutex<Vec<String>>,
     }
 
     impl SyntheticGitSpawner {
         fn take_tokens(&self) -> io::Result<Vec<Vec<u8>>> {
-            self.credential_channels
-                .lock()
-                .unwrap()
-                .drain(..)
-                .map(|mut channel| {
-                    let mut token = Vec::new();
-                    channel.read_to_end(&mut token)?;
-                    Ok(token)
-                })
-                .collect()
+            Ok(self.tokens.lock().unwrap().drain(..).collect())
         }
     }
 
@@ -1402,17 +1393,26 @@ mod tests {
                 .get_args()
                 .map(|argument| argument.to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
-            if let Some(socket) = arguments.iter().find_map(|argument| {
+            let credential_gate = if let Some(socket) = arguments.iter().find_map(|argument| {
                 argument
                     .strip_prefix("credential.helper=")?
                     .split_once(" --credential-socket ")
                     .map(|(_, socket)| socket.trim_matches('\''))
             }) {
-                self.credential_channels
-                    .lock()
-                    .unwrap()
-                    .push(std::os::unix::net::UnixStream::connect(socket)?);
-            }
+                let mut channel = std::os::unix::net::UnixStream::connect(socket)?;
+                let (gate_reader, gate_writer) = std::os::unix::net::UnixStream::pair()?;
+                let tokens = Arc::clone(&self.tokens);
+                std::thread::spawn(move || {
+                    let mut token = Vec::new();
+                    if channel.read_to_end(&mut token).is_ok() {
+                        tokens.lock().unwrap().push(token);
+                    }
+                    drop(gate_writer);
+                });
+                Some(gate_reader)
+            } else {
+                None
+            };
             let environment = command
                 .get_envs()
                 .map(|(name, value)| {
@@ -1448,12 +1448,17 @@ mod tests {
             } else {
                 String::new()
             };
-            let mut child = tokio::process::Command::new("/usr/bin/printf");
+            let mut child = if let Some(gate_reader) = credential_gate {
+                let mut child = tokio::process::Command::new("/usr/bin/cat");
+                child.stdin(Stdio::from(std::os::fd::OwnedFd::from(gate_reader)));
+                child
+            } else {
+                let mut child = tokio::process::Command::new("/usr/bin/printf");
+                child.arg("%s").arg(output).stdin(Stdio::null());
+                child
+            };
             child
-                .arg("%s")
-                .arg(output)
                 .env_clear()
-                .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .kill_on_drop(true)
