@@ -100,13 +100,14 @@ with local `mounts` using `mode: copy`; relative mount sources resolve from the
 configuration file, and each becomes an environment-owned point-in-time copy.
 Multi-repository entries use the same normalized project model as the platform.
 `image` in `codewire.yaml` and `--image` select any valid OCI workspace image. A
-bare `ports` entry declares
-a guest application port; an explicit `HOST:GUEST` entry also publishes it for
-the VM lifetime on `127.0.0.1:HOST` only:
+`ports` entry with `port` declares a guest application port. A `host_port` and
+`guest_port` pair also publishes it for the VM lifetime on the host loopback
+address only:
 
 ```yaml
 ports:
-  - 18080:8080
+  - host_port: 18080
+    guest_port: 8080
 ```
 
 Native local environments join Mesh only when `--network NAME` is explicit or
@@ -122,7 +123,11 @@ disconnected environment when enrollment cannot be completed.
 the product smoke. The host owns Mesh identity and transport, and the VM sees
 only admitted TCP streams for its declared application ports. Access profiles
 select material-free credential grants whose protected values remain in the
-isolated host broker. Preset, install/startup, environment, agent-installation,
+isolated host broker. Credential and access-profile commands treat a bare
+selector as a name. Use `name:<name>` for a name that resembles selector syntax,
+`id:<canonical-uuid>` for a record ID, and `user/<name>` for an exact
+scope-qualified access-profile reference. Malformed prefixes are rejected.
+Preset, install/startup, environment, agent-installation,
 and secret options still fail explicitly while the remaining Forgejo #1910
 slices are completed. Repository, copy-mount, and direct-mount skills are
 captured into immutable environment-owned generations at create time and on

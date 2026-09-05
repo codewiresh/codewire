@@ -8,7 +8,7 @@ description: Frequently asked questions about Codewire
 <details>
 <summary>What is Codewire?</summary>
 
-Codewire provides cloud machines for AI coding agents. Every agent gets its own dedicated, Xen-isolated environment with full root access. Launch Claude Code, Codex, or any tool on isolated machines — and run them in parallel.
+Codewire provides cloud machines for AI coding agents. Every agent gets its own hardware-isolated VM with a dedicated kernel and full root access. Launch Claude Code, Codex, or any tool on isolated machines — and run them in parallel.
 
 </details>
 

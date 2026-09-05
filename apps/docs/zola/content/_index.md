@@ -27,9 +27,8 @@ Isolated development machines where agents run. Each environment has its own run
 
 1. **Sign up** with an invite code and set up 2FA
 2. **Create an organization**
-3. **Connect GitHub** for private repository access
-4. **Create an environment** — analyze a repo and spin up a sandbox
-5. **Connect** — open a terminal, preview, files, SSH, or an agent session
+3. **Create an environment** from a public repository URL
+4. **Connect** — open a terminal, preview, files, SSH, or an agent session
 
 ### From the CLI
 
@@ -37,9 +36,9 @@ During the private preview, run this from an authorized source checkout:
 
 ```bash
 make cli-install
-cw setup                                    # interactive wizard: login, org, GitHub
-cw env create github.com/your-org/your-repo # AI detects stack, creates a sandbox environment
-cw run -- claude "fix the tests"            # run an agent in a persistent session
+cw setup
+cw env create https://github.com/owner/public-repo
+cw run -- claude "fix the tests"
 ```
 
 ## Codewire vs alternatives

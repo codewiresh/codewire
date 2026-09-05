@@ -35,9 +35,10 @@ are compiled for Rust at build time by `crates/codewire-proto`.
 |---|---|---|
 | `codewire.internal.v1` | `CoordinatorService`, `MeshCoordinatorService`, gateway binding, and Mesh authorization. | First-party runtime clients only |
 
-`libs/gateway-proto/proto/` holds the Rust-consumed daemon/gateway protocol.
-It has no independent Go module or generated Go copy. New client-facing
-contracts go here.
+`libs/gateway-proto/proto/` holds only the Rust-consumed private `daemon.v1`
+protocol between the gateway and environment daemon. It has no independent Go
+module or generated Go copy. New client-facing contracts belong under
+`proto/codewire/`.
 
 ## Vendored third-party protos
 

@@ -118,9 +118,10 @@ The suite under `apps/dashboard/e2e/` covers:
 - organization creation, members, invitations, roles, assignments, and API
   key lifecycle;
 - organization, user, and project secrets plus environment presets;
-- Git credentials, Git identity, and SSH-key settings;
+- Git identity settings and manual repository URL, branch, and mount entry;
 - billing and admin rendering through server-side clients; and
-- real Kind environment preparation, creation, running state, terminal,
+- direct environment creation, including typed rejection of an unknown
+  repository-only configuration, plus real Kind running state, terminal,
   exposed port, stop, restart, and destruction.
 
 The real environment lifecycle is mandatory in the desktop gate. It must not
@@ -215,7 +216,7 @@ home, cache, XDG, and temporary directories, and no ambient credential or proxy
 configuration; host `node_modules` directories are never mounted.
 
 The renderer receives the populated read-only tracked-source projection, the
-verified Chromium archive, and one writable staging mount for the four
+verified Chromium archive, and one writable staging mount for the two current
 environment-create snapshots. It receives no owner home directory, credentials,
 Docker socket, or kubeconfig. A `kubectl` sentinel rejects the run if browser
 setup unexpectedly tries to use Kubernetes. Successful output is validated and

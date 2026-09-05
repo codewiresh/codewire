@@ -1,58 +1,76 @@
 ---
 title: Secrets
-description: Manage organization-level secrets for environment provisioning
+description: Store generic write-only values and inspect their metadata
 ---
 
+Secrets are named, opaque values. Codewire stores the value associated with a
+key; it does not infer a provider, credential type, or intended use from the
+key or value. `DATABASE_URL`, `OPENAI_API_KEY`, and an application-specific
+signing key all use the same storage contract.
 
-Organization secrets store credentials used during environment provisioning — private repo access, container registry auth, and AI agent API keys.
+## Storage scopes
 
-## Accessing secrets
+The dashboard groups stored values by scope:
 
-1. Navigate to your organization in the sidebar
-2. Click **Secrets** in the org's quick links
+- **Organization** — shared metadata owned by the selected organization
+- **User** — personal metadata owned by the signed-in user
+- **Secret project** — a named collection owned by the organization
 
-## Available secrets
+Open an organization and choose **Secrets** to select a scope or manage secret
+projects.
 
-| Secret | Purpose |
-|--------|---------|
-| **GitHub Token** | Access private repositories during environment creation |
-| **DockerHub Username** | Authenticate with DockerHub for container images |
-| **DockerHub Token** | DockerHub authentication token |
-| **Claude API Key** | API key for Claude Code in environments |
-| **Claude OAuth Token** | OAuth token for Claude Code authentication |
+## Value-blind reads
 
-Each secret shows its current status: **configured** or **not configured**.
+Setting a secret sends its value through a write-only request and stores it
+encrypted. Subsequent lists return only metadata such as the key and
+timestamps. The stored value is not displayed or returned by a read API.
 
 ## Set a secret
 
-1. Find the secret you want to configure
-2. Enter the value in the inline password input
-3. Click **Set**
+1. Choose the organization, user, or secret-project scope.
+2. Enter a valid environment-style key, such as `DATABASE_URL`.
+3. Enter the value in the password field.
+4. Choose **Save Secret**.
 
-The value is encrypted and stored at the organization level.
+Setting the same key again replaces its stored value. Use rename when only the
+key should change.
 
 ## Delete a secret
 
-1. Find the configured secret
-2. Click **Delete**
-3. The secret is removed immediately
+Delete removes the stored value and its readable metadata. Deleting a secret
+project removes every value in that project.
 
 {% aside(kind="caution") %}
-  Deleting a secret may affect running environments that depend on it. New environments created after deletion won't have access to the removed credential.
+  Values are write-only. If you need a value later, keep the authoritative copy
+  in your own password manager or secrets system.
 {% end %}
 
-## How secrets are used
+## Environment delivery
 
-Secrets are injected during environment provisioning:
+Storage is not delivery. In the current hosted release, saved secrets cannot be
+attached to an environment and are not automatically injected, exposed, or
+proxied to workloads. Environment creation rejects secret-bearing project
+configuration rather than silently copying a value into a sandbox.
 
-- **GitHub Token** — clones private repos during environment setup
-- **DockerHub credentials** — pulls private container images without rate limiting
-- **Claude API Key / OAuth Token** — configures Claude Code inside environments so agents can authenticate automatically
+Saving a repository token here therefore does not enable private-repository
+cloning. See [Repository access](@/settings/github-integration.md) for the
+current repository boundary.
+
+## CLI
+
+Use an explicit placement and scope. `set` prompts for the value without
+placing it in the command line:
+
+```bash
+cw secrets --platform list
+cw secrets --platform organization set DATABASE_URL
+cw secrets --platform organization delete DATABASE_URL
+```
 
 ## Related
 
 {{ card_grid(
-  titles=["Create an environment", "GitHub integration"],
+  titles=["Create an environment", "Repository access"],
   hrefs=["/docs/getting-started/create-your-first-environment", "/docs/settings/github-integration"],
-  descriptions=["Create sandbox environments that use these secrets.", "Set up GitHub access for private repositories."]
+  descriptions=["Create a secret-free sandbox environment.", "Review the supported repository boundary."]
 ) }}

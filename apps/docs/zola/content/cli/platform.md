@@ -10,13 +10,15 @@ Platform mode connects the CLI to codewire.sh for sandbox environment management
 
 ### setup
 
-Interactive wizard that configures platform mode. Walks you through server URL, login, org selection, and GitHub connection.
+Interactive wizard that configures platform mode. It walks through the server
+URL, login, organization selection, and optional OpenSSH configuration.
 
 ```bash
 cw setup
 ```
 
-Run this once to get started. Your configuration is saved to `~/.codewire/platform.json`.
+Run this once to get started. By default, platform configuration is saved under
+`~/.config/cw/`.
 
 ## Authentication
 
@@ -85,7 +87,7 @@ cw org invite <email> [--org <slug>] [--role <role>]
 Create a sandbox environment from a repository or template.
 
 ```bash
-cw env create github.com/your-org/your-repo
+cw env create https://github.com/your-org/your-repo
 cw env create --preset python --name fix-auth
 ```
 
@@ -143,11 +145,19 @@ cw run --detach fix-auth -- codex
 
 ### secrets
 
-Manage organization secrets from the CLI.
+Manage write-only stored values and inspect value-blind metadata. Select the
+platform placement explicitly:
 
 ```bash
-cw secrets [--org <slug>]
+cw secrets --platform list
+cw secrets --platform organization list
+cw secrets --platform organization set DATABASE_URL
+cw secrets --platform organization delete DATABASE_URL
 ```
+
+`set` reads the value from a hidden prompt on an interactive terminal or from
+standard input. Saving a value does not attach it to an environment; see
+[Secrets](@/organizations/secrets.md) for the current delivery boundary.
 
 ## Billing & Cost
 
@@ -159,32 +169,6 @@ View organization billing and sandbox environment usage.
 cw cost [--org <slug>]
 ```
 
-
-## GitHub
-
-### github login
-
-Authenticate with GitHub for private repo access.
-
-```bash
-cw github login
-```
-
-### github logout
-
-Remove stored GitHub credentials.
-
-```bash
-cw github logout
-```
-
-### github status
-
-Check GitHub authentication status.
-
-```bash
-cw github status
-```
 
 ## Utilities
 

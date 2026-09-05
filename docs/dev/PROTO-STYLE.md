@@ -19,9 +19,9 @@ proto/
     secret.proto
     preset.proto
     port.proto
-    common.proto          # shared messages (SetupConfig, SetupAgent,
-                          # AppPort, RepoEntry) — authored by 07's
-                          # first proto WI (owner decision 2026-07-10)
+    common.proto          # canonical ProjectSpec plus RepositorySpec,
+                          # ApplicationPort, agents, skills, resources,
+                          # secrets, and access bindings shared by public APIs
   codewire/console/v1/    # first-party UX surface
   codewire/admin/v1/
   codewire/internal/v1/
@@ -29,7 +29,7 @@ proto/
   google/rpc/             # vendored error-detail types (01 WI-1)
 ```
 
-(`gateway.v1` and `daemon.v1` are Rust-consumed internal protocols under
+(`daemon.v1` is the Rust-consumed private gateway-to-daemon protocol under
 `libs/gateway-proto/proto/`; see `proto/README.md`.)
 
 `codewire.testing.v1` (an 03-D8 amendment to this layout) is the
@@ -51,8 +51,8 @@ messages live together in that file.
   the resource's service (`EnvironmentService.StopEnvironment`), no
   grab-bag `MiscService`.
 - Methods: `Get/List/Create/Update/Delete<Resource>` for CRUD; domain
-  verbs otherwise (`StopEnvironment`, `RegenerateSshKey`,
-  `AcceptInvitation`). Server-streaming reads are `Stream*`
+  verbs otherwise (`StopEnvironment`, `AcceptInvitation`,
+  `RedeemMeshNodeEnrollment`). Server-streaming reads are `Stream*`
   (`StreamLogs`, `StreamExec`); state-change feeds are `Watch*`
   (`WatchEnvironmentCreate`).
 - Every method has exactly one `<Method>Request` / `<Method>Response`
@@ -121,7 +121,7 @@ shim.
 not define new credential flavors: user-facing product RPCs use the shared
 Connect authentication layer for the browser session cookie,
 organization-scoped `cw_` API key, or opaque OAuth user bearer; internal
-services use only their declared environment or HMAC sidecar boundary.
+services use only their declared HMAC sidecar boundary.
 
 Missing or invalid credentials map to `unauthenticated`. A valid credential
 without the required scope, role, organization binding, or method authority

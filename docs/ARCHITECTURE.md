@@ -71,8 +71,8 @@ Codewire runs each development environment in its own hardware-virtualized VM wi
 own kernel. A vulnerability inside the guest kernel has nowhere to go -- there is no
 shared kernel. The hypervisor sits between guests, and the hypervisor boundary is the
 security boundary. The default `commodity` runtime uses Kata Containers with Cloud
-Hypervisor (see §4); the external isol8 backend (§5) provides the same guarantee with Xen
-paravirtualized domains.
+Hypervisor (see §4). The `confidential` profile uses Kata with QEMU-SNP on
+eligible hosts.
 
 This is the same isolation model used by:
 
@@ -113,8 +113,8 @@ manage that complexity.
      +-----------+---------------+-----------------+
      |           |               |                 |
   Sandbox    Sandbox         Sandbox           Sandbox
-  Claim      Template        WarmPool          (core)
-     |           |               |                 |
+  Claim      Template       Shadow Pool        (core)
+     |           |          (zero replicas)         |
      +-----------+---------------+-----------------+
                                  |
                     Agent Sandbox Controller
@@ -137,13 +137,8 @@ manage that complexity.
                   Isolated workload
           (container or VM depending on profile)
                          |
-              +----------+----------+
-              |                     |
-          guest-init           guest-zone
-          (PID 1)              (IDM server)
-                                    |
-                            styrolite containers
-                          (namespace-isolated workloads)
+             workspace + cw __hosted-daemon
+                  + guest-local dockerd
 ```
 
 **Layer 1 -- Codewire Platform:** Control plane handling auth, billing,
@@ -307,8 +302,9 @@ capability names; they are not implemented today. In short: projections launch
 processes, snapshots restore saved state, and checkpoints resume execution.
 
 > **Rust port status:** lifecycle execution, environment reconciliation,
-> sandbox liveness, warm-pool reconciliation, and sandbox billing-session
-> loops are Rust-owned by default in `crates/codewire-orchestration`. Billing
+> sandbox liveness, environment-specific sandbox-template creation, and the
+> sandbox billing-session loop are Rust-owned by default in
+> `crates/codewire-orchestration`. Billing
 > metering, overage, and trial-expiry crons are Rust-owned by default in
 > `crates/codewire-billing`. The rendered local-kind, dev, and prod runtime no
 > longer includes the Go fallback server, and the old Go monolith source has
@@ -385,10 +381,10 @@ reconciles underlying runtime resources.
 
 | CRD | Group | Purpose |
 |-----|-------|---------|
-| `Sandbox` | `agents.x-k8s.io/v1alpha1` | Core: single stateful pod with stable identity and persistent storage |
-| `SandboxTemplate` | `extensions.agents.x-k8s.io/v1alpha1` | Platform-defined reusable template for creating sandboxes |
-| `SandboxClaim` | `extensions.agents.x-k8s.io/v1alpha1` | User/platform request to create a sandbox from a template |
-| `SandboxWarmPool` | `extensions.agents.x-k8s.io/v1alpha1` | Pre-warmed pod pool configuration for fast allocation |
+| `Sandbox` | `agents.x-k8s.io/v1beta1` | Core: single stateful pod with stable identity and persistent storage |
+| `SandboxTemplate` | `extensions.agents.x-k8s.io/v1beta1` | Private environment-scoped template used to create one sandbox |
+| `SandboxClaim` | `extensions.agents.x-k8s.io/v1beta1` | User/platform request to create a sandbox from a template |
+| `SandboxWarmPool` | `extensions.agents.x-k8s.io/v1beta1` | Zero-replica shadow object required for the current claim-controller reference contract |
 
 ### Controller reconciliation flow
 
@@ -401,16 +397,16 @@ flowchart TD
     ClaimCtrl["Claim Controller"]
     SandboxCtrl["Sandbox Controller"]
     Pod["Pod (RuntimeClass from profile)"]
-    WarmPool["SandboxWarmPool"]
+    ShadowPool["SandboxWarmPool (zero replicas)"]
 
     Platform -->|"creates"| Claim
     Claim -->|"references"| Template
+    Claim -->|"references"| ShadowPool
     Claim -->|"reconciled by"| ClaimCtrl
     ClaimCtrl -->|"creates"| Sandbox
-    ClaimCtrl -->|"adopts pod from"| WarmPool
     Sandbox -->|"reconciled by"| SandboxCtrl
     SandboxCtrl -->|"creates"| Pod
-    WarmPool -->|"pre-warmed pods"| Pod
+    ShadowPool -->|"references"| Template
 ```
 
 ### Codewire integration
@@ -422,12 +418,14 @@ Codewire platform to the agent-sandbox CRDs using `kube-rs`.
 
 | Table | Purpose |
 |-------|---------|
-| `sandbox_template_config` | Links `environment_templates` to k8s SandboxTemplate names, image refs, warm pool size |
+| `sandbox_template_config` | Links environment-template configuration to Kubernetes image and runtime inputs |
 | `sandbox_environment_backend` | Per-environment: namespace, claim name, pod name, pod IP, agent port, setup state |
 
-**Claim creation:** The sandbox client generates a claim named `sandbox-{envID}`, labels it
-with environment and org IDs, and references the SandboxTemplate. Handles idempotency --
-reuses existing claims rather than failing.
+**Claim creation:** The sandbox client generates a private `SandboxTemplate` and
+zero-replica shadow `SandboxWarmPool` for each environment, then creates a claim
+named `sandbox-{envID}` with environment and org labels. The private template
+contains the environment-specific daemon token before the Sandbox starts.
+Creation is idempotent and reuses matching existing objects rather than failing.
 
 **Readiness watching:** `WaitForReady` watches the SandboxClaim until the `Ready` condition
 becomes `True` (5 min timeout). A concurrent pod health checker detects terminal failures
@@ -441,352 +439,35 @@ to the DB and detecting unexpected pod failures or sandbox expiry.
 - `SANDBOX_RUNTIME_PROFILE=commodity` renders `RuntimeClass: commodity`.
 - `SANDBOX_RUNTIME_PROFILE=confidential` renders `RuntimeClass: confidential`
   for the future hardware TEE-backed runtime lane.
-- `SANDBOX_RUNTIME_PROFILE=runc`, `none`, or an empty profile is diagnostic
-  only for managed creation and requires
-  `SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME=true`.
+- `SANDBOX_RUNTIME_PROFILE=runc` or `none` is diagnostic only for managed
+  creation and requires `SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME=true`; an empty
+  profile is rejected.
 - `commodity` relies on the RuntimeClass scheduling stanza to select Kata
   runtime candidate nodes.
-- The Rust orchestration warm-pool reconciler is the default owner for
-  `SandboxTemplate` and `SandboxWarmPool` reconciliation. Go fallback worker
-  loops are no longer rendered in local-kind, dev, or prod runtime paths.
+- Shared performance warm pools are disabled because a prestarted daemon
+  cannot safely receive the claim's unique token. Shared warm starts may return
+  only with a designed claim-time authenticated bootstrap and attestation
+  contract. Go fallback worker loops are no longer rendered in local-kind,
+  dev, or prod runtime paths.
 
 ---
 
-## 5. External isol8 Xen backend
+## 5. Sandbox Claim Indirection
 
-### What it is
+The agent-sandbox claim API currently requires a `SandboxWarmPool` reference.
+Codewire creates an environment-scoped shadow object with zero replicas, pointing
+to the same private `SandboxTemplate` as the claim. It exists only to satisfy
+that controller contract; it does not prestart a pod or share a daemon between
+environments.
 
-isol8 is a separate OCI runtime project that replaces runc with Xen PV domains.
-It remains useful as an optional external backend, but it is not the default
-Codewire path and is not an approved managed runtime profile. Current
-commodity runtime work uses Kata + Cloud Hypervisor through the `commodity`
-profile.
-
-### Control plane
-
-```text
-kube-apiserver
-  -> MutatingAdmissionWebhook (isol8-webhook)
-       converts cpu/memory -> domain-vcpus/domain-memory-mb extended resources
-
-kubelet
-  -> containerd
-    -> io.containerd.runc.v2 shim
-      -> /usr/local/bin/isol8-runtime
-           -> DomainService  (/run/isol8/domd.sock)
-           -> NetworkService (/run/isol8/netd.sock)
-
-systemd
-  -> isol8-domd.service   (socket-activated)
-  -> isol8-netd.service   (socket-activated)
-  -> isol8-orchd.service
-       -> advertises domain-vcpus + domain-memory-mb on node status
-```
-
-### System layout
-
-```text
-Host node
-+-- Xen hypervisor
-    +-- dom0
-        |-- kubelet
-        |-- containerd
-        |   +-- RuntimeClass "isol8"
-        |       -> BinaryName=/usr/local/bin/isol8-runtime
-        |
-        |-- isol8-runtime
-        |   |-- parses OCI bundles
-        |   |-- stores task state in /run/isol8/runtime/
-        |   |-- forks per-task monitors
-        |   |-- calls isol8-domd over UDS
-        |   +-- calls isol8-netd over UDS
-        |
-        |-- isol8-domd
-        |   |-- Xen PV domain lifecycle
-        |   |-- Xen console / IDM transport
-        |   |-- guest container RPCs
-        |   |-- exec / stream forwarding
-        |   |-- 9PFS backend for kubelet volumes
-        |   +-- Docker proxy + policy (workspace domains)
-        |
-        |-- isol8-netd
-        |   |-- host-side VIF setup
-        |   |-- routed /32 datapath
-        |   |-- proxy_arp + rp_filter tuning
-        |   +-- nftables anti-spoofing per VIF
-        |
-        |-- isol8-orchd
-        |   |-- daemon health checks
-        |   |-- orphan reconciliation
-        |   |-- warm-pool maintenance
-        |   +-- Prometheus metrics / cordon state
-        |
-        +-- Xen guest domains (one per pod)
-            |-- guest-init (/init, PID 1)
-            +-- guest-zone (/bin/zone)
-                |-- styrolite containers
-                +-- Docker stream tunnel (workspace only)
-```
-
-### Four components
-
-| Component | Type | Runs as | Role |
-|-----------|------|---------|------|
-| `isol8-runtime` | OCI binary | root via containerd | OCI lifecycle: `create`, `start`, `exec`, `delete`, `kill`, `state` |
-| `isol8-domd` | systemd service + UDS | root | Xen domain lifecycle, IDM bridge, 9PFS, Docker proxy |
-| `isol8-netd` | systemd service + UDS | root (`CAP_NET_ADMIN`) | Host-side guest networking |
-| `isol8-orchd` | systemd service | root | Health supervisor, warm pool, orphan cleanup, metrics |
-
-### OCI runtime flow
-
-**1. `isol8-runtime create`**
-
-- Parses the OCI bundle
-- Determines whether the task is a sandbox or workload container
-- Records the sandbox network namespace path for sandboxes
-- Forks a monitor process (containerd expects a process to wait on)
-- Writes task state to `/run/isol8/runtime/<id>/state.json`
-
-**2. `isol8-runtime start` (sandbox)**
-
-Creates the Xen PV domain:
-
-1. Parse resource limits from OCI spec (memory, vCPUs)
-2. Verify base guest rootfs squashfs exists
-3. Resolve guest network config from sandbox netns and CRI annotations
-4. Call `CreateDomain` on isol8-domd with base guest rootfs
-5. Call `AllocateNetwork` / `AttachVif` on isol8-netd
-6. Persist `domid`, `vif_name`, `network_ip` to sandbox state
-
-**3. `isol8-runtime start` (workload container)**
-
-Creates a container inside the already-running guest:
-
-1. Verify sandbox domain exists
-2. Build squashfs image for the container rootfs
-3. Call `CreateContainer` in the guest through isol8-domd
-
-### Sandbox vs workload rootfs
-
-**Sandbox rootfs** (`CreateDomainRequest.rootfs_path`): Host-side base guest image
-(Alpine + guest-init + guest-zone), shared across all pods on the node. Located at
-`/var/lib/isol8/images/ami-combined/rootfs.squashfs`. This boots the Xen PV domain.
-
-**Workload rootfs** (`CreateContainerRequest.rootfs`): Per-container OCI image
-(e.g., nginx, postgres), delivered into the guest via 9PFS and used as the overlay
-lowerdir by guest-zone. Located at `/containerd/<container-id>/rootfs` inside the guest.
-
-```text
-/tmp/overlay-<ctr>-merged   (merged view -- container sees this as /)
-  |-- upperdir: /tmp/overlay-<ctr>/upper   (writable tmpfs)
-  +-- lowerdir: /containerd/<ctr-id>/rootfs   (workload image via 9PFS, read-only)
-```
+This clean cutover is intentional. Every hosted daemon starts with one validated,
+environment-specific authentication token. Shared warm starts are unsupported
+until a separate design can authenticate and attest claim-time bootstrap before
+the daemon accepts traffic.
 
 ---
 
-## 6. Guest Execution Model
-
-### Boot sequence
-
-Each pod gets one Xen PV guest domain. At boot:
-
-1. `guest-init` (PID 1) performs early mount and initramfs setup
-2. Waits for `eth0` if guest networking is enabled
-3. Configures guest networking from kernel cmdline (`isolate.ip`, `isolate.gw`, `isolate.dns`)
-4. Prepares `/etc/resolv.conf`
-5. Launches `guest-zone`
-
-### guest-zone
-
-`guest-zone` is the long-running agent inside the VM:
-
-- Serves the guest side of the IDM protocol over `/dev/hvc0`
-- Creates and manages workload containers with `styrolite`
-- Handles exec, signals, TTY resize, and stdio streaming
-- Creates containers with 7 namespaces (Mount, PID, IPC, User, UTS, Cgroup, Time)
-- NET is **not** unshared -- all containers share the guest init network namespace
-- Exposes the Docker stream tunnel (workspace domains only)
-
-### IDM protocol
-
-Protobuf over the Xen console (`/dev/hvc0`), bidirectional request/response.
-
-**Dom0 -> Guest (`IdmRequest`):**
-
-| Message | Purpose |
-|---------|---------|
-| `ExecRequest` | Execute command in domain |
-| `ContainerCreateRequest` | Create container (styrolite `CreateRequest::wrap`) |
-| `ContainerExecRequest` | Exec into existing container (styrolite `AttachRequest::wrap`) |
-| `ContainerStopRequest` | Stop container (SIGTERM -> SIGKILL) |
-| `SignalRequest` | Send signal to process |
-| `ResizePtyRequest` | Resize exec PTY |
-| `ShutdownRequest` | Graceful guest shutdown |
-| `PortForwardRequest` | Establish port-forward tunnel |
-| `DockerStreamData` | Docker proxy data |
-| `VolumePrepareRequest` | Stage volume data via IDM |
-
-**Guest -> Dom0 (`IdmResponse`):**
-
-| Message | Purpose |
-|---------|---------|
-| `ReadyResponse` | Guest booted, zone ready (includes version and workspace flag) |
-| `ExecStarted` | Exec process started (returns PID) |
-| `ExecOutput` | stdout/stderr data |
-| `ExecDone` | Exec process exited (returns exit code) |
-| `ContainerCreatedResponse` | Container created (returns supervisor PID) |
-| `ContainerStoppedResponse` | Container stopped (returns exit code) |
-| `ErrorResponse` | Error message |
-
-**Handshake:** Guest boots -> zone sends `ReadyResponse` -> domd marks domain `RUNNING`.
-
----
-
-## 7. Isolation Model (Defense in Depth)
-
-```text
-+---------------------------------------------------------------+
-| Layer 1: Xen Hypervisor                                       |
-|   - Separate kernel per pod                                   |
-|   - Separate memory address space                             |
-|   - Separate network stack (xen-netfront virtual interface)   |
-|   - No shared kernel attack surface                           |
-+---------------------------------------------------------------+
-                           |
-+---------------------------------------------------------------+
-| Layer 2: Linux Namespaces + pivot_root (styrolite)            |
-|   - 7 namespaces: Mount, PID, IPC, User, UTS, Cgroup, Time   |
-|   - NET is VM-level (hypervisor provides isolation)           |
-|   - Mount: pivot_root into OCI rootfs, /dev/hvc0 not visible |
-|   - PID: workload cannot see zone or init processes           |
-|   - User: full 65536-UID mapping (0 0 65536)                 |
-+---------------------------------------------------------------+
-                           |
-+---------------------------------------------------------------+
-| Layer 3: Hardening                                            |
-|   - Capabilities: drop ALL + 12 safe K8s defaults             |
-|   - Seccomp-bpf: ~275 syscall allowlist, W^X enforcement      |
-|   - Cgroup v2: per-container memory/pids/cpu limits           |
-|   - Per-process rlimits: NPROC=256, NOFILE=1024, AS=4G       |
-|   - All fds > 2 closed before exec (IDM transport protection) |
-|   - 14 masked /proc paths + /proc/sys readonly                |
-|   - Yama LSM: ptrace restricted to parent-child               |
-+---------------------------------------------------------------+
-```
-
-Layer 1 (the hypervisor) provides the **primary security boundary**. Layers 2 and 3 add
-defense-in-depth and ensure security auditing tools see the expected isolation properties.
-
-### Capabilities
-
-Drop ALL (41 capabilities), then add 12 safe Kubernetes defaults:
-
-```text
-CHOWN, DAC_OVERRIDE, FSETID, FOWNER, MKNOD, SETGID, SETUID,
-SETFCAP, SETPCAP, NET_BIND_SERVICE, SYS_CHROOT, KILL
-```
-
-Excluded: `NET_RAW`, `SYS_ADMIN`, `SYS_MODULE`, `SYS_PTRACE`, `NET_ADMIN`, `SYS_RAWIO`.
-
-### Seccomp-BPF
-
-Default-deny allowlist model. ~275 explicitly permitted syscalls matching Docker defaults.
-
-- `socket()` -- only AF_UNIX, AF_INET, AF_INET6 allowed
-- `mmap`/`mprotect` -- W^X enforcement (PROT_WRITE + PROT_EXEC blocked)
-- Blocked: `mount`, `unshare`, `setns`, `ptrace`, `bpf`, `io_uring_*`, `clone3`
-
-### Why NET namespace is not unshared
-
-In a VM-based isolator, the guest kernel runs a completely independent network stack. The
-guest's `eth0` is a Xen virtual network interface connected to dom0 -- it is not the host's
-physical network. Calling `unshare(CLONE_NEWNET)` inside the VM would create an empty
-namespace with only a disabled loopback, breaking all connectivity.
-
-This matches Kata Containers, Firecracker, and every other VM-based runtime: PID, IPC,
-USER, Mount, and UTS namespaces are unshared for defense-in-depth, but NET isolation comes
-from the hypervisor boundary.
-
----
-
-## 8. Networking
-
-### Routed /32 VIF datapath
-
-isol8 uses a routed /32 model, not a bridge. Each guest gets a Xen VIF with a /32 host
-route and nftables anti-spoofing.
-
-### Packet path
-
-```mermaid
-flowchart LR
-    Guest["Guest eth0<br/>(xen-netfront)"]
-    VIF["Host VIF<br/>(vif{domid}.1)"]
-    Route["/32 route<br/>+ proxy_arp"]
-    NFT["nftables<br/>anti-spoof"]
-    Forward["ip_forward"]
-    NAT["SNAT masquerade<br/>(guest subnet)"]
-    Ext["External<br/>network"]
-
-    Guest --> VIF --> Route --> NFT --> Forward --> NAT --> Ext
-```
-
-### Network setup flow
-
-1. Runtime resolves pod IP from sandbox netns and CRI annotations
-2. `isol8-domd` receives IP via `CreateDomain` and passes it on the kernel cmdline
-3. `isol8-netd` receives IP via `AllocateNetwork` and programs host-side routes
-4. `guest-init` configures guest networking from kernel cmdline parameters
-
-### isol8-netd responsibilities
-
-Per VIF:
-- Install nftables anti-spoof rules (source IP must match allocated IP)
-- Enable `proxy_arp` on the VIF
-- Disable `rp_filter` on the VIF
-- Bring VIF up
-- Install `/32` route to guest IP through VIF
-
-Boot-time (`isol8-setup.sh`):
-- Enable IPv4 forwarding
-- Set up base `isol8` nftables forward chain
-- Add no-inter-guest rule for `vif* -> vif*`
-- Install NAT masquerade for guest subnet
-
-### Known gap: Cilium NetworkPolicy
-
-Guest traffic does **not** traverse the Cilium endpoint path. The Xen VIF datapath gives
-host-managed networking, but Cilium `NetworkPolicy` enforcement does not apply to isol8
-guests in the current design. Connectivity works, but network policies are not enforced.
-
----
-
-## 9. Warm Pools
-
-### Purpose
-
-Reduce pod creation latency by pre-booting Xen domains with kernel + IDM ready but no
-container image loaded.
-
-### How it works
-
-**Host-level (isol8-orchd):**
-
-- Manages warm domain pool via domd `CreateWarmDomain` / `WarmPoolStatus` RPCs
-- Pre-boots bare Xen domains (Alpine kernel + guest-init + guest-zone, IDM handshake
-  complete)
-- On pod creation: runtime requests a warm domain instead of cold-booting
-- `DrainWarmPool` for graceful shutdown of all warm domains
-
-**Kubernetes-level (agent-sandbox SandboxWarmPool CRD):**
-
-- `SandboxWarmPool` CRD configures target pool size per template
-- Claim controller adopts pre-warmed pods from the pool on claim creation
-- `sandbox_template_config.warm_pool_size` column stores target in Codewire DB
-
----
-
-## 10. Docker in Workspaces
+## 6. Docker in Workspaces
 
 ### Profile-dependent architecture
 
@@ -810,9 +491,8 @@ dind socket, not a Kubernetes node socket.
 
 The guest Docker data root must be backed by a real Linux filesystem. The
 commodity renderer currently uses an ext4 image in the workspace volume,
-mounted at `/var/lib/docker`, and starts dockerd with `vfs`. This is the
-near-term Kata equivalent of the isol8 lesson that Docker layer unpack and
-nested container workloads need ext4/xattr semantics. The durable target is a
+mounted at `/var/lib/docker`, and starts dockerd with `vfs`. Docker layer unpack
+and nested container workloads require ext4/xattr semantics. The durable target is a
 separate raw block PVC presented to the Kata guest, formatted and mounted at
 `/var/lib/docker`; see
 `docs/plans/2026-07-03-guest-docker-block-backed-data-root-plan.md`.
@@ -821,9 +501,6 @@ The bootstrap verifies the target is mounted as ext4 specifically, because
 
 For local kind, tests may use `SANDBOX_DOCKER_MODE=local-dind-direct`, which
 injects the existing `docker:dind` sidecar.
-
-The separate isol8 Xen project owns its own backend-specific Docker behavior.
-Codewire emits neutral `codewire.sh/*` annotations for active profiles.
 
 The sandbox gateway is a separate per-environment workload. It reaches the
 workspace daemon through the environment-local daemon Service and does not
@@ -834,14 +511,13 @@ hardening, and validation contract.
 
 ### Security boundary
 
-Future Docker proxy/filtering work is a defense-in-depth integration point and
-a place to add telemetry. It is not the primary security boundary. The
-VM/runtime boundary is the security boundary. If any path ever forwards to host
-Docker, that is a node-escape regression.
+The VM/runtime boundary is the security boundary. The gateway does not receive
+a Docker socket. If any path ever forwards to host Docker, that is a node-escape
+regression.
 
 ---
 
-## 11. Data Flow Examples
+## 7. Data Flow Examples
 
 ### Environment creation
 
@@ -865,15 +541,19 @@ sequenceDiagram
     Worker->>SC: EnsureNamespace
     SC->>K8s: create Namespace
     Worker->>SC: EnsureTemplate
-    SC->>K8s: create/update SandboxTemplate
+    SC->>K8s: create/update private SandboxTemplate
+    Worker->>SC: EnsureShadowPool
+    SC->>K8s: create/update zero-replica SandboxWarmPool
     Worker->>SC: CreateSandboxClaim
     SC->>K8s: create SandboxClaim
+    Worker->>SC: EnsureGatewayStack
+    SC->>K8s: create/update private gateway workload
     K8s->>Ctrl: reconcile claim
     Ctrl->>K8s: create Sandbox
     Ctrl->>K8s: create Pod (RuntimeClass from profile)
     K8s->>Node: schedule pod
     Node->>Node: runtime creates sandbox boundary
-    Node->>Node: workspace + gateway start
+    Node->>Node: workspace starts cw __hosted-daemon
     Worker->>SC: WaitForReady (watch claim)
     Ctrl-->>K8s: Ready=True
     SC-->>Worker: ready (pod IP, pod name)
@@ -886,51 +566,16 @@ sequenceDiagram
 sequenceDiagram
     participant Client as CLI / Web
     participant API as Rust Orchestration API
-    participant Sidecar as Pod Sidecar
-    participant Zone as guest-zone
-    participant Ctr as Container
+    participant Gateway as Environment Gateway
+    participant Daemon as Hosted Daemon
+    participant Child as Child Process
 
     Client->>API: POST /environments/{id}/terminal (get ticket)
-    API-->>Client: WebSocket ticket
-    Client->>Sidecar: WebSocket connect (ticket auth)
-    Sidecar->>Zone: kubectl exec -> AttachRequest
-    Zone->>Ctr: setns() into container namespaces
-    Zone->>Ctr: execvpe(shell)
-    Ctr-->>Zone: stdout/stderr
-    Zone-->>Sidecar: IDM ExecOutput
-    Sidecar-->>Client: WebSocket frames
+    API-->>Client: authenticated connection metadata
+    Client->>Gateway: tailnet or WebSocket transport
+    Gateway->>Daemon: authenticated gRPC ExecuteCommand
+    Daemon->>Child: launch requested process
+    Child-->>Daemon: stdout/stderr
+    Daemon-->>Gateway: gRPC stream
+    Gateway-->>Client: terminal stream
 ```
-
----
-
-## 12. Privilege Separation
-
-| Component | Runs as | Owns | Communicates via |
-|-----------|---------|------|------------------|
-| `isol8-runtime` | root (containerd child) | OCI lifecycle, state files | UDS to domd + netd |
-| `isol8-domd` | root | Xen domains, IDM channels, 9PFS exports | UDS server, Xen console |
-| `isol8-netd` | root (`CAP_NET_ADMIN`) | VIF routes, nft rules, proxy_arp | UDS server |
-| `isol8-orchd` | root | Cross-daemon health, warm pool | UDS client to domd + netd |
-| `guest-init` | PID 1 in guest | Guest mounts, network config | Launches guest-zone |
-| `guest-zone` | Inside guest | Containers, exec, Docker tunnel | IDM over `/dev/hvc0` |
-| `styrolite` | Inside guest (via zone) | Namespace creation, seccomp | fork/unshare/execvpe |
-
-### Reconciliation ownership
-
-Each daemon owns reconciliation for its own artifact class. No daemon cleans another
-daemon's artifacts.
-
-| Daemon | Owns | Reconciles on | Artifacts |
-|--------|------|---------------|-----------|
-| netd | Network artifacts | Startup | VIF /32 routes, nft rules, proxy_arp sysctl |
-| domd | Xen domains | On-demand (CleanupOrphans RPC) | Xen PV domains, IDM channels, 9PFS exports |
-| orchd | Cross-daemon health | Periodic timer | Triggers domd.CleanupOrphans, cleans loop devices |
-| runtime | State files | Per-operation | `/run/isol8/runtime/*/state.json`, domain locks |
-
-### Invariants
-
-1. netd NEVER destroys Xen domains or modifies state.json
-2. domd NEVER modifies network state (routes, nft rules)
-3. orchd NEVER directly modifies artifacts -- it triggers owner daemons
-4. runtime is the single writer for state.json (via OCI command lifecycle)
-5. Reconciliation prefers leak over incorrect cleanup (conservative)

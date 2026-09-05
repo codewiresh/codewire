@@ -100,6 +100,14 @@ The hosted or self-hosted node network control plane used by the CLI and
 environment runtime for remote access, node discovery, membership, access
 grants, and task/reporting coordination.
 
+Mesh does not use the AV credential proxy. Hosted Mesh sends the one Codewire
+user credential already presented to it over a private, method-scoped Connect
+RPC and receives only typed identity, organization, role, and credential-kind
+metadata. It does not store that credential. For a native VM, a confined
+one-shot enrollment issuer on the host uses the selected owner login to mint
+one narrow node enrollment and transfers it directly to the Mesh transport.
+Neither the owner login nor a workload-provider secret enters the VM.
+
 Rust CLI config and environment inputs are Mesh-only: use
 `CODEWIRE_MESH_URL`, `CODEWIRE_MESH_AUTH_TOKEN`, `CODEWIRE_MESH_NETWORK`,
 `CODEWIRE_MESH_INVITE_CODE`, `mesh_url`, `mesh_auth_token`, and

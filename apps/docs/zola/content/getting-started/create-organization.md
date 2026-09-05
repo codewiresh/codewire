@@ -15,7 +15,8 @@ Organizations are the top-level container in Codewire. Each organization has its
 
 You're now the **owner** of this organization and can start creating environments and inviting members.
 
-After creating your org, connect GitHub and create your first environment.
+After creating your organization, you can create your first environment from a
+public repository.
 
 ## Slug format
 

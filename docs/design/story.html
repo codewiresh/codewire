@@ -1534,7 +1534,7 @@
         <span class="hero-eyebrow">Cloud sandboxes</span>
         <h1 id="intro-title">Cloud environments for agents and their humans.</h1>
         <p class="lede">Persistent, isolated Linux environments you can access from anywhere, orchestrate through the CLI or SDK, and connect in encrypted private meshes.</p>
-        <p class="hero-detail">Open one in the browser, SSH, or VS Code. Check out any Git repository, manage credentials, and return to the same files, tools, and sessions.</p>
+        <p class="hero-detail">Open one in the browser, SSH, or VS Code. Check out a public Git repository by URL, manage application secrets, and return to the same files, tools, and sessions.</p>
         <div class="hero-actions">
           <a class="hero-action hero-action--primary" href="#access">Request access</a>
           <a class="hero-action hero-action--secondary" href="https://docs.codewire.sh">Read the docs</a>
@@ -1544,18 +1544,18 @@
 
     <section class="workflow-section" id="how-it-works" aria-labelledby="workflow-title">
       <h2 id="workflow-title">Everything your session needs. Ready every time.</h2>
-      <p class="workflow-intro">Connect a repository, save your setup, and start a complete Linux sandbox for any session. Open it yourself or hand it to an agent.</p>
+      <p class="workflow-intro">Enter a public repository URL, save your setup, and start a complete Linux sandbox for any session. Private platform repositories will use an explicit access profile and typed repository executor when that capability ships.</p>
 
       <div class="workflow-stage">
         <div class="workflow-sticky">
           <div class="workflow-copy-window">
             <div class="workflow-list" aria-label="How Codewire works">
-        <article class="workflow-step is-active" id="workflow-step-1" data-title="01 / connect GitHub" data-command="cw github login" data-result="GitHub connected.">
+        <article class="workflow-step is-active" id="workflow-step-1" data-title="01 / choose a repository" data-command="git ls-remote https://github.com/acme/api" data-result="Public repository is reachable.">
           <span class="workflow-number" aria-hidden="true">01</span>
           <div>
-            <h3>Connect GitHub</h3>
-            <p>Authorize once. Codewire can use any public or private repository you choose.</p>
-            <pre class="workflow-command"><code><span class="prompt">$</span> cw github login</code></pre>
+            <h3>Choose a public repository</h3>
+            <p>Use its Git URL directly. Codewire does not store or inject a raw forge token as a fallback.</p>
+            <pre class="workflow-command"><code><span class="prompt">$</span> git ls-remote https://github.com/acme/api</code></pre>
           </div>
         </article>
 
@@ -1645,13 +1645,13 @@
             <div class="workflow-terminal">
               <div class="workflow-terminal-bar">
                 <span class="terminal-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-                <span id="workflow-terminal-title">01 / connect GitHub</span>
+                <span id="workflow-terminal-title">01 / choose a repository</span>
               </div>
               <div class="workflow-terminal-screen">
                 <div id="workflow-terminal-commands">
-                  <div class="terminal-command-line"><span class="terminal-prompt">$ </span><span>cw github login</span><span class="terminal-cursor" aria-hidden="true"></span></div>
+                  <div class="terminal-command-line"><span class="terminal-prompt">$ </span><span>git ls-remote https://github.com/acme/api</span><span class="terminal-cursor" aria-hidden="true"></span></div>
                 </div>
-                <div class="terminal-result" id="workflow-terminal-result" aria-live="polite">GitHub connected.</div>
+                <div class="terminal-result" id="workflow-terminal-result" aria-live="polite">Public repository is reachable.</div>
               </div>
             </div>
           </aside>
