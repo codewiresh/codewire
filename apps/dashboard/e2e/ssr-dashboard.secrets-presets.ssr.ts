@@ -240,7 +240,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
     preset = page.locator(".cw-preset-card", { hasText: updatedPresetName });
     await expect(preset).toContainText("1.5 vCPU");
     await expect(preset).toContainText("3 GiB");
-    await expect(preset).toContainText("12 GB");
+    await expect(preset).toContainText("12 GiB");
 
     activeEnvironmentId = crypto.randomUUID();
     await sql`
@@ -250,7 +250,12 @@ test.describe.serial("server-rendered secrets and presets", () => {
       VALUES
         (${activeEnvironmentId}, ${orgId}, ${ownerId}, 'sandbox', ${presetId},
          ${`ssr-preset-in-use-${runId}`}, 'running', 'started',
-         ${sql.json({ schema_version: 1, working_directory: "/workspace" })})
+         ${sql.json({
+           schema_version: 1,
+           image: "python:3.12-slim",
+           working_directory: "/workspace",
+           resources: { cpu_millicores: 1500, memory_mib: 3072, disk_gib: 12 },
+         })})
     `;
     await page.reload();
     preset = page.locator(".cw-preset-card", { hasText: updatedPresetName });

@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RUNNER="$ROOT/scripts/ci/verify/update-playwright-ubuntu24-snapshots.sh"
 PRODUCT_VERIFY="$ROOT/scripts/ci/verify/run-product-verification.sh"
 ENVIRONMENT_SPEC="$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts"
+MANAGEMENT_SPEC="$ROOT/apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts"
+DASHBOARD_SPEC="$ROOT/apps/dashboard/e2e/ssr-dashboard.read.ssr.ts"
 CHROMIUM_INSTALLER="$ROOT/scripts/ci/install-pinned-playwright-chromium.sh"
 
 die() {
@@ -29,11 +31,22 @@ emit_renderer_dockerfile >"$dockerfile"
   die 'renderer PATH changed without updating its immutable-base contract'
 [ "$FIXTURE_RUN_ID" = 'ubuntu24-cft145' ] ||
   die 'Ubuntu snapshot fixture run ID changed without updating its contract'
+# shellcheck disable=SC2153 # Set by the sourced updater.
+[ "$SNAPSHOT_RELATIVE_DIR" = 'apps/dashboard/e2e' ] ||
+  die 'snapshot staging root changed without updating its contract'
+[ "$(expected_snapshots)" = "$(cat <<'EOF'
+ssr-dashboard.environments.ssr.ts-snapshots/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.environments.ssr.ts-snapshots/environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.read.ssr.ts-snapshots/dashboard-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+EOF
+)" ] || die 'expected snapshot allowlist changed without updating its contract'
 [ "$(retired_snapshots)" = "$(cat <<'EOF'
-environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png
-environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
-environments-prepared-image-mobile-dashboard-ssr-mobile-linux.png
-environments-prepared-image-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png
+ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-mobile-dashboard-ssr-mobile-linux.png
+ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
 )" ] || die 'retired snapshot deletion allowlist changed without updating its contract'
 [ "$CHROMIUM_SHA256" = "$(sed -n "s/^readonly chromium_sha256='\([^']*\)'/\1/p" "$CHROMIUM_INSTALLER")" ] ||
@@ -244,13 +257,18 @@ grep -- '--mount ' "$RUNNER" | grep -v 'readonly' |
   grep -Fq 'src=$snapshot_stage,dst=/workspace/$SNAPSHOT_RELATIVE_DIR' ||
   die 'the sole writable bind mount is not the snapshot staging directory'
 
-for title in \
-    'renders server-owned create options and resources with no browser service caller' \
-    'keeps environment create and inventory usable on mobile'; do
+while IFS='|' read -r title spec_relative spec; do
   grep -Fq "$title" "$RUNNER" || die "focused visual test is not selected: $title"
-  grep -Fq "test(\"$title\"" "$ENVIRONMENT_SPEC" ||
+  grep -Fq "$spec_relative" "$RUNNER" ||
+    die "focused visual spec is not selected: $spec_relative"
+  grep -Fq "test(\"$title\"" "$spec" ||
     die "focused visual test no longer exists: $title"
-done
+done <<EOF
+renders server-owned create options and resources with no browser service caller|apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts|$ENVIRONMENT_SPEC
+keeps environment create and inventory usable on mobile|apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts|$ENVIRONMENT_SPEC
+renders account, security, and session surfaces in the selected context|apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts|$MANAGEMENT_SPEC
+renders the shared console shell and operational overview|apps/dashboard/e2e/ssr-dashboard.read.ssr.ts|$DASHBOARD_SPEC
+EOF
 
 archive="$fixture/chrome-linux64.zip"
 printf 'synthetic archive\n' >"$archive"
@@ -343,14 +361,19 @@ if prepare_private_runtime_directory "$fixture/runtime-link" >/dev/null 2>&1; th
 fi
 
 snapshot_repo="$fixture/snapshot-repo"
-snapshot_relative_dir='apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts-snapshots'
+snapshot_relative_dir='apps/dashboard/e2e'
 mkdir -p "$snapshot_repo/$snapshot_relative_dir"
 git -C "$snapshot_repo" init -q
 while IFS= read -r snapshot; do
-  printf '\x89PNG\r\n\x1a\n%s\n' "$snapshot" >"$snapshot_repo/$snapshot_relative_dir/$snapshot"
+  mkdir -p "$snapshot_repo/$snapshot_relative_dir/$(dirname "$snapshot")"
+  printf '\x89PNG\r\n\x1a\n%s\n' "$snapshot" > \
+    "$snapshot_repo/$snapshot_relative_dir/$snapshot"
 done < <(retired_snapshots)
-printf '\x89PNG\r\n\x1a\ncurrent\n' > \
-  "$snapshot_repo/$snapshot_relative_dir/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png"
+while IFS= read -r snapshot; do
+  mkdir -p "$snapshot_repo/$snapshot_relative_dir/$(dirname "$snapshot")"
+  printf '\x89PNG\r\n\x1a\n%s\n' "$snapshot" > \
+    "$snapshot_repo/$snapshot_relative_dir/$snapshot"
+done < <(expected_snapshots)
 git -C "$snapshot_repo" add "$snapshot_relative_dir"
 git -C "$snapshot_repo" -c user.name=Codewire -c user.email=codewire@example.invalid \
   commit -qm 'snapshot validator fixture'
@@ -360,21 +383,21 @@ done < <(retired_snapshots)
 validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" ||
   die 'the exact retired snapshot deletions were rejected'
 
-retired_type_change='environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png'
-ln -s environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png \
+retired_type_change='ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png'
+current_snapshot='ssr-dashboard.environments.ssr.ts-snapshots/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png'
+ln -s "$(basename "$current_snapshot")" \
   "$snapshot_repo/$snapshot_relative_dir/$retired_type_change"
 if validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" >/dev/null 2>&1; then
   die 'a retired snapshot type change was accepted as a deletion'
 fi
 rm "$snapshot_repo/$snapshot_relative_dir/$retired_type_change"
 
-current_snapshot='environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png'
 printf 'unapproved change\n' >>"$snapshot_repo/$snapshot_relative_dir/$current_snapshot"
 if validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" >/dev/null 2>&1; then
   die 'a current snapshot modification was accepted beside the retired deletions'
 fi
 git -C "$snapshot_repo" checkout -q -- "$snapshot_relative_dir/$current_snapshot"
-unexpected_snapshot='unexpected-prepared-image-dashboard-ssr-desktop-linux.png'
+unexpected_snapshot='ssr-dashboard.read.ssr.ts-snapshots/unexpected-dashboard-ssr-desktop-linux.png'
 printf '\x89PNG\r\n\x1a\nunexpected\n' > \
   "$snapshot_repo/$snapshot_relative_dir/$unexpected_snapshot"
 git -C "$snapshot_repo" add "$snapshot_relative_dir/$unexpected_snapshot"
@@ -390,10 +413,11 @@ stage="$fixture/stage"
 target="$fixture/target"
 mkdir -p "$baseline" "$stage" "$target"
 while IFS= read -r snapshot; do
+  mkdir -p "$baseline/$(dirname "$snapshot")"
   printf '\x89PNG\r\n\x1a\n%s\n' "$snapshot" >"$baseline/$snapshot"
 done < <(expected_snapshots)
 cp -a "$baseline/." "$stage/"
-printf 'changed\n' >>"$stage/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png"
+printf 'changed\n' >>"$stage/$current_snapshot"
 validate_snapshot_stage "$baseline" "$stage" ||
   die 'allowlisted snapshot update fixture was rejected'
 promote_snapshots "$stage" "$target"
@@ -404,13 +428,14 @@ while IFS= read -r snapshot; do
     die "promotion did not normalize $snapshot to mode 0644"
 done < <(expected_snapshots)
 
-printf '\x89PNG\r\n\x1a\nunapproved\n' >"$stage/unapproved-ubuntu24-cft145.png"
+unapproved_stage_snapshot='ssr-dashboard.read.ssr.ts-snapshots/unapproved-ubuntu24-cft145.png'
+printf '\x89PNG\r\n\x1a\nunapproved\n' >"$stage/$unapproved_stage_snapshot"
 if validate_snapshot_stage "$baseline" "$stage" >/dev/null 2>&1; then
   die 'an unexpected snapshot mutation was accepted'
 fi
-rm -f "$stage/unapproved-ubuntu24-cft145.png"
-ln -s "$stage/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png" \
-  "$stage/unapproved-link.png"
+rm -f "$stage/$unapproved_stage_snapshot"
+unapproved_stage_link='ssr-dashboard.management-visual.ssr.ts-snapshots/unapproved-link.png'
+ln -s "$stage/$current_snapshot" "$stage/$unapproved_stage_link"
 if validate_snapshot_stage "$baseline" "$stage" >/dev/null 2>&1; then
   die 'a symlink in snapshot staging was accepted'
 fi

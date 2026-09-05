@@ -49,14 +49,33 @@ export async function makeUserAdmin(email: string) {
   await sql`UPDATE users SET is_admin = true WHERE email = ${email}`;
 }
 
-// Get password reset token from Better Auth verifications table
-export async function getPasswordResetToken(identifier: string): Promise<string | null> {
-  const [result] = await sql`
-    SELECT value FROM verifications
-    WHERE identifier = ${identifier}
-    ORDER BY created_at DESC LIMIT 1
+// Bind a test-owned capability to the row issued by the real password-reset
+// request. Production stores only a purpose-bound digest, so the original raw
+// capability is intentionally unrecoverable from the database.
+export async function bindSyntheticPasswordResetToken(
+  identifier: string,
+): Promise<string | null> {
+  const token = randomBytes(32).toString("hex");
+  const tokenHash = createHash("sha256")
+    .update("codewire/idp/verification/v1\0")
+    .update("password_reset")
+    .update("\0")
+    .update(token)
+    .digest("hex");
+  const [row] = await sql`
+    UPDATE verifications
+    SET token_hash = ${tokenHash}, updated_at = NOW()
+    WHERE id = (
+      SELECT id FROM verifications
+      WHERE identifier = ${identifier}
+        AND purpose = 'password_reset'
+        AND expires_at > NOW()
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    )
+    RETURNING id
   `;
-  return result?.value ?? null;
+  return row ? token : null;
 }
 
 // Get user ID by email
@@ -69,6 +88,7 @@ export async function getUserId(email: string): Promise<string | null> {
 
 // Clean up a single user and all associated auth records
 export async function cleanupUser(email: string): Promise<void> {
+  await sql`DELETE FROM verifications WHERE identifier = ${email}`;
   const [user] = await sql`SELECT id FROM users WHERE email = ${email}`;
   if (!user) return;
   await sql`DELETE FROM sessions WHERE user_id = ${user.id}`;

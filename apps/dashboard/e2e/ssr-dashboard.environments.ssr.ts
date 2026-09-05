@@ -306,8 +306,8 @@ test.describe.serial("server-rendered environments", () => {
     await page.getByRole("button", { name: "Add another URL" }).click();
     await page.getByLabel("Repository URL").nth(1).fill("https://example.test/codewire/secondary");
     await page.getByLabel("Mount path").nth(1).fill("secondary");
-    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue(repositoryUrl);
-    await expect(page.getByLabel("Mount path", { exact: true })).toHaveValue("codewire");
+    await expect(page.getByLabel("Repository URL", { exact: true }).first()).toHaveValue(repositoryUrl);
+    await expect(page.getByLabel("Mount path", { exact: true }).first()).toHaveValue("codewire");
     await expect(page.getByLabel("Repository URL").nth(1)).toHaveValue(
       "https://example.test/codewire/secondary",
     );
