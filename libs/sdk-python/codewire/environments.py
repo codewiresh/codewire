@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Any, BinaryIO
 
 from google.protobuf.duration_pb2 import Duration
-from google.protobuf.json_format import ParseDict
 
 from codewire._context import ConnectContext
 from codewire._convert import (
@@ -13,11 +11,11 @@ from codewire._convert import (
     environment_resize_plan_to_dict,
     environment_to_dict,
     port_to_dict,
+    project_spec_from_dict,
 )
 from codewire.environment import Environment
 from codewire.environment_ops import exec_environment, list_environment_ports
 from codewire.files import Files
-from codewire.v1.common_pb2 import AppPort, ProjectSpec
 from codewire.v1.environment_connect import EnvironmentServiceClientSync
 from codewire.v1.environment_pb2 import (
     CreateEnvironmentRequest,
@@ -67,17 +65,6 @@ def _isolation_tier(value: str | None) -> int:
     raise ValueError("codewire: isolation_tier must be standard or confidential")
 
 
-def _project_spec(value: dict[str, Any]) -> ProjectSpec:
-    """Convert the SDK's short enum spellings to the canonical proto shape."""
-    payload = deepcopy(value)
-    for skill in payload.get("skills", []):
-        source = skill.get("source")
-        if source not in ("repository", "user"):
-            raise ValueError("codewire: project skill source must be repository or user")
-        skill["source"] = f"PROJECT_SKILL_SOURCE_{source.upper()}"
-    return ParseDict(payload, ProjectSpec())
-
-
 class Environments:
     def __init__(self, context: ConnectContext):
         self._context = context
@@ -87,87 +74,27 @@ class Environments:
     def create(
         self,
         *,
-        template_slug: str | None = None,
-        template_id: str | None = None,
+        project_spec: dict[str, Any],
+        preset_id: str | None = None,
         name: str | None = None,
-        type: str | None = None,
         ttl_seconds: int | None = None,
-        repo_url: str | None = None,
-        branch: str | None = None,
-        image: str | None = None,
-        cpu_millicores: int | None = None,
-        memory_mb: int | None = None,
-        disk_gb: int | None = None,
-        startup_script: str | None = None,
-        install_command: str | None = None,
-        env_vars: dict[str, str] | None = None,
-        agent: str | None = None,
-        app_ports: list[dict] | None = None,
-        include_org_secrets: bool | None = None,
-        include_user_secrets: bool | None = None,
         isolation_tier: str | None = None,
-        secret_project: str | None = None,
-        project_spec: dict[str, Any] | None = None,
         wait: bool = False,
         wait_timeout: float = 300,
     ) -> Environment:
         """Create a new environment through EnvironmentService."""
-        # ``type`` was never accepted by the REST create body. Keep the frozen
-        # public argument but do not invent a second wire representation for it.
-        del type
         assert_environment_converter_coverage()
         request = CreateEnvironmentRequest(
             org_id=self._context.resolve_org_id(),
             isolation_tier=_isolation_tier(isolation_tier),
         )
-        if template_slug is not None:
-            request.preset_slug = template_slug
-        if template_id is not None:
-            request.preset_id = template_id
+        if preset_id is not None:
+            request.preset_id = preset_id
         if name is not None:
             request.name = name
         if ttl_seconds is not None:
             request.ttl_seconds = ttl_seconds
-        if repo_url is not None:
-            request.repo_url = repo_url
-        if branch is not None:
-            request.branch = branch
-        if image is not None:
-            request.image = image
-        if cpu_millicores is not None:
-            request.cpu_millicores = cpu_millicores
-        if memory_mb is not None:
-            request.memory_mb = memory_mb
-        if disk_gb is not None:
-            request.disk_gb = disk_gb
-        if startup_script is not None:
-            request.startup_script = startup_script
-        if install_command is not None:
-            request.install_command = install_command
-        if env_vars is not None:
-            request.env_vars.update(env_vars)
-        if agent is not None:
-            request.agent = agent
-        if app_ports is not None:
-            request.app_ports.extend(
-                AppPort(
-                    port=item["port"],
-                    label=item.get("label", ""),
-                    access=item.get("access", ""),
-                )
-                for item in app_ports
-            )
-        if include_org_secrets is not None:
-            request.include_org_secrets = include_org_secrets
-        if include_user_secrets is not None:
-            request.include_user_secrets = include_user_secrets
-        if secret_project is not None:
-            # Environment creation accepts the same project-name selector as
-            # the REST body. PresetService uses a distinct ``*_id`` field,
-            # which is resolved in Templates instead.
-            request.secret_project = secret_project
-        if project_spec is not None:
-            request.project_spec.CopyFrom(_project_spec(project_spec))
+        request.project_spec.CopyFrom(project_spec_from_dict(project_spec))
 
         response = self._context.unary(self._client.create_environment, request)
         if not response.HasField("environment"):

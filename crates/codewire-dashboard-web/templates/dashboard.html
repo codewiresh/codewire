@@ -51,7 +51,7 @@
           {% if view.show_checklist %}
           <section id="get-started" class="cw-console-panel cw-onboarding" aria-labelledby="setup-title">
             <div class="cw-console-panel-header"><div><p class="cw-eyebrow">First run</p><h2 id="setup-title">Get started</h2></div></div>
-            <ol><li data-complete="{{ view.has_organizations }}"><span>1</span><div><strong>Create an organization</strong><p>Choose the stable URL namespace for your team.</p></div></li><li data-complete="{{ view.github_connected }}"><span>2</span><div><strong>Connect GitHub <small>Optional</small></strong><p>Use private repositories in the Sandbox creator.</p>{% if view.github_available && !view.github_connected %}<a href="{{ view.github_connect_url }}">Connect GitHub</a>{% endif %}</div></li><li><span>3</span><div><strong>Create a Sandbox</strong><p>Launch an isolated workspace from a repository or image.</p><a href="{{ view.selected_organization_url }}new/">Create Sandbox</a></div></li></ol>
+            <ol><li data-complete="{{ view.has_organizations }}"><span>1</span><div><strong>Create an organization</strong><p>Choose the stable URL namespace for your team.</p></div></li><li><span>2</span><div><strong>Create a Sandbox</strong><p>Launch an isolated workspace from a repository or image.</p><a href="{{ view.selected_organization_url }}new/">Create Sandbox</a></div></li></ol>
           </section>
           {% endif %}
           {% else %}

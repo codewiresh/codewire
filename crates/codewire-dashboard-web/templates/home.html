@@ -97,7 +97,7 @@
         <div class="cw-landing-container">
           <p class="cw-section-label">Security</p>
           <h2>AI agents write and run code you haven't reviewed. They need real isolation.</h2>
-          <p class="cw-section-lede">Every competitor runs shared-kernel containers. One escape compromises every tenant. Codewire runs each environment in its own Xen VM with a dedicated kernel.</p>
+          <p class="cw-section-lede">Every competitor runs shared-kernel containers. One escape compromises every tenant. Codewire runs each environment in its own hardware-isolated VM with a dedicated kernel.</p>
 
           <div class="cw-security-grid">
             <article class="cw-landing-card cw-security-card cw-security-card--danger">
@@ -117,14 +117,14 @@
                 <g class="cw-diagram-text"><text x="60" y="43">Pod</text><text x="160" y="43">Pod</text><text x="260" y="43">Pod</text></g>
                 <g class="cw-safe-text"><text x="60" y="91">Kernel</text><text x="160" y="91">Kernel</text><text x="260" y="91">Kernel</text></g>
                 <g class="cw-safe-lines"><line x1="60" y1="56" x2="60" y2="72"/><line x1="160" y1="56" x2="160" y2="72"/><line x1="260" y1="56" x2="260" y2="72"/><line x1="60" y1="100" x2="60" y2="140"/><line x1="160" y1="100" x2="160" y2="140"/><line x1="260" y1="100" x2="260" y2="140"/></g>
-                <rect class="cw-safe-stroke" x="20" y="140" width="280" height="36" rx="6"/><text class="cw-safe-text" x="160" y="163">Xen Hypervisor</text>
+                <rect class="cw-safe-stroke" x="20" y="140" width="280" height="36" rx="6"/><text class="cw-safe-text" x="160" y="163">Hypervisor</text>
                 <rect class="cw-hardware" x="20" y="190" width="280" height="24" rx="4"/><text class="cw-diagram-muted" x="160" y="207">Hardware</text>
               </svg>
             </article>
           </div>
 
           <div class="cw-table-card"><table><thead><tr><th>Platform</th><th>Isolation model</th></tr></thead><tbody>
-            <tr><td>GitHub Codespaces</td><td>Shared kernel (containers)</td></tr><tr><td>Gitpod</td><td>Shared kernel (containers)</td></tr><tr><td>DevPod</td><td>Shared kernel (containers)</td></tr><tr><td>vCluster</td><td>Shared kernel (virtual K8s)</td></tr><tr class="cw-highlight-row"><td>Codewire</td><td>Dedicated kernel (Xen VM)</td></tr>
+            <tr><td>GitHub Codespaces</td><td>Shared kernel (containers)</td></tr><tr><td>Gitpod</td><td>Shared kernel (containers)</td></tr><tr><td>DevPod</td><td>Shared kernel (containers)</td></tr><tr><td>vCluster</td><td>Shared kernel (virtual K8s)</td></tr><tr class="cw-highlight-row"><td>Codewire</td><td>Dedicated kernel (VM)</td></tr>
           </tbody></table></div>
         </div>
       </section>

@@ -163,7 +163,7 @@ async function runTests() {
     id,
     orgId: "org_test",
     createdBy: "user_1",
-    presetId: "tmpl_1",
+    presetId: "preset_1",
     type: "sandbox",
     state,
     desiredState: DesiredState.STARTED,
@@ -193,15 +193,17 @@ async function runTests() {
     completedAt: timestamp,
   });
   const preset = (name = "Go", cpu = 2000) => ({
-    id: "tmpl_1",
+    id: "preset_1",
     orgId: "org_test",
     name,
     buildStatus: "ready",
-    defaultCpuMillicores: cpu,
-    defaultMemoryMb: 4096,
-    defaultDiskGb: 20,
     official: false,
     createdAt: timestamp,
+    projectSpec: {
+      schemaVersion: 1,
+      workingDirectory: "/workspace",
+      resources: { cpuMillicores: cpu, memoryMib: 4096n, diskGib: 20n },
+    },
   });
   const requireTestKey = (context: { requestHeader: Headers }) => {
     if (context.requestHeader.get("authorization") !== "Bearer test-key") {
@@ -219,7 +221,7 @@ async function runTests() {
     },
     createEnvironment: (request, context) => {
       requireTestKey(context);
-      if (request.presetSlug === "wait-test") {
+      if (request.projectSpec?.preset === "wait-test") {
         return { environment: environment("env_cwait", EnvironmentState.PENDING) };
       }
       return { environment: environment("env_123", EnvironmentState.RUNNING) };
@@ -404,6 +406,7 @@ async function runTests() {
   router.service(PresetService, {
     createPreset: (request, context) => {
       requireTestKey(context);
+      assert(request.projectSpec?.workingDirectory === "/workspace", "create preset carries canonical project intent");
       return { preset: preset(request.name) };
     },
     listPresets: (_request, context) => {
@@ -416,7 +419,8 @@ async function runTests() {
     },
     updatePreset: (request, context) => {
       requireTestKey(context);
-      return { preset: preset(request.name || "Go Updated", request.defaultCpuMillicores || 4000) };
+      assert(request.projectSpec?.resources?.cpuMillicores === 4000, "update preset replaces canonical project intent");
+      return { preset: preset(request.name || "Go Updated", request.projectSpec?.resources?.cpuMillicores ?? 4000) };
     },
     deletePreset: (_request, context) => {
       requireTestKey(context);
@@ -614,21 +618,15 @@ async function runTests() {
   assert(convertedEnvironment.ttl_seconds === 300, "environment optional numbers are retained");
 
   const createEnvironment = toProtoCreateEnvironmentRequest("org_test", {
-    preset_slug: "python",
     isolation_tier: "confidential",
-    repos: [{
-      branch: "main",
-      mount_path: "/workspace/platform",
-      revision: "deadbeef",
-      url: "https://git.example.test/org/platform",
-    }],
     project_spec: {
       schema_version: 1,
+      preset: "python",
       image: "ghcr.io/example/workspace@sha256:abc",
       repositories: [{
         revision: "deadbeef",
-        mount_path: "/workspace/platform",
-        url: "https://git.example.test/org/platform",
+        destination: "/workspace/platform",
+        source: "https://git.example.test/org/platform",
       }],
       working_directory: "/workspace/platform",
       skills: [{ source: "repository", reference: ".agents/skills/rust", agents: ["codex"] }],
@@ -637,14 +635,22 @@ async function runTests() {
     },
   });
   assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
-  assert(createEnvironment.repos[0]?.mountPath === "/workspace/platform", "create environment preserves repository mount paths");
-  assert(createEnvironment.repos[0]?.revision === "deadbeef", "create environment preserves repository revisions");
+  assert(createEnvironment.projectSpec?.repositories[0]?.destination === "/workspace/platform", "create environment preserves repository destinations");
+  assert(createEnvironment.projectSpec?.repositories[0]?.revision === "deadbeef", "create environment preserves repository revisions");
   assert(createEnvironment.projectSpec?.resources?.memoryMib === 16384n, "create environment preserves project resource units");
   assert(createEnvironment.projectSpec?.access?.profile === "user/work", "create environment preserves access profile references");
+  let rejectedMissingProjectSpec = false;
+  try {
+    toProtoCreateEnvironmentRequest("org_test", {} as never);
+  } catch {
+    rejectedMissingProjectSpec = true;
+  }
+  assert(rejectedMissingProjectSpec, "create environment requires project_spec at runtime");
   let rejectedUnknownIsolation = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {
       isolation_tier: "container" as never,
+      project_spec: { schema_version: 1, working_directory: "/workspace" },
     });
   } catch {
     rejectedUnknownIsolation = true;
@@ -700,37 +706,30 @@ async function runTests() {
     language: "go",
     description: "Go template",
     defaultTtlSeconds: 600,
-    image: "golang:1.25",
-    secretProjectId: "sp_1",
-    defaultSetupConfig: {
-      agent: "claude",
-      agents: [{ type: "claude" }],
-      appPorts: [{ access: "public", label: "web", port: 8080 }],
-      branch: "main",
-      envVars: { GOFLAGS: "-mod=readonly" },
-      includeOrgSecrets: true,
-      includeUserSecrets: false,
-      installAgents: true,
+    projectSpec: {
+      schemaVersion: 1,
+      image: "golang:1.25",
+      workingDirectory: "/workspace/repo",
+      applicationPorts: [{ access: "public", label: "web", port: 8080 }],
+      environment: { GOFLAGS: "-mod=readonly" },
+      agents: { install: true, tools: ["claude"] },
       installCommand: "go install",
-      repoUrl: "https://git.example.test/org/repo",
-      repos: [{
+      repositories: [{
         branch: "main",
-        mountPath: "/workspace/repo",
-        url: "https://git.example.test/org/repo",
+        destination: "/workspace/repo",
+        source: "https://git.example.test/org/repo",
       }],
       startupScript: "go test ./...",
-      projectSpec: {
-        schemaVersion: 1,
-        workingDirectory: "/workspace/repo",
-        skills: [{ source: ProjectSkillSource.USER, reference: "personal", agents: ["codex"] }],
-      },
+      skills: [{ source: ProjectSkillSource.USER, reference: "personal", agents: ["codex"] }],
+      resources: { cpuMillicores: 4000 },
+      secrets: { project: "development" },
     },
   }));
-  assert(convertedPreset.default_cpu_millicores === 4000, "preset numbers keep SDK values");
-  assert(convertedPreset.default_setup_config?.app_ports?.[0]?.access === "public", "preset nested ports preserve values");
-  assert(convertedPreset.default_setup_config?.repos?.[0]?.mount_path === "/workspace/repo", "preset repository mount paths are retained");
-  assert(convertedPreset.default_setup_config?.project_spec?.skills?.[0]?.source === "user", "preset project skill sources use ergonomic values");
-  assert(convertedPreset.secret_project_id === "sp_1", "preset optional IDs are retained");
+  assert(convertedPreset.project_spec.resources?.cpu_millicores === 4000, "preset project resources keep SDK values");
+  assert(convertedPreset.project_spec.application_ports?.[0]?.access === "public", "preset project ports preserve values");
+  assert(convertedPreset.project_spec.repositories?.[0]?.destination === "/workspace/repo", "preset repository destinations are retained");
+  assert(convertedPreset.project_spec.skills?.[0]?.source === "user", "preset project skill sources use ergonomic values");
+  assert(convertedPreset.project_spec.secrets?.project === "development", "preset secret bindings remain opaque names");
 
   const convertedSecretMetadata = fromProtoSecretMetadata(create(SecretMetadataSchema, {
     key: "DB_URL",
@@ -793,7 +792,9 @@ async function runTests() {
 
     // Test: Create environment returns Environment wrapper
     console.log("Test: Environment CRUD");
-    const env = await cw.environments.create({ preset_slug: "python" });
+    const env = await cw.environments.create({
+      project_spec: { schema_version: 1, preset: "python", working_directory: "/workspace" },
+    });
     assert(env instanceof Environment, "create returns Environment instance");
     assert(env.id === "env_123", "env.id matches");
     assert(env.state === "running", "env.state matches");
@@ -893,18 +894,19 @@ async function runTests() {
     assert((await env.getResizeOperation(wrapperResize.id)).state === "completed", "wrapper reads resize operation");
     await env.remove();
 
-    // Test: Templates
-    console.log("Test: Templates");
-    const tmpl = await cw.templates.create({
+    // Test: Presets
+    console.log("Test: Presets");
+    const presetValue = await cw.presets.create({
       name: "Go",
+      project_spec: { schema_version: 1, working_directory: "/workspace" },
     });
-    assert(tmpl.id === "tmpl_1", "template created");
+    assert(presetValue.id === "preset_1", "preset created");
 
-    const tmpl2 = await cw.templates.get("tmpl_1");
-    assert(tmpl2.name === "Go", "template get works");
+    const fetchedPreset = await cw.presets.get("preset_1");
+    assert(fetchedPreset.name === "Go", "preset get works");
 
-    const templates = await cw.templates.list();
-    assert(templates.length === 1, "templates list works");
+    const presets = await cw.presets.list();
+    assert(presets.length === 1, "presets list works");
 
     // Test: API Keys
     console.log("Test: API Keys");
@@ -1053,17 +1055,8 @@ async function runTests() {
 
     // Test: File Operations
     console.log("Test: File Operations");
-    await env2.upload(new Uint8Array([1, 2, 3]), "/workspace/test.bin");
-
-    const downloaded = await env2.download("/workspace/test.bin");
-    assert(downloaded instanceof ArrayBuffer, "download returns ArrayBuffer");
-
-    const files = await env2.listFiles();
-    assert(Array.isArray(files), "listFiles returns array");
-    assert(files[0].name === "main.go", "file entry name matches");
-
     await env2.files.upload(
-      new Uint8Array([4, 5, 6]),
+      new Uint8Array([1, 2, 3]),
       "/workspace/files.bin",
     );
     const filesDownload = await env2.files.download("/workspace/files.bin");
@@ -1086,16 +1079,20 @@ async function runTests() {
 
     await env2.deletePort("port_2");
 
-    // Test: Template CRUD (extended)
-    console.log("Test: Template CRUD (extended)");
-    const updatedTmpl = await cw.templates.update("tmpl_1", {
+    // Test: Preset CRUD (extended)
+    console.log("Test: Preset CRUD (extended)");
+    const updatedPreset = await cw.presets.update("preset_1", {
       name: "Go Updated",
-      default_cpu_millicores: 4000,
+      project_spec: {
+        schema_version: 1,
+        working_directory: "/workspace",
+        resources: { cpu_millicores: 4000 },
+      },
     });
-    assert(updatedTmpl.name === "Go Updated", "template name updated");
-    assert(updatedTmpl.default_cpu_millicores === 4000, "template cpu updated");
+    assert(updatedPreset.name === "Go Updated", "preset name updated");
+    assert(updatedPreset.project_spec.resources?.cpu_millicores === 4000, "preset project CPU updated");
 
-    await cw.templates.delete("tmpl_1");
+    await cw.presets.delete("preset_1");
 
     // Test: Error 404
     console.log("Test: Error 404");
@@ -1125,7 +1122,7 @@ async function runTests() {
     console.log("Test: create(wait=true)");
     createWaitCounter = 0;
     const envWaited = await cw.environments.create(
-      { preset_slug: "wait-test" },
+      { project_spec: { schema_version: 1, preset: "wait-test", working_directory: "/workspace" } },
       { wait: true, waitTimeout: 10_000 },
     );
     assert(envWaited.id === "env_cwait", "create(wait) returns correct env id");

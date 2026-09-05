@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::http::HeaderValue;
 use codewire_proto::codewire::v1::{
     CreateSecretProjectRequest, DeletePresetRequest, DeleteProjectSecretRequest,
-    DeleteSecretProjectRequest, DeleteSecretRequest, DeleteUserSecretRequest, ListPresetsRequest,
-    ListProjectSecretsRequest, ListSecretProjectsRequest, ListSecretsRequest,
+    DeleteSecretProjectRequest, DeleteSecretRequest, DeleteUserSecretRequest, GetPresetRequest,
+    ListPresetsRequest, ListProjectSecretsRequest, ListSecretProjectsRequest, ListSecretsRequest,
     ListUserSecretsRequest, Preset, PresetServiceClient, RenameProjectSecretRequest,
     RenameSecretRequest, RenameUserSecretRequest, SecretMetadata, SecretServiceClient,
     SetProjectSecretRequest, SetSecretRequest, SetUserSecretRequest, UpdatePresetRequest,
@@ -296,17 +296,22 @@ pub(crate) async fn presets(
         })
         .await?
         .into_owned();
-    Ok(response.presets.into_iter().map(preset_row).collect())
+    response.presets.into_iter().map(preset_row).collect()
 }
 
-fn preset_row(preset: Preset) -> PresetRow {
-    let setup = preset
-        .default_setup_config
+fn preset_row(preset: Preset) -> Result<PresetRow, ConnectError> {
+    let project_spec = preset
+        .project_spec
         .into_option()
-        .unwrap_or_default();
+        .ok_or_else(|| ConnectError::internal("preset omitted its canonical project spec"))?;
+    let project_spec = codewire_project_proto::from_proto(project_spec).map_err(|error| {
+        ConnectError::internal(format!(
+            "preset has an invalid canonical project spec: {error}"
+        ))
+    })?;
     let slug = preset.slug.unwrap_or_default();
     let description = preset.description.unwrap_or_default();
-    let image = preset.image.unwrap_or_default();
+    let image = project_spec.image.clone();
     let ttl_value = preset
         .default_ttl_seconds
         .map(|seconds| seconds.to_string())
@@ -316,23 +321,47 @@ fn preset_row(preset: Preset) -> PresetRow {
         slug: slug.clone(),
         description: description.clone(),
         image: image.clone(),
-        cpu: preset.default_cpu_millicores.to_string(),
-        memory: preset.default_memory_mb.to_string(),
-        disk: preset.default_disk_gb.to_string(),
+        cpu: project_spec
+            .resources
+            .cpu_millicores
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        memory: project_spec
+            .resources
+            .memory_mib
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        disk: project_spec
+            .resources
+            .disk_gib
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
         ttl: ttl_value.clone(),
-        install_command: setup.install_command,
-        startup_script: setup.startup_script,
+        install_command: project_spec.install_command,
+        startup_script: project_spec.startup_script,
         ..Default::default()
     };
-    PresetRow {
+    Ok(PresetRow {
         id: preset.id,
         name: preset.name,
         slug,
         description,
         image,
-        cpu: cpu_label(preset.default_cpu_millicores),
-        memory: memory_label(preset.default_memory_mb),
-        disk: format!("{} GB", preset.default_disk_gb),
+        cpu: project_spec
+            .resources
+            .cpu_millicores
+            .map(cpu_label)
+            .unwrap_or_else(|| "Default".to_owned()),
+        memory: project_spec
+            .resources
+            .memory_mib
+            .map(memory_label)
+            .unwrap_or_else(|| "Default".to_owned()),
+        disk: project_spec
+            .resources
+            .disk_gib
+            .map(|value| format!("{value} GiB"))
+            .unwrap_or_else(|| "Default".to_owned()),
         ttl: preset
             .default_ttl_seconds
             .map(ttl_label)
@@ -340,7 +369,35 @@ fn preset_row(preset: Preset) -> PresetRow {
         official: preset.official,
         organization_owned: preset.org_id.is_some(),
         form,
-    }
+    })
+}
+
+pub(crate) async fn preset_project_spec(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    preset_id: String,
+) -> Result<codewire_project::ProjectSpec, ConnectError> {
+    let preset = preset_client(state, cookie)
+        .get_preset(GetPresetRequest {
+            org_id,
+            preset_id,
+            ..Default::default()
+        })
+        .await?
+        .into_owned()
+        .preset
+        .into_option()
+        .ok_or_else(|| ConnectError::not_found("preset not found"))?;
+    let project_spec = preset
+        .project_spec
+        .into_option()
+        .ok_or_else(|| ConnectError::internal("preset omitted its canonical project spec"))?;
+    codewire_project_proto::from_proto(project_spec).map_err(|error| {
+        ConnectError::internal(format!(
+            "preset has an invalid canonical project spec: {error}"
+        ))
+    })
 }
 
 pub(crate) async fn update_preset(
@@ -389,16 +446,16 @@ fn past_time(seconds: i64) -> String {
     }
 }
 
-fn cpu_label(millicores: i32) -> String {
-    if millicores % 1_000 == 0 {
+fn cpu_label(millicores: u32) -> String {
+    if millicores.is_multiple_of(1_000) {
         format!("{} vCPU", millicores / 1_000)
     } else {
         format!("{:.1} vCPU", f64::from(millicores) / 1_000.0)
     }
 }
 
-fn memory_label(megabytes: i32) -> String {
-    if megabytes % 1_024 == 0 {
+fn memory_label(megabytes: u64) -> String {
+    if megabytes.is_multiple_of(1_024) {
         format!("{} GiB", megabytes / 1_024)
     } else {
         format!("{} MB", megabytes)
@@ -418,26 +475,29 @@ fn ttl_label(seconds: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_proto::codewire::v1::SetupConfig;
 
     #[test]
     fn preset_mapping_preserves_editable_fields_and_escapes_only_in_templates() {
+        let project_spec = codewire_project::ProjectSpec {
+            image: "example.test/workspace@sha256:abc".to_owned(),
+            install_command: "cargo build".to_owned(),
+            startup_script: "cargo run".to_owned(),
+            resources: codewire_project::ResourceSpec {
+                cpu_millicores: Some(1_500),
+                memory_mib: Some(3_072),
+                disk_gib: Some(20),
+            },
+            ..Default::default()
+        };
         let row = preset_row(Preset {
             id: "preset-1".into(),
             org_id: Some("org-1".into()),
             name: "Rust <script>".into(),
-            default_cpu_millicores: 1500,
-            default_memory_mb: 3072,
-            default_disk_gb: 20,
             default_ttl_seconds: Some(3600),
-            default_setup_config: Some(SetupConfig {
-                install_command: "cargo build".into(),
-                startup_script: "cargo run".into(),
-                ..Default::default()
-            })
-            .into(),
+            project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
             ..Default::default()
-        });
+        })
+        .expect("canonical preset");
         assert_eq!(row.cpu, "1.5 vCPU");
         assert_eq!(row.memory, "3 GiB");
         assert_eq!(row.ttl, "1h TTL");

@@ -293,7 +293,10 @@ mod tests {
         ));
         assert!(!should_record_worker_checkpoint("health_check", "warning"));
         assert!(!should_record_worker_checkpoint("ssh_public_key", "info"));
-        assert!(!should_record_worker_checkpoint("mesh_node", "completed"));
+        assert!(!should_record_worker_checkpoint(
+            "unknown_phase",
+            "completed"
+        ));
     }
 
     #[test]

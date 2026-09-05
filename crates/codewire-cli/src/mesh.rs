@@ -287,7 +287,7 @@ pub struct Node {
     pub connected: bool,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct Invite {
     pub id: String,
     pub org_id: String,
@@ -298,12 +298,27 @@ pub struct Invite {
     pub created_at: String,
 }
 
+impl std::fmt::Debug for Invite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Invite")
+            .field("id", &self.id)
+            .field("org_id", &self.org_id)
+            .field("network_id", &self.network_id)
+            .field("created_by_user_id", &self.created_by_user_id)
+            .field("invite_code", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct NetworkJoin {
     pub network_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct NodeEnrollment {
     pub id: String,
     pub org_id: String,
@@ -317,6 +332,24 @@ pub struct NodeEnrollment {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub redeemed_at: String,
+}
+
+impl std::fmt::Debug for NodeEnrollment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeEnrollment")
+            .field("id", &self.id)
+            .field("org_id", &self.org_id)
+            .field("network_id", &self.network_id)
+            .field("node_name", &self.node_name)
+            .field("owner_user_id", &self.owner_user_id)
+            .field("issued_by_user_id", &self.issued_by_user_id)
+            .field("enrollment_code", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("created_at", &self.created_at)
+            .field("redeemed_at", &self.redeemed_at)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,6 +380,42 @@ mod tests {
         let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
         crate::config::resolve_mesh(MeshResolveOptions::default(), &paths, &env)
             .expect("resolved Mesh")
+    }
+
+    #[test]
+    fn one_use_mesh_presentation_debug_is_redacted_while_json_remains_deliverable() {
+        const MARKER: &str = "synthetic-one-use-mesh-capability-canary";
+        let invite = Invite {
+            id: "invite-alpha".into(),
+            org_id: "org-alpha".into(),
+            network_id: "network-alpha".into(),
+            created_by_user_id: "user-alpha".into(),
+            invite_code: MARKER.into(),
+            expires_at: "2026-09-05T12:00:00Z".into(),
+            created_at: "2026-09-05T11:00:00Z".into(),
+        };
+        let enrollment = NodeEnrollment {
+            id: "enrollment-alpha".into(),
+            org_id: "org-alpha".into(),
+            network_id: "network-alpha".into(),
+            node_name: "builder".into(),
+            owner_user_id: "user-alpha".into(),
+            issued_by_user_id: "user-alpha".into(),
+            enrollment_code: MARKER.into(),
+            expires_at: "2026-09-05T12:00:00Z".into(),
+            created_at: "2026-09-05T11:00:00Z".into(),
+            redeemed_at: String::new(),
+        };
+
+        for debug in [format!("{invite:?}"), format!("{enrollment:?}")] {
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains(MARKER));
+        }
+        assert_eq!(serde_json::to_value(invite).unwrap()["invite_code"], MARKER);
+        assert_eq!(
+            serde_json::to_value(enrollment).unwrap()["enrollment_code"],
+            MARKER
+        );
     }
 
     #[tokio::test]

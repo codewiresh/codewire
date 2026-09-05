@@ -10,10 +10,7 @@ use std::fmt;
 use serde::Deserialize;
 use sqlx::PgPool;
 
-use codewire_workload_secrets::validate_workload_secret_metadata_key;
-
-/// Reserved credential material is excluded from stored-secret APIs.
-pub const SSH_PRIVATE_KEY_SECRET_KEY: &str = "SSH_PRIVATE_KEY";
+use codewire_workload_secrets::validate_workload_secret_key;
 
 /// Stored secret material used only within the protected storage boundary.
 #[derive(Clone, Default, Deserialize)]
@@ -216,7 +213,7 @@ fn split_folder_path(secret_path: &str) -> anyhow::Result<(String, String)> {
 /// than a general URL segment keeps the storage path sink unambiguous and
 /// matches the dashboard's environment-variable-style key input.
 pub fn is_valid_secret_key(key: &str) -> bool {
-    validate_workload_secret_metadata_key(key).is_ok()
+    validate_workload_secret_key(key).is_ok()
 }
 
 #[cfg(test)]

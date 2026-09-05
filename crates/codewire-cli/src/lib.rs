@@ -1,7 +1,6 @@
 pub mod config;
 mod console_client;
 mod environment_client;
-mod github_device;
 mod mesh;
 mod organization_client;
 mod presentation;
@@ -14,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io::{IsTerminal as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
@@ -27,7 +26,7 @@ use codewire_client::{
     OAuthUserInfo,
 };
 use config::{OsEnv, ResolvePaths};
-use console_client::{BillingOverview, ConsoleClient, GitHubStatus, SaveGitHubToken};
+use console_client::{BillingOverview, ConsoleClient};
 use environment_client::{CreateEnvironmentPortRequest, EnvironmentClient, EnvironmentPort};
 use mesh::{Invite, MeshClient, Network, Node, NodeEnrollment, RedeemedNodeEnrollment};
 use organization_client::{
@@ -37,8 +36,7 @@ use organization_client::{
 use presentation::{
     CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonRepair,
     EnvironmentDaemonStatus, EnvironmentLog, EnvironmentResizeResources, EnvironmentTrustReport,
-    ExtendTtlRequest, GrantEnvironmentAccessRequest, PrepareEnvironmentRequest, RepoEntry,
-    SetupAgent, StatusResponse,
+    ExtendTtlRequest, GrantEnvironmentAccessRequest, PrepareEnvironmentRequest, StatusResponse,
 };
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};
 
@@ -73,8 +71,6 @@ const LOCAL_DERP_LOG_FILE: &str = "codewire-derp.log";
 struct Cli {
     #[arg(short, long, global = true, help = "Platform server URL override")]
     server: Option<String>,
-    #[arg(long, global = true, help = "Auth token override")]
-    token: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -82,7 +78,6 @@ struct Cli {
 #[derive(Clone, Debug)]
 struct Globals {
     server: Option<String>,
-    token: Option<String>,
 }
 
 mod commands;
@@ -112,7 +107,7 @@ enum Command {
     Login(LoginArgs),
     #[command(
         about = "Run the Codewire first-time setup wizard",
-        long_about = "Connect to a Codewire server, sign in, choose or create a default organization, and optionally configure GitHub and SSH integration."
+        long_about = "Connect to a Codewire server, sign in, choose or create a default organization, and optionally configure OpenSSH integration."
     )]
     Setup(SetupArgs),
     #[command(about = "Sign out of Codewire")]
@@ -141,11 +136,6 @@ enum Command {
     Env(EnvArgs),
     #[command(about = "Show usage and billing overview")]
     Cost(CostArgs),
-    #[command(about = "Manage GitHub connection for private repo access")]
-    Github {
-        #[command(subcommand)]
-        command: GithubCommand,
-    },
     #[command(alias = "orgs", about = "Manage organizations")]
     Org {
         #[command(subcommand)]
@@ -179,11 +169,8 @@ enum Command {
         #[command(subcommand)]
         command: MeshCommand,
     },
-    #[command(
-        hide = true,
-        about = "Run the managed environment daemon inside an environment"
-    )]
-    Daemon,
+    #[command(name = "__hosted-daemon", hide = true)]
+    HostedDaemon,
     #[cfg(target_os = "linux")]
     #[command(name = "__native-supervisor", hide = true)]
     NativeSupervisor(NativeSupervisorArgs),
@@ -238,14 +225,6 @@ pub async fn run() -> anyhow::Result<()> {
     #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
     require_local_broker_smoke_executable()?;
     let mut args = std::env::args().collect::<Vec<_>>();
-    let invoked_as_daemon = args
-        .first()
-        .and_then(|program| Path::new(program).file_name())
-        .and_then(|program| program.to_str())
-        .is_some_and(|program| matches!(program, "daemon" | "codewire-daemon"));
-    if invoked_as_daemon {
-        return codewire_daemon::run_entrypoint().await;
-    }
     if let Some(program) = args.first_mut() {
         *program = "cw".to_string();
     }
@@ -305,17 +284,9 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let args = args
-        .into_iter()
-        .map(Into::into)
-        .collect::<Vec<std::ffi::OsString>>();
-    if let Some(message) = legacy_cli_migration_error(&args) {
-        anyhow::bail!("{message}");
-    }
     let cli = Cli::parse_from(args);
     let globals = Globals {
         server: cli.server.clone(),
-        token: cli.token.clone(),
     };
     match cli.command {
         Command::Config {
@@ -337,7 +308,6 @@ where
         Command::Run(args) => handle_environment_run_command(&globals, args).await,
         Command::Env(args) => handle_env_command(&globals, args).await,
         Command::Cost(args) => handle_cost_command(&globals, args).await,
-        Command::Github { command } => handle_github_command(&globals, command).await,
         Command::Org { command } => handle_org_command(&globals, command).await,
         Command::ApiKeys { command } => handle_api_keys_command(&globals, command).await,
         Command::Preset { command } => handle_preset_command(&globals, command).await,
@@ -346,7 +316,7 @@ where
         Command::Credentials(args) => handle_credentials_command(args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
-        Command::Daemon => codewire_daemon::run_entrypoint().await,
+        Command::HostedDaemon => run_hosted_daemon().await,
         #[cfg(target_os = "linux")]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,
         #[cfg(target_os = "linux")]
@@ -386,75 +356,46 @@ where
     }
 }
 
-fn legacy_cli_migration_error(args: &[std::ffi::OsString]) -> Option<String> {
-    let args = args
-        .iter()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>();
-    let command_index = root_command_index(&args)?;
-    let command = args[command_index].as_ref();
+async fn run_hosted_daemon() -> anyhow::Result<()> {
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tracing_subscriber::EnvFilter;
 
-    let guidance = match command {
-        "local" => "`cw local` was removed; use `cw env COMMAND --local ...`",
-        "exec" => "`cw exec` was removed; use `cw run [ENV] -- COMMAND`",
-        "node" => {
-            "`cw node` was removed; use `cw env daemon ...` for environment-daemon diagnostics or `cw network nodes` for Mesh inventory"
-        }
-        "hook" | "gateway" | "mcp-server" | "tasks" | "msg" | "request" | "reply" | "listen"
-        | "subscribe" | "status" | "wait" | "kill" | "send" | "watch" | "inbox" | "access"
-        | "group" => {
-            "the host-owned session command was removed; use `cw run`, `cw list`, `cw attach`, and `cw logs` with an environment"
-        }
-        "run" => {
-            let command_args = args[command_index + 1..]
-                .iter()
-                .take_while(|arg| arg.as_ref() != "--");
-            if command_args.clone().any(|arg| arg.as_ref() == "--local") {
-                "`cw run --local` was removed; use `cw run ENV -- COMMAND`"
-            } else if command_args
-                .clone()
-                .any(|arg| arg.as_ref() == "--node" || arg.starts_with("--node="))
-            {
-                "`cw run --node` was removed; use `cw run ENV -- COMMAND`"
-            } else {
-                return None;
-            }
-        }
-        "init" | "env" => {
-            if args[command_index + 1..]
-                .iter()
-                .take_while(|arg| arg.as_ref() != "--")
-                .any(|arg| arg.as_ref() == "--agent" || arg.starts_with("--agent="))
-            {
-                "`--agent` was renamed; use `--coding-agent`"
-            } else {
-                return None;
-            }
-        }
-        "attach" | "list" | "logs"
-            if args[command_index + 1..]
-                .iter()
-                .take_while(|arg| arg.as_ref() != "--")
-                .filter(|arg| !arg.starts_with('-'))
-                .any(|arg| arg.contains(':')) =>
-        {
-            "`node:session` locators were removed; pass `ENV SESSION`"
-        }
-        "attach" | "list" | "logs" => return None,
-        _ => return None,
-    };
-    Some(guidance.to_string())
+    let _ = tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
+    let config = codewire_daemon::Config::from_env()?;
+    let listener = tokio::net::TcpListener::bind(&config.listen_addr)
+        .await
+        .with_context(|| format!("listen hosted daemon {}", config.listen_addr))?;
+    let local_addr = listener
+        .local_addr()
+        .context("read hosted daemon listener address")?;
+    tracing::info!(daemon_listen_addr = %local_addr, "hosted environment daemon listening");
+    codewire_daemon::serve_grpc_with_incoming(
+        config,
+        TcpListenerStream::new(listener),
+        hosted_daemon_shutdown_signal(),
+    )
+    .await
 }
 
-fn root_command_index(args: &[std::borrow::Cow<'_, str>]) -> Option<usize> {
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_ref() {
-            "--server" | "--token" => index += 2,
-            value if value.starts_with("--server=") || value.starts_with("--token=") => index += 1,
-            value if value.starts_with('-') => index += 1,
-            _ => return Some(index),
+async fn hosted_daemon_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
         }
     }
-    None
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
 }

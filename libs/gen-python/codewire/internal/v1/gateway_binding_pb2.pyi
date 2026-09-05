@@ -7,12 +7,8 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class IssueGatewayBindingRequest(_message.Message):
-    __slots__ = ("pod", "namespace")
-    POD_FIELD_NUMBER: _ClassVar[int]
-    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
-    pod: str
-    namespace: str
-    def __init__(self, pod: _Optional[str] = ..., namespace: _Optional[str] = ...) -> None: ...
+    __slots__ = ()
+    def __init__(self) -> None: ...
 
 class IssueGatewayBindingResponse(_message.Message):
     __slots__ = ("environment_id", "sidecar_token", "workspace_pod_ip", "app_ports", "runtime_transport")

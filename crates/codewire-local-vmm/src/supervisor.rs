@@ -2928,15 +2928,9 @@ impl SupervisorCore {
                         .environments
                         .get_mut(&parameters.name)
                         .ok_or_else(|| SupervisorError::NotFound(parameters.name.clone()))?;
-                    let precondition_matches =
-                        parameters
-                            .precondition
-                            .as_ref()
-                            .is_some_and(|precondition| {
-                                environment.state == precondition.state
-                                    && environment.generation == precondition.generation
-                                    && environment.runner == precondition.runner
-                            });
+                    let precondition_matches = environment.state == parameters.precondition.state
+                        && environment.generation == parameters.precondition.generation
+                        && environment.runner == parameters.precondition.runner;
                     if precondition_matches {
                         environment.state = parameters.state;
                         environment.generation = parameters.generation;
@@ -6910,7 +6904,7 @@ struct ReconcileOperationParameters {
     generation: u64,
     clear_runner: bool,
     runner_error_code: Option<String>,
-    precondition: Option<ReconcilePrecondition>,
+    precondition: ReconcilePrecondition,
 }
 
 fn reconcile_operation_payload(
@@ -6942,7 +6936,7 @@ fn reconcile_operation_parameters(
         .payload
         .as_object()
         .ok_or(SupervisorError::InvalidState)?;
-    if !matches!(fields.len(), 5 | 8) {
+    if fields.len() != 8 {
         return Err(SupervisorError::InvalidState);
     }
     let name = fields
@@ -6951,12 +6945,12 @@ fn reconcile_operation_parameters(
         .filter(|name| valid_environment_name(name))
         .ok_or(SupervisorError::InvalidState)?
         .to_owned();
-    let state = fields
+    let target_state = fields
         .get("observed_state")
         .and_then(serde_json::Value::as_str)
         .and_then(StoredEnvironmentState::parse)
         .ok_or(SupervisorError::InvalidState)?;
-    let generation = fields
+    let target_generation = fields
         .get("generation")
         .and_then(serde_json::Value::as_u64)
         .ok_or(SupervisorError::InvalidState)?;
@@ -6974,50 +6968,44 @@ fn reconcile_operation_parameters(
         _ => return Err(SupervisorError::InvalidState),
     };
     if clear_runner && runner_error_code.is_some()
-        || (state == StoredEnvironmentState::Error) != runner_error_code.is_some() && !clear_runner
+        || (target_state == StoredEnvironmentState::Error) != runner_error_code.is_some()
+            && !clear_runner
     {
         return Err(SupervisorError::InvalidState);
     }
-    let precondition = if fields.len() == 8 {
-        let state = fields
-            .get("expected_observed_state")
-            .and_then(serde_json::Value::as_str)
-            .and_then(StoredEnvironmentState::parse)
-            .ok_or(SupervisorError::InvalidState)?;
-        let generation = fields
-            .get("expected_generation")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or(SupervisorError::InvalidState)?;
-        let runner = serde_json::from_value::<Option<RunnerRecord>>(
-            fields
-                .get("expected_runner")
-                .cloned()
-                .ok_or(SupervisorError::InvalidState)?,
-        )
-        .map_err(|_| SupervisorError::InvalidState)?;
-        if runner.as_ref().is_some_and(|runner| {
-            runner
-                .error_code
-                .as_deref()
-                .is_some_and(|error_code| !runner_event_error_code_valid(error_code))
-        }) {
-            return Err(SupervisorError::InvalidState);
-        }
-        Some(ReconcilePrecondition {
-            state,
-            generation,
-            runner,
-        })
-    } else {
-        // The pre-CAS shape can remain after a development-build crash. Its
-        // target has no safe basis after startup reconciliation, so replay it
-        // as a checkpointed no-op rather than overwriting newer observation.
-        None
+    let expected_state = fields
+        .get("expected_observed_state")
+        .and_then(serde_json::Value::as_str)
+        .and_then(StoredEnvironmentState::parse)
+        .ok_or(SupervisorError::InvalidState)?;
+    let expected_generation = fields
+        .get("expected_generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(SupervisorError::InvalidState)?;
+    let runner = serde_json::from_value::<Option<RunnerRecord>>(
+        fields
+            .get("expected_runner")
+            .cloned()
+            .ok_or(SupervisorError::InvalidState)?,
+    )
+    .map_err(|_| SupervisorError::InvalidState)?;
+    if runner.as_ref().is_some_and(|runner| {
+        runner
+            .error_code
+            .as_deref()
+            .is_some_and(|error_code| !runner_event_error_code_valid(error_code))
+    }) {
+        return Err(SupervisorError::InvalidState);
+    }
+    let precondition = ReconcilePrecondition {
+        state: expected_state,
+        generation: expected_generation,
+        runner,
     };
     Ok(ReconcileOperationParameters {
         name,
-        state,
-        generation,
+        state: target_state,
+        generation: target_generation,
         clear_runner,
         runner_error_code,
         precondition,
@@ -11481,6 +11469,41 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_observation_applies_the_target_state_and_generation() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let before = core.environment("dev").unwrap().clone();
+        let target_generation = before.generation + 1;
+        let payload = reconcile_operation_payload(
+            &before,
+            StoredEnvironmentState::Running,
+            target_generation,
+            false,
+            None,
+        );
+        let operation = core
+            .store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(before.id),
+                OperationKind::Reconcile,
+                &payload,
+            )
+            .unwrap();
+
+        let applied = core.apply_reconcile_operation(&operation).unwrap();
+
+        assert_eq!(applied.checkpoint, 1);
+        assert_eq!(
+            core.environment("dev").unwrap().state,
+            StoredEnvironmentState::Running
+        );
+        assert_eq!(
+            core.environment("dev").unwrap().generation,
+            target_generation
+        );
+    }
+
+    #[test]
     fn stale_reconcile_observation_is_checkpointed_without_overwriting_newer_state() {
         let runner_record = |pid, inode| RunnerRecord {
             process: ProcessIdentity {
@@ -11542,43 +11565,39 @@ mod tests {
         assert_eq!(core.environment("dev").unwrap().runner, Some(replacement));
     }
 
-    #[tokio::test]
-    async fn legacy_reconcile_intent_is_completed_as_a_safe_noop() {
+    #[test]
+    fn reconcile_intent_rejects_missing_precondition_fields() {
         let (_parent, mut core) = test_supervisor_core(project_environment());
-        let environment = core.environment("dev").unwrap().clone();
+        let before = core.environment("dev").unwrap().clone();
         let operation = core
             .store
             .begin_operation(
                 Uuid::new_v4(),
-                Some(environment.id),
+                Some(before.id),
                 OperationKind::Reconcile,
                 &serde_json::json!({
                     "name": "dev",
                     "observed_state": "running",
-                    "generation": environment.generation + 1,
+                    "generation": before.generation + 1,
                     "clear_runner": false,
                     "runner_error_code": null,
                 }),
             )
             .unwrap();
 
-        core.replay_pending_operations().await.unwrap();
-        let completed = core
+        assert!(matches!(
+            core.apply_reconcile_operation(&operation),
+            Err(SupervisorError::InvalidState)
+        ));
+        let persisted = core
             .store
             .operation_by_request(operation.request_id)
             .unwrap()
             .unwrap();
 
-        assert_eq!(completed.phase, OperationPhase::Completed);
-        assert_eq!(completed.checkpoint, 2);
-        assert_eq!(
-            core.environment("dev").unwrap().state,
-            StoredEnvironmentState::Stopped
-        );
-        assert_eq!(
-            core.environment("dev").unwrap().generation,
-            environment.generation
-        );
+        assert_eq!(persisted.phase, OperationPhase::Intent);
+        assert_eq!(persisted.checkpoint, 0);
+        assert_eq!(core.environment("dev").unwrap(), &before);
     }
 
     #[tokio::test]

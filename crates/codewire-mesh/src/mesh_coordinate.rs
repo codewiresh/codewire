@@ -173,25 +173,13 @@ async fn authorize(
         forwarded_mesh_credential(ctx.headers()).map_err(|_| AppError::Unauthorized)?;
     let node_enrollment = credential.node_enrollment_code().is_some();
     let peer_id = match role {
-        MeshCoordinateRole::Peer if node_enrollment => {
+        MeshCoordinateRole::Peer if !node_enrollment => return Err(AppError::Forbidden),
+        MeshCoordinateRole::Peer => {
             let redeemed = state
                 .product
                 .redeem_coordinate_enrollment(&org_id, &network_id, &credential)
                 .await?;
             stable_peer_id(&network_id, "peer", &redeemed.node.name)
-        }
-        MeshCoordinateRole::Peer => {
-            let authorization = state
-                .product
-                .authorize_coordinate(&org_id, &network_id, credential)
-                .await?;
-            if authorization.principal_kind != MeshAuthorizationPrincipalKind::Environment
-                || authorization.credential_kind
-                    != MeshAuthorizationCredentialKind::EnvironmentToken
-            {
-                return Err(AppError::Forbidden);
-            }
-            stable_peer_id(&network_id, "peer", &authorization.principal_id)
         }
         MeshCoordinateRole::Dial if node_enrollment => return Err(AppError::Forbidden),
         MeshCoordinateRole::Dial => {
@@ -585,14 +573,18 @@ mod tests {
     use codewire_proto::codewire::internal::v1::{
         MeshCoordinatorServiceClient, mesh_coordinator_service_coordinate_response,
     };
-    use codewire_proto::codewire::v1::{MeshNodeServiceClient, RevokeMeshNodeRequest};
+    use codewire_proto::codewire::v1::{
+        JoinMeshNetworkRequest, MeshNetworkServiceClient, MeshNodeServiceClient,
+        RevokeMeshNodeRequest,
+    };
     use codewire_tailnet::node::{DiscoPublic, NodePublic, prefix_from_uuid};
     use connectrpc::Protocol;
     use connectrpc::client::{ClientConfig, HttpClient};
 
     use crate::config::{Config, LocalMeshAuthorizationConfig};
-    use crate::mesh_authorization::hash_local_environment_token;
-    use crate::store::{MemoryStore, MeshStore, NodeEnrollment, NodeRecord};
+    use crate::store::{
+        Invite, MemoryStore, MeshStore, NETWORK_ROLE_MEMBER, NodeEnrollment, NodeRecord,
+    };
 
     fn config() -> Config {
         Config {
@@ -605,8 +597,6 @@ mod tests {
             local_authorization: Some(LocalMeshAuthorizationConfig {
                 organization_id: "org-test".to_owned(),
                 api_key_hash: codewire_server_core::auth::hash_api_key("cw_test"),
-                environment_id: "environment-test".to_owned(),
-                environment_token_hash: hash_local_environment_token("environment-token"),
             }),
         }
     }
@@ -614,7 +604,12 @@ mod tests {
     async fn start() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let store = Arc::new(MemoryStore::new());
         store
-            .network_create_owned("network-test", "org-test")
+            .network_create_with_owner(
+                "network-test",
+                "org-test",
+                "local-owner:org-test",
+                chrono::Utc::now(),
+            )
             .await
             .unwrap();
         start_with_store(store).await
@@ -646,8 +641,8 @@ mod tests {
             .node_enrollment_create(NodeEnrollment {
                 id: format!("enrollment-{}", code.trim_start_matches("cw_enr_")),
                 network_id: "network-test".to_owned(),
-                owner_subject: "local-machine:environment-test".to_owned(),
-                issued_by: "local-machine:environment-test".to_owned(),
+                owner_subject: "local-owner:org-test".to_owned(),
+                issued_by: "local-owner:org-test".to_owned(),
                 node_name: node_name.to_owned(),
                 token_hash: format!("{:x}", Sha256::digest(code.as_bytes())),
                 uses_remaining: 1,
@@ -787,8 +782,20 @@ mod tests {
 
     #[tokio::test]
     async fn typed_coordinate_auth_recovery_and_protocol_are_deterministic() {
-        let (address, server) = start().await;
-        let mut first_peer = client(address, "environment-token")
+        let store = Arc::new(MemoryStore::new());
+        store
+            .network_create_with_owner(
+                "network-test",
+                "org-test",
+                "local-owner:org-test",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        seed_enrollment(&store, "cw_enr_recovery-first", "environment-test").await;
+        seed_enrollment(&store, "cw_enr_recovery-replacement", "environment-test").await;
+        let (address, server) = start_with_store(store).await;
+        let mut first_peer = client(address, "cw_enr_recovery-first")
             .coordinate()
             .await
             .unwrap();
@@ -803,7 +810,7 @@ mod tests {
             ))
         ));
 
-        let mut replacement_peer = client(address, "environment-token")
+        let mut replacement_peer = client(address, "cw_enr_recovery-replacement")
             .coordinate()
             .await
             .unwrap();
@@ -858,7 +865,12 @@ mod tests {
     async fn one_use_enrollment_opens_one_named_peer_and_revocation_closes_it() {
         let store = Arc::new(MemoryStore::new());
         store
-            .network_create_owned("network-test", "org-test")
+            .network_create_with_owner(
+                "network-test",
+                "org-test",
+                "local-owner:org-test",
+                chrono::Utc::now(),
+            )
             .await
             .unwrap();
         let code = "cw_enr_coordinate-once";
@@ -950,7 +962,12 @@ mod tests {
     async fn enrollment_coordinate_setup_rejects_scope_role_and_unnamed_capabilities() {
         let store = Arc::new(MemoryStore::new());
         store
-            .network_create_owned("network-test", "org-test")
+            .network_create_with_owner(
+                "network-test",
+                "org-test",
+                "local-owner:org-test",
+                chrono::Utc::now(),
+            )
             .await
             .unwrap();
         for (code, node_name) in [
@@ -1115,19 +1132,95 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, connectrpc::ErrorCode::PermissionDenied);
 
-        let mut dial_with_environment_token = client(address, "environment-token")
+        let mut dial_with_unknown_bearer = client(address, "retired-environment-bearer")
             .coordinate()
             .await
             .unwrap();
-        dial_with_environment_token
+        dial_with_unknown_bearer
             .send(request(hello(MeshCoordinateRole::Dial)))
             .await
             .unwrap();
-        let error = dial_with_environment_token
+        let error = dial_with_unknown_bearer
             .message::<MeshCoordinatorServiceCoordinateResponse>()
             .await
             .unwrap_err();
-        assert_eq!(error.code, connectrpc::ErrorCode::PermissionDenied);
+        assert_eq!(error.code, connectrpc::ErrorCode::Unauthenticated);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn same_org_nonmember_cannot_coordinate_until_invite_join() {
+        let store = Arc::new(MemoryStore::new());
+        store
+            .network_create_with_owner(
+                "network-test",
+                "org-test",
+                "different-network-owner",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        let invite_code = "cw_inv_synthetic_coordinate_membership";
+        store
+            .invite_create(Invite {
+                id: "invite-coordinate-membership".to_owned(),
+                network_id: "network-test".to_owned(),
+                organization_id: "org-test".to_owned(),
+                created_by_user_id: "different-network-owner".to_owned(),
+                code_hash: format!("{:x}", Sha256::digest(invite_code.as_bytes())),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let (address, server) = start_with_store(Arc::clone(&store)).await;
+
+        let mut denied = client(address, "cw_test").coordinate().await.unwrap();
+        denied
+            .send(request(hello(MeshCoordinateRole::Dial)))
+            .await
+            .unwrap();
+        assert_eq!(
+            denied
+                .message::<MeshCoordinatorServiceCoordinateResponse>()
+                .await
+                .unwrap_err()
+                .code,
+            connectrpc::ErrorCode::PermissionDenied
+        );
+
+        MeshNetworkServiceClient::new(
+            HttpClient::plaintext_http2_only(),
+            ClientConfig::new(format!("http://{address}").parse().unwrap())
+                .with_default_header(axum::http::header::AUTHORIZATION, "Bearer cw_test"),
+        )
+        .join_mesh_network(JoinMeshNetworkRequest {
+            invite_code: invite_code.to_owned(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .network_member_get("network-test", "local-owner:org-test")
+                .await
+                .unwrap()
+                .unwrap()
+                .role,
+            NETWORK_ROLE_MEMBER
+        );
+
+        let mut admitted = client(address, "cw_test").coordinate().await.unwrap();
+        admitted
+            .send(request(hello(MeshCoordinateRole::Dial)))
+            .await
+            .unwrap();
+        assert!(matches!(
+            response(&mut admitted).await.msg,
+            Some(mesh_coordinator_service_coordinate_response::Msg::DerpMap(
+                _
+            ))
+        ));
         server.abort();
     }
 
@@ -1173,8 +1266,19 @@ mod tests {
 
     #[tokio::test]
     async fn typed_coordinate_explicitly_admits_native_grpc() {
-        let (address, server) = start().await;
-        let mut peer = client_with_protocol(address, "environment-token", Protocol::Grpc)
+        let store = Arc::new(MemoryStore::new());
+        store
+            .network_create_with_owner(
+                "network-test",
+                "org-test",
+                "local-owner:org-test",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        seed_enrollment(&store, "cw_enr_native-grpc", "grpc-node").await;
+        let (address, server) = start_with_store(store).await;
+        let mut peer = client_with_protocol(address, "cw_enr_native-grpc", Protocol::Grpc)
             .coordinate()
             .await
             .unwrap();

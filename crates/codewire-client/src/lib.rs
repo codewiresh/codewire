@@ -14,7 +14,7 @@ mod tailnet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use codewire_proto::codewire::console::v1::{BillingServiceClient, GitHubServiceClient};
+use codewire_proto::codewire::console::v1::BillingServiceClient;
 use codewire_proto::codewire::v1::{
     ApiKeyServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
     ExecServiceClient, FileServiceClient, MeshInviteServiceClient, MeshNetworkServiceClient,
@@ -41,23 +41,21 @@ pub use auth::{DesktopOAuthCancellation, DesktopOAuthLogin};
 pub use buffa::EnumValue;
 pub use buffa_types::{Duration as ProtoDuration, Empty as ProtoEmpty, Timestamp};
 pub use codewire_proto::codewire::console::v1::{
-    BillingLimitUsage, BillingLimits, DeleteGitHubTokenRequest, DeleteGitHubTokenResponse,
-    GetBillingOverviewRequest, GetBillingOverviewResponse, GetGitHubConfigRequest,
-    GetGitHubConfigResponse, GetGitHubStatusRequest, GetGitHubStatusResponse,
-    SaveGitHubTokenRequest, SaveGitHubTokenResponse, UsageSummary,
+    BillingLimitUsage, BillingLimits, GetBillingOverviewRequest, GetBillingOverviewResponse,
+    UsageSummary,
 };
 pub use codewire_proto::codewire::v1::{
-    AccessGrant, AccessPermission, ApiKey, AppPort, AttachSessionOpen, AttachSessionRequest,
-    AttachSessionResize, AttachSessionResponse, AttachSessionResponseView, AttachSessionStatus,
-    CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateApiKeyRequest,
-    CreateApiKeyResponse, CreateEnvironmentRequest, CreateEnvironmentResponse,
+    AccessGrant, AccessPermission, ApiKey, ApplicationPort, AttachSessionOpen,
+    AttachSessionRequest, AttachSessionResize, AttachSessionResponse, AttachSessionResponseView,
+    AttachSessionStatus, CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse,
+    CreateApiKeyRequest, CreateApiKeyResponse, CreateEnvironmentRequest, CreateEnvironmentResponse,
     CreateInvitationRequest, CreateInvitationResponse, CreateOrganizationRequest,
     CreateOrganizationResponse, CreatePortRequest, CreatePortResponse, CreatePresetRequest,
     CreatePresetResponse, DeleteApiKeyRequest, DeleteApiKeyResponse, DeleteEnvironmentRequest,
     DeleteEnvironmentResponse, DeleteOrganizationRequest, DeleteOrganizationResponse,
     DeletePortRequest, DeletePortResponse, DeletePresetRequest, DeletePresetResponse, DesiredState,
-    DetectionResult, DownloadFileRequest, DownloadFileResponse, Environment,
-    EnvironmentDaemonDiagnostic, EnvironmentDaemonState, EnvironmentDaemonStatus, EnvironmentLog,
+    DownloadFileRequest, DownloadFileResponse, Environment, EnvironmentDaemonDiagnostic,
+    EnvironmentDaemonState, EnvironmentDaemonStatus, EnvironmentLog,
     EnvironmentResizeDisruptionPolicy, EnvironmentResizeExecutionMode, EnvironmentResizeFailure,
     EnvironmentResizeOperation, EnvironmentResizeOperationState, EnvironmentResizePlan,
     EnvironmentResources, EnvironmentServiceClient as GeneratedEnvironmentServiceClient,
@@ -81,12 +79,12 @@ pub use codewire_proto::codewire::v1::{
     ProjectAgents, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
     ProjectSkillSource, ProjectSpec, ProtectEnvironmentRequest, ProtectEnvironmentResponse,
     ReadSessionOutputRequest, ReadSessionOutputResponse, RepairEnvironmentDaemonRequest,
-    RepairEnvironmentDaemonResponse, RepoConfig, RepoEntry, ResizeEnvironmentRequest,
+    RepairEnvironmentDaemonResponse, RepoConfig, RepositorySpec, ResizeEnvironmentRequest,
     ResizeEnvironmentResponse, RestartSessionRequest, RestartSessionResponse,
     RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, RunRequest, RunResize,
     RunResponse, RunResponseView, RunStart, SecretMetadata, SecretProject, SetProjectSecretRequest,
     SetProjectSecretResponse, SetSecretRequest, SetSecretResponse, SetUserSecretRequest,
-    SetUserSecretResponse, SetupAgent, StartEnvironmentRequest, StartEnvironmentResponse,
+    SetUserSecretResponse, StartEnvironmentRequest, StartEnvironmentResponse,
     StopEnvironmentRequest, StopEnvironmentResponse, StopSessionRequest, StopSessionResponse,
     StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest,
     StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse,
@@ -147,7 +145,6 @@ pub struct CodewireClient {
     ports: PortServiceClient<ReqwestConnectTransport>,
     secrets: SecretServiceClient<ReqwestConnectTransport>,
     billing: BillingServiceClient<ReqwestConnectTransport>,
-    github: GitHubServiceClient<ReqwestConnectTransport>,
     mesh_networks: MeshNetworkServiceClient<ReqwestConnectTransport>,
     mesh_nodes: MeshNodeServiceClient<ReqwestConnectTransport>,
     mesh_invites: MeshInviteServiceClient<ReqwestConnectTransport>,
@@ -331,7 +328,6 @@ impl CodewireClient {
         let port_config = config.connect_config()?;
         let secret_config = config.connect_config()?;
         let billing_config = config.connect_config()?;
-        let github_config = config.connect_config()?;
         let mesh_network_config = config.mesh_connect_config()?;
         let mesh_node_config = config.mesh_connect_config()?;
         let mesh_invite_config = config.mesh_connect_config()?;
@@ -364,7 +360,6 @@ impl CodewireClient {
                 ReqwestConnectTransport(http.clone()),
                 billing_config,
             ),
-            github: GitHubServiceClient::new(ReqwestConnectTransport(http.clone()), github_config),
             mesh_networks: MeshNetworkServiceClient::new(
                 ReqwestConnectTransport(http.clone()),
                 mesh_network_config,
@@ -405,50 +400,6 @@ impl CodewireClient {
     ) -> Result<GetBillingOverviewResponse, ClientError> {
         self.billing
             .get_billing_overview_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn get_github_config(
-        &self,
-        request: GetGitHubConfigRequest,
-    ) -> Result<GetGitHubConfigResponse, ClientError> {
-        self.github
-            .get_git_hub_config_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn get_github_status(
-        &self,
-        request: GetGitHubStatusRequest,
-    ) -> Result<GetGitHubStatusResponse, ClientError> {
-        self.github
-            .get_git_hub_status_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn save_github_token(
-        &self,
-        request: SaveGitHubTokenRequest,
-    ) -> Result<SaveGitHubTokenResponse, ClientError> {
-        self.github
-            .save_git_hub_token_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn delete_github_token(
-        &self,
-        request: DeleteGitHubTokenRequest,
-    ) -> Result<DeleteGitHubTokenResponse, ClientError> {
-        self.github
-            .delete_git_hub_token_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
@@ -1653,10 +1604,6 @@ mod tests {
         "/codewire.v1.SecretService/PreviewWorkloadSecretResolution";
     const GET_BILLING_OVERVIEW_PATH: &str =
         "/codewire.console.v1.BillingService/GetBillingOverview";
-    const GET_GITHUB_CONFIG_PATH: &str = "/codewire.console.v1.GitHubService/GetGitHubConfig";
-    const GET_GITHUB_STATUS_PATH: &str = "/codewire.console.v1.GitHubService/GetGitHubStatus";
-    const SAVE_GITHUB_TOKEN_PATH: &str = "/codewire.console.v1.GitHubService/SaveGitHubToken";
-    const DELETE_GITHUB_TOKEN_PATH: &str = "/codewire.console.v1.GitHubService/DeleteGitHubToken";
     const EXEC_PATH: &str = "/codewire.v1.ExecService/Exec";
     const LAUNCH_SESSION_PATH: &str = "/codewire.v1.EnvironmentSessionService/LaunchSession";
     const LIST_SESSIONS_PATH: &str = "/codewire.v1.EnvironmentSessionService/ListSessions";
@@ -2125,6 +2072,7 @@ mod tests {
                 ..Default::default()
             })
             .into(),
+            token: "synthetic-invitation-capability".into(),
             ..Default::default()
         };
         for (rpc_path, body) in [
@@ -2203,20 +2151,18 @@ mod tests {
                 .operation_id,
             "org-delete-org_123-1"
         );
+        let created = client
+            .create_invitation(CreateInvitationRequest {
+                org_id: "org_123".into(),
+                email: "member@example.com".into(),
+                role: OrgRole::Member.into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create invitation");
+        assert_eq!(created.token, "synthetic-invitation-capability");
         assert_eq!(
-            client
-                .create_invitation(CreateInvitationRequest {
-                    org_id: "org_123".into(),
-                    email: "member@example.com".into(),
-                    role: OrgRole::Member.into(),
-                    ..Default::default()
-                })
-                .await
-                .expect("create invitation")
-                .invitation
-                .into_option()
-                .expect("invitation")
-                .id,
+            created.invitation.into_option().expect("invitation").id,
             "invite_123"
         );
     }
@@ -2680,57 +2626,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generated_console_services_use_the_provider() {
+    async fn generated_billing_service_uses_the_provider() {
         let server = MockServer::start().await;
-        for (rpc_path, body) in [
-            (
-                GET_BILLING_OVERVIEW_PATH,
-                GetBillingOverviewResponse {
-                    plan: "team".into(),
-                    ..Default::default()
-                }
-                .encode_to_vec(),
-            ),
-            (
-                GET_GITHUB_CONFIG_PATH,
-                GetGitHubConfigResponse {
-                    client_id: "Iv1.example".into(),
-                    app_slug: "codewire-dev".into(),
-                    ..Default::default()
-                }
-                .encode_to_vec(),
-            ),
-            (
-                GET_GITHUB_STATUS_PATH,
-                GetGitHubStatusResponse {
-                    connected: true,
-                    username: "noel".into(),
-                    ..Default::default()
-                }
-                .encode_to_vec(),
-            ),
-            (
-                SAVE_GITHUB_TOKEN_PATH,
-                SaveGitHubTokenResponse::default().encode_to_vec(),
-            ),
-            (
-                DELETE_GITHUB_TOKEN_PATH,
-                DeleteGitHubTokenResponse::default().encode_to_vec(),
-            ),
-        ] {
-            Mock::given(method("POST"))
-                .and(path(rpc_path))
-                .and(header("authorization", "Bearer test-token"))
-                .and(header("user-agent", "codewire-client-test/1"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("content-type", "application/proto")
-                        .set_body_bytes(body),
-                )
-                .expect(1)
-                .mount(&server)
-                .await;
-        }
+        Mock::given(method("POST"))
+            .and(path(GET_BILLING_OVERVIEW_PATH))
+            .and(header("authorization", "Bearer test-token"))
+            .and(header("user-agent", "codewire-client-test/1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(
+                        GetBillingOverviewResponse {
+                            plan: "team".into(),
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let client = test_client(&server).await;
         assert_eq!(
@@ -2744,32 +2659,6 @@ mod tests {
                 .plan,
             "team"
         );
-        assert_eq!(
-            client
-                .get_github_config(GetGitHubConfigRequest::default())
-                .await
-                .expect("get GitHub config")
-                .app_slug,
-            "codewire-dev"
-        );
-        assert!(
-            client
-                .get_github_status(GetGitHubStatusRequest::default())
-                .await
-                .expect("get GitHub status")
-                .connected
-        );
-        client
-            .save_github_token(SaveGitHubTokenRequest {
-                access_token: "gho_test".into(),
-                ..Default::default()
-            })
-            .await
-            .expect("save GitHub token");
-        client
-            .delete_github_token(DeleteGitHubTokenRequest::default())
-            .await
-            .expect("delete GitHub token");
     }
 
     #[tokio::test]

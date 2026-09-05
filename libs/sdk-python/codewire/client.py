@@ -8,7 +8,7 @@ from codewire._transport import ConnectTransport
 from codewire.api_keys import APIKeys
 from codewire.environments import Environments
 from codewire.secrets import SecretProjects, Secrets
-from codewire.templates import Templates
+from codewire.presets import Presets
 
 DEFAULT_BASE_URL = "https://codewire.sh"
 
@@ -37,7 +37,7 @@ class Codewire:
         )
         self._context = ConnectContext(self._connect, resolved_org)
         self.environments = Environments(self._context)
-        self.templates = Templates(self._context)
+        self.presets = Presets(self._context)
         self.api_keys = APIKeys(self._context)
         self.secrets = Secrets(self._context)
         self.secret_projects = SecretProjects(self._context)

@@ -9,6 +9,8 @@
 //! [`crate::store::DeviceAuthorizationStore`] via the builder; otherwise the
 //! methods return `invalid_request` / `unsupported_grant_type`.
 
+use std::fmt;
+
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +30,7 @@ const POLL_INTERVAL_SECS: u64 = 5;
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 
 /// The device-authorization response (RFC 8628 §3.2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceAuthorizationResponse {
     /// The device verification code (polled at the token endpoint).
     pub device_code: String,
@@ -42,6 +44,23 @@ pub struct DeviceAuthorizationResponse {
     pub expires_in: u64,
     /// Minimum polling interval in seconds.
     pub interval: u64,
+}
+
+impl fmt::Debug for DeviceAuthorizationResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceAuthorizationResponse")
+            .field("device_code", &"[REDACTED]")
+            .field("user_code", &"[REDACTED]")
+            .field("verification_uri", &self.verification_uri)
+            .field(
+                "verification_uri_complete",
+                &"[REDACTED: contains user_code]",
+            )
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
+    }
 }
 
 impl Provider {
@@ -252,4 +271,28 @@ fn mint_user_code() -> String {
         s.push(pick(&mut rng));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_authorization_response_debug_redacts_capabilities() {
+        let response = DeviceAuthorizationResponse {
+            device_code: "device-response-marker".into(),
+            user_code: "user-response-marker".into(),
+            verification_uri: "https://issuer.example/device".into(),
+            verification_uri_complete:
+                "https://issuer.example/device?user_code=user-response-marker".into(),
+            expires_in: 600,
+            interval: 5,
+        };
+
+        let diagnostic = format!("{response:?}");
+        assert!(!diagnostic.contains("device-response-marker"));
+        assert!(!diagnostic.contains("user-response-marker"));
+        assert!(diagnostic.contains("https://issuer.example/device"));
+        assert!(diagnostic.contains("[REDACTED]"));
+    }
 }

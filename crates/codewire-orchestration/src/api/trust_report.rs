@@ -18,8 +18,8 @@ use sqlx::Row;
 
 use crate::sandbox::template::{
     RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC,
-    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_RUNC,
-    gateway_workload_name, runtime_profile_spec,
+    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE,
+    RUNTIME_PROFILE_RUNC, gateway_workload_name, runtime_profile_spec,
 };
 
 use super::ApiState;
@@ -450,7 +450,14 @@ fn deployment_container_image(deployment: &Deployment, name: &str) -> Option<Str
 }
 
 fn runtime_from_class(runtime_class: &str) -> TrustReportRuntime {
-    let spec = runtime_profile_spec("", runtime_class, "profile-default", false);
+    let profile = match runtime_class.trim() {
+        "" => RUNTIME_PROFILE_NONE,
+        RUNTIME_CLASS_RUNC => RUNTIME_PROFILE_RUNC,
+        RUNTIME_CLASS_COMMODITY => RUNTIME_PROFILE_COMMODITY,
+        RUNTIME_CLASS_CONFIDENTIAL => RUNTIME_PROFILE_CONFIDENTIAL,
+        other => other,
+    };
+    let spec = runtime_profile_spec(profile, "profile-default", false);
     let profile = spec.profile;
     let runtime_class = spec.runtime_class_name;
     let handler = match runtime_class.as_str() {

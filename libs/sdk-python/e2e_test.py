@@ -11,7 +11,15 @@ from codewire import Codewire
 class E2EFirstParty(unittest.TestCase):
     def test_full_lifecycle(self):
         with Codewire(timeout=300) as cw:
-            env = cw.environments.create(template_slug="python", wait=True, wait_timeout=300)
+            env = cw.environments.create(
+                project_spec={
+                    "schema_version": 1,
+                    "preset": "python",
+                    "working_directory": "/workspace",
+                },
+                wait=True,
+                wait_timeout=300,
+            )
             try:
                 result = env.exec(command=["python3", "--version"])
                 self.assertEqual(result["exit_code"], 0)
@@ -30,7 +38,15 @@ class E2EFirstParty(unittest.TestCase):
 class E2EArbitraryImage(unittest.TestCase):
     def test_exec_on_arbitrary_image(self):
         with Codewire(timeout=300) as cw:
-            env = cw.environments.create(image="python:3.12-slim", wait=True, wait_timeout=300)
+            env = cw.environments.create(
+                project_spec={
+                    "schema_version": 1,
+                    "image": "python:3.12-slim",
+                    "working_directory": "/workspace",
+                },
+                wait=True,
+                wait_timeout=300,
+            )
             try:
                 result = env.exec(command=["python3", "-c", "print(1+1)"])
                 self.assertEqual(result["exit_code"], 0)

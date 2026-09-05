@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::CLI_VERSION;
 use crate::config::ResolvedPlatformConfig;
-use crate::organization_client::legacy_preset;
+use crate::organization_client::preset_from_proto;
 use crate::presentation::*;
 
 /// Typed EnvironmentService facade preserving the CLI's established
@@ -70,7 +70,6 @@ impl EnvironmentClient {
             .watch_environment_create(rpc::WatchEnvironmentCreateRequest {
                 org_id: org_id.to_string(),
                 draft: Some(proto_create_environment_request(org_id, &request.draft)).into(),
-                analyze: request.analyze,
                 ..Default::default()
             })
             .await
@@ -82,8 +81,7 @@ impl EnvironmentClient {
                 rpc::watch_environment_create_response::Event::Complete(complete) => {
                     Some(*complete)
                 }
-                rpc::watch_environment_create_response::Event::Progress(_)
-                | rpc::watch_environment_create_response::Event::RepoFetched(_) => None,
+                rpc::watch_environment_create_response::Event::Progress(_) => None,
             })
             .ok_or_else(|| {
                 anyhow::anyhow!("WatchEnvironmentCreate ended without a complete event")
@@ -744,61 +742,16 @@ fn proto_create_environment_request(
         org_id: org_id.to_string(),
         preset_id: request.preset_id.clone(),
         name: request.name.clone(),
-        cpu_millicores: request.cpu_millicores,
-        memory_mb: request.memory_mb,
-        disk_gb: request.disk_gb,
         ttl_seconds: request.ttl_seconds,
-        preset_slug: request.preset_slug.clone(),
-        repo_url: request.repo_url.clone(),
-        branch: request.branch.clone(),
-        repos: request
-            .repos
-            .iter()
-            .map(|repo| rpc::RepoEntry {
-                url: repo.url.clone(),
-                branch: repo.branch.clone(),
-                mount_path: repo.mount_path.clone(),
-                revision: repo.revision.clone(),
-                ..Default::default()
-            })
-            .collect(),
-        image: request.image.clone(),
-        install_command: request.install_command.clone(),
-        startup_script: request.startup_script.clone(),
-        env_vars: request.env_vars.clone().into_iter().collect(),
-        agents: request
-            .agents
-            .iter()
-            .map(|agent| rpc::SetupAgent {
-                r#type: agent.agent_type.clone(),
-                ..Default::default()
-            })
-            .collect(),
-        install_agents: request.install_agents,
-        agent: request.agent.clone(),
-        secret_project: request.secret_project.clone(),
-        app_ports: request
-            .app_ports
-            .iter()
-            .map(|port| rpc::AppPort {
-                port: port.port,
-                label: port.label.clone(),
-                access: port.access.clone(),
-                ..Default::default()
-            })
-            .collect(),
-        include_org_secrets: request.include_org_secrets,
-        include_user_secrets: request.include_user_secrets,
         isolation_tier: match request.isolation_tier.as_str() {
             "" | "standard" => rpc::IsolationTier::Standard.into(),
             "confidential" => rpc::IsolationTier::Confidential.into(),
             _ => rpc::IsolationTier::Unspecified.into(),
         },
-        project_spec: request
-            .project_spec
-            .clone()
-            .map(codewire_project_proto::to_proto)
-            .into(),
+        project_spec: Some(codewire_project_proto::to_proto(
+            request.project_spec.clone(),
+        ))
+        .into(),
         ..Default::default()
     }
 }
@@ -837,80 +790,34 @@ fn legacy_prepare_complete(
         draft: complete
             .draft
             .into_option()
-            .map(legacy_create_environment_request)
+            .map(create_environment_request_from_proto)
             .transpose()?
             .ok_or_else(|| anyhow::anyhow!("WatchEnvironmentCreate complete event had no draft"))?,
-        detection: complete
-            .detection
-            .into_option()
-            .map(legacy_detection)
-            .transpose()?,
         resolved_preset: complete
             .resolved_preset
             .into_option()
-            .map(legacy_preset)
+            .map(preset_from_proto)
             .transpose()?,
         repo_config: complete
             .repo_config
             .into_option()
-            .map(legacy_repo_config)
+            .map(repo_config_from_proto)
             .transpose()?,
     })
 }
 
-fn legacy_create_environment_request(
+fn create_environment_request_from_proto(
     value: rpc::CreateEnvironmentRequest,
 ) -> anyhow::Result<CreateEnvironmentRequest> {
     let project_spec = value
         .project_spec
         .into_option()
-        .map(codewire_project_proto::from_proto)
-        .transpose()?;
+        .ok_or_else(|| anyhow::anyhow!("CreateEnvironmentRequest omitted project_spec"))
+        .and_then(|value| codewire_project_proto::from_proto(value).map_err(Into::into))?;
     Ok(CreateEnvironmentRequest {
         preset_id: value.preset_id,
         name: value.name,
-        cpu_millicores: value.cpu_millicores,
-        memory_mb: value.memory_mb,
-        disk_gb: value.disk_gb,
         ttl_seconds: value.ttl_seconds,
-        preset_slug: value.preset_slug,
-        repo_url: value.repo_url,
-        branch: value.branch,
-        repos: value
-            .repos
-            .into_iter()
-            .map(|repo| RepoEntry {
-                url: repo.url,
-                branch: repo.branch,
-                mount_path: repo.mount_path,
-                revision: repo.revision,
-            })
-            .collect(),
-        image: value.image,
-        install_command: value.install_command,
-        startup_script: value.startup_script,
-        env_vars: value.env_vars.into_iter().collect(),
-        agents: value
-            .agents
-            .into_iter()
-            .map(|agent| SetupAgent {
-                agent_type: agent.r#type,
-            })
-            .collect(),
-        install_agents: value.install_agents,
-        agent: value.agent,
-        secret_project: value.secret_project,
-        app_ports: value
-            .app_ports
-            .into_iter()
-            .map(|port| AppPort {
-                port: port.port,
-                label: port.label,
-                access: port.access,
-            })
-            .collect(),
-        include_org_secrets: value.include_org_secrets,
-        include_user_secrets: value.include_user_secrets,
         isolation_tier: match value.isolation_tier.as_known() {
             Some(rpc::IsolationTier::Confidential) => "confidential".into(),
             Some(rpc::IsolationTier::Standard) | Some(rpc::IsolationTier::Unspecified) | None => {
@@ -921,62 +828,17 @@ fn legacy_create_environment_request(
     })
 }
 
-fn legacy_detection(value: rpc::DetectionResult) -> anyhow::Result<DetectionResult> {
+fn repo_config_from_proto(value: rpc::RepoConfig) -> anyhow::Result<RepoConfig> {
     let project_spec = value
         .project_spec
         .into_option()
-        .map(codewire_project_proto::from_proto)
-        .transpose()?;
-    Ok(DetectionResult {
-        project_type: value.project_type,
-        preset_slug: value.preset_slug,
-        preset_image: value.preset_image,
-        install_command: value.install_command,
-        startup_script: value.startup_script,
-        language: value.language,
-        framework: value.framework,
-        suggested_name: value.suggested_name,
-        needs_docker: value.needs_docker,
-        has_compose: value.has_compose,
-        app_ports: value
-            .app_ports
-            .into_iter()
-            .map(|port| AppPort {
-                port: port.port,
-                label: port.label,
-                access: port.access,
-            })
-            .collect(),
-        agents: value
-            .agents
-            .into_iter()
-            .map(|agent| SetupAgent {
-                agent_type: agent.r#type,
-            })
-            .collect(),
-        install_agents: value.install_agents,
-        secret_project: value.secret_project,
-        include_org_secrets: value.include_org_secrets,
-        include_user_secrets: value.include_user_secrets,
-        cpu: value.cpu,
-        memory: value.memory,
-        setup_notes: value.setup_notes,
-        project_spec,
-    })
-}
-
-fn legacy_repo_config(value: rpc::RepoConfig) -> anyhow::Result<RepoConfig> {
+        .ok_or_else(|| anyhow::anyhow!("RepoConfig omitted project_spec"))
+        .and_then(|spec| codewire_project_proto::from_proto(spec).map_err(Into::into))?;
     Ok(RepoConfig {
         id: value.id,
         org_id: value.org_id,
         repo_url: value.repo_url,
-        preset_id: value.preset_id,
-        setup_config: value
-            .setup_config
-            .into_option()
-            .map(serde_json::to_value)
-            .transpose()?
-            .unwrap_or(serde_json::Value::Null),
+        project_spec,
         created_by: value.created_by,
         updated_at: value.updated_at,
     })
@@ -1371,37 +1233,44 @@ fn proto_duration_to_std(duration: rpc::ProtoDuration) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use super::*;
 
     #[test]
-    fn environment_connect_adapter_preserves_cli_request_and_output_shapes() {
+    fn environment_connect_adapter_round_trips_the_complete_canonical_project_spec() {
         let request = CreateEnvironmentRequest {
             preset_id: Some("preset_123".to_string()),
             name: Some("builder".to_string()),
-            repo_url: "https://git.example/codewire".to_string(),
-            branch: "main".to_string(),
-            env_vars: BTreeMap::from([("RUST_LOG".to_string(), "info".to_string())]),
-            agents: vec![SetupAgent {
-                agent_type: "codex".to_string(),
-            }],
-            app_ports: vec![AppPort {
-                port: 8080,
-                label: "web".to_string(),
-                access: "public".to_string(),
-            }],
-            project_spec: Some(
-                codewire_project::parse_project_yaml(
-                    "version: 1\nimage: ghcr.io/example/workspace@sha256:abc\n",
-                )
-                .unwrap()
-                .spec,
-            ),
+            project_spec: codewire_project::parse_project_yaml(
+                r#"
+version: 1
+image: ghcr.io/example/workspace@sha256:abc
+repositories:
+  - source: https://git.example/codewire
+    revision: deadbeef
+    destination: /workspace/codewire
+working_directory: /workspace/codewire
+install_command: cargo fetch
+startup_script: cargo test
+environment: {RUST_LOG: info}
+agents: {install: false, tools: [codex]}
+skills:
+  - {source: repository, path: .agents/skills/rust, agents: [codex]}
+  - {source: user, name: personal}
+ports: [{port: 8080, label: web, access: public}]
+cpu: "2"
+memory: "8Gi"
+disk: "40Gi"
+secrets: {project: development, organization: true, user: true}
+access: {profile: user/work}
+"#,
+            )
+            .unwrap()
+            .spec,
             ..CreateEnvironmentRequest::default()
         };
-        let round_trip = legacy_create_environment_request(proto_create_environment_request(
+        let round_trip = create_environment_request_from_proto(proto_create_environment_request(
             "org_123", &request,
         ))
         .unwrap();
@@ -1455,6 +1324,20 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(grant.created_at, "2026-01-01 00:00:00.123456+00");
+    }
+
+    #[test]
+    fn environment_inputs_fail_when_required_project_specs_are_absent() {
+        let create_error =
+            create_environment_request_from_proto(rpc::CreateEnvironmentRequest::default())
+                .unwrap_err();
+        assert!(create_error.to_string().contains("omitted project_spec"));
+
+        let repo_error = repo_config_from_proto(rpc::RepoConfig::default()).unwrap_err();
+        assert!(repo_error.to_string().contains("omitted project_spec"));
+
+        let complete_error = legacy_prepare_complete(rpc::PrepareComplete::default()).unwrap_err();
+        assert!(complete_error.to_string().contains("had no draft"));
     }
 
     #[test]

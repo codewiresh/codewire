@@ -1,6 +1,6 @@
 //! Live ingress proof for WS06 WI-2 WatchEnvironmentCreate.
 //!
-//! Drives the deterministic non-analysis prepare path through the configured
+//! Drives the deterministic explicit-configuration prepare path through the configured
 //! edge and proves typed ordering plus the per-response no-buffering marker.
 
 use anyhow::Context as _;
@@ -42,11 +42,16 @@ async fn run_prepare(
             org_id: org_id.to_owned(),
             draft: Some(CreateEnvironmentRequest {
                 org_id: org_id.to_owned(),
-                repo_url,
+                project_spec: Some(codewire_project_proto::to_proto(
+                    codewire_project::parse_project_yaml(&format!(
+                        "image: example.test/workspace:latest\nrepositories: [{{source: {repo_url}}}]\n"
+                    ))?
+                    .spec,
+                ))
+                .into(),
                 ..Default::default()
             })
             .into(),
-            analyze: Some(false),
             ..Default::default()
         })
         .await
@@ -72,12 +77,6 @@ async fn run_prepare(
         match &message.view().event {
             Some(EventView::Progress(progress)) => events.push(progress.phase.to_owned()),
             Some(EventView::Complete(_)) => events.push("complete".into()),
-            Some(EventView::RepoFetched(event)) => {
-                anyhow::bail!(
-                    "non-analysis prepare emitted repo_fetched for {}",
-                    event.repo
-                )
-            }
             None => anyhow::bail!("WatchEnvironmentCreate emitted an empty event"),
         }
     }

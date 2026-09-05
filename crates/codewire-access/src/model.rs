@@ -53,8 +53,6 @@ pub enum CredentialAuthKind {
     ApiKey,
     AccessToken,
     GitHubApp,
-    SshPrivateKey,
-    SshAgent,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

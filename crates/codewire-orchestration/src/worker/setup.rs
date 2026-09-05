@@ -16,8 +16,6 @@ use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::agents::agent_definition;
-#[cfg(test)]
-use super::env_data::SetupConfig;
 use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environment};
 #[cfg(feature = "kind-e2e")]
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
@@ -26,7 +24,7 @@ use super::setup_lease::{
     PhaseAcquire, PhasePreparation, SetupActivityIdentity, SetupLeaseRecord, SetupPhaseAuthority,
 };
 use super::{JobPayload, WorkerContext};
-use crate::repository_mount::{effective_repository_mount, validate_repository_mounts};
+use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
 use crate::sandbox::client::{ProbeResult, SandboxClient};
 use crate::sandbox::exec::WorkspaceExecResult;
 use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
@@ -119,6 +117,7 @@ fn setup_command_cancelled(state: &str, desired_state: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct Repo {
     pub url: String,
+    pub revision: String,
     pub branch: String,
     pub mount_path: String,
 }
@@ -135,11 +134,11 @@ pub struct Inputs {
     pub ttl_seconds: Option<i32>,
     pub has_setup: bool,
     pub repos: Vec<Repo>,
+    pub working_directory: String,
     pub install_command: String,
     pub startup_script: String,
     pub agents: Vec<String>,
     pub app_ports: Vec<(i32, String, String)>, // (port, label, access)
-    pub has_mesh: bool,
 }
 
 /// Mirrors `environmentsetup.Store`.
@@ -219,25 +218,6 @@ pub trait SetupOps {
         &mut self,
         input: &Inputs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
-    fn start_mesh_node(
-        &mut self,
-        input: &Inputs,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
-}
-
-/// Mirrors `environmentsetup.workDirForRepos`.
-pub fn work_dir_for_repos(repos: &[Repo]) -> anyhow::Result<String> {
-    validate_repository_mounts(
-        repos
-            .iter()
-            .map(|repo| (repo.url.as_str(), repo.mount_path.as_str())),
-    )?;
-    match repos.len() {
-        0 => Ok(String::new()),
-        1 => effective_repository_mount(&repos[0].url, &repos[0].mount_path)
-            .map_err(anyhow::Error::from),
-        _ => Ok("/workspace".to_string()),
-    }
 }
 
 fn duration_ms_meta(started: std::time::Instant) -> Option<serde_json::Value> {
@@ -315,11 +295,11 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
             .await?;
         }
 
-        if !input.has_setup && !input.has_mesh {
+        if !input.has_setup {
             return self.complete(input).await;
         }
 
-        let work_dir = work_dir_for_repos(&input.repos)?;
+        let work_dir = input.working_directory.clone();
 
         if input.setup_phase <= 2 && !input.repos.is_empty() {
             let phase = input.setup_phase;
@@ -447,35 +427,6 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
                 .await?;
         }
 
-        if input.setup_phase <= 7 && input.has_mesh {
-            let phase = input.setup_phase;
-            if !self.begin_phase(input, phase).await? {
-                return Ok(());
-            }
-            match self.ops.start_mesh_node(input).await {
-                Err(e) => {
-                    if is_setup_control_flow(&e) {
-                        return Err(e);
-                    }
-                    // Non-fatal: env works without the mesh node.
-                    self.finish_phase(
-                        input,
-                        phase,
-                        8,
-                        "mesh_node",
-                        "warning",
-                        &format!("{e:#}"),
-                        None,
-                    )
-                    .await?;
-                }
-                Ok(()) => {
-                    self.finish_phase(input, phase, 8, "mesh_node", "completed", "", None)
-                        .await?;
-                }
-            }
-        }
-
         self.complete(input).await
     }
 
@@ -587,6 +538,7 @@ impl SetupStore for PgSetupStore {
 
 /// Mirrors `toSetupInputs`.
 pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
+    let spec = &env.project_spec;
     let mut input = Inputs {
         environment_id: env.id.clone(),
         namespace: backend.namespace.clone(),
@@ -595,32 +547,36 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
         setup_phase: backend.setup_phase,
         setup_complete: backend.setup_complete,
         ttl_seconds: env.ttl_seconds,
+        has_setup: !spec.repositories.is_empty()
+            || !spec.install_command.is_empty()
+            || !spec.startup_script.is_empty()
+            || !spec.environment.is_empty()
+            || !spec.agents.is_empty()
+            || !spec.application_ports.is_empty(),
+        working_directory: spec.working_directory.clone(),
+        install_command: spec.install_command.clone(),
+        startup_script: spec.startup_script.clone(),
+        agents: spec.agents.tools.clone(),
+        app_ports: spec
+            .application_ports
+            .iter()
+            .map(|port| {
+                (
+                    i32::from(port.port),
+                    port.label.clone(),
+                    port.access.clone(),
+                )
+            })
+            .collect(),
         ..Default::default()
     };
-    let Some(sc) = &env.setup_config else {
-        return input;
-    };
-
-    input.has_setup = true;
-    input.install_command = sc.install_command.clone();
-    input.startup_script = sc.startup_script.clone();
-    for repo in sc.normalized_repos() {
+    for repository in &spec.repositories {
         input.repos.push(Repo {
-            url: repo.url,
-            branch: repo.branch,
-            mount_path: repo.mount_path,
+            url: repository.source.clone(),
+            revision: repository.revision.clone(),
+            branch: repository.branch.clone(),
+            mount_path: repository.destination.clone(),
         });
-    }
-    for agent in sc.configured_agents() {
-        input.agents.push(agent.agent_type);
-    }
-    for port in &sc.app_ports {
-        input
-            .app_ports
-            .push((port.port, port.label.clone(), port.access.clone()));
-    }
-    if sc.env_vars.contains_key("CODEWIRE_MESH_URL") {
-        input.has_mesh = true;
     }
     input
 }
@@ -662,11 +618,7 @@ pub struct WorkerSetupOps<'a> {
 
 impl WorkerSetupOps<'_> {
     fn setup_env_vars(&self) -> BTreeMap<String, String> {
-        self.env
-            .setup_config
-            .as_ref()
-            .map(|sc| sc.env_vars.clone())
-            .unwrap_or_default()
+        self.env.project_spec.environment.clone()
     }
 
     fn sandbox_client(&self, namespace: &str) -> anyhow::Result<SandboxClient> {
@@ -1267,13 +1219,10 @@ impl WorkerSetupOps<'_> {
 
     /// Mirrors `syncWorkspaceEnv` (warn-only).
     async fn sync_workspace_env(&self, namespace: &str) -> anyhow::Result<()> {
-        let Some(sc) = &self.env.setup_config else {
-            return Ok(());
-        };
-        if sc.env_vars.is_empty() {
+        if self.env.project_spec.environment.is_empty() {
             return Ok(());
         }
-        let script = build_workspace_env_script(&sc.env_vars);
+        let script = build_workspace_env_script(&self.env.project_spec.environment);
         let cmd = vec!["sh".to_string(), "-c".to_string(), script];
         if let Err(e) = self
             .workspace_exec(namespace, &self.env.id, &cmd, "", &BTreeMap::new())
@@ -1454,8 +1403,10 @@ impl SetupOps for WorkerSetupOps<'_> {
             let namespace = input.namespace.clone();
             let env_id = input.environment_id.clone();
             async move {
-                this.phase_authority.ensure_active(this.active_phase).await?;
-                let dir = effective_repository_mount(&repo.url, &repo.mount_path)?;
+                this.phase_authority
+                    .ensure_active(this.active_phase)
+                    .await?;
+                let dir = canonical_repository_mount(&repo.url, &repo.mount_path)?;
                 let rm: Vec<String> = vec!["rm".into(), "-rf".into(), dir.clone()];
                 if let Err(error) = this
                     .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
@@ -1464,7 +1415,9 @@ impl SetupOps for WorkerSetupOps<'_> {
                 {
                     return Err(error);
                 }
-                this.phase_authority.ensure_active(this.active_phase).await?;
+                this.phase_authority
+                    .ensure_active(this.active_phase)
+                    .await?;
                 #[cfg(feature = "kind-e2e")]
                 let clone = super::fencing_evidence::clone_fixture_command(&repo.url)
                     .unwrap_or_else(|| {
@@ -1483,9 +1436,17 @@ impl SetupOps for WorkerSetupOps<'_> {
                     let error = e.context(format!("git clone {}", repo.url));
                     return Err(this.fence_failed_launch_group(input, error).await);
                 }
-                if !repo.branch.is_empty() && repo.branch != "main" && repo.branch != "master" {
-                    let checkout: Vec<String> =
-                        vec!["git".into(), "checkout".into(), repo.branch.clone()];
+                let selector = if repo.revision.is_empty() {
+                    &repo.branch
+                } else {
+                    &repo.revision
+                };
+                if !selector.is_empty() {
+                    let mut checkout: Vec<String> = vec!["git".into(), "checkout".into()];
+                    if !repo.revision.is_empty() {
+                        checkout.push("--detach".into());
+                    }
+                    checkout.push(selector.clone());
                     if let Err(e) = this
                         .workspace_exec(&namespace, &env_id, &checkout, &dir, &BTreeMap::new())
                         .await
@@ -1493,7 +1454,9 @@ impl SetupOps for WorkerSetupOps<'_> {
                         if is_setup_control_flow(&e) {
                             return Err(e);
                         }
-                        tracing::warn!(env = env_id, repo = repo.url, error = %e, "setup: branch checkout failed");
+                        let error =
+                            e.context(format!("git checkout {} for {}", selector, repo.url));
+                        return Err(this.fence_failed_launch_group(input, error).await);
                     }
                 }
                 Ok(())
@@ -1618,20 +1581,6 @@ impl SetupOps for WorkerSetupOps<'_> {
                 "post-boot: auto-registered ports"
             );
         }
-        Ok(())
-    }
-
-    async fn start_mesh_node(&mut self, input: &Inputs) -> anyhow::Result<()> {
-        self.phase_authority
-            .ensure_active(self.active_phase)
-            .await?;
-        // The supervised environment daemon and the platform gateway own
-        // optional Mesh participation. Setup must never start a second
-        // best-effort host-owned node process inside the workspace.
-        tracing::info!(
-            environment_id = input.environment_id,
-            "post-boot: optional Mesh is owned by the supervised runtime"
-        );
         Ok(())
     }
 }
@@ -1998,9 +1947,6 @@ mod tests {
         async fn register_ports(&mut self, _input: &Inputs) -> anyhow::Result<()> {
             self.call("register_ports")
         }
-        async fn start_mesh_node(&mut self, _input: &Inputs) -> anyhow::Result<()> {
-            self.call("start_mesh_node")
-        }
     }
 
     fn full_inputs() -> Inputs {
@@ -2011,14 +1957,15 @@ mod tests {
             has_setup: true,
             repos: vec![Repo {
                 url: "https://x/y/app.git".into(),
+                revision: String::new(),
                 branch: "".into(),
-                mount_path: String::new(),
+                mount_path: "/workspace/app".into(),
             }],
+            working_directory: "/workspace/app".into(),
             install_command: "npm ci".into(),
             startup_script: "npm start".into(),
             agents: vec!["claude-code".into()],
             app_ports: vec![(3000, "web".into(), "public".into())],
-            has_mesh: true,
             ttl_seconds: Some(7200),
             ..Default::default()
         }
@@ -2049,11 +1996,10 @@ mod tests {
                 "run_install",
                 "run_startup_script",
                 "validate_agents",
-                "register_ports",
-                "start_mesh_node"
+                "register_ports"
             ]
         );
-        assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7]);
         assert!(s.complete);
         assert_eq!(s.shutdown_ttl, Some(7200));
         assert!(input.setup_complete);
@@ -2102,11 +2048,10 @@ mod tests {
                 "run_install",
                 "run_startup_script",
                 "validate_agents",
-                "register_ports",
-                "start_mesh_node"
+                "register_ports"
             ]
         );
-        assert_eq!(s.phases, vec![4, 5, 6, 7, 8]);
+        assert_eq!(s.phases, vec![4, 5, 6, 7]);
     }
 
     #[tokio::test]
@@ -2151,7 +2096,7 @@ mod tests {
         let s = mock.state();
         assert!(s.complete);
         assert!(s.calls.contains(&"log:startup_script:warning".to_string()));
-        assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[tokio::test]
@@ -2179,20 +2124,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mesh_node_failure_is_warning_only() {
-        let mock = Mock::failing("start_mesh_node");
-        let mut runner = Runner {
-            store: mock.clone(),
-            ops: mock.clone(),
-        };
-        let mut input = full_inputs();
-        runner.run(&mut input).await.unwrap();
-        let s = mock.state();
-        assert!(s.complete);
-        assert!(s.calls.contains(&"log:mesh_node:warning".to_string()));
-    }
-
-    #[tokio::test]
     async fn authority_loss_escapes_every_runner_path_without_advancing() {
         for step in [
             "health_check",
@@ -2202,7 +2133,6 @@ mod tests {
             "run_startup_script",
             "validate_agents",
             "register_ports",
-            "start_mesh_node",
         ] {
             let mock = Mock::losing_authority(step);
             let mut runner = Runner {
@@ -2222,7 +2152,6 @@ mod tests {
             );
             let log_step = match step {
                 "run_startup_script" => "startup_script",
-                "start_mesh_node" => "mesh_node",
                 other => other,
             };
             assert!(
@@ -2245,7 +2174,6 @@ mod tests {
             "run_startup_script",
             "validate_agents",
             "register_ports",
-            "start_mesh_node",
         ] {
             let mock = Mock::failing_recovery(step);
             let mut runner = Runner {
@@ -2265,7 +2193,6 @@ mod tests {
             );
             let log_step = match step {
                 "run_startup_script" => "startup_script",
-                "start_mesh_node" => "mesh_node",
                 other => other,
             };
             assert!(
@@ -2327,46 +2254,7 @@ mod tests {
     }
 
     #[test]
-    fn work_dir_for_repos_mirrors_go() {
-        assert_eq!(work_dir_for_repos(&[]).unwrap(), "");
-        assert_eq!(
-            work_dir_for_repos(&[Repo {
-                url: "https://g/x/app.git".into(),
-                branch: String::new(),
-                mount_path: "/workspace/services/app".into(),
-            }])
-            .unwrap(),
-            "/workspace/services/app"
-        );
-        assert_eq!(
-            work_dir_for_repos(&[Repo {
-                url: "https://g/x/app.git".into(),
-                branch: String::new(),
-                mount_path: String::new(),
-            }])
-            .unwrap(),
-            "/workspace/app"
-        );
-        assert_eq!(
-            work_dir_for_repos(&[
-                Repo {
-                    url: "https://g/x/a.git".into(),
-                    branch: String::new(),
-                    mount_path: String::new(),
-                },
-                Repo {
-                    url: "https://g/x/b.git".into(),
-                    branch: String::new(),
-                    mount_path: String::new(),
-                },
-            ])
-            .unwrap(),
-            "/workspace"
-        );
-    }
-
-    #[test]
-    fn to_setup_inputs_keeps_only_setup_execution_inputs() {
+    fn to_setup_inputs_consumes_the_canonical_project_spec() {
         let env = EnvironmentRow {
             id: "env-1".into(),
             org_id: "org-1".into(),
@@ -2379,9 +2267,8 @@ mod tests {
             cpu_millicores: 2000,
             memory_mb: 4096,
             disk_gb: 10,
-            auth_token: None,
             ttl_seconds: Some(3600),
-            setup_config: None,
+            project_spec: codewire_project::ProjectSpec::default(),
         };
         let backend = BackendRow {
             namespace: "ns".into(),
@@ -2394,20 +2281,32 @@ mod tests {
         assert_eq!(input.ttl_seconds, Some(3600));
 
         let mut env = env;
-        env.setup_config = Some(
-            serde_json::from_str(
-                r#"{"repo_url":"https://g/o/r.git","branch":"dev",
-                    "env_vars":{"CODEWIRE_MESH_URL":"https://mesh.example.com"},
-                    "agents":[{"type":"codex"}],"install_agents":true,
-                    "app_ports":[{"port":8080,"label":"api"}]}"#,
-            )
-            .unwrap(),
-        );
+        env.project_spec = codewire_project::ProjectSpec {
+            repositories: vec![codewire_project::RepositorySpec {
+                source: "https://g/o/r.git".into(),
+                branch: "dev".into(),
+                destination: "/workspace/r".into(),
+                ..Default::default()
+            }],
+            working_directory: "/workspace/r".into(),
+            environment: BTreeMap::from([("APP_MODE".into(), "test".into())]),
+            agents: codewire_project::AgentsSpec {
+                install: Some(true),
+                tools: vec!["codex".into()],
+            },
+            application_ports: vec![codewire_project::ApplicationPort {
+                port: 8080,
+                label: "api".into(),
+                access: String::new(),
+            }],
+            ..Default::default()
+        };
         let input = to_setup_inputs(&env, &backend);
         assert!(input.has_setup);
-        assert!(input.has_mesh);
         assert_eq!(input.repos.len(), 1);
         assert_eq!(input.repos[0].branch, "dev");
+        assert_eq!(input.repos[0].mount_path, "/workspace/r");
+        assert_eq!(input.working_directory, "/workspace/r");
         assert_eq!(input.agents, vec!["codex".to_string()]);
         assert_eq!(
             input.app_ports,
@@ -2428,7 +2327,7 @@ mod tests {
     #[test]
     fn removed_agent_env_is_rejected() {
         assert!(
-            serde_json::from_str::<SetupConfig>(
+            serde_json::from_str::<codewire_project::ProjectSpec>(
                 r#"{"agent_env":{"CLAUDE_CODE_OAUTH_TOKEN":"synthetic"}}"#,
             )
             .is_err()

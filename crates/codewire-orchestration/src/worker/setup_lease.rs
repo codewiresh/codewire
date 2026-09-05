@@ -1036,7 +1036,8 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO environment_presets (id, org_id, name, slug) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+             VALUES ($1, $2, $3, $4, '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
         )
         .bind(&preset_id)
         .bind(&org_id)
@@ -1047,8 +1048,9 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO environments
-                    (id, org_id, created_by, type, state, desired_state, preset_id)
-             VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4)",
+                    (id, org_id, created_by, type, state, desired_state, preset_id, project_spec)
+             VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4,
+                     '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
         )
         .bind(&environment_id)
         .bind(&org_id)

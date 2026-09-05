@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use codewire_gateway_proto::DaemonAuthToken;
 use codewire_tailnet::netstack::TcpListener as TailnetTcpListener;
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::copy_bidirectional;
@@ -91,9 +92,7 @@ where
     }
     if let Some(binding_config) = BindingPollConfig::from_gateway_config(&config) {
         tracing::info!(
-            pod = %binding_config.pod_name,
-            namespace = %binding_config.pod_namespace,
-            "rust gateway binding mode: will poll for tailnet credentials and runtime transport"
+            "rust gateway binding mode: will poll with projected identity for tailnet credentials and runtime transport"
         );
         tasks.spawn(serve_tailnet_after_binding(
             config.clone(),
@@ -384,7 +383,7 @@ async fn serve_tailnet_tcp_proxy_listener(
 
 async fn connect_daemon_with_retry(
     shim_addr: &str,
-    auth_token: Option<String>,
+    auth_token: DaemonAuthToken,
     connect_timeout: Duration,
 ) -> Result<DaemonSessionClient> {
     let deadline = Instant::now() + connect_timeout;
@@ -401,7 +400,7 @@ async fn connect_daemon_with_retry(
         attempts += 1;
         match timeout(
             remaining,
-            DaemonSessionClient::connect_shim_with_auth(shim_addr, auth_token.clone()),
+            DaemonSessionClient::connect_shim(shim_addr, auth_token.clone()),
         )
         .await
         {
@@ -550,10 +549,10 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_gateway_proto::daemon::v1;
     use codewire_gateway_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,
     };
+    use codewire_gateway_proto::{DaemonAuthToken, daemon::v1};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -573,7 +572,7 @@ mod tests {
         let readyz_addr = readyz_listener.local_addr().unwrap().to_string();
         let host_key_path = std::env::temp_dir()
             .join(format!("codewire-gateway-runtime-{}", Uuid::new_v4()))
-            .join("sidecar_host_ed25519");
+            .join("host_ed25519");
         let config = GatewayConfig {
             shim_addr: daemon_addr.to_string(),
             daemon_connect_timeout: Duration::from_secs(60),
@@ -584,7 +583,7 @@ mod tests {
             api_url: None,
             binding_url: None,
             coordinator_url: None,
-            daemon_auth_token: None,
+            daemon_auth_token: DaemonAuthToken::new("gateway-runtime-test-token").unwrap(),
             derp_url: None,
             stun: None,
             stun_servers: Vec::new(),
@@ -636,7 +635,7 @@ mod tests {
                 "codewire-gateway-runtime-delayed-{}",
                 Uuid::new_v4()
             ))
-            .join("sidecar_host_ed25519");
+            .join("host_ed25519");
         let config = GatewayConfig {
             shim_addr: daemon_addr,
             daemon_connect_timeout: Duration::from_secs(1),
@@ -647,7 +646,7 @@ mod tests {
             api_url: None,
             binding_url: None,
             coordinator_url: None,
-            daemon_auth_token: None,
+            daemon_auth_token: DaemonAuthToken::new("gateway-runtime-test-token").unwrap(),
             derp_url: None,
             stun: None,
             stun_servers: Vec::new(),
@@ -686,7 +685,11 @@ mod tests {
         let daemon_addr = reserve_local_addr().await;
         let result = timeout(
             Duration::from_secs(3),
-            connect_daemon_with_retry(&daemon_addr, None, Duration::from_secs(1)),
+            connect_daemon_with_retry(
+                &daemon_addr,
+                DaemonAuthToken::new("gateway-runtime-timeout-test-token").unwrap(),
+                Duration::from_secs(1),
+            ),
         )
         .await
         .expect("daemon connection exceeded its configured timeout");
@@ -704,7 +707,11 @@ mod tests {
     async fn invalid_daemon_endpoint_fails_without_retrying() {
         let result = timeout(
             Duration::from_secs(3),
-            connect_daemon_with_retry("http://[", None, Duration::from_secs(60)),
+            connect_daemon_with_retry(
+                "http://[",
+                DaemonAuthToken::new("gateway-runtime-invalid-endpoint-test-token").unwrap(),
+                Duration::from_secs(60),
+            ),
         )
         .await
         .expect("invalid daemon endpoint entered the retry loop");

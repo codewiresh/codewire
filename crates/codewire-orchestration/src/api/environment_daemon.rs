@@ -39,7 +39,7 @@ use crate::sandbox::template::{WORKSPACE_DAEMON_PORT, workspace_daemon_service_n
 use crate::worker::activity_authority::{
     ActivityAuthority, await_external_mutation, is_authority_lost,
 };
-use crate::worker::gatewayauth::{SCOPE_COORDINATE, issue_token};
+use crate::worker::gatewayauth::{SCOPE_DAEMON, issue_token};
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(120);
@@ -910,7 +910,7 @@ async fn daemon_channel_for_endpoint(
     environment_id: &str,
     endpoint: String,
 ) -> AppResult<(Channel, String)> {
-    let token = issue_token(session_secret, environment_id, SCOPE_COORDINATE).map_err(|error| {
+    let token = issue_token(session_secret, environment_id, SCOPE_DAEMON).map_err(|error| {
         tracing::error!(environment_id, %error, "issue environment daemon token failed");
         AppError::InternalMsg("failed to authorize environment daemon".into())
     })?;
@@ -1095,13 +1095,14 @@ async fn resolve_pod_name(
 #[cfg(test)]
 mod tests {
     use codewire_daemon::service::DaemonRuntimeState;
-    use codewire_daemon::{Config, server};
+    use codewire_daemon::{Config, DaemonAuthToken, server};
     use codewire_gateway_proto::DAEMON_CAPABILITY_HEALTH;
     use tempfile::TempDir;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
     use tokio::time::{Duration as TokioDuration, timeout};
+    use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
 
@@ -1203,19 +1204,20 @@ mod tests {
                 listen_addr: address.to_string(),
                 workspace_root,
                 home_root,
-                auth_token: Some(TEST_DAEMON_TOKEN.into()),
+                auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
                 process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 credential_bridge: None,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let task = tokio::spawn(async move {
-                axum::serve(
-                    listener,
-                    server::router_with_runtime_state(config, runtime_state),
+                server::serve_grpc_with_incoming_and_runtime_state(
+                    config,
+                    runtime_state,
+                    TcpListenerStream::new(listener),
+                    async {
+                        let _ = shutdown_rx.await;
+                    },
                 )
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
                 .await
                 .expect("serve daemon proxy harness");
             });

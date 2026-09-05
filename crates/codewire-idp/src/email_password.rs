@@ -14,9 +14,10 @@ use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::{AppError, ValidatedJson};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::auth_session::{hash_password, hex_id, hex_token, validate_password};
+use crate::auth_session::{hash_password, hex_id, hex_lower, hex_token, validate_password};
 
 const RESEND_API: &str = "https://api.resend.com/emails";
 
@@ -74,6 +75,21 @@ struct VerificationRow {
     expires_at: NaiveDateTime,
 }
 
+#[derive(Clone, Copy)]
+enum VerificationPurpose {
+    EmailVerification,
+    PasswordReset,
+}
+
+impl VerificationPurpose {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::EmailVerification => "email_verification",
+            Self::PasswordReset => "password_reset",
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct EmailUserRow {
     email: String,
@@ -99,20 +115,24 @@ fn bad_request(detail: &'static str) -> AppError {
 async fn create_verification(
     pool: &PgPool,
     email: &str,
+    purpose: VerificationPurpose,
     expires_in: Duration,
 ) -> Result<String, AppError> {
     let id = hex_id();
     let token = hex_token();
+    let token_hash = verification_token_hash(purpose, &token);
     let now = Utc::now().naive_utc();
     let expires_at = now + expires_in;
 
     sqlx::query(
-        r#"INSERT INTO verifications (id, identifier, value, expires_at, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $5)"#,
+        r#"INSERT INTO verifications
+               (id, identifier, purpose, token_hash, expires_at, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $6)"#,
     )
     .bind(&id)
     .bind(email)
-    .bind(&token)
+    .bind(purpose.as_str())
+    .bind(&token_hash)
     .bind(expires_at)
     .bind(now)
     .execute(pool)
@@ -125,20 +145,30 @@ async fn create_verification(
     Ok(token)
 }
 
-async fn verification_by_token(pool: &PgPool, token: &str) -> Result<VerificationRow, sqlx::Error> {
-    sqlx::query_as::<_, VerificationRow>(
-        "SELECT identifier, expires_at FROM verifications WHERE value = $1",
-    )
-    .bind(token)
-    .fetch_one(pool)
-    .await
+fn verification_token_hash(purpose: VerificationPurpose, token: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"codewire/idp/verification/v1\0");
+    digest.update(purpose.as_str().as_bytes());
+    digest.update(b"\0");
+    digest.update(token.as_bytes());
+    hex_lower(&digest.finalize())
 }
 
-async fn delete_verification(pool: &PgPool, token: &str) {
-    let _ = sqlx::query("DELETE FROM verifications WHERE value = $1")
-        .bind(token)
-        .execute(pool)
-        .await;
+async fn claim_verification(
+    tx: &mut Transaction<'_, Postgres>,
+    purpose: VerificationPurpose,
+    token: &str,
+) -> Result<Option<VerificationRow>, sqlx::Error> {
+    let token_hash = verification_token_hash(purpose, token);
+    sqlx::query_as::<_, VerificationRow>(
+        r#"DELETE FROM verifications
+           WHERE purpose = $1 AND token_hash = $2
+           RETURNING identifier, expires_at"#,
+    )
+    .bind(purpose.as_str())
+    .bind(token_hash)
+    .fetch_optional(&mut **tx)
+    .await
 }
 
 async fn send_resend_email(
@@ -197,24 +227,39 @@ async fn verify_email(
     State(state): State<EmailPasswordState>,
     Query(query): Query<VerifyEmailQuery>,
 ) -> Result<Json<VerifyEmailResponse>, AppError> {
-    let row = verification_by_token(&state.pool, &query.token)
-        .await
-        .map_err(|_| bad_request("Invalid or expired verification token"))?;
+    let mut tx = state.pool.begin().await.map_err(|e| {
+        tracing::error!(error = %e, "failed to begin email verification claim");
+        AppError::InternalMsg("Failed to verify email".into())
+    })?;
+    let row = claim_verification(
+        &mut tx,
+        VerificationPurpose::EmailVerification,
+        &query.token,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "failed to claim email verification");
+        AppError::InternalMsg("Failed to verify email".into())
+    })?
+    .ok_or_else(|| bad_request("Invalid or expired verification token"))?;
 
     if Utc::now().naive_utc() > row.expires_at {
-        delete_verification(&state.pool, &query.token).await;
+        tx.commit().await?;
         return Err(bad_request("Verification token has expired"));
     }
 
     sqlx::query("UPDATE users SET email_verified = true, updated_at = NOW() WHERE email = $1")
         .bind(&row.identifier)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to verify email");
             AppError::InternalMsg("Failed to verify email".into())
         })?;
-    delete_verification(&state.pool, &query.token).await;
+    tx.commit().await.map_err(|e| {
+        tracing::error!(error = %e, "failed to commit email verification");
+        AppError::InternalMsg("Failed to verify email".into())
+    })?;
 
     Ok(Json(VerifyEmailResponse { verified: true }))
 }
@@ -236,7 +281,14 @@ async fn forget_password(
     };
 
     if exists.is_some() {
-        match create_verification(&state.pool, &req.email, Duration::hours(1)).await {
+        match create_verification(
+            &state.pool,
+            &req.email,
+            VerificationPurpose::PasswordReset,
+            Duration::hours(1),
+        )
+        .await
+        {
             Ok(token) => {
                 let reset_url = format!("{}/reset-password?token={}", state.frontend_url, token);
                 if state.resend_api_key.is_empty() {
@@ -264,12 +316,20 @@ async fn reset_password(
         return Err(AppError::BadRequest(msg.into()));
     }
 
-    let row = verification_by_token(&state.pool, &req.token)
+    let mut tx = state.pool.begin().await.map_err(|e| {
+        tracing::error!(error = %e, "failed to begin password reset claim");
+        AppError::InternalMsg("Failed to reset password".into())
+    })?;
+    let row = claim_verification(&mut tx, VerificationPurpose::PasswordReset, &req.token)
         .await
-        .map_err(|_| bad_request("Invalid or expired reset token"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to claim password reset");
+            AppError::InternalMsg("Failed to reset password".into())
+        })?
+        .ok_or_else(|| bad_request("Invalid or expired reset token"))?;
 
     if Utc::now().naive_utc() > row.expires_at {
-        delete_verification(&state.pool, &req.token).await;
+        tx.commit().await?;
         return Err(bad_request("Reset token has expired"));
     }
 
@@ -281,14 +341,17 @@ async fn reset_password(
     )
     .bind(&hash)
     .bind(&row.identifier)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "failed to reset password");
         AppError::InternalMsg("Failed to reset password".into())
     })?;
 
-    delete_verification(&state.pool, &req.token).await;
+    tx.commit().await.map_err(|e| {
+        tracing::error!(error = %e, "failed to commit password reset");
+        AppError::InternalMsg("Failed to reset password".into())
+    })?;
     Ok(Json(ResetPasswordResponse { reset: true }))
 }
 
@@ -319,7 +382,13 @@ async fn send_verification(
         }));
     }
 
-    let token = create_verification(&state.pool, &row.email, Duration::hours(24)).await?;
+    let token = create_verification(
+        &state.pool,
+        &row.email,
+        VerificationPurpose::EmailVerification,
+        Duration::hours(24),
+    )
+    .await?;
     let verify_url = format!("{}/verify-email?token={}", state.frontend_url, token);
     if state.resend_api_key.is_empty() {
         tracing::warn!(email = %row.email, "RESEND_API_KEY not set, skipping verification email");
@@ -360,4 +429,23 @@ pub fn router(
         .route("/api/auth/reset-password", post(reset_password))
         .merge(required)
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verification_digests_are_purpose_bound_and_value_blind() {
+        let raw = "verification-capability-marker";
+        let email = verification_token_hash(VerificationPurpose::EmailVerification, raw);
+        let reset = verification_token_hash(VerificationPurpose::PasswordReset, raw);
+
+        assert_ne!(email, reset);
+        for digest in [email, reset] {
+            assert_eq!(digest.len(), 64);
+            assert!(digest.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f')));
+            assert!(!digest.contains(raw));
+        }
+    }
 }

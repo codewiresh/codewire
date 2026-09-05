@@ -2,7 +2,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use codewire_client::{self as rpc, ClientConfig, CodewireClient};
 use codewire_workload_secrets::{
     MAX_WORKLOAD_SECRETS, ResolvedWorkloadSecretMetadata, WorkloadSecretSource,
-    validate_workload_secret_metadata_key,
+    validate_workload_secret_key,
 };
 use serde::{Deserialize, Serialize};
 
@@ -364,7 +364,7 @@ fn validate_preview_response(
     let mut previous_key: Option<&str> = None;
     let mut secrets = Vec::with_capacity(response.secrets.len());
     for secret in &response.secrets {
-        validate_workload_secret_metadata_key(&secret.key).map_err(|_| {
+        validate_workload_secret_key(&secret.key).map_err(|_| {
             anyhow::anyhow!("platform returned invalid workload-secret preview metadata")
         })?;
         if previous_key.is_some_and(|previous| previous >= secret.key.as_str()) {
@@ -586,6 +586,13 @@ mod tests {
                     overridden_sources: vec![rpc::WorkloadSecretSource::User.into()],
                     ..Default::default()
                 }],
+                ..Default::default()
+            },
+            rpc::PreviewWorkloadSecretResolutionResponse {
+                secrets: vec![secret(
+                    "1DIGIT_FIRST",
+                    rpc::WorkloadSecretSource::User.into(),
+                )],
                 ..Default::default()
             },
         ] {

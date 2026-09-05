@@ -1,8 +1,7 @@
 //! Connect-RPC adapters for the cluster-local `codewire.internal.v1` surface.
 //!
-//! The binding service is deliberately anonymous and validates its pod
-//! identity in the handler; credentials use the environment-token Connect
-//! layer.
+//! The binding service authenticates an exact-audience, Pod-bound Kubernetes
+//! service-account token before it performs any Pod or environment lookup.
 
 use std::sync::Arc;
 
@@ -11,23 +10,33 @@ use codewire_proto::codewire::internal::v1::{
     GatewayBindingService, IssueGatewayBindingRequest, IssueGatewayBindingResponse,
     PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
 };
+use codewire_server_core::AppError;
 use codewire_server_core::connect::rpc_app_error;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
 use crate::api::internal::{GatewayBinding, issue_gateway_binding_core};
+use crate::gateway_binding_identity::{
+    GatewayBindingAuthenticator, GatewayBindingIdentityError, KubernetesGatewayBindingAuthenticator,
+};
 use crate::runtime_transport::{
     DirectUdpTransport, EndpointList, PeerRelayTransport, RuntimeTransportBinding,
 };
 
-/// Registers the anonymous pod-keyed binding command. The handler itself
-/// resolves `(pod, namespace)` in the shared service layer.
+/// Registers the projected-Kubernetes-identity binding command.
 pub fn gateway_binding_router(state: ApiState) -> connectrpc::Router {
-    connectrpc::Router::new().add_service(Arc::new(GatewayBindingConnectService { state }))
+    let authenticator = Arc::new(KubernetesGatewayBindingAuthenticator::new(
+        state.kube.clone(),
+    ));
+    connectrpc::Router::new().add_service(Arc::new(GatewayBindingConnectService {
+        state,
+        authenticator,
+    }))
 }
 
 struct GatewayBindingConnectService {
     state: ApiState,
+    authenticator: Arc<dyn GatewayBindingAuthenticator>,
 }
 
 #[allow(refining_impl_trait)]
@@ -35,14 +44,32 @@ impl GatewayBindingService for GatewayBindingConnectService {
     async fn issue_gateway_binding(
         &self,
         ctx: RequestContext,
-        request: ServiceRequest<'_, IssueGatewayBindingRequest>,
+        _request: ServiceRequest<'_, IssueGatewayBindingRequest>,
     ) -> ServiceResult<IssueGatewayBindingResponse> {
-        let request = request.view();
-        let binding = issue_gateway_binding_core(&self.state, request.pod, request.namespace)
+        let identity = self
+            .authenticator
+            .authenticate(ctx.headers())
+            .await
+            .map_err(|error| gateway_binding_identity_rpc_error(error, &ctx))?;
+        let binding = issue_gateway_binding_core(&self.state, &identity)
             .await
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(proto_gateway_binding(binding))
     }
+}
+
+fn gateway_binding_identity_rpc_error(
+    error: GatewayBindingIdentityError,
+    ctx: &RequestContext,
+) -> connectrpc::ConnectError {
+    let error = match error {
+        GatewayBindingIdentityError::Unauthenticated => AppError::Unauthorized,
+        GatewayBindingIdentityError::PermissionDenied => AppError::Forbidden,
+        GatewayBindingIdentityError::Unavailable => {
+            AppError::ServiceUnavailable("gateway binding identity verification unavailable".into())
+        }
+    };
+    rpc_app_error(&error, ctx)
 }
 
 fn proto_gateway_binding(binding: GatewayBinding) -> IssueGatewayBindingResponse {
@@ -102,10 +129,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gateway_binding_identity_failures_keep_distinct_connect_codes() {
+        let context = RequestContext::new(Default::default());
+        assert_eq!(
+            gateway_binding_identity_rpc_error(
+                GatewayBindingIdentityError::Unauthenticated,
+                &context,
+            )
+            .code,
+            connectrpc::ErrorCode::Unauthenticated
+        );
+        assert_eq!(
+            gateway_binding_identity_rpc_error(
+                GatewayBindingIdentityError::PermissionDenied,
+                &context,
+            )
+            .code,
+            connectrpc::ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            gateway_binding_identity_rpc_error(GatewayBindingIdentityError::Unavailable, &context)
+                .code,
+            connectrpc::ErrorCode::Unavailable
+        );
+    }
+
+    #[test]
     fn runtime_transport_conversion_preserves_every_optional_surface() {
+        const MARKER: &str = "synthetic-sidecar-token-canary";
         let binding = GatewayBinding {
             environment_id: "env-1".to_string(),
-            sidecar_token: "sidecar-token".to_string(),
+            sidecar_token: MARKER.to_string(),
             workspace_pod_ip: Some("10.0.0.3".to_string()),
             app_ports: vec![3000],
             runtime_transport: Some(RuntimeTransportBinding {
@@ -130,6 +184,10 @@ mod tests {
                 }),
             }),
         };
+
+        let debug = format!("{binding:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(MARKER));
 
         let proto = proto_gateway_binding(binding);
         let transport = proto

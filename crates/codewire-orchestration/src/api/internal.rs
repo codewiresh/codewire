@@ -1,23 +1,25 @@
 //! Internal sidecar service logic (#140).
 //!
-//! These are the endpoints the in-pod gateway sidecar (and warm pods)
-//! call to fetch their binding + credentials. They are authenticated by
-//! the environment's `auth_token` (a Bearer token), NOT a user session
-//! cookie — except `gateway/binding`, which is keyed by the requesting
-//! pod's `(pod, ns)` and issues a coordinate-scoped sidecar token.
+//! The in-pod gateway calls this service to fetch its binding. The gateway
+//! binding is keyed by the Pod identity derived from an exact-audience
+//! Kubernetes TokenReview and issues a coordinate-scoped sidecar token.
 //!
-//! Connect-RPC owns the binding and credential wire contracts. The shared
-//! functions below stay transport-neutral so that policy, persistence, and
-//! token issuance remain in one service layer.
+//! Connect-RPC owns the binding wire contract. The shared functions below stay
+//! transport-neutral so that policy and token issuance remain in one service
+//! layer.
 
+use codewire_gateway_proto::GATEWAY_BINDING_SERVICE_ACCOUNT;
 use codewire_server_core::{AppError, AppResult};
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::Api;
+use uuid::Uuid;
 
+use crate::gateway_binding_identity::GatewayPodIdentity;
 use crate::runtime_transport::{
     RUNTIME_REGION_LABEL, RuntimeTransportBinding, TRANSPORT_ZONE_LABEL, load_enabled_zone,
 };
 use crate::sandbox::client::{ProbeResult, SandboxClient};
+use crate::sandbox::{LABEL_ENV_ID, LABEL_TYPE};
 use crate::worker::gatewayauth::{SCOPE_COORDINATE, issue_token};
 
 use super::ApiState;
@@ -40,7 +42,7 @@ struct BindingRuntime {
 type BindingRuntimeRow = (String, String, String, String, String, String);
 
 /// Shared service-layer result for `GatewayBindingService`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GatewayBinding {
     pub environment_id: String,
     pub sidecar_token: String,
@@ -49,23 +51,34 @@ pub struct GatewayBinding {
     pub runtime_transport: Option<RuntimeTransportBinding>,
 }
 
+impl std::fmt::Debug for GatewayBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayBinding")
+            .field("environment_id", &self.environment_id)
+            .field("sidecar_token", &"[REDACTED]")
+            .field("workspace_pod_ip", &self.workspace_pod_ip)
+            .field("app_ports", &self.app_ports)
+            .field("runtime_transport", &self.runtime_transport)
+            .finish()
+    }
+}
+
 /// Resolves a gateway pod binding and issues its coordinate-scoped token.
 /// The internal Connect command delegates here.
-pub async fn issue_gateway_binding_core(
+pub(crate) async fn issue_gateway_binding_core(
     state: &ApiState,
-    pod: &str,
-    namespace: &str,
+    identity: &GatewayPodIdentity,
 ) -> AppResult<GatewayBinding> {
-    if pod.is_empty() || namespace.is_empty() {
-        return Err(AppError::BadRequest(
-            "pod and ns query params required".into(),
-        ));
-    }
-
-    let target = resolve_binding_target(state, pod, namespace)
+    let target = resolve_binding_target(state, identity)
         .await
         .map_err(|error| {
-            tracing::error!(pod, namespace, error = %error, "gateway binding lookup failed");
+            tracing::error!(
+                pod = %identity.pod_name(),
+                namespace = %identity.namespace(),
+                error = %error,
+                "gateway binding lookup failed"
+            );
             AppError::from(error)
         })?
         .ok_or_else(|| AppError::NotFound("gateway binding not ready".into()))?;
@@ -123,41 +136,35 @@ pub async fn issue_gateway_binding_core(
 
 async fn resolve_binding_target(
     state: &ApiState,
-    pod: &str,
-    namespace: &str,
+    identity: &GatewayPodIdentity,
 ) -> anyhow::Result<Option<BindingTarget>> {
     let Some(client) = state.kube.as_ref() else {
         return Ok(None);
     };
-    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
-    let pod_obj = match pods.get(pod).await {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), identity.namespace());
+    let pod_obj = match pods.get(identity.pod_name()).await {
         Ok(pod_obj) => pod_obj,
         Err(kube::Error::Api(error)) if error.code == 404 => return Ok(None),
         Err(error) => {
             return Err(anyhow::anyhow!(
-                "get requesting gateway pod {namespace}/{pod}: {error}"
+                "get authenticated gateway Pod {}/{}: {error}",
+                identity.namespace(),
+                identity.pod_name(),
             ));
         }
+    };
+    let Some(env_id) = authenticated_gateway_environment(&pod_obj, identity) else {
+        return Ok(None);
     };
     let pod_node_name = pod_obj
         .spec
         .as_ref()
         .and_then(|spec| spec.node_name.clone());
-    let env_id = pod_obj
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|labels| labels.get("codewire.sh/environment-id"))
-        .map(|env_id| env_id.trim())
-        .filter(|env_id| !env_id.is_empty());
-    let runtime = match env_id {
-        Some(env_id) => binding_runtime_for_environment(state, env_id).await?,
-        None => binding_runtime_for_backend_pod(state, pod, namespace).await?,
-    };
+    let runtime = binding_runtime_for_environment(state, &env_id).await?;
     let Some(runtime) = runtime else {
         return Ok(None);
     };
-    if runtime.namespace != namespace {
+    if runtime.namespace != identity.namespace() {
         return Ok(None);
     }
 
@@ -181,6 +188,28 @@ async fn resolve_binding_target(
     }))
 }
 
+fn authenticated_gateway_environment(pod: &Pod, identity: &GatewayPodIdentity) -> Option<String> {
+    if pod.metadata.name.as_deref() != Some(identity.pod_name())
+        || pod.metadata.namespace.as_deref() != Some(identity.namespace())
+        || pod.metadata.uid.as_deref() != Some(identity.pod_uid())
+        || pod.metadata.deletion_timestamp.is_some()
+        || pod
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.service_account_name.as_deref())
+            != Some(GATEWAY_BINDING_SERVICE_ACCOUNT)
+    {
+        return None;
+    }
+    let labels = pod.metadata.labels.as_ref()?;
+    if labels.get(LABEL_TYPE).map(String::as_str) != Some("gateway") {
+        return None;
+    }
+    let environment_id = labels.get(LABEL_ENV_ID)?;
+    let parsed = Uuid::parse_str(environment_id).ok()?;
+    (parsed.to_string() == *environment_id).then(|| environment_id.clone())
+}
+
 async fn binding_runtime_for_environment(
     state: &ApiState,
     env_id: &str,
@@ -200,32 +229,6 @@ async fn binding_runtime_for_environment(
     .fetch_optional(&state.pool)
     .await
     .map_err(|error| anyhow::anyhow!("query environment gateway binding: {error}"))?;
-
-    Ok(row.and_then(binding_runtime_from_row))
-}
-
-async fn binding_runtime_for_backend_pod(
-    state: &ApiState,
-    pod: &str,
-    namespace: &str,
-) -> anyhow::Result<Option<BindingRuntime>> {
-    let row: Option<BindingRuntimeRow> = sqlx::query_as(
-        r#"SELECT b.environment_id,
-                  b.namespace,
-                  COALESCE(b.pod_name, ''),
-                  COALESCE(b.pod_ip, ''),
-                  e.state,
-                  e.desired_state
-             FROM sandbox_environment_backend b
-             JOIN environments e ON e.id = b.environment_id
-            WHERE b.pod_name = $1
-              AND b.namespace = $2"#,
-    )
-    .bind(pod)
-    .bind(namespace)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("query backend gateway binding: {error}"))?;
 
     Ok(row.and_then(binding_runtime_from_row))
 }
@@ -328,6 +331,40 @@ async fn runtime_transport_for_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::core::v1::PodSpec;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
+
+    const ENVIRONMENT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn gateway_identity() -> GatewayPodIdentity {
+        GatewayPodIdentity::for_test(
+            "runtime",
+            "cw-gateway-current",
+            "7e7b20f6-0bd2-4f11-8b16-9c239851eb52",
+        )
+    }
+
+    fn gateway_pod() -> Pod {
+        let identity = gateway_identity();
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(identity.pod_name().to_owned()),
+                namespace: Some(identity.namespace().to_owned()),
+                uid: Some(identity.pod_uid().to_owned()),
+                labels: Some(std::collections::BTreeMap::from([
+                    (LABEL_TYPE.into(), "gateway".into()),
+                    (LABEL_ENV_ID.into(), ENVIRONMENT_ID.into()),
+                ])),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                service_account_name: Some(GATEWAY_BINDING_SERVICE_ACCOUNT.into()),
+                containers: Vec::new(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 
     fn current_runtime() -> BindingRuntime {
         BindingRuntime {
@@ -390,5 +427,76 @@ mod tests {
         let mut not_ready = current;
         not_ready.claim_ready = false;
         assert!(!binding_runtime_is_current(&runtime, &not_ready));
+    }
+
+    #[test]
+    fn gateway_environment_requires_exact_reviewed_uid_service_account_and_labels() {
+        let identity = gateway_identity();
+        assert_eq!(
+            authenticated_gateway_environment(&gateway_pod(), &identity).as_deref(),
+            Some(ENVIRONMENT_ID)
+        );
+
+        let replacement = GatewayPodIdentity::for_test(
+            identity.namespace(),
+            identity.pod_name(),
+            "a1560db3-8899-40c9-b521-500f223b04fb",
+        );
+        assert!(authenticated_gateway_environment(&gateway_pod(), &replacement).is_none());
+
+        let mut wrong_service_account = gateway_pod();
+        wrong_service_account
+            .spec
+            .as_mut()
+            .unwrap()
+            .service_account_name = Some("other-service-account".into());
+        assert!(authenticated_gateway_environment(&wrong_service_account, &identity).is_none());
+
+        let mut wrong_type = gateway_pod();
+        wrong_type
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(LABEL_TYPE.into(), "workspace".into());
+        assert!(authenticated_gateway_environment(&wrong_type, &identity).is_none());
+
+        let mut missing_environment = gateway_pod();
+        missing_environment
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .remove(LABEL_ENV_ID);
+        assert!(authenticated_gateway_environment(&missing_environment, &identity).is_none());
+
+        let mut noncanonical_environment = gateway_pod();
+        noncanonical_environment
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert(LABEL_ENV_ID.into(), ENVIRONMENT_ID.to_ascii_uppercase());
+        assert!(authenticated_gateway_environment(&noncanonical_environment, &identity).is_none());
+    }
+
+    #[test]
+    fn terminating_or_cross_scope_gateway_pods_are_rejected() {
+        let identity = gateway_identity();
+
+        let mut terminating = gateway_pod();
+        terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
+        assert!(authenticated_gateway_environment(&terminating, &identity).is_none());
+
+        let other_namespace =
+            GatewayPodIdentity::for_test("other-runtime", identity.pod_name(), identity.pod_uid());
+        assert!(authenticated_gateway_environment(&gateway_pod(), &other_namespace).is_none());
+
+        let other_name = GatewayPodIdentity::for_test(
+            identity.namespace(),
+            "cw-gateway-other",
+            identity.pod_uid(),
+        );
+        assert!(authenticated_gateway_environment(&gateway_pod(), &other_name).is_none());
     }
 }

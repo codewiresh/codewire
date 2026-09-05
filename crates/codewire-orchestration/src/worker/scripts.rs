@@ -1,7 +1,7 @@
 //! Rust-owned workspace setup script builders, pinned byte-for-byte by the
 //! checked-in fixtures under `tests/fixtures/setup_scripts`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Mirrors `shellQuoteLiteral` / sandbox.`shellQuote` (same impl).
 pub fn shell_quote(value: &str) -> String {
@@ -24,31 +24,61 @@ fn go_marshal_indent(map: &BTreeMap<String, String>) -> String {
         .replace('>', "\\u003e")
 }
 
+fn unused_heredoc_delimiter(prefix: &str, content: &str) -> String {
+    let lines = content.lines().collect::<BTreeSet<_>>();
+    for index in 0..=lines.len() {
+        let candidate = format!("{prefix}_{index}");
+        if !lines.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+    unreachable!("one more delimiter candidate exists than occupied lines")
+}
+
 /// Mirrors `buildWorkspaceEnvScript`.
 pub fn build_workspace_env_script(env_vars: &BTreeMap<String, String>) -> String {
-    let mut b = String::new();
-    b.push_str(
-        "set -eu\nmkdir -p \"$HOME/.codewire\"\ncat > \"$HOME/.codewire/environment.sh\" <<'CWEOF'\n",
-    );
+    let mut environment_sh = String::new();
     for (key, value) in env_vars {
-        b.push_str("export ");
-        b.push_str(key);
-        b.push('=');
-        b.push_str(&shell_quote(value));
-        b.push('\n');
+        environment_sh.push_str("export ");
+        environment_sh.push_str(key);
+        environment_sh.push('=');
+        environment_sh.push_str(&shell_quote(value));
+        environment_sh.push('\n');
     }
-    b.push_str("CWEOF\ncat > \"$HOME/.codewire/environment.json\" <<'CWJSON'\n");
-    b.push_str(&go_marshal_indent(env_vars));
-    b.push_str(
-        "\nCWJSON\nchmod 600 \"$HOME/.codewire/environment.sh\" \"$HOME/.codewire/environment.json\"\nfor rc in \"$HOME/.profile\" \"$HOME/.bash_profile\" \"$HOME/.bashrc\" \"$HOME/.zshrc\"; do\n  touch \"$rc\"\n  line='[ -f \"$HOME/.codewire/environment.sh\" ] && . \"$HOME/.codewire/environment.sh\"'\n  if ! grep -Fqx \"$line\" \"$rc\"; then\n    printf '\\n%s\\n' \"$line\" >> \"$rc\"\n  fi\ndone\n",
-    );
-    b
+    let environment_json = go_marshal_indent(env_vars);
+    let shell_delimiter = unused_heredoc_delimiter("CW_ENVIRONMENT_SH", &environment_sh);
+    let json_delimiter = unused_heredoc_delimiter("CW_ENVIRONMENT_JSON", &environment_json);
+
+    format!(
+        concat!(
+            "set -eu\n",
+            "umask 077\n",
+            "mkdir -p \"$HOME/.codewire\"\n",
+            "cat > \"$HOME/.codewire/environment.sh\" <<'{shell_delimiter}'\n",
+            "{environment_sh}{shell_delimiter}\n",
+            "cat > \"$HOME/.codewire/environment.json\" <<'{json_delimiter}'\n",
+            "{environment_json}\n{json_delimiter}\n",
+            "chmod 600 \"$HOME/.codewire/environment.sh\" \"$HOME/.codewire/environment.json\"\n",
+            "for rc in \"$HOME/.profile\" \"$HOME/.bash_profile\" \"$HOME/.bashrc\" \"$HOME/.zshrc\"; do\n",
+            "  touch \"$rc\"\n",
+            "  line='[ -f \"$HOME/.codewire/environment.sh\" ] && . \"$HOME/.codewire/environment.sh\"'\n",
+            "  if ! grep -Fqx \"$line\" \"$rc\"; then\n",
+            "    printf '\\n%s\\n' \"$line\" >> \"$rc\"\n",
+            "  fi\n",
+            "done\n",
+        ),
+        shell_delimiter = shell_delimiter,
+        environment_sh = environment_sh,
+        json_delimiter = json_delimiter,
+        environment_json = environment_json,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
 
     fn golden(name: &str) -> String {
         let path = format!(
@@ -71,5 +101,53 @@ mod tests {
             build_workspace_env_script(&vars),
             golden("workspace_env.golden.txt")
         );
+    }
+
+    #[test]
+    fn workspace_env_script_round_trips_delimiters_and_shell_syntax() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let payload = concat!(
+            "before\n",
+            "CW_ENVIRONMENT_SH_0\n",
+            "touch \"$HOME/injected\"\n",
+            "CW_ENVIRONMENT_JSON_0\n",
+            "$(touch \"$HOME/expanded\")\n",
+            "`touch \"$HOME/backtick\"`\n",
+            "after"
+        );
+        let vars = BTreeMap::from([("PAYLOAD".to_owned(), payload.to_owned())]);
+        let script = build_workspace_env_script(&vars);
+        assert!(script.contains("<<'CW_ENVIRONMENT_SH_1'"));
+        assert!(script.contains("<<'CW_ENVIRONMENT_JSON_0'"));
+
+        let status = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .status()
+            .expect("execute generated setup script");
+        assert!(status.success());
+        for marker in ["injected", "expanded", "backtick"] {
+            assert!(!home.path().join(marker).exists(), "created {marker}");
+        }
+
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(". \"$HOME/.codewire/environment.sh\"; printf '%s' \"$PAYLOAD\"")
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("source generated environment");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, payload.as_bytes());
+
+        let json: BTreeMap<String, String> = serde_json::from_slice(
+            &fs::read(home.path().join(".codewire/environment.json")).expect("read generated JSON"),
+        )
+        .expect("parse generated JSON");
+        assert_eq!(json, vars);
     }
 }

@@ -1,14 +1,14 @@
-//! SandboxTemplate + SandboxWarmPool rendering facade.
+//! Per-environment SandboxTemplate and zero-replica SandboxWarmPool rendering facade.
 //!
 //! Runtime decisions, deterministic encoding, names/selectors, workspace
 //! objects, gateway objects, and network policies live in one-way internal
-//! modules. This facade preserves the historical `sandbox::template` API.
+//! modules. This facade owns their stable internal API.
 
 use std::fmt;
 
 use serde_json::{Value, json};
 
-use super::EXTENSIONS_API_VERSION;
+use super::{EXTENSIONS_API_VERSION, LABEL_ENV_ID, LABEL_TYPE};
 
 mod encoding;
 mod gateway;
@@ -24,7 +24,7 @@ use gateway::{
     COMMODITY_GATEWAY_STARTUP_FAILURE_THRESHOLD,
     CONFIDENTIAL_GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS,
     CONFIDENTIAL_GATEWAY_PROGRESS_DEADLINE_SECONDS, CONFIDENTIAL_GATEWAY_STARTUP_FAILURE_THRESHOLD,
-    build_sidecar_env,
+    GATEWAY_BINDING_TOKEN_VOLUME, build_sidecar_env,
 };
 pub use gateway::{
     render_gateway_deployment, render_gateway_direct_udp_service, render_gateway_host_key_secret,
@@ -37,22 +37,15 @@ pub use naming::{
 };
 pub use network::{render_gateway_network_policy, render_workspace_daemon_network_policy};
 pub use runtime_policy::{
-    DOCKER_MODE_EXTERNAL_ISOL8_PROXY, DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT,
-    DOCKER_MODE_NONE, DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY,
-    RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_EXTERNAL_ISOL8_XEN, RUNTIME_CLASS_NAME,
+    DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,
+    DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_CONFIDENTIAL,
     RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
-    RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN, RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC,
-    RuntimeProfileSpec, SIDECAR_RESOURCE_MODE_EXPLICIT, SIDECAR_RESOURCE_MODE_RUNTIME_ENVELOPE,
-    Toleration, default_node_selector, default_tolerations, isol8_tolerations,
-    runtime_profile_spec, validate_managed_runtime_profile,
+    RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, RuntimeProfileSpec, runtime_profile_spec,
+    validate_managed_runtime_profile,
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
 pub use workspace::{render_sandbox_template, render_workspace_daemon_service};
-
-pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
-    workspace::render_sandbox_blueprint(opts)
-}
 
 /// Return the exact raw TOML bytes that the hypervisor annotation compresses
 /// and the SNP verifier hashes into HOST_DATA. Callers use this single source
@@ -73,7 +66,7 @@ pub(crate) fn confidential_init_data(opts: &TemplateOpts) -> anyhow::Result<Stri
     Ok(encoding::build_codewire_kata_policy_init_data(opts, true))
 }
 
-// Constants mirrored from internal/sandbox/types.go and internal/shim.
+// Canonical sandbox and daemon contract constants.
 pub const DEFAULT_GATEWAY_IMAGE: &str = "ghcr.io/codewiresh/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836";
 pub const DEFAULT_DIND_IMAGE: &str = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c";
 pub const DEFAULT_GATEWAY_READYZ_PORT: i64 = 2223;
@@ -85,10 +78,8 @@ pub const GATEWAY_HOST_KEY_SECRET_MOUNT_PATH: &str = "/codewire/gateway-host-key
 pub const GATEWAY_HOST_KEY_PATH: &str = "/codewire/gateway/ssh/host_ed25519";
 pub const WORKSPACE_DAEMON_PORT: i64 = 7777;
 pub const WORKSPACE_DAEMON_LISTEN_ADDR: &str = "0.0.0.0:7777";
-pub const SANDBOX_SERVICE_ACCOUNT: &str = "codewire-sandbox";
-pub const GATEWAY_DOCKER_PROXY_SOCK_PATH: &str = "/codewire/run/docker.sock";
-pub const GATEWAY_DOCKER_UPSTREAM_SOCK_ENV: &str = "CODEWIRE_DOCKER_UPSTREAM_SOCK";
-pub const GATEWAY_DOCKER_UPSTREAM_SOCK_PATH: &str = "/var/run/docker/docker.sock";
+pub const SANDBOX_SERVICE_ACCOUNT: &str = codewire_gateway_proto::GATEWAY_BINDING_SERVICE_ACCOUNT;
+pub const DIND_SOCKET_PATH: &str = "/var/run/docker/docker.sock";
 pub const DAEMON_AUTH_TOKEN_ENV: &str = "CODEWIRE_DAEMON_AUTH_TOKEN";
 pub const GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV: &str =
     "CODEWIRE_DAEMON_CONNECT_TIMEOUT_SECONDS";
@@ -115,13 +106,10 @@ const INTERNAL_DERP_STUN_PORT: i64 = 3478;
 const HOME_ROOT: &str = "/home/codewire";
 const WORKSPACE_ANNOTATION_KEY: &str = "codewire.sh/workspace";
 const WORKSPACE_DISK_GIB_ANNOTATION_KEY: &str = "codewire.sh/disk-gib";
-const ISOL8_WORKSPACE_ANNOTATION_KEY: &str = "isol8.codewire.sh/workspace";
-const ISOL8_DISK_GIB_ANNOTATION_KEY: &str = "isol8.codewire.sh/disk-gb";
 const APP_PREVIEW_MIN_PORT: i64 = 1;
 const APP_PREVIEW_MAX_PORT: i64 = 65535;
 
-/// Mirrors `sandbox.TemplateOpts`. Tolerations are pre-flattened to the
-/// JSON shape (key/operator/effect/value) the Go renderer emits.
+/// Inputs for rendering one environment-scoped sandbox template.
 #[derive(Clone, Default)]
 pub struct TemplateOpts {
     pub name: String,
@@ -130,15 +118,11 @@ pub struct TemplateOpts {
     pub support_image: String,
     pub dind_image: String,
     pub runtime_profile: String,
-    pub runtime_class_name: String,
     pub docker_mode: String,
-    pub sidecar_resource_mode: String,
-    /// (key, value) pairs; rendered as a JSON object (order-insensitive).
-    pub node_selector: Vec<(String, String)>,
-    pub tolerations: Vec<Toleration>,
     pub environment_id: String,
     pub confidential_storage_manifest_uri: String,
     pub gateway_token: String,
+    pub daemon_auth_token: String,
     pub api_base_url: String,
     pub coordinator_url: String,
     pub server_namespace: String,
@@ -184,17 +168,14 @@ impl fmt::Debug for TemplateOpts {
             .field("support_image", &self.support_image)
             .field("dind_image", &self.dind_image)
             .field("runtime_profile", &self.runtime_profile)
-            .field("runtime_class_name", &self.runtime_class_name)
             .field("docker_mode", &self.docker_mode)
-            .field("sidecar_resource_mode", &self.sidecar_resource_mode)
-            .field("node_selector", &self.node_selector)
-            .field("tolerations", &self.tolerations)
             .field("environment_id", &self.environment_id)
             .field(
                 "confidential_storage_manifest_uri",
                 &self.confidential_storage_manifest_uri,
             )
             .field("gateway_token", &"<redacted>")
+            .field("daemon_auth_token", &"<redacted>")
             .field("api_base_url", &self.api_base_url)
             .field("coordinator_url", &self.coordinator_url)
             .field("server_namespace", &self.server_namespace)
@@ -257,16 +238,7 @@ impl fmt::Debug for TemplateOpts {
 
 impl TemplateOpts {
     pub fn runtime_profile_spec(&self) -> RuntimeProfileSpec {
-        let mut spec = runtime_profile_spec(
-            &self.runtime_profile,
-            &self.runtime_class_name,
-            &self.docker_mode,
-            self.dind_enabled,
-        );
-        if !self.sidecar_resource_mode.is_empty() {
-            spec.sidecar_resource_mode = self.sidecar_resource_mode.clone();
-        }
-        spec
+        runtime_profile_spec(&self.runtime_profile, &self.docker_mode, self.dind_enabled)
     }
 
     pub fn validate_confidential_storage_manifest(&self) -> anyhow::Result<()> {
@@ -289,19 +261,26 @@ impl TemplateOpts {
     }
 }
 
-/// Mirrors `sandbox.RenderSandboxWarmPool`.
-pub fn render_sandbox_warm_pool(
+/// Render the zero-replica shadow pool required by the SandboxClaim contract.
+pub fn render_sandbox_shadow_pool(
     namespace: &str,
     name: &str,
     template_ref: &str,
-    replicas: i64,
+    environment_id: &str,
 ) -> Value {
     json!({
         "apiVersion": EXTENSIONS_API_VERSION,
         "kind": "SandboxWarmPool",
-        "metadata": { "name": name, "namespace": namespace },
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "labels": {
+                LABEL_ENV_ID: environment_id,
+                LABEL_TYPE: "sandbox-claim-shadow",
+            },
+        },
         "spec": {
-            "replicas": replicas,
+            "replicas": 0,
             "sandboxTemplateRef": { "name": template_ref },
         },
     })

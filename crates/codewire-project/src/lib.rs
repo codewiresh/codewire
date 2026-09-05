@@ -21,6 +21,13 @@ pub const MAX_APPLICATION_PORTS: usize = 128;
 pub const MAX_AGENTS: usize = 32;
 pub const MAX_SKILLS: usize = 256;
 pub const MAX_LOCAL_MOUNTS: usize = 64;
+/// Environment names reserved for Codewire-owned runtime control channels.
+pub const RESERVED_RUNTIME_ENVIRONMENT_KEYS: [&str; 4] = [
+    "CODEWIRE_MESH_URL",
+    "CODEWIRE_MESH_AUTH_TOKEN",
+    "CODEWIRE_MESH_NETWORK",
+    "CODEWIRE_MESH_INVITE_CODE",
+];
 /// Maximum key size accepted by canonical project and guest workload boundaries.
 pub const MAX_ENVIRONMENT_KEY_BYTES: usize =
     codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES;
@@ -43,8 +50,6 @@ pub enum ProjectError {
     Yaml(#[from] serde_yaml::Error),
     #[error("unsupported codewire project schema version {0}")]
     UnsupportedSchema(u32),
-    #[error("conflicting codewire project schema versions {version} and {schema_version}")]
-    ConflictingSchemaVersion { version: u32, schema_version: u32 },
     #[error("{field} exceeds the maximum of {maximum} entries")]
     TooManyEntries { field: &'static str, maximum: usize },
     #[error("invalid {field}: {detail}")]
@@ -279,31 +284,25 @@ struct RawProject {
     #[serde(default)]
     version: Option<u32>,
     #[serde(default)]
-    schema_version: Option<u32>,
-    #[serde(default)]
     preset: String,
     #[serde(default)]
     image: String,
-    #[serde(default, alias = "repos")]
+    #[serde(default)]
     repositories: Vec<RawRepository>,
-    #[serde(default, alias = "workdir")]
+    #[serde(default)]
     working_directory: String,
-    #[serde(default, alias = "install")]
+    #[serde(default)]
     install_command: String,
-    #[serde(default, alias = "startup")]
+    #[serde(default)]
     startup_script: String,
-    #[serde(default, alias = "env")]
+    #[serde(default)]
     environment: BTreeMap<String, String>,
     #[serde(default)]
-    agents: Option<RawAgents>,
+    agents: Option<RawAgentsBlock>,
     #[serde(default)]
-    agent: String,
+    skills: Vec<RawSkillBlock>,
     #[serde(default)]
-    install_agents: Option<bool>,
-    #[serde(default)]
-    skills: Vec<RawSkill>,
-    #[serde(default, alias = "app_ports")]
-    ports: Vec<RawPort>,
+    ports: Vec<RawPortBlock>,
     #[serde(default)]
     cpu: Option<RawQuantity>,
     #[serde(default)]
@@ -321,22 +320,14 @@ struct RawProject {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRepository {
-    #[serde(default, alias = "url")]
+    #[serde(default)]
     source: String,
     #[serde(default)]
     revision: String,
     #[serde(default)]
     branch: String,
-    #[serde(default, alias = "mount_path")]
+    #[serde(default)]
     destination: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawAgents {
-    String(String),
-    List(Vec<String>),
-    Mapping(RawAgentsBlock),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -349,31 +340,15 @@ struct RawAgentsBlock {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawSkill {
-    String(String),
-    Mapping(RawSkillBlock),
-}
-
-#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSkillBlock {
+    source: SkillSource,
     #[serde(default)]
     path: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
-    source: String,
-    #[serde(default)]
     agents: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawPort {
-    Int(i64),
-    String(String),
-    Mapping(RawPortBlock),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -386,20 +361,26 @@ struct RawPortBlock {
     #[serde(default)]
     guest_port: i64,
     #[serde(default)]
-    published: i64,
-    #[serde(default)]
-    target: i64,
-    #[serde(default)]
     label: String,
     #[serde(default)]
     access: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum RawQuantity {
-    Int(i64),
-    String(String),
+#[derive(Debug, Clone)]
+struct RawQuantity(String);
+
+impl<'de> Deserialize<'de> for RawQuantity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match serde_yaml::Value::deserialize(deserializer)? {
+            serde_yaml::Value::String(value) => Ok(Self(value)),
+            _ => Err(serde::de::Error::custom(
+                "resource quantity must be a unit-bearing string",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -424,11 +405,11 @@ struct RawAccessBlock {
 struct RawMountBlock {
     #[serde(default)]
     source: String,
-    #[serde(default, alias = "target")]
+    #[serde(default)]
     destination: String,
     #[serde(default)]
     mode: String,
-    #[serde(default, alias = "readonly")]
+    #[serde(default)]
     read_only: Option<bool>,
 }
 

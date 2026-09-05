@@ -21,7 +21,7 @@ RUN rm -f /etc/apt/sources.list && \
     ! grep -RqsE '(archive|security|ports)\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d && \
     apt-get-with-retry install -y --no-install-recommends \
       bash build-essential ca-certificates curl file git htop iproute2 iptables jq locales man \
-      openssh-server postgresql-client python3 python3-pip sudo tmux unzip vim wget rsync && \
+      openssh-client postgresql-client python3 python3-pip sudo tmux unzip vim wget rsync && \
     rm -rf /var/lib/apt/lists/*
 
 # Foundational release tools are direct, checksum-verified upstream artifacts.
@@ -83,18 +83,8 @@ RUN userdel -r ubuntu 2>/dev/null || true && \
     echo "codewire ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/nopasswd && \
     usermod -aG docker codewire
 
-# sshd runs as codewire on port 2222. Host keys and authorized_keys live in
-# /etc/codewire/ssh so ~/.ssh can be mounted read-only for git credentials.
-RUN mkdir -p /run/sshd /etc/codewire/ssh && \
-    chown codewire:codewire /etc/codewire/ssh && \
-    chmod 700 /etc/codewire/ssh && \
-    echo -e "Port 2222\nPasswordAuthentication no\nPermitRootLogin no\nPubkeyAuthentication yes\nHostKey /etc/codewire/ssh/ssh_host_ed25519_key\nAuthorizedKeysFile /etc/codewire/ssh/authorized_keys .ssh/authorized_keys" \
-    > /etc/ssh/sshd_config.d/codewire.conf
-
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod 0755 /entrypoint.sh
-
-EXPOSE 2222
 
 USER codewire
 WORKDIR /home/codewire

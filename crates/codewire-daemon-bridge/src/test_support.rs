@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use codewire_daemon::execution::ProcessExecution;
-use codewire_daemon::{Config, serve_grpc_with_incoming};
+use codewire_daemon::{Config, DaemonAuthToken, serve_grpc_with_incoming};
 use prost::Message as _;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -57,7 +57,7 @@ impl DaemonHarness {
             listen_addr: endpoint.clone(),
             workspace_root: workspace_root.clone(),
             home_root,
-            auth_token: Some(TEST_DAEMON_TOKEN.to_owned()),
+            auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
         };

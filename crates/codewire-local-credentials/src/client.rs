@@ -1487,8 +1487,6 @@ fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
         Ok(CredentialAuthenticationKind::ApiKey) => Ok(CredentialAuthKind::ApiKey),
         Ok(CredentialAuthenticationKind::AccessToken) => Ok(CredentialAuthKind::AccessToken),
         Ok(CredentialAuthenticationKind::GithubApp) => Ok(CredentialAuthKind::GitHubApp),
-        Ok(CredentialAuthenticationKind::SshPrivateKey) => Ok(CredentialAuthKind::SshPrivateKey),
-        Ok(CredentialAuthenticationKind::SshAgent) => Ok(CredentialAuthKind::SshAgent),
         Ok(CredentialAuthenticationKind::Unspecified) | Err(_) => Err(Status::data_loss(
             "local credential authority returned invalid metadata",
         )),
@@ -1534,7 +1532,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workload_secret_response_keys_use_the_shared_storage_boundary() {
+    fn workload_secret_response_keys_use_the_canonical_workload_grammar() {
         let maximum = format!(
             "A{}",
             "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES - 1)
@@ -1546,6 +1544,18 @@ mod tests {
 
         assert!(valid_workload_secret_key(&maximum));
         assert!(!valid_workload_secret_key(&too_long));
+        assert!(valid_workload_secret_key("_UNDERSCORE_FIRST"));
+        assert!(!valid_workload_secret_key("1DIGIT_FIRST"));
+        assert_eq!(
+            resolved_workload_secret_from_proto(v1::ResolvedWorkloadSecretMetadata {
+                key: "1DIGIT_FIRST".into(),
+                source: v1::WorkloadSecretSource::User.into(),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .code(),
+            tonic::Code::DataLoss
+        );
         assert!(
             workload_secret_from_proto(v1::WorkloadSecretMetadata {
                 key: maximum,

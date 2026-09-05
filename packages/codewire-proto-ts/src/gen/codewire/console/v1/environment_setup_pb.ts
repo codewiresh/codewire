@@ -4,21 +4,15 @@
 
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
-import type { DetectionResult } from "../../v1/environment_pb";
-import { file_codewire_v1_environment } from "../../v1/environment_pb";
 import type { Preset } from "../../v1/preset_pb";
 import { file_codewire_v1_preset } from "../../v1/preset_pb";
-import type { SecretProject } from "../../v1/secret_pb";
-import { file_codewire_v1_secret } from "../../v1/secret_pb";
-import type { Timestamp } from "@bufbuild/protobuf/wkt";
-import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file codewire/console/v1/environment_setup.proto.
  */
 export const file_codewire_console_v1_environment_setup: GenFile = /*@__PURE__*/
-  fileDesc("Citjb2Rld2lyZS9jb25zb2xlL3YxL2Vudmlyb25tZW50X3NldHVwLnByb3RvEhNjb2Rld2lyZS5jb25zb2xlLnYxIjQKIkdldEVudmlyb25tZW50Q3JlYXRlT3B0aW9uc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJIr4BCiNHZXRFbnZpcm9ubWVudENyZWF0ZU9wdGlvbnNSZXNwb25zZRI8Cg1naXRodWJfc3RhdHVzGAEgASgLMiUuY29kZXdpcmUuY29uc29sZS52MS5HaXRIdWJDb25uZWN0aW9uEiQKB3ByZXNldHMYAiADKAsyEy5jb2Rld2lyZS52MS5QcmVzZXQSMwoPc2VjcmV0X3Byb2plY3RzGAMgAygLMhouY29kZXdpcmUudjEuU2VjcmV0UHJvamVjdCKxAQoQR2l0SHViQ29ubmVjdGlvbhIRCgljb25uZWN0ZWQYASABKAgSEAoIdXNlcm5hbWUYAiABKAkSHAoPaW5zdGFsbGF0aW9uX2lkGAMgASgDSACIAQESNQoMY29ubmVjdGVkX2F0GAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgBiAEBQhIKEF9pbnN0YWxsYXRpb25faWRCDwoNX2Nvbm5lY3RlZF9hdCI1ChFEZXRlY3RSZXBvUmVxdWVzdBIQCghyZXBvX3VybBgBIAEoCRIOCgZicmFuY2gYAiABKAkiQgoSRGV0ZWN0UmVwb1Jlc3BvbnNlEiwKBnJlc3VsdBgBIAEoCzIcLmNvZGV3aXJlLnYxLkRldGVjdGlvblJlc3VsdCIcChpJc3N1ZVRlcm1pbmFsVGlja2V0UmVxdWVzdCItChtJc3N1ZVRlcm1pbmFsVGlja2V0UmVzcG9uc2USDgoGdGlja2V0GAEgASgJMo8DChdFbnZpcm9ubWVudFNldHVwU2VydmljZRKVAQobR2V0RW52aXJvbm1lbnRDcmVhdGVPcHRpb25zEjcuY29kZXdpcmUuY29uc29sZS52MS5HZXRFbnZpcm9ubWVudENyZWF0ZU9wdGlvbnNSZXF1ZXN0GjguY29kZXdpcmUuY29uc29sZS52MS5HZXRFbnZpcm9ubWVudENyZWF0ZU9wdGlvbnNSZXNwb25zZSIDkAIBEmIKCkRldGVjdFJlcG8SJi5jb2Rld2lyZS5jb25zb2xlLnYxLkRldGVjdFJlcG9SZXF1ZXN0GicuY29kZXdpcmUuY29uc29sZS52MS5EZXRlY3RSZXBvUmVzcG9uc2UiA5ACARJ4ChNJc3N1ZVRlcm1pbmFsVGlja2V0Ei8uY29kZXdpcmUuY29uc29sZS52MS5Jc3N1ZVRlcm1pbmFsVGlja2V0UmVxdWVzdBowLmNvZGV3aXJlLmNvbnNvbGUudjEuSXNzdWVUZXJtaW5hbFRpY2tldFJlc3BvbnNlQugBChdjb20uY29kZXdpcmUuY29uc29sZS52MUIVRW52aXJvbm1lbnRTZXR1cFByb3RvUAFaSGdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9jb25zb2xlL3YxO2NvbnNvbGV2MaICA0NDWKoCE0NvZGV3aXJlLkNvbnNvbGUuVjHKAhNDb2Rld2lyZVxDb25zb2xlXFYx4gIfQ29kZXdpcmVcQ29uc29sZVxWMVxHUEJNZXRhZGF0YeoCFUNvZGV3aXJlOjpDb25zb2xlOjpWMWIGcHJvdG8z", [file_codewire_v1_environment, file_codewire_v1_preset, file_codewire_v1_secret, file_google_protobuf_timestamp]);
+  fileDesc("Citjb2Rld2lyZS9jb25zb2xlL3YxL2Vudmlyb25tZW50X3NldHVwLnByb3RvEhNjb2Rld2lyZS5jb25zb2xlLnYxIjQKIkdldEVudmlyb25tZW50Q3JlYXRlT3B0aW9uc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJIncKI0dldEVudmlyb25tZW50Q3JlYXRlT3B0aW9uc1Jlc3BvbnNlEiQKB3ByZXNldHMYAiADKAsyEy5jb2Rld2lyZS52MS5QcmVzZXRKBAgBEAJKBAgDEARSDWdpdGh1Yl9zdGF0dXNSD3NlY3JldF9wcm9qZWN0cyIcChpJc3N1ZVRlcm1pbmFsVGlja2V0UmVxdWVzdCItChtJc3N1ZVRlcm1pbmFsVGlja2V0UmVzcG9uc2USDgoGdGlja2V0GAEgASgJMqsCChdFbnZpcm9ubWVudFNldHVwU2VydmljZRKVAQobR2V0RW52aXJvbm1lbnRDcmVhdGVPcHRpb25zEjcuY29kZXdpcmUuY29uc29sZS52MS5HZXRFbnZpcm9ubWVudENyZWF0ZU9wdGlvbnNSZXF1ZXN0GjguY29kZXdpcmUuY29uc29sZS52MS5HZXRFbnZpcm9ubWVudENyZWF0ZU9wdGlvbnNSZXNwb25zZSIDkAIBEngKE0lzc3VlVGVybWluYWxUaWNrZXQSLy5jb2Rld2lyZS5jb25zb2xlLnYxLklzc3VlVGVybWluYWxUaWNrZXRSZXF1ZXN0GjAuY29kZXdpcmUuY29uc29sZS52MS5Jc3N1ZVRlcm1pbmFsVGlja2V0UmVzcG9uc2VC6AEKF2NvbS5jb2Rld2lyZS5jb25zb2xlLnYxQhVFbnZpcm9ubWVudFNldHVwUHJvdG9QAVpIZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2NvbnNvbGUvdjE7Y29uc29sZXYxogIDQ0NYqgITQ29kZXdpcmUuQ29uc29sZS5WMcoCE0NvZGV3aXJlXENvbnNvbGVcVjHiAh9Db2Rld2lyZVxDb25zb2xlXFYxXEdQQk1ldGFkYXRh6gIVQ29kZXdpcmU6OkNvbnNvbGU6OlYxYgZwcm90bzM", [file_codewire_v1_preset]);
 
 /**
  * @generated from message codewire.console.v1.GetEnvironmentCreateOptionsRequest
@@ -42,19 +36,9 @@ export const GetEnvironmentCreateOptionsRequestSchema: GenMessage<GetEnvironment
  */
 export type GetEnvironmentCreateOptionsResponse = Message<"codewire.console.v1.GetEnvironmentCreateOptionsResponse"> & {
   /**
-   * @generated from field: codewire.console.v1.GitHubConnection github_status = 1;
-   */
-  githubStatus?: GitHubConnection | undefined;
-
-  /**
    * @generated from field: repeated codewire.v1.Preset presets = 2;
    */
   presets: Preset[];
-
-  /**
-   * @generated from field: repeated codewire.v1.SecretProject secret_projects = 3;
-   */
-  secretProjects: SecretProject[];
 };
 
 /**
@@ -63,80 +47,6 @@ export type GetEnvironmentCreateOptionsResponse = Message<"codewire.console.v1.G
  */
 export const GetEnvironmentCreateOptionsResponseSchema: GenMessage<GetEnvironmentCreateOptionsResponse> = /*@__PURE__*/
   messageDesc(file_codewire_console_v1_environment_setup, 1);
-
-/**
- * GitHubConnection is the environment-creation view of the caller's stored
- * GitHub connection. No token material is exposed.
- *
- * @generated from message codewire.console.v1.GitHubConnection
- */
-export type GitHubConnection = Message<"codewire.console.v1.GitHubConnection"> & {
-  /**
-   * @generated from field: bool connected = 1;
-   */
-  connected: boolean;
-
-  /**
-   * @generated from field: string username = 2;
-   */
-  username: string;
-
-  /**
-   * @generated from field: optional int64 installation_id = 3;
-   */
-  installationId?: bigint | undefined;
-
-  /**
-   * @generated from field: optional google.protobuf.Timestamp connected_at = 4;
-   */
-  connectedAt?: Timestamp | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.GitHubConnection.
- * Use `create(GitHubConnectionSchema)` to create a new message.
- */
-export const GitHubConnectionSchema: GenMessage<GitHubConnection> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_environment_setup, 2);
-
-/**
- * @generated from message codewire.console.v1.DetectRepoRequest
- */
-export type DetectRepoRequest = Message<"codewire.console.v1.DetectRepoRequest"> & {
-  /**
-   * @generated from field: string repo_url = 1;
-   */
-  repoUrl: string;
-
-  /**
-   * @generated from field: string branch = 2;
-   */
-  branch: string;
-};
-
-/**
- * Describes the message codewire.console.v1.DetectRepoRequest.
- * Use `create(DetectRepoRequestSchema)` to create a new message.
- */
-export const DetectRepoRequestSchema: GenMessage<DetectRepoRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_environment_setup, 3);
-
-/**
- * @generated from message codewire.console.v1.DetectRepoResponse
- */
-export type DetectRepoResponse = Message<"codewire.console.v1.DetectRepoResponse"> & {
-  /**
-   * @generated from field: codewire.v1.DetectionResult result = 1;
-   */
-  result?: DetectionResult | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.DetectRepoResponse.
- * Use `create(DetectRepoResponseSchema)` to create a new message.
- */
-export const DetectRepoResponseSchema: GenMessage<DetectRepoResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_environment_setup, 4);
 
 /**
  * @generated from message codewire.console.v1.IssueTerminalTicketRequest
@@ -149,7 +59,7 @@ export type IssueTerminalTicketRequest = Message<"codewire.console.v1.IssueTermi
  * Use `create(IssueTerminalTicketRequestSchema)` to create a new message.
  */
 export const IssueTerminalTicketRequestSchema: GenMessage<IssueTerminalTicketRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_environment_setup, 5);
+  messageDesc(file_codewire_console_v1_environment_setup, 2);
 
 /**
  * @generated from message codewire.console.v1.IssueTerminalTicketResponse
@@ -166,7 +76,7 @@ export type IssueTerminalTicketResponse = Message<"codewire.console.v1.IssueTerm
  * Use `create(IssueTerminalTicketResponseSchema)` to create a new message.
  */
 export const IssueTerminalTicketResponseSchema: GenMessage<IssueTerminalTicketResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_environment_setup, 6);
+  messageDesc(file_codewire_console_v1_environment_setup, 3);
 
 /**
  * EnvironmentSetupService supplies the first-party environment-creation UX.
@@ -185,14 +95,6 @@ export const EnvironmentSetupService: GenService<{
     methodKind: "unary";
     input: typeof GetEnvironmentCreateOptionsRequestSchema;
     output: typeof GetEnvironmentCreateOptionsResponseSchema;
-  },
-  /**
-   * @generated from rpc codewire.console.v1.EnvironmentSetupService.DetectRepo
-   */
-  detectRepo: {
-    methodKind: "unary";
-    input: typeof DetectRepoRequestSchema;
-    output: typeof DetectRepoResponseSchema;
   },
   /**
    * @generated from rpc codewire.console.v1.EnvironmentSetupService.IssueTerminalTicket

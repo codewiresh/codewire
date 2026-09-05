@@ -60,9 +60,8 @@ use http::{HeaderValue, Method, StatusCode, header};
 use sha2::{Digest, Sha256};
 
 use crate::auth::{
-    AuthState, AuthUser, CredentialContext, EnvironmentIdentity, authenticate_environment_token,
-    authenticate_product_credential, bearer_token, require_product_access, resolve_authentication,
-    session_cookie,
+    AuthState, AuthUser, CredentialContext, authenticate_product_credential, bearer_token,
+    require_product_access, resolve_authentication, session_cookie,
 };
 use crate::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
 use crate::error::AppError;
@@ -387,8 +386,9 @@ async fn unbuffer_streaming_responses(
 ///   `permission_denied` for every method of the mount (`require_admin`
 ///   twin). Admin gating is per-Service: `codewire.admin.v1` services use
 ///   this whole-mount mode (D3).
-/// - pod-keyed internal services mount without any auth layer
-///   ([`connect_router`]); their handlers validate their own credentials.
+/// - self-authenticating internal services mount without this product-user
+///   auth layer ([`connect_router`]); their handlers must validate their
+///   dedicated machine identity before any domain lookup.
 ///
 /// Two explicit per-method sets refine a mount, both defaulting to empty
 /// (secure by default) and both reviewed like a route registration:
@@ -510,7 +510,6 @@ pub enum MeshAuthorizationPrincipal {
         user: AuthUser,
         credential: CredentialContext,
     },
-    Environment(EnvironmentIdentity),
 }
 
 /// Extracts the original caller identity established by
@@ -701,29 +700,15 @@ async fn enforce_mesh_authorization(
                     );
                 }
             };
-            match bounded_authentication(
+            bounded_authentication(
                 authenticate_product_credential(&layer.state, None, Some(bearer)),
                 auth_timeout,
             )
             .await
-            {
-                Ok(authentication) => Ok(MeshAuthorizationPrincipal::User {
-                    user: authentication.user,
-                    credential: authentication.credential,
-                }),
-                // Environment identities are not product credentials. Fall
-                // back only after an otherwise unrecognized bearer, never
-                // after an OAuth scope or API-key authorization denial.
-                Err(AuthResolutionFailure::Authentication(AppError::Unauthorized)) => {
-                    bounded_authentication(
-                        authenticate_environment_token(&layer.state, Some(bearer)),
-                        auth_timeout,
-                    )
-                    .await
-                    .map(MeshAuthorizationPrincipal::Environment)
-                }
-                Err(error) => Err(error),
-            }
+            .map(|authentication| MeshAuthorizationPrincipal::User {
+                user: authentication.user,
+                credential: authentication.credential,
+            })
         }
     };
     let principal = match principal {
@@ -738,16 +723,9 @@ async fn enforce_mesh_authorization(
         }
     };
 
-    let (credential, principal_evidence) = match &principal {
-        MeshAuthorizationPrincipal::User { user, credential } => (
-            RpcCredentialKind(credential.kind().as_str()),
-            RpcPrincipalEvidence::authenticated(&user.user_id, &BTreeSet::new()),
-        ),
-        MeshAuthorizationPrincipal::Environment(identity) => (
-            RpcCredentialKind("environment_token"),
-            RpcPrincipalEvidence::authenticated(&identity.user_id, &BTreeSet::new()),
-        ),
-    };
+    let MeshAuthorizationPrincipal::User { user, credential } = &principal;
+    let credential = RpcCredentialKind(credential.kind().as_str());
+    let principal_evidence = RpcPrincipalEvidence::authenticated(&user.user_id, &BTreeSet::new());
     req.extensions_mut().insert(principal);
     let mut response = next.run(req).await;
     response.extensions_mut().insert(credential);

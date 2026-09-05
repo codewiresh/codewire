@@ -291,10 +291,11 @@ mod tests {
     }
 
     #[test]
-    fn repository_picker_preserves_its_bounded_viewport_contract() {
-        assert!(ENVIRONMENTS_STYLES.contains("height: 186px"));
-        assert!(ENVIRONMENTS_STYLES.contains("content-visibility: auto"));
-        assert!(ENVIRONMENTS_STYLES.contains(".cw-mount-row[hidden] { display: none; }"));
+    fn manual_repository_entry_preserves_its_mount_contract() {
+        assert!(ENVIRONMENTS_STYLES.contains(".cw-manual-repositories"));
+        assert!(ENVIRONMENTS_STYLES.contains(".cw-repository-row"));
         assert!(ENVIRONMENTS_STYLES.contains(".cw-workspace-mount"));
+        assert!(!ENVIRONMENTS_STYLES.contains(".cw-repository-picker"));
+        assert!(!ENVIRONMENTS_STYLES.contains(".cw-github-banner"));
     }
 }

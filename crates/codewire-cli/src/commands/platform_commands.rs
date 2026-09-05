@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::*;
 use codewire_client::{ClientError, CodewireClient, DeleteApiKeyRequest, ListApiKeysRequest};
 
@@ -400,115 +402,6 @@ pub(crate) fn short_env_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
-pub(crate) async fn handle_github_command(
-    globals: &Globals,
-    command: GithubCommand,
-) -> anyhow::Result<()> {
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
-    let platform = resolve_platform(globals, &paths, &env)?;
-    let client = ConsoleClient::new(&platform)?;
-
-    match command {
-        GithubCommand::Login => {
-            handle_github_login(&client).await?;
-        }
-        GithubCommand::Logout => {
-            client
-                .disconnect_github()
-                .await
-                .context("disconnect github")?;
-            println!("GitHub disconnected.");
-        }
-        GithubCommand::Status => {
-            let status = client.get_github_status().await.context("github status")?;
-            print!("{}", format_github_status_text(&status));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) async fn handle_github_login(client: &ConsoleClient) -> anyhow::Result<()> {
-    let config = client
-        .get_github_config()
-        .await
-        .context("fetch github config")?;
-    if config.client_id.trim().is_empty() {
-        anyhow::bail!("GitHub App not configured on server");
-    }
-
-    let device_code = github_device::request_github_device_code(&config.client_id)
-        .await
-        .context("request device code")?;
-    println!();
-    println!("  Open: {}", device_code.verification_uri);
-    println!("  Code: {}", device_code.user_code);
-    println!();
-    let _ = open_browser(&device_code.verification_uri);
-
-    eprintln!("Waiting for authorization...");
-    let token = github_device::poll_github_token(
-        &config.client_id,
-        &device_code.device_code,
-        device_code.interval,
-    )
-    .await?;
-
-    let username = match github_device::fetch_github_username(&token.access_token).await {
-        Ok(username) => {
-            println!("  Authenticated as @{username}");
-            username
-        }
-        Err(err) => {
-            println!("  Warning: could not fetch username: {err}");
-            String::new()
-        }
-    };
-
-    let installation_id = if config.app_slug.trim().is_empty() {
-        None
-    } else {
-        match github_device::fetch_github_installation_id(&token.access_token, &config.app_slug)
-            .await
-        {
-            Ok(Some(installation_id)) => {
-                println!("  App installed (ID: {installation_id})");
-                Some(installation_id)
-            }
-            Ok(None) => {
-                println!();
-                println!("  The GitHub App is not installed on your account.");
-                println!(
-                    "  Install it at: https://github.com/apps/{}/installations/new",
-                    config.app_slug
-                );
-                println!("  (You can do this later - private repo access requires installation)");
-                None
-            }
-            Err(err) => {
-                println!("  Warning: could not check installation: {err}");
-                None
-            }
-        }
-    };
-
-    client
-        .save_github_token(SaveGitHubToken {
-            access_token: token.access_token,
-            refresh_token: token.refresh_token,
-            token_type: token.token_type,
-            expires_at: github_expiry_at(token.expires_in),
-            refresh_token_expires_at: github_expiry_at(token.refresh_token_expires_in),
-            installation_id,
-            github_username: username,
-        })
-        .await
-        .context("save token")?;
-
-    println!("  GitHub connected.");
-    Ok(())
-}
-
 pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
@@ -565,10 +458,6 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
 }
 
 pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> anyhow::Result<()> {
-    if args.github && args.skip_github {
-        anyhow::bail!("--github and --skip-github are mutually exclusive");
-    }
-
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
     let server_url = resolve_setup_server_url(globals, &paths, &env);
@@ -590,14 +479,12 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
         None,
     );
     let organization_client = organization_client(&authed_platform)?;
-    let console_client = ConsoleClient::new(&authed_platform)?;
     let selected_org = setup_select_org(&organization_client, &args).await?;
 
     config::save_platform_config(
         &paths.platform_config_dir,
         &config::PlatformConfig {
             server_url: server_url.clone(),
-            session_token: String::new(),
             default_org: selected_org
                 .as_ref()
                 .map(|org| org.id.clone())
@@ -615,13 +502,6 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
         eprintln!("Default org: {} ({}).", org.name, org.slug);
     } else {
         eprintln!("No default org selected.");
-    }
-
-    if should_setup_github(&args)?
-        && let Err(err) = handle_github_login(&console_client).await
-    {
-        eprintln!("Warning: GitHub setup failed: {err}");
-        eprintln!("You can retry later with: cw github login");
     }
 
     if !args.skip_ssh {
@@ -712,16 +592,6 @@ pub(crate) async fn setup_select_org(
         _ if stdin_is_interactive() => Ok(Some(prompt_select_org(&orgs)?.clone())),
         _ => anyhow::bail!("multiple organizations found; pass --org <id-or-slug>"),
     }
-}
-
-pub(crate) fn should_setup_github(args: &SetupArgs) -> anyhow::Result<bool> {
-    if args.github {
-        return Ok(true);
-    }
-    if args.skip_github || !stdin_is_interactive() {
-        return Ok(false);
-    }
-    prompt_confirm_default_no("Connect GitHub for private repository access?")
 }
 
 pub(crate) fn resolve_login_server_url(
@@ -852,7 +722,6 @@ pub(crate) fn save_login_platform_config(
         &paths.platform_config_dir,
         &config::PlatformConfig {
             server_url: server_url.to_string(),
-            session_token: String::new(),
             default_org: default_org.unwrap_or_default().to_string(),
         },
     )
@@ -877,17 +746,6 @@ pub(crate) fn oauth_user_display_name(user: &OAuthUserInfo) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "(unknown)".to_string())
-}
-
-pub(crate) fn github_expiry_at(expires_in_seconds: i32) -> Option<codewire_client::Timestamp> {
-    (expires_in_seconds > 0).then(|| {
-        let expires_at = Utc::now() + ChronoDuration::seconds(expires_in_seconds as i64);
-        codewire_client::Timestamp {
-            seconds: expires_at.timestamp(),
-            nanos: expires_at.timestamp_subsec_nanos() as i32,
-            ..Default::default()
-        }
-    })
 }
 
 pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
@@ -1014,7 +872,7 @@ pub(crate) async fn handle_org_command(
             let role = trimmed_required(&args.role, "role")?;
             let orgs = client.list_orgs().await.context("list orgs")?;
             let org_id = resolve_org_id(&platform, &orgs, args.org.as_deref())?;
-            let invitation = client
+            let created = client
                 .create_invitation(
                     &org_id,
                     &CreateInvitationRequest {
@@ -1024,7 +882,11 @@ pub(crate) async fn handle_org_command(
                 )
                 .await
                 .context("invite")?;
-            eprintln!("Invited {} as {}.", invitation.email, invitation.role);
+            eprintln!(
+                "Created an invitation for {} as {}. Share this URL; it will not be shown again.",
+                created.invitation.email, created.invitation.role
+            );
+            println!("{}", created.url);
         }
     }
 
@@ -1097,7 +959,6 @@ pub(crate) async fn handle_preset_command(
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
     let platform = resolve_platform(globals, &paths, &env)?;
-    let secret_client = SecretClient::new(&platform)?;
     let client = organization_client(&platform)?;
     let orgs = client.list_orgs().await.context("list orgs")?;
     let org_id = current_org_id(&platform, &orgs)?;
@@ -1132,31 +993,32 @@ pub(crate) async fn handle_preset_command(
                 name,
                 slug: slug.to_string(),
                 description: trimmed_optional(args.description).unwrap_or_default(),
-                default_cpu_millicores: positive_i32(args.cpu),
-                default_memory_mb: positive_i32(args.memory),
-                default_disk_gb: positive_i32(args.disk),
                 default_ttl_seconds: ttl_seconds,
-                image,
-                install_command: trimmed_optional(args.install).unwrap_or_default(),
-                startup_script: trimmed_optional(args.startup).unwrap_or_default(),
-                secret_project: trimmed_optional(args.secret_project).unwrap_or_default(),
-                ..CreatePresetRequest::default()
+                project_spec: codewire_project::ProjectSpec {
+                    image,
+                    install_command: trimmed_optional(args.install).unwrap_or_default(),
+                    startup_script: trimmed_optional(args.startup).unwrap_or_default(),
+                    resources: codewire_project::ResourceSpec {
+                        cpu_millicores: positive_i32(args.cpu).map(|value| value as u32),
+                        memory_mib: positive_i32(args.memory).map(|value| value as u64),
+                        disk_gib: positive_i32(args.disk).map(|value| value as u64),
+                    },
+                    ..Default::default()
+                },
             };
-            let secret_project_id =
-                resolve_preset_secret_project_id(&secret_client, &org_id, &request.secret_project)
-                    .await?;
+            request.project_spec.validate()?;
             let preset = client
-                .create_preset(&org_id, &request, secret_project_id)
+                .create_preset(&org_id, &request)
                 .await
                 .context("create preset")?;
             eprintln!("Preset created: {}.", preset.name);
             println!("  ID:    {}", preset.id);
         }
         PresetCommand::Info(args) => {
-            let slug_or_id = trimmed_required(&args.slug_or_id, "preset slug or id")?;
+            let selector = trimmed_required(&args.selector, "preset selector")?;
             let presets = client.list_presets(&org_id).await.context("list presets")?;
-            let preset = find_preset(&presets, slug_or_id)
-                .ok_or_else(|| anyhow::anyhow!("preset not found: {slug_or_id}"))?;
+            let preset = find_preset(&presets, &org_id, selector)?
+                .ok_or_else(|| anyhow::anyhow!("preset not found: {selector}"))?;
             print!("{}", format_preset_info_text(preset));
         }
         PresetCommand::Rm(args) => {
@@ -1478,25 +1340,6 @@ pub(crate) async fn load_secret_project_by_name(
     find_secret_project_by_name(&projects, project_name)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("secret project {project_name:?} not found"))
-}
-
-pub(crate) async fn resolve_preset_secret_project_id(
-    client: &SecretClient,
-    org_id: &str,
-    project_ref: &str,
-) -> anyhow::Result<Option<String>> {
-    let Some(project_ref) = trimmed_str(project_ref) else {
-        return Ok(None);
-    };
-    let projects = client
-        .list_secret_projects(org_id)
-        .await
-        .context("list secret projects")?;
-    projects
-        .iter()
-        .find(|project| project.id == project_ref || project.name == project_ref)
-        .map(|project| Some(project.id.clone()))
-        .ok_or_else(|| anyhow::anyhow!("secret project {project_ref:?} not found"))
 }
 
 pub(crate) fn inspect_config(output: OutputFormat) -> anyhow::Result<()> {

@@ -24,18 +24,8 @@
 [data-dashboard-app] .cw-settings-card p + form { margin-top: .75rem; }
 [data-dashboard-app] .cw-settings-muted { margin: 0; color: #777; font-size: .75rem; line-height: 1.6; }
 [data-dashboard-app] .cw-mono { font-family: var(--font-mono); }
-[data-dashboard-app] .cw-credential-list { overflow: hidden; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
-[data-dashboard-app] .cw-credential-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .75rem .85rem; }
-[data-dashboard-app] .cw-credential-row + .cw-credential-row { border-top: 1px solid #1d1d1d; }
-[data-dashboard-app] .cw-credential-row strong,
-[data-dashboard-app] .cw-credential-row span { display: block; }
-[data-dashboard-app] .cw-credential-row strong { font: 500 .72rem var(--font-mono); }
-[data-dashboard-app] .cw-credential-row span { margin-top: .15rem; color: #666; font: .65rem var(--font-mono); }
-[data-dashboard-app] .cw-settings-details-panel summary { width: fit-content; list-style: none; }
-[data-dashboard-app] .cw-settings-details-panel summary::-webkit-details-marker { display: none; }
 [data-dashboard-app] .cw-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; padding: 1rem; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
 [data-dashboard-app] .cw-settings-form > .cw-button { align-self: end; justify-self: start; }
-[data-dashboard-app] .cw-public-key { display: block; overflow-wrap: anywhere; padding: .8rem; border: 1px solid #222; border-radius: .5rem; background: #080808; color: #aaa; font: .67rem/1.6 var(--font-mono); white-space: pre-wrap; user-select: all; }
 [data-dashboard-app] .cw-settings-account-links { display: flex; flex-wrap: wrap; align-items: center; gap: .85rem; }
 [data-dashboard-app] .cw-settings-account-links > a { color: #3aa7c2; font-size: .72rem; }
 [data-dashboard-app] .cw-settings-account-links form { margin-left: auto; }
@@ -56,7 +46,6 @@
   [data-dashboard-app] .cw-settings-subnav a { flex: none; }
   [data-dashboard-app] .cw-settings-content { padding: 1rem .8rem 2rem; }
   [data-dashboard-app] .cw-settings-form { grid-template-columns: 1fr; }
-  [data-dashboard-app] .cw-credential-row { align-items: flex-start; }
   [data-dashboard-app] .cw-settings-account-links { align-items: stretch; flex-direction: column; }
   [data-dashboard-app] .cw-settings-account-links form { width: 100%; margin-left: 0; }
   [data-dashboard-app] .cw-settings-account-links form .cw-button { width: 100%; }

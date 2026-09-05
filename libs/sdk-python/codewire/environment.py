@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from typing import BinaryIO
 
 from codewire._context import ConnectContext
 from codewire._convert import (
@@ -163,18 +162,6 @@ class Environment:
                 org_id=self._context.resolve_org_id(), environment_id=self.id
             ),
         )
-
-    def upload(self, src: bytes | BinaryIO, remote_path: str) -> None:
-        """Deprecated: Use env.files.upload() instead."""
-        self.files.upload(src, remote_path)
-
-    def download(self, remote_path: str) -> bytes:
-        """Deprecated: Use env.files.download() instead."""
-        return self.files.download(remote_path)
-
-    def list_files(self, path: str = "/") -> list[dict]:
-        """Deprecated: Use env.files.list() instead."""
-        return self.files.list(path)
 
     def list_ports(self) -> list[dict]:
         return list_environment_ports(self._context, self.id)

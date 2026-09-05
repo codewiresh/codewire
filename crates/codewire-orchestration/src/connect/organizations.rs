@@ -265,7 +265,7 @@ impl OrganizationService for OrganizationConnectService {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
         let role = api_role(request.role, true).map_err(|error| rpc_app_error(&error, &ctx))?;
-        let invitation = create_invitation_core(
+        let created = create_invitation_core(
             self.state.clone(),
             user,
             request.org_id,
@@ -279,9 +279,11 @@ impl OrganizationService for OrganizationConnectService {
         .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(CreateInvitationResponse {
             invitation: Some(
-                proto_invitation(invitation).map_err(|error| rpc_app_error(&error, &ctx))?,
+                proto_invitation(created.invitation)
+                    .map_err(|error| rpc_app_error(&error, &ctx))?,
             )
             .into(),
+            token: created.token,
             ..Default::default()
         })
     }
@@ -529,7 +531,6 @@ fn proto_invitation(invitation: OrgInvitation) -> AppResult<ProtoOrgInvitation> 
         role: proto_role(&invitation.role)?.into(),
         invited_by: invitation.invited_by,
         inviter_name: invitation.inviter_name,
-        token: invitation.token,
         status: proto_invitation_status(&invitation.status)?.into(),
         expires_at: Some(proto_timestamp(&invitation.expires_at)?).into(),
         created_at: Some(proto_timestamp(&invitation.created_at)?).into(),
@@ -637,7 +638,6 @@ mod tests {
             role: "member".into(),
             invited_by: "user_test".into(),
             inviter_name: None,
-            token: "opaque".into(),
             status: "pending".into(),
             expires_at: "2026-07-27T00:00:00Z".into(),
             created_at: "2026-07-20T00:00:00Z".into(),

@@ -15,14 +15,14 @@ import (
 	codewirev1connect "github.com/codewiresh/codewire/libs/gen-go/codewire/v1/codewirev1connect"
 )
 
-// DefaultBaseURL is the production API base. Generated client paths already
-// include /api/v1.
+// DefaultBaseURL is the production API base. Generated clients append their
+// exact Connect RPC procedure paths.
 const DefaultBaseURL = "https://codewire.sh"
 
 // Client is the SDK entry point.
 type Client struct {
 	Environments   *EnvironmentService
-	Templates      *TemplateService
+	Presets        *PresetService
 	APIKeys        *APIKeyService
 	Secrets        *SecretService
 	SecretProjects *SecretProjectService
@@ -43,11 +43,10 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-// WithBaseURL overrides DefaultBaseURL. A trailing /api/v1 is stripped so
-// callers that include the legacy prefix keep working.
+// WithBaseURL overrides DefaultBaseURL.
 func WithBaseURL(u string) Option {
 	return func(c *Client) {
-		c.baseURL = strings.TrimSuffix(strings.TrimRight(u, "/"), "/api/v1")
+		c.baseURL = strings.TrimRight(u, "/")
 	}
 }
 
@@ -71,7 +70,7 @@ func New(apiKey string, opts ...Option) *Client {
 	}
 	baseURL := DefaultBaseURL
 	if envBaseURL := os.Getenv("CODEWIRE_API_URL"); envBaseURL != "" {
-		baseURL = strings.TrimSuffix(strings.TrimRight(envBaseURL, "/"), "/api/v1")
+		baseURL = strings.TrimRight(envBaseURL, "/")
 	}
 	c := &Client{baseURL: baseURL, apiKey: apiKey, httpClient: http.DefaultClient}
 	for _, o := range opts {
@@ -89,7 +88,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c.presets = codewirev1connect.NewPresetServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.secrets = codewirev1connect.NewSecretServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.Environments = &EnvironmentService{c}
-	c.Templates = &TemplateService{c}
+	c.Presets = &PresetService{c}
 	c.APIKeys = &APIKeyService{c}
 	c.Secrets = &SecretService{c}
 	c.SecretProjects = &SecretProjectService{c}

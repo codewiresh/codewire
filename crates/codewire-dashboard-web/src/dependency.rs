@@ -7,11 +7,7 @@ use crate::error::WebError;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum PageDependency {
     DashboardOrganizations,
-    DashboardGithubStatus,
-    SettingsGithubStatus,
-    SettingsCredentials,
     SettingsGitIdentity,
-    SettingsSshKey,
     BillingOverview,
     BillingUsage,
     BillingInvoices,
@@ -26,13 +22,9 @@ enum Criticality {
 
 impl PageDependency {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::DashboardOrganizations,
-        Self::DashboardGithubStatus,
-        Self::SettingsGithubStatus,
-        Self::SettingsCredentials,
         Self::SettingsGitIdentity,
-        Self::SettingsSshKey,
         Self::BillingOverview,
         Self::BillingUsage,
         Self::BillingInvoices,
@@ -42,11 +34,7 @@ impl PageDependency {
     fn criticality(self) -> Criticality {
         match self {
             Self::DashboardOrganizations | Self::BillingOverview => Criticality::Required,
-            Self::DashboardGithubStatus
-            | Self::SettingsGithubStatus
-            | Self::SettingsCredentials
-            | Self::SettingsGitIdentity
-            | Self::SettingsSshKey
+            Self::SettingsGitIdentity
             | Self::BillingUsage
             | Self::BillingInvoices
             | Self::BillingEvents => Criticality::Optional,
@@ -180,7 +168,7 @@ mod tests {
     #[test]
     fn web_dependencies_preserve_login_and_authorization_boundaries() {
         let login = resolve_web::<()>(
-            PageDependency::DashboardGithubStatus,
+            PageDependency::SettingsGitIdentity,
             Err(WebError::Connect(ConnectError::unauthenticated(
                 "expired session",
             ))),
@@ -189,7 +177,7 @@ mod tests {
         assert!(matches!(login, WebError::Unauthorized));
 
         let forbidden = resolve_web::<()>(
-            PageDependency::DashboardGithubStatus,
+            PageDependency::SettingsGitIdentity,
             Err(WebError::Connect(ConnectError::permission_denied(
                 "forbidden",
             ))),

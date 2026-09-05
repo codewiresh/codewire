@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from codewire.v1 import organization_pb2 as codewire_dot_v1_dot_organization__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n-codewire/internal/v1/mesh_authorization.proto\x12\x14\x63odewire.internal.v1\x1a\x1e\x63odewire/v1/organization.proto\"8\n\x1fResolveMeshAuthorizationRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\"l\n ResolveMeshAuthorizationResponse\x12H\n\x07\x63ontext\x18\x01 \x01(\x0b\x32..codewire.internal.v1.MeshAuthorizationContextR\x07\x63ontext\"\xbb\x02\n\x18MeshAuthorizationContext\x12!\n\x0cprincipal_id\x18\x01 \x01(\tR\x0bprincipalId\x12[\n\x0eprincipal_kind\x18\x02 \x01(\x0e\x32\x34.codewire.internal.v1.MeshAuthorizationPrincipalKindR\rprincipalKind\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12(\n\x04role\x18\x04 \x01(\x0e\x32\x14.codewire.v1.OrgRoleR\x04role\x12^\n\x0f\x63redential_kind\x18\x05 \x01(\x0e\x32\x35.codewire.internal.v1.MeshAuthorizationCredentialKindR\x0e\x63redentialKind*\xb2\x01\n\x1eMeshAuthorizationPrincipalKind\x12\x31\n-MESH_AUTHORIZATION_PRINCIPAL_KIND_UNSPECIFIED\x10\x00\x12*\n&MESH_AUTHORIZATION_PRINCIPAL_KIND_USER\x10\x01\x12\x31\n-MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT\x10\x02*\xab\x02\n\x1fMeshAuthorizationCredentialKind\x12\x32\n.MESH_AUTHORIZATION_CREDENTIAL_KIND_UNSPECIFIED\x10\x00\x12\x35\n1MESH_AUTHORIZATION_CREDENTIAL_KIND_SESSION_COOKIE\x10\x01\x12\x33\n/MESH_AUTHORIZATION_CREDENTIAL_KIND_OAUTH_BEARER\x10\x02\x12.\n*MESH_AUTHORIZATION_CREDENTIAL_KIND_API_KEY\x10\x03\x12\x38\n4MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN\x10\x04\x32\xab\x01\n\x18MeshAuthorizationService\x12\x8e\x01\n\x18ResolveMeshAuthorization\x12\x35.codewire.internal.v1.ResolveMeshAuthorizationRequest\x1a\x36.codewire.internal.v1.ResolveMeshAuthorizationResponse\"\x03\x90\x02\x01\x42\xf0\x01\n\x18\x63om.codewire.internal.v1B\x16MeshAuthorizationProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n-codewire/internal/v1/mesh_authorization.proto\x12\x14\x63odewire.internal.v1\x1a\x1e\x63odewire/v1/organization.proto\"8\n\x1fResolveMeshAuthorizationRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\"l\n ResolveMeshAuthorizationResponse\x12H\n\x07\x63ontext\x18\x01 \x01(\x0b\x32..codewire.internal.v1.MeshAuthorizationContextR\x07\x63ontext\"\xbb\x02\n\x18MeshAuthorizationContext\x12!\n\x0cprincipal_id\x18\x01 \x01(\tR\x0bprincipalId\x12[\n\x0eprincipal_kind\x18\x02 \x01(\x0e\x32\x34.codewire.internal.v1.MeshAuthorizationPrincipalKindR\rprincipalKind\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12(\n\x04role\x18\x04 \x01(\x0e\x32\x14.codewire.v1.OrgRoleR\x04role\x12^\n\x0f\x63redential_kind\x18\x05 \x01(\x0e\x32\x35.codewire.internal.v1.MeshAuthorizationCredentialKindR\x0e\x63redentialKind*\xb4\x01\n\x1eMeshAuthorizationPrincipalKind\x12\x31\n-MESH_AUTHORIZATION_PRINCIPAL_KIND_UNSPECIFIED\x10\x00\x12*\n&MESH_AUTHORIZATION_PRINCIPAL_KIND_USER\x10\x01\"\x04\x08\x02\x10\x02*-MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT*\xad\x02\n\x1fMeshAuthorizationCredentialKind\x12\x32\n.MESH_AUTHORIZATION_CREDENTIAL_KIND_UNSPECIFIED\x10\x00\x12\x35\n1MESH_AUTHORIZATION_CREDENTIAL_KIND_SESSION_COOKIE\x10\x01\x12\x33\n/MESH_AUTHORIZATION_CREDENTIAL_KIND_OAUTH_BEARER\x10\x02\x12.\n*MESH_AUTHORIZATION_CREDENTIAL_KIND_API_KEY\x10\x03\"\x04\x08\x04\x10\x04*4MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN2\xab\x01\n\x18MeshAuthorizationService\x12\x8e\x01\n\x18ResolveMeshAuthorization\x12\x35.codewire.internal.v1.ResolveMeshAuthorizationRequest\x1a\x36.codewire.internal.v1.ResolveMeshAuthorizationResponse\"\x03\x90\x02\x01\x42\xf0\x01\n\x18\x63om.codewire.internal.v1B\x16MeshAuthorizationProtoP\x01ZJgithub.com/codewiresh/codewire/libs/gen-go/codewire/internal/v1;internalv1\xa2\x02\x03\x43IX\xaa\x02\x14\x43odewire.Internal.V1\xca\x02\x14\x43odewire\\Internal\\V1\xe2\x02 Codewire\\Internal\\V1\\GPBMetadata\xea\x02\x16\x43odewire::Internal::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,15 +36,15 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_MESHAUTHORIZATIONSERVICE'].methods_by_name['ResolveMeshAuthorization']._loaded_options = None
   _globals['_MESHAUTHORIZATIONSERVICE'].methods_by_name['ResolveMeshAuthorization']._serialized_options = b'\220\002\001'
   _globals['_MESHAUTHORIZATIONPRINCIPALKIND']._serialized_start=590
-  _globals['_MESHAUTHORIZATIONPRINCIPALKIND']._serialized_end=768
-  _globals['_MESHAUTHORIZATIONCREDENTIALKIND']._serialized_start=771
-  _globals['_MESHAUTHORIZATIONCREDENTIALKIND']._serialized_end=1070
+  _globals['_MESHAUTHORIZATIONPRINCIPALKIND']._serialized_end=770
+  _globals['_MESHAUTHORIZATIONCREDENTIALKIND']._serialized_start=773
+  _globals['_MESHAUTHORIZATIONCREDENTIALKIND']._serialized_end=1074
   _globals['_RESOLVEMESHAUTHORIZATIONREQUEST']._serialized_start=103
   _globals['_RESOLVEMESHAUTHORIZATIONREQUEST']._serialized_end=159
   _globals['_RESOLVEMESHAUTHORIZATIONRESPONSE']._serialized_start=161
   _globals['_RESOLVEMESHAUTHORIZATIONRESPONSE']._serialized_end=269
   _globals['_MESHAUTHORIZATIONCONTEXT']._serialized_start=272
   _globals['_MESHAUTHORIZATIONCONTEXT']._serialized_end=587
-  _globals['_MESHAUTHORIZATIONSERVICE']._serialized_start=1073
-  _globals['_MESHAUTHORIZATIONSERVICE']._serialized_end=1244
+  _globals['_MESHAUTHORIZATIONSERVICE']._serialized_start=1077
+  _globals['_MESHAUTHORIZATIONSERVICE']._serialized_end=1248
 # @@protoc_insertion_point(module_scope)

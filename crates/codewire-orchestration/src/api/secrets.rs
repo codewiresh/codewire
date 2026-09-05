@@ -51,7 +51,7 @@ pub(super) fn validate_secret_key(key: &str) -> AppResult<()> {
     if !crate::worker::secrets::is_valid_secret_key(key) {
         return Err(AppError::BadRequest(
             format!(
-                "secret key must be 1 to {MAX_WORKLOAD_SECRET_KEY_BYTES} bytes and contain only ASCII letters, digits, or underscores"
+                "secret key must be 1 to {MAX_WORKLOAD_SECRET_KEY_BYTES} bytes, start with an ASCII letter or underscore, and contain only ASCII letters, digits, or underscores"
             )
             .into(),
         ));
@@ -86,7 +86,6 @@ pub(crate) async fn preview_workload_secret_resolution_core(
             state,
             &org_secret_path(org_id),
             WorkloadSecretSource::Organization,
-            &[],
             &mut source_keys,
         )
         .await?;
@@ -97,7 +96,6 @@ pub(crate) async fn preview_workload_secret_resolution_core(
             state,
             &super::secret_projects::secret_project_path(org_id, &project.id),
             WorkloadSecretSource::Project,
-            &[],
             &mut source_keys,
         )
         .await?;
@@ -107,7 +105,6 @@ pub(crate) async fn preview_workload_secret_resolution_core(
             state,
             &user_secret_path(&user.user_id),
             WorkloadSecretSource::User,
-            &[crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
             &mut source_keys,
         )
         .await?;
@@ -162,12 +159,10 @@ async fn append_preview_source_keys(
     state: &ApiState,
     path: &str,
     source: WorkloadSecretSource,
-    excluded_keys: &[&str],
     destination: &mut Vec<(WorkloadSecretSource, String)>,
 ) -> AppResult<()> {
     let query_limit = MAX_WORKLOAD_SECRETS
-        .checked_add(excluded_keys.len())
-        .and_then(|limit| limit.checked_add(1))
+        .checked_add(1)
         .ok_or_else(|| AppError::InternalMsg("workload-secret preview limit invalid".into()))?;
     let metadata = state
         .secrets
@@ -177,7 +172,7 @@ async fn append_preview_source_keys(
             tracing::error!(%error, ?source, "workload-secret preview source unavailable");
             AppError::InternalMsg("selected workload-secret source is unavailable".into())
         })?;
-    let source_count = extend_preview_source_keys(destination, metadata, source, excluded_keys);
+    let source_count = extend_preview_source_keys(destination, metadata, source);
     if source_count > MAX_WORKLOAD_SECRETS {
         return Err(AppError::BadRequest(
             "selected workload-secret source has too many keys".into(),
@@ -190,15 +185,9 @@ fn extend_preview_source_keys(
     destination: &mut Vec<(WorkloadSecretSource, String)>,
     metadata: Vec<crate::worker::secrets::StoredSecretMetadata>,
     source: WorkloadSecretSource,
-    excluded_keys: &[&str],
 ) -> usize {
     let initial_len = destination.len();
-    destination.extend(
-        metadata
-            .into_iter()
-            .filter(|secret| !excluded_keys.contains(&secret.key.as_str()))
-            .map(|secret| (source, secret.key)),
-    );
+    destination.extend(metadata.into_iter().map(|secret| (source, secret.key)));
     destination.len() - initial_len
 }
 
@@ -528,12 +517,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_secret_keys_use_the_shared_storage_boundary() {
-        let maximum = format!("1{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 1));
+    fn platform_secret_keys_use_the_canonical_workload_grammar() {
+        let maximum = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 1));
         let too_long = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES));
 
         assert!(validate_secret_key(&maximum).is_ok());
         assert!(validate_secret_key(&too_long).is_err());
+        assert!(validate_secret_key("_UNDERSCORE_FIRST").is_ok());
+        assert!(matches!(
+            validate_secret_key("1DIGIT_FIRST"),
+            Err(AppError::BadRequest(message))
+                if message.contains("start with an ASCII letter or underscore")
+        ));
     }
 
     #[test]
@@ -552,58 +547,14 @@ mod tests {
     }
 
     #[test]
-    fn preview_excludes_legacy_user_ssh_material_before_precedence_resolution() {
-        let metadata = |key: &str| crate::worker::secrets::StoredSecretMetadata {
-            key: key.into(),
-            ..Default::default()
-        };
-        let mut source_keys = vec![
-            (
-                WorkloadSecretSource::Organization,
-                crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY.into(),
-            ),
-            (
-                WorkloadSecretSource::Project,
-                crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY.into(),
-            ),
-        ];
-        let source_count = extend_preview_source_keys(
-            &mut source_keys,
-            vec![metadata(crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY)],
-            WorkloadSecretSource::User,
-            &[crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
-        );
-        assert_eq!(source_count, 0);
-        let resolved = resolve_workload_secret_metadata(
-            source_keys
-                .iter()
-                .map(|(source, key)| (*source, key.as_str())),
-        )
-        .unwrap();
-        assert_eq!(
-            resolved,
-            vec![ResolvedWorkloadSecretMetadata {
-                key: crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY.into(),
-                source: WorkloadSecretSource::Project,
-                overridden_sources: vec![WorkloadSecretSource::Organization],
-            }]
-        );
-    }
-
-    #[test]
-    fn preview_source_bound_counts_only_participating_keys() {
-        let metadata = |normal_count: usize| {
-            let mut rows = (0..normal_count)
+    fn preview_source_bound_counts_every_source_key() {
+        let metadata = |count: usize| {
+            (0..count)
                 .map(|index| crate::worker::secrets::StoredSecretMetadata {
                     key: format!("KEY_{index}"),
                     ..Default::default()
                 })
-                .collect::<Vec<_>>();
-            rows.push(crate::worker::secrets::StoredSecretMetadata {
-                key: crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY.into(),
-                ..Default::default()
-            });
-            rows
+                .collect::<Vec<_>>()
         };
         let mut source_keys = Vec::new();
         assert_eq!(
@@ -611,7 +562,6 @@ mod tests {
                 &mut source_keys,
                 metadata(MAX_WORKLOAD_SECRETS),
                 WorkloadSecretSource::User,
-                &[crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
             ),
             MAX_WORKLOAD_SECRETS
         );
@@ -621,7 +571,6 @@ mod tests {
                 &mut source_keys,
                 metadata(MAX_WORKLOAD_SECRETS + 1),
                 WorkloadSecretSource::User,
-                &[crate::worker::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
             ),
             MAX_WORKLOAD_SECRETS + 1
         );

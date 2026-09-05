@@ -1,41 +1,24 @@
 use super::*;
 
 #[test]
-fn legacy_and_canonical_forms_normalize_to_one_spec() {
-    let legacy = parse_project_yaml(
-        r#"
-preset: workspace
-install: bun install
-startup: bun test
-cpu: 2
-memory: 4096
-disk: 20
-env: {B: two, A: one}
-agent: claude
-secrets: {project: dev}
-ports: [3000]
-"#,
-    )
-    .unwrap();
+fn canonical_mapping_grammar_normalizes_to_one_spec() {
     let canonical = parse_project_yaml(
         r#"
 version: 1
 preset: workspace
 install_command: bun install
 startup_script: bun test
-cpu: 2000m
-memory: 4Gi
-disk: 20Gi
+cpu: "2000m"
+memory: "4Gi"
+disk: "20Gi"
 environment: {A: one, B: two}
-agents: [claude-code]
+agents: {tools: [claude-code]}
 secrets: {project: dev}
-app_ports: [{port: 3000}]
+ports: [{port: 3000}]
 "#,
     )
     .unwrap();
-    assert_eq!(legacy.spec, canonical.spec);
-    let encoded = legacy.canonical_json().unwrap();
-    assert_eq!(encoded, canonical.canonical_json().unwrap());
+    let encoded = canonical.canonical_json().unwrap();
     assert_eq!(
         String::from_utf8(encoded).unwrap(),
         r#"{"schema_version":1,"preset":"workspace","working_directory":"/workspace","install_command":"bun install","startup_script":"bun test","environment":{"A":"one","B":"two"},"agents":{"tools":["claude-code"]},"application_ports":[{"port":3000}],"resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":20},"secrets":{"project":"dev"}}"#
@@ -43,8 +26,41 @@ app_ports: [{port: 3000}]
 }
 
 #[test]
+fn removed_compatibility_forms_are_rejected() {
+    for yaml in [
+        "schema_version: 1\n",
+        "repos: [{source: https://example.com/org/app.git}]\n",
+        "repositories: [{url: https://example.com/org/app.git}]\n",
+        "repositories: [{source: https://example.com/org/app.git, mount_path: /workspace/app}]\n",
+        "workdir: /workspace\n",
+        "install: bun install\n",
+        "startup: bun test\n",
+        "env: {A: one}\n",
+        "agent: codex\n",
+        "install_agents: true\n",
+        "agents: codex\n",
+        "agents: [codex]\n",
+        "agents: {tools: [claude]}\n",
+        "skills: [.agents/skills/rust]\n",
+        "skills: [{path: .agents/skills/rust}]\n",
+        "skills: [{source: repo, path: .agents/skills/rust}]\n",
+        "ports: [3000]\n",
+        "ports: ['18080:8080']\n",
+        "app_ports: [{port: 3000}]\n",
+        "ports: [{published: 18080, target: 8080}]\n",
+        "cpu: 2\n",
+        "memory: 4096\n",
+        "disk: 20\n",
+        "mounts: [{source: ./fixtures, target: /workspace/fixtures, mode: copy}]\n",
+        "mounts: [{source: ../shared, destination: /workspace/shared, mode: direct, readonly: true}]\n",
+    ] {
+        assert!(parse_project_yaml(yaml).is_err(), "accepted {yaml:?}");
+    }
+}
+
+#[test]
 fn accepts_human_gigabyte_resource_quantities() {
-    let document = parse_project_yaml("memory: 8GB\ndisk: 40GB\n").unwrap();
+    let document = parse_project_yaml("memory: \"8GB\"\ndisk: \"40GB\"\n").unwrap();
     assert_eq!(document.spec.resources.memory_mib, Some(8 * 1024));
     assert_eq!(document.spec.resources.disk_gib, Some(40));
 
@@ -54,18 +70,41 @@ fn accepts_human_gigabyte_resource_quantities() {
         ("1024mb", 1024),
         ("2048mb", 2048),
     ] {
-        let document = parse_project_yaml(&format!("memory: {quantity}\n")).unwrap();
+        let document = parse_project_yaml(&format!("memory: {quantity:?}\n")).unwrap();
         assert_eq!(document.spec.resources.memory_mib, Some(memory_mib));
     }
 }
 
 #[test]
-fn environment_names_use_the_workload_secret_key_boundary() {
+fn rejects_cpu_quantities_that_overflow_millicore_conversion() {
+    let error = parse_project_yaml("cpu: \"9223372036854775807\"\n").unwrap_err();
+    assert_eq!(error.to_string(), "invalid cpu: quantity is too large");
+}
+
+#[test]
+fn environment_names_use_the_canonical_workload_secret_key_grammar() {
     let maximum = format!("A{}", "_".repeat(MAX_ENVIRONMENT_KEY_BYTES - 1));
     let too_long = format!("A{}", "_".repeat(MAX_ENVIRONMENT_KEY_BYTES));
 
     assert!(parse_project_yaml(&format!("environment:\n  {maximum}: value\n")).is_ok());
     assert!(parse_project_yaml(&format!("environment:\n  {too_long}: value\n")).is_err());
+    assert!(parse_project_yaml("environment:\n  1DIGIT_FIRST: value\n").is_err());
+}
+
+#[test]
+fn reserved_runtime_environment_keys_are_rejected_at_yaml_and_typed_boundaries() {
+    for key in RESERVED_RUNTIME_ENVIRONMENT_KEYS {
+        let expected =
+            format!("invalid environment: {key} is reserved for Codewire runtime control");
+        let yaml = format!("environment: {{{key}: synthetic}}\n");
+        assert_eq!(parse_project_yaml(&yaml).unwrap_err().to_string(), expected);
+
+        let spec = ProjectSpec {
+            environment: BTreeMap::from([(key.to_string(), "synthetic".to_string())]),
+            ..Default::default()
+        };
+        assert_eq!(spec.validate().unwrap_err().to_string(), expected);
+    }
 }
 
 #[test]
@@ -73,14 +112,16 @@ fn normalizes_repositories_workdir_skills_and_access_profile() {
     let document = parse_project_yaml(
         r#"
 repositories:
-  - url: https://example.com/org/api.git
+  - source: https://example.com/org/api.git
     branch: main
-    mount_path: /workspace/services/api
+    destination: /workspace/services/api
   - source: git@example.com:org/web.git
 skills:
-  - path: .agents/skills/rust
-    agents: [claude, codex]
-  - user:personal
+  - source: repository
+    path: .agents/skills/rust
+    agents: [claude-code, codex]
+  - source: user
+    name: personal
 access: {profile: user/work}
 "#,
     )
@@ -107,11 +148,12 @@ fn defaults_working_directory_from_workspace_input_count() {
     let none = parse_project_yaml("{}\n").unwrap();
     assert_eq!(none.spec.working_directory, "/workspace");
 
-    let one = parse_project_yaml("repositories: [{url: https://example.com/app.git}]\n").unwrap();
+    let one =
+        parse_project_yaml("repositories: [{source: https://example.com/app.git}]\n").unwrap();
     assert_eq!(one.spec.working_directory, "/workspace/app");
 
     let many = parse_project_yaml(
-        "repositories: [{url: https://example.com/a.git}, {url: https://example.com/b.git}]\n",
+        "repositories: [{source: https://example.com/a.git}, {source: https://example.com/b.git}]\n",
     )
     .unwrap();
     assert_eq!(many.spec.working_directory, "/workspace");
@@ -123,7 +165,7 @@ fn defaults_working_directory_from_workspace_input_count() {
     assert_eq!(mount.spec.working_directory, "/workspace/fixtures");
 
     let mixed = parse_project_yaml(
-        "repositories: [{url: https://example.com/app.git}]\nmounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: copy}]\n",
+        "repositories: [{source: https://example.com/app.git}]\nmounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: copy}]\n",
     )
     .unwrap();
     assert_eq!(mixed.spec.working_directory, "/workspace");
@@ -135,10 +177,12 @@ fn separates_local_only_directives_from_portable_intent() {
         r#"
 mounts:
   - source: ../shared
-    target: /workspace/shared
+    destination: /workspace/shared
     mode: direct
-    readonly: true
-ports: ["18080:8080"]
+    read_only: true
+ports:
+  - host_port: 18080
+    guest_port: 8080
 "#,
     )
     .unwrap();
@@ -223,6 +267,8 @@ fn rejects_unknown_unsafe_overlapping_and_nonportable_shapes() {
         "workspace: {mode: clone, source: .}\n",
         "ports: [3000, 3000]\n",
         "repositories: [{source: 'https://userinfo@example.com/org/app.git'}]\n",
+        "repositories: [{source: 'https://synthetic-user%3Asynthetic-secret%40example.com/org/app.git'}]\n",
+        "repositories: [{source: 'http://synthetic-user%253Asynthetic-secret%2540example.com/org/app.git'}]\n",
         "repositories: [{source: 'ssh://git:password@example.com/org/app.git'}]\n",
         "repositories: [{source: 'ssh://git%3Apassword@example.com/org/app.git'}]\n",
         "repositories: [{source: 'git://userinfo@example.com/org/app.git'}]\n",
@@ -231,9 +277,10 @@ fn rejects_unknown_unsafe_overlapping_and_nonportable_shapes() {
         "repositories: [{source: ../app}]\n",
         "repositories: [{source: 'file:///home/user/app'}]\n",
         "repositories: [{source: 'https://example.com/'}]\n",
+        "repositories: [{source: codewiresh/codewire}]\n",
         "repositories: [{source: 'https://example.com/org/app.git', branch: '--upload-pack'}]\n",
         "repositories: [{source: 'https://example.com/org/app.git', branch: main, revision: deadbeef}]\n",
-        "disk: 1536Mi\n",
+        "disk: \"1536Mi\"\n",
         &format!(
             "working_directory: /workspace/{}\n",
             "x".repeat(MAX_SHORT_VALUE_BYTES + 1)
@@ -247,10 +294,13 @@ fn rejects_unknown_unsafe_overlapping_and_nonportable_shapes() {
 fn accepts_remote_https_ssh_and_scp_repository_sources() {
     for (source, name) in [
         ("https://example.com/org/app.git", "app"),
+        (
+            "https://example.com:8443/org/app%20with%20spaces.git",
+            "app%20with%20spaces",
+        ),
         ("ssh://git@example.com/org/app.git", "app"),
         ("git://example.com/org/app.git", "app"),
         ("git@example.com:org/app.git", "app"),
-        ("codewiresh/codewire", "codewire"),
     ] {
         let yaml = format!("repositories: [{{source: {source:?}}}]\n");
         let project = parse_project_yaml(&yaml).unwrap().spec;
@@ -262,15 +312,25 @@ fn accepts_remote_https_ssh_and_scp_repository_sources() {
 }
 
 #[test]
+fn encoded_http_authority_rejection_is_value_blind() {
+    const MARKER: &str = "synthetic-user%3Asynthetic-secret%40host.invalid";
+    let error = parse_project_yaml(&format!(
+        "repositories: [{{source: 'https://{MARKER}/org/app.git'}}]\n"
+    ))
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("must not percent-encode URL authority characters"));
+    assert!(!error.contains(MARKER));
+}
+
+#[test]
 fn schema_and_input_bounds_fail_closed() {
     assert!(matches!(
         parse_project_yaml("version: 2\n"),
         Err(ProjectError::UnsupportedSchema(2))
     ));
-    assert!(matches!(
-        parse_project_yaml("version: 1\nschema_version: 2\n"),
-        Err(ProjectError::ConflictingSchemaVersion { .. })
-    ));
+    assert!(parse_project_yaml("version: 1\nschema_version: 2\n").is_err());
     let oversized = "x".repeat(MAX_PROJECT_DOCUMENT_BYTES + 1);
     assert!(matches!(
         parse_project_yaml(&oversized),
@@ -280,7 +340,7 @@ fn schema_and_input_bounds_fail_closed() {
     let too_many_ports = format!(
         "ports: [{}]\n",
         (1..=MAX_APPLICATION_PORTS + 1)
-            .map(|port| port.to_string())
+            .map(|port| format!("{{port: {port}}}"))
             .collect::<Vec<_>>()
             .join(",")
     );
@@ -312,14 +372,19 @@ fn schema_and_input_bounds_fail_closed() {
         ),
         (
             "agents",
-            format!("agents: [{}]\n", vec!["codex"; MAX_AGENTS + 1].join(",")),
+            format!(
+                "agents: {{tools: [{}]}}\n",
+                vec!["codex"; MAX_AGENTS + 1].join(",")
+            ),
         ),
         (
             "skills",
             format!(
                 "skills: [{}]\n",
                 (0..=MAX_SKILLS)
-                    .map(|index| format!(".agents/skills/s{index}"))
+                    .map(|index| format!(
+                        "{{source: repository, path: .agents/skills/s{index}}}"
+                    ))
                     .collect::<Vec<_>>()
                     .join(",")
             ),
@@ -327,7 +392,7 @@ fn schema_and_input_bounds_fail_closed() {
         (
             "skills.agents",
             format!(
-                "skills: [{{path: .agents/skills/rust, agents: [{}]}}]\n",
+                "skills: [{{source: repository, path: .agents/skills/rust, agents: [{}]}}]\n",
                 vec!["codex"; MAX_AGENTS + 1].join(",")
             ),
         ),
@@ -358,17 +423,17 @@ fn schema_and_input_bounds_fail_closed() {
 #[test]
 fn canonicalization_is_idempotent_for_generated_valid_specs() {
     for repositories in 0..=3 {
-        for agents in ["[]", "[claude, codex]"] {
+        for agents in ["{tools: []}", "{tools: [claude-code, codex]}"] {
             let repos = (0..repositories)
                 .map(|index| {
                     format!(
-                        "{{url: https://example.com/org/r{index}.git, mount_path: /workspace/r{index}}}"
+                        "{{source: https://example.com/org/r{index}.git, destination: /workspace/r{index}}}"
                     )
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
             let yaml = format!(
-                "version: 1\nrepositories: [{repos}]\nagents: {agents}\nenv: {{Z: last, A: first}}\n"
+                "version: 1\nrepositories: [{repos}]\nagents: {agents}\nenvironment: {{Z: last, A: first}}\n"
             );
             let first = parse_project_yaml(&yaml).unwrap().spec;
             let encoded = first.canonical_json().unwrap();
@@ -380,12 +445,15 @@ fn canonicalization_is_idempotent_for_generated_valid_specs() {
 }
 
 #[test]
-fn repository_destination_helper_preserves_legacy_defaults() {
+fn repository_destination_helper_preserves_inferred_defaults() {
     assert_eq!(
         validate_repository_destinations([
             ("https://example.com/org/app.git", ""),
             ("git@host:org/api.git", "/workspace/services/api"),
-            ("codewiresh/codewire", "/workspace/codewire"),
+            (
+                "https://github.com/codewiresh/codewire.git",
+                "/workspace/codewire",
+            ),
         ])
         .unwrap(),
         [
@@ -400,7 +468,7 @@ fn repository_destination_helper_preserves_legacy_defaults() {
 #[test]
 fn typed_specs_validate_before_crossing_adapter_boundaries() {
     let mut spec = parse_project_yaml(
-        "agents: [claude]\nskills: [.agents/skills/rust]\naccess: {profile: user/work}\n",
+        "agents: {tools: [claude-code]}\nskills: [{source: repository, path: .agents/skills/rust}]\naccess: {profile: user/work}\n",
     )
     .unwrap()
     .spec;

@@ -13,8 +13,6 @@ pub const MESH_AUTHORIZATION_URL_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_URL";
 pub const MESH_AUTHORIZATION_HMAC_SECRET_ENV: &str = "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET";
 pub const LOCAL_ORGANIZATION_ID_ENV: &str = "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID";
 pub const LOCAL_API_KEY_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_API_KEY_HASH";
-pub const LOCAL_ENVIRONMENT_ID_ENV: &str = "CODEWIRE_MESH_LOCAL_ENVIRONMENT_ID";
-pub const LOCAL_ENVIRONMENT_TOKEN_HASH_ENV: &str = "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH";
 
 const DEFAULT_STUN_PORT: u16 = 3478;
 const MAX_STUN_SERVERS: usize = 8;
@@ -53,8 +51,6 @@ impl fmt::Debug for MeshAuthorizationConfig {
 pub struct LocalMeshAuthorizationConfig {
     pub organization_id: String,
     pub api_key_hash: String,
-    pub environment_id: String,
-    pub environment_token_hash: String,
 }
 
 impl fmt::Debug for LocalMeshAuthorizationConfig {
@@ -63,8 +59,6 @@ impl fmt::Debug for LocalMeshAuthorizationConfig {
             .debug_struct("LocalMeshAuthorizationConfig")
             .field("organization_id", &self.organization_id)
             .field("api_key_hash", &"[redacted]")
-            .field("environment_id", &self.environment_id)
-            .field("environment_token_hash", &"[redacted]")
             .finish()
     }
 }
@@ -76,7 +70,7 @@ pub struct StunServerConfig {
     pub port: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     pub bind_addr: SocketAddr,
     pub base_url: String,
@@ -90,6 +84,24 @@ pub struct Config {
     /// Present for the explicit standalone-local identity. Hosted and local
     /// authorization configurations are mutually exclusive.
     pub local_authorization: Option<LocalMeshAuthorizationConfig>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("bind_addr", &self.bind_addr)
+            .field("base_url", &self.base_url)
+            .field("derp_url", &self.derp_url)
+            .field("stun_servers", &self.stun_servers)
+            .field(
+                "database_url",
+                &self.database_url.as_ref().map(|_| "[redacted]"),
+            )
+            .field("mesh_authorization", &self.mesh_authorization)
+            .field("local_authorization", &self.local_authorization)
+            .finish()
+    }
 }
 
 impl Config {
@@ -121,7 +133,7 @@ impl Config {
             validate_base_url(url)?;
         }
         let stun_servers = stun_server_config(args.stun_servers, getenv(STUN_SERVERS_ENV))?;
-        let database_url = first_non_empty([args.database_url, getenv(DATABASE_URL_ENV), None]);
+        let database_url = trim(getenv(DATABASE_URL_ENV));
         let mesh_authorization = mesh_authorization_config(
             getenv(MESH_AUTHORIZATION_URL_ENV),
             getenv(MESH_AUTHORIZATION_HMAC_SECRET_ENV),
@@ -129,8 +141,6 @@ impl Config {
         let local_authorization = local_authorization_config(
             getenv(LOCAL_ORGANIZATION_ID_ENV),
             getenv(LOCAL_API_KEY_HASH_ENV),
-            getenv(LOCAL_ENVIRONMENT_ID_ENV),
-            getenv(LOCAL_ENVIRONMENT_TOKEN_HASH_ENV),
         )?;
         if database_url.is_some() && mesh_authorization.is_none() {
             return Err(ConfigError::HostedMeshAuthorizationRequired);
@@ -173,9 +183,7 @@ pub enum ConfigError {
         "{MESH_AUTHORIZATION_URL_ENV} and {MESH_AUTHORIZATION_HMAC_SECRET_ENV} must be set together"
     )]
     IncompleteMeshAuthorization,
-    #[error(
-        "{LOCAL_ORGANIZATION_ID_ENV}, {LOCAL_API_KEY_HASH_ENV}, {LOCAL_ENVIRONMENT_ID_ENV}, and {LOCAL_ENVIRONMENT_TOKEN_HASH_ENV} must be set together"
-    )]
+    #[error("{LOCAL_ORGANIZATION_ID_ENV} and {LOCAL_API_KEY_HASH_ENV} must be set together")]
     IncompleteLocalMeshAuthorization,
     #[error(
         "hosted Mesh requires {MESH_AUTHORIZATION_URL_ENV} and {MESH_AUTHORIZATION_HMAC_SECRET_ENV}"
@@ -191,7 +199,6 @@ struct Args {
     listen: Option<String>,
     derp_url: Option<String>,
     stun_servers: Vec<String>,
-    database_url: Option<String>,
 }
 
 impl Args {
@@ -231,14 +238,8 @@ impl Args {
                 }
                 FlagValue::NotMatched => {}
             }
-            match flag_value(&arg, "--database-url", &mut iter)? {
-                FlagValue::Matched(value) => {
-                    parsed.database_url = Some(value);
-                    continue;
-                }
-                FlagValue::NotMatched => {}
-            }
-            return Err(ConfigError::UnknownFlag(arg));
+            let flag = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+            return Err(ConfigError::UnknownFlag(flag.to_owned()));
         }
         Ok(parsed)
     }
@@ -292,26 +293,12 @@ fn mesh_authorization_config(
 fn local_authorization_config(
     organization_id: Option<String>,
     api_key_hash: Option<String>,
-    environment_id: Option<String>,
-    environment_token_hash: Option<String>,
 ) -> Result<Option<LocalMeshAuthorizationConfig>, ConfigError> {
-    match (
-        trim(organization_id),
-        trim(api_key_hash),
-        trim(environment_id),
-        trim(environment_token_hash),
-    ) {
-        (None, None, None, None) => Ok(None),
-        (
-            Some(organization_id),
-            Some(api_key_hash),
-            Some(environment_id),
-            Some(environment_token_hash),
-        ) => Ok(Some(LocalMeshAuthorizationConfig {
+    match (trim(organization_id), trim(api_key_hash)) {
+        (None, None) => Ok(None),
+        (Some(organization_id), Some(api_key_hash)) => Ok(Some(LocalMeshAuthorizationConfig {
             organization_id,
             api_key_hash,
-            environment_id,
-            environment_token_hash,
         })),
         _ => Err(ConfigError::IncompleteLocalMeshAuthorization),
     }
@@ -470,6 +457,43 @@ mod tests {
     }
 
     #[test]
+    fn standalone_authorization_requires_exactly_the_org_and_api_key_hash() {
+        let cfg = Config::from_sources(
+            Vec::<String>::new(),
+            env(&[
+                (MESH_URL_ENV, "https://mesh.codewire.sh"),
+                (LOCAL_ORGANIZATION_ID_ENV, "local-org"),
+                (LOCAL_API_KEY_HASH_ENV, "api-key-hash"),
+            ]),
+        )
+        .unwrap();
+        let local = cfg.local_authorization.unwrap();
+        assert_eq!(local.organization_id, "local-org");
+        assert_eq!(local.api_key_hash, "api-key-hash");
+        assert!(!format!("{local:?}").contains("api-key-hash"));
+
+        for incomplete in [
+            &[(LOCAL_ORGANIZATION_ID_ENV, "local-org")][..],
+            &[(LOCAL_API_KEY_HASH_ENV, "api-key-hash")][..],
+        ] {
+            assert_eq!(
+                Config::from_sources(Vec::<String>::new(), move |key| {
+                    (key == MESH_URL_ENV)
+                        .then(|| "https://mesh.codewire.sh".to_owned())
+                        .or_else(|| {
+                            incomplete
+                                .iter()
+                                .find(|(name, _)| *name == key)
+                                .map(|(_, value)| (*value).to_owned())
+                        })
+                },)
+                .unwrap_err(),
+                ConfigError::IncompleteLocalMeshAuthorization
+            );
+        }
+    }
+
+    #[test]
     fn retained_cli_flags_win_over_mesh_env() {
         let cfg = Config::from_sources(
             [
@@ -479,8 +503,6 @@ mod tests {
                 "--derp-url",
                 "https://derp.flag",
                 "--stun-server=stun://STUN.FLAG.:19302",
-                "--database-url",
-                "postgres://flag/db",
             ],
             env(&[
                 (MESH_URL_ENV, "https://mesh.codewire.sh"),
@@ -507,13 +529,52 @@ mod tests {
                 port: 19_302,
             }]
         );
-        assert_eq!(cfg.database_url.as_deref(), Some("postgres://flag/db"));
+        assert_eq!(cfg.database_url.as_deref(), Some("postgres://env/db"));
         assert_eq!(
             cfg.mesh_authorization
                 .as_ref()
                 .map(|config| config.url.as_str()),
             Some("http://orchestration.internal:8085")
         );
+    }
+
+    #[test]
+    fn rejects_database_url_flag_without_exposing_its_value() {
+        const MARKER: &str = "postgres://synthetic-user:synthetic-secret@database.invalid/db";
+
+        for args in [
+            vec![format!("--database-url={MARKER}")],
+            vec!["--database-url".to_owned(), MARKER.to_owned()],
+        ] {
+            let error =
+                Config::from_sources(args, env(&[(MESH_URL_ENV, "https://mesh.codewire.sh")]))
+                    .unwrap_err();
+            assert_eq!(error, ConfigError::UnknownFlag("--database-url".to_owned()));
+            assert!(!error.to_string().contains(MARKER));
+        }
+    }
+
+    #[test]
+    fn config_debug_redacts_database_url() {
+        const MARKER: &str = "postgres://synthetic-user:synthetic-secret@database.invalid/db";
+        let config = Config::from_sources(
+            Vec::<String>::new(),
+            env(&[
+                (MESH_URL_ENV, "https://mesh.codewire.sh"),
+                (DATABASE_URL_ENV, MARKER),
+                (
+                    MESH_AUTHORIZATION_URL_ENV,
+                    "http://orchestration.internal:8085",
+                ),
+                (MESH_AUTHORIZATION_HMAC_SECRET_ENV, "synthetic-hmac"),
+            ]),
+        )
+        .unwrap();
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("database_url: Some(\"[redacted]\")"));
+        assert!(!debug.contains(MARKER));
+        assert!(!debug.contains("synthetic-hmac"));
     }
 
     #[test]

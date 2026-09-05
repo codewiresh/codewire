@@ -3,7 +3,6 @@ package codewire
 import (
 	"context"
 	"fmt"
-	"io"
 	"time"
 )
 
@@ -53,24 +52,6 @@ func (e *Environment) GetResizeOperation(ctx context.Context, operationID string
 // Remove destroys the environment.
 func (e *Environment) Remove(ctx context.Context) error {
 	return e.client.Environments.Delete(ctx, e.Id)
-}
-
-// Upload uploads a file to the environment.
-// Deprecated: use e.Files.Upload instead.
-func (e *Environment) Upload(ctx context.Context, src io.Reader, remotePath string) error {
-	return e.Files.Upload(ctx, src, remotePath)
-}
-
-// Download retrieves a file from the environment.
-// Deprecated: use e.Files.Download instead.
-func (e *Environment) Download(ctx context.Context, remotePath string) (io.ReadCloser, error) {
-	return e.Files.Download(ctx, remotePath)
-}
-
-// ListFiles lists files in a directory of the environment.
-// Deprecated: use e.Files.List instead.
-func (e *Environment) ListFiles(ctx context.Context, dirPath *string) ([]FileEntry, error) {
-	return e.Files.List(ctx, dirPath)
 }
 
 // ListPorts returns all forwarded ports for the environment.

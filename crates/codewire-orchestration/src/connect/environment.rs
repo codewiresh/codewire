@@ -5,7 +5,6 @@
 //! errors.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -19,9 +18,7 @@ use codewire_server_core::{AppError, AppResult, ValidationIssue};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 
 use crate::api::ApiState;
-use crate::api::create::{
-    AppPort, CreateEnvironmentBody, RepoEntry, SetupAgent, create_environment_core,
-};
+use crate::api::create::{CreateEnvironmentBody, create_environment_core};
 use crate::api::env_access::{
     AccessGrant, GrantAccessBody, grant_environment_access_core, list_environment_access_core,
     revoke_environment_access_core,
@@ -582,8 +579,7 @@ impl proto::EnvironmentService for EnvironmentConnectService {
 
         let org_id = request.org_id;
         let draft = create_body(draft).map_err(|error| environment_rpc_error(&error, &ctx))?;
-        let events =
-            start_prepare_stream(self.state.clone(), org_id.clone(), draft, request.analyze);
+        let events = start_prepare_stream(self.state.clone(), org_id.clone(), draft);
         let request_id = request_id(&ctx).map(str::to_owned);
         let stream = futures::stream::unfold(events, move |mut events| {
             let org_id = org_id.clone();
@@ -639,60 +635,26 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvi
     let project_spec = request
         .project_spec
         .into_option()
-        .map(codewire_project_proto::from_proto)
-        .transpose()
-        .map_err(|error| {
-            crate::api::environments::coded_owned(
+        .ok_or_else(|| {
+            crate::api::environments::coded(
                 axum::http::StatusCode::BAD_REQUEST,
-                "invalid_project_spec",
-                error.to_string(),
+                "project_spec_required",
+                "project_spec is required",
             )
+        })
+        .and_then(|value| {
+            codewire_project_proto::from_proto(value).map_err(|error| {
+                crate::api::environments::coded_owned(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "invalid_project_spec",
+                    error.to_string(),
+                )
+            })
         })?;
     Ok(CreateEnvironmentBody {
         preset_id: request.preset_id,
         name: request.name,
-        cpu_millicores: request.cpu_millicores,
-        memory_mb: request.memory_mb,
-        disk_gb: request.disk_gb,
         ttl_seconds: request.ttl_seconds,
-        preset_slug: request.preset_slug,
-        repo_url: request.repo_url,
-        branch: request.branch,
-        repos: request
-            .repos
-            .into_iter()
-            .map(|repo| RepoEntry {
-                url: repo.url,
-                branch: repo.branch,
-                mount_path: repo.mount_path,
-                revision: repo.revision,
-            })
-            .collect(),
-        image: request.image,
-        install_command: request.install_command,
-        startup_script: request.startup_script,
-        env_vars: ordered_map(request.env_vars),
-        agents: request
-            .agents
-            .into_iter()
-            .map(|agent| SetupAgent {
-                agent_type: agent.r#type,
-            })
-            .collect(),
-        install_agents: request.install_agents,
-        agent: request.agent,
-        secret_project: request.secret_project,
-        app_ports: request
-            .app_ports
-            .into_iter()
-            .map(|port| AppPort {
-                port: port.port,
-                label: port.label,
-                access: port.access,
-            })
-            .collect(),
-        include_org_secrets: request.include_org_secrets,
-        include_user_secrets: request.include_user_secrets,
         isolation_tier: match request.isolation_tier.as_known() {
             Some(proto::IsolationTier::Unspecified) | Some(proto::IsolationTier::Standard) => {
                 String::new()
@@ -723,14 +685,6 @@ fn proto_prepare_event(
             repo: repo.unwrap_or_default(),
             ..Default::default()
         })),
-        PrepareStreamEvent::RepoFetched { index, repo, ok } => {
-            Event::RepoFetched(Box::new(proto::RepoFetched {
-                index,
-                repo,
-                ok,
-                ..Default::default()
-            }))
-        }
         PrepareStreamEvent::Complete(response) => {
             Event::Complete(Box::new(proto_prepare_complete(*response, org_id)?))
         }
@@ -845,7 +799,6 @@ fn proto_prepare_complete(
 ) -> AppResult<proto::PrepareComplete> {
     Ok(proto::PrepareComplete {
         draft: Some(proto_create_request(response.draft, org_id)).into(),
-        detection: response.detection.map(proto_detection).into(),
         resolved_preset: response
             .resolved_preset
             .map(proto_preset)
@@ -868,127 +821,28 @@ fn proto_create_request(
         org_id: org_id.to_owned(),
         preset_id: body.preset_id,
         name: body.name,
-        cpu_millicores: body.cpu_millicores,
-        memory_mb: body.memory_mb,
-        disk_gb: body.disk_gb,
         ttl_seconds: body.ttl_seconds,
-        preset_slug: body.preset_slug,
-        repo_url: body.repo_url,
-        branch: body.branch,
-        repos: body
-            .repos
-            .into_iter()
-            .map(|repo| proto::RepoEntry {
-                url: repo.url,
-                branch: repo.branch,
-                mount_path: repo.mount_path,
-                revision: repo.revision,
-                ..Default::default()
-            })
-            .collect(),
-        image: body.image,
-        install_command: body.install_command,
-        startup_script: body.startup_script,
-        env_vars: body.env_vars.into_iter().collect(),
-        agents: body
-            .agents
-            .into_iter()
-            .map(|agent| proto::SetupAgent {
-                r#type: agent.agent_type,
-                ..Default::default()
-            })
-            .collect(),
-        install_agents: body.install_agents,
-        agent: body.agent,
-        secret_project: body.secret_project,
-        app_ports: body
-            .app_ports
-            .into_iter()
-            .map(|port| proto::AppPort {
-                port: port.port,
-                label: port.label,
-                access: port.access,
-                ..Default::default()
-            })
-            .collect(),
-        include_org_secrets: body.include_org_secrets,
-        include_user_secrets: body.include_user_secrets,
-        project_spec: body
-            .project_spec
-            .map(codewire_project_proto::to_proto)
-            .into(),
-        ..Default::default()
-    }
-}
-
-pub(crate) fn proto_detection(
-    value: crate::api::detect::DetectionResult,
-) -> proto::DetectionResult {
-    proto::DetectionResult {
-        project_type: value.project_type,
-        preset_slug: value.preset_slug,
-        preset_image: value.preset_image,
-        install_command: value.install_command,
-        startup_script: value.startup_script,
-        language: value.language,
-        framework: value.framework,
-        suggested_name: value.suggested_name,
-        needs_docker: value.needs_docker,
-        has_compose: value.has_compose,
-        app_ports: value
-            .app_ports
-            .into_iter()
-            .map(|port| proto::AppPort {
-                port: port.port,
-                label: port.label,
-                access: port.access,
-                ..Default::default()
-            })
-            .collect(),
-        agents: value
-            .agents
-            .into_iter()
-            .map(|agent| proto::SetupAgent {
-                r#type: agent.agent_type,
-                ..Default::default()
-            })
-            .collect(),
-        install_agents: value.install_agents,
-        secret_project: value.secret_project,
-        include_org_secrets: value.include_org_secrets,
-        include_user_secrets: value.include_user_secrets,
-        cpu: value.cpu,
-        memory: value.memory,
-        setup_notes: value.setup_notes,
-        project_spec: value
-            .project_spec
-            .map(codewire_project_proto::to_proto)
-            .into(),
+        isolation_tier: match body.isolation_tier.as_str() {
+            "confidential" => proto::IsolationTier::Confidential,
+            "" | "standard" => proto::IsolationTier::Standard,
+            _ => proto::IsolationTier::Unspecified,
+        }
+        .into(),
+        project_spec: Some(codewire_project_proto::to_proto(body.project_spec)).into(),
         ..Default::default()
     }
 }
 
 fn proto_repo_config(value: RepoConfig) -> AppResult<proto::RepoConfig> {
-    let setup_config = if value.setup_config.is_null() {
-        Default::default()
-    } else {
-        serde_json::from_value(value.setup_config)
-            .map_err(|error| AppError::Internal(anyhow::Error::new(error)))?
-    };
     Ok(proto::RepoConfig {
         id: value.id,
         org_id: value.org_id,
         repo_url: value.repo_url,
-        preset_id: value.preset_id,
-        setup_config: Some(setup_config).into(),
+        project_spec: Some(codewire_project_proto::to_proto(value.project_spec)).into(),
         created_by: value.created_by,
         updated_at: value.updated_at,
         ..Default::default()
     })
-}
-
-fn ordered_map(values: impl IntoIterator<Item = (String, String)>) -> BTreeMap<String, String> {
-    values.into_iter().collect()
 }
 
 fn validate_pagination(page_token: &str) -> AppResult<()> {
@@ -1600,6 +1454,56 @@ mod tests {
     }
 
     #[test]
+    fn create_requires_and_round_trips_one_canonical_project_spec() {
+        let error = create_body(proto::CreateEnvironmentRequest::default()).unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                code: "project_spec_required",
+                ..
+            }
+        ));
+
+        let project_spec = codewire_project::parse_project_yaml(
+            r#"
+image: ghcr.io/example/workspace:1
+repositories:
+  - source: https://example.test/acme/repo.git
+    destination: /workspace/repo
+working_directory: /workspace/repo
+environment: {RUST_LOG: info}
+agents: {install: false, tools: [codex]}
+ports: [{port: 8080, label: api, access: private}]
+cpu: "2"
+memory: "8Gi"
+"#,
+        )
+        .unwrap()
+        .spec;
+        let body = create_body(proto::CreateEnvironmentRequest {
+            org_id: "org_contract".into(),
+            name: Some("canonical".into()),
+            isolation_tier: proto::IsolationTier::Confidential.into(),
+            project_spec: Some(codewire_project_proto::to_proto(project_spec.clone())).into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(body.project_spec, project_spec);
+        assert_eq!(body.isolation_tier, "confidential");
+
+        let request = proto_create_request(body, "org_contract");
+        let mapped = codewire_project_proto::from_proto(
+            request
+                .project_spec
+                .into_option()
+                .expect("project spec remains present"),
+        )
+        .unwrap();
+        assert_eq!(mapped, project_spec);
+    }
+
+    #[test]
     fn prepare_connect_stream_preserves_one_recorded_sequence() {
         let repo = "https://example.test/acme/repo";
         let events = [
@@ -1615,29 +1519,15 @@ mod tests {
                 total: None,
                 repo: None,
             },
-            PrepareStreamEvent::Progress {
-                phase: "repo_fetch".into(),
-                message: "Fetching repository context...".into(),
-                total: Some(1),
-                repo: None,
-            },
-            PrepareStreamEvent::RepoFetched {
-                index: 0,
-                repo: repo.into(),
-                ok: true,
-            },
             PrepareStreamEvent::Complete(Box::new(PrepareResponse {
                 draft: CreateEnvironmentBody {
-                    repo_url: repo.into(),
-                    repos: vec![RepoEntry {
-                        url: repo.into(),
-                        branch: String::new(),
-                        revision: String::new(),
-                        mount_path: String::new(),
-                    }],
+                    project_spec: codewire_project::parse_project_yaml(&format!(
+                        "repositories: [{{source: {repo}}}]\n"
+                    ))
+                    .unwrap()
+                    .spec,
                     ..Default::default()
                 },
-                detection: None,
                 resolved_preset: None,
                 repo_config: None,
             })),
@@ -1659,42 +1549,42 @@ mod tests {
             event.phase == "resolving" && event.message == "Resolving preset...")
         );
         assert!(
-            matches!(connect[2].event, Some(Event::Progress(ref event)) if
-            event.phase == "repo_fetch" && event.total == 1)
-        );
-        assert!(
-            matches!(connect[3].event, Some(Event::RepoFetched(ref event)) if
-            event.index == 0 && event.repo == repo && event.ok)
-        );
-        assert!(
-            matches!(connect[4].event, Some(Event::Complete(ref event)) if
-            event.draft.org_id == "org_contract" && event.draft.repo_url == repo)
+            matches!(connect[2].event, Some(Event::Complete(ref event)) if
+            event.draft.org_id == "org_contract"
+                && event.draft.project_spec.repositories[0].source == repo)
         );
     }
 
     #[test]
-    fn prepare_complete_maps_full_typed_payload() {
+    fn prepare_complete_maps_canonical_project_specs_at_every_boundary() {
+        let draft_spec = codewire_project::parse_project_yaml(
+            r#"
+image: example.test/draft:latest
+environment: {RUST_LOG: info}
+agents: {install: true, tools: [codex]}
+ports: [{port: 3000, label: web, access: public}]
+"#,
+        )
+        .unwrap()
+        .spec;
+        let preset_spec = codewire_project::parse_project_yaml(
+            "image: example.test/preset:latest\nmemory: \"4Gi\"\n",
+        )
+        .unwrap()
+        .spec;
+        let repo_spec = codewire_project::parse_project_yaml(
+            "install_command: cargo build\nenvironment: {RUST_BACKTRACE: '1'}\n",
+        )
+        .unwrap()
+        .spec;
         let complete = proto_prepare_complete(
             PrepareResponse {
                 draft: CreateEnvironmentBody {
                     name: Some("typed-draft".into()),
-                    app_ports: vec![AppPort {
-                        port: 3000,
-                        label: "web".into(),
-                        access: "public".into(),
-                    }],
+                    isolation_tier: "confidential".into(),
+                    project_spec: draft_spec,
                     ..Default::default()
                 },
-                detection: Some(crate::api::detect::DetectionResult {
-                    project_type: "rust".into(),
-                    agents: vec![SetupAgent {
-                        agent_type: "codex".into(),
-                    }],
-                    install_agents: Some(true),
-                    include_org_secrets: Some(false),
-                    setup_notes: "deterministic".into(),
-                    ..Default::default()
-                }),
                 resolved_preset: Some(crate::api::prepare::PresetWire {
                     id: "preset_typed".into(),
                     org_id: Some("org_contract".into()),
@@ -1705,24 +1595,15 @@ mod tests {
                     description: None,
                     build_status: "ready".into(),
                     build_error: None,
-                    default_cpu_millicores: 2_000,
-                    default_memory_mb: 4_096,
-                    default_disk_gb: 10,
                     default_ttl_seconds: Some(3_600),
-                    image: Some("example.test/typed:latest".into()),
-                    default_setup_config: None,
-                    secret_project_id: None,
+                    project_spec: preset_spec,
                     created_at: "2026-07-18T12:34:56Z".into(),
                 }),
                 repo_config: Some(RepoConfig {
                     id: "repo_config_typed".into(),
                     org_id: "org_contract".into(),
                     repo_url: "https://example.test/acme/typed".into(),
-                    preset_id: Some("preset_typed".into()),
-                    setup_config: serde_json::json!({
-                        "install_command": "cargo build",
-                        "env_vars": {"RUST_LOG": "info"}
-                    }),
+                    project_spec: repo_spec,
                     created_by: "usr_contract".into(),
                     updated_at: "2026-07-18T12:34:56Z".into(),
                 }),
@@ -1733,14 +1614,27 @@ mod tests {
 
         let json = serde_json::to_value(complete).unwrap();
         assert_eq!(json["draft"]["orgId"], "org_contract");
-        assert_eq!(json["draft"]["appPorts"][0]["port"], 3000);
-        assert_eq!(json["detection"]["projectType"], "rust");
-        assert_eq!(json["detection"]["agents"][0]["type"], "codex");
-        assert_eq!(json["detection"]["installAgents"], true);
+        assert_eq!(
+            json["draft"]["isolationTier"],
+            "ISOLATION_TIER_CONFIDENTIAL"
+        );
+        assert_eq!(
+            json["draft"]["projectSpec"]["applicationPorts"][0]["port"],
+            3000
+        );
+        assert_eq!(
+            json["draft"]["projectSpec"]["environment"]["RUST_LOG"],
+            "info"
+        );
+        assert!(json.get("detection").is_none());
         assert_eq!(json["resolvedPreset"]["id"], "preset_typed");
         assert_eq!(
-            json["repoConfig"]["setupConfig"]["env_vars"]["RUST_LOG"],
-            "info"
+            json["resolvedPreset"]["projectSpec"]["image"],
+            "example.test/preset:latest"
+        );
+        assert_eq!(
+            json["repoConfig"]["projectSpec"]["installCommand"],
+            "cargo build"
         );
     }
 

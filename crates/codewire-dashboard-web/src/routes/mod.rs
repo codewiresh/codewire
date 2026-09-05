@@ -224,14 +224,6 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/{slug}/new", get(organization_slash_redirect))
         .route("/{slug}/new/", get(environments::new_page))
         .route(
-            "/{slug}/_actions/sandboxes/prepare",
-            post(environments::prepare),
-        )
-        .route(
-            "/{slug}/_events/sandboxes/prepare",
-            post(environments::prepare_events),
-        )
-        .route(
             "/{slug}/_actions/sandboxes/create",
             post(environments::create),
         )
@@ -267,28 +259,8 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/settings", get(slash_redirect))
         .route("/settings/", get(settings::settings))
         .route(
-            "/settings/_actions/github/disconnect",
-            post(settings::disconnect_github_action),
-        )
-        .route(
-            "/settings/_actions/credentials/create",
-            post(settings::create_credential_action),
-        )
-        .route(
-            "/settings/_actions/credentials/delete",
-            post(settings::delete_credential_action),
-        )
-        .route(
             "/settings/_actions/git-identity",
             post(settings::update_identity_action),
-        )
-        .route(
-            "/settings/_actions/ssh/ensure",
-            post(settings::ensure_ssh_action),
-        )
-        .route(
-            "/settings/_actions/ssh/regenerate",
-            post(settings::regenerate_ssh_action),
         )
         .route(
             "/settings/_actions/sign-out",

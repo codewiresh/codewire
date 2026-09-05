@@ -1,5 +1,5 @@
-# CI deployer RBAC — grants the Gitea Actions runner permission to cycle
-# sandbox warm pools after deploying new sidecar images.
+# CI deployer RBAC — grants the Gitea Actions runner permission to inspect and
+# clean environment-scoped sandbox resources after deploying runtime images.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

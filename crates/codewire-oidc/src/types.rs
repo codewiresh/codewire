@@ -2,6 +2,7 @@
 //! particular deployment.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -263,7 +264,7 @@ pub enum DeviceStatus {
 /// A stored device-authorization grant (RFC 8628). The `device_code` is the
 /// secret the device polls with; the `user_code` is the short human-entered
 /// code shown at the verification URI.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeviceAuthorization {
     /// The opaque device code (polled at the token endpoint).
     pub device_code: String,
@@ -277,12 +278,67 @@ pub struct DeviceAuthorization {
     pub status: DeviceStatus,
 }
 
+impl fmt::Debug for DeviceAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceAuthorization")
+            .field("device_code", &"[REDACTED]")
+            .field("user_code", &"[REDACTED]")
+            .field("client_id", &self.client_id)
+            .field("scopes", &self.scopes)
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
 /// Ambient request context the host supplies to [`crate::store::UserAuthenticator`]
 /// (e.g. session cookie, headers) — opaque to the library.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct RequestContext {
     /// Raw cookie header, if any (the host interprets it).
     pub cookie: Option<String>,
+}
+
+impl fmt::Debug for RequestContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RequestContext")
+            .field("cookie", &self.cookie.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::*;
+
+    #[test]
+    fn device_authorization_debug_redacts_capabilities() {
+        let value = DeviceAuthorization {
+            device_code: "device-capability-marker".into(),
+            user_code: "user-capability-marker".into(),
+            client_id: "client".into(),
+            scopes: Scopes(vec!["openid".into()]),
+            status: DeviceStatus::Pending,
+        };
+
+        let diagnostic = format!("{value:?}");
+        assert!(!diagnostic.contains("device-capability-marker"));
+        assert!(!diagnostic.contains("user-capability-marker"));
+        assert!(diagnostic.contains("[REDACTED]"));
+        assert!(diagnostic.contains("client"));
+    }
+
+    #[test]
+    fn request_context_debug_redacts_cookie() {
+        let context = RequestContext {
+            cookie: Some("session-cookie-marker".into()),
+        };
+
+        let diagnostic = format!("{context:?}");
+        assert!(!diagnostic.contains("session-cookie-marker"));
+        assert!(diagnostic.contains("[REDACTED]"));
+    }
 }
 
 /// Outcome of resolving the end-user for an authorization request.

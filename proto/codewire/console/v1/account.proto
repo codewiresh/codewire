@@ -2,38 +2,11 @@ syntax = "proto3";
 
 package codewire.console.v1;
 
-import "google/protobuf/timestamp.proto";
-
-// AccountService manages account-global login keys, the user's generated SSH
-// keypair, Git author identity, and non-GitHub forge credentials.
+// AccountService manages account-global Git author identity.
 //
 // Organization-scoped API keys cannot call this service. Callers must use a
 // browser session or an OAuth-issued native-app bearer credential.
 service AccountService {
-  // ListLoginKeys returns every public key accepted for account login.
-  rpc ListLoginKeys(ListLoginKeysRequest) returns (ListLoginKeysResponse) {
-    option idempotency_level = NO_SIDE_EFFECTS;
-  }
-
-  // CreateLoginKey adds one caller-supplied public login key.
-  rpc CreateLoginKey(CreateLoginKeyRequest) returns (CreateLoginKeyResponse);
-
-  // DeleteLoginKey removes one public login key owned by the caller.
-  rpc DeleteLoginKey(DeleteLoginKeyRequest) returns (DeleteLoginKeyResponse);
-
-  // EnsureSshKey returns the generated workspace SSH key, creating and
-  // storing a keypair when the account does not have one yet.
-  rpc EnsureSshKey(EnsureSshKeyRequest) returns (EnsureSshKeyResponse);
-
-  // GetSshKey performs a pure read. It returns not_found until EnsureSshKey
-  // or RegenerateSshKey has created the account's keypair.
-  rpc GetSshKey(GetSshKeyRequest) returns (GetSshKeyResponse) {
-    option idempotency_level = NO_SIDE_EFFECTS;
-  }
-
-  // RegenerateSshKey rotates the generated workspace SSH keypair.
-  rpc RegenerateSshKey(RegenerateSshKeyRequest) returns (RegenerateSshKeyResponse);
-
   // GetGitIdentity returns the resolved Git author name and email.
   rpc GetGitIdentity(GetGitIdentityRequest) returns (GetGitIdentityResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -42,84 +15,6 @@ service AccountService {
   // UpdateGitIdentity replaces the optional Git author overrides. An absent
   // field clears that override, restoring the account-derived fallback.
   rpc UpdateGitIdentity(UpdateGitIdentityRequest) returns (UpdateGitIdentityResponse);
-
-  // ListGitCredentials returns metadata for non-GitHub forge credentials.
-  // Secret values are never returned.
-  rpc ListGitCredentials(ListGitCredentialsRequest) returns (ListGitCredentialsResponse) {
-    option idempotency_level = NO_SIDE_EFFECTS;
-  }
-
-  // CreateGitCredential stores metadata and one secret for a non-GitHub
-  // forge. github.com credentials must use GitHubService instead.
-  rpc CreateGitCredential(CreateGitCredentialRequest) returns (CreateGitCredentialResponse);
-
-  // UpdateGitCredential changes selected metadata and optionally replaces the
-  // stored secret. Absent fields remain unchanged.
-  rpc UpdateGitCredential(UpdateGitCredentialRequest) returns (UpdateGitCredentialResponse);
-
-  // DeleteGitCredential removes the metadata and its stored secret.
-  rpc DeleteGitCredential(DeleteGitCredentialRequest) returns (DeleteGitCredentialResponse);
-}
-
-// LoginKey is a caller-managed public key accepted for SSH login.
-message LoginKey {
-  string id = 1;
-  string name = 2;
-  string public_key = 3;
-  // SHA-256 fingerprint in OpenSSH's SHA256:<base64-without-padding> form.
-  string fingerprint = 4;
-  google.protobuf.Timestamp created_at = 5;
-}
-
-message ListLoginKeysRequest {}
-
-message ListLoginKeysResponse {
-  repeated LoginKey login_keys = 1;
-}
-
-message CreateLoginKeyRequest {
-  string name = 1;
-  string public_key = 2;
-}
-
-message CreateLoginKeyResponse {
-  LoginKey login_key = 1;
-}
-
-message DeleteLoginKeyRequest {
-  // Matches the existing REST path parameter name.
-  string id = 1;
-}
-
-message DeleteLoginKeyResponse {}
-
-// SshKey is the public half of Codewire's generated workspace keypair. The
-// private key remains in the account's secret-store path and is never exposed.
-message SshKey {
-  // OpenSSH authorized_keys form, including its trailing newline.
-  string public_key = 1;
-  string fingerprint = 2;
-  google.protobuf.Timestamp created_at = 3;
-  // Present after an explicit rotation.
-  optional google.protobuf.Timestamp regenerated_at = 4;
-}
-
-message EnsureSshKeyRequest {}
-
-message EnsureSshKeyResponse {
-  SshKey ssh_key = 1;
-}
-
-message GetSshKeyRequest {}
-
-message GetSshKeyResponse {
-  SshKey ssh_key = 1;
-}
-
-message RegenerateSshKeyRequest {}
-
-message RegenerateSshKeyResponse {
-  SshKey ssh_key = 1;
 }
 
 // GitIdentity is the resolved author identity after applying account
@@ -145,55 +40,3 @@ message UpdateGitIdentityRequest {
 message UpdateGitIdentityResponse {
   GitIdentity git_identity = 1;
 }
-
-// GitCredential is non-secret metadata for one non-GitHub forge credential.
-message GitCredential {
-  string id = 1;
-  string user_id = 2;
-  string name = 3;
-  // Lowercase host name used to derive the stable secret-store key.
-  string host = 4;
-  // "basic" is the only supported value today.
-  string auth_type = 5;
-  optional string username = 6;
-  google.protobuf.Timestamp created_at = 7;
-  google.protobuf.Timestamp updated_at = 8;
-}
-
-message ListGitCredentialsRequest {}
-
-message ListGitCredentialsResponse {
-  repeated GitCredential git_credentials = 1;
-}
-
-message CreateGitCredentialRequest {
-  string name = 1;
-  string host = 2;
-  string auth_type = 3;
-  // Empty stores no username.
-  string username = 4;
-  // Written to the secret store and never echoed.
-  string password = 5;
-}
-
-message CreateGitCredentialResponse {
-  GitCredential git_credential = 1;
-}
-
-message UpdateGitCredentialRequest {
-  string credential_id = 1;
-  optional string name = 2;
-  optional string username = 3;
-  // Absent or empty leaves the stored secret unchanged.
-  optional string password = 4;
-}
-
-message UpdateGitCredentialResponse {
-  GitCredential git_credential = 1;
-}
-
-message DeleteGitCredentialRequest {
-  string credential_id = 1;
-}
-
-message DeleteGitCredentialResponse {}

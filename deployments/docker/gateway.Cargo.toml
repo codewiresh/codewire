@@ -68,6 +68,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 wiremock = "=0.6.5"
+zeroize = { version = "1", features = ["serde"] }
 
 tempfile = "3"
 

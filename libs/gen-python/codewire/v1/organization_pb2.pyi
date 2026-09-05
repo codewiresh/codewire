@@ -106,7 +106,7 @@ class OrgMember(_message.Message):
     def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., user_id: _Optional[str] = ..., role: _Optional[_Union[OrgRole, str]] = ..., email: _Optional[str] = ..., name: _Optional[str] = ..., image: _Optional[str] = ..., assignments: _Optional[_Iterable[str]] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class OrgInvitation(_message.Message):
-    __slots__ = ("id", "org_id", "org_name", "email", "role", "invited_by", "inviter_name", "token", "status", "expires_at", "created_at", "accepted_at")
+    __slots__ = ("id", "org_id", "org_name", "email", "role", "invited_by", "inviter_name", "status", "expires_at", "created_at", "accepted_at")
     ID_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     ORG_NAME_FIELD_NUMBER: _ClassVar[int]
@@ -114,7 +114,6 @@ class OrgInvitation(_message.Message):
     ROLE_FIELD_NUMBER: _ClassVar[int]
     INVITED_BY_FIELD_NUMBER: _ClassVar[int]
     INVITER_NAME_FIELD_NUMBER: _ClassVar[int]
-    TOKEN_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
     EXPIRES_AT_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_FIELD_NUMBER: _ClassVar[int]
@@ -126,12 +125,11 @@ class OrgInvitation(_message.Message):
     role: OrgRole
     invited_by: str
     inviter_name: str
-    token: str
     status: InvitationStatus
     expires_at: _timestamp_pb2.Timestamp
     created_at: _timestamp_pb2.Timestamp
     accepted_at: _timestamp_pb2.Timestamp
-    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., org_name: _Optional[str] = ..., email: _Optional[str] = ..., role: _Optional[_Union[OrgRole, str]] = ..., invited_by: _Optional[str] = ..., inviter_name: _Optional[str] = ..., token: _Optional[str] = ..., status: _Optional[_Union[InvitationStatus, str]] = ..., expires_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., accepted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., org_name: _Optional[str] = ..., email: _Optional[str] = ..., role: _Optional[_Union[OrgRole, str]] = ..., invited_by: _Optional[str] = ..., inviter_name: _Optional[str] = ..., status: _Optional[_Union[InvitationStatus, str]] = ..., expires_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., accepted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class ListOrganizationsRequest(_message.Message):
     __slots__ = ("page_size", "page_token")
@@ -296,10 +294,12 @@ class CreateInvitationRequest(_message.Message):
     def __init__(self, org_id: _Optional[str] = ..., email: _Optional[str] = ..., role: _Optional[_Union[OrgRole, str]] = ..., assignments: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class CreateInvitationResponse(_message.Message):
-    __slots__ = ("invitation",)
+    __slots__ = ("invitation", "token")
     INVITATION_FIELD_NUMBER: _ClassVar[int]
+    TOKEN_FIELD_NUMBER: _ClassVar[int]
     invitation: OrgInvitation
-    def __init__(self, invitation: _Optional[_Union[OrgInvitation, _Mapping]] = ...) -> None: ...
+    token: str
+    def __init__(self, invitation: _Optional[_Union[OrgInvitation, _Mapping]] = ..., token: _Optional[str] = ...) -> None: ...
 
 class RevokeInvitationRequest(_message.Message):
     __slots__ = ("org_id", "invitation_id")

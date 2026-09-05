@@ -68,12 +68,14 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 kube = { workspace = true }
 futures = { workspace = true }
+hyper-util = { workspace = true }
 reqwest = { workspace = true }
 k8s-openapi = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
+tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }

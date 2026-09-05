@@ -28,6 +28,7 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 reqwest = { workspace = true }
 # bcrypt verification of confidential-client secrets, matching the Go
 # provider's bcrypt.CompareHashAndPassword (cost 10 / DefaultCost).

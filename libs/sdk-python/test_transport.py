@@ -34,7 +34,15 @@ from codewire._convert import (
 from codewire._transport import ConnectTransport
 from codewire.errors import codewire_error_from_connect
 from codewire.v1.api_key_pb2 import ApiKey
-from codewire.v1.common_pb2 import AppPort, RepoEntry, SetupAgent, SetupConfig
+from codewire.v1.common_pb2 import (
+    ApplicationPort,
+    ProjectAgents,
+    ProjectSecretBindings,
+    ProjectSkillSelection,
+    ProjectSkillSource,
+    ProjectSpec,
+    RepositorySpec,
+)
 from codewire.v1.environment_pb2 import (
     DesiredState,
     Environment,
@@ -347,68 +355,76 @@ class TransportTestCase(unittest.TestCase):
             Preset(
                 id="preset_1",
                 name="Python",
-                default_setup_config=SetupConfig(
-                    repo_url="https://example.test/repository",
-                    branch="main",
-                    repos=[
-                        RepoEntry(
-                            url="https://example.test/a",
+                project_spec=ProjectSpec(
+                    schema_version=1,
+                    working_directory="/workspace/a",
+                    repositories=[
+                        RepositorySpec(
+                            source="https://example.test/a",
                             branch="branch",
-                            mount_path="/workspace/a",
+                            destination="/workspace/a",
                         ),
-                        RepoEntry(
-                            url="https://example.test/b",
+                        RepositorySpec(
+                            source="https://example.test/b",
                             revision="deadbeef",
-                            mount_path="/workspace/b",
+                            destination="/workspace/b",
                         ),
                     ],
                     install_command="pip install",
                     startup_script="python app.py",
-                    env_vars={"PYTHONUNBUFFERED": "1"},
-                    agents=[SetupAgent(type="claude")],
-                    install_agents=True,
-                    agent="claude",
-                    app_ports=[AppPort(port=8080, label="web", access="public")],
-                    include_org_secrets=True,
-                    include_user_secrets=False,
+                    environment={"PYTHONUNBUFFERED": "1"},
+                    agents=ProjectAgents(install=True, tools=["claude"]),
+                    skills=[
+                        ProjectSkillSelection(
+                            source=ProjectSkillSource.PROJECT_SKILL_SOURCE_USER,
+                            reference="personal",
+                            agents=["codex"],
+                        )
+                    ],
+                    application_ports=[
+                        ApplicationPort(port=8080, label="web", access="public")
+                    ],
+                    secrets=ProjectSecretBindings(
+                        project="development", organization=True
+                    ),
                 ),
             )
         )
 
         self.assertEqual(file_value["mode"], "0755")
         self.assertEqual(file_value["mod_time"], "2026-01-01T00:00:00Z")
-        self.assertEqual(preset_value["type"], "sandbox")
-        self.assertEqual(preset_value["repo_url"], "https://example.test/repository")
-        self.assertEqual(preset_value["branch"], "main")
+        project = preset_value["project_spec"]
+        self.assertEqual(project["schema_version"], 1)
+        self.assertEqual(project["working_directory"], "/workspace/a")
         self.assertEqual(
-            preset_value["repos"],
+            project["repositories"],
             [
                 {
-                    "url": "https://example.test/a",
+                    "source": "https://example.test/a",
                     "branch": "branch",
-                    "mount_path": "/workspace/a",
+                    "destination": "/workspace/a",
                 },
                 {
-                    "url": "https://example.test/b",
+                    "source": "https://example.test/b",
                     "branch": "",
-                    "mount_path": "/workspace/b",
+                    "destination": "/workspace/b",
                     "revision": "deadbeef",
                 },
             ],
         )
-        self.assertEqual(preset_value["install_command"], "pip install")
-        self.assertEqual(preset_value["startup_script"], "python app.py")
-        self.assertEqual(preset_value["env_vars"], {"PYTHONUNBUFFERED": "1"})
-        self.assertEqual(preset_value["agents"], [{"type": "claude"}])
-        self.assertTrue(preset_value["install_agents"])
-        self.assertEqual(preset_value["agent"], "claude")
+        self.assertEqual(project["install_command"], "pip install")
+        self.assertEqual(project["startup_script"], "python app.py")
+        self.assertEqual(project["environment"], {"PYTHONUNBUFFERED": "1"})
+        self.assertEqual(project["agents"], {"install": True, "tools": ["claude"]})
+        self.assertEqual(project["skills"][0]["source"], "user")
         self.assertEqual(
-            preset_value["app_ports"],
+            project["application_ports"],
             [{"port": 8080, "label": "web", "access": "public"}],
         )
-        self.assertTrue(preset_value["include_org_secrets"])
-        self.assertFalse(preset_value["include_user_secrets"])
-        self.assertNotIn("default_setup_config", preset_value)
+        self.assertEqual(
+            project["secrets"],
+            {"project": "development", "organization": True, "user": False},
+        )
 
     def test_connect_error_maps_status_violations_and_request_id(self) -> None:
         error = ConnectError(

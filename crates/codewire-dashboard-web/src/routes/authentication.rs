@@ -1,3 +1,5 @@
+use std::fmt;
+
 use axum::{
     Form,
     extract::{Query, State},
@@ -71,13 +73,27 @@ struct AuthUserResponse {
     two_factor_enabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct SignInResponse {
     user: Option<AuthUserResponse>,
     #[serde(default, rename = "twoFactorRequired")]
     two_factor_required: bool,
     #[serde(default, rename = "twoFactorToken")]
     two_factor_token: String,
+}
+
+impl fmt::Debug for SignInResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SignInResponse")
+            .field("user", &self.user)
+            .field("two_factor_required", &self.two_factor_required)
+            .field(
+                "two_factor_token",
+                &(!self.two_factor_token.is_empty()).then_some("[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,13 +121,24 @@ struct ResetResponse {
     reset: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TwoFactorEnableResponse {
     #[serde(rename = "totpUri")]
     totp_uri: String,
     secret: String,
     #[serde(rename = "backupCodes")]
     backup_codes: Vec<String>,
+}
+
+impl fmt::Debug for TwoFactorEnableResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TwoFactorEnableResponse")
+            .field("totp_uri", &"[REDACTED]")
+            .field("secret", &"[REDACTED]")
+            .field("backup_code_count", &self.backup_codes.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -885,6 +912,29 @@ mod tests {
         for secret in [&form.password, &form.invite_code, &form.code, &form.email] {
             assert!(!url.contains(secret));
         }
+    }
+
+    #[test]
+    fn identity_response_debug_redacts_challenge_and_two_factor_setup_secrets() {
+        let sign_in = SignInResponse {
+            user: None,
+            two_factor_required: true,
+            two_factor_token: "challenge-token-marker".into(),
+        };
+        let sign_in_debug = format!("{sign_in:?}");
+        assert!(!sign_in_debug.contains("challenge-token-marker"));
+        assert!(sign_in_debug.contains("[REDACTED]"));
+
+        let setup = TwoFactorEnableResponse {
+            totp_uri: "otpauth://totp/example?secret=totp-uri-marker".into(),
+            secret: "totp-secret-marker".into(),
+            backup_codes: vec!["backup-code-marker".into()],
+        };
+        let setup_debug = format!("{setup:?}");
+        assert!(!setup_debug.contains("totp-uri-marker"));
+        assert!(!setup_debug.contains("totp-secret-marker"));
+        assert!(!setup_debug.contains("backup-code-marker"));
+        assert!(setup_debug.contains("backup_code_count: 1"));
     }
 
     #[test]

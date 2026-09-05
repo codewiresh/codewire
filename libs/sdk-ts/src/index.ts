@@ -1,5 +1,5 @@
 import { Environments } from "./environments.js";
-import { Templates } from "./templates.js";
+import { Presets } from "./presets.js";
 import { APIKeys } from "./api-keys.js";
 import { Secrets } from "./secrets.js";
 import { SecretProjects } from "./secret-projects.js";
@@ -8,7 +8,7 @@ import type { ClientOptions } from "./types.js";
 
 export class Codewire {
   readonly environments: Environments;
-  readonly templates: Templates;
+  readonly presets: Presets;
   readonly apiKeys: APIKeys;
   readonly secrets: Secrets;
   readonly secretProjects: SecretProjects;
@@ -26,7 +26,7 @@ export class Codewire {
       timeout: opts.timeout,
     });
     this.environments = new Environments(clients, orgId);
-    this.templates = new Templates(clients.presets, clients.secrets, orgId);
+    this.presets = new Presets(clients.presets, orgId);
     this.apiKeys = new APIKeys(clients.apiKeys, orgId);
     this.secrets = new Secrets(clients.secrets, orgId);
     this.secretProjects = new SecretProjects(clients.secrets, orgId);
@@ -62,6 +62,14 @@ export type {
   ClientOptions,
   FieldViolation,
   CreateEnvironmentRequest,
+  ApplicationPort,
+  RepositorySpec,
+  ProjectAgents,
+  ProjectSkillSelection,
+  ProjectResources,
+  ProjectSecretBindings,
+  ProjectAccessBinding,
+  ProjectSpec,
   EnvironmentData,
   IsolationTier,
   EnvironmentResources,
@@ -69,9 +77,9 @@ export type {
   EnvironmentResizeOperation,
   EnvironmentResizePlan,
   ResizeEnvironmentRequest,
-  TemplateData,
-  CreateTemplateRequest,
-  UpdateTemplateRequest,
+  PresetData,
+  CreatePresetRequest,
+  UpdatePresetRequest,
   APIKeyData,
   CreateAPIKeyRequest,
   CreateAPIKeyResponse,

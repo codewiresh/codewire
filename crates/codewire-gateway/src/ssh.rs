@@ -1191,7 +1191,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sidecar_host_ed25519");
+        let path = dir.join("host_ed25519");
         let key = host_key::load_or_create(&path).unwrap().key;
         let _ = std::fs::remove_dir_all(dir);
         key
@@ -1948,9 +1948,12 @@ mod tests {
     async fn daemon_backed_runner_bridges_exec_output_to_ssh_channel() {
         let daemon = RecordingTonicDaemon::default();
         let daemon_addr = spawn_recording_tonic_daemon(daemon.clone()).await;
-        let daemon_client = DaemonSessionClient::connect_endpoint(format!("http://{daemon_addr}"))
-            .await
-            .unwrap();
+        let daemon_client = DaemonSessionClient::connect_endpoint(
+            format!("http://{daemon_addr}"),
+            codewire_gateway_proto::DaemonAuthToken::new("gateway-ssh-test-token").unwrap(),
+        )
+        .await
+        .unwrap();
         let runner = Arc::new(DaemonBackedSshRunner::new(daemon_client));
         let (addr, server_task) = spawn_test_gateway_with_runner(runner).await;
         let client = authenticated_client(addr).await;
@@ -1989,9 +1992,12 @@ mod tests {
     async fn daemon_backed_runner_bridges_pty_output_to_ssh_channel() {
         let daemon = RecordingTonicDaemon::default();
         let daemon_addr = spawn_recording_tonic_daemon(daemon.clone()).await;
-        let daemon_client = DaemonSessionClient::connect_endpoint(format!("http://{daemon_addr}"))
-            .await
-            .unwrap();
+        let daemon_client = DaemonSessionClient::connect_endpoint(
+            format!("http://{daemon_addr}"),
+            codewire_gateway_proto::DaemonAuthToken::new("gateway-ssh-test-token").unwrap(),
+        )
+        .await
+        .unwrap();
         let runner = Arc::new(DaemonBackedSshRunner::new(daemon_client));
         let (addr, server_task) = spawn_test_gateway_with_runner(runner).await;
         let client = authenticated_client(addr).await;

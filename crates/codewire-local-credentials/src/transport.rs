@@ -18,7 +18,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 
 // Bump this whenever a detached authority must be replaced, including
 // behavior or provider-catalog changes that leave the wire layout intact.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 7;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 8;
 const AUTHORITY_SOCKET_FILE: &str = "authority.sock";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

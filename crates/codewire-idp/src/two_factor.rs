@@ -14,6 +14,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use base64::Engine;
 use chrono::{NaiveDateTime, Utc};
+use codewire_server_core::auth::hash_session_token;
 use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::{AppError, ValidatedJson};
 use schemars::JsonSchema;
@@ -355,7 +356,7 @@ async fn complete_login(
     user_id: &str,
 ) -> Result<Response, AppError> {
     let (ip, ua) = request_info(headers);
-    let session = create_session(&state.pool, user_id, &ip, &ua).await?;
+    let created_session = create_session(&state.pool, user_id, &ip, &ua).await?;
     let user: UserAuthRow = sqlx::query_as(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
@@ -370,10 +371,10 @@ async fn complete_login(
 
     let body = AuthResponse {
         user: user_response(user),
-        session,
+        session: created_session.response,
         skip_2fa_setup: false,
     };
-    let cookie = session_cookie_string(&body.session.token, state.secure);
+    let cookie = session_cookie_string(&created_session.token, state.secure);
     let mut resp = Json(body).into_response();
     if let Ok(v) = header::HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
@@ -385,14 +386,15 @@ async fn claim_token(
     tx: &mut Transaction<'_, Postgres>,
     token: &str,
 ) -> Result<Option<String>, AppError> {
+    let token_hash = hash_session_token(token);
     let user_id = sqlx::query_scalar(
         r#"
         DELETE FROM two_factor_tokens
-        WHERE token = $1 AND expires_at > NOW()
+        WHERE token_hash = $1 AND expires_at > NOW()
         RETURNING user_id
         "#,
     )
-    .bind(token)
+    .bind(token_hash)
     .fetch_optional(&mut **tx)
     .await?;
 

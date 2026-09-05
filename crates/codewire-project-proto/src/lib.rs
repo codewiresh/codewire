@@ -52,10 +52,10 @@ pub fn from_proto(
             .repositories
             .into_iter()
             .map(|repository| project::RepositorySpec {
-                source: repository.url,
+                source: repository.source,
                 revision: repository.revision,
                 branch: repository.branch,
-                destination: repository.mount_path,
+                destination: repository.destination,
             })
             .collect(),
         working_directory: value.working_directory,
@@ -121,10 +121,10 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
         repositories: value
             .repositories
             .into_iter()
-            .map(|repository| proto::RepoEntry {
-                url: repository.source,
+            .map(|repository| proto::RepositorySpec {
+                source: repository.source,
                 branch: repository.branch,
-                mount_path: repository.destination,
+                destination: repository.destination,
                 revision: repository.revision,
                 ..Default::default()
             })
@@ -152,7 +152,7 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
         application_ports: value
             .application_ports
             .into_iter()
-            .map(|port| proto::AppPort {
+            .map(|port| proto::ApplicationPort {
                 port: i32::from(port.port),
                 label: port.label,
                 access: port.access,
@@ -192,20 +192,27 @@ repositories:
     revision: deadbeef
     destination: /workspace/app
 working_directory: /workspace/app
-env: {RUST_LOG: info}
-agents: [claude, codex]
-skills: [{path: .agents/skills/rust, agents: [codex]}]
+environment: {RUST_LOG: info}
+agents: {tools: [claude-code, codex]}
+skills: [{source: repository, path: .agents/skills/rust, agents: [codex]}]
 ports: [{port: 8080, label: web, access: private}]
-cpu: 2
-memory: 16Gi
-disk: 40Gi
+cpu: "2"
+memory: "16Gi"
+disk: "40Gi"
 secrets: {project: dev, organization: false, user: true}
 access: {profile: user/work}
 "#,
         )
         .unwrap()
         .spec;
-        let decoded = from_proto(to_proto(original.clone())).unwrap();
+        let encoded = to_proto(original.clone());
+        assert_eq!(
+            encoded.repositories[0].source,
+            "https://example.test/org/app.git"
+        );
+        assert_eq!(encoded.repositories[0].destination, "/workspace/app");
+        assert_eq!(encoded.application_ports[0].port, 8080);
+        let decoded = from_proto(encoded).unwrap();
         assert_eq!(decoded, original);
         assert_eq!(
             decoded.canonical_json().unwrap(),

@@ -7,10 +7,6 @@ authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Rust workspace daemon for Codewire sandbox exec, PTY, and file RPCs."
 
-[[bin]]
-name = "codewire-daemon"
-path = "src/main.rs"
-
 [lib]
 name = "codewire_daemon"
 path = "src/lib.rs"
@@ -31,7 +27,6 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 

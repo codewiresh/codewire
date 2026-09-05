@@ -247,63 +247,20 @@ class ListEnvironmentsResponse(_message.Message):
     def __init__(self, environments: _Optional[_Iterable[_Union[Environment, _Mapping]]] = ..., next_page_token: _Optional[str] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentRequest(_message.Message):
-    __slots__ = ("org_id", "preset_id", "name", "cpu_millicores", "memory_mb", "disk_gb", "ttl_seconds", "preset_slug", "repo_url", "branch", "repos", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "secret_project", "app_ports", "include_org_secrets", "include_user_secrets", "isolation_tier", "project_spec")
-    class EnvVarsEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    __slots__ = ("org_id", "preset_id", "name", "ttl_seconds", "isolation_tier", "project_spec")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     PRESET_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
-    CPU_MILLICORES_FIELD_NUMBER: _ClassVar[int]
-    MEMORY_MB_FIELD_NUMBER: _ClassVar[int]
-    DISK_GB_FIELD_NUMBER: _ClassVar[int]
     TTL_SECONDS_FIELD_NUMBER: _ClassVar[int]
-    PRESET_SLUG_FIELD_NUMBER: _ClassVar[int]
-    REPO_URL_FIELD_NUMBER: _ClassVar[int]
-    BRANCH_FIELD_NUMBER: _ClassVar[int]
-    REPOS_FIELD_NUMBER: _ClassVar[int]
-    IMAGE_FIELD_NUMBER: _ClassVar[int]
-    INSTALL_COMMAND_FIELD_NUMBER: _ClassVar[int]
-    STARTUP_SCRIPT_FIELD_NUMBER: _ClassVar[int]
-    ENV_VARS_FIELD_NUMBER: _ClassVar[int]
-    AGENTS_FIELD_NUMBER: _ClassVar[int]
-    INSTALL_AGENTS_FIELD_NUMBER: _ClassVar[int]
-    AGENT_FIELD_NUMBER: _ClassVar[int]
-    SECRET_PROJECT_FIELD_NUMBER: _ClassVar[int]
-    APP_PORTS_FIELD_NUMBER: _ClassVar[int]
-    INCLUDE_ORG_SECRETS_FIELD_NUMBER: _ClassVar[int]
-    INCLUDE_USER_SECRETS_FIELD_NUMBER: _ClassVar[int]
     ISOLATION_TIER_FIELD_NUMBER: _ClassVar[int]
     PROJECT_SPEC_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     preset_id: str
     name: str
-    cpu_millicores: int
-    memory_mb: int
-    disk_gb: int
     ttl_seconds: int
-    preset_slug: str
-    repo_url: str
-    branch: str
-    repos: _containers.RepeatedCompositeFieldContainer[_common_pb2.RepoEntry]
-    image: str
-    install_command: str
-    startup_script: str
-    env_vars: _containers.ScalarMap[str, str]
-    agents: _containers.RepeatedCompositeFieldContainer[_common_pb2.SetupAgent]
-    install_agents: bool
-    agent: str
-    secret_project: str
-    app_ports: _containers.RepeatedCompositeFieldContainer[_common_pb2.AppPort]
-    include_org_secrets: bool
-    include_user_secrets: bool
     isolation_tier: IsolationTier
     project_spec: _common_pb2.ProjectSpec
-    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., ttl_seconds: _Optional[int] = ..., preset_slug: _Optional[str] = ..., repo_url: _Optional[str] = ..., branch: _Optional[str] = ..., repos: _Optional[_Iterable[_Union[_common_pb2.RepoEntry, _Mapping]]] = ..., image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., agent: _Optional[str] = ..., secret_project: _Optional[str] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
+    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentResponse(_message.Message):
     __slots__ = ("environment",)
@@ -797,24 +754,20 @@ class TrustReportSummary(_message.Message):
     def __init__(self, trust_level: _Optional[str] = ..., production_verified: _Optional[bool] = ..., warnings: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class WatchEnvironmentCreateRequest(_message.Message):
-    __slots__ = ("org_id", "draft", "analyze")
+    __slots__ = ("org_id", "draft")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     DRAFT_FIELD_NUMBER: _ClassVar[int]
-    ANALYZE_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     draft: CreateEnvironmentRequest
-    analyze: bool
-    def __init__(self, org_id: _Optional[str] = ..., draft: _Optional[_Union[CreateEnvironmentRequest, _Mapping]] = ..., analyze: _Optional[bool] = ...) -> None: ...
+    def __init__(self, org_id: _Optional[str] = ..., draft: _Optional[_Union[CreateEnvironmentRequest, _Mapping]] = ...) -> None: ...
 
 class WatchEnvironmentCreateResponse(_message.Message):
-    __slots__ = ("progress", "repo_fetched", "complete")
+    __slots__ = ("progress", "complete")
     PROGRESS_FIELD_NUMBER: _ClassVar[int]
-    REPO_FETCHED_FIELD_NUMBER: _ClassVar[int]
     COMPLETE_FIELD_NUMBER: _ClassVar[int]
     progress: PrepareProgress
-    repo_fetched: RepoFetched
     complete: PrepareComplete
-    def __init__(self, progress: _Optional[_Union[PrepareProgress, _Mapping]] = ..., repo_fetched: _Optional[_Union[RepoFetched, _Mapping]] = ..., complete: _Optional[_Union[PrepareComplete, _Mapping]] = ...) -> None: ...
+    def __init__(self, progress: _Optional[_Union[PrepareProgress, _Mapping]] = ..., complete: _Optional[_Union[PrepareComplete, _Mapping]] = ...) -> None: ...
 
 class PrepareProgress(_message.Message):
     __slots__ = ("phase", "message", "total", "repo")
@@ -828,89 +781,31 @@ class PrepareProgress(_message.Message):
     repo: str
     def __init__(self, phase: _Optional[str] = ..., message: _Optional[str] = ..., total: _Optional[int] = ..., repo: _Optional[str] = ...) -> None: ...
 
-class RepoFetched(_message.Message):
-    __slots__ = ("index", "repo", "ok")
-    INDEX_FIELD_NUMBER: _ClassVar[int]
-    REPO_FIELD_NUMBER: _ClassVar[int]
-    OK_FIELD_NUMBER: _ClassVar[int]
-    index: int
-    repo: str
-    ok: bool
-    def __init__(self, index: _Optional[int] = ..., repo: _Optional[str] = ..., ok: _Optional[bool] = ...) -> None: ...
-
 class PrepareComplete(_message.Message):
-    __slots__ = ("draft", "detection", "resolved_preset", "repo_config")
+    __slots__ = ("draft", "resolved_preset", "repo_config")
     DRAFT_FIELD_NUMBER: _ClassVar[int]
-    DETECTION_FIELD_NUMBER: _ClassVar[int]
     RESOLVED_PRESET_FIELD_NUMBER: _ClassVar[int]
     REPO_CONFIG_FIELD_NUMBER: _ClassVar[int]
     draft: CreateEnvironmentRequest
-    detection: DetectionResult
     resolved_preset: _preset_pb2.Preset
     repo_config: RepoConfig
-    def __init__(self, draft: _Optional[_Union[CreateEnvironmentRequest, _Mapping]] = ..., detection: _Optional[_Union[DetectionResult, _Mapping]] = ..., resolved_preset: _Optional[_Union[_preset_pb2.Preset, _Mapping]] = ..., repo_config: _Optional[_Union[RepoConfig, _Mapping]] = ...) -> None: ...
-
-class DetectionResult(_message.Message):
-    __slots__ = ("project_type", "preset_slug", "preset_image", "install_command", "startup_script", "language", "framework", "suggested_name", "needs_docker", "has_compose", "app_ports", "agents", "install_agents", "secret_project", "include_org_secrets", "include_user_secrets", "cpu", "memory", "setup_notes", "project_spec")
-    PROJECT_TYPE_FIELD_NUMBER: _ClassVar[int]
-    PRESET_SLUG_FIELD_NUMBER: _ClassVar[int]
-    PRESET_IMAGE_FIELD_NUMBER: _ClassVar[int]
-    INSTALL_COMMAND_FIELD_NUMBER: _ClassVar[int]
-    STARTUP_SCRIPT_FIELD_NUMBER: _ClassVar[int]
-    LANGUAGE_FIELD_NUMBER: _ClassVar[int]
-    FRAMEWORK_FIELD_NUMBER: _ClassVar[int]
-    SUGGESTED_NAME_FIELD_NUMBER: _ClassVar[int]
-    NEEDS_DOCKER_FIELD_NUMBER: _ClassVar[int]
-    HAS_COMPOSE_FIELD_NUMBER: _ClassVar[int]
-    APP_PORTS_FIELD_NUMBER: _ClassVar[int]
-    AGENTS_FIELD_NUMBER: _ClassVar[int]
-    INSTALL_AGENTS_FIELD_NUMBER: _ClassVar[int]
-    SECRET_PROJECT_FIELD_NUMBER: _ClassVar[int]
-    INCLUDE_ORG_SECRETS_FIELD_NUMBER: _ClassVar[int]
-    INCLUDE_USER_SECRETS_FIELD_NUMBER: _ClassVar[int]
-    CPU_FIELD_NUMBER: _ClassVar[int]
-    MEMORY_FIELD_NUMBER: _ClassVar[int]
-    SETUP_NOTES_FIELD_NUMBER: _ClassVar[int]
-    PROJECT_SPEC_FIELD_NUMBER: _ClassVar[int]
-    project_type: str
-    preset_slug: str
-    preset_image: str
-    install_command: str
-    startup_script: str
-    language: str
-    framework: str
-    suggested_name: str
-    needs_docker: bool
-    has_compose: bool
-    app_ports: _containers.RepeatedCompositeFieldContainer[_common_pb2.AppPort]
-    agents: _containers.RepeatedCompositeFieldContainer[_common_pb2.SetupAgent]
-    install_agents: bool
-    secret_project: str
-    include_org_secrets: bool
-    include_user_secrets: bool
-    cpu: str
-    memory: str
-    setup_notes: str
-    project_spec: _common_pb2.ProjectSpec
-    def __init__(self, project_type: _Optional[str] = ..., preset_slug: _Optional[str] = ..., preset_image: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., language: _Optional[str] = ..., framework: _Optional[str] = ..., suggested_name: _Optional[str] = ..., needs_docker: _Optional[bool] = ..., has_compose: _Optional[bool] = ..., app_ports: _Optional[_Iterable[_Union[_common_pb2.AppPort, _Mapping]]] = ..., agents: _Optional[_Iterable[_Union[_common_pb2.SetupAgent, _Mapping]]] = ..., install_agents: _Optional[bool] = ..., secret_project: _Optional[str] = ..., include_org_secrets: _Optional[bool] = ..., include_user_secrets: _Optional[bool] = ..., cpu: _Optional[str] = ..., memory: _Optional[str] = ..., setup_notes: _Optional[str] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
+    def __init__(self, draft: _Optional[_Union[CreateEnvironmentRequest, _Mapping]] = ..., resolved_preset: _Optional[_Union[_preset_pb2.Preset, _Mapping]] = ..., repo_config: _Optional[_Union[RepoConfig, _Mapping]] = ...) -> None: ...
 
 class RepoConfig(_message.Message):
-    __slots__ = ("id", "org_id", "repo_url", "preset_id", "setup_config", "created_by", "updated_at")
+    __slots__ = ("id", "org_id", "repo_url", "created_by", "updated_at", "project_spec")
     ID_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     REPO_URL_FIELD_NUMBER: _ClassVar[int]
-    PRESET_ID_FIELD_NUMBER: _ClassVar[int]
-    SETUP_CONFIG_FIELD_NUMBER: _ClassVar[int]
     CREATED_BY_FIELD_NUMBER: _ClassVar[int]
     UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_SPEC_FIELD_NUMBER: _ClassVar[int]
     id: str
     org_id: str
     repo_url: str
-    preset_id: str
-    setup_config: _struct_pb2.Struct
     created_by: str
     updated_at: str
-    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., repo_url: _Optional[str] = ..., preset_id: _Optional[str] = ..., setup_config: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ..., created_by: _Optional[str] = ..., updated_at: _Optional[str] = ...) -> None: ...
+    project_spec: _common_pb2.ProjectSpec
+    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., repo_url: _Optional[str] = ..., created_by: _Optional[str] = ..., updated_at: _Optional[str] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
 
 class StreamLogsRequest(_message.Message):
     __slots__ = ("org_id", "environment_id", "follow", "after_log_id")

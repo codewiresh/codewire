@@ -65,45 +65,26 @@ async fn resolve_mesh_authorization(
         return Err(AppError::BadRequest("org_id is required".into()));
     }
 
-    match mesh_authorization_principal(ctx).map_err(|_| AppError::Unauthorized)? {
-        MeshAuthorizationPrincipal::User { user, credential } => {
-            // API keys are exactly-one-organization machine credentials. This
-            // check deliberately precedes membership lookup: a key owner who
-            // belongs to several organizations must not borrow another
-            // membership through the Mesh receiver.
-            if !user.permits_organization(org_id) {
-                return Err(AppError::Forbidden);
-            }
-            let role = user_org_role(pool, user, org_id)
-                .await?
-                .ok_or(AppError::Forbidden)?;
-            Ok(MeshAuthorizationContext {
-                principal_id: user.user_id.clone(),
-                principal_kind: MeshAuthorizationPrincipalKind::User.into(),
-                org_id: org_id.to_owned(),
-                role: proto_role(&role)?.into(),
-                credential_kind: credential_kind(credential).into(),
-                ..Default::default()
-            })
-        }
-        MeshAuthorizationPrincipal::Environment(environment) => {
-            if environment.organization_id != org_id {
-                return Err(AppError::Forbidden);
-            }
-            Ok(MeshAuthorizationContext {
-                principal_id: environment.environment_id.clone(),
-                principal_kind: MeshAuthorizationPrincipalKind::Environment.into(),
-                org_id: org_id.to_owned(),
-                // Environment tokens carry no user membership. The typed
-                // principal and credential kind preserve that distinction;
-                // member is the least-privileged role spelling for consumers
-                // that require a role field.
-                role: OrgRole::Member.into(),
-                credential_kind: MeshAuthorizationCredentialKind::EnvironmentToken.into(),
-                ..Default::default()
-            })
-        }
+    let MeshAuthorizationPrincipal::User { user, credential } =
+        mesh_authorization_principal(ctx).map_err(|_| AppError::Unauthorized)?;
+    // API keys are exactly-one-organization machine credentials. This check
+    // deliberately precedes membership lookup: a key owner who belongs to
+    // several organizations must not borrow another membership through the
+    // Mesh receiver.
+    if !user.permits_organization(org_id) {
+        return Err(AppError::Forbidden);
     }
+    let role = user_org_role(pool, user, org_id)
+        .await?
+        .ok_or(AppError::Forbidden)?;
+    Ok(MeshAuthorizationContext {
+        principal_id: user.user_id.clone(),
+        principal_kind: MeshAuthorizationPrincipalKind::User.into(),
+        org_id: org_id.to_owned(),
+        role: proto_role(&role)?.into(),
+        credential_kind: credential_kind(credential).into(),
+        ..Default::default()
+    })
 }
 
 fn credential_kind(
@@ -172,8 +153,6 @@ mod tests {
         oauth: String,
         identity_oauth: String,
         expired_oauth: String,
-        environment_token: String,
-        destroying_environment_token: String,
     }
 
     #[tokio::test]
@@ -248,31 +227,24 @@ mod tests {
             assert_eq!(body["context"]["credentialKind"], expected_kind);
         }
 
-        let active_environment = post_receiver(
+        let retired_environment_token = format!("retired-environment-token-{}", fixture.user_id);
+        let retired_environment = post_receiver(
             &client,
             address,
             &fixture.org_id,
             MESH_FORWARDED_AUTHORIZATION_METADATA,
-            &format!("Bearer {}", fixture.environment_token),
+            &format!("Bearer {retired_environment_token}"),
             &hmac(MESH_AUTHORIZATION_CALLER, MESH_AUTHORIZATION_METHOD),
         )
         .await;
-        assert_eq!(active_environment.status(), reqwest::StatusCode::OK);
-        let active_body = active_environment.text().await.expect("response body");
-        assert!(
-            !active_body.contains(&fixture.environment_token),
-            "environment token appeared in the response"
-        );
-        let active_body: serde_json::Value =
-            serde_json::from_str(&active_body).expect("response JSON");
-        assert_eq!(
-            active_body["context"]["principalKind"],
-            "MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT"
-        );
-        assert_eq!(
-            active_body["context"]["credentialKind"],
-            "MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN"
-        );
+        assert_connect_error_redacted(
+            retired_environment,
+            reqwest::StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "retired environment bearer",
+            &[&retired_environment_token],
+        )
+        .await;
 
         for (label, credential, expected_status, expected_code) in [
             (
@@ -290,12 +262,6 @@ mod tests {
             (
                 "revoked API key",
                 format!("Bearer {}", fixture.revoked_api_key),
-                reqwest::StatusCode::UNAUTHORIZED,
-                "unauthenticated",
-            ),
-            (
-                "destroying environment",
-                format!("Bearer {}", fixture.destroying_environment_token),
                 reqwest::StatusCode::UNAUTHORIZED,
                 "unauthenticated",
             ),
@@ -705,16 +671,6 @@ mod tests {
             .expect("seed OAuth token");
         }
 
-        let environment_token =
-            insert_environment(pool, &user_id, &org_id, &suffix, "running").await;
-        let destroying_environment_token = insert_environment(
-            pool,
-            &user_id,
-            &org_id,
-            &format!("destroying-{suffix}"),
-            "destroying",
-        )
-        .await;
         Fixture {
             user_id,
             org_id,
@@ -726,8 +682,6 @@ mod tests {
             oauth,
             identity_oauth,
             expired_oauth,
-            environment_token,
-            destroying_environment_token,
         }
     }
 
@@ -753,41 +707,6 @@ mod tests {
         .await
         .expect("seed API key");
         key
-    }
-
-    async fn insert_environment(
-        pool: &PgPool,
-        user_id: &str,
-        org_id: &str,
-        suffix: &str,
-        state: &str,
-    ) -> String {
-        let preset_id = format!("mesh-auth-preset-{suffix}");
-        sqlx::query(
-            "INSERT INTO environment_presets (id, org_id, name, slug) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&preset_id)
-        .bind(org_id)
-        .bind(format!("Mesh authorization {suffix}"))
-        .bind(&preset_id)
-        .execute(pool)
-        .await
-        .expect("seed environment preset");
-        let environment_id = format!("mesh-auth-environment-id-{suffix}");
-        let token = format!("mesh-auth-environment-token-{suffix}");
-        sqlx::query(
-            "INSERT INTO environments (id, org_id, created_by, type, state, desired_state, preset_id, auth_token) VALUES ($1, $2, $3, 'sandbox', $4, 'started', $5, $6)",
-        )
-        .bind(environment_id)
-        .bind(org_id)
-        .bind(user_id)
-        .bind(state)
-        .bind(&preset_id)
-        .bind(&token)
-        .execute(pool)
-        .await
-        .expect("seed environment");
-        token
     }
 
     #[test]

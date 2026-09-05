@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 from codewire._context import ConnectContext
-from codewire._convert import preset_to_dict
+from codewire._convert import (
+    assert_preset_converter_coverage,
+    preset_to_dict,
+    project_spec_from_dict,
+)
 from codewire.v1.preset_connect import PresetServiceClientSync
 from codewire.v1.preset_pb2 import (
     CreatePresetRequest,
@@ -12,7 +18,7 @@ from codewire.v1.preset_pb2 import (
 )
 
 
-class Templates:
+class Presets:
     def __init__(self, context: ConnectContext):
         self._context = context
         self._client = context.transport.client(PresetServiceClientSync)
@@ -21,50 +27,29 @@ class Templates:
         self,
         *,
         name: str,
-        type: str,
+        project_spec: dict[str, Any],
         slug: str | None = None,
         description: str | None = None,
-        image: str | None = None,
-        install_command: str | None = None,
-        startup_script: str | None = None,
-        default_cpu_millicores: int | None = None,
-        default_memory_mb: int | None = None,
-        default_disk_gb: int | None = None,
         default_ttl_seconds: int | None = None,
-        secret_project: str | None = None,
     ) -> dict:
         """Create a new sandbox preset through PresetService."""
-        # The REST handler always created sandbox presets; retain the public
-        # argument without turning it into an invented protocol field.
-        del type
+        assert_preset_converter_coverage()
         request = CreatePresetRequest(
             org_id=self._context.resolve_org_id(), name=name, slug=slug or ""
         )
         _set_create_fields(
             request,
             description=description,
-            image=image,
-            install_command=install_command,
-            startup_script=startup_script,
-            default_cpu_millicores=default_cpu_millicores,
-            default_memory_mb=default_memory_mb,
-            default_disk_gb=default_disk_gb,
             default_ttl_seconds=default_ttl_seconds,
         )
-        if secret_project:
-            request.secret_project_id = self._context.resolve_secret_project_id(
-                secret_project
-            )
+        request.project_spec.CopyFrom(project_spec_from_dict(project_spec))
         response = self._context.unary(self._client.create_preset, request)
         if not response.HasField("preset"):
             raise RuntimeError("preset response omitted preset")
         return preset_to_dict(response.preset)
 
-    def list(self, *, type: str | None = None) -> list[dict]:
-        # REST accepted this query parameter but its handler always returned all
-        # presets. Preserve that public behavior without inventing a
-        # client-side filter or an off-contract Connect field.
-        del type
+    def list(self) -> list[dict]:
+        assert_preset_converter_coverage()
         request = ListPresetsRequest(org_id=self._context.resolve_org_id())
         values: list[dict] = []
         while True:
@@ -75,11 +60,12 @@ class Templates:
             request.page_token = response.next_page_token
         return values
 
-    def get(self, template_id: str) -> dict:
+    def get(self, preset_id: str) -> dict:
+        assert_preset_converter_coverage()
         response = self._context.unary(
             self._client.get_preset,
             GetPresetRequest(
-                org_id=self._context.resolve_org_id(), preset_id=template_id
+                org_id=self._context.resolve_org_id(), preset_id=preset_id
             ),
         )
         if not response.HasField("preset"):
@@ -88,52 +74,37 @@ class Templates:
 
     def update(
         self,
-        template_id: str,
+        preset_id: str,
         *,
         name: str | None = None,
         slug: str | None = None,
         description: str | None = None,
-        image: str | None = None,
-        install_command: str | None = None,
-        startup_script: str | None = None,
-        default_cpu_millicores: int | None = None,
-        default_memory_mb: int | None = None,
-        default_disk_gb: int | None = None,
         default_ttl_seconds: int | None = None,
-        secret_project: str | None = None,
+        project_spec: dict[str, Any] | None = None,
     ) -> dict:
+        assert_preset_converter_coverage()
         request = UpdatePresetRequest(
-            org_id=self._context.resolve_org_id(), preset_id=template_id
+            org_id=self._context.resolve_org_id(), preset_id=preset_id
         )
         _set_update_fields(
             request,
             name=name,
             slug=slug,
             description=description,
-            image=image,
-            install_command=install_command,
-            startup_script=startup_script,
-            default_cpu_millicores=default_cpu_millicores,
-            default_memory_mb=default_memory_mb,
-            default_disk_gb=default_disk_gb,
             default_ttl_seconds=default_ttl_seconds,
         )
-        if secret_project is not None:
-            request.secret_project_id = (
-                self._context.resolve_secret_project_id(secret_project)
-                if secret_project
-                else ""
-            )
+        if project_spec is not None:
+            request.project_spec.CopyFrom(project_spec_from_dict(project_spec))
         response = self._context.unary(self._client.update_preset, request)
         if not response.HasField("preset"):
             raise RuntimeError("preset response omitted preset")
         return preset_to_dict(response.preset)
 
-    def delete(self, template_id: str) -> None:
+    def delete(self, preset_id: str) -> None:
         self._context.unary(
             self._client.delete_preset,
             DeletePresetRequest(
-                org_id=self._context.resolve_org_id(), preset_id=template_id
+                org_id=self._context.resolve_org_id(), preset_id=preset_id
             ),
         )
 

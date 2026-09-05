@@ -19,7 +19,7 @@ codewire-gateway-proto = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-tailnet = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
-ed25519-dalek = { workspace = true, features = ["pem", "rand_core"] }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
 http = { workspace = true }
 prost-types = { workspace = true }
 rand = { workspace = true }
@@ -38,8 +38,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 boringtun = "0.7"
 chrono = { workspace = true }
+tempfile = { workspace = true }
 tower = { workspace = true }

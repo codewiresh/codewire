@@ -22,7 +22,6 @@ import {
   type EnvironmentResources,
   type ExecRequest,
   type ExecResult,
-  type FileEntry,
   type IsolationTier,
   type ResizeEnvironmentRequest,
 } from "./types.js";
@@ -211,21 +210,6 @@ export class Environment implements EnvironmentData {
     } catch (error) {
       throw mapConnectError(error);
     }
-  }
-
-  /** @deprecated Use env.files.upload() instead. */
-  upload(src: Uint8Array, remotePath: string): Promise<void> {
-    return this.files.upload(src, remotePath);
-  }
-
-  /** @deprecated Use env.files.download() instead. */
-  download(remotePath: string): Promise<ArrayBuffer> {
-    return this.files.download(remotePath);
-  }
-
-  /** @deprecated Use env.files.list() instead. */
-  listFiles(dirPath?: string): Promise<FileEntry[]> {
-    return this.files.list(dirPath);
   }
 
   /** List exposed ports for the environment. */

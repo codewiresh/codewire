@@ -1,31 +1,34 @@
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use codewire_gateway_proto::GATEWAY_BINDING_TOKEN_PATH;
 use codewire_proto::codewire::internal::v1::{
     DirectUdpTransport as ProtoDirectUdpTransport, EndpointList as ProtoEndpointList,
     GatewayBindingServiceClient, IssueGatewayBindingRequest,
     PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
 };
-use connectrpc::client::{ClientConfig, HttpClient};
+use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
 use connectrpc::{ConnectError, ErrorCode};
+use http::HeaderValue;
+use http::header::AUTHORIZATION;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio::time::sleep;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::config::{DEFAULT_TAILNET_UDP_LISTEN_ADDR, GatewayConfig, TailnetConfig};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-const SERVICEACCOUNT_NAMESPACE_PATH: &str =
-    "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+const MAX_BINDING_TOKEN_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingPollConfig {
     pub binding_url: String,
     pub coordinator_url: String,
-    pub pod_name: String,
-    pub pod_namespace: String,
+    binding_token_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,18 +77,18 @@ pub enum BindingError {
     Connect(#[from] ConnectError),
     #[error("parse binding environment_id: {0}")]
     InvalidEnvironmentId(String),
+    #[error("gateway binding identity is unavailable")]
+    IdentityUnavailable,
+    #[error("gateway binding identity is invalid")]
+    InvalidIdentity,
 }
 
 impl BindingPollConfig {
     pub fn from_gateway_config(config: &GatewayConfig) -> Option<Self> {
-        Self::from_gateway_config_parts(config, pod_name()?, pod_namespace()?)
+        Self::from_gateway_config_parts(config)
     }
 
-    fn from_gateway_config_parts(
-        config: &GatewayConfig,
-        pod_name: String,
-        pod_namespace: String,
-    ) -> Option<Self> {
+    fn from_gateway_config_parts(config: &GatewayConfig) -> Option<Self> {
         let binding_url = config
             .binding_url
             .as_deref()
@@ -93,14 +96,13 @@ impl BindingPollConfig {
             .filter(|url| !url.is_empty())
             .map(str::to_string)?;
         let coordinator_url = config.coordinator_url.as_deref()?.trim();
-        if coordinator_url.is_empty() || pod_name.is_empty() || pod_namespace.is_empty() {
+        if coordinator_url.is_empty() {
             return None;
         }
         Some(Self {
             binding_url,
             coordinator_url: coordinator_url.into(),
-            pod_name,
-            pod_namespace,
+            binding_token_path: PathBuf::from(GATEWAY_BINDING_TOKEN_PATH),
         })
     }
 
@@ -146,12 +148,10 @@ pub async fn poll_binding_once(
     client: &GatewayBindingServiceClient<HttpClient>,
     config: &BindingPollConfig,
 ) -> Result<Option<BindingPollResult>, BindingError> {
+    let token = read_binding_token(&config.binding_token_path).await?;
+    let options = binding_call_options(&token)?;
     let binding = match client
-        .issue_gateway_binding(IssueGatewayBindingRequest {
-            pod: config.pod_name.clone(),
-            namespace: config.pod_namespace.clone(),
-            ..Default::default()
-        })
+        .issue_gateway_binding_with_options(IssueGatewayBindingRequest::default(), options)
         .await
     {
         Ok(binding) => binding.into_owned(),
@@ -178,6 +178,40 @@ pub async fn poll_binding_once(
             .collect(),
         runtime_transport: binding.runtime_transport.into_option().map(Into::into),
     }))
+}
+
+async fn read_binding_token(path: &Path) -> Result<Zeroizing<String>, BindingError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| BindingError::IdentityUnavailable)?;
+    let mut token = Zeroizing::new(String::with_capacity(2048));
+    file.take((MAX_BINDING_TOKEN_BYTES + 1) as u64)
+        .read_to_string(&mut token)
+        .await
+        .map_err(|_| BindingError::InvalidIdentity)?;
+    if token.is_empty()
+        || token.len() > MAX_BINDING_TOKEN_BYTES
+        || !token.is_ascii()
+        || token.chars().any(char::is_whitespace)
+        || token.chars().any(char::is_control)
+    {
+        return Err(BindingError::InvalidIdentity);
+    }
+    Ok(token)
+}
+
+fn binding_authorization_value(token: &str) -> Result<HeaderValue, BindingError> {
+    let authorization = Zeroizing::new(format!("Bearer {token}"));
+    let mut value =
+        HeaderValue::try_from(authorization.as_str()).map_err(|_| BindingError::InvalidIdentity)?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+fn binding_call_options(token: &str) -> Result<CallOptions, BindingError> {
+    CallOptions::default()
+        .try_with_header(AUTHORIZATION, binding_authorization_value(token)?)
+        .map_err(|_| BindingError::InvalidIdentity)
 }
 
 fn binding_not_ready(error: &ConnectError) -> bool {
@@ -252,40 +286,22 @@ impl RuntimeTransportBinding {
     }
 }
 
-fn pod_name() -> Option<String> {
-    trim_env("HOSTNAME").or_else(|| trim_file("/etc/hostname"))
-}
-
-fn pod_namespace() -> Option<String> {
-    trim_env("POD_NAMESPACE").or_else(|| trim_file(SERVICEACCOUNT_NAMESPACE_PATH))
-}
-
-fn trim_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn trim_file(path: impl AsRef<Path>) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::Router;
+    use codewire_gateway_proto::DaemonAuthToken;
     use codewire_proto::codewire::internal::v1::{
         DirectUdpTransport as ProtoDirectUdpTransport, EndpointList as ProtoEndpointList,
         GatewayBindingService, IssueGatewayBindingResponse,
         PeerRelayTransport as ProtoPeerRelayTransport, RuntimeTransport as ProtoRuntimeTransport,
     };
     use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
     use tokio::net::TcpListener;
+
+    const SYNTHETIC_BINDING_TOKEN: &str = "synthetic.projected.binding-token";
 
     fn gateway_config(api_url: Option<&str>, binding_url: Option<&str>) -> GatewayConfig {
         GatewayConfig {
@@ -298,7 +314,7 @@ mod tests {
             api_url: api_url.map(str::to_string),
             binding_url: binding_url.map(str::to_string),
             coordinator_url: Some("http://coordinator:8080".into()),
-            daemon_auth_token: None,
+            daemon_auth_token: DaemonAuthToken::new("gateway-binding-test-token").unwrap(),
             derp_url: None,
             stun: None,
             stun_servers: Vec::new(),
@@ -313,13 +329,18 @@ mod tests {
         }
     }
 
-    fn binding_config(binding_url: String) -> BindingPollConfig {
-        BindingPollConfig {
-            binding_url,
-            coordinator_url: "http://coordinator:8080".into(),
-            pod_name: "test-pod".into(),
-            pod_namespace: "test-ns".into(),
-        }
+    fn binding_config(binding_url: String) -> (BindingPollConfig, TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let binding_token_path = directory.path().join("token");
+        std::fs::write(&binding_token_path, SYNTHETIC_BINDING_TOKEN).unwrap();
+        (
+            BindingPollConfig {
+                binding_url,
+                coordinator_url: "http://coordinator:8080".into(),
+                binding_token_path,
+            },
+            directory,
+        )
     }
 
     struct ReadyBindingService;
@@ -328,12 +349,15 @@ mod tests {
     impl GatewayBindingService for ReadyBindingService {
         async fn issue_gateway_binding(
             &self,
-            _ctx: RequestContext,
-            request: ServiceRequest<'_, IssueGatewayBindingRequest>,
+            ctx: RequestContext,
+            _request: ServiceRequest<'_, IssueGatewayBindingRequest>,
         ) -> ServiceResult<IssueGatewayBindingResponse> {
-            let request = request.view();
-            assert_eq!(request.pod, "test-pod");
-            assert_eq!(request.namespace, "test-ns");
+            assert_eq!(
+                ctx.headers()
+                    .get(AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer synthetic.projected.binding-token")
+            );
             connectrpc::Response::ok(IssueGatewayBindingResponse {
                 environment_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 sidecar_token: "test-token".into(),
@@ -403,14 +427,7 @@ mod tests {
     fn from_gateway_config_requires_explicit_binding_url() {
         let config = gateway_config(Some("https://codewire.example"), None);
 
-        assert!(
-            BindingPollConfig::from_gateway_config_parts(
-                &config,
-                "test-pod".into(),
-                "test-ns".into()
-            )
-            .is_none()
-        );
+        assert!(BindingPollConfig::from_gateway_config_parts(&config).is_none());
     }
 
     #[test]
@@ -420,24 +437,23 @@ mod tests {
             Some("http://codewire-orchestration.dev.svc.cluster.local:8085"),
         );
 
-        let poll = BindingPollConfig::from_gateway_config_parts(
-            &config,
-            "test-pod".into(),
-            "test-ns".into(),
-        )
-        .expect("binding poll config");
+        let poll =
+            BindingPollConfig::from_gateway_config_parts(&config).expect("binding poll config");
 
         assert_eq!(
             poll.binding_url,
             "http://codewire-orchestration.dev.svc.cluster.local:8085"
         );
-        assert_eq!(poll.pod_name, "test-pod");
-        assert_eq!(poll.pod_namespace, "test-ns");
+        assert_eq!(
+            poll.binding_token_path,
+            PathBuf::from(GATEWAY_BINDING_TOKEN_PATH)
+        );
     }
 
     #[tokio::test]
     async fn poll_binding_success_builds_tailnet_config() {
-        let config = binding_config(start_binding_service(Arc::new(ReadyBindingService)).await);
+        let (config, _token_directory) =
+            binding_config(start_binding_service(Arc::new(ReadyBindingService)).await);
         let client = config.client().unwrap();
         let binding = poll_binding_once(&client, &config).await.unwrap().unwrap();
         let tailnet = binding.tailnet;
@@ -525,7 +541,8 @@ mod tests {
 
     #[tokio::test]
     async fn poll_binding_not_found_keeps_waiting() {
-        let config = binding_config(start_binding_service(Arc::new(NotReadyBindingService)).await);
+        let (config, _token_directory) =
+            binding_config(start_binding_service(Arc::new(NotReadyBindingService)).await);
         let client = config.client().unwrap();
         assert!(poll_binding_once(&client, &config).await.unwrap().is_none());
     }
@@ -542,5 +559,92 @@ mod tests {
             ErrorCode::InvalidArgument,
             "bad request"
         )));
+    }
+
+    #[tokio::test]
+    async fn binding_identity_file_is_bounded_and_canonical() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("token");
+
+        for invalid in ["", " token", "token\n", "to ken", "tökén"] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(matches!(
+                read_binding_token(&path).await,
+                Err(BindingError::InvalidIdentity)
+            ));
+        }
+
+        std::fs::write(&path, vec![b'a'; MAX_BINDING_TOKEN_BYTES + 1]).unwrap();
+        assert!(matches!(
+            read_binding_token(&path).await,
+            Err(BindingError::InvalidIdentity)
+        ));
+        assert!(matches!(
+            read_binding_token(&directory.path().join("missing")).await,
+            Err(BindingError::IdentityUnavailable)
+        ));
+    }
+
+    #[test]
+    fn binding_authorization_metadata_is_sensitive() {
+        let value = binding_authorization_value(SYNTHETIC_BINDING_TOKEN).unwrap();
+        assert!(value.is_sensitive());
+        assert_eq!(
+            value.to_str().unwrap(),
+            "Bearer synthetic.projected.binding-token"
+        );
+    }
+
+    struct RecordingBindingService {
+        authorizations: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[allow(refining_impl_trait)]
+    impl GatewayBindingService for RecordingBindingService {
+        async fn issue_gateway_binding(
+            &self,
+            ctx: RequestContext,
+            _request: ServiceRequest<'_, IssueGatewayBindingRequest>,
+        ) -> ServiceResult<IssueGatewayBindingResponse> {
+            self.authorizations.lock().unwrap().push(
+                ctx.headers()
+                    .get(AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+            connectrpc::Response::ok(IssueGatewayBindingResponse {
+                environment_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                sidecar_token: "synthetic-coordinate-token".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn every_binding_poll_rereads_the_rotated_projected_token() {
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
+        let binding_url = start_binding_service(Arc::new(RecordingBindingService {
+            authorizations: authorizations.clone(),
+        }))
+        .await;
+        let (config, _token_directory) = binding_config(binding_url);
+        let client = config.client().unwrap();
+
+        poll_binding_once(&client, &config).await.unwrap();
+        std::fs::write(
+            &config.binding_token_path,
+            "rotated.projected.binding-token",
+        )
+        .unwrap();
+        poll_binding_once(&client, &config).await.unwrap();
+
+        assert_eq!(
+            *authorizations.lock().unwrap(),
+            [
+                "Bearer synthetic.projected.binding-token",
+                "Bearer rotated.projected.binding-token",
+            ]
+        );
     }
 }

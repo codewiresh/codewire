@@ -12,7 +12,7 @@
 //! 3. **OIDC-issued opaque access tokens** — minted by `codewire-idp`,
 //!    SHA-256 hashed and looked up in `oidc_access_tokens` joined to
 //!    `users` and `oidc_clients` (see
-//!    [`authenticate_oidc_access_token`]). Access tokens keep the fixed
+//!    `authenticate_oidc_access_token`). Access tokens keep the fixed
 //!    expiry the idp issued: presenting one never reads or writes
 //!    `sessions`, and no shared secret is involved. Product APIs additionally
 //!    require the exact `codewire.api` scope; identity-only tokens remain
@@ -192,25 +192,6 @@ pub struct AuthState {
     pub pool: PgPool,
 }
 
-/// Identity resolved from an active environment's bearer `auth_token`.
-///
-/// Environment tokens are platform-internal credentials. They deliberately do
-/// not become [`AuthUser`]s: a sidecar may act only as its environment and its
-/// owning user where an internal service explicitly permits that authority.
-/// Keeping the two identities distinct prevents an environment token from
-/// inheriting user-session, API-key, or OIDC product permissions.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnvironmentIdentity {
-    /// `environments.id` for the active environment that owns the token.
-    pub environment_id: String,
-    /// `environments.org_id`. Environment credentials are not user
-    /// membership, but every accepted environment identity remains confined
-    /// to this one organization.
-    pub organization_id: String,
-    /// `environments.created_by`, retained for environment-owned forge access.
-    pub user_id: String,
-}
-
 /// Axum middleware that requires a valid credential. Inserts an
 /// [`AuthUser`] into request extensions on success.
 pub async fn require_auth(
@@ -365,40 +346,6 @@ pub async fn authenticate_with_kind(
     let auth = authenticate_product(state, session_token, bearer).await?;
     let kind = auth.credential.kind();
     Ok((auth.user, kind))
-}
-
-/// Authenticate an environment's internal bearer token.
-///
-/// This is intentionally separate from [`authenticate`] and
-/// [`authenticate_headers`]: an environment token is not a product user
-/// credential. The active-environment predicate matches the existing REST
-/// internal-credentials handlers. Missing, invalid, destroyed, and
-/// destroying-environment tokens are all intentionally indistinguishable as
-/// [`AppError::Unauthorized`].
-pub async fn authenticate_environment_token(
-    state: &AuthState,
-    bearer: Option<&str>,
-) -> Result<EnvironmentIdentity, AppError> {
-    let token = bearer.ok_or(AppError::Unauthorized)?;
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        r#"
-        SELECT id, org_id, created_by
-          FROM environments
-         WHERE auth_token = $1
-           AND state NOT IN ('destroyed', 'destroying')
-        "#,
-    )
-    .bind(token)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(AppError::from)?;
-
-    let (environment_id, organization_id, user_id) = row.ok_or(AppError::Unauthorized)?;
-    Ok(EnvironmentIdentity {
-        environment_id,
-        organization_id,
-        user_id,
-    })
 }
 
 async fn authenticate_product(

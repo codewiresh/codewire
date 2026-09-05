@@ -11,7 +11,6 @@ class MeshAuthorizationPrincipalKind(int, metaclass=_enum_type_wrapper.EnumTypeW
     __slots__ = ()
     MESH_AUTHORIZATION_PRINCIPAL_KIND_UNSPECIFIED: _ClassVar[MeshAuthorizationPrincipalKind]
     MESH_AUTHORIZATION_PRINCIPAL_KIND_USER: _ClassVar[MeshAuthorizationPrincipalKind]
-    MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT: _ClassVar[MeshAuthorizationPrincipalKind]
 
 class MeshAuthorizationCredentialKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -19,15 +18,12 @@ class MeshAuthorizationCredentialKind(int, metaclass=_enum_type_wrapper.EnumType
     MESH_AUTHORIZATION_CREDENTIAL_KIND_SESSION_COOKIE: _ClassVar[MeshAuthorizationCredentialKind]
     MESH_AUTHORIZATION_CREDENTIAL_KIND_OAUTH_BEARER: _ClassVar[MeshAuthorizationCredentialKind]
     MESH_AUTHORIZATION_CREDENTIAL_KIND_API_KEY: _ClassVar[MeshAuthorizationCredentialKind]
-    MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN: _ClassVar[MeshAuthorizationCredentialKind]
 MESH_AUTHORIZATION_PRINCIPAL_KIND_UNSPECIFIED: MeshAuthorizationPrincipalKind
 MESH_AUTHORIZATION_PRINCIPAL_KIND_USER: MeshAuthorizationPrincipalKind
-MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT: MeshAuthorizationPrincipalKind
 MESH_AUTHORIZATION_CREDENTIAL_KIND_UNSPECIFIED: MeshAuthorizationCredentialKind
 MESH_AUTHORIZATION_CREDENTIAL_KIND_SESSION_COOKIE: MeshAuthorizationCredentialKind
 MESH_AUTHORIZATION_CREDENTIAL_KIND_OAUTH_BEARER: MeshAuthorizationCredentialKind
 MESH_AUTHORIZATION_CREDENTIAL_KIND_API_KEY: MeshAuthorizationCredentialKind
-MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN: MeshAuthorizationCredentialKind
 
 class ResolveMeshAuthorizationRequest(_message.Message):
     __slots__ = ("org_id",)

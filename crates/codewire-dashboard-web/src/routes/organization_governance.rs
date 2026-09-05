@@ -71,6 +71,8 @@ pub(super) async fn members_page(
         assignment_options: &ASSIGNMENTS,
         invite_form: InviteFormView::default(),
         csrf_token: token.clone(),
+        one_time_invitation_url: String::new(),
+        has_one_time_invitation: false,
         message: members_message(&query.message).to_owned(),
         error: members_error(&query.error).to_owned(),
     };
@@ -149,7 +151,49 @@ pub(super) async fn invite_member(
     )
     .await;
     match result {
-        Ok(()) => mutation_redirect(&state, members_path(&slug), "invite-sent", "", &headers),
+        Ok(created) if created.token.is_empty() => error_page(WebError::Connect(
+            ConnectError::internal("empty invitation token"),
+        )),
+        Ok(created) => {
+            let one_time_invitation_url = invitation_url(&state.public_origin, &created.token);
+            let (members, invitations) = organization_connect::members(
+                &state,
+                cookie,
+                &organization.id,
+                organization.can_admin,
+            )
+            .await
+            .unwrap_or_default();
+            let token = new_csrf_token();
+            let page = MembersPageView {
+                members,
+                invitations,
+                assignment_options: &ASSIGNMENTS,
+                invite_form: InviteFormView::default(),
+                csrf_token: token.clone(),
+                one_time_invitation_url,
+                has_one_time_invitation: true,
+                message: String::new(),
+                error: String::new(),
+            };
+            let response = if headers.contains_key(HTMX_REQUEST) {
+                render_template(
+                    StatusCode::OK,
+                    OrganizationMembersContentTemplate {
+                        organization: &organization,
+                        page: &page,
+                    },
+                )
+            } else {
+                render_page(OrganizationMembersTemplate {
+                    view: &dashboard,
+                    organization: &organization,
+                    page: &page,
+                    active_tab: "members",
+                })
+            };
+            with_csrf_cookie(response, csrf_cookie(&state.public_origin, &token))
+        }
         Err(error) if error.code == ErrorCode::Unauthenticated => {
             login_redirect(&members_path(&slug), &headers)
         }
@@ -572,6 +616,8 @@ async fn render_members_form_error(
         assignment_options: &ASSIGNMENTS,
         invite_form: form,
         csrf_token: csrf.to_owned(),
+        one_time_invitation_url: String::new(),
+        has_one_time_invitation: false,
         message: String::new(),
         error: String::new(),
     };
@@ -784,9 +830,16 @@ fn api_keys_path(slug: &str) -> String {
     format!("/{slug}/api-keys/")
 }
 
+fn invitation_url(public_origin: &str, token: &str) -> String {
+    format!(
+        "{}{}",
+        public_origin.trim_end_matches('/'),
+        super::invitations::invite_continuation(token)
+    )
+}
+
 fn members_message(value: &str) -> &'static str {
     match value {
-        "invite-sent" => "Invitation sent.",
         "role-updated" => "Member role updated.",
         "assignments-updated" => "Member assignments updated.",
         "member-removed" => "Member removed.",
@@ -830,13 +883,122 @@ mod tests {
 
     #[test]
     fn query_feedback_is_allowlisted() {
-        assert_eq!(members_message("invite-sent"), "Invitation sent.");
+        assert_eq!(members_message("invite-sent"), "");
         assert_eq!(members_message("<script>"), "");
         assert_eq!(
             api_keys_error("not-authorized"),
             "You do not have permission to delete API keys."
         );
         assert_eq!(api_keys_error("raw-upstream-detail"), "");
+    }
+
+    #[test]
+    fn one_time_invitation_url_uses_the_canonical_accept_route() {
+        assert_eq!(
+            invitation_url(
+                "https://codewire.test/",
+                "synthetic/invitation capability?marker"
+            ),
+            "https://codewire.test/accept-invite?token=synthetic%2Finvitation+capability%3Fmarker"
+        );
+    }
+
+    #[test]
+    fn members_template_surfaces_invitation_url_only_for_create_response() {
+        let organization = OrganizationContext {
+            id: "org-1".into(),
+            name: "Synthetic Organization".into(),
+            slug: "synthetic".into(),
+            role: "Owner",
+            can_admin: true,
+            environments_url: "/synthetic/".into(),
+            snapshots_url: "/synthetic/snapshots/".into(),
+            presets_url: "/synthetic/presets/".into(),
+            secrets_url: "/synthetic/secrets/".into(),
+            api_keys_url: "/synthetic/api-keys/".into(),
+            members_url: "/synthetic/members/".into(),
+            billing_url: "/synthetic/billing/".into(),
+        };
+        let marker = "https://codewire.test/accept-invite?token=synthetic-marker";
+        let render = |has_one_time_invitation| {
+            let page = MembersPageView {
+                members: Vec::new(),
+                invitations: Vec::new(),
+                assignment_options: &ASSIGNMENTS,
+                invite_form: InviteFormView::default(),
+                csrf_token: "synthetic-csrf".into(),
+                one_time_invitation_url: marker.into(),
+                has_one_time_invitation,
+                message: String::new(),
+                error: String::new(),
+            };
+            askama::Template::render(&OrganizationMembersContentTemplate {
+                organization: &organization,
+                page: &page,
+            })
+            .unwrap()
+        };
+
+        let ordinary_read = render(false);
+        assert!(!ordinary_read.contains("synthetic-marker"));
+        assert!(!ordinary_read.contains("hx-history=\"false\""));
+        let created = render(true);
+        assert!(created.contains("Invitation created"));
+        assert!(created.contains("synthetic-marker"));
+        assert!(created.contains("will not be shown again"));
+        assert!(created.contains("hx-history=\"false\""));
+    }
+
+    #[test]
+    fn api_keys_template_disables_history_only_for_the_one_time_create_view() {
+        let organization = OrganizationContext {
+            id: "org-1".into(),
+            name: "Synthetic Organization".into(),
+            slug: "synthetic".into(),
+            role: "Owner",
+            can_admin: true,
+            environments_url: "/synthetic/".into(),
+            snapshots_url: "/synthetic/snapshots/".into(),
+            presets_url: "/synthetic/presets/".into(),
+            secrets_url: "/synthetic/secrets/".into(),
+            api_keys_url: "/synthetic/api-keys/".into(),
+            members_url: "/synthetic/members/".into(),
+            billing_url: "/synthetic/billing/".into(),
+        };
+        let marker = "cw_synthetic_one_time_api_key_marker";
+        let render = |has_one_time_key| {
+            let page = ApiKeysPageView {
+                keys: Vec::new(),
+                form: ApiKeyFormView::default(),
+                csrf_token: "synthetic-csrf".into(),
+                one_time_key: marker.into(),
+                has_one_time_key,
+                message: String::new(),
+                error: String::new(),
+            };
+            askama::Template::render(&OrganizationApiKeysContentTemplate {
+                organization: &organization,
+                page: &page,
+            })
+            .unwrap()
+        };
+
+        let ordinary_read = render(false);
+        assert!(ordinary_read.starts_with(
+            "<section id=\"organization-content\" class=\"cw-org-content\" aria-live=\"polite\">"
+        ));
+        assert!(!ordinary_read.contains("hx-history=\"false\""));
+        assert!(!ordinary_read.contains(marker));
+        assert!(!ordinary_read.contains("data-secret-kind=\"api-key\""));
+
+        let created = render(true);
+        assert!(created.starts_with(
+            "<section id=\"organization-content\" class=\"cw-org-content\" aria-live=\"polite\" hx-history=\"false\">"
+        ));
+        assert_eq!(created.matches("hx-history=\"false\"").count(), 1);
+        assert!(created.contains(marker));
+        assert!(created.contains("data-secret-kind=\"api-key\""));
+        assert!(created.contains("will not be shown again"));
     }
 
     #[test]

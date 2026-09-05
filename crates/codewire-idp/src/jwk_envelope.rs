@@ -67,12 +67,26 @@ impl fmt::Display for EnvelopeError {
 impl std::error::Error for EnvelopeError {}
 
 /// The complete persisted representation of one encrypted signing seed.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct JwkEnvelope {
     pub ciphertext: Vec<u8>,
     pub nonce: Vec<u8>,
     pub kek_id: String,
     pub format: i16,
+}
+
+impl fmt::Debug for JwkEnvelope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JwkEnvelope")
+            .field("ciphertext", &"[REDACTED]")
+            .field("ciphertext_len", &self.ciphertext.len())
+            .field("nonce", &"[REDACTED]")
+            .field("nonce_len", &self.nonce.len())
+            .field("kek_id", &self.kek_id)
+            .field("format", &self.format)
+            .finish()
+    }
 }
 
 /// A versioned, in-memory KEK keyring loaded from the idp-only Secret mount.
@@ -245,6 +259,23 @@ mod tests {
             .verifying_key()
             .to_bytes();
         (seed, public)
+    }
+
+    #[test]
+    fn envelope_debug_redacts_ciphertext_and_nonce() {
+        let envelope = JwkEnvelope {
+            ciphertext: b"ciphertext-secret-marker".to_vec(),
+            nonce: b"nonce-marker".to_vec(),
+            kek_id: "v1".into(),
+            format: FORMAT_V1,
+        };
+
+        let diagnostic = format!("{envelope:?}");
+        assert!(!diagnostic.contains("ciphertext-secret-marker"));
+        assert!(!diagnostic.contains("nonce-marker"));
+        assert!(diagnostic.contains("ciphertext_len: 24"));
+        assert!(diagnostic.contains("nonce_len: 12"));
+        assert!(diagnostic.contains("[REDACTED]"));
     }
 
     #[test]

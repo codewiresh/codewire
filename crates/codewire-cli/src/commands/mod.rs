@@ -3,7 +3,7 @@
 //! - `core`: hook, gateway, target selection, init, VS Code, shell, and CLI utilities.
 //! - `environment`: environment lifecycle, files, access, ports, logs, and list views.
 //! - `native`: Codewire-owned native local environment lifecycle and public clients.
-//! - `platform_commands`: doctor, billing, login/setup, GitHub, organizations, API keys,
+//! - `platform_commands`: doctor, billing, login/setup, organizations, API keys,
 //!   presets, and secrets.
 //! - `mesh_commands`: network, node, and local Mesh management.
 //! - `sessions`: local and remote session lifecycle, output, and messaging.
@@ -140,10 +140,6 @@ pub(crate) struct SetupArgs {
         help = "Slug for --create-org"
     )]
     org_slug: Option<String>,
-    #[arg(long, help = "Connect GitHub during setup")]
-    github: bool,
-    #[arg(long, help = "Skip GitHub connection prompts")]
-    skip_github: bool,
     #[arg(long, help = "Skip OpenSSH config update")]
     skip_ssh: bool,
 }
@@ -392,8 +388,6 @@ pub(crate) enum CredentialAuthenticationKindArg {
     ApiKey,
     AccessToken,
     GithubApp,
-    SshPrivateKey,
-    SshAgent,
 }
 
 #[cfg(target_os = "linux")]
@@ -421,7 +415,10 @@ pub(crate) struct CredentialListArgs {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialSelectorArgs {
-    #[arg(value_name = "ID_OR_NAME")]
+    #[arg(
+        value_name = "CREDENTIAL_SELECTOR",
+        help = "Credential name, name:<name>, or id:<canonical-uuid>"
+    )]
     pub(crate) credential: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
@@ -430,7 +427,10 @@ pub(crate) struct CredentialSelectorArgs {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialRenameArgs {
-    #[arg(value_name = "ID_OR_NAME")]
+    #[arg(
+        value_name = "CREDENTIAL_SELECTOR",
+        help = "Credential name, name:<name>, or id:<canonical-uuid>"
+    )]
     pub(crate) credential: String,
     #[arg(value_name = "NEW_NAME")]
     pub(crate) name: String,
@@ -439,7 +439,10 @@ pub(crate) struct CredentialRenameArgs {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialRotateArgs {
-    #[arg(value_name = "ID_OR_NAME")]
+    #[arg(
+        value_name = "CREDENTIAL_SELECTOR",
+        help = "Credential name, name:<name>, or id:<canonical-uuid>"
+    )]
     pub(crate) credential: String,
     #[arg(long, value_name = "UNIX_SECONDS")]
     pub(crate) expires_at: Option<u64>,
@@ -448,7 +451,10 @@ pub(crate) struct CredentialRotateArgs {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialDeleteArgs {
-    #[arg(value_name = "ID_OR_NAME")]
+    #[arg(
+        value_name = "CREDENTIAL_SELECTOR",
+        help = "Credential name, name:<name>, or id:<canonical-uuid>"
+    )]
     pub(crate) credential: String,
     #[arg(long)]
     pub(crate) yes: bool,
@@ -483,7 +489,10 @@ pub(crate) struct CredentialProfileNameArgs {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialProfileSelectorArgs {
-    #[arg(value_name = "ID_OR_NAME")]
+    #[arg(
+        value_name = "PROFILE_SELECTOR",
+        help = "Profile name, name:<name>, id:<canonical-uuid>, or scope/name"
+    )]
     pub(crate) profile: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
@@ -492,18 +501,27 @@ pub(crate) struct CredentialProfileSelectorArgs {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialProfileSetArgs {
-    #[arg(value_name = "PROFILE")]
+    #[arg(
+        value_name = "PROFILE_SELECTOR",
+        help = "Profile name, name:<name>, id:<canonical-uuid>, or scope/name"
+    )]
     pub(crate) profile: String,
     #[arg(value_name = "SLOT")]
     pub(crate) slot: String,
-    #[arg(value_name = "CREDENTIAL")]
+    #[arg(
+        value_name = "CREDENTIAL_SELECTOR",
+        help = "Credential name, name:<name>, or id:<canonical-uuid>"
+    )]
     pub(crate) credential: String,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialProfileSlotArgs {
-    #[arg(value_name = "PROFILE")]
+    #[arg(
+        value_name = "PROFILE_SELECTOR",
+        help = "Profile name, name:<name>, id:<canonical-uuid>, or scope/name"
+    )]
     pub(crate) profile: String,
     #[arg(value_name = "SLOT")]
     pub(crate) slot: String,
@@ -512,7 +530,10 @@ pub(crate) struct CredentialProfileSlotArgs {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialProfileDeleteArgs {
-    #[arg(value_name = "ID_OR_NAME")]
+    #[arg(
+        value_name = "PROFILE_SELECTOR",
+        help = "Profile name, name:<name>, id:<canonical-uuid>, or scope/name"
+    )]
     pub(crate) profile: String,
     #[arg(long)]
     pub(crate) yes: bool,
@@ -540,7 +561,11 @@ pub(crate) struct CurrentTargetArgs {
 pub(crate) struct InitArgs {
     #[arg(value_name = "REPO_URL")]
     repo_urls: Vec<String>,
-    #[arg(long = "preset", help = "Preset slug (e.g. go, node, python)")]
+    #[arg(
+        long = "preset",
+        conflicts_with = "preset_id",
+        help = "Preset slug (e.g. go, node, python)"
+    )]
     preset_slug: Option<String>,
     #[arg(long = "preset-id", help = "Preset ID (exact)")]
     preset_id: Option<String>,
@@ -582,8 +607,6 @@ pub(crate) struct InitArgs {
     coding_agent: Option<String>,
     #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
     env: Vec<String>,
-    #[arg(long = "secrets", help = "Secret project to bind")]
-    secret_project: Option<String>,
     #[arg(long, default_value = "codewire.yaml", help = "Path to write")]
     file: PathBuf,
     #[arg(long, help = "Overwrite the target file if it exists")]
@@ -710,7 +733,11 @@ pub(crate) enum EnvCommand {
 pub(crate) struct EnvCreateArgs {
     #[arg(value_name = "REPO_URL")]
     repo_urls: Vec<String>,
-    #[arg(long = "preset", help = "Preset slug (e.g. go, node, python)")]
+    #[arg(
+        long = "preset",
+        conflicts_with = "preset_id",
+        help = "Preset slug (e.g. go, node, python)"
+    )]
     preset_slug: Option<String>,
     #[arg(long = "preset-id", help = "Preset ID (exact)")]
     preset_id: Option<String>,
@@ -794,8 +821,6 @@ pub(crate) struct EnvCreateArgs {
     coding_agent: Option<String>,
     #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
     env: Vec<String>,
-    #[arg(long = "secrets", help = "Secret project to bind")]
-    secret_project: Option<String>,
     #[arg(
         long,
         value_name = "SCOPE/NAME",
@@ -1176,16 +1201,6 @@ pub(crate) struct CostArgs {
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum GithubCommand {
-    #[command(about = "Connect GitHub account via device flow")]
-    Login,
-    #[command(about = "Disconnect GitHub account")]
-    Logout,
-    #[command(about = "Show GitHub connection status")]
-    Status,
-}
-
-#[derive(Debug, Subcommand)]
 pub(crate) enum OrgCommand {
     #[command(about = "List organizations")]
     List(OrgListArgs),
@@ -1301,14 +1316,15 @@ pub(crate) struct PresetCreateArgs {
     ttl: Option<String>,
     #[arg(long, help = "Preset description")]
     description: Option<String>,
-    #[arg(long = "secrets", help = "Default secret project to bind")]
-    secret_project: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct PresetInfoArgs {
-    #[arg(value_name = "SLUG_OR_ID")]
-    slug_or_id: String,
+    #[arg(
+        value_name = "SLUG_OR_EXACT_REFERENCE",
+        help = "Preset slug, slug:<slug>, or id:<id>"
+    )]
+    selector: String,
 }
 
 #[derive(Debug, Args)]
@@ -1633,12 +1649,22 @@ pub(crate) struct NetworkInviteArgs {
     output: OutputFormat,
 }
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 pub(crate) struct NetworkJoinArgs {
     #[arg(value_name = "INVITE_CODE", help = "One-use invitation code to redeem")]
     invite_code: String,
     #[arg(long = "mesh-url", help = "Mesh base URL override")]
     mesh_url: Option<String>,
+}
+
+impl std::fmt::Debug for NetworkJoinArgs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NetworkJoinArgs")
+            .field("invite_code", &"[REDACTED]")
+            .field("mesh_url", &self.mesh_url)
+            .finish()
+    }
 }
 
 #[derive(Debug, Args)]
@@ -1677,7 +1703,7 @@ pub(crate) struct NetworkEnrollCreateArgs {
     output: OutputFormat,
 }
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 pub(crate) struct NetworkEnrollRedeemArgs {
     #[arg(
         value_name = "ENROLLMENT_CODE",
@@ -1688,6 +1714,17 @@ pub(crate) struct NetworkEnrollRedeemArgs {
     mesh_url: Option<String>,
     #[arg(long, help = "Node name to redeem as")]
     node_name: Option<String>,
+}
+
+impl std::fmt::Debug for NetworkEnrollRedeemArgs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NetworkEnrollRedeemArgs")
+            .field("enrollment_code", &"[REDACTED]")
+            .field("mesh_url", &self.mesh_url)
+            .field("node_name", &self.node_name)
+            .finish()
+    }
 }
 
 #[derive(Debug, Args)]

@@ -4,7 +4,7 @@
 //! The library owns the OAuth/OIDC *mechanics*; everything stateful or
 //! deployment-specific lives behind these traits, so a host can back them
 //! with sqlx, an in-memory map (see `examples/in_memory.rs`), or anything
-//! else. Each trait is `async` (via [`async_trait`]) and `Send + Sync` so
+//! else. Each trait is `async` (via `#[async_trait]`) and `Send + Sync` so
 //! it can sit in shared application state.
 //!
 //! Fallible methods return [`StoreResult`], whose error

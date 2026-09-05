@@ -3,16 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 
 pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, ProjectError> {
-    let schema_version = match (raw.version, raw.schema_version) {
-        (Some(version), Some(schema_version)) if version != schema_version => {
-            return Err(ProjectError::ConflictingSchemaVersion {
-                version,
-                schema_version,
-            });
-        }
-        (Some(version), _) | (_, Some(version)) => version,
-        (None, None) => PROJECT_SCHEMA_VERSION,
-    };
+    let schema_version = raw.version.unwrap_or(PROJECT_SCHEMA_VERSION);
     if schema_version != PROJECT_SCHEMA_VERSION {
         return Err(ProjectError::UnsupportedSchema(schema_version));
     }
@@ -28,7 +19,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     let working_directory_explicit = !raw.working_directory.trim().is_empty();
     let working_directory =
         normalize_working_directory(&raw.working_directory, &repositories, &mounts)?;
-    let agents = normalize_agents(raw.agents, &raw.agent, raw.install_agents)?;
+    let agents = normalize_agents(raw.agents)?;
     let skills = normalize_skills(raw.skills)?;
     let (application_ports, host_ports) = normalize_ports(raw.ports)?;
     let resources = ResourceSpec {
@@ -252,26 +243,21 @@ fn normalize_working_directory(
     }
 }
 
-fn normalize_agents(
-    agents: Option<RawAgents>,
-    legacy_agent: &str,
-    legacy_install: Option<bool>,
-) -> Result<AgentsSpec, ProjectError> {
-    let (install, tools) = match agents {
-        None => (legacy_install, vec![legacy_agent.to_string()]),
-        Some(RawAgents::String(tool)) => (legacy_install, vec![tool]),
-        Some(RawAgents::List(tools)) => (legacy_install, tools),
-        Some(RawAgents::Mapping(block)) => (block.install, block.tools),
+fn normalize_agents(agents: Option<RawAgentsBlock>) -> Result<AgentsSpec, ProjectError> {
+    let Some(RawAgentsBlock { install, tools }) = agents else {
+        return Ok(AgentsSpec::default());
     };
     enforce_count("agents", tools.len(), MAX_AGENTS)?;
     let mut seen = BTreeSet::new();
     let mut normalized = Vec::new();
     for tool in tools {
-        if let Some(tool) = canonical_agent_id(&tool)?
-            && seen.insert(tool.to_string())
-        {
-            normalized.push(tool.to_string());
+        let Some(tool) = canonical_agent_id(&tool)? else {
+            return invalid("agents", "agent identifier cannot be empty");
+        };
+        if !seen.insert(tool.to_string()) {
+            return invalid("agents", format!("duplicate agent {tool:?}"));
         }
+        normalized.push(tool.to_string());
     }
     Ok(AgentsSpec {
         install,
@@ -279,36 +265,27 @@ fn normalize_agents(
     })
 }
 
-fn normalize_skills(skills: Vec<RawSkill>) -> Result<Vec<SkillSelection>, ProjectError> {
+fn normalize_skills(skills: Vec<RawSkillBlock>) -> Result<Vec<SkillSelection>, ProjectError> {
     let mut normalized = Vec::with_capacity(skills.len());
-    for skill in skills {
-        let (source, reference, agents) = match skill {
-            RawSkill::String(value) => {
-                let value = value.trim();
-                if let Some(name) = value.strip_prefix("user:") {
-                    (SkillSource::User, name.to_string(), Vec::new())
-                } else {
-                    (SkillSource::Repository, value.to_string(), Vec::new())
-                }
+    for block in skills {
+        let source = block.source;
+        let reference = match source {
+            SkillSource::Repository
+                if !block.path.trim().is_empty() && block.name.trim().is_empty() =>
+            {
+                block.path
             }
-            RawSkill::Mapping(block) => {
-                let source = match block.source.trim() {
-                    "" | "repository" | "repo" => SkillSource::Repository,
-                    "user" => SkillSource::User,
-                    other => {
-                        return invalid("skills.source", format!("unsupported source {other:?}"));
-                    }
-                };
-                let reference = match source {
-                    SkillSource::Repository if !block.path.trim().is_empty() => block.path,
-                    SkillSource::User if !block.name.trim().is_empty() => block.name,
-                    SkillSource::Repository if !block.name.trim().is_empty() => block.name,
-                    SkillSource::User if !block.path.trim().is_empty() => block.path,
-                    _ => return invalid("skills", "path or name is required"),
-                };
-                (source, reference, block.agents)
+            SkillSource::User if !block.name.trim().is_empty() && block.path.trim().is_empty() => {
+                block.name
+            }
+            SkillSource::Repository => {
+                return invalid("skills", "repository source requires path and forbids name");
+            }
+            SkillSource::User => {
+                return invalid("skills", "user source requires name and forbids path");
             }
         };
+        let agents = block.agents;
         let reference = short_value("skills.reference", &reference)?;
         if reference.is_empty() {
             return invalid("skills.reference", "value is required");
@@ -321,11 +298,13 @@ fn normalize_skills(skills: Vec<RawSkill>) -> Result<Vec<SkillSelection>, Projec
         let mut seen = BTreeSet::new();
         enforce_count("skills.agents", agents.len(), MAX_AGENTS)?;
         for agent in agents {
-            if let Some(agent) = canonical_agent_id(&agent)?
-                && seen.insert(agent.to_string())
-            {
-                canonical_agents.push(agent.to_string());
+            let Some(agent) = canonical_agent_id(&agent)? else {
+                return invalid("skills.agents", "agent identifier cannot be empty");
+            };
+            if !seen.insert(agent.to_string()) {
+                return invalid("skills.agents", format!("duplicate agent {agent:?}"));
             }
+            canonical_agents.push(agent.to_string());
         }
         normalized.push(SkillSelection {
             source,
@@ -343,36 +322,28 @@ fn normalize_skills(skills: Vec<RawSkill>) -> Result<Vec<SkillSelection>, Projec
 }
 
 fn normalize_ports(
-    ports: Vec<RawPort>,
+    ports: Vec<RawPortBlock>,
 ) -> Result<(Vec<ApplicationPort>, Vec<HostPortBinding>), ProjectError> {
     let mut application_ports = Vec::with_capacity(ports.len());
     let mut host_ports = Vec::new();
     let mut guest_seen = BTreeSet::new();
     let mut host_seen = BTreeSet::new();
     for port in ports {
-        let (host, guest, label, access) = match port {
-            RawPort::Int(port) => (None, port, String::new(), String::new()),
-            RawPort::String(raw) => parse_port_string(&raw)?,
-            RawPort::Mapping(port) => {
-                let host = [port.published, port.host_port]
-                    .into_iter()
-                    .find(|value| *value != 0);
-                let paired_guest = [port.target, port.guest_port]
-                    .into_iter()
-                    .find(|value| *value != 0);
-                if host.is_some() != paired_guest.is_some() {
-                    return invalid(
-                        "ports",
-                        "host_port and guest_port must both be greater than zero",
-                    );
-                }
-                if host.is_some() && port.port != 0 {
-                    return invalid("ports", "use either port or host_port/guest_port");
-                }
-                let guest = paired_guest.unwrap_or(port.port);
-                (host, guest, port.label, port.access)
+        let host_pair = port.host_port != 0 || port.guest_port != 0;
+        let (host, guest) = match (port.port != 0, host_pair) {
+            (true, false) => (None, port.port),
+            (false, true) if port.host_port != 0 && port.guest_port != 0 => {
+                (Some(port.host_port), port.guest_port)
+            }
+            _ => {
+                return invalid(
+                    "ports",
+                    "use either port or a complete host_port/guest_port pair",
+                );
             }
         };
+        let label = port.label;
+        let access = port.access;
         let guest = valid_port("ports.port", guest)?;
         if !guest_seen.insert(guest) {
             return invalid("ports.port", format!("duplicate guest port {guest}"));
@@ -398,42 +369,18 @@ fn normalize_ports(
     Ok((application_ports, host_ports))
 }
 
-fn parse_port_string(raw: &str) -> Result<(Option<i64>, i64, String, String), ProjectError> {
-    let raw = raw.trim();
-    if let Ok(port) = raw.parse::<i64>() {
-        return Ok((None, port, String::new(), String::new()));
-    }
-    let Some((host, guest)) = raw.split_once(':') else {
-        return invalid("ports", format!("expected PORT or HOST:PORT, got {raw:?}"));
-    };
-    let host = host
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| ProjectError::InvalidField {
-            field: "ports.host_port",
-            detail: format!("invalid host port in {raw:?}"),
-        })?;
-    let guest = guest
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| ProjectError::InvalidField {
-            field: "ports.port",
-            detail: format!("invalid guest port in {raw:?}"),
-        })?;
-    Ok((Some(host), guest, String::new(), String::new()))
-}
-
 fn normalize_cpu(quantity: RawQuantity) -> Result<u32, ProjectError> {
-    let value = match quantity {
-        RawQuantity::Int(value) if (1..=64).contains(&value) => value * 1000,
-        RawQuantity::Int(value) => value,
-        RawQuantity::String(value) => {
-            let value = value.trim();
-            if let Some(value) = value.strip_suffix('m') {
-                parse_i64("cpu", value)?
-            } else {
-                parse_i64("cpu", value)? * 1000
-            }
+    let value = {
+        let value = quantity.0.trim();
+        if let Some(value) = value.strip_suffix('m') {
+            parse_i64("cpu", value)?
+        } else {
+            parse_i64("cpu", value)?.checked_mul(1000).ok_or_else(|| {
+                ProjectError::InvalidField {
+                    field: "cpu",
+                    detail: "quantity is too large".to_string(),
+                }
+            })?
         }
     };
     if !(100..=256_000).contains(&value) {
@@ -467,48 +414,33 @@ fn normalize_binary_quantity(
     quantity: RawQuantity,
     default_multiplier_mib: u64,
 ) -> Result<u64, ProjectError> {
-    match quantity {
-        RawQuantity::Int(value) => {
-            if value <= 0 {
-                return invalid(field, "must be greater than zero");
-            }
-            (value as u64)
-                .checked_mul(default_multiplier_mib)
-                .ok_or_else(|| ProjectError::InvalidField {
-                    field,
-                    detail: "quantity is too large".to_string(),
-                })
-        }
-        RawQuantity::String(value) => {
-            let value = value.trim();
-            let lowercase = value.to_ascii_lowercase();
-            let (suffix_len, multiplier) = if lowercase.ends_with("gib") {
-                (3, 1024_u64)
-            } else if lowercase.ends_with("gi") || lowercase.ends_with("gb") {
-                (2, 1024_u64)
-            } else if lowercase.ends_with("mib") {
-                (3, 1_u64)
-            } else if lowercase.ends_with("mi") || lowercase.ends_with("mb") {
-                (2, 1_u64)
-            } else {
-                (0, default_multiplier_mib)
-            };
-            let number = &value[..value.len() - suffix_len];
-            let number = number
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| ProjectError::InvalidField {
-                    field,
-                    detail: format!("invalid binary quantity {value:?}"),
-                })?;
-            number
-                .checked_mul(multiplier)
-                .ok_or_else(|| ProjectError::InvalidField {
-                    field,
-                    detail: "quantity is too large".to_string(),
-                })
-        }
-    }
+    let value = quantity.0.trim();
+    let lowercase = value.to_ascii_lowercase();
+    let (suffix_len, multiplier) = if lowercase.ends_with("gib") {
+        (3, 1024_u64)
+    } else if lowercase.ends_with("gi") || lowercase.ends_with("gb") {
+        (2, 1024_u64)
+    } else if lowercase.ends_with("mib") {
+        (3, 1_u64)
+    } else if lowercase.ends_with("mi") || lowercase.ends_with("mb") {
+        (2, 1_u64)
+    } else {
+        (0, default_multiplier_mib)
+    };
+    let number = &value[..value.len() - suffix_len];
+    let number = number
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| ProjectError::InvalidField {
+            field,
+            detail: format!("invalid binary quantity {value:?}"),
+        })?;
+    number
+        .checked_mul(multiplier)
+        .ok_or_else(|| ProjectError::InvalidField {
+            field,
+            detail: "quantity is too large".to_string(),
+        })
 }
 
 fn normalize_secrets(secrets: Option<RawSecretsBlock>) -> Result<SecretBindings, ProjectError> {
@@ -602,13 +534,13 @@ fn validate_workspace_input_destinations(
 }
 
 pub fn canonical_agent_id(raw: &str) -> Result<Option<&'static str>, ProjectError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "none" => Ok(None),
-        "claude" | "claude-code" => Ok(Some("claude-code")),
+    match raw.trim() {
+        "" => Ok(None),
+        "claude-code" => Ok(Some("claude-code")),
         "codex" => Ok(Some("codex")),
-        "gemini" | "gemini-cli" => Ok(Some("gemini-cli")),
-        "kimi" | "kimi-code" => Ok(Some("kimi-code")),
-        "pi" | "pi-coding-agent" => Ok(Some("pi")),
+        "gemini-cli" => Ok(Some("gemini-cli")),
+        "kimi-code" => Ok(Some("kimi-code")),
+        "pi" => Ok(Some("pi")),
         "aider" => Ok(Some("aider")),
         other => invalid("agents", format!("unsupported agent {other:?}")),
     }
@@ -685,6 +617,17 @@ fn validate_repository_source(index: usize, source: &str) -> Result<(), ProjectE
                 format!("entry {index} must include a host and repository name"),
             );
         }
+        // HTTP authority is structural input, not an opaque URL component.
+        // Reject every percent escape there so an encoded `@` (including a
+        // double-encoded form interpreted by a downstream client) can never
+        // turn an apparently credential-free host into URL userinfo later.
+        // Percent-encoded repository path bytes remain valid.
+        if matches!(scheme.as_str(), "http" | "https") && authority.contains('%') {
+            return invalid(
+                "repositories.source",
+                format!("entry {index} must not percent-encode URL authority characters"),
+            );
+        }
         if path
             .split('/')
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
@@ -737,22 +680,10 @@ fn validate_repository_source(index: usize, source: &str) -> Result<(), ProjectE
             );
         }
     } else {
-        let mut segments = source.split('/');
-        let owner = segments.next().unwrap_or_default();
-        let repository = segments.next().unwrap_or_default();
-        if owner.is_empty()
-            || repository.is_empty()
-            || segments.next().is_some()
-            || matches!(owner, "." | "..")
-            || matches!(repository, "." | "..")
-        {
-            return invalid(
-                "repositories.source",
-                format!(
-                    "entry {index} must use owner/repository shorthand, a remote URL, or SSH scp syntax"
-                ),
-            );
-        }
+        return invalid(
+            "repositories.source",
+            format!("entry {index} must use a remote URL or SSH scp syntax"),
+        );
     }
     if repository_name(source).is_empty() {
         return invalid(
@@ -811,6 +742,12 @@ fn normalize_environment(
     for (key, value) in &environment {
         if !is_valid_environment_key(key) {
             return invalid(field, format!("invalid environment name {key:?}"));
+        }
+        if RESERVED_RUNTIME_ENVIRONMENT_KEYS.contains(&key.as_str()) {
+            return invalid(
+                field,
+                format!("{key} is reserved for Codewire runtime control"),
+            );
         }
         if value.len() > MAX_ENVIRONMENT_VALUE_BYTES {
             return invalid(field, format!("value for {key:?} is too large"));

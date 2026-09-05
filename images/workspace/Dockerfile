@@ -115,8 +115,6 @@ RUN cargo --version && rustc --version && rustfmt --version && cargo clippy --ve
 # and exposes the exact binary built from this source tree.
 USER root
 COPY --from=cw-builder /out/cw /usr/local/bin/cw
-RUN /usr/local/bin/cw --version && \
-    ln -s cw /usr/local/bin/daemon && \
-    ln -s cw /usr/local/bin/codewire-daemon
+RUN /usr/local/bin/cw --version
 
 USER codewire

@@ -1712,12 +1712,13 @@ fn open_database(root: &Path) -> Result<Connection, LocalCredentialError> {
         let after =
             fs::symlink_metadata(&path).map_err(|_| LocalCredentialError::InvalidDatabasePath)?;
         validate_private_file(&after)?;
-        configure_database(&connection)?;
-        if before.is_none() || before == Some(0) {
-            initialize_schema(&connection)?;
-        } else {
-            migrate_schema(&connection)?;
+        let initialize = before.is_none() || before == Some(0);
+        if !initialize {
             validate_schema(&connection)?;
+        }
+        configure_database(&connection)?;
+        if initialize {
+            initialize_schema(&connection)?;
         }
         validate_database(&connection)?;
         Ok(connection)
@@ -1924,68 +1925,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
     validate_schema(connection)
 }
 
-fn migrate_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
-    let version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(database_error)?;
-    match version {
-        DATABASE_SCHEMA_VERSION => Ok(()),
-        1 => {
-            connection
-                .execute_batch(
-                    "BEGIN IMMEDIATE;
-                     CREATE TABLE secret_projects(
-                       id TEXT PRIMARY KEY NOT NULL,
-                       owner_id TEXT NOT NULL,
-                       name TEXT NOT NULL COLLATE NOCASE,
-                       created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
-                       updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
-                       UNIQUE(owner_id, name)
-                     ) STRICT;
-                     CREATE TABLE workload_secrets(
-                       id TEXT PRIMARY KEY NOT NULL,
-                       scope_kind TEXT NOT NULL CHECK(scope_kind IN ('user', 'project')),
-                       scope_id TEXT NOT NULL,
-                       project_id TEXT NULL,
-                       key TEXT NOT NULL,
-                       material_generation INTEGER NOT NULL CHECK(material_generation > 0),
-                       protected_entry_id TEXT NOT NULL UNIQUE,
-                       material_state TEXT NOT NULL CHECK(material_state IN ('pending_write', 'ready', 'pending_delete')),
-                       created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
-                       updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
-                       UNIQUE(scope_kind, scope_id, key),
-                       CHECK((scope_kind = 'user' AND project_id IS NULL) OR
-                             (scope_kind = 'project' AND project_id = scope_id)),
-                       FOREIGN KEY(project_id) REFERENCES secret_projects(id) ON DELETE RESTRICT
-                     ) STRICT;
-                     CREATE INDEX workload_secrets_scope
-                       ON workload_secrets(scope_kind, scope_id, key);
-                     CREATE TABLE workload_secret_journal(
-                       secret_id TEXT PRIMARY KEY NOT NULL,
-                       operation TEXT NOT NULL CHECK(operation IN ('rollback_write', 'delete_retired')),
-                       protected_entry_id TEXT NOT NULL UNIQUE,
-                       created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
-                       FOREIGN KEY(secret_id) REFERENCES workload_secrets(id) ON DELETE CASCADE
-                     ) STRICT;
-                     PRAGMA user_version = 2;
-                     COMMIT;",
-                )
-                .map_err(database_error)
-        }
-        _ => Err(LocalCredentialError::UnsupportedSchema),
-    }
-}
-
 fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
-    let application_id: i64 = connection
-        .pragma_query_value(None, "application_id", |row| row.get(0))
-        .map_err(database_error)?;
-    let schema_version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(database_error)?;
-    if application_id != DATABASE_APPLICATION_ID || schema_version != DATABASE_SCHEMA_VERSION {
-        return Err(LocalCredentialError::UnsupportedSchema);
-    }
+    validate_schema_identity(connection)?;
     for table in [
         "authority_metadata",
         "credentials",
@@ -2010,6 +1951,19 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
         if !present {
             return Err(LocalCredentialError::InvalidDatabase);
         }
+    }
+    Ok(())
+}
+
+fn validate_schema_identity(connection: &Connection) -> Result<(), LocalCredentialError> {
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(database_error)?;
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(database_error)?;
+    if application_id != DATABASE_APPLICATION_ID || schema_version != DATABASE_SCHEMA_VERSION {
+        return Err(LocalCredentialError::UnsupportedSchema);
     }
     Ok(())
 }
@@ -2885,8 +2839,6 @@ fn auth_kind_to_str(kind: CredentialAuthKind) -> &'static str {
         CredentialAuthKind::ApiKey => "api_key",
         CredentialAuthKind::AccessToken => "access_token",
         CredentialAuthKind::GitHubApp => "github_app",
-        CredentialAuthKind::SshPrivateKey => "ssh_private_key",
-        CredentialAuthKind::SshAgent => "ssh_agent",
     }
 }
 
@@ -2896,8 +2848,6 @@ fn parse_auth_kind(value: &str) -> Result<CredentialAuthKind, LocalCredentialErr
         "api_key" => Ok(CredentialAuthKind::ApiKey),
         "access_token" => Ok(CredentialAuthKind::AccessToken),
         "github_app" => Ok(CredentialAuthKind::GitHubApp),
-        "ssh_private_key" => Ok(CredentialAuthKind::SshPrivateKey),
-        "ssh_agent" => Ok(CredentialAuthKind::SshAgent),
         _ => Err(LocalCredentialError::CorruptMetadata),
     }
 }

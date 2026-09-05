@@ -202,6 +202,14 @@ fn gateway_template_opts(namespace: &str) -> anyhow::Result<TemplateOpts> {
     });
     let gateway_token =
         resolve_gateway_token(local_gateway, std::env::var("CRD_SMOKE_GATEWAY_TOKEN").ok())?;
+    let daemon_auth_token = resolve_daemon_auth_token(
+        local_gateway,
+        std::env::var("CRD_SMOKE_DAEMON_AUTH_TOKEN").ok(),
+    )?;
+    anyhow::ensure!(
+        gateway_token != daemon_auth_token,
+        "CRD smoke coordinate and daemon capabilities must be distinct"
+    );
     Ok(TemplateOpts {
         name: "tmpl-crd-smoke".into(),
         image: workspace_image,
@@ -217,6 +225,7 @@ fn gateway_template_opts(namespace: &str) -> anyhow::Result<TemplateOpts> {
         },
         environment_id: "env-crd-smoke".into(),
         gateway_token,
+        daemon_auth_token,
         api_base_url: if local_gateway {
             String::new()
         } else {
@@ -248,6 +257,16 @@ fn resolve_gateway_token(local_gateway: bool, token: Option<String>) -> anyhow::
             anyhow::bail!("CRD_SMOKE_GATEWAY_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1")
         }
         _ => Ok("gateway-crd-smoke-token".into()),
+    }
+}
+
+fn resolve_daemon_auth_token(local_gateway: bool, token: Option<String>) -> anyhow::Result<String> {
+    match token {
+        Some(token) if !token.trim().is_empty() => Ok(token),
+        _ if local_gateway => {
+            anyhow::bail!("CRD_SMOKE_DAEMON_AUTH_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1")
+        }
+        _ => Ok("daemon-crd-smoke-token".into()),
     }
 }
 
@@ -327,12 +346,17 @@ async fn verify_gateway_stack(
                             entry["name"] == "CODEWIRE_DAEMON_AUTH_TOKEN"
                                 && entry["value"]
                                     .as_str()
-                                    .is_some_and(|value| !value.is_empty())
+                                    .is_some_and(|value| value == opts.daemon_auth_token)
+                        }) && env.iter().any(|entry| {
+                            entry["name"] == "CODEWIRE_GATEWAY_TOKEN"
+                                && entry["value"]
+                                    .as_str()
+                                    .is_some_and(|value| value == opts.gateway_token)
                         })
                     })
             })
             .unwrap_or(false),
-        "gateway deployment missing daemon address/token env"
+        "gateway deployment did not keep coordinate and daemon capabilities separated"
     );
     let expected_runtime_class = opts.runtime_profile_spec().runtime_class_name;
     anyhow::ensure!(
@@ -494,7 +518,9 @@ fn value_contains(value: &Value, needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_transient_apiserver_shutdown, resolve_gateway_token};
+    use super::{
+        is_transient_apiserver_shutdown, resolve_daemon_auth_token, resolve_gateway_token,
+    };
 
     #[test]
     fn classifies_only_the_observed_transient_shutdown() {
@@ -510,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn local_gateway_requires_and_preserves_the_shared_daemon_credential() {
+    fn local_gateway_requires_distinct_coordinate_and_daemon_credentials() {
         assert!(resolve_gateway_token(true, None).is_err());
         assert!(resolve_gateway_token(true, Some("  ".into())).is_err());
         assert_eq!(
@@ -520,6 +546,16 @@ mod tests {
         assert_eq!(
             resolve_gateway_token(false, None).unwrap(),
             "gateway-crd-smoke-token"
+        );
+        assert!(resolve_daemon_auth_token(true, None).is_err());
+        assert!(resolve_daemon_auth_token(true, Some("  ".into())).is_err());
+        assert_eq!(
+            resolve_daemon_auth_token(true, Some("derived-daemon-token".into())).unwrap(),
+            "derived-daemon-token"
+        );
+        assert_eq!(
+            resolve_daemon_auth_token(false, None).unwrap(),
+            "daemon-crd-smoke-token"
         );
     }
 }

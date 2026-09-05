@@ -416,7 +416,7 @@ fn secret_key_validation(error: AppError, key: &str) -> AppError {
             errors: vec![ValidationIssue {
                 path: Cow::Borrowed("/key"),
                 message: Cow::Owned(format!(
-                    "secret key must be 1 to {MAX_WORKLOAD_SECRET_KEY_BYTES} bytes and contain only ASCII letters, digits, or underscores"
+                    "secret key must be 1 to {MAX_WORKLOAD_SECRET_KEY_BYTES} bytes, start with an ASCII letter or underscore, and contain only ASCII letters, digits, or underscores"
                 )),
             }],
         }
@@ -576,6 +576,7 @@ mod tests {
     #[test]
     fn invalid_secret_keys_name_the_key_proto_field() {
         for key in [
+            "1DIGIT_FIRST".to_owned(),
             "unsafe/path".to_owned(),
             "A".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES + 1),
         ] {
@@ -587,7 +588,11 @@ mod tests {
                 panic!("missing BadRequest detail");
             };
             assert_eq!(detail.field_violations[0].field, "key");
-            assert!(!detail.field_violations[0].description.is_empty());
+            assert!(
+                detail.field_violations[0]
+                    .description
+                    .contains("start with an ASCII letter or underscore")
+            );
         }
     }
 

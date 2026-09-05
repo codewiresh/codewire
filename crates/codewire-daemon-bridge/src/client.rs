@@ -173,6 +173,14 @@ impl DaemonClient {
             .into_inner())
     }
 
+    pub async fn get_health(&self) -> Result<v1::GetHealthResponse, DaemonClientError> {
+        let mut client = self.inner.clone();
+        Ok(client
+            .get_health(self.authorized(v1::GetHealthRequest {}))
+            .await?
+            .into_inner())
+    }
+
     pub async fn start_run(
         &self,
         start: DaemonRunStart,
@@ -430,6 +438,10 @@ mod tests {
             .require_ready(&[DAEMON_CAPABILITY_EXEC, DAEMON_CAPABILITY_FILES])
             .await
             .expect("daemon capabilities");
+        assert_eq!(
+            client.get_health().await.expect("daemon health").state,
+            v1::DaemonState::Ready as i32
+        );
         let file_path = harness.workspace_root().join("client.bin");
         let file_path = file_path.to_string_lossy().into_owned();
         let workspace = harness.workspace_root().to_string_lossy().into_owned();

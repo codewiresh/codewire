@@ -253,6 +253,41 @@
         assert_eq!(cli.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
+    #[test]
+    fn global_token_flag_is_rejected_without_echoing_its_value() {
+        const MARKER: &str = "synthetic-retired-global-token-canary";
+
+        for argument in ["--token".to_owned(), format!("--token={MARKER}")] {
+            let argv = if argument == "--token" {
+                vec![
+                    "cw".to_owned(),
+                    argument,
+                    MARKER.to_owned(),
+                    "whoami".to_owned(),
+                ]
+            } else {
+                vec!["cw".to_owned(), argument, "whoami".to_owned()]
+            };
+            let error = Cli::try_parse_from(argv).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+            assert!(!error.to_string().contains(MARKER));
+        }
+    }
+
+    #[test]
+    fn one_use_mesh_arguments_are_redacted_through_nested_cli_debug() {
+        const MARKER: &str = "synthetic-one-use-mesh-argument-canary";
+        for argv in [
+            vec!["cw", "network", "join", MARKER],
+            vec!["cw", "network", "enroll", "redeem", MARKER],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let debug = format!("{cli:?}");
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains(MARKER));
+        }
+    }
+
 
 
 
@@ -275,7 +310,6 @@
             &paths.platform_config_dir,
             &config::PlatformConfig {
                 server_url: "https://old.codewire.sh".to_string(),
-                session_token: "old-token".to_string(),
                 default_org: "org_123".to_string(),
             },
         )
@@ -308,7 +342,6 @@
 
         let saved = config::load_platform_config(&paths.platform_config_dir).unwrap();
         assert_eq!(saved.server_url, "https://new.codewire.sh");
-        assert!(saved.session_token.is_empty());
         assert_eq!(saved.default_org, "org_new");
         assert!(config::oauth_credentials_path(&paths.platform_config_dir).is_file());
         let resolved = config::resolve_platform(
@@ -374,6 +407,122 @@
         assert!(!encoded.contains("synthetic-refresh-canary"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_mesh_children_receive_only_explicit_startup_and_logging_environment() {
+        const CHILD_SENTINEL: &str = "CODEWIRE_TEST_LOCAL_MESH_ENV_CHILD";
+        const AMBIENT_CANARY: &str = "synthetic-ambient-secret-canary";
+        if std::env::var_os(CHILD_SENTINEL).is_none() {
+            let test_name = std::thread::current().name().unwrap().to_owned();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(CHILD_SENTINEL, "1")
+                .env("UNRELATED_SECRET", AMBIENT_CANARY)
+                .env("DATABASE_URL", AMBIENT_CANARY)
+                .env("CODEWIRE_MESH_AUTHORIZATION_URL", "https://ambient.invalid")
+                .env("CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET", AMBIENT_CANARY)
+                .env("RUST_LOG", "codewire_mesh=trace")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::Builder::new()
+            .prefix(".codewire-mesh-child-test-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        let executable = directory.path().join("synthetic-child");
+        fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ "$1" = "--base-url" ]; then
+    output="$2"
+else
+    output="$TLS_LISTEN_ADDR"
+fi
+set > "$output"
+exec /bin/sleep 30
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let raw_api_key = "cw_synthetic-local-mesh-api-key";
+        let local_identity = config::LocalMeshIdentity {
+            organization_id: "local-org-synthetic".to_owned(),
+            api_key: raw_api_key.to_owned(),
+        };
+        let mesh_environment = directory.path().join("mesh.env");
+        let mesh_spec = LocalMeshStartSpec {
+            binary: executable.clone(),
+            base_url: mesh_environment.display().to_string(),
+            listen_addr: "127.0.0.1:0".to_owned(),
+            local_identity: local_identity.clone(),
+            log_path: directory.path().join("mesh.log"),
+            derp: None,
+        };
+        assert!(!format!("{mesh_spec:?}").contains(raw_api_key));
+        let mesh_pid = start_local_mesh_process(&mesh_spec).unwrap();
+        let mesh_dump = fs::read_to_string(&mesh_environment).unwrap();
+        let _ = std::process::Command::new("/bin/kill")
+            .arg(mesh_pid.to_string())
+            .status();
+        assert!(mesh_dump.contains("CODEWIRE_MESH_LOCAL_ORGANIZATION_ID="));
+        assert!(mesh_dump.contains("local-org-synthetic"));
+        assert!(mesh_dump.contains("CODEWIRE_MESH_LOCAL_API_KEY_HASH="));
+        assert!(mesh_dump.contains(&local_identity.api_key_hash()));
+        assert!(mesh_dump.contains("RUST_LOG="));
+        assert!(mesh_dump.contains("codewire_mesh=trace"));
+        assert!(!mesh_dump.contains(raw_api_key));
+        for forbidden in [
+            CHILD_SENTINEL,
+            "UNRELATED_SECRET",
+            "DATABASE_URL",
+            "CODEWIRE_MESH_AUTHORIZATION_URL",
+            "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET",
+            AMBIENT_CANARY,
+        ] {
+            assert!(!mesh_dump.contains(forbidden), "Mesh inherited {forbidden}");
+        }
+
+        let derp_environment = directory.path().join("derp.env");
+        let derp_spec = LocalDerpStartSpec {
+            binary: executable,
+            url: "https://127.0.0.1:33443".to_owned(),
+            listen_addr: derp_environment.display().to_string(),
+            log_path: directory.path().join("derp.log"),
+        };
+        let derp = start_local_derp_process(&derp_spec).unwrap();
+        let derp_dump = fs::read_to_string(&derp_environment).unwrap();
+        let _ = std::process::Command::new("/bin/kill")
+            .arg(derp.pid.to_string())
+            .status();
+        assert!(derp_dump.contains("PORT='-1'") || derp_dump.contains("PORT=-1"));
+        assert!(derp_dump.contains("TLS_LISTEN_ADDR="));
+        assert!(derp_dump.contains(&derp_environment.display().to_string()));
+        assert!(
+            derp_dump.contains("STUN_LISTEN_ADDR='-1'")
+                || derp_dump.contains("STUN_LISTEN_ADDR=-1")
+        );
+        assert!(derp_dump.contains("RUST_LOG="));
+        for forbidden in [
+            CHILD_SENTINEL,
+            "UNRELATED_SECRET",
+            "DATABASE_URL",
+            "CODEWIRE_MESH_AUTHORIZATION_URL",
+            "CODEWIRE_MESH_AUTHORIZATION_HMAC_SECRET",
+            "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID",
+            "CODEWIRE_MESH_LOCAL_API_KEY_HASH",
+            AMBIENT_CANARY,
+            raw_api_key,
+        ] {
+            assert!(!derp_dump.contains(forbidden), "DERP inherited {forbidden}");
+        }
+    }
+
     #[test]
     fn login_parser_accepts_default_org() {
         let cli = Cli::try_parse_from(["cw", "login", "--org", "codewire"]).unwrap();
@@ -390,7 +539,6 @@
             "setup",
             "--org",
             "codewire",
-            "--github",
             "--skip-ssh",
         ])
         .unwrap();
@@ -399,8 +547,18 @@
             panic!("expected setup command");
         };
         assert_eq!(args.org.as_deref(), Some("codewire"));
-        assert!(args.github);
         assert!(args.skip_ssh);
+    }
+
+    #[test]
+    fn removed_platform_github_commands_and_setup_flags_are_rejected() {
+        for command in [
+            vec!["cw", "github", "status"],
+            vec!["cw", "setup", "--github"],
+            vec!["cw", "setup", "--skip-github"],
+        ] {
+            assert!(Cli::try_parse_from(command).is_err());
+        }
     }
 
     #[test]
@@ -452,7 +610,6 @@
         let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
         let globals = Globals {
             server: None,
-            token: None,
         };
 
         assert_eq!(
@@ -468,7 +625,6 @@
         let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
         let globals = Globals {
             server: Some(" https://flag.codewire.sh/ ".to_string()),
-            token: None,
         };
 
         assert_eq!(

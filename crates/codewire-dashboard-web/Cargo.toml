@@ -14,6 +14,8 @@ axum = { workspace = true }
 base64 = { workspace = true }
 buffa = { workspace = true }
 codewire-admin-proto = { workspace = true, features = ["client"] }
+codewire-project = { workspace = true }
+codewire-project-proto = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-server-core = { workspace = true }
 codewire-workload-secrets = { workspace = true }

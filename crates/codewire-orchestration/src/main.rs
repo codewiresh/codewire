@@ -6,8 +6,8 @@
 //! - the Temporal worker (`TEMPORAL_HOST_PORT`) — the only trigger
 //!   path after the D3 NATS retirement (owner decision 2026-06-12)
 //! - leader-gated background loops (`WORKER_LOOPS`): the env reconciler,
-//!   sandbox-liveness, warm-pool reconciler, and billing-session
-//!   controller, whose enqueues SignalWithStart workflows
+//!   sandbox-liveness, and billing-session controller, whose enqueues
+//!   SignalWithStart workflows
 //!
 //! NATS is gone: there is no consumer plane and no `TENANT_LOCKS`
 //! distributed lock — one workflow per environment id serializes
@@ -24,12 +24,7 @@ use codewire_orchestration::worker::{self, cloudflare::CloudflareClient};
 use codewire_server_core::{AppBuilder, ServiceConfig};
 use tokio::net::TcpListener;
 
-const DEFAULT_WORKER_LOOPS: &[&str] = &[
-    "env-reconciler",
-    "sandbox-liveness",
-    "warm-pool-reconciler",
-    "billing-session",
-];
+const DEFAULT_WORKER_LOOPS: &[&str] = &["env-reconciler", "sandbox-liveness", "billing-session"];
 const CONNECT_SYNTHETIC_USER_IDS_ENV: &str = "CONNECT_SYNTHETIC_USER_IDS";
 
 const PUBLIC_CONNECT_METHODS: [&str; 1] = ["/codewire.v1.OrganizationService/GetInvitationByToken"];
@@ -200,7 +195,6 @@ async fn main() -> anyhow::Result<()> {
         preview_base_domain: std::env::var("PREVIEW_BASE_DOMAIN").unwrap_or_default(),
         kube: kube.clone(),
         secrets: secrets.clone(),
-        github_cfg: worker::github::GitHubAppConfig::from_env(),
         sandbox_cfg,
         confidential_storage: confidential_storage.clone(),
         temporal_trigger: temporal_trigger.clone(),
@@ -248,8 +242,6 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "http://localhost:5173".into()),
         http_client: reqwest::Client::new(),
         temporal_trigger,
-        anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-        github_cfg: worker::github::GitHubAppConfig::from_env(),
         secrets: secrets.clone(),
         auth: auth.clone(),
         // Ambient kube client for the exec proxy; unavailable mirrors
@@ -311,10 +303,6 @@ async fn main() -> anyhow::Result<()> {
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::admin::router(api_state.clone()),
             connect_admin,
-        )
-        .with_unary_connect_routes_auth(
-            codewire_orchestration::connect::github::router(api_state.clone()),
-            connect_auth.clone(),
         )
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::environment_setup::router(api_state.clone()),
@@ -414,12 +402,7 @@ mod tests {
     fn worker_loops_default_to_rust_owned_set() {
         assert_eq!(
             env_list_from(None),
-            vec![
-                "env-reconciler",
-                "sandbox-liveness",
-                "warm-pool-reconciler",
-                "billing-session",
-            ]
+            vec!["env-reconciler", "sandbox-liveness", "billing-session",]
         );
     }
 

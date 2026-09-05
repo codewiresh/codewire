@@ -7,285 +7,13 @@ use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Serialize, Serializer};
-use sqlx::migrate::{Migrate, Migrator};
-use sqlx::{Acquire, PgPool, Row};
+use sqlx::migrate::Migrator;
+use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 
 use crate::Config;
 
 static MESH_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
-
-const LEGACY_AUTH_RELATIONS: [&str; 8] = [
-    "users",
-    "sessions",
-    "oauth_state",
-    "oidc_users",
-    "oidc_sessions",
-    "oidc_device_flows",
-    "device_codes",
-    "github_app",
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LegacyAuthRetirementOutcome {
-    Purged,
-    AlreadyRetired,
-}
-
-/// Value-blind evidence from the bounded legacy-auth retirement operation.
-///
-/// The report deliberately contains only affected row counts. It never holds
-/// or formats the retired credential, session, device, or OAuth values.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct LegacyAuthRetirementCounts {
-    pub sessions: u64,
-    pub oauth_state: u64,
-    pub oidc_sessions: u64,
-    pub oidc_device_flows: u64,
-    pub oidc_users: u64,
-    pub device_codes: u64,
-    pub github_app: u64,
-    pub users: u64,
-    pub node_tokens: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct LegacyAuthRetirementReport {
-    pub outcome: LegacyAuthRetirementOutcome,
-    pub counts: LegacyAuthRetirementCounts,
-}
-
-struct RetirementLedgerRow {
-    version: i64,
-    description: String,
-    success: bool,
-    checksum: Vec<u8>,
-}
-
-/// Purges the Mesh-local auth/session/device state retired by migration 6.
-///
-/// This is intentionally separate from normal startup so a Helm pre-upgrade
-/// hook can remove disposable legacy state before the new Deployment starts.
-/// SQLx remains the sole migration owner: this function validates but never
-/// edits `_sqlx_migrations`, and migration 6 performs the schema retirement.
-pub async fn prelaunch_retire_legacy_auth(
-    database_url: &str,
-) -> anyhow::Result<LegacyAuthRetirementReport> {
-    anyhow::ensure!(!database_url.trim().is_empty(), "DATABASE_URL is empty");
-
-    let pool = codewire_server_core::db::connect(database_url)
-        .await
-        .context("connect codewire-mesh database for legacy-auth retirement")?;
-    let mut connection = pool
-        .acquire()
-        .await
-        .context("acquire codewire-mesh retirement connection")?;
-
-    Migrate::lock(&mut *connection)
-        .await
-        .context("acquire SQLx migration lock for legacy-auth retirement")?;
-    let retirement = retire_legacy_auth_under_migration_lock(&mut connection).await;
-    let unlock = Migrate::unlock(&mut *connection)
-        .await
-        .context("release SQLx migration lock after legacy-auth retirement");
-
-    match retirement {
-        Ok(report) => {
-            unlock?;
-            Ok(report)
-        }
-        Err(error) => {
-            // Preserve the operation failure as the primary diagnostic. The
-            // pooled connection is dropped immediately afterwards, which also
-            // releases a session-level advisory lock if unlock itself failed.
-            let _ = unlock;
-            Err(error)
-        }
-    }
-}
-
-async fn retire_legacy_auth_under_migration_lock(
-    connection: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
-) -> anyhow::Result<LegacyAuthRetirementReport> {
-    let mut transaction = connection
-        .begin()
-        .await
-        .context("begin legacy-auth retirement transaction")?;
-    sqlx::query("SET LOCAL lock_timeout = '15s'")
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query("SET LOCAL statement_timeout = '60s'")
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *transaction)
-        .await
-        .context("lock SQLx migration ledger")?;
-
-    let ledger = sqlx::query(
-        r#"
-        SELECT version, description, success, checksum
-        FROM _sqlx_migrations
-        ORDER BY version
-        "#,
-    )
-    .fetch_all(&mut *transaction)
-    .await
-    .context("read SQLx migration ledger")?
-    .into_iter()
-    .map(|row| {
-        Ok(RetirementLedgerRow {
-            version: row.try_get("version")?,
-            description: row.try_get("description")?,
-            success: row.try_get("success")?,
-            checksum: row.try_get("checksum")?,
-        })
-    })
-    .collect::<Result<Vec<_>, sqlx::Error>>()?;
-    let applied_count = validate_retirement_ledger(&ledger)?;
-
-    let report = if applied_count == 5 {
-        validate_legacy_auth_schema(&mut transaction, true).await?;
-        sqlx::query(
-            r#"
-            LOCK TABLE
-                sessions, oauth_state, oidc_sessions, oidc_device_flows,
-                oidc_users, device_codes, github_app, users, nodes
-            IN ACCESS EXCLUSIVE MODE
-            "#,
-        )
-        .execute(&mut *transaction)
-        .await
-        .context("lock legacy Mesh auth/session/device state")?;
-        validate_legacy_auth_schema(&mut transaction, true).await?;
-
-        let counts = LegacyAuthRetirementCounts {
-            sessions: sqlx::query("DELETE FROM sessions")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-            oauth_state: sqlx::query("DELETE FROM oauth_state")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-            oidc_sessions: sqlx::query("DELETE FROM oidc_sessions")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-            oidc_device_flows: sqlx::query("DELETE FROM oidc_device_flows")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-            oidc_users: sqlx::query("DELETE FROM oidc_users")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-            device_codes: sqlx::query("DELETE FROM device_codes")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-            github_app: sqlx::query("DELETE FROM github_app")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-            users: sqlx::query("DELETE FROM users")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-            node_tokens: sqlx::query("UPDATE nodes SET token = '' WHERE token <> ''")
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected(),
-        };
-        LegacyAuthRetirementReport {
-            outcome: LegacyAuthRetirementOutcome::Purged,
-            counts,
-        }
-    } else {
-        validate_legacy_auth_schema(&mut transaction, false).await?;
-        LegacyAuthRetirementReport {
-            outcome: LegacyAuthRetirementOutcome::AlreadyRetired,
-            counts: LegacyAuthRetirementCounts::default(),
-        }
-    };
-
-    transaction
-        .commit()
-        .await
-        .context("commit legacy-auth retirement transaction")?;
-    Ok(report)
-}
-
-fn validate_retirement_ledger(ledger: &[RetirementLedgerRow]) -> anyhow::Result<usize> {
-    anyhow::ensure!(
-        matches!(ledger.len(), 5 | 6),
-        "legacy-auth retirement requires an exact successful SQLx 1-5 or 1-6 ledger"
-    );
-    for (applied, expected) in ledger.iter().zip(MESH_MIGRATOR.iter()) {
-        anyhow::ensure!(
-            applied.version == expected.version
-                && applied.description == expected.description.as_ref()
-                && applied.success
-                && applied.checksum == expected.checksum.as_ref(),
-            "legacy-auth retirement rejected SQLx ledger entry at version {}",
-            applied.version
-        );
-    }
-    Ok(ledger.len())
-}
-
-async fn validate_legacy_auth_schema(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    legacy_expected: bool,
-) -> anyhow::Result<()> {
-    let legacy_relation_count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*)
-        FROM pg_class
-        WHERE relnamespace = 'public'::regnamespace
-          AND relkind IN ('r', 'p')
-          AND relname = ANY($1)
-        "#,
-    )
-    .bind(LEGACY_AUTH_RELATIONS.as_slice())
-    .fetch_one(&mut **transaction)
-    .await?;
-    let nodes_table_exists: bool =
-        sqlx::query_scalar("SELECT to_regclass('public.nodes') IS NOT NULL")
-            .fetch_one(&mut **transaction)
-            .await?;
-    let node_token_column_exists: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'nodes'
-              AND column_name = 'token'
-        )
-        "#,
-    )
-    .fetch_one(&mut **transaction)
-    .await?;
-
-    anyhow::ensure!(
-        nodes_table_exists,
-        "legacy-auth retirement requires nodes table"
-    );
-    if legacy_expected {
-        anyhow::ensure!(
-            legacy_relation_count == LEGACY_AUTH_RELATIONS.len() as i64 && node_token_column_exists,
-            "SQLx 1-5 ledger does not match the expected pre-retirement schema"
-        );
-    } else {
-        anyhow::ensure!(
-            legacy_relation_count == 0 && !node_token_column_exists,
-            "SQLx 1-6 ledger does not match the expected retired schema"
-        );
-    }
-    Ok(())
-}
 
 pub const NETWORK_ROLE_OWNER: &str = "owner";
 pub const NETWORK_ROLE_MEMBER: &str = "member";
@@ -572,18 +300,24 @@ pub trait MeshStore: Send + Sync + 'static {
         group_name: &str,
     ) -> Result<Option<GroupPolicy>, StoreError>;
     async fn network_list(&self) -> Result<Vec<Network>, StoreError>;
-    async fn network_list_by_member(&self, subject: &str) -> Result<Vec<Network>, StoreError>;
+    async fn network_list_by_member(
+        &self,
+        organization_id: &str,
+        subject: &str,
+    ) -> Result<Vec<Network>, StoreError>;
     async fn network_list_by_organization(
         &self,
         organization_id: &str,
     ) -> Result<Vec<Network>, StoreError>;
-    /// Creates a network for one exact organization, or confirms that an
-    /// existing row belongs to that same organization. It never invents an
-    /// owner or converts an existing row to a different organization.
-    async fn network_create_owned(
+    /// Atomically creates a network and its first owner membership. A retry by
+    /// that same owner is idempotent; no other caller can claim an existing
+    /// network or acquire ownership through this operation.
+    async fn network_create_with_owner(
         &self,
         network_id: &str,
         organization_id: &str,
+        owner_subject: &str,
+        created_at: DateTime<Utc>,
     ) -> Result<(), StoreError>;
     async fn network_organization_id(&self, network_id: &str)
     -> Result<Option<String>, StoreError>;
@@ -609,10 +343,15 @@ pub trait MeshStore: Send + Sync + 'static {
         code_hash: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<Invite>, StoreError>;
-    async fn invite_consume(
+    /// Atomically consumes one live invitation in the already-authorized
+    /// organization and inserts the joining member. An existing membership is
+    /// preserved so an owner can never be demoted by redeeming an invitation.
+    async fn invite_consume_and_join(
         &self,
         code_hash: &str,
         now: DateTime<Utc>,
+        organization_id: &str,
+        subject: &str,
     ) -> Result<Option<Invite>, StoreError>;
     async fn invite_list(&self, network_id: &str) -> Result<Vec<Invite>, StoreError>;
     async fn invite_delete(&self, network_id: &str, invite_id: &str) -> Result<(), StoreError>;
@@ -995,7 +734,11 @@ impl MeshStore for MemoryStore {
         Ok(networks_from_state(&state, None))
     }
 
-    async fn network_list_by_member(&self, subject: &str) -> Result<Vec<Network>, StoreError> {
+    async fn network_list_by_member(
+        &self,
+        organization_id: &str,
+        subject: &str,
+    ) -> Result<Vec<Network>, StoreError> {
         let state = self.state.lock().await;
         let allowed = state
             .members
@@ -1004,7 +747,10 @@ impl MeshStore for MemoryStore {
                 (member_subject == subject).then_some(network_id.as_str())
             })
             .collect::<HashSet<_>>();
-        Ok(networks_from_state(&state, Some(&allowed)))
+        Ok(networks_from_state(&state, Some(&allowed))
+            .into_iter()
+            .filter(|network| network.organization_id == organization_id)
+            .collect())
     }
 
     async fn network_list_by_organization(
@@ -1018,29 +764,47 @@ impl MeshStore for MemoryStore {
             .collect())
     }
 
-    async fn network_create_owned(
+    async fn network_create_with_owner(
         &self,
         network_id: &str,
         organization_id: &str,
+        owner_subject: &str,
+        created_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         let network_id = required_identifier(network_id, "network_id")?;
         let organization_id = required_identifier(organization_id, "organization_id")?;
+        let owner_subject = required_identifier(owner_subject, "owner_subject")?;
         let mut state = self.state.lock().await;
-        match state.networks.entry(network_id) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(MemoryNetwork {
-                    organization_id,
-                    created_at: Utc::now(),
-                });
-                Ok(())
-            }
-            std::collections::hash_map::Entry::Occupied(entry)
-                if entry.get().organization_id == organization_id =>
+        if let Some(existing) = state.networks.get(&network_id) {
+            return if existing.organization_id == organization_id
+                && state
+                    .members
+                    .get(&(network_id, owner_subject))
+                    .is_some_and(|member| member.role == NETWORK_ROLE_OWNER)
             {
                 Ok(())
-            }
-            std::collections::hash_map::Entry::Occupied(_) => Err(StoreError::AlreadyExists),
+            } else {
+                Err(StoreError::AlreadyExists)
+            };
         }
+        state.networks.insert(
+            network_id.clone(),
+            MemoryNetwork {
+                organization_id,
+                created_at,
+            },
+        );
+        state.members.insert(
+            (network_id.clone(), owner_subject.clone()),
+            NetworkMember {
+                network_id,
+                subject: owner_subject.clone(),
+                role: NETWORK_ROLE_OWNER.to_owned(),
+                created_at,
+                created_by: owner_subject,
+            },
+        );
+        Ok(())
     }
 
     async fn network_organization_id(
@@ -1143,16 +907,46 @@ impl MeshStore for MemoryStore {
             .cloned())
     }
 
-    async fn invite_consume(
+    async fn invite_consume_and_join(
         &self,
         code_hash: &str,
         now: DateTime<Utc>,
+        organization_id: &str,
+        subject: &str,
     ) -> Result<Option<Invite>, StoreError> {
+        let organization_id = required_identifier(organization_id, "organization_id")?;
+        let subject = required_identifier(subject, "subject")?;
         let mut state = self.state.lock().await;
-        let invite_id = state.invites.iter().find_map(|(id, invite)| {
-            (invite.code_hash == code_hash && invite.expires_at > now).then(|| id.clone())
-        });
-        Ok(invite_id.and_then(|id| state.invites.remove(&id)))
+        let invitation = state
+            .invites
+            .values()
+            .find(|invite| {
+                invite.code_hash == code_hash
+                    && invite.organization_id == organization_id
+                    && invite.expires_at > now
+            })
+            .cloned();
+        let Some(invitation) = invitation else {
+            return Ok(None);
+        };
+        let Some(network) = state.networks.get(&invitation.network_id) else {
+            return Err(StoreError::NotFound);
+        };
+        if network.organization_id != invitation.organization_id {
+            return Err(StoreError::NotFound);
+        }
+        state
+            .members
+            .entry((invitation.network_id.clone(), subject.clone()))
+            .or_insert_with(|| NetworkMember {
+                network_id: invitation.network_id.clone(),
+                subject,
+                role: NETWORK_ROLE_MEMBER.to_owned(),
+                created_at: now,
+                created_by: format!("invite:{}", invitation.id),
+            });
+        state.invites.remove(&invitation.id);
+        Ok(Some(invitation))
     }
 
     async fn invite_list(&self, network_id: &str) -> Result<Vec<Invite>, StoreError> {
@@ -2056,10 +1850,15 @@ impl MeshStore for PostgresMeshStore {
         rows_to_networks(rows)
     }
 
-    async fn network_list_by_member(&self, subject: &str) -> Result<Vec<Network>, StoreError> {
+    async fn network_list_by_member(
+        &self,
+        organization_id: &str,
+        subject: &str,
+    ) -> Result<Vec<Network>, StoreError> {
         let rows = sqlx::query(network_list_sql(Some(subject)))
             .bind(Utc::now())
             .bind(subject)
+            .bind(organization_id)
             .fetch_all(&self.pool)
             .await?;
         rows_to_networks(rows)
@@ -2077,29 +1876,72 @@ impl MeshStore for PostgresMeshStore {
         rows_to_networks(rows)
     }
 
-    async fn network_create_owned(
+    async fn network_create_with_owner(
         &self,
         network_id: &str,
         organization_id: &str,
+        owner_subject: &str,
+        created_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         let network_id = required_identifier(network_id, "network_id")?;
         let organization_id = required_identifier(organization_id, "organization_id")?;
-        let matched: Option<String> = sqlx::query_scalar(
+        let owner_subject = required_identifier(owner_subject, "owner_subject")?;
+        let mut transaction = self.pool.begin().await?;
+        let created: Option<String> = sqlx::query_scalar(
             r#"
             INSERT INTO networks (network_id, organization_id, created_at)
             VALUES ($1, $2, $3)
-            ON CONFLICT (network_id) DO UPDATE
-               SET organization_id = networks.organization_id
-             WHERE networks.organization_id = EXCLUDED.organization_id
-            RETURNING organization_id
+            ON CONFLICT (network_id) DO NOTHING
+            RETURNING network_id
             "#,
         )
-        .bind(network_id)
-        .bind(organization_id)
-        .bind(Utc::now())
-        .fetch_optional(&self.pool)
+        .bind(&network_id)
+        .bind(&organization_id)
+        .bind(created_at)
+        .fetch_optional(&mut *transaction)
         .await?;
-        matched.map(|_| ()).ok_or(StoreError::AlreadyExists)
+        if created.is_some() {
+            sqlx::query(
+                r#"
+                INSERT INTO network_members
+                    (network_id, subject, role, created_at, created_by)
+                VALUES ($1, $2, $3, $4, $2)
+                "#,
+            )
+            .bind(&network_id)
+            .bind(&owner_subject)
+            .bind(NETWORK_ROLE_OWNER)
+            .bind(created_at)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Ok(());
+        }
+
+        let same_owner: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM networks n
+                JOIN network_members nm ON nm.network_id = n.network_id
+                WHERE n.network_id = $1
+                  AND n.organization_id = $2
+                  AND nm.subject = $3
+                  AND nm.role = $4
+            )
+            "#,
+        )
+        .bind(&network_id)
+        .bind(&organization_id)
+        .bind(&owner_subject)
+        .bind(NETWORK_ROLE_OWNER)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !same_owner {
+            return Err(StoreError::AlreadyExists);
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     async fn network_organization_id(
@@ -2247,24 +2089,66 @@ impl MeshStore for PostgresMeshStore {
         row.map(row_to_invite).transpose()
     }
 
-    async fn invite_consume(
+    async fn invite_consume_and_join(
         &self,
         code_hash: &str,
         now: DateTime<Utc>,
+        organization_id: &str,
+        subject: &str,
     ) -> Result<Option<Invite>, StoreError> {
+        let organization_id = required_identifier(organization_id, "organization_id")?;
+        let subject = required_identifier(subject, "subject")?;
+        let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             r#"
             DELETE FROM invites
-            WHERE code_hash = $1 AND expires_at > $2
+            WHERE code_hash = $1 AND organization_id = $2 AND expires_at > $3
             RETURNING id, network_id, organization_id, created_by_user_id,
                       code_hash, expires_at, created_at
             "#,
         )
         .bind(code_hash)
+        .bind(&organization_id)
         .bind(now)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-        row.map(row_to_invite).transpose()
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let invitation = row_to_invite(row)?;
+        let network_matches: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM networks
+                WHERE network_id = $1 AND organization_id = $2
+            )
+            "#,
+        )
+        .bind(&invitation.network_id)
+        .bind(&invitation.organization_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !network_matches {
+            return Err(StoreError::NotFound);
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO network_members
+                (network_id, subject, role, created_at, created_by)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (network_id, subject) DO NOTHING
+            "#,
+        )
+        .bind(&invitation.network_id)
+        .bind(&subject)
+        .bind(NETWORK_ROLE_MEMBER)
+        .bind(now)
+        .bind(format!("invite:{}", invitation.id))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(Some(invitation))
     }
 
     async fn invite_list(&self, network_id: &str) -> Result<Vec<Invite>, StoreError> {
@@ -2824,6 +2708,7 @@ fn network_list_sql(subject: Option<&str>) -> &'static str {
                 GROUP BY network_id
             ) invite_counts ON invite_counts.network_id = n.network_id
             WHERE nm.subject = $2
+              AND n.organization_id = $3
             ORDER BY n.network_id
             "#
         }
@@ -3095,47 +2980,6 @@ mod migration_tests {
         .collect()
     }
 
-    async fn prepare_mesh_through_migration_five(pool: &PgPool) -> anyhow::Result<()> {
-        for migration_sql in [
-            include_str!("../migrations/001_initial_schema.sql"),
-            include_str!("../migrations/002_network_organization_ownership.sql"),
-            include_str!("../migrations/003_contract_native_invitations.sql"),
-            include_str!("../migrations/004_retire_persistent_node_bearer.sql"),
-            include_str!("../migrations/005_retire_network_auth_issuer.sql"),
-        ] {
-            sqlx::raw_sql(migration_sql).execute(pool).await?;
-        }
-        sqlx::query(
-            r#"
-            CREATE TABLE _sqlx_migrations (
-                version BIGINT PRIMARY KEY,
-                description TEXT NOT NULL,
-                installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
-                success BOOLEAN NOT NULL,
-                checksum BYTEA NOT NULL,
-                execution_time BIGINT NOT NULL
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-        for migration in MESH_MIGRATOR.iter().take(5) {
-            sqlx::query(
-                r#"
-                INSERT INTO _sqlx_migrations
-                    (version, description, success, checksum, execution_time)
-                VALUES ($1, $2, true, $3, 0)
-                "#,
-            )
-            .bind(migration.version)
-            .bind(migration.description.as_ref())
-            .bind(migration.checksum.as_ref())
-            .execute(pool)
-            .await?;
-        }
-        Ok(())
-    }
-
     async fn startup(database_url: String) -> anyhow::Result<()> {
         PostgresMeshStore::connect(&database_url).await?;
         Ok(())
@@ -3144,6 +2988,57 @@ mod migration_tests {
     fn test_database_url() -> anyhow::Result<String> {
         std::env::var("TEST_DATABASE_URL")
             .context("TEST_DATABASE_URL must be set for Mesh migration tests")
+    }
+
+    #[tokio::test]
+    async fn invite_consumption_is_bound_to_the_authorized_organization() -> anyhow::Result<()> {
+        let store = MemoryStore::new();
+        let now = Utc::now();
+        store
+            .network_create_with_owner("network-beta", "org-beta", "owner-beta", now)
+            .await?;
+        store
+            .invite_create(Invite {
+                id: "invite-beta".to_owned(),
+                network_id: "network-beta".to_owned(),
+                organization_id: "org-beta".to_owned(),
+                created_by_user_id: "owner-beta".to_owned(),
+                code_hash: "synthetic-hash-beta".to_owned(),
+                expires_at: now + Duration::hours(1),
+                created_at: now,
+            })
+            .await?;
+
+        let mismatched = store
+            .invite_consume_and_join("synthetic-hash-beta", now, "org-alpha", "member-alpha")
+            .await?;
+        anyhow::ensure!(mismatched.is_none());
+        anyhow::ensure!(
+            store
+                .invite_get_by_id("network-beta", "invite-beta")
+                .await?
+                .is_some(),
+            "organization mismatch consumed the invitation"
+        );
+        anyhow::ensure!(
+            store
+                .network_member_get("network-beta", "member-alpha")
+                .await?
+                .is_none(),
+            "organization mismatch created a cross-organization membership"
+        );
+
+        let matched = store
+            .invite_consume_and_join("synthetic-hash-beta", now, "org-beta", "member-beta")
+            .await?;
+        anyhow::ensure!(matched.is_some());
+        anyhow::ensure!(
+            store
+                .network_member_get("network-beta", "member-beta")
+                .await?
+                .is_some()
+        );
+        Ok(())
     }
 
     #[test]
@@ -3342,8 +3237,18 @@ mod migration_tests {
         let result = async {
             let store = Arc::new(PostgresMeshStore::connect(&test_db.url).await?);
             store
-                .network_create_owned("network-alpha", "org-alpha")
+                .network_create_with_owner(
+                    "network-alpha",
+                    "org-alpha",
+                    "user-primary-alpha",
+                    Utc::now(),
+                )
                 .await?;
+            let owner = store
+                .network_member_get("network-alpha", "user-primary-alpha")
+                .await?
+                .context("network creation omitted its owner membership")?;
+            anyhow::ensure!(owner.role == NETWORK_ROLE_OWNER);
             let raw_code = "cw_inv_contract_capability_must_never_persist";
             let code_hash = format!("{:x}", Sha256::digest(raw_code.as_bytes()));
             // PostgreSQL stores `timestamptz` at microsecond precision. Match
@@ -3400,18 +3305,48 @@ mod migration_tests {
                 .any(|value| value.contains(raw_code))
             );
 
+            anyhow::ensure!(
+                store
+                    .invite_consume_and_join(&code_hash, now, "org-other", "cross-org-member")
+                    .await?
+                    .is_none(),
+                "an authorization for another organization consumed the invitation"
+            );
+            anyhow::ensure!(
+                store
+                    .invite_get_by_id("network-alpha", "invite-opaque-alpha")
+                    .await?
+                    .is_some()
+            );
+            anyhow::ensure!(
+                store
+                    .network_member_get("network-alpha", "cross-org-member")
+                    .await?
+                    .is_none()
+            );
+
             let first_store = store.clone();
             let first_hash = code_hash.clone();
-            let first =
-                tokio::spawn(async move { first_store.invite_consume(&first_hash, now).await });
+            let first = tokio::spawn(async move {
+                first_store
+                    .invite_consume_and_join(&first_hash, now, "org-alpha", "member-first")
+                    .await
+            });
             let second_store = store.clone();
             let second_hash = code_hash.clone();
-            let second =
-                tokio::spawn(async move { second_store.invite_consume(&second_hash, now).await });
+            let second = tokio::spawn(async move {
+                second_store
+                    .invite_consume_and_join(&second_hash, now, "org-alpha", "member-second")
+                    .await
+            });
             let consumed = [first.await??, second.await??];
             anyhow::ensure!(
                 consumed.iter().filter(|invite| invite.is_some()).count() == 1,
                 "one-use invitation was not consumed exactly once"
+            );
+            anyhow::ensure!(
+                store.network_member_count("network-alpha").await? == 2,
+                "invitation consumption did not atomically create one member"
             );
             anyhow::ensure!(
                 store
@@ -3434,10 +3369,194 @@ mod migration_tests {
                 })
                 .await?;
             anyhow::ensure!(
-                store.invite_consume(&expired_hash, now).await?.is_none(),
+                store
+                    .invite_consume_and_join(&expired_hash, now, "org-alpha", "member-expired")
+                    .await?
+                    .is_none(),
                 "expired invitation was consumed"
             );
+            let expired_still_stored: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM invites WHERE id = 'invite-expired')",
+            )
+            .fetch_one(&store.pool)
+            .await?;
+            anyhow::ensure!(expired_still_stored);
             anyhow::ensure!(store.invite_list("network-alpha").await?.is_empty());
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn network_owner_and_invite_join_transactions_roll_back_on_failure_and_cancellation()
+    -> anyhow::Result<()> {
+        let test_db = TestDatabase::create(&test_database_url()?).await?;
+        let result = async {
+            let store = Arc::new(PostgresMeshStore::connect(&test_db.url).await?);
+            sqlx::raw_sql(
+                r#"
+                CREATE FUNCTION reject_or_block_synthetic_mesh_member()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    IF NEW.subject IN ('owner-rejected', 'member-rejected') THEN
+                        RAISE EXCEPTION 'synthetic membership rejection';
+                    ELSIF NEW.subject = 'member-cancelled' THEN
+                        PERFORM pg_advisory_xact_lock(1922);
+                    END IF;
+                    RETURN NEW;
+                END
+                $$;
+                CREATE TRIGGER reject_or_block_synthetic_mesh_member
+                BEFORE INSERT ON network_members
+                FOR EACH ROW
+                EXECUTE FUNCTION reject_or_block_synthetic_mesh_member();
+                "#,
+            )
+            .execute(&store.pool)
+            .await?;
+
+            anyhow::ensure!(
+                store
+                    .network_create_with_owner(
+                        "network-owner-rejected",
+                        "org-alpha",
+                        "owner-rejected",
+                        Utc::now(),
+                    )
+                    .await
+                    .is_err()
+            );
+            let rejected_network_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM networks WHERE network_id = $1)",
+            )
+            .bind("network-owner-rejected")
+            .fetch_one(&store.pool)
+            .await?;
+            anyhow::ensure!(
+                !rejected_network_exists,
+                "failed owner insert left a network without its owner"
+            );
+
+            store
+                .network_create_with_owner(
+                    "network-transaction",
+                    "org-alpha",
+                    "owner-alpha",
+                    Utc::now(),
+                )
+                .await?;
+            let now = Utc::now();
+            let rejected_hash = format!("{:x}", Sha256::digest(b"cw_inv_rejected"));
+            store
+                .invite_create(Invite {
+                    id: "invite-rejected".to_owned(),
+                    network_id: "network-transaction".to_owned(),
+                    organization_id: "org-alpha".to_owned(),
+                    created_by_user_id: "owner-alpha".to_owned(),
+                    code_hash: rejected_hash.clone(),
+                    expires_at: now + Duration::hours(1),
+                    created_at: now,
+                })
+                .await?;
+            anyhow::ensure!(
+                store
+                    .invite_consume_and_join(
+                        &rejected_hash,
+                        now,
+                        "org-alpha",
+                        "member-rejected",
+                    )
+                    .await
+                    .is_err()
+            );
+            anyhow::ensure!(
+                store
+                    .invite_get_by_id("network-transaction", "invite-rejected")
+                    .await?
+                    .is_some(),
+                "failed membership insert consumed its invitation"
+            );
+            anyhow::ensure!(
+                store
+                    .network_member_get("network-transaction", "member-rejected")
+                    .await?
+                    .is_none()
+            );
+
+            let cancelled_hash = format!("{:x}", Sha256::digest(b"cw_inv_cancelled"));
+            store
+                .invite_create(Invite {
+                    id: "invite-cancelled".to_owned(),
+                    network_id: "network-transaction".to_owned(),
+                    organization_id: "org-alpha".to_owned(),
+                    created_by_user_id: "owner-alpha".to_owned(),
+                    code_hash: cancelled_hash.clone(),
+                    expires_at: now + Duration::hours(1),
+                    created_at: now,
+                })
+                .await?;
+            let mut lock_holder = store.pool.acquire().await?;
+            sqlx::query("SELECT pg_advisory_lock(1922)")
+                .execute(&mut *lock_holder)
+                .await?;
+            let cancelled_store = Arc::clone(&store);
+            let join = tokio::spawn(async move {
+                cancelled_store
+                    .invite_consume_and_join(
+                        &cancelled_hash,
+                        now,
+                        "org-alpha",
+                        "member-cancelled",
+                    )
+                    .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted)",
+                    )
+                    .fetch_one(&store.pool)
+                    .await?;
+                    if waiting {
+                        return anyhow::Ok(());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .context("invite join did not reach the transactional membership insert")??;
+            join.abort();
+            anyhow::ensure!(join.await.is_err_and(|error| error.is_cancelled()));
+            sqlx::query("SELECT pg_advisory_unlock(1922)")
+                .execute(&mut *lock_holder)
+                .await?;
+            drop(lock_holder);
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let invite_exists: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM invites WHERE id = 'invite-cancelled')",
+                    )
+                    .fetch_one(&store.pool)
+                    .await?;
+                    let member_exists: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM network_members WHERE network_id = 'network-transaction' AND subject = 'member-cancelled')",
+                    )
+                    .fetch_one(&store.pool)
+                    .await?;
+                    if invite_exists && !member_exists {
+                        return anyhow::Ok(());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .context("cancelled invite join did not roll back")??;
             anyhow::Ok(())
         }
         .await;
@@ -3630,236 +3749,6 @@ mod migration_tests {
         .await;
         let cleanup = test_db.drop().await;
         result.and(cleanup)
-    }
-
-    #[tokio::test]
-    #[ignore = "requires TEST_DATABASE_URL"]
-    async fn prelaunch_retirement_purges_all_legacy_state_and_preserves_product_rows()
-    -> anyhow::Result<()> {
-        let test_db = TestDatabase::create(&test_database_url()?).await?;
-        let result = async {
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&test_db.url)
-                .await?;
-            prepare_mesh_through_migration_five(&pool).await?;
-            sqlx::raw_sql(
-                r#"
-                INSERT INTO networks (network_id, created_at, organization_id)
-                VALUES ('network-retained', now(), 'org-retained');
-                INSERT INTO network_members
-                    (network_id, subject, role, created_at, created_by)
-                VALUES ('network-retained', 'subject-retained', 'owner', now(), 'issuer-retained');
-                INSERT INTO nodes
-                    (network_id, name, token, peer_url, owner_subject,
-                     authorized_by, enrollment_id, authorized_at, last_seen_at)
-                VALUES
-                    ('network-retained', 'node-retained', 'legacy-node-secret',
-                     'udp://127.0.0.1:10000', 'subject-retained',
-                     'issuer-retained', 'enrollment-retained', now(), now());
-                INSERT INTO invites
-                    (id, network_id, organization_id, created_by_user_id,
-                     code_hash, expires_at, created_at)
-                VALUES
-                    ('invite-retained', 'network-retained', 'org-retained',
-                     'primary-user-retained', 'hash-retained',
-                     now() + interval '1 hour', now());
-                INSERT INTO kv (network_id, namespace, key, value)
-                VALUES ('network-retained', 'product.settings', 'retained', '\x0102');
-
-                INSERT INTO users
-                    (github_id, username, created_at, last_login_at)
-                VALUES (7, 'legacy-user-secret', now(), now());
-                INSERT INTO sessions (token, github_id, created_at, expires_at)
-                VALUES ('legacy-session-secret', 7, now(), now() + interval '1 hour');
-                INSERT INTO oauth_state (state, created_at, expires_at)
-                VALUES ('legacy-oauth-secret', now(), now() + interval '1 hour');
-                INSERT INTO oidc_users (sub, username, created_at, last_login_at)
-                VALUES ('legacy-oidc-subject', 'legacy-oidc-user', now(), now());
-                INSERT INTO oidc_sessions (token, sub, created_at, expires_at)
-                VALUES ('legacy-oidc-session', 'legacy-oidc-subject', now(), now() + interval '1 hour');
-                INSERT INTO oidc_device_flows
-                    (poll_token, device_code, network_id, node_name, node_token, expires_at)
-                VALUES
-                    ('legacy-poll-secret', 'legacy-device-secret', 'network-retained',
-                     'node-retained', 'legacy-device-node-secret', now() + interval '1 hour');
-                INSERT INTO device_codes
-                    (code, public_key, node_name, created_at, expires_at)
-                VALUES
-                    ('legacy-code-secret', 'legacy-public-key', 'node-retained',
-                     now(), now() + interval '1 hour');
-                INSERT INTO github_app
-                    (id, app_id, client_id, client_secret, pem, webhook_secret,
-                     owner, created_at)
-                VALUES
-                    (1, 7, 'legacy-client-id', 'legacy-client-secret',
-                     'legacy-pem-secret', 'legacy-webhook-secret', 'legacy-owner', now());
-                "#,
-            )
-            .execute(&pool)
-            .await?;
-            drop(pool);
-
-            let report = prelaunch_retire_legacy_auth(&test_db.url).await?;
-            anyhow::ensure!(
-                report
-                    == LegacyAuthRetirementReport {
-                        outcome: LegacyAuthRetirementOutcome::Purged,
-                        counts: LegacyAuthRetirementCounts {
-                            sessions: 1,
-                            oauth_state: 1,
-                            oidc_sessions: 1,
-                            oidc_device_flows: 1,
-                            oidc_users: 1,
-                            device_codes: 1,
-                            github_app: 1,
-                            users: 1,
-                            node_tokens: 1,
-                        },
-                    }
-            );
-            let evidence = serde_json::to_string(&report)?;
-            anyhow::ensure!(!evidence.contains("legacy-"));
-
-            let store = PostgresMeshStore::connect(&test_db.url).await?;
-            let retained: (String, String, String, Vec<u8>) = sqlx::query_as(
-                r#"
-                SELECT n.organization_id, nd.owner_subject, i.created_by_user_id, kv.value
-                FROM networks n
-                JOIN nodes nd ON nd.network_id = n.network_id
-                JOIN invites i ON i.network_id = n.network_id
-                JOIN kv ON kv.network_id = n.network_id
-                WHERE n.network_id = 'network-retained'
-                  AND nd.name = 'node-retained'
-                  AND i.id = 'invite-retained'
-                  AND kv.namespace = 'product.settings'
-                  AND kv.key = 'retained'
-                "#,
-            )
-            .fetch_one(&store.pool)
-            .await?;
-            anyhow::ensure!(
-                retained
-                    == (
-                        "org-retained".to_string(),
-                        "subject-retained".to_string(),
-                        "primary-user-retained".to_string(),
-                        vec![1, 2],
-                    )
-            );
-            let applied = applied_migrations(&store.pool).await?;
-            let expected = MESH_MIGRATOR.iter().collect::<Vec<_>>();
-            anyhow::ensure!(
-                applied.iter().zip(expected).all(|(applied, expected)| {
-                    applied.version == expected.version
-                        && applied.description == expected.description
-                        && applied.success
-                        && applied.checksum == expected.checksum.as_ref()
-                })
-            );
-            anyhow::Ok(())
-        }
-        .await;
-        let cleanup = test_db.drop().await;
-        result.and(cleanup)
-    }
-
-    #[tokio::test]
-    #[ignore = "requires TEST_DATABASE_URL"]
-    async fn prelaunch_retirement_is_an_exact_migration_six_noop() -> anyhow::Result<()> {
-        let test_db = TestDatabase::create(&test_database_url()?).await?;
-        let result = async {
-            let store = PostgresMeshStore::connect(&test_db.url).await?;
-            let before = applied_migrations(&store.pool).await?;
-            drop(store);
-
-            let report = prelaunch_retire_legacy_auth(&test_db.url).await?;
-            anyhow::ensure!(
-                report
-                    == LegacyAuthRetirementReport {
-                        outcome: LegacyAuthRetirementOutcome::AlreadyRetired,
-                        counts: LegacyAuthRetirementCounts::default(),
-                    }
-            );
-
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&test_db.url)
-                .await?;
-            anyhow::ensure!(applied_migrations(&pool).await? == before);
-            anyhow::Ok(())
-        }
-        .await;
-        let cleanup = test_db.drop().await;
-        result.and(cleanup)
-    }
-
-    #[tokio::test]
-    #[ignore = "requires TEST_DATABASE_URL"]
-    async fn prelaunch_retirement_rejects_checksum_drift_without_deleting_rows()
-    -> anyhow::Result<()> {
-        let test_db = TestDatabase::create(&test_database_url()?).await?;
-        let result = async {
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&test_db.url)
-                .await?;
-            prepare_mesh_through_migration_five(&pool).await?;
-            sqlx::query(
-                "INSERT INTO oauth_state (state, created_at, expires_at) VALUES ('must-remain', now(), now() + interval '1 hour')",
-            )
-            .execute(&pool)
-            .await?;
-            sqlx::query("UPDATE _sqlx_migrations SET checksum = decode('00', 'hex') WHERE version = 5")
-                .execute(&pool)
-                .await?;
-            drop(pool);
-
-            let error = prelaunch_retire_legacy_auth(&test_db.url)
-                .await
-                .expect_err("checksum drift unexpectedly allowed retirement");
-            anyhow::ensure!(error.to_string().contains("version 5"));
-
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&test_db.url)
-                .await?;
-            let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM oauth_state")
-                .fetch_one(&pool)
-                .await?;
-            anyhow::ensure!(retained == 1);
-            anyhow::Ok(())
-        }
-        .await;
-        let cleanup = test_db.drop().await;
-        result.and(cleanup)
-    }
-
-    #[tokio::test]
-    #[ignore = "requires TEST_DATABASE_URL"]
-    async fn prelaunch_retirement_rejects_partial_or_dirty_ledgers() -> anyhow::Result<()> {
-        for ledger_mutation in [
-            "DELETE FROM _sqlx_migrations WHERE version = 5",
-            "UPDATE _sqlx_migrations SET success = false WHERE version = 5",
-        ] {
-            let test_db = TestDatabase::create(&test_database_url()?).await?;
-            let result = async {
-                let pool = PgPoolOptions::new()
-                    .max_connections(1)
-                    .connect(&test_db.url)
-                    .await?;
-                prepare_mesh_through_migration_five(&pool).await?;
-                sqlx::query(ledger_mutation).execute(&pool).await?;
-                drop(pool);
-
-                anyhow::ensure!(prelaunch_retire_legacy_auth(&test_db.url).await.is_err());
-                anyhow::Ok(())
-            }
-            .await;
-            let cleanup = test_db.drop().await;
-            result.and(cleanup)?;
-        }
-        Ok(())
     }
 
     #[tokio::test]

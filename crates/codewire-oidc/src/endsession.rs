@@ -12,6 +12,8 @@
 //! session store. The outcome carries the resolved [`Subject`] (from the
 //! `id_token_hint`) so the host can end exactly that user's session.
 
+use std::fmt;
+
 use crate::Provider;
 use crate::error::OAuthError;
 use crate::flow::{enc, sep};
@@ -19,7 +21,7 @@ use crate::token;
 use crate::types::Subject;
 
 /// Raw end-session query parameters, as received off the wire.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RawEndSessionParams {
     /// `id_token_hint` — an id_token previously issued to the RP. Used to
     /// identify the subject and (via its audience) the client.
@@ -32,6 +34,21 @@ pub struct RawEndSessionParams {
     pub post_logout_redirect_uri: Option<String>,
     /// `state` — opaque value round-tripped to the RP on redirect.
     pub state: Option<String>,
+}
+
+impl fmt::Debug for RawEndSessionParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RawEndSessionParams")
+            .field(
+                "id_token_hint",
+                &self.id_token_hint.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("client_id", &self.client_id)
+            .field("post_logout_redirect_uri", &self.post_logout_redirect_uri)
+            .field("state", &self.state.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// The outcome of [`Provider::end_session`].
@@ -122,5 +139,27 @@ impl Provider {
             url.push_str(&format!("{}state={}", sep(uri), enc(state)));
         }
         Ok(EndSessionOutcome::Redirect { url, subject })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_end_session_debug_redacts_token_hint_and_state() {
+        let params = RawEndSessionParams {
+            id_token_hint: Some("id-token-hint-marker".into()),
+            client_id: Some("client-id".into()),
+            post_logout_redirect_uri: Some("https://client.example/logged-out".into()),
+            state: Some("logout-state-marker".into()),
+        };
+
+        let diagnostic = format!("{params:?}");
+        assert!(!diagnostic.contains("id-token-hint-marker"));
+        assert!(!diagnostic.contains("logout-state-marker"));
+        assert!(diagnostic.contains("client-id"));
+        assert!(diagnostic.contains("https://client.example/logged-out"));
+        assert!(diagnostic.contains("[REDACTED]"));
     }
 }

@@ -1,6 +1,13 @@
-<section id="organization-content" class="cw-org-content" aria-live="polite">
+<section id="organization-content" class="cw-org-content" aria-live="polite"{% if page.has_one_time_invitation %} hx-history="false"{% endif %}>
   {% if !page.message.is_empty() %}<div class="cw-alert cw-alert--success" role="status">{{ page.message }}</div>{% endif %}
   {% if !page.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ page.error }}</div>{% endif %}
+
+  {% if page.has_one_time_invitation %}
+  <section class="cw-card" aria-labelledby="invitation-created-title">
+    <div class="cw-card-header"><h2 id="invitation-created-title" class="cw-card-title">Invitation created</h2><p class="cw-card-description">Share this link now. It will not be shown again.</p></div>
+    <div class="cw-card-content"><code class="cw-key-secret" data-secret-kind="invitation-url">{{ page.one_time_invitation_url }}</code><div class="cw-dialog-actions"><a class="cw-button" href="{{ page.one_time_invitation_url }}">Open invitation</a></div></div>
+  </section>
+  {% endif %}
 
   <div class="cw-org-toolbar">
     <p>Manage members and invitations</p>

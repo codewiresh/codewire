@@ -24,7 +24,7 @@ pub(crate) fn resolve_mesh(
     Ok(config::resolve_mesh(
         config::MeshResolveOptions {
             mesh_url,
-            auth_token: globals.token.clone(),
+            auth_token: None,
             network_id,
             platform_server_url: globals.server.clone(),
         },
@@ -41,7 +41,6 @@ pub(crate) fn resolve_platform(
     Ok(config::resolve_platform(
         config::PlatformResolveOptions {
             server_url: globals.server.clone(),
-            token: globals.token.clone(),
         },
         paths,
         env,
@@ -194,21 +193,6 @@ pub(crate) fn billing_plan_label(overview: &BillingOverview) -> &str {
 
 pub(crate) fn format_cents(cents: i32) -> String {
     format!("${:.2}", cents as f64 / 100.0)
-}
-
-pub(crate) fn format_github_status_text(status: &GitHubStatus) -> String {
-    if !status.connected {
-        return "GitHub: not connected\n  Run 'cw github login' to connect.\n".to_string();
-    }
-
-    let mut output = format!("GitHub: connected as @{}\n", status.username);
-    if let Some(installation_id) = status.installation_id {
-        output.push_str(&format!("  Installation ID: {installation_id}\n"));
-    }
-    if let Some(connected_at) = status.connected_at.as_deref() {
-        output.push_str(&format!("  Connected: {connected_at}\n"));
-    }
-    output
 }
 
 pub(crate) fn print_orgs(
@@ -604,7 +588,7 @@ pub(crate) fn format_preset_list_text(presets: &[Preset]) -> String {
 
     let image_width = presets
         .iter()
-        .filter_map(|preset| preset.image.as_deref().and_then(trimmed_str))
+        .filter_map(|preset| trimmed_str(&preset.project_spec.image))
         .map(str::len)
         .chain([40])
         .max()
@@ -619,11 +603,26 @@ pub(crate) fn format_preset_list_text(presets: &[Preset]) -> String {
             "{:<24} {:<12} {:<image_width$} {:<8} {}m/{}MB/{}GB\n",
             preset_label(preset),
             optional_label(preset.language.as_deref()),
-            optional_label(preset.image.as_deref()),
+            optional_label(trimmed_str(&preset.project_spec.image)),
             official,
-            preset.default_cpu_millicores,
-            preset.default_memory_mb,
-            preset.default_disk_gb
+            preset
+                .project_spec
+                .resources
+                .cpu_millicores
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "--".to_string()),
+            preset
+                .project_spec
+                .resources
+                .memory_mib
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "--".to_string()),
+            preset
+                .project_spec
+                .resources
+                .disk_gib
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "--".to_string())
         ));
     }
     output
@@ -641,7 +640,7 @@ pub(crate) fn format_preset_info_text(preset: &Preset) -> String {
         "Language:",
         optional_label(preset.language.as_deref())
     );
-    if let Some(image) = preset.image.as_deref().and_then(trimmed_str) {
+    if let Some(image) = trimmed_str(&preset.project_spec.image) {
         output.push_str(&format!("{:<10} {}\n", "Image:", image));
     }
     output.push_str(&format!(
@@ -650,9 +649,24 @@ pub(crate) fn format_preset_info_text(preset: &Preset) -> String {
         preset.official,
         "Build:",
         preset.build_status,
-        preset.default_cpu_millicores,
-        preset.default_memory_mb,
-        preset.default_disk_gb
+        preset
+            .project_spec
+            .resources
+            .cpu_millicores
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "--".to_string()),
+        preset
+            .project_spec
+            .resources
+            .memory_mib
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "--".to_string()),
+        preset
+            .project_spec
+            .resources
+            .disk_gib
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "--".to_string())
     ));
     output
 }
@@ -665,14 +679,40 @@ pub(crate) fn optional_label(value: Option<&str>) -> &str {
     value.and_then(trimmed_str).unwrap_or("--")
 }
 
-pub(crate) fn find_preset<'a>(presets: &'a [Preset], slug_or_id: &str) -> Option<&'a Preset> {
-    presets.iter().find(|preset| {
-        preset.id == slug_or_id
-            || preset
-                .slug
-                .as_deref()
-                .is_some_and(|slug| slug == slug_or_id)
-    })
+pub(crate) fn find_preset<'a>(
+    presets: &'a [Preset],
+    org_id: &str,
+    selector: &str,
+) -> anyhow::Result<Option<&'a Preset>> {
+    if let Some(id) = selector.strip_prefix("id:") {
+        let id = trimmed_required(id, "preset id")?;
+        return Ok(presets.iter().find(|preset| preset.id == id));
+    }
+    let slug = selector.strip_prefix("slug:").unwrap_or(selector);
+    let slug = trimmed_required(slug, "preset slug")?;
+    if slug.contains(':') {
+        anyhow::bail!("preset selector must be a slug, slug:<slug>, or id:<id>");
+    }
+
+    let mut organization_matches = presets.iter().filter(|preset| {
+        preset.org_id.as_deref() == Some(org_id) && preset.slug.as_deref() == Some(slug)
+    });
+    let organization_match = organization_matches.next();
+    if organization_matches.next().is_some() {
+        anyhow::bail!("organization preset slug {slug:?} is ambiguous");
+    }
+    if organization_match.is_some() {
+        return Ok(organization_match);
+    }
+
+    let mut official_matches = presets.iter().filter(|preset| {
+        preset.official && preset.org_id.is_none() && preset.slug.as_deref() == Some(slug)
+    });
+    let official_match = official_matches.next();
+    if official_matches.next().is_some() {
+        anyhow::bail!("official preset slug {slug:?} is ambiguous");
+    }
+    Ok(official_match)
 }
 
 pub(crate) fn positive_i32(value: Option<i32>) -> Option<i32> {
@@ -840,7 +880,7 @@ pub(crate) fn parse_env_overrides(entries: &[String]) -> anyhow::Result<BTreeMap
     for entry in entries {
         let entry = trimmed_required(entry, "environment override")?;
         let Some((key, value)) = entry.split_once('=') else {
-            anyhow::bail!("environment override must be KEY=VALUE: {entry}");
+            anyhow::bail!("environment override must be KEY=VALUE");
         };
         let key = trimmed_required(key, "environment override key")?;
         env.insert(key.to_string(), value.to_string());

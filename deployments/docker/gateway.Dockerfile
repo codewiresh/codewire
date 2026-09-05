@@ -58,7 +58,5 @@ LABEL org.opencontainers.image.source="https://github.com/codewiresh/codewire" \
 COPY --from=rust-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=rust-builder /out/codewire-gateway /usr/local/bin/codewire-gateway
 COPY --from=cw-builder /out/cw /usr/local/bin/cw
-RUN ln -s cw /usr/local/bin/daemon \
-    && ln -s cw /usr/local/bin/codewire-daemon \
-    && /usr/local/bin/cw --version
+RUN /usr/local/bin/cw --version
 ENTRYPOINT ["/usr/local/bin/codewire-gateway"]

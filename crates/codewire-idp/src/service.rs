@@ -6,6 +6,7 @@
 //! browser approval route is assembled beside this standards-based router.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use axum::{
@@ -27,7 +28,7 @@ use crate::{
 };
 
 /// Static configuration for the idp service.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IdpConfig {
     /// The OIDC issuer URL (also the base for endpoint URLs).
     pub issuer: String,
@@ -40,6 +41,22 @@ pub struct IdpConfig {
     pub signup_invite_policy: SignupInvitePolicy,
     /// Scopes advertised in discovery.
     pub scopes_supported: Vec<String>,
+}
+
+impl fmt::Debug for IdpConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IdpConfig")
+            .field("issuer", &self.issuer)
+            .field("frontend_url", &self.frontend_url)
+            .field(
+                "resend_api_key_configured",
+                &!self.resend_api_key.is_empty(),
+            )
+            .field("signup_invite_policy", &self.signup_invite_policy)
+            .field("scopes_supported", &self.scopes_supported)
+            .finish()
+    }
 }
 
 impl IdpConfig {
@@ -97,12 +114,16 @@ impl IdpConfig {
 }
 
 /// Assemble the [`Provider`] from a pool, config, and idp-only signing
-/// keyring. Every signing-capable envelope is authenticated and the active
-/// signer is created or adopted before the replica can serve readiness.
+/// keyring. `capability_hmac_secret` is the service's existing session secret;
+/// it keys the purpose-bound lookup digest for low-entropy human device codes
+/// and is never persisted. Every signing-capable envelope is authenticated and
+/// the active signer is created or adopted before the replica can serve
+/// readiness.
 pub async fn build_provider(
     pool: PgPool,
     cfg: &IdpConfig,
     keyring: SigningKekKeyring,
+    capability_hmac_secret: impl Into<String>,
 ) -> anyhow::Result<Provider> {
     let keys = PgKeyStore::new(pool.clone(), keyring);
     let validated = keys
@@ -115,6 +136,8 @@ pub async fn build_provider(
         .map_err(|error| anyhow::anyhow!(error.0))?;
     tracing::info!(validated, kid = %signer.kid, "oidc signing-key envelopes ready");
 
+    let device_store = PgDeviceAuthorizationStore::new(pool.clone(), capability_hmac_secret)?;
+
     Ok(Provider::builder(ProviderConfig {
         issuer: Issuer(cfg.issuer.clone()),
         paths: EndpointPaths::default(),
@@ -124,7 +147,7 @@ pub async fn build_provider(
     .tokens(Arc::new(PgTokenStore::new(pool.clone())))
     .clients(Arc::new(PgClientStore::new(pool.clone())))
     .keys(Arc::new(keys))
-    .device_store(Arc::new(PgDeviceAuthorizationStore::new(pool.clone())))
+    .device_store(Arc::new(device_store))
     .device_verification_uri(format!("{}/device", cfg.frontend_url.trim_end_matches('/')))
     .authenticator(Arc::new(PgUserAuthenticator::new(
         pool.clone(),
@@ -206,7 +229,22 @@ fn found(location: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::IdpConfig;
+    use super::{IdpConfig, SignupInvitePolicy};
+
+    #[test]
+    fn config_debug_redacts_resend_api_key() {
+        let cfg = IdpConfig {
+            issuer: "https://issuer.example".into(),
+            frontend_url: "https://app.example".into(),
+            resend_api_key: "resend-secret-marker".into(),
+            signup_invite_policy: SignupInvitePolicy::open(),
+            scopes_supported: vec!["openid".into()],
+        };
+
+        let diagnostic = format!("{cfg:?}");
+        assert!(!diagnostic.contains("resend-secret-marker"));
+        assert!(diagnostic.contains("resend_api_key_configured: true"));
+    }
 
     #[test]
     fn issuer_prefers_public_oidc_issuer_url() {

@@ -580,10 +580,6 @@
           <h2 style="margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em">Create Sandbox</h2>
           <button onClick="{{ closeCreate }}" style="background: none; border: none; font-size: 15px; cursor: pointer; color: #7a7a7a; padding: 0 0 0 12px">✕</button>
         </div>
-        <div style="display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: #8a8a8a">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 1.9a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 6.9A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4-2"></path></svg>
-          <span>GitHub connected as <span style="color: #cfcfcf; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">@noeljackson</span></span>
-        </div>
       </div>
 
       <div style="flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px 24px; display: flex; flex-direction: column; gap: 18px">
@@ -664,47 +660,22 @@
         <div>
           <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px">
             <label style="font-size: 12px; color: #b9b9b9">Repositories</label>
-            <div style="display: flex; gap: 12px">
-              <button onClick="{{ addRepoUrl }}" style="background: none; border: none; font-size: 11.5px; color: #9a9a9a; cursor: pointer; padding: 0" style-hover="color: #ededed">＋ Add URL</button>
-              <button onClick="{{ connectGithub }}" style="background: none; border: none; font-size: 11.5px; color: #9a9a9a; cursor: pointer; padding: 0" style-hover="color: #ededed">Connect GitHub</button>
+            <button onClick="{{ addRepoUrl }}" style="background: none; border: none; font-size: 11.5px; color: #9a9a9a; cursor: pointer; padding: 0" style-hover="color: #ededed">＋ Add URL</button>
+          </div>
+          <div style="display: grid; grid-template-columns: minmax(0,1fr) 84px minmax(0,.75fr); align-items: end; gap: 8px">
+            <div>
+              <label style="display: block; margin-bottom: 5px; color: #b9b9b9; font-size: 10px; letter-spacing: .05em; text-transform: uppercase">Repository URL</label>
+              <input value="{{ cRepoUrl }}" onChange="{{ onCRepoUrl }}" placeholder="https://github.com/owner/repo" style="width: 100%; padding: 7px 9px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; color: #ededed; font-size: 12px">
+            </div>
+            <div>
+              <label style="display: block; margin-bottom: 5px; color: #b9b9b9; font-size: 10px; letter-spacing: .05em; text-transform: uppercase">Branch</label>
+              <input value="{{ cRepoBranch }}" onChange="{{ onCRepoBranch }}" placeholder="main" style="width: 100%; padding: 7px 9px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; color: #ededed; font: 12px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">
+            </div>
+            <div>
+              <label style="display: block; margin-bottom: 5px; color: #b9b9b9; font-size: 10px; letter-spacing: .05em; text-transform: uppercase">Mount path</label>
+              <label style="display: flex; min-width: 0; align-items: center; overflow: hidden; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px"><span style="padding-left: 9px; color: #686868; font: 12px/16px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">/workspace/</span><input value="{{ cRepoMount }}" onChange="{{ onCRepoMount }}" placeholder="repo" style="flex: 1; min-width: 0; padding: 7px 9px 7px 0; background: transparent; border: 0; outline: 0; color: #ededed; font: 12px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace"></label>
             </div>
           </div>
-          <div style="border: 1px solid #232323; border-radius: 8px; background: #111; overflow: hidden">
-            <input value="{{ cRepoQuery }}" onChange="{{ onCRepoQuery }}" placeholder="Search repositories" style="width: 100%; display: block; padding: 10px 12px; background: none; border: none; border-bottom: 1px solid #232323; outline: none; font-size: 12.5px; color: #ededed">
-            <div style="height: 186px; min-height: 186px; max-height: 186px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; contain: layout paint style">
-              <sc-for list="{{ repoRows }}" as="r" hint-placeholder-count="6">
-                <button onClick="{{ r.onClick }}" style="{{ r.style }}" style-hover="background: #191919">
-                  <span style="{{ r.boxStyle }}">
-                    <sc-if value="{{ r.on }}" hint-placeholder-val="{{ false }}">
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#02131a" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg>
-                    </sc-if>
-                  </span>
-                  <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ r.full }}</span>
-                  <span style="font-size: 10.5px; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; flex: none">{{ r.branch }}</span>
-                  <sc-if value="{{ r.private }}" hint-placeholder-val="{{ false }}">
-                    <span style="font-size: 9.5px; letter-spacing: 0.07em; text-transform: uppercase; color: #7a7a7a; border: 1px solid #2f2f2f; border-radius: 4px; padding: 1px 5px; flex: none; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">private</span>
-                  </sc-if>
-                </button>
-              </sc-for>
-              <sc-if value="{{ noRepoMatches }}" hint-placeholder-val="{{ false }}">
-                <div style="padding: 20px 14px; font-size: 12px; color: #6e6e6e">No repositories match that search.</div>
-              </sc-if>
-            </div>
-          </div>
-
-          <sc-if value="{{ hasRepos }}" hint-placeholder-val="{{ false }}">
-            <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px">
-              <div style="font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: #6e6e6e; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">Mount points</div>
-              <sc-for list="{{ selectedRepos }}" as="r" hint-placeholder-count="1">
-                <div style="display: flex; align-items: center; gap: 9px">
-                  <span style="flex: 0 0 176px; font-size: 12px; color: #cfcfcf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">{{ r.full }}</span>
-                  <span style="font-size: 12px; color: #5c5c5c; flex: none">→</span>
-                  <label style="display: flex; flex: 1; min-width: 0; align-items: center; overflow: hidden; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px"><span style="padding-left: 10px; color: #686868; font-size: 12px; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace">/workspace/</span><input value="{{ r.mount }}" onChange="{{ r.onMount }}" placeholder="repo" style="flex: 1; min-width: 0; padding: 7px 10px 7px 0; background: transparent; border: 0; outline: 0; font-size: 12px; color: #ededed; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace"></label>
-                  <button onClick="{{ r.onRemove }}" style="background: none; border: none; color: #6e6e6e; font-size: 12px; cursor: pointer; padding: 2px 4px; flex: none" style-hover="color: #e8705f">✕</button>
-                </div>
-              </sc-for>
-            </div>
-          </sc-if>
         </div>
 
         <div style="border: 1px solid #232323; border-radius: 8px; background: #111; padding: 13px 16px">
@@ -734,33 +705,7 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8a8a8a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M2 18v3h3l8-8-3-3z"></path><circle cx="16.5" cy="7.5" r="4.5"></circle><path d="m14 10 2 2"></path></svg>
             <span style="font-size: 13px; font-weight: 500">Secrets</span>
           </div>
-          <div style="display: flex; flex-direction: column; gap: 11px">
-            <sc-for list="{{ secretChecks }}" as="c" hint-placeholder-count="2">
-              <button onClick="{{ c.onClick }}" style="display: flex; align-items: flex-start; gap: 9px; background: none; border: none; padding: 0; cursor: pointer; text-align: left">
-                <span style="{{ c.boxStyle }}">
-                  <sc-if value="{{ c.on }}" hint-placeholder-val="{{ false }}">
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#02131a" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"></path></svg>
-                  </sc-if>
-                </span>
-                <span>
-                  <span style="display: block; font-size: 13px; color: #ededed">{{ c.label }}</span>
-                  <span style="display: block; font-size: 11.5px; color: #6e6e6e; margin-top: 2px; line-height: 1.5">{{ c.hint }}</span>
-                </span>
-              </button>
-            </sc-for>
-          </div>
-          <div style="margin-top: 15px">
-            <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Project secrets</label>
-            <div style="position: relative">
-              <select value="{{ cSecretProject }}" onChange="{{ onCSecretProject }}" style="width: 100%; appearance: none; padding: 10px 34px 10px 12px; background: #0d0d0d; border: 1px solid #262626; border-radius: 8px; font-size: 13px; color: #ededed; cursor: pointer">
-                <sc-for list="{{ secretProjects }}" as="o" hint-placeholder-count="3">
-                  <option value="{{ o.value }}">{{ o.label }}</option>
-                </sc-for>
-              </select>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6e6e6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position: absolute; right: 12px; top: 50%; margin-top: -6px; pointer-events: none"><path d="m6 9 6 6 6-6"></path></svg>
-            </div>
-            <p style="margin: 7px 0 0; font-size: 11.5px; color: #6e6e6e; line-height: 1.5">Injects every secret in the selected project.</p>
-          </div>
+          <p style="margin: 0; font-size: 12px; color: #7a7a7a; line-height: 1.55">Saved secrets cannot be attached to a Sandbox until protected access is available.</p>
         </div>
 
         <div style="border: 1px solid #232323; border-radius: 8px; background: #111; padding: 14px 16px 16px">
@@ -792,11 +737,8 @@
         </div>
 
         <div style="border: 1px solid #232323; border-radius: 8px; background: #111; padding: 14px 16px 16px">
-          <button onClick="{{ generateFromRepo }}" style="{{ generateStyle }}" style-hover="background: #183039; color: #7ad3e8">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M12 3v3"></path><path d="M12 18v3"></path><path d="M5.6 5.6l2.1 2.1"></path><path d="M16.3 16.3l2.1 2.1"></path><path d="M3 12h3"></path><path d="M18 12h3"></path><path d="M5.6 18.4l2.1-2.1"></path><path d="M16.3 7.7l2.1-2.1"></path></svg>
-            <span>Analyze and generate from repo</span>
-          </button>
-          <p style="margin: 9px 0 15px; font-size: 11.5px; color: #6e6e6e; line-height: 1.5">{{ generateHint }}</p>
+          <h3 style="margin: 0; color: #ededed; font-size: 13px; font-weight: 500; line-height: 18px">Runtime</h3>
+          <p style="margin: 5px 0 15px; font-size: 11.5px; color: #6e6e6e; line-height: 1.5">Optional commands run after the Sandbox workspace is created.</p>
           <div style="display: flex; flex-direction: column; gap: 14px">
             <div>
               <label style="display: block; font-size: 12px; color: #b9b9b9; margin-bottom: 7px">Install Command</label>
@@ -874,7 +816,7 @@ const SEED = {
     ],
     secrets: [
       { name: 'ANTHROPIC_API_KEY', description: 'Agent model access', hosts: 'api.anthropic.com', created: '02 Aug 2026' },
-      { name: 'GITHUB_TOKEN', description: 'Repo checkout', hosts: 'github.com', created: '28 Jul 2026' }
+      { name: 'NPM_TOKEN', description: 'Package registry', hosts: 'registry.npmjs.org', created: '28 Jul 2026' }
     ],
     keys: [
       { name: 'local-cli', key: 'cw_live_9f2c…41ab', perms: 'sandboxes:write', used: '2 min ago', expires: 'never' },
@@ -947,17 +889,6 @@ const SETTINGS_NAV = [
 
 const SETTINGS_PAGES = SETTINGS_NAV.map(x => x.id);
 
-const REPOS = [
-  { full: 'noeljackson/codewire', branch: 'main', private: true },
-  { full: 'noeljackson/codewire-cli', branch: 'main', private: true },
-  { full: 'noeljackson/agent-harness', branch: 'develop', private: true },
-  { full: 'aperture/eval-suite', branch: 'main', private: true },
-  { full: 'aperture/trace-viewer', branch: 'main', private: false },
-  { full: 'aperture/infra', branch: 'main', private: true },
-  { full: 'noeljackson/dotfiles', branch: 'main', private: false },
-  { full: 'noeljackson/scratch', branch: 'main', private: false }
-];
-
 const AGENTS = ['Claude Code', 'OpenAI Codex', 'Gemini CLI', 'Aider'];
 
 const STATE_COLORS = {
@@ -1000,10 +931,9 @@ class Component extends DCLogic {
   openCreate() {
     this.setState({ orgOpen: false, userOpen: false, create: {
       image: 'ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467',
-      snapshot: '', repos: [], repoQuery: '',
+      snapshot: '', repoUrl: '', repoBranch: '', repoMount: '',
       ports: [], agents: ['Claude Code'],
-      userSecrets: true, orgSecrets: true, installTools: false,
-      secretProject: '',
+      installTools: false,
       name: '', install: '', startup: '', cpu: '1', mem: '2', disk: '10', ttl: 'infinity'
     } });
   }
@@ -1045,7 +975,8 @@ class Component extends DCLogic {
   submitCreate() {
     const c = this.state.create;
     if (!c) return;
-    const name = (c.name || '').trim() || (c.repos.length ? c.repos[0].full.split('/').pop() : 'sandbox-' + Math.random().toString(36).slice(2, 6));
+    const repositoryName = (c.repoUrl || '').split('/').filter(Boolean).pop() || '';
+    const name = (c.name || '').trim() || repositoryName.replace(/\.git$/, '') || 'sandbox-' + Math.random().toString(36).slice(2, 6);
     this.mutate(o => o.sandboxes.unshift({
       id: 'sb_' + Math.random().toString(36).slice(2, 8), name,
       state: 'Starting', snapshot: (c.snapshot ? (this.org.snapshots.find(x => x.id === c.snapshot) || {}).name : '') || (c.image || '').trim() || 'codewire/base:1.4',
@@ -1284,7 +1215,7 @@ class Component extends DCLogic {
     });
     switch (this.state.drawer) {
       case 'sandbox': return { title: 'Create Sandbox', sub: 'A fresh isolated environment for your agent to run in.', cta: 'Create Sandbox', fields: [mk('name', 'Name', 'quiet-mesa', 'Lowercase letters, numbers and dashes.', true), mk('snapshot', 'Snapshot', 'codewire/base:1.4', 'Image the sandbox boots from.', true), mk('region', 'Region', 'eu', 'eu or us.', true), mk('cpu', 'Compute (vCPU)', '2', 'Up to 4 on Tier 1.'), mk('mem', 'Memory (GiB)', '4', 'Up to 8 on Tier 1.')] };
-      case 'secret': return { title: 'Create New Secret', sub: 'Secrets are injected into sandboxes at runtime.', cta: 'Create Secret', fields: [mk('name', 'Name', 'MY_SECRET', 'Uppercase with underscores.', true), mk('value', 'Value', 'Secret value', 'Stored encrypted; never shown again.', true), mk('description', 'Description', 'Optional description', 'Optional description for this secret.'), mk('hosts', 'Allowed Hosts', 'api.anthropic.com, *.openai.com', 'Comma-separated list of hosts this secret may be sent to.', true)] };
+      case 'secret': return { title: 'Create New Secret', sub: 'Save a value for future protected access. Saved secrets are not yet attachable to Sandboxes.', cta: 'Create Secret', fields: [mk('name', 'Name', 'MY_SECRET', 'Uppercase with underscores.', true), mk('value', 'Value', 'Secret value', 'Stored encrypted; never shown again.', true), mk('description', 'Description', 'Optional description', 'Optional description for this secret.'), mk('hosts', 'Allowed Hosts', 'api.anthropic.com, *.openai.com', 'Comma-separated list of hosts this secret may be sent to.', true)] };
       case 'key': return { title: 'Create API Key', sub: 'Authenticate the SDK or CLI as this organization.', cta: 'Create API Key', fields: [mk('name', 'Name', 'local-cli', 'For your own reference.', true), mk('perms', 'Permissions', 'sandboxes:write', 'Comma-separated scopes.', true), mk('expires', 'Expires', 'never', 'A date, or never.')] };
       case 'member': return { title: 'Invite Member', sub: 'They will get an email invitation.', cta: 'Send invite', fields: [mk('email', 'Email', 'someone@company.com', '', true), mk('role', 'Role', 'Member', 'Owner, Admin or Member.')] };
       case 'org': return { title: 'New Organization', sub: 'Separate sandboxes, secrets, keys and billing.', cta: 'Create Organization', fields: [mk('name', 'Name', 'Aperture Labs', 'Shown in the organization switcher.')] };
@@ -1373,28 +1304,10 @@ class Component extends DCLogic {
       createOpen: !!c,
       closeCreate: () => this.setState({ create: null }),
       submitCreate: () => this.submitCreate(),
-      cRepoQuery: c ? c.repoQuery : '',
-      onCRepoQuery: e => this.setCreate({ repoQuery: e.target.value }),
-      repoRows: c ? REPOS.filter(r => r.full.toLowerCase().includes((c.repoQuery || '').toLowerCase())).map(r => {
-        const on = c.repos.some(x => x.full === r.full);
-        return {
-          full: r.full, branch: r.branch, private: r.private, on,
-          onClick: () => this.setCreate({ repos: on
-            ? c.repos.filter(x => x.full !== r.full)
-            : c.repos.concat([{ full: r.full, mount: r.full.split('/').pop() }]) }),
-          style: 'width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: ' + (on ? '#181818' : 'none') + '; border: none; border-bottom: 1px solid #1a1a1a; text-align: left; cursor: pointer; color: #ededed; content-visibility: auto; contain-intrinsic-block-size: 35px',
-          boxStyle: 'width: 14px; height: 14px; flex: none; border-radius: 3px; display: flex; align-items: center; justify-content: center; background: ' + (on ? '#1f96b4' : '#0d0d0d') + '; border: 1px solid ' + (on ? '#1f96b4' : '#3a3a3a')
-        };
-      }) : [],
-      noRepoMatches: !!c && REPOS.filter(r => r.full.toLowerCase().includes((c.repoQuery || '').toLowerCase())).length === 0,
-      hasRepos: !!c && c.repos.length > 0,
-      selectedRepos: c ? c.repos.map((r, i) => ({
-        full: r.full, mount: r.mount,
-        onMount: e => this.setCreate({ repos: c.repos.map((x, j) => j === i ? Object.assign({}, x, { mount: e.target.value }) : x) }),
-        onRemove: () => this.setCreate({ repos: c.repos.filter((_, j) => j !== i) })
-      })) : [],
+      cRepoUrl: c ? c.repoUrl : '', onCRepoUrl: e => this.setCreate({ repoUrl: e.target.value }),
+      cRepoBranch: c ? c.repoBranch : '', onCRepoBranch: e => this.setCreate({ repoBranch: e.target.value }),
+      cRepoMount: c ? c.repoMount : '', onCRepoMount: e => this.setCreate({ repoMount: e.target.value }),
       addRepoUrl: () => this.flash('Paste a git URL (prototype)'),
-      connectGithub: () => this.flash('GitHub already connected as @noeljackson'),
       cSnapshot: c ? c.snapshot : '',
       onCSnapshot: e => {
         const v = e.target.value;
@@ -1410,7 +1323,7 @@ class Component extends DCLogic {
         ? 'Boots from this snapshot. Filesystem and installed dependencies are restored as captured.'
         : o.snapshots.length + ' snapshot' + (o.snapshots.length === 1 ? '' : 's') + ' stored. Snapshots are captured from any running sandbox and reused here.',
       imageRowStyle: 'border: 1px solid #232323; border-radius: 8px; background: #111; padding: 12px 14px; display: flex; align-items: center; gap: 12px; opacity: ' + (c && c.snapshot ? '.45' : '1') + '; pointer-events: ' + (c && c.snapshot ? 'none' : 'auto'),
-      imageHint: c && c.snapshot ? 'Inherited from the selected snapshot.' : 'Agent-ready image the sandbox boots from.',
+      imageHint: c && c.snapshot ? 'Inherited from the selected snapshot.' : 'Use an OCI image. Leave it blank only to use a saved configuration for the first repository.',
       cImage: c ? c.image : '', onCImage: e => this.setCreate({ image: e.target.value }),
       resetImage: () => this.setCreate({ image: '' }),
       noPorts: !!c && c.ports.length === 0,
@@ -1430,30 +1343,10 @@ class Component extends DCLogic {
           style: 'padding: 8px 13px; border-radius: 999px; font-size: 13px; cursor: pointer; background: ' + (on ? '#0b2028' : '#161616') + '; border: 1px solid ' + (on ? '#1d5566' : '#2a2a2a') + '; color: ' + (on ? '#7ad3e8' : '#b9b9b9')
         };
       }) : [],
-      secretChecks: c ? [
-        { key: 'userSecrets', label: 'Include user secrets', hint: 'Injects saved agent credentials and other personal secrets.' },
-        { key: 'orgSecrets', label: 'Include org secrets', hint: 'Secrets shared across this organization.' }
-      ].map(x => this.createCheck(c, x)) : [],
       installChecks: c ? [
         { key: 'installTools', label: 'Install selected agent tools during setup', hint: 'Advanced fallback for custom images. Slower and less reliable than agent-ready images.' }
       ].map(x => this.createCheck(c, x)) : [],
-      cSecretProject: c ? c.secretProject : '',
-      onCSecretProject: e => this.setCreate({ secretProject: e.target.value }),
-      secretProjects: [
-        { value: '', label: 'Select a secret project…' },
-        { value: 'agents', label: 'agents' },
-        { value: 'production', label: 'production' },
-        { value: 'scratch', label: 'scratch' }
-      ],
       cName: c ? c.name : '', onCName: e => this.setCreate({ name: e.target.value }),
-      generateStyle: 'width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 500; cursor: ' + (c && c.repos.length ? 'pointer' : 'not-allowed') + '; background: ' + (c && c.repos.length ? '#122630' : '#131313') + '; border: 1px solid ' + (c && c.repos.length ? '#2b5766' : '#262626') + '; color: ' + (c && c.repos.length ? '#54c2dd' : '#6e6e6e'),
-      generateHint: c && c.repos.length ? 'Reads the selected repositories and fills in install and startup steps.' : 'Select a repository above to generate these steps.',
-      generateFromRepo: () => {
-        if (!c || !c.repos.length) { this.flash('Select a repository first'); return; }
-        const first = c.repos[0];
-        this.setCreate({ install: 'bun install', startup: 'cd /workspace/' + first.mount + ' && bun run dev' });
-        this.flash('Generated setup from ' + first.full);
-      },
       cInstall: c ? c.install : '', onCInstall: e => this.setCreate({ install: e.target.value }),
       cStartup: c ? c.startup : '', onCStartup: e => this.setCreate({ startup: e.target.value }),
       cCpu: c ? c.cpu : '1', onCCpu: e => this.setCreate({ cpu: e.target.value }),

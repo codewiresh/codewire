@@ -7,16 +7,17 @@
 //! exchange — and can relay packets between peers through the server.
 //!
 //! Layout:
-//! - [`frame`]: typed [`frame::FrameType`] enum + header/frame
+//! - [`crate::derp::frame`]: typed [`crate::derp::frame::FrameType`] enum + header/frame
 //!   encode/decode. The wire numbers are copied from `derp.go`.
-//! - [`key`]: [`key::NodePrivate`] / [`key::NodePublic`] and the
+//! - [`crate::derp::key`]: [`crate::derp::key::NodePrivate`] /
+//!   [`crate::derp::key::NodePublic`] and the
 //!   `SealTo`/`OpenFrom` NaCl-box crypto used in the handshake.
-//! - [`client`]: the async [`client::Client`] (handshake, `send`,
+//! - [`crate::derp::client`]: the async [`crate::derp::client::Client`] (handshake, `send`,
 //!   `recv`) over any `AsyncRead + AsyncWrite`, plus typed
-//!   [`client::ReceivedMessage`]s.
+//!   [`crate::derp::client::ReceivedMessage`]s.
 //! - this file: the HTTP `Upgrade: DERP` connect helpers
-//!   ([`connect_tls`], [`connect_plain`]) that establish the transport
-//!   then hand the stream to [`client::Client::handshake`].
+//!   ([`crate::derp::connect_tls`], [`crate::derp::connect_plain`]) that establish the transport
+//!   then hand the stream to [`crate::derp::client::Client::handshake`].
 //!
 //! Scope: this is the #46 feasibility spike. It proves a Rust client can
 //! interop with the Codewire DERP server (relay A→B); it is deliberately

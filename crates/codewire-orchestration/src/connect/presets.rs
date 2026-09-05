@@ -4,28 +4,25 @@
 //! pagination, and renders Connect errors.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use buffa_types::Timestamp;
 use chrono::DateTime;
 use codewire_proto::codewire::v1::{
-    AppPort as ProtoAppPort, CreatePresetRequest, CreatePresetResponse, DeletePresetRequest,
-    DeletePresetResponse, GetPresetRequest, GetPresetResponse, ListPresetsRequest,
-    ListPresetsResponse, Preset, PresetService, RepoEntry as ProtoRepoEntry,
-    SetupAgent as ProtoSetupAgent, SetupConfig as ProtoSetupConfig, UpdatePresetRequest,
-    UpdatePresetResponse,
+    CreatePresetRequest, CreatePresetResponse, DeletePresetRequest, DeletePresetResponse,
+    GetPresetRequest, GetPresetResponse, ListPresetsRequest, ListPresetsResponse, Preset,
+    PresetService, UpdatePresetRequest, UpdatePresetResponse,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult, ValidationIssue};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
-use crate::api::create::{AppPort, RepoEntry, SetupAgent, SetupConfig};
+use crate::api::environments::{coded, coded_owned};
 use crate::api::prepare::PresetWire;
 use crate::api::presets::{
-    CreatePresetBody, SecretProjectSelection, UpdatePresetBody, create_preset_core,
-    delete_preset_core, get_preset_core, list_presets_core, update_preset_core,
+    CreatePresetBody, UpdatePresetBody, create_preset_core, delete_preset_core, get_preset_core,
+    list_presets_core, update_preset_core,
 };
 
 /// Registers all five PresetService RPCs on their generated Connect routes.
@@ -70,8 +67,8 @@ impl PresetService for PresetConnectService {
         let request = request.to_owned_message();
         let name_missing = request.name.trim().is_empty();
         let org_id = request.org_id.clone();
-        let (body, secret_project) = create_body(request);
-        let preset = create_preset_core(&self.state, &user, &org_id, body, secret_project)
+        let body = create_body(request).map_err(|error| rpc_app_error(&error, &ctx))?;
+        let preset = create_preset_core(&self.state, &user, &org_id, body)
             .await
             .map_err(|error| {
                 let error = create_preset_validation(error, name_missing);
@@ -108,17 +105,10 @@ impl PresetService for PresetConnectService {
         let request = request.to_owned_message();
         let org_id = request.org_id.clone();
         let preset_id = request.preset_id.clone();
-        let (body, secret_project) = update_body(request);
-        let preset = update_preset_core(
-            &self.state,
-            &user,
-            &org_id,
-            &preset_id,
-            body,
-            secret_project,
-        )
-        .await
-        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let body = update_body(request).map_err(|error| rpc_app_error(&error, &ctx))?;
+        let preset = update_preset_core(&self.state, &user, &org_id, &preset_id, body)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(UpdatePresetResponse {
             preset: Some(proto_preset(preset).map_err(|error| rpc_app_error(&error, &ctx))?).into(),
             ..Default::default()
@@ -139,94 +129,47 @@ impl PresetService for PresetConnectService {
     }
 }
 
-fn create_body(request: CreatePresetRequest) -> (CreatePresetBody, Option<SecretProjectSelection>) {
-    let secret_project = request
-        .secret_project_id
-        .filter(|id| !id.is_empty())
-        .map(SecretProjectSelection::Id);
-    (
-        CreatePresetBody {
-            name: request.name,
-            slug: request.slug,
-            description: request.description,
-            default_cpu_millicores: request.default_cpu_millicores,
-            default_memory_mb: request.default_memory_mb,
-            default_disk_gb: request.default_disk_gb,
-            default_ttl_seconds: request.default_ttl_seconds,
-            image: request.image,
-            install_command: request.install_command,
-            startup_script: request.startup_script,
-            env_vars: string_map(request.env_vars),
-            agents: request.agents.into_iter().map(api_setup_agent).collect(),
-            install_agents: request.install_agents,
-            agent: request.agent,
-            app_ports: request.app_ports.into_iter().map(api_app_port).collect(),
-            include_org_secrets: request.include_org_secrets,
-            include_user_secrets: request.include_user_secrets,
-            secret_project: String::new(),
-        },
-        secret_project,
-    )
+fn create_body(request: CreatePresetRequest) -> AppResult<CreatePresetBody> {
+    let project_spec = request.project_spec.into_option().ok_or_else(|| {
+        coded(
+            axum::http::StatusCode::BAD_REQUEST,
+            "project_spec_required",
+            "project_spec is required",
+        )
+    })?;
+    Ok(CreatePresetBody {
+        name: request.name,
+        slug: request.slug,
+        description: request.description,
+        default_ttl_seconds: request.default_ttl_seconds,
+        project_spec: decode_project_spec(project_spec)?,
+    })
 }
 
-fn update_body(request: UpdatePresetRequest) -> (UpdatePresetBody, Option<SecretProjectSelection>) {
-    let secret_project = request.secret_project_id.map(|id| {
-        if id.is_empty() {
-            SecretProjectSelection::Clear
-        } else {
-            SecretProjectSelection::Id(id)
-        }
-    });
-    (
-        UpdatePresetBody {
-            name: request.name,
-            description: request.description,
-            slug: request.slug,
-            default_cpu_millicores: request.default_cpu_millicores,
-            default_memory_mb: request.default_memory_mb,
-            default_disk_gb: request.default_disk_gb,
-            default_ttl_seconds: request.default_ttl_seconds,
-            image: request.image,
-            install_command: request.install_command,
-            startup_script: request.startup_script,
-            env_vars: request
-                .env_vars
-                .into_option()
-                .map(|map| string_map(map.values)),
-            agents: request
-                .agents
-                .into_option()
-                .map(|list| list.values.into_iter().map(api_setup_agent).collect()),
-            install_agents: request.install_agents,
-            agent: request.agent,
-            app_ports: request
-                .app_ports
-                .into_option()
-                .map(|list| list.values.into_iter().map(api_app_port).collect()),
-            include_org_secrets: request.include_org_secrets,
-            include_user_secrets: request.include_user_secrets,
-            secret_project: None,
-        },
-        secret_project,
-    )
+fn update_body(request: UpdatePresetRequest) -> AppResult<UpdatePresetBody> {
+    Ok(UpdatePresetBody {
+        name: request.name,
+        description: request.description,
+        slug: request.slug,
+        default_ttl_seconds: request.default_ttl_seconds,
+        project_spec: request
+            .project_spec
+            .into_option()
+            .map(decode_project_spec)
+            .transpose()?,
+    })
 }
 
-fn string_map(values: impl IntoIterator<Item = (String, String)>) -> BTreeMap<String, String> {
-    values.into_iter().collect()
-}
-
-fn api_setup_agent(agent: ProtoSetupAgent) -> SetupAgent {
-    SetupAgent {
-        agent_type: agent.r#type,
-    }
-}
-
-fn api_app_port(port: ProtoAppPort) -> AppPort {
-    AppPort {
-        port: port.port,
-        label: port.label,
-        access: port.access,
-    }
+fn decode_project_spec(
+    project_spec: codewire_proto::codewire::v1::ProjectSpec,
+) -> AppResult<codewire_project::ProjectSpec> {
+    codewire_project_proto::from_proto(project_spec).map_err(|error| {
+        coded_owned(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_project_spec",
+            error.to_string(),
+        )
+    })
 }
 
 fn validate_pagination(page_token: &str) -> AppResult<()> {
@@ -269,64 +212,11 @@ pub(crate) fn proto_preset(preset: PresetWire) -> AppResult<Preset> {
         description: preset.description,
         build_status: preset.build_status,
         build_error: preset.build_error,
-        default_cpu_millicores: preset.default_cpu_millicores,
-        default_memory_mb: preset.default_memory_mb,
-        default_disk_gb: preset.default_disk_gb,
         default_ttl_seconds: preset.default_ttl_seconds,
-        image: preset.image,
-        default_setup_config: preset.default_setup_config.map(proto_setup_config).into(),
-        secret_project_id: preset.secret_project_id,
         created_at: Some(proto_timestamp(&preset.created_at)?).into(),
+        project_spec: Some(codewire_project_proto::to_proto(preset.project_spec)).into(),
         ..Default::default()
     })
-}
-
-fn proto_setup_config(config: SetupConfig) -> ProtoSetupConfig {
-    ProtoSetupConfig {
-        repo_url: config.repo_url,
-        branch: config.branch,
-        repos: config.repos.into_iter().map(proto_repo_entry).collect(),
-        install_command: config.install_command,
-        startup_script: config.startup_script,
-        env_vars: config.env_vars.into_iter().collect(),
-        agents: config.agents.into_iter().map(proto_setup_agent).collect(),
-        install_agents: config.install_agents,
-        agent: config.agent,
-        app_ports: config.app_ports.into_iter().map(proto_app_port).collect(),
-        include_org_secrets: config.include_org_secrets,
-        include_user_secrets: config.include_user_secrets,
-        project_spec: config
-            .project_spec
-            .map(codewire_project_proto::to_proto)
-            .into(),
-        ..Default::default()
-    }
-}
-
-fn proto_repo_entry(entry: RepoEntry) -> ProtoRepoEntry {
-    ProtoRepoEntry {
-        url: entry.url,
-        branch: entry.branch,
-        mount_path: entry.mount_path,
-        revision: entry.revision,
-        ..Default::default()
-    }
-}
-
-fn proto_setup_agent(agent: SetupAgent) -> ProtoSetupAgent {
-    ProtoSetupAgent {
-        r#type: agent.agent_type,
-        ..Default::default()
-    }
-}
-
-fn proto_app_port(port: AppPort) -> ProtoAppPort {
-    ProtoAppPort {
-        port: port.port,
-        label: port.label,
-        access: port.access,
-        ..Default::default()
-    }
 }
 
 fn proto_timestamp(value: &str) -> AppResult<Timestamp> {
@@ -342,60 +232,49 @@ fn proto_timestamp(value: &str) -> AppResult<Timestamp> {
 
 #[cfg(test)]
 mod tests {
-    use codewire_proto::codewire::v1::{AgentList, AppPortList, EnvVarMap};
-
     use super::*;
     use codewire_server_core::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
 
     #[test]
-    fn update_mapping_preserves_absent_and_present_empty_collections() {
-        let (absent, selection) = update_body(UpdatePresetRequest::default());
-        assert!(absent.slug.is_none());
-        assert!(absent.env_vars.is_none());
-        assert!(absent.agents.is_none());
-        assert!(absent.app_ports.is_none());
-        assert!(selection.is_none());
+    fn create_mapping_requires_one_canonical_project_spec() {
+        let error = create_body(CreatePresetRequest::default()).unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Coded {
+                code: "project_spec_required",
+                ..
+            }
+        ));
 
-        let (empty, selection) = update_body(UpdatePresetRequest {
-            slug: Some(String::new()),
-            env_vars: Some(EnvVarMap::default()).into(),
-            agents: Some(AgentList::default()).into(),
-            app_ports: Some(AppPortList::default()).into(),
-            secret_project_id: Some(String::new()),
+        let body = create_body(CreatePresetRequest {
+            name: "Default".into(),
+            project_spec: Some(codewire_project_proto::to_proto(
+                codewire_project::ProjectSpec::default(),
+            ))
+            .into(),
             ..Default::default()
-        });
-        assert_eq!(empty.slug.as_deref(), Some(""));
-        assert_eq!(empty.env_vars, Some(BTreeMap::new()));
-        assert!(empty.agents.is_some_and(|agents| agents.is_empty()));
-        assert!(empty.app_ports.is_some_and(|ports| ports.is_empty()));
-        assert_eq!(selection, Some(SecretProjectSelection::Clear));
+        })
+        .unwrap();
+        assert_eq!(body.name, "Default");
+        assert_eq!(body.project_spec, codewire_project::ProjectSpec::default());
     }
 
     #[test]
-    fn update_mapping_preserves_present_values_and_project_id() {
-        let (body, selection) = update_body(UpdatePresetRequest {
-            env_vars: Some(EnvVarMap {
-                values: [("RUST_LOG".into(), "debug".into())].into_iter().collect(),
-                ..Default::default()
-            })
-            .into(),
-            agents: Some(AgentList {
-                values: vec![ProtoSetupAgent {
-                    r#type: "claude".into(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .into(),
-            secret_project_id: Some("project_123".into()),
+    fn update_mapping_preserves_absent_and_present_whole_project_spec() {
+        let absent = update_body(UpdatePresetRequest::default()).unwrap();
+        assert!(absent.slug.is_none());
+        assert!(absent.project_spec.is_none());
+
+        let mut spec = codewire_project::ProjectSpec::default();
+        spec.environment.insert("RUST_LOG".into(), "debug".into());
+        let present = update_body(UpdatePresetRequest {
+            slug: Some(String::new()),
+            project_spec: Some(codewire_project_proto::to_proto(spec.clone())).into(),
             ..Default::default()
-        });
-        assert_eq!(body.env_vars.unwrap()["RUST_LOG"], "debug");
-        assert_eq!(body.agents.unwrap()[0].agent_type, "claude");
-        assert_eq!(
-            selection,
-            Some(SecretProjectSelection::Id("project_123".into()))
-        );
+        })
+        .unwrap();
+        assert_eq!(present.slug.as_deref(), Some(""));
+        assert_eq!(present.project_spec, Some(spec));
     }
 
     #[test]
@@ -410,23 +289,17 @@ mod tests {
             description: None,
             build_status: "ready".into(),
             build_error: None,
-            default_cpu_millicores: 2_000,
-            default_memory_mb: 4_096,
-            default_disk_gb: 10,
             default_ttl_seconds: Some(3_600),
-            image: None,
-            default_setup_config: Some(SetupConfig {
-                env_vars: [("RUST_LOG".into(), "info".into())].into_iter().collect(),
+            project_spec: codewire_project::ProjectSpec {
+                environment: [("RUST_LOG".into(), "info".into())].into_iter().collect(),
                 ..Default::default()
-            }),
-            secret_project_id: Some("project_123".into()),
+            },
             created_at: "2026-07-18T03:10:02Z".into(),
         })
         .unwrap();
         let json = serde_json::to_value(preset).unwrap();
         assert_eq!(json["orgId"], "org_123");
-        assert_eq!(json["defaultSetupConfig"]["envVars"]["RUST_LOG"], "info");
-        assert_eq!(json["secretProjectId"], "project_123");
+        assert_eq!(json["projectSpec"]["environment"]["RUST_LOG"], "info");
         assert_eq!(json["createdAt"], "2026-07-18T03:10:02Z");
         assert!(json.get("description").is_none());
     }

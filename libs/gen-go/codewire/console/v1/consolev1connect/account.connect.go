@@ -33,76 +33,21 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
-	// AccountServiceListLoginKeysProcedure is the fully-qualified name of the AccountService's
-	// ListLoginKeys RPC.
-	AccountServiceListLoginKeysProcedure = "/codewire.console.v1.AccountService/ListLoginKeys"
-	// AccountServiceCreateLoginKeyProcedure is the fully-qualified name of the AccountService's
-	// CreateLoginKey RPC.
-	AccountServiceCreateLoginKeyProcedure = "/codewire.console.v1.AccountService/CreateLoginKey"
-	// AccountServiceDeleteLoginKeyProcedure is the fully-qualified name of the AccountService's
-	// DeleteLoginKey RPC.
-	AccountServiceDeleteLoginKeyProcedure = "/codewire.console.v1.AccountService/DeleteLoginKey"
-	// AccountServiceEnsureSshKeyProcedure is the fully-qualified name of the AccountService's
-	// EnsureSshKey RPC.
-	AccountServiceEnsureSshKeyProcedure = "/codewire.console.v1.AccountService/EnsureSshKey"
-	// AccountServiceGetSshKeyProcedure is the fully-qualified name of the AccountService's GetSshKey
-	// RPC.
-	AccountServiceGetSshKeyProcedure = "/codewire.console.v1.AccountService/GetSshKey"
-	// AccountServiceRegenerateSshKeyProcedure is the fully-qualified name of the AccountService's
-	// RegenerateSshKey RPC.
-	AccountServiceRegenerateSshKeyProcedure = "/codewire.console.v1.AccountService/RegenerateSshKey"
 	// AccountServiceGetGitIdentityProcedure is the fully-qualified name of the AccountService's
 	// GetGitIdentity RPC.
 	AccountServiceGetGitIdentityProcedure = "/codewire.console.v1.AccountService/GetGitIdentity"
 	// AccountServiceUpdateGitIdentityProcedure is the fully-qualified name of the AccountService's
 	// UpdateGitIdentity RPC.
 	AccountServiceUpdateGitIdentityProcedure = "/codewire.console.v1.AccountService/UpdateGitIdentity"
-	// AccountServiceListGitCredentialsProcedure is the fully-qualified name of the AccountService's
-	// ListGitCredentials RPC.
-	AccountServiceListGitCredentialsProcedure = "/codewire.console.v1.AccountService/ListGitCredentials"
-	// AccountServiceCreateGitCredentialProcedure is the fully-qualified name of the AccountService's
-	// CreateGitCredential RPC.
-	AccountServiceCreateGitCredentialProcedure = "/codewire.console.v1.AccountService/CreateGitCredential"
-	// AccountServiceUpdateGitCredentialProcedure is the fully-qualified name of the AccountService's
-	// UpdateGitCredential RPC.
-	AccountServiceUpdateGitCredentialProcedure = "/codewire.console.v1.AccountService/UpdateGitCredential"
-	// AccountServiceDeleteGitCredentialProcedure is the fully-qualified name of the AccountService's
-	// DeleteGitCredential RPC.
-	AccountServiceDeleteGitCredentialProcedure = "/codewire.console.v1.AccountService/DeleteGitCredential"
 )
 
 // AccountServiceClient is a client for the codewire.console.v1.AccountService service.
 type AccountServiceClient interface {
-	// ListLoginKeys returns every public key accepted for account login.
-	ListLoginKeys(context.Context, *connect.Request[v1.ListLoginKeysRequest]) (*connect.Response[v1.ListLoginKeysResponse], error)
-	// CreateLoginKey adds one caller-supplied public login key.
-	CreateLoginKey(context.Context, *connect.Request[v1.CreateLoginKeyRequest]) (*connect.Response[v1.CreateLoginKeyResponse], error)
-	// DeleteLoginKey removes one public login key owned by the caller.
-	DeleteLoginKey(context.Context, *connect.Request[v1.DeleteLoginKeyRequest]) (*connect.Response[v1.DeleteLoginKeyResponse], error)
-	// EnsureSshKey returns the generated workspace SSH key, creating and
-	// storing a keypair when the account does not have one yet.
-	EnsureSshKey(context.Context, *connect.Request[v1.EnsureSshKeyRequest]) (*connect.Response[v1.EnsureSshKeyResponse], error)
-	// GetSshKey performs a pure read. It returns not_found until EnsureSshKey
-	// or RegenerateSshKey has created the account's keypair.
-	GetSshKey(context.Context, *connect.Request[v1.GetSshKeyRequest]) (*connect.Response[v1.GetSshKeyResponse], error)
-	// RegenerateSshKey rotates the generated workspace SSH keypair.
-	RegenerateSshKey(context.Context, *connect.Request[v1.RegenerateSshKeyRequest]) (*connect.Response[v1.RegenerateSshKeyResponse], error)
 	// GetGitIdentity returns the resolved Git author name and email.
 	GetGitIdentity(context.Context, *connect.Request[v1.GetGitIdentityRequest]) (*connect.Response[v1.GetGitIdentityResponse], error)
 	// UpdateGitIdentity replaces the optional Git author overrides. An absent
 	// field clears that override, restoring the account-derived fallback.
 	UpdateGitIdentity(context.Context, *connect.Request[v1.UpdateGitIdentityRequest]) (*connect.Response[v1.UpdateGitIdentityResponse], error)
-	// ListGitCredentials returns metadata for non-GitHub forge credentials.
-	// Secret values are never returned.
-	ListGitCredentials(context.Context, *connect.Request[v1.ListGitCredentialsRequest]) (*connect.Response[v1.ListGitCredentialsResponse], error)
-	// CreateGitCredential stores metadata and one secret for a non-GitHub
-	// forge. github.com credentials must use GitHubService instead.
-	CreateGitCredential(context.Context, *connect.Request[v1.CreateGitCredentialRequest]) (*connect.Response[v1.CreateGitCredentialResponse], error)
-	// UpdateGitCredential changes selected metadata and optionally replaces the
-	// stored secret. Absent fields remain unchanged.
-	UpdateGitCredential(context.Context, *connect.Request[v1.UpdateGitCredentialRequest]) (*connect.Response[v1.UpdateGitCredentialResponse], error)
-	// DeleteGitCredential removes the metadata and its stored secret.
-	DeleteGitCredential(context.Context, *connect.Request[v1.DeleteGitCredentialRequest]) (*connect.Response[v1.DeleteGitCredentialResponse], error)
 }
 
 // NewAccountServiceClient constructs a client for the codewire.console.v1.AccountService service.
@@ -116,44 +61,6 @@ func NewAccountServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 	baseURL = strings.TrimRight(baseURL, "/")
 	accountServiceMethods := v1.File_codewire_console_v1_account_proto.Services().ByName("AccountService").Methods()
 	return &accountServiceClient{
-		listLoginKeys: connect.NewClient[v1.ListLoginKeysRequest, v1.ListLoginKeysResponse](
-			httpClient,
-			baseURL+AccountServiceListLoginKeysProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("ListLoginKeys")),
-			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
-			connect.WithClientOptions(opts...),
-		),
-		createLoginKey: connect.NewClient[v1.CreateLoginKeyRequest, v1.CreateLoginKeyResponse](
-			httpClient,
-			baseURL+AccountServiceCreateLoginKeyProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("CreateLoginKey")),
-			connect.WithClientOptions(opts...),
-		),
-		deleteLoginKey: connect.NewClient[v1.DeleteLoginKeyRequest, v1.DeleteLoginKeyResponse](
-			httpClient,
-			baseURL+AccountServiceDeleteLoginKeyProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("DeleteLoginKey")),
-			connect.WithClientOptions(opts...),
-		),
-		ensureSshKey: connect.NewClient[v1.EnsureSshKeyRequest, v1.EnsureSshKeyResponse](
-			httpClient,
-			baseURL+AccountServiceEnsureSshKeyProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("EnsureSshKey")),
-			connect.WithClientOptions(opts...),
-		),
-		getSshKey: connect.NewClient[v1.GetSshKeyRequest, v1.GetSshKeyResponse](
-			httpClient,
-			baseURL+AccountServiceGetSshKeyProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("GetSshKey")),
-			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
-			connect.WithClientOptions(opts...),
-		),
-		regenerateSshKey: connect.NewClient[v1.RegenerateSshKeyRequest, v1.RegenerateSshKeyResponse](
-			httpClient,
-			baseURL+AccountServiceRegenerateSshKeyProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("RegenerateSshKey")),
-			connect.WithClientOptions(opts...),
-		),
 		getGitIdentity: connect.NewClient[v1.GetGitIdentityRequest, v1.GetGitIdentityResponse](
 			httpClient,
 			baseURL+AccountServiceGetGitIdentityProcedure,
@@ -167,78 +74,13 @@ func NewAccountServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(accountServiceMethods.ByName("UpdateGitIdentity")),
 			connect.WithClientOptions(opts...),
 		),
-		listGitCredentials: connect.NewClient[v1.ListGitCredentialsRequest, v1.ListGitCredentialsResponse](
-			httpClient,
-			baseURL+AccountServiceListGitCredentialsProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("ListGitCredentials")),
-			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
-			connect.WithClientOptions(opts...),
-		),
-		createGitCredential: connect.NewClient[v1.CreateGitCredentialRequest, v1.CreateGitCredentialResponse](
-			httpClient,
-			baseURL+AccountServiceCreateGitCredentialProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("CreateGitCredential")),
-			connect.WithClientOptions(opts...),
-		),
-		updateGitCredential: connect.NewClient[v1.UpdateGitCredentialRequest, v1.UpdateGitCredentialResponse](
-			httpClient,
-			baseURL+AccountServiceUpdateGitCredentialProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("UpdateGitCredential")),
-			connect.WithClientOptions(opts...),
-		),
-		deleteGitCredential: connect.NewClient[v1.DeleteGitCredentialRequest, v1.DeleteGitCredentialResponse](
-			httpClient,
-			baseURL+AccountServiceDeleteGitCredentialProcedure,
-			connect.WithSchema(accountServiceMethods.ByName("DeleteGitCredential")),
-			connect.WithClientOptions(opts...),
-		),
 	}
 }
 
 // accountServiceClient implements AccountServiceClient.
 type accountServiceClient struct {
-	listLoginKeys       *connect.Client[v1.ListLoginKeysRequest, v1.ListLoginKeysResponse]
-	createLoginKey      *connect.Client[v1.CreateLoginKeyRequest, v1.CreateLoginKeyResponse]
-	deleteLoginKey      *connect.Client[v1.DeleteLoginKeyRequest, v1.DeleteLoginKeyResponse]
-	ensureSshKey        *connect.Client[v1.EnsureSshKeyRequest, v1.EnsureSshKeyResponse]
-	getSshKey           *connect.Client[v1.GetSshKeyRequest, v1.GetSshKeyResponse]
-	regenerateSshKey    *connect.Client[v1.RegenerateSshKeyRequest, v1.RegenerateSshKeyResponse]
-	getGitIdentity      *connect.Client[v1.GetGitIdentityRequest, v1.GetGitIdentityResponse]
-	updateGitIdentity   *connect.Client[v1.UpdateGitIdentityRequest, v1.UpdateGitIdentityResponse]
-	listGitCredentials  *connect.Client[v1.ListGitCredentialsRequest, v1.ListGitCredentialsResponse]
-	createGitCredential *connect.Client[v1.CreateGitCredentialRequest, v1.CreateGitCredentialResponse]
-	updateGitCredential *connect.Client[v1.UpdateGitCredentialRequest, v1.UpdateGitCredentialResponse]
-	deleteGitCredential *connect.Client[v1.DeleteGitCredentialRequest, v1.DeleteGitCredentialResponse]
-}
-
-// ListLoginKeys calls codewire.console.v1.AccountService.ListLoginKeys.
-func (c *accountServiceClient) ListLoginKeys(ctx context.Context, req *connect.Request[v1.ListLoginKeysRequest]) (*connect.Response[v1.ListLoginKeysResponse], error) {
-	return c.listLoginKeys.CallUnary(ctx, req)
-}
-
-// CreateLoginKey calls codewire.console.v1.AccountService.CreateLoginKey.
-func (c *accountServiceClient) CreateLoginKey(ctx context.Context, req *connect.Request[v1.CreateLoginKeyRequest]) (*connect.Response[v1.CreateLoginKeyResponse], error) {
-	return c.createLoginKey.CallUnary(ctx, req)
-}
-
-// DeleteLoginKey calls codewire.console.v1.AccountService.DeleteLoginKey.
-func (c *accountServiceClient) DeleteLoginKey(ctx context.Context, req *connect.Request[v1.DeleteLoginKeyRequest]) (*connect.Response[v1.DeleteLoginKeyResponse], error) {
-	return c.deleteLoginKey.CallUnary(ctx, req)
-}
-
-// EnsureSshKey calls codewire.console.v1.AccountService.EnsureSshKey.
-func (c *accountServiceClient) EnsureSshKey(ctx context.Context, req *connect.Request[v1.EnsureSshKeyRequest]) (*connect.Response[v1.EnsureSshKeyResponse], error) {
-	return c.ensureSshKey.CallUnary(ctx, req)
-}
-
-// GetSshKey calls codewire.console.v1.AccountService.GetSshKey.
-func (c *accountServiceClient) GetSshKey(ctx context.Context, req *connect.Request[v1.GetSshKeyRequest]) (*connect.Response[v1.GetSshKeyResponse], error) {
-	return c.getSshKey.CallUnary(ctx, req)
-}
-
-// RegenerateSshKey calls codewire.console.v1.AccountService.RegenerateSshKey.
-func (c *accountServiceClient) RegenerateSshKey(ctx context.Context, req *connect.Request[v1.RegenerateSshKeyRequest]) (*connect.Response[v1.RegenerateSshKeyResponse], error) {
-	return c.regenerateSshKey.CallUnary(ctx, req)
+	getGitIdentity    *connect.Client[v1.GetGitIdentityRequest, v1.GetGitIdentityResponse]
+	updateGitIdentity *connect.Client[v1.UpdateGitIdentityRequest, v1.UpdateGitIdentityResponse]
 }
 
 // GetGitIdentity calls codewire.console.v1.AccountService.GetGitIdentity.
@@ -251,58 +93,13 @@ func (c *accountServiceClient) UpdateGitIdentity(ctx context.Context, req *conne
 	return c.updateGitIdentity.CallUnary(ctx, req)
 }
 
-// ListGitCredentials calls codewire.console.v1.AccountService.ListGitCredentials.
-func (c *accountServiceClient) ListGitCredentials(ctx context.Context, req *connect.Request[v1.ListGitCredentialsRequest]) (*connect.Response[v1.ListGitCredentialsResponse], error) {
-	return c.listGitCredentials.CallUnary(ctx, req)
-}
-
-// CreateGitCredential calls codewire.console.v1.AccountService.CreateGitCredential.
-func (c *accountServiceClient) CreateGitCredential(ctx context.Context, req *connect.Request[v1.CreateGitCredentialRequest]) (*connect.Response[v1.CreateGitCredentialResponse], error) {
-	return c.createGitCredential.CallUnary(ctx, req)
-}
-
-// UpdateGitCredential calls codewire.console.v1.AccountService.UpdateGitCredential.
-func (c *accountServiceClient) UpdateGitCredential(ctx context.Context, req *connect.Request[v1.UpdateGitCredentialRequest]) (*connect.Response[v1.UpdateGitCredentialResponse], error) {
-	return c.updateGitCredential.CallUnary(ctx, req)
-}
-
-// DeleteGitCredential calls codewire.console.v1.AccountService.DeleteGitCredential.
-func (c *accountServiceClient) DeleteGitCredential(ctx context.Context, req *connect.Request[v1.DeleteGitCredentialRequest]) (*connect.Response[v1.DeleteGitCredentialResponse], error) {
-	return c.deleteGitCredential.CallUnary(ctx, req)
-}
-
 // AccountServiceHandler is an implementation of the codewire.console.v1.AccountService service.
 type AccountServiceHandler interface {
-	// ListLoginKeys returns every public key accepted for account login.
-	ListLoginKeys(context.Context, *connect.Request[v1.ListLoginKeysRequest]) (*connect.Response[v1.ListLoginKeysResponse], error)
-	// CreateLoginKey adds one caller-supplied public login key.
-	CreateLoginKey(context.Context, *connect.Request[v1.CreateLoginKeyRequest]) (*connect.Response[v1.CreateLoginKeyResponse], error)
-	// DeleteLoginKey removes one public login key owned by the caller.
-	DeleteLoginKey(context.Context, *connect.Request[v1.DeleteLoginKeyRequest]) (*connect.Response[v1.DeleteLoginKeyResponse], error)
-	// EnsureSshKey returns the generated workspace SSH key, creating and
-	// storing a keypair when the account does not have one yet.
-	EnsureSshKey(context.Context, *connect.Request[v1.EnsureSshKeyRequest]) (*connect.Response[v1.EnsureSshKeyResponse], error)
-	// GetSshKey performs a pure read. It returns not_found until EnsureSshKey
-	// or RegenerateSshKey has created the account's keypair.
-	GetSshKey(context.Context, *connect.Request[v1.GetSshKeyRequest]) (*connect.Response[v1.GetSshKeyResponse], error)
-	// RegenerateSshKey rotates the generated workspace SSH keypair.
-	RegenerateSshKey(context.Context, *connect.Request[v1.RegenerateSshKeyRequest]) (*connect.Response[v1.RegenerateSshKeyResponse], error)
 	// GetGitIdentity returns the resolved Git author name and email.
 	GetGitIdentity(context.Context, *connect.Request[v1.GetGitIdentityRequest]) (*connect.Response[v1.GetGitIdentityResponse], error)
 	// UpdateGitIdentity replaces the optional Git author overrides. An absent
 	// field clears that override, restoring the account-derived fallback.
 	UpdateGitIdentity(context.Context, *connect.Request[v1.UpdateGitIdentityRequest]) (*connect.Response[v1.UpdateGitIdentityResponse], error)
-	// ListGitCredentials returns metadata for non-GitHub forge credentials.
-	// Secret values are never returned.
-	ListGitCredentials(context.Context, *connect.Request[v1.ListGitCredentialsRequest]) (*connect.Response[v1.ListGitCredentialsResponse], error)
-	// CreateGitCredential stores metadata and one secret for a non-GitHub
-	// forge. github.com credentials must use GitHubService instead.
-	CreateGitCredential(context.Context, *connect.Request[v1.CreateGitCredentialRequest]) (*connect.Response[v1.CreateGitCredentialResponse], error)
-	// UpdateGitCredential changes selected metadata and optionally replaces the
-	// stored secret. Absent fields remain unchanged.
-	UpdateGitCredential(context.Context, *connect.Request[v1.UpdateGitCredentialRequest]) (*connect.Response[v1.UpdateGitCredentialResponse], error)
-	// DeleteGitCredential removes the metadata and its stored secret.
-	DeleteGitCredential(context.Context, *connect.Request[v1.DeleteGitCredentialRequest]) (*connect.Response[v1.DeleteGitCredentialResponse], error)
 }
 
 // NewAccountServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -312,44 +109,6 @@ type AccountServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewAccountServiceHandler(svc AccountServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	accountServiceMethods := v1.File_codewire_console_v1_account_proto.Services().ByName("AccountService").Methods()
-	accountServiceListLoginKeysHandler := connect.NewUnaryHandler(
-		AccountServiceListLoginKeysProcedure,
-		svc.ListLoginKeys,
-		connect.WithSchema(accountServiceMethods.ByName("ListLoginKeys")),
-		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
-		connect.WithHandlerOptions(opts...),
-	)
-	accountServiceCreateLoginKeyHandler := connect.NewUnaryHandler(
-		AccountServiceCreateLoginKeyProcedure,
-		svc.CreateLoginKey,
-		connect.WithSchema(accountServiceMethods.ByName("CreateLoginKey")),
-		connect.WithHandlerOptions(opts...),
-	)
-	accountServiceDeleteLoginKeyHandler := connect.NewUnaryHandler(
-		AccountServiceDeleteLoginKeyProcedure,
-		svc.DeleteLoginKey,
-		connect.WithSchema(accountServiceMethods.ByName("DeleteLoginKey")),
-		connect.WithHandlerOptions(opts...),
-	)
-	accountServiceEnsureSshKeyHandler := connect.NewUnaryHandler(
-		AccountServiceEnsureSshKeyProcedure,
-		svc.EnsureSshKey,
-		connect.WithSchema(accountServiceMethods.ByName("EnsureSshKey")),
-		connect.WithHandlerOptions(opts...),
-	)
-	accountServiceGetSshKeyHandler := connect.NewUnaryHandler(
-		AccountServiceGetSshKeyProcedure,
-		svc.GetSshKey,
-		connect.WithSchema(accountServiceMethods.ByName("GetSshKey")),
-		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
-		connect.WithHandlerOptions(opts...),
-	)
-	accountServiceRegenerateSshKeyHandler := connect.NewUnaryHandler(
-		AccountServiceRegenerateSshKeyProcedure,
-		svc.RegenerateSshKey,
-		connect.WithSchema(accountServiceMethods.ByName("RegenerateSshKey")),
-		connect.WithHandlerOptions(opts...),
-	)
 	accountServiceGetGitIdentityHandler := connect.NewUnaryHandler(
 		AccountServiceGetGitIdentityProcedure,
 		svc.GetGitIdentity,
@@ -363,57 +122,12 @@ func NewAccountServiceHandler(svc AccountServiceHandler, opts ...connect.Handler
 		connect.WithSchema(accountServiceMethods.ByName("UpdateGitIdentity")),
 		connect.WithHandlerOptions(opts...),
 	)
-	accountServiceListGitCredentialsHandler := connect.NewUnaryHandler(
-		AccountServiceListGitCredentialsProcedure,
-		svc.ListGitCredentials,
-		connect.WithSchema(accountServiceMethods.ByName("ListGitCredentials")),
-		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
-		connect.WithHandlerOptions(opts...),
-	)
-	accountServiceCreateGitCredentialHandler := connect.NewUnaryHandler(
-		AccountServiceCreateGitCredentialProcedure,
-		svc.CreateGitCredential,
-		connect.WithSchema(accountServiceMethods.ByName("CreateGitCredential")),
-		connect.WithHandlerOptions(opts...),
-	)
-	accountServiceUpdateGitCredentialHandler := connect.NewUnaryHandler(
-		AccountServiceUpdateGitCredentialProcedure,
-		svc.UpdateGitCredential,
-		connect.WithSchema(accountServiceMethods.ByName("UpdateGitCredential")),
-		connect.WithHandlerOptions(opts...),
-	)
-	accountServiceDeleteGitCredentialHandler := connect.NewUnaryHandler(
-		AccountServiceDeleteGitCredentialProcedure,
-		svc.DeleteGitCredential,
-		connect.WithSchema(accountServiceMethods.ByName("DeleteGitCredential")),
-		connect.WithHandlerOptions(opts...),
-	)
 	return "/codewire.console.v1.AccountService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case AccountServiceListLoginKeysProcedure:
-			accountServiceListLoginKeysHandler.ServeHTTP(w, r)
-		case AccountServiceCreateLoginKeyProcedure:
-			accountServiceCreateLoginKeyHandler.ServeHTTP(w, r)
-		case AccountServiceDeleteLoginKeyProcedure:
-			accountServiceDeleteLoginKeyHandler.ServeHTTP(w, r)
-		case AccountServiceEnsureSshKeyProcedure:
-			accountServiceEnsureSshKeyHandler.ServeHTTP(w, r)
-		case AccountServiceGetSshKeyProcedure:
-			accountServiceGetSshKeyHandler.ServeHTTP(w, r)
-		case AccountServiceRegenerateSshKeyProcedure:
-			accountServiceRegenerateSshKeyHandler.ServeHTTP(w, r)
 		case AccountServiceGetGitIdentityProcedure:
 			accountServiceGetGitIdentityHandler.ServeHTTP(w, r)
 		case AccountServiceUpdateGitIdentityProcedure:
 			accountServiceUpdateGitIdentityHandler.ServeHTTP(w, r)
-		case AccountServiceListGitCredentialsProcedure:
-			accountServiceListGitCredentialsHandler.ServeHTTP(w, r)
-		case AccountServiceCreateGitCredentialProcedure:
-			accountServiceCreateGitCredentialHandler.ServeHTTP(w, r)
-		case AccountServiceUpdateGitCredentialProcedure:
-			accountServiceUpdateGitCredentialHandler.ServeHTTP(w, r)
-		case AccountServiceDeleteGitCredentialProcedure:
-			accountServiceDeleteGitCredentialHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -423,50 +137,10 @@ func NewAccountServiceHandler(svc AccountServiceHandler, opts ...connect.Handler
 // UnimplementedAccountServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedAccountServiceHandler struct{}
 
-func (UnimplementedAccountServiceHandler) ListLoginKeys(context.Context, *connect.Request[v1.ListLoginKeysRequest]) (*connect.Response[v1.ListLoginKeysResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.ListLoginKeys is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) CreateLoginKey(context.Context, *connect.Request[v1.CreateLoginKeyRequest]) (*connect.Response[v1.CreateLoginKeyResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.CreateLoginKey is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) DeleteLoginKey(context.Context, *connect.Request[v1.DeleteLoginKeyRequest]) (*connect.Response[v1.DeleteLoginKeyResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.DeleteLoginKey is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) EnsureSshKey(context.Context, *connect.Request[v1.EnsureSshKeyRequest]) (*connect.Response[v1.EnsureSshKeyResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.EnsureSshKey is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) GetSshKey(context.Context, *connect.Request[v1.GetSshKeyRequest]) (*connect.Response[v1.GetSshKeyResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.GetSshKey is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) RegenerateSshKey(context.Context, *connect.Request[v1.RegenerateSshKeyRequest]) (*connect.Response[v1.RegenerateSshKeyResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.RegenerateSshKey is not implemented"))
-}
-
 func (UnimplementedAccountServiceHandler) GetGitIdentity(context.Context, *connect.Request[v1.GetGitIdentityRequest]) (*connect.Response[v1.GetGitIdentityResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.GetGitIdentity is not implemented"))
 }
 
 func (UnimplementedAccountServiceHandler) UpdateGitIdentity(context.Context, *connect.Request[v1.UpdateGitIdentityRequest]) (*connect.Response[v1.UpdateGitIdentityResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.UpdateGitIdentity is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) ListGitCredentials(context.Context, *connect.Request[v1.ListGitCredentialsRequest]) (*connect.Response[v1.ListGitCredentialsResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.ListGitCredentials is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) CreateGitCredential(context.Context, *connect.Request[v1.CreateGitCredentialRequest]) (*connect.Response[v1.CreateGitCredentialResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.CreateGitCredential is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) UpdateGitCredential(context.Context, *connect.Request[v1.UpdateGitCredentialRequest]) (*connect.Response[v1.UpdateGitCredentialResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.UpdateGitCredential is not implemented"))
-}
-
-func (UnimplementedAccountServiceHandler) DeleteGitCredential(context.Context, *connect.Request[v1.DeleteGitCredentialRequest]) (*connect.Response[v1.DeleteGitCredentialResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.AccountService.DeleteGitCredential is not implemented"))
 }

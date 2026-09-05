@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::config::Config;
+use crate::config::{Config, DAEMON_AUTH_TOKEN_ENV};
 
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -25,6 +25,9 @@ fn build_process_env_from(
     let mut session_override = HashMap::<String, bool>::new();
     for entry in &persisted {
         if let Some((key, _)) = entry.split_once('=') {
+            if key == DAEMON_AUTH_TOKEN_ENV {
+                continue;
+            }
             override_keys.insert(key.into(), true);
         }
     }
@@ -34,6 +37,9 @@ fn build_process_env_from(
     }
     for entry in extra {
         if let Some((key, _)) = entry.split_once('=') {
+            if key == DAEMON_AUTH_TOKEN_ENV {
+                continue;
+            }
             override_keys.insert(key.into(), true);
             session_override.insert(key.into(), true);
         }
@@ -41,6 +47,9 @@ fn build_process_env_from(
 
     let mut env = Vec::new();
     for (key, value) in inherited {
+        if key == DAEMON_AUTH_TOKEN_ENV {
+            continue;
+        }
         if override_keys.contains_key(&key) {
             continue;
         }
@@ -67,13 +76,22 @@ fn build_process_env_from(
     }
     for entry in persisted {
         if let Some((key, _)) = entry.split_once('=')
-            && session_override.contains_key(key)
+            && (key == DAEMON_AUTH_TOKEN_ENV || session_override.contains_key(key))
         {
             continue;
         }
         env.push(entry);
     }
-    env.extend(extra.iter().cloned());
+    env.extend(
+        extra
+            .iter()
+            .filter(|entry| {
+                entry
+                    .split_once('=')
+                    .is_none_or(|(key, _)| key != DAEMON_AUTH_TOKEN_ENV)
+            })
+            .cloned(),
+    );
     env
 }
 
@@ -93,6 +111,7 @@ pub fn load_persisted_environment(config: &Config) -> Vec<String> {
 
     values
         .into_iter()
+        .filter(|(key, _)| key != DAEMON_AUTH_TOKEN_ENV)
         .map(|(key, value)| format!("{key}={value}"))
         .collect()
 }
@@ -145,7 +164,7 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             workspace_root: PathBuf::from("/workspace"),
             home_root,
-            auth_token: None,
+            auth_token: crate::DaemonAuthToken::new("daemon-env-test-token").unwrap(),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
         }
@@ -225,6 +244,45 @@ mod tests {
             values.get("USER").map(String::as_str),
             Some("persisted-user")
         );
+    }
+
+    #[test]
+    fn build_process_env_never_projects_daemon_auth_token() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().to_path_buf();
+        fs::create_dir_all(home.join(".codewire")).expect("env dir");
+        fs::write(
+            home.join(".codewire/environment.json"),
+            br#"{"CODEWIRE_DAEMON_AUTH_TOKEN":"persisted-marker","PERSISTED":"visible"}"#,
+        )
+        .expect("environment file");
+
+        let config = test_config(home);
+        let persisted = load_persisted_environment(&config);
+        let env = build_process_env_from(
+            &config,
+            persisted,
+            &[
+                "CODEWIRE_DAEMON_AUTH_TOKEN=request-marker".into(),
+                "REQUEST=visible".into(),
+            ],
+            "xterm-256color",
+            [
+                (DAEMON_AUTH_TOKEN_ENV.into(), "inherited-marker".into()),
+                ("INHERITED".into(), "visible".into()),
+            ],
+            "/bin/sh",
+        );
+        let values = env_map(&env);
+
+        assert!(!values.contains_key(DAEMON_AUTH_TOKEN_ENV));
+        assert_eq!(values.get("PERSISTED").map(String::as_str), Some("visible"));
+        assert_eq!(values.get("REQUEST").map(String::as_str), Some("visible"));
+        assert_eq!(values.get("INHERITED").map(String::as_str), Some("visible"));
+        let rendered = format!("{env:?}");
+        for marker in ["persisted-marker", "request-marker", "inherited-marker"] {
+            assert!(!rendered.contains(marker));
+        }
     }
 
     #[test]

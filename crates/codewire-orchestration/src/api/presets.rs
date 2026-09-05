@@ -3,8 +3,6 @@
 //! `environment_db.go`. Admin gate mirrors `canAdmin` (org owner/admin
 //! or a `super_admin` assignment).
 
-use std::collections::BTreeMap;
-
 use axum::http::StatusCode;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::user_org_role;
@@ -15,7 +13,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 
 use super::ApiState;
-use super::create::{AppPort, SetupAgent, SetupConfig, sanitize_image_name};
+use super::create::{ensure_no_secret_delivery, sanitize_image_name};
 use super::environments::{coded, coded_owned, require_org_member};
 use super::prepare::{PresetWire, get_preset_wire, list_presets};
 
@@ -64,9 +62,52 @@ fn valid_agent_type(agent: &str) -> bool {
     crate::worker::agents::is_supported_agent(agent)
 }
 
+async fn insert_preset_db(
+    pool: &PgPool,
+    org_id: &str,
+    name: &str,
+    body: &CreatePresetBody,
+    project_spec: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let mut transaction = pool.begin().await?;
+    let slug = (!body.slug.is_empty()).then_some(body.slug.as_str());
+    let id: String = sqlx::query_scalar(
+        r#"INSERT INTO environment_presets
+              (org_id, name, slug, description, default_ttl_seconds, project_spec)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id"#,
+    )
+    .bind(org_id)
+    .bind(name)
+    .bind(slug)
+    .bind(&body.description)
+    .bind(body.default_ttl_seconds)
+    .bind(project_spec)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(|error| anyhow::anyhow!("insert preset: {error}"))?;
+
+    if !body.project_spec.image.is_empty() {
+        let sandbox_name = sanitize_image_name(&body.project_spec.image);
+        sqlx::query(
+            r#"INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name)
+               VALUES ($1, $2, $3)"#,
+        )
+        .bind(&id)
+        .bind(&body.project_spec.image)
+        .bind(&sandbox_name)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| anyhow::anyhow!("insert sandbox_template_config: {error}"))?;
+    }
+
+    transaction.commit().await?;
+    Ok(id)
+}
+
 // ── Create ──────────────────────────────────────────────────────────────
 
-/// Mirrors `api.CreatePresetBody`.
+/// Preset metadata plus its one canonical project configuration.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePresetBody {
@@ -76,79 +117,37 @@ pub struct CreatePresetBody {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub default_cpu_millicores: Option<i32>,
-    #[serde(default)]
-    pub default_memory_mb: Option<i32>,
-    #[serde(default)]
-    pub default_disk_gb: Option<i32>,
-    #[serde(default)]
     pub default_ttl_seconds: Option<i32>,
-    #[serde(default)]
-    pub image: String,
-    #[serde(default)]
-    pub install_command: String,
-    #[serde(default)]
-    pub startup_script: String,
-    #[serde(default)]
-    pub env_vars: BTreeMap<String, String>,
-    #[serde(default)]
-    pub agents: Vec<SetupAgent>,
-    #[serde(default)]
-    pub install_agents: Option<bool>,
-    #[serde(default)]
-    pub agent: String,
-    #[serde(default)]
-    pub app_ports: Vec<AppPort>,
-    #[serde(default)]
-    pub include_org_secrets: Option<bool>,
-    #[serde(default)]
-    pub include_user_secrets: Option<bool>,
-    #[serde(default)]
-    pub secret_project: String,
+    #[schemars(with = "serde_json::Value")]
+    pub project_spec: codewire_project::ProjectSpec,
 }
 
-/// Renderer-specific selector for the shared preset service core. REST keeps
-/// accepting a secret-project display name while Connect carries the stable
-/// project ID; both resolve through the same organization-scoped lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SecretProjectSelection {
-    Id(String),
-    Clear,
-}
-
-async fn resolve_secret_project_id(
-    pool: &PgPool,
-    org_id: &str,
-    selection: &SecretProjectSelection,
-) -> AppResult<Option<String>> {
-    let (sql, value) = match selection {
-        SecretProjectSelection::Id(id) => (
-            "SELECT id FROM secret_projects WHERE org_id = $1 AND id = $2",
-            id,
-        ),
-        SecretProjectSelection::Clear => return Ok(None),
-    };
-    sqlx::query_scalar(sql)
-        .bind(org_id)
-        .bind(value)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "secret-project lookup failed");
-            coded(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "failed to resolve secret project",
-            )
-        })?
-        .ok_or_else(|| {
-            coded_owned(
+fn validate_preset_project_spec(spec: &codewire_project::ProjectSpec) -> AppResult<()> {
+    spec.validate().map_err(|error| {
+        coded_owned(
+            StatusCode::BAD_REQUEST,
+            "invalid_project_spec",
+            error.to_string(),
+        )
+    })?;
+    if !spec.preset.is_empty() {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_project_spec",
+            "a preset project_spec cannot select another preset",
+        ));
+    }
+    ensure_no_secret_delivery(spec)?;
+    for agent in &spec.agents.tools {
+        if !valid_agent_type(agent) {
+            return Err(coded_owned(
                 StatusCode::BAD_REQUEST,
-                "secret_project_not_found",
-                format!("secret project not found: {value}"),
-            )
-        })
-        .map(Some)
+                "unsupported_agent",
+                format!("unsupported agent: {agent}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn create_preset_core(
@@ -156,7 +155,6 @@ pub(crate) async fn create_preset_core(
     user: &AuthUser,
     org_id: &str,
     body: CreatePresetBody,
-    secret_project: Option<SecretProjectSelection>,
 ) -> AppResult<PresetWire> {
     let pool = &state.pool;
     let role = require_org_role(pool, user, org_id).await?;
@@ -175,76 +173,17 @@ pub(crate) async fn create_preset_core(
             "name is required",
         ));
     }
-    let cpu = body.default_cpu_millicores.unwrap_or(2000);
-    let mem = body.default_memory_mb.unwrap_or(4096);
-    let disk = body.default_disk_gb.unwrap_or(10);
-
-    for agent in &body.agents {
-        if !valid_agent_type(&agent.agent_type) {
-            return Err(coded_owned(
-                StatusCode::BAD_REQUEST,
-                "unsupported_agent",
-                format!("unsupported agent: {}", agent.agent_type),
-            ));
-        }
-    }
-
-    // Build default setup config if any runtime setup fields are
-    // provided (note: ANY include_*_secrets value counts here, unlike
-    // createEnvironment which only persists explicit false).
-    let needs_cfg = !body.install_command.is_empty()
-        || !body.startup_script.is_empty()
-        || !body.env_vars.is_empty()
-        || !body.agents.is_empty()
-        || body.install_agents.is_some()
-        || !body.agent.is_empty()
-        || !body.app_ports.is_empty()
-        || body.include_org_secrets.is_some()
-        || body.include_user_secrets.is_some();
-    let default_setup_config = needs_cfg.then(|| SetupConfig {
-        install_command: body.install_command.clone(),
-        startup_script: body.startup_script.clone(),
-        env_vars: body.env_vars.clone(),
-        agents: body.agents.clone(),
-        install_agents: body.install_agents,
-        agent: body.agent.clone(),
-        app_ports: body.app_ports.clone(),
-        include_org_secrets: body.include_org_secrets,
-        include_user_secrets: body.include_user_secrets,
-        ..Default::default()
-    });
-    let setup_json = match &default_setup_config {
-        Some(cfg) => Some(serde_json::to_value(cfg).map_err(|_| {
-            coded(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "failed to create preset",
-            )
-        })?),
-        None => None,
-    };
+    validate_preset_project_spec(&body.project_spec)?;
+    let project_spec = serde_json::to_value(&body.project_spec).map_err(|_| {
+        coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "failed to serialize preset project specification",
+        )
+    })?;
 
     run_organization_database_mutation(pool, org_id, async {
-        let slug = (!body.slug.is_empty()).then_some(body.slug.as_str());
-        let id: String = match sqlx::query_scalar(
-            r#"INSERT INTO environment_presets
-              (org_id, name, slug, description, default_setup_config,
-               default_cpu_millicores, default_memory_mb, default_disk_gb, default_ttl_seconds)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-           RETURNING id"#,
-        )
-        .bind(org_id)
-        .bind(&name)
-        .bind(slug)
-        .bind(&body.description)
-        .bind(&setup_json)
-        .bind(cpu)
-        .bind(mem)
-        .bind(disk)
-        .bind(body.default_ttl_seconds)
-        .fetch_one(pool)
-        .await
-        {
+        let id = match insert_preset_db(pool, org_id, &name, &body, &project_spec).await {
             Ok(id) => id,
             Err(e) if e.to_string().contains("idx_presets_slug_org") => {
                 return Err(coded(
@@ -262,44 +201,6 @@ pub(crate) async fn create_preset_core(
                 ));
             }
         };
-
-        // If image is provided, create the sandbox_template_config row.
-        if !body.image.is_empty() {
-            let sandbox_name = sanitize_image_name(&body.image);
-            if let Err(e) = sqlx::query(
-                r#"INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name)
-               VALUES ($1, $2, $3)"#,
-            )
-            .bind(&id)
-            .bind(&body.image)
-            .bind(&sandbox_name)
-            .execute(pool)
-            .await
-            {
-                tracing::error!(error = %e, "failed to create sandbox_preset_config");
-                return Err(coded(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    "failed to create sandbox preset config",
-                ));
-            }
-        }
-
-        // Bind a renderer-selected project through one organization-scoped
-        // lookup. The UPDATE remains best-effort to preserve the existing
-        // REST service behavior.
-        if let Some(selection) = secret_project.as_ref() {
-            let sp_id = resolve_secret_project_id(pool, org_id, selection)
-                .await?
-                .expect("create never supplies the clear selector");
-            let _ = sqlx::query(
-                "UPDATE environment_presets SET default_secret_project_id = $1 WHERE id = $2",
-            )
-            .bind(&sp_id)
-            .bind(&id)
-            .execute(pool)
-            .await;
-        }
 
         let preset = get_preset_wire(pool, &id).await.map_err(|_| {
             coded(
@@ -358,8 +259,7 @@ pub(crate) async fn get_preset_core(
 
 // ── Update ──────────────────────────────────────────────────────────────
 
-/// Mirrors `api.UpdatePresetBody` (all-optional PATCH semantics; for
-/// maps/slices "present" means replace, mirroring Go nil-vs-empty).
+/// Metadata patch plus optional whole-value canonical configuration replacement.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdatePresetBody {
@@ -370,45 +270,16 @@ pub struct UpdatePresetBody {
     #[serde(default)]
     pub slug: Option<String>,
     #[serde(default)]
-    pub default_cpu_millicores: Option<i32>,
-    #[serde(default)]
-    pub default_memory_mb: Option<i32>,
-    #[serde(default)]
-    pub default_disk_gb: Option<i32>,
-    #[serde(default)]
     pub default_ttl_seconds: Option<i32>,
     #[serde(default)]
-    pub image: Option<String>,
-    #[serde(default)]
-    pub install_command: Option<String>,
-    #[serde(default)]
-    pub startup_script: Option<String>,
-    #[serde(default)]
-    pub env_vars: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    pub agents: Option<Vec<SetupAgent>>,
-    #[serde(default)]
-    pub install_agents: Option<bool>,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub app_ports: Option<Vec<AppPort>>,
-    #[serde(default)]
-    pub include_org_secrets: Option<bool>,
-    #[serde(default)]
-    pub include_user_secrets: Option<bool>,
-    #[serde(default)]
-    pub secret_project: Option<String>,
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub project_spec: Option<codewire_project::ProjectSpec>,
 }
 
-/// Mirrors `updatePreset` (environment_db.go): dynamic UPDATE +
-/// setup-config rebuild + secret-project resolution + image upsert.
-async fn update_preset_db(
-    pool: &PgPool,
-    id: &str,
-    body: &UpdatePresetBody,
-    secret_project_id: Option<Option<String>>,
-) -> anyhow::Result<()> {
+/// Replace metadata fields and, when present, the complete canonical spec.
+async fn update_preset_db(pool: &PgPool, id: &str, body: &UpdatePresetBody) -> anyhow::Result<()> {
+    let mut transaction = pool.begin().await?;
+
     // Dynamic SET clauses. sqlx can't bind heterogenous Vec<dyn>, so
     // build the query with explicit positional binds per branch.
     let mut sets: Vec<String> = Vec::new();
@@ -434,89 +305,22 @@ async fn update_preset_db(
         let v = (!slug.is_empty()).then(|| slug.clone());
         push_text(&mut sets, &mut texts, "slug", v);
     }
-    if let Some(v) = body.default_cpu_millicores {
-        sets.push("default_cpu_millicores".into());
-        texts.push(None);
-        ints.push((sets.len() - 1, v));
-    }
-    if let Some(v) = body.default_memory_mb {
-        sets.push("default_memory_mb".into());
-        texts.push(None);
-        ints.push((sets.len() - 1, v));
-    }
-    if let Some(v) = body.default_disk_gb {
-        sets.push("default_disk_gb".into());
-        texts.push(None);
-        ints.push((sets.len() - 1, v));
-    }
     if let Some(v) = body.default_ttl_seconds {
         sets.push("default_ttl_seconds".into());
         texts.push(None);
         ints.push((sets.len() - 1, v));
     }
 
-    // Setup-config rebuild from current + updates.
-    if body.install_command.is_some()
-        || body.startup_script.is_some()
-        || body.env_vars.is_some()
-        || body.agents.is_some()
-        || body.install_agents.is_some()
-        || body.agent.is_some()
-        || body.app_ports.is_some()
-        || body.include_org_secrets.is_some()
-        || body.include_user_secrets.is_some()
-    {
-        let current: Option<serde_json::Value> = sqlx::query_scalar(
-            "SELECT default_setup_config FROM environment_presets WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .flatten();
-        let mut cfg: SetupConfig = current
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-        if let Some(v) = &body.install_command {
-            cfg.install_command = v.clone();
-        }
-        if let Some(v) = &body.startup_script {
-            cfg.startup_script = v.clone();
-        }
-        if let Some(v) = &body.env_vars {
-            cfg.env_vars = v.clone();
-        }
-        if let Some(v) = &body.agents {
-            cfg.agents = v.clone();
-        }
-        if body.install_agents.is_some() {
-            cfg.install_agents = body.install_agents;
-        }
-        if let Some(v) = &body.agent {
-            cfg.agent = v.clone();
-        }
-        if let Some(v) = &body.app_ports {
-            cfg.app_ports = v.clone();
-        }
-        if body.include_org_secrets.is_some() {
-            cfg.include_org_secrets = body.include_org_secrets;
-        }
-        if body.include_user_secrets.is_some() {
-            cfg.include_user_secrets = body.include_user_secrets;
-        }
-        sets.push("default_setup_config".into());
+    if let Some(project_spec) = &body.project_spec {
+        sets.push("project_spec".into());
         texts.push(None);
-        jsons.push((sets.len() - 1, serde_json::to_value(&cfg)?));
-    }
-
-    if let Some(secret_project_id) = secret_project_id {
-        push_text(
-            &mut sets,
-            &mut texts,
-            "default_secret_project_id",
-            secret_project_id,
-        );
+        jsons.push((sets.len() - 1, serde_json::to_value(project_spec)?));
+        // Once a user replaces the canonical specification, this is a manual
+        // preset rather than the internal identity for image-only resolution.
+        // Clear the identity in the same statement so it can never disagree
+        // with the canonical source.
+        sets.push("auto_image_ref".into());
+        texts.push(None);
     }
 
     if !sets.is_empty() {
@@ -541,26 +345,37 @@ async fn update_preset_db(
             }
         }
         q = q.bind(id);
-        q.execute(pool)
+        q.execute(&mut *transaction)
             .await
             .map_err(|e| anyhow::anyhow!("update preset: {e}"))?;
     }
 
-    // Image upsert into sandbox_template_config.
-    if let Some(image) = &body.image {
-        sqlx::query(
-            r#"INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name)
-               VALUES ($1, $2, $3)
-               ON CONFLICT (preset_id) DO UPDATE SET image_ref = $2"#,
-        )
-        .bind(id)
-        .bind(image)
-        .bind(sanitize_image_name(image))
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("update sandbox_template_config: {e}"))?;
+    // Keep the runtime template projection derived from the canonical image.
+    if let Some(project_spec) = &body.project_spec {
+        if project_spec.image.is_empty() {
+            sqlx::query("DELETE FROM sandbox_template_config WHERE preset_id = $1")
+                .bind(id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|e| anyhow::anyhow!("delete sandbox_template_config: {e}"))?;
+        } else {
+            sqlx::query(
+                r#"INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (preset_id) DO UPDATE
+                   SET image_ref = EXCLUDED.image_ref,
+                       sandbox_template_name = EXCLUDED.sandbox_template_name"#,
+            )
+            .bind(id)
+            .bind(&project_spec.image)
+            .bind(sanitize_image_name(&project_spec.image))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| anyhow::anyhow!("update sandbox_template_config: {e}"))?;
+        }
     }
 
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -570,7 +385,6 @@ pub(crate) async fn update_preset_core(
     org_id: &str,
     preset_id: &str,
     body: UpdatePresetBody,
-    secret_project: Option<SecretProjectSelection>,
 ) -> AppResult<PresetWire> {
     let pool = &state.pool;
     let role = require_org_role(pool, user, org_id).await?;
@@ -580,6 +394,9 @@ pub(crate) async fn update_preset_core(
             "forbidden",
             "only owner or admin can update presets",
         ));
+    }
+    if let Some(project_spec) = &body.project_spec {
+        validate_preset_project_spec(project_spec)?;
     }
     run_organization_database_mutation(pool, org_id, async {
         let preset = get_preset_wire(pool, preset_id).await.map_err(|_| {
@@ -597,11 +414,7 @@ pub(crate) async fn update_preset_core(
             ));
         }
 
-        let secret_project_id = match secret_project.as_ref() {
-            Some(selection) => Some(resolve_secret_project_id(pool, org_id, selection).await?),
-            None => None,
-        };
-        if let Err(e) = update_preset_db(pool, &preset.id, &body, secret_project_id).await {
+        if let Err(e) = update_preset_db(pool, &preset.id, &body).await {
             if e.to_string().contains("idx_presets_slug_org") {
                 return Err(coded(
                     StatusCode::CONFLICT,
@@ -719,15 +532,16 @@ mod tests {
     use super::*;
     use codewire_server_core::AppError;
     use codewire_server_core::validation::validate_value;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
-    fn create_preset_schema_requires_go_required_fields() {
+    fn create_preset_schema_requires_canonical_fields() {
         let schema = serde_json::to_value(schemars::schema_for!(CreatePresetBody)).unwrap();
 
         assert_eq!(
             schema["required"],
-            serde_json::json!(["name"]),
-            "Go/huma marks only name required; blank names still return the handler 400"
+            serde_json::json!(["name", "project_spec"]),
+            "preset creation requires a name and one canonical project specification"
         );
     }
 
@@ -735,7 +549,10 @@ mod tests {
     fn create_preset_validation_rejects_missing_required_fields() {
         let Err(AppError::Validation { errors }) =
             validate_value::<CreatePresetBody>(serde_json::json!({
-                "image": "ghcr.io/codewiresh/sandbox:latest"
+                "project_spec": {
+                    "schema_version": 1,
+                    "working_directory": "/workspace"
+                }
             }))
         else {
             panic!("expected missing name to be rejected");
@@ -747,14 +564,18 @@ mod tests {
     }
 
     #[test]
-    fn create_preset_validation_keeps_image_optional() {
+    fn create_preset_validation_accepts_a_minimal_project_spec() {
         let parsed = validate_value::<CreatePresetBody>(serde_json::json!({
-            "name": "Default"
+            "name": "Default",
+            "project_spec": {
+                "schema_version": 1,
+                "working_directory": "/workspace"
+            }
         }))
-        .expect("image stays optional like Go omitempty");
+        .expect("minimal canonical project specification should validate");
 
         assert_eq!(parsed.name, "Default");
-        assert!(parsed.image.is_empty());
+        assert!(parsed.project_spec.image.is_empty());
     }
 
     #[test]
@@ -785,35 +606,40 @@ mod tests {
     }
 
     #[test]
-    fn rest_update_patch_presence_table_is_pinned() {
+    fn rest_update_replaces_the_whole_project_spec_when_present() {
         let absent: UpdatePresetBody = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(absent.slug.is_none());
-        assert!(absent.secret_project.is_none());
-        assert!(absent.env_vars.is_none());
+        assert!(absent.project_spec.is_none());
 
         let empty: UpdatePresetBody = serde_json::from_value(serde_json::json!({
             "slug": "",
-            "secret_project": "",
-            "env_vars": {}
+            "project_spec": {
+                "schema_version": 1,
+                "working_directory": "/workspace"
+            }
         }))
         .unwrap();
         assert_eq!(empty.slug.as_deref(), Some(""));
-        assert_eq!(empty.secret_project.as_deref(), Some(""));
-        assert_eq!(empty.env_vars, Some(BTreeMap::new()));
+        assert_eq!(
+            empty.project_spec,
+            Some(codewire_project::ProjectSpec::default())
+        );
 
         let value: UpdatePresetBody = serde_json::from_value(serde_json::json!({
             "slug": "rust",
-            "secret_project": "workspace-secrets",
-            "env_vars": {"RUST_LOG": "debug"}
+            "project_spec": {
+                "schema_version": 1,
+                "working_directory": "/workspace",
+                "environment": {"RUST_LOG": "debug"}
+            }
         }))
         .unwrap();
         assert_eq!(value.slug.as_deref(), Some("rust"));
-        assert_eq!(value.secret_project.as_deref(), Some("workspace-secrets"));
         assert_eq!(
             value
-                .env_vars
+                .project_spec
                 .as_ref()
-                .and_then(|vars| vars.get("RUST_LOG"))
+                .and_then(|spec| spec.environment.get("RUST_LOG"))
                 .map(String::as_str),
             Some("debug")
         );
@@ -823,14 +649,186 @@ mod tests {
     fn update_preset_validation_rejects_type_errors() {
         let Err(AppError::Validation { errors }) =
             validate_value::<UpdatePresetBody>(serde_json::json!({
-                "default_cpu_millicores": "2000"
+                "project_spec": {
+                    "schema_version": 1,
+                    "working_directory": "/workspace",
+                    "resources": {"cpu_millicores": "2000"}
+                }
             }))
         else {
             panic!("expected type-invalid CPU to be rejected");
         };
 
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/default_cpu_millicores");
+        assert_eq!(errors[0].path, "/project_spec/resources/cpu_millicores");
         assert!(errors[0].message.contains("integer"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_preset_source_and_runtime_projection_commit_atomically() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = format!("user_preset_atomic_{suffix}");
+        let org_id = format!("org_preset_atomic_{suffix}");
+        let function_name = format!("cw_fail_preset_projection_{suffix}");
+        let trigger_name = format!("cw_fail_preset_projection_{suffix}");
+        let failing_image = format!("ghcr.io/example/failing-{suffix}:1");
+        let original_image = format!("ghcr.io/example/original-{suffix}:1");
+
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@example.test"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&org_id)
+        .bind(format!("Preset atomic {suffix}"))
+        .bind(format!("preset-atomic-{suffix}"))
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(&format!(
+            r#"CREATE FUNCTION {function_name}() RETURNS trigger
+               LANGUAGE plpgsql AS $function$
+               BEGIN
+                   IF NEW.image_ref = '{failing_image}' THEN
+                       RAISE EXCEPTION 'synthetic preset projection failure';
+                   END IF;
+                   RETURN NEW;
+               END
+               $function$"#,
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(&format!(
+            r#"CREATE TRIGGER {trigger_name}
+               BEFORE INSERT OR UPDATE ON sandbox_template_config
+               FOR EACH ROW EXECUTE FUNCTION {function_name}()"#,
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let failing_spec = codewire_project::ProjectSpec {
+            image: failing_image.clone(),
+            ..Default::default()
+        };
+        let failing_body = CreatePresetBody {
+            name: "Must roll back".to_owned(),
+            project_spec: failing_spec.clone(),
+            ..Default::default()
+        };
+        let serialized_failing = serde_json::to_value(&failing_spec).unwrap();
+        let insert_error = insert_preset_db(
+            &pool,
+            &org_id,
+            &failing_body.name,
+            &failing_body,
+            &serialized_failing,
+        )
+        .await
+        .expect_err("projection failure must abort preset creation");
+        let failed_insert_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM environment_presets WHERE org_id = $1 AND name = $2",
+        )
+        .bind(&org_id)
+        .bind(&failing_body.name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let original_spec = codewire_project::ProjectSpec {
+            image: original_image.clone(),
+            ..Default::default()
+        };
+        let original_body = CreatePresetBody {
+            name: "Original".to_owned(),
+            project_spec: original_spec.clone(),
+            ..Default::default()
+        };
+        let original_json = serde_json::to_value(&original_spec).unwrap();
+        let preset_id = insert_preset_db(
+            &pool,
+            &org_id,
+            &original_body.name,
+            &original_body,
+            &original_json,
+        )
+        .await
+        .unwrap();
+        let update_error = update_preset_db(
+            &pool,
+            &preset_id,
+            &UpdatePresetBody {
+                name: Some("Must also roll back".to_owned()),
+                project_spec: Some(failing_spec),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("projection failure must abort preset update");
+        let stored: (String, serde_json::Value, String) = sqlx::query_as(
+            r#"SELECT ep.name, ep.project_spec, stc.image_ref
+               FROM environment_presets ep
+               JOIN sandbox_template_config stc ON stc.preset_id = ep.id
+               WHERE ep.id = $1"#,
+        )
+        .bind(&preset_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(&format!(
+            "DROP TRIGGER {trigger_name} ON sandbox_template_config",
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(&format!("DROP FUNCTION {function_name}()"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM environment_presets WHERE id = $1")
+            .bind(&preset_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            insert_error
+                .to_string()
+                .contains("synthetic preset projection failure")
+        );
+        assert_eq!(failed_insert_count, 0);
+        assert!(
+            update_error
+                .to_string()
+                .contains("synthetic preset projection failure")
+        );
+        assert_eq!(stored.0, "Original");
+        assert_eq!(stored.1, original_json);
+        assert_eq!(stored.2, original_image);
     }
 }

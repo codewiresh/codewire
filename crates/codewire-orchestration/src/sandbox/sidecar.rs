@@ -9,9 +9,11 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, ListParams};
 use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
 use super::client::SandboxClient;
@@ -32,12 +34,42 @@ pub struct PortForwardedStream {
 }
 
 impl PortForwardedStream {
-    pub fn stream_mut(&mut self) -> &mut dyn AsyncReadWrite {
-        self.stream.as_mut()
-    }
-
     pub fn into_parts(self) -> (Box<dyn AsyncReadWrite>, Option<kube::api::Portforwarder>) {
         (self.stream, self._pf)
+    }
+}
+
+impl AsyncRead for PortForwardedStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(self.stream.as_mut()).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for PortForwardedStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(self.stream.as_mut()).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(self.stream.as_mut()).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(self.stream.as_mut()).poll_shutdown(context)
     }
 }
 
