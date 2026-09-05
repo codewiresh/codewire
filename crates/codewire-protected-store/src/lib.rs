@@ -2,10 +2,18 @@
 
 //! Opaque protected-value storage for Codewire credential authorities.
 //!
-//! The API deliberately supports only exact-entry get, put, and delete. It
+//! The OS-store API supports only exact-entry get, put, and delete. It
 //! exposes no list or namespace sweep operation, so recovery code must act on
 //! entry IDs recorded in its metadata journal. Provider material must not be
 //! passed to a VM supervisor or serialized into placement metadata.
+//!
+//! The opt-in `platform` feature adds authenticated tenant-secret envelopes,
+//! OpenBao Transit wrapping, and pod-bound Kubernetes workload identities.
+
+#[cfg(feature = "platform")]
+pub mod openbao_workload_identity;
+#[cfg(feature = "platform")]
+pub mod secret_envelope;
 
 use std::collections::BTreeMap;
 use std::fmt;

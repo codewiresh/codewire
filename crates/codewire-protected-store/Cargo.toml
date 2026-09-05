@@ -7,8 +7,46 @@ license = "AGPL-3.0-only"
 authors.workspace = true
 description = "Opaque fail-closed protected credential storage for Codewire authorities"
 
+[features]
+default = []
+# Platform authorities opt into authenticated envelopes and pod-bound OpenBao
+# identities. Local OS-store consumers do not enable these dependencies.
+platform = [
+  "dep:aes-gcm",
+  "dep:async-trait",
+  "dep:base64",
+  "dep:futures-util",
+  "dep:k8s-openapi",
+  "dep:kube",
+  "dep:rand",
+  "dep:reqwest",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:sha2",
+  "dep:tokio",
+  "dep:tracing",
+  "dep:url",
+]
+# Synthetic identities and an unprotected KEK test double. Enable only through
+# dev-dependencies or non-promotable Kind fixtures, never production services.
+platform-test-support = ["platform"]
+
 [dependencies]
+aes-gcm = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+futures-util = { version = "0.3", optional = true }
+k8s-openapi = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -18,3 +56,6 @@ secret-service = { workspace = true, features = ["rt-async-io-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { workspace = true, features = ["apple-native"] }
+
+[dev-dependencies]
+axum = { workspace = true }

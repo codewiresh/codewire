@@ -211,7 +211,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::api::secret_projects::delete_secret_project_storage;
-    use crate::worker::secret_envelope::TestKekProvider;
+    use codewire_protected_store::secret_envelope::TestKekProvider;
 
     use super::*;
 

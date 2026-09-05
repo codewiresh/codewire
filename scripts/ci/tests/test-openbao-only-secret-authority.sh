@@ -16,6 +16,33 @@ readonly -a ALLOWED=(
   crates/codewire-server-core/migrations/0013_finalize_openbao_native_secrets.sql
 )
 
+check_production_primitive_features() {
+  local production_tree primitive_features
+  production_tree="$(cargo tree --locked -p codewire-orchestration \
+    --edges normal,build --depth 1 --prefix none --format '{p}|{f}')"
+  primitive_features="$(sed -n 's/^codewire-protected-store .*|//p' <<<"$production_tree")"
+  if [[ -z "$primitive_features" ]] \
+      || ! grep -Eq '(^|,)platform(,|$)' <<<"$primitive_features" \
+      || grep -Eq '(^|,)platform-test-support(,|$)' <<<"$primitive_features"; then
+    printf 'production protected-store graph must enable platform without synthetic providers\n' >&2
+    return 1
+  fi
+}
+
+# Shared policy needs only static source and rendered-manifest checks. Cargo's
+# resolved graph belongs to the separately provisioned Rust capability.
+if [[ "$#" -gt 0 ]]; then
+  if [[ "$#" -ne 1 || "$1" != --production-features ]]; then
+    printf 'usage: %s [--production-features]\n' "$SELF" >&2
+    exit 2
+  fi
+  # Resolver-v2 normal/build edges exclude dev feature unification and expose
+  # any transitive feature that would enable the synthetic provider.
+  check_production_primitive_features
+  printf 'Production protected-store feature graph: OK\n'
+  exit 0
+fi
+
 is_allowed() {
   local candidate="$1" allowed
   case "$candidate" in
@@ -74,7 +101,8 @@ done
 
 if rg -n \
   'TENANT_SECRET_(STORE|KEK_PROVIDER|KEYRING)|LocalSecretStore|tenant-secret-operator|tenant_secret_control|local_secrets|KekProviderKind::Keyring' \
-  crates/codewire-orchestration/src deployments docs/SECRETS.md; then
+  crates/codewire-orchestration/src crates/codewire-protected-store/src \
+  deployments docs/SECRETS.md; then
   printf 'retired tenant-secret runtime choice remains active\n' >&2
   exit 1
 fi
@@ -89,6 +117,59 @@ if rg -n \
   printf 'obsolete file-backed OpenBao workload identity remains active\n' >&2
   exit 1
 fi
+
+# Shared primitives have one owner, with no orchestration compatibility path.
+for retired_copy in \
+  crates/codewire-orchestration/src/openbao_workload_identity.rs \
+  crates/codewire-orchestration/src/worker/secret_envelope.rs; do
+  [[ ! -e "$retired_copy" ]] || {
+    printf 'orchestration retains a duplicate protected-store primitive: %s\n' "$retired_copy" >&2
+    exit 1
+  }
+done
+if rg -n \
+  '(crate|super)(::super)*::(secret_envelope|openbao_workload_identity)|mod (secret_envelope|openbao_workload_identity);' \
+  crates/codewire-orchestration/src; then
+  printf 'orchestration must consume protected-store primitives directly\n' >&2
+  exit 1
+fi
+
+# Production receives only platform primitives. Synthetic providers are an
+# explicit dev/Kind feature, never a default or a normal dependency feature.
+python3 - <<'PY'
+from pathlib import Path
+import tomllib
+
+root = Path.cwd()
+protected = tomllib.loads((root / "crates/codewire-protected-store/Cargo.toml").read_text())
+orchestration = tomllib.loads((root / "crates/codewire-orchestration/Cargo.toml").read_text())
+assert protected["features"]["default"] == []
+assert protected["features"]["platform-test-support"] == ["platform"]
+assert all(feature.startswith("dep:") for feature in protected["features"]["platform"])
+assert orchestration["dependencies"]["codewire-protected-store"]["features"] == ["platform"]
+assert orchestration["dev-dependencies"]["codewire-protected-store"]["features"] == ["platform-test-support"]
+assert orchestration["features"]["kind-e2e"].count("codewire-protected-store/platform-test-support") == 1
+
+manifests = [root / "Cargo.toml", *sorted((root / "crates").glob("*/Cargo.toml"))]
+for path in manifests:
+    manifest = tomllib.loads(path.read_text())
+    tables = [manifest, manifest.get("workspace", {}), *manifest.get("target", {}).values()]
+    for table in tables:
+        for kind in ("dependencies", "build-dependencies"):
+            for dependency in table.get(kind, {}).values():
+                if isinstance(dependency, dict):
+                    assert "platform-test-support" not in dependency.get("features", []), path
+    for feature, members in manifest.get("features", {}).items():
+        if any("platform-test-support" in member for member in members):
+            assert path == root / "crates/codewire-orchestration/Cargo.toml" and feature == "kind-e2e", path
+
+envelope = (root / "crates/codewire-protected-store/src/secret_envelope.rs").read_text()
+identity = (root / "crates/codewire-protected-store/src/openbao_workload_identity.rs").read_text()
+gate = '#[cfg(any(test, feature = "platform-test-support"))]'
+assert gate + "\npub struct TestKekProvider;" in envelope
+assert gate + "\n#[async_trait]\nimpl KekProvider for TestKekProvider" in envelope
+assert gate + "\npub fn static_workload_identity" in identity
+PY
 
 # The synthetic KEK is a deliberate, two-part Kind contract: only the
 # non-promotable image is compiled with it, and every repository-owned Kind

@@ -15,14 +15,13 @@ use zeroize::Zeroizing;
 
 use codewire_workload_secrets::validate_workload_secret_value;
 
-use crate::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
-
-use super::secret_envelope::{
-    DEK_BYTES, DekContext, EncryptedTenantSecret, GeneratedDek, KekProvider, KekProviderKind,
-    OpenBaoTransitConfig, OpenBaoTransitProvider, SecretCoordinates, WrappedDek, decrypt_secret,
-    encrypt_secret, verify_dek_fingerprint,
-};
 use super::secrets::{StoredSecret, StoredSecretMetadata, is_valid_secret_key};
+use codewire_protected_store::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
+use codewire_protected_store::secret_envelope::{
+    DEK_BYTES, DekContext, EncryptedTenantSecret, GeneratedDek, KekProvider, KekProviderKind,
+    OpenBaoTransitConfig, OpenBaoTransitProvider, SecretCoordinates, SecretEnvelopeError,
+    WrappedDek, decrypt_secret, dek_fingerprint, encrypt_secret, verify_dek_fingerprint,
+};
 
 const MAX_CACHED_DEKS: usize = 4096;
 const CANARY_LOCK_KEY: i64 = 0x4357_5453_4341_4e31;
@@ -32,7 +31,7 @@ fn store_error(class: &'static str) -> anyhow::Error {
     anyhow::anyhow!("tenant-secret-store failure_class={class}")
 }
 
-fn envelope_error(error: super::secret_envelope::SecretEnvelopeError) -> anyhow::Error {
+fn envelope_error(error: SecretEnvelopeError) -> anyhow::Error {
     anyhow::anyhow!(error)
 }
 
@@ -741,7 +740,7 @@ impl PostgresSecretStore {
             .await
             .map_err(envelope_error)?;
         let wrapped_dek = Self::wrapped_field(&generated.wrapped)?;
-        let fingerprint = super::secret_envelope::dek_fingerprint(&generated.plaintext);
+        let fingerprint = dek_fingerprint(&generated.plaintext);
         sqlx::query(
             "INSERT INTO tenant_secret_kek_canary \
              (provider, key_name, key_version, wrapped_dek, format, \
@@ -772,8 +771,8 @@ impl PostgresSecretStore {
 
 #[cfg(test)]
 mod tests {
-    use super::super::secret_envelope::TestKekProvider;
     use super::*;
+    use codewire_protected_store::secret_envelope::TestKekProvider;
     use sqlx::postgres::PgPoolOptions;
 
     #[test]

@@ -427,6 +427,19 @@ run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false 
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/tests/wire_contract.rs \
   crates/codewire-orchestration/tests/wire_contract/environment.rs
+run_paths_case shared_platform_identity pull_request refs/pull/711/head false \
+  'policy rust rust_pkg_codewire_orchestration rust_pkg_codewire_protected_store service_integration service_orchestration' \
+  crates/codewire-protected-store/src/openbao_workload_identity.rs
+for primitive_input in src/secret_envelope.rs src/lib.rs Cargo.toml; do
+  run_paths_case shared_platform_envelope pull_request refs/pull/712/head false \
+    'database policy rust rust_pkg_codewire_orchestration rust_pkg_codewire_protected_store service_integration service_orchestration service_temporal' \
+    "crates/codewire-protected-store/$primitive_input"
+done
+for store_consumer in postgres_secrets.rs tenant_secret_teardown.rs; do
+  run_paths_case platform_store_consumer pull_request refs/pull/713/head false \
+    'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
+    "crates/codewire-orchestration/src/worker/$store_consumer"
+done
 run_paths_case billing_contract pull_request refs/pull/8/head false \
   'policy rust rust_pkg_codewire_billing service_billing service_integration' \
   crates/codewire-billing/src/connect/billing.rs
@@ -2161,6 +2174,100 @@ for policy_owner in \
   fi
 done
 desktop_package_args="$TMP/desktop-package-args.sh"
+# The lightweight policy lane must not resolve Rust dependencies. Exercise the
+# actual authority guard with a Cargo stub, then the actual Rust dispatch body
+# with terminal package commands so this fixture cannot launch a nested build.
+primitive_probe="$TMP/primitive-routing"
+mkdir -p "$primitive_probe/bin"
+cat > "$primitive_probe/bin/cargo" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$PRIMITIVE_CARGO_LOG"
+if [[ "${PRIMITIVE_CARGO_FAIL:-}" == all || "${PRIMITIVE_CARGO_FAIL:-}" == "$1" ]]; then
+  exit 86
+fi
+if [[ "$1" == tree ]]; then
+  printf 'codewire-protected-store v0.0.0|%s\n' "${PRIMITIVE_GRAPH_FEATURES:-platform}"
+fi
+SH
+chmod +x "$primitive_probe/bin/cargo"
+primitive_cargo_stub="$primitive_probe/bin/cargo"
+primitive_cargo_command="$(PATH="$primitive_probe/bin:$PATH" bash -c 'command -v cargo')"
+[[ -x "$primitive_cargo_stub" && "$primitive_cargo_command" == "$primitive_cargo_stub" ]] || {
+  echo 'primitive routing requires an executable TMPDIR and must resolve only its Cargo stub' >&2
+  printf 'expected %s; resolved %s\n' "$primitive_cargo_stub" "$primitive_cargo_command" >&2
+  exit 1
+}
+primitive_guard="$ROOT/scripts/ci/tests/test-openbao-only-secret-authority.sh"
+: > "$primitive_probe/default.log"
+PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/default.log" \
+  PRIMITIVE_CARGO_FAIL=all "$primitive_guard" > "$primitive_probe/default.out" 2>&1
+[[ ! -s "$primitive_probe/default.log" ]] || {
+  echo 'default authority policy must not invoke Cargo' >&2
+  exit 1
+}
+primitive_rust_body="$primitive_probe/run-rust.sh"
+awk '
+  /^run_rust\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$primitive_rust_body"
+cat > "$primitive_probe/dispatch.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -x "$PRIMITIVE_CARGO_STUB" && "$(command -v cargo)" == "$PRIMITIVE_CARGO_STUB" ]] || {
+  echo 'primitive Rust dispatch must resolve only its Cargo stub' >&2
+  type -a cargo >&2
+  exit 1
+}
+selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
+has_root_rust_selection() { return 0; }
+run_rust_packages() { printf '%s\n' "$*" > "$PRIMITIVE_PACKAGE_LOG"; }
+source "$PRIMITIVE_RUST_BODY"
+run_rust
+SH
+run_primitive_rust_case() {
+  local name="$1" token="$2" graph="$3" platform="$4" fail="${5:-}" features="${6:-platform}"
+  local log="$primitive_probe/$name.log" status=0 graph_count clippy_count test_count
+  : > "$log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$log" \
+    PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
+    PRIMITIVE_PACKAGE_LOG="$primitive_probe/$name.packages" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" PRIMITIVE_CARGO_FAIL="$fail" \
+    PRIMITIVE_GRAPH_FEATURES="$features" SELECTION="|valid:v3|$token|complete|" \
+    bash -x "$primitive_probe/dispatch.sh" > "$primitive_probe/$name.out" 2>&1 || status=$?
+  if [[ -n "$fail" ]]; then
+    [[ "$status" == 86 ]] || { echo "$name: lost Cargo failure ($status)" >&2; exit 1; }
+  elif [[ "$features" == *platform-test-support* ]]; then
+    [[ "$status" == 1 ]] || { echo "$name: accepted synthetic production provider" >&2; exit 1; }
+  else
+    [[ "$status" == 0 ]] || { cat "$primitive_probe/$name.out" >&2; exit 1; }
+  fi
+  grep -qxF rust_pkg_ "$primitive_probe/$name.packages"
+  graph_count="$(grep -c '^tree --locked -p codewire-orchestration --edges normal,build ' "$log" || true)"
+  clippy_count="$(grep -cxF 'clippy --locked -p codewire-protected-store --features platform --all-targets -- -D warnings' "$log" || true)"
+  test_count="$(grep -cxF 'test --locked -p codewire-protected-store --features platform --all-targets' "$log" || true)"
+  [[ "$graph_count" == "$graph" && "$clippy_count" == "$platform" ]] || {
+    echo "$name: missing or duplicate protected-store verification" >&2
+    cat "$primitive_probe/$name.out" >&2
+    cat "$primitive_rust_body" >&2
+    cat "$log" >&2
+    exit 1
+  }
+  if [[ "$fail" == clippy ]]; then
+    [[ "$test_count" == 0 ]] || { echo "$name: ran tests after failed Clippy" >&2; exit 1; }
+  else
+    [[ "$test_count" == "$platform" ]] || { echo "$name: missing platform tests" >&2; exit 1; }
+  fi
+}
+run_primitive_rust_case protected_store rust_pkg_codewire_protected_store 1 1
+run_primitive_rust_case workspace rust_workspace 1 1
+run_primitive_rust_case orchestration rust_pkg_codewire_orchestration 1 0
+run_primitive_rust_case unrelated rust_pkg_codewire_client 0 0
+run_primitive_rust_case graph_failure rust_pkg_codewire_protected_store 1 0 tree
+run_primitive_rust_case forbidden_provider rust_pkg_codewire_protected_store 1 0 '' platform,platform-test-support
+run_primitive_rust_case clippy_failure rust_pkg_codewire_protected_store 1 1 clippy
+
 awk '
   /^rust_package_args\(\) \{/ { capture = 1 }
   /^run_rust_packages\(\) \{/ { exit }

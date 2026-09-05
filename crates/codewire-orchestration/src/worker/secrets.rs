@@ -10,6 +10,10 @@ use std::fmt;
 use serde::Deserialize;
 use sqlx::PgPool;
 
+#[cfg(test)]
+use codewire_protected_store::secret_envelope::KekProvider;
+#[cfg(feature = "kind-e2e")]
+use codewire_protected_store::secret_envelope::TestKekProvider;
 use codewire_workload_secrets::validate_workload_secret_key;
 
 /// Stored secret material used only within the protected storage boundary.
@@ -49,10 +53,7 @@ pub struct SecretStore(super::postgres_secrets::PostgresSecretStore);
 
 impl SecretStore {
     #[cfg(test)]
-    pub(crate) fn new_for_test(
-        pool: PgPool,
-        provider: std::sync::Arc<dyn super::secret_envelope::KekProvider>,
-    ) -> Self {
+    pub(crate) fn new_for_test(pool: PgPool, provider: std::sync::Arc<dyn KekProvider>) -> Self {
         Self(super::postgres_secrets::PostgresSecretStore::new(
             pool, provider,
         ))
@@ -62,7 +63,7 @@ impl SecretStore {
     pub fn for_kind_e2e(pool: PgPool) -> Self {
         Self(super::postgres_secrets::PostgresSecretStore::new(
             pool,
-            std::sync::Arc::new(super::secret_envelope::TestKekProvider),
+            std::sync::Arc::new(TestKekProvider),
         ))
     }
 
@@ -82,7 +83,7 @@ impl SecretStore {
             tracing::warn!("using the Kind-only tenant-secret KEK test provider");
             return Ok(Self(super::postgres_secrets::PostgresSecretStore::new(
                 pool,
-                std::sync::Arc::new(super::secret_envelope::TestKekProvider),
+                std::sync::Arc::new(TestKekProvider),
             )));
         }
         tracing::info!("using OpenBao-wrapped encrypted PostgreSQL tenant-secret store");

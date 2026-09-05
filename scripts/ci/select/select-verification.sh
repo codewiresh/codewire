@@ -881,6 +881,17 @@ if [ "$event_selected" = false ]; then
         select_token service_integration
         select_token service_orchestration
         ;;
+      crates/codewire-protected-store/src/openbao_workload_identity.rs|\
+      crates/codewire-protected-store/src/secret_envelope.rs|\
+      crates/codewire-protected-store/src/lib.rs|\
+      crates/codewire-protected-store/Cargo.toml)
+        # Moving platform primitives must retain their orchestration consumer
+        # proof, including changes to the feature gates that expose them.
+        select_token rust
+        select_token rust_pkg_codewire_orchestration
+        select_token service_integration
+        select_token service_orchestration
+        ;;
       crates/codewire-coordinator/*)
         select_token service_integration
         select_token service_coordinator
@@ -923,7 +934,14 @@ if [ "$event_selected" = false ]; then
       crates/codewire-server-core/src/bin/codewire-db-migrate.rs|\
       crates/codewire-server-core/tests/data/application_schema_fingerprint.sql|\
       crates/codewire-server-core/tests/session_auth.rs|\
+      crates/codewire-protected-store/src/secret_envelope.rs|\
+      crates/codewire-protected-store/src/lib.rs|\
+      crates/codewire-protected-store/Cargo.toml|\
+      crates/codewire-orchestration/src/worker/postgres_secrets.rs|\
+      crates/codewire-orchestration/src/worker/tenant_secret_teardown.rs|\
       crates/codewire-billing/src/subscription_migration.rs)
+        # Encrypted-store/teardown tests are deliberately database-only; the
+        # ordinary orchestration and Temporal lanes do not execute them.
         select_token database
         recognized=true
         ;;
@@ -1063,6 +1081,9 @@ if [ "$event_selected" = false ]; then
     case "$path" in
       crates/codewire-orchestration/src/temporal*|\
       crates/codewire-orchestration/src/worker/*|\
+      crates/codewire-protected-store/src/secret_envelope.rs|\
+      crates/codewire-protected-store/src/lib.rs|\
+      crates/codewire-protected-store/Cargo.toml|\
       crates/codewire-billing/src/temporal*)
         select_token service_integration
         select_token service_temporal

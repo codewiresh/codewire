@@ -27,7 +27,7 @@ use zeroize::Zeroizing;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::{AppError, AppResult};
 
-use crate::openbao_workload_identity::{
+use codewire_protected_store::openbao_workload_identity::{
     KubernetesOpenBaoWorkloadIdentity, OpenBaoWorkloadIdentity,
 };
 
@@ -904,7 +904,9 @@ impl OpenBaoKvRecoveryKeyStore {
                 kv_mount: "codewire-confidential-dev".to_owned(),
                 expected_cluster_id: expected_cluster_id.to_owned(),
             },
-            identity: crate::openbao_workload_identity::static_workload_identity("projected-jwt"),
+            identity: codewire_protected_store::openbao_workload_identity::static_workload_identity(
+                "projected-jwt",
+            ),
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(5))
