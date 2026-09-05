@@ -363,12 +363,27 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByRole("alert")).toContainText(
       "This repository has no saved Sandbox configuration. Enter a workspace image or use a configured repository.",
     );
+    await expect(page.getByLabel("Name")).toHaveValue(name);
+    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue(unknownRepository);
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      const onSwap = (event: Event) => {
+        if (!(event.target instanceof Element) || event.target.id !== "environment-list") return;
+        document.removeEventListener("htmx:afterSwap", onSwap);
+        resolve();
+      };
+      document.addEventListener("htmx:afterSwap", onSwap);
+    }));
+    await expect(page.getByRole("alert")).toBeVisible();
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     const [environment] = await sql`
       SELECT COUNT(*)::int AS count FROM environments
       WHERE org_id = ${orgId} AND name = ${name}
     `;
     expect(environment.count).toBe(0);
+    await page.getByRole("dialog", { name: "Create Sandbox" })
+      .getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+    await expect(page.locator("[data-drawer]")).toBeHidden();
+    await expect(page).toHaveURL(`${ssrUrl}/${slug}/`);
   });
 
   test("keeps environment create and inventory usable on mobile", async ({ page, isMobile }) => {

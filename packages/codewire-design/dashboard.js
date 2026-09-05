@@ -39,7 +39,11 @@ if (app) {
 
   const drawerPathMatches = (drawer) => {
     const createUrl = drawer?.getAttribute("data-create-url");
-    return Boolean(createUrl && new URL(createUrl, window.location.origin).pathname === window.location.pathname);
+    // A rejected native form submission renders the open drawer at its POST URL.
+    // Keep that response visible, including when background fragments refresh.
+    const actionUrl = drawer?.querySelector("form")?.getAttribute("action");
+    return [createUrl, actionUrl].some((url) => url
+      && new URL(url, window.location.origin).pathname === window.location.pathname);
   };
 
   const focusDrawer = (drawer) => {
