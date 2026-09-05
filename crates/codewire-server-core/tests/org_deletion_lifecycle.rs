@@ -1419,6 +1419,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "org_invitations:cascade",
             "org_members:cascade",
             "org_subscriptions:cascade",
+            "platform_credentials:cascade",
             "repo_configs:no_action",
             "sandbox_running_sessions:cascade",
             "secret_projects:no_action",
