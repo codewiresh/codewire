@@ -63,13 +63,13 @@ pub enum SplitDirection {
     Vertical,
 }
 
-/// How a remote terminal connects to its target.
+/// How a terminal connects to its target.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum RemoteConnection {
-    /// Plain SSH: `ssh <host>`
-    Ssh { host: String },
+pub enum TerminalConnection {
+    /// A shell running on the desktop host.
+    Local,
     /// Via the native Connect client facade.
-    CodewireEnv {
+    CodewireEnvironment {
         org_id: String,
         env_id: String,
         env_name: String,
@@ -83,18 +83,18 @@ pub enum TabContent {
     Terminal {
         workspace_id: String,
         session_name: String,
-        connection: RemoteConnection,
+        connection: TerminalConnection,
         session_type: String,
     },
     /// Chat panel
     Chat,
-    /// Diff viewer (local folder or SSH)
+    /// Diff viewer for a local folder.
     Diff {
         source_id: String,
         display_name: String,
         source: crate::local_diff::DiffSource,
     },
-    /// File explorer (local folder or SSH)
+    /// File explorer for a local folder.
     Explorer {
         source_id: String,
         display_name: String,
@@ -129,7 +129,7 @@ impl Tab {
     pub fn new_terminal(
         workspace_id: String,
         session_name: String,
-        connection: RemoteConnection,
+        connection: TerminalConnection,
         session_type: String,
     ) -> Self {
         Self {
@@ -772,17 +772,13 @@ mod tests {
         leaf.add_tab(Tab::new_terminal(
             "ws1".to_string(),
             "session1".to_string(),
-            RemoteConnection::Ssh {
-                host: "env.ws1".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
         ));
         leaf.add_tab(Tab::new_terminal(
             "ws2".to_string(),
             "session2".to_string(),
-            RemoteConnection::Ssh {
-                host: "env.ws2".to_string(),
-            },
+            TerminalConnection::Local,
             "tmux".to_string(),
         ));
 
@@ -791,5 +787,11 @@ mod tests {
 
         let not_found = leaf.find_terminal_tab("ws3", "session3");
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn retired_ssh_terminal_connection_is_rejected() {
+        let retired = r#"{"Ssh":{"host":"example.invalid"}}"#;
+        assert!(serde_json::from_str::<TerminalConnection>(retired).is_err());
     }
 }

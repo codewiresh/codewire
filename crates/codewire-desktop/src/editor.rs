@@ -130,40 +130,12 @@ impl EditorView {
         cx.spawn(async move |this, cx| {
             let (tx, rx) = futures::channel::oneshot::channel();
 
-            match source {
-                FileSource::Local { root_path } => {
-                    std::thread::spawn(move || {
-                        let result = std::fs::read_to_string(&root_path)
-                            .map_err(|e| format!("Failed to read file: {}", e));
-                        let _ = tx.send(result);
-                    });
-                }
-                FileSource::Ssh {
-                    ssh_host,
-                    root_path,
-                } => {
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                        let result = rt.block_on(async {
-                            use codewire_platform_native::RusshClient;
-
-                            let ssh_client = RusshClient::new();
-                            let connection = ssh_client
-                                .connect(&ssh_host)
-                                .await
-                                .map_err(|e| format!("SSH connection failed: {}", e))?;
-
-                            let content = connection
-                                .exec(&format!("cat '{}'", root_path))
-                                .await
-                                .map_err(|e| format!("Failed to read file: {}", e))?;
-
-                            Ok::<String, String>(content)
-                        });
-                        let _ = tx.send(result);
-                    });
-                }
-            }
+            let FileSource::Local { root_path } = source;
+            std::thread::spawn(move || {
+                let result = std::fs::read_to_string(&root_path)
+                    .map_err(|e| format!("Failed to read file: {}", e));
+                let _ = tx.send(result);
+            });
 
             let result = rx.await;
 
@@ -478,44 +450,12 @@ impl EditorView {
         cx.spawn(async move |this, cx| {
             let (tx, rx) = futures::channel::oneshot::channel();
 
-            match source {
-                FileSource::Local { root_path } => {
-                    let content = content.clone();
-                    std::thread::spawn(move || {
-                        let result = std::fs::write(&root_path, &content)
-                            .map_err(|e| format!("Failed to save: {}", e));
-                        let _ = tx.send(result);
-                    });
-                }
-                FileSource::Ssh {
-                    ssh_host,
-                    root_path,
-                } => {
-                    let content = content.clone();
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                        let result = rt.block_on(async {
-                            use codewire_platform_native::RusshClient;
-
-                            let ssh_client = RusshClient::new();
-                            let connection = ssh_client
-                                .connect(&ssh_host)
-                                .await
-                                .map_err(|e| format!("SSH connection failed: {}", e))?;
-
-                            // Write via stdin to cat
-                            let escaped = content.replace('\'', "'\\''");
-                            connection
-                                .exec(&format!("printf '%s' '{}' > '{}'", escaped, root_path))
-                                .await
-                                .map_err(|e| format!("Failed to save: {}", e))?;
-
-                            Ok::<(), String>(())
-                        });
-                        let _ = tx.send(result);
-                    });
-                }
-            }
+            let FileSource::Local { root_path } = source;
+            std::thread::spawn(move || {
+                let result = std::fs::write(&root_path, &content)
+                    .map_err(|e| format!("Failed to save: {}", e));
+                let _ = tx.send(result);
+            });
 
             let result = rx.await;
 

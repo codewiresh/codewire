@@ -34,7 +34,7 @@ use codewire_client::{
     ListEnvironmentsRequest, ListOrganizationsRequest, NativeClientFacade, OAuthClient, OrgRole,
     PortAccess, RefreshingTokenProvider,
 };
-use codewire_types::{GitStatus, MergeableState, PrState, PullRequest};
+use codewire_types::GitStatus;
 use dialogs::{LoginDialog, LoginDialogEvent};
 use editor::{
     EditorBackspace, EditorCopy, EditorCut, EditorDelete, EditorEnter, EditorLeft, EditorPaste,
@@ -48,7 +48,7 @@ use gpui::{
     prelude::*, px, size, svg,
 };
 use input::{Backspace, Copy, Cut, Delete, Left, Paste, Right, SelectAll};
-use pane_tree::{RemoteConnection, SplitDirection};
+use pane_tree::{SplitDirection, TerminalConnection};
 use sidebar::{
     AddLocalProjectRequested, CodewireSignInRequested, CodewireSignOutRequested,
     EnvironmentTerminalRequested, LocalBrowseRequested, LocalDiffRequested, LocalProjectExpanded,
@@ -192,8 +192,6 @@ actions!(
     [
         Quit,
         CancelLogin,
-        SendMessage,
-        FocusInput,
         DisconnectTerminal,
         // Inner splits (within active workspace)
         SplitRight,
@@ -556,8 +554,6 @@ fn main() {
             // `secondary` is Cmd on macOS and Ctrl on Linux/Windows.
             KeyBinding::new(PRIMARY_QUIT_KEY, Quit, None),
             KeyBinding::new("escape", CancelLogin, None),
-            KeyBinding::new("enter", SendMessage, Some("ChatInput")),
-            KeyBinding::new("cmd-l", FocusInput, None),
             KeyBinding::new("cmd-b", ToggleSidebar, None),
             KeyBinding::new("cmd-p", QuickOpenAction, None),
             KeyBinding::new("cmd-shift-p", CommandPaletteAction, None),
@@ -839,7 +835,7 @@ fn main() {
             },
         ]);
 
-        // Restore windows from manifest, or migrate from legacy, or start fresh
+        // Restore current layouts from the manifest, or start fresh.
         let mut opened = false;
         if let Ok(storage) = layout_storage::LayoutStorage::new() {
             if let Some(manifest) = storage.load_window_manifest() {
@@ -852,14 +848,6 @@ fn main() {
                         );
                         opened = true;
                     }
-                }
-            }
-
-            // Try legacy migration if no manifest windows were restored
-            if !opened {
-                if let Some((wid, layout)) = storage.migrate_to_multi_window() {
-                    open_new_window(Some((wid, layout, None)), cx);
-                    opened = true;
                 }
             }
         }
@@ -1209,7 +1197,7 @@ impl AppView {
             container.open_terminal(
                 workspace_id,
                 env_name.clone(),
-                RemoteConnection::CodewireEnv {
+                TerminalConnection::CodewireEnvironment {
                     org_id,
                     env_id,
                     env_name,
@@ -1555,10 +1543,10 @@ impl AppView {
                 let _ = tx.send(result);
             });
 
-            if let Ok(Ok((git_status, pr))) = rx.await {
+            if let Ok(Ok(git_status)) = rx.await {
                 cx.update(|cx| {
                     sidebar.update(cx, |sidebar, cx| {
-                        sidebar.update_local_git_status(&path, git_status, pr, cx);
+                        sidebar.update_local_git_status(&path, git_status, cx);
                     });
                 })
                 .ok();
@@ -1668,10 +1656,6 @@ impl AppView {
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
-    }
-
-    fn focus_input(&mut self, _: &FocusInput, _window: &mut Window, _cx: &mut Context<Self>) {
-        // TODO: Focus the chat input in the active pane if it's showing chat
     }
 
     fn disconnect_terminal(
@@ -1902,7 +1886,6 @@ impl Render for AppView {
             .font_family("Menlo")
             .track_focus(&self.focus_handle(cx))
             .on_action(cx.listener(Self::cancel_login_action))
-            .on_action(cx.listener(Self::focus_input))
             .on_action(cx.listener(Self::disconnect_terminal))
             .on_action(cx.listener(Self::open_local_terminal))
             // Inner split actions
@@ -2022,9 +2005,7 @@ impl Render for AppView {
 
 /// Discover git status for a local project directory.
 /// Runs on a background thread (no tokio needed — uses std::process::Command).
-fn discover_local_git_status(
-    path: &str,
-) -> Result<(Option<GitStatus>, Option<PullRequest>), String> {
+fn discover_local_git_status(path: &str) -> Result<Option<GitStatus>, String> {
     use std::process::Command;
 
     // Check if this is a git repo
@@ -2039,7 +2020,7 @@ fn discover_local_git_status(
     };
 
     if !is_git {
-        return Ok((None, None));
+        return Ok(None);
     }
 
     // Get status --porcelain for dirty flag
@@ -2092,57 +2073,11 @@ fn discover_local_git_status(
         _ => (0, 0),
     };
 
-    let git_status = GitStatus {
+    Ok(Some(GitStatus {
         ahead,
         behind,
         dirty,
         additions,
         deletions,
-    };
-
-    // Try to get PR info via gh CLI
-    let pr = match Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            "--json",
-            "number,title,state",
-            "-q",
-            ".number,.title,.state",
-        ])
-        .current_dir(path)
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let lines: Vec<&str> = text.trim().lines().collect();
-            if lines.len() >= 3 {
-                let number = lines[0].parse().unwrap_or(0);
-                let title = lines[1].to_string();
-                let state = match lines[2].to_lowercase().as_str() {
-                    "open" => PrState::Open,
-                    "closed" => PrState::Closed,
-                    "merged" => PrState::Merged,
-                    _ => PrState::Open,
-                };
-                Some(PullRequest {
-                    number,
-                    title,
-                    url: String::new(),
-                    state,
-                    is_draft: false,
-                    head_ref: String::new(),
-                    base_ref: String::new(),
-                    mergeable: MergeableState::Unknown,
-                    has_failed_checks: false,
-                    has_pending_checks: false,
-                })
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-
-    Ok((Some(git_status), pr))
+    }))
 }

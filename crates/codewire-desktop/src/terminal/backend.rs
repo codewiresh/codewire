@@ -1,8 +1,7 @@
 //! Terminal backend: PTY + alacritty_terminal parser.
 //!
 //! Owns the `alacritty_terminal::Term` grid and pumps bytes from a local PTY
-//! through the VTE parser to update it. Both local shells and SSH sessions
-//! use the same code path — they just spawn different commands.
+//! through the VTE parser to update it.
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::EventListener;

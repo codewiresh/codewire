@@ -7,7 +7,7 @@ use crate::input::TextInput;
 use crate::local_diff::{self, DiffSource};
 use crate::theme::Theme;
 use crate::{FocusDiffSearch, NextDiffFile, PrevDiffFile, RefreshDiff, ToggleDiffFile};
-use codewire_types::{DiffLine, DiffLineType, FileChangeType, FileDiff, PrState, PullRequest};
+use codewire_types::{DiffLine, DiffLineType, FileChangeType, FileDiff};
 use codewire_ui::icon_button;
 use gpui::{
     App, Context, ElementId, Entity, FocusHandle, Focusable, ScrollStrategy, SharedString,
@@ -45,7 +45,6 @@ const ROW_HEIGHT: f32 = 22.0;
 pub struct DiffView {
     source: DiffSource,
     status: DiffStatus,
-    pr: Option<PullRequest>,
     files: Vec<FileDiff>,
 
     // Virtual list
@@ -81,7 +80,6 @@ impl DiffView {
         let view = Self {
             source: source.clone(),
             status: DiffStatus::Loading,
-            pr: None,
             files: Vec::new(),
             flat_rows: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
@@ -104,39 +102,26 @@ impl DiffView {
         cx.spawn(async move |this, cx| {
             let (tx, rx) = futures::channel::oneshot::channel();
 
-            match source {
-                DiffSource::Local { path } => {
-                    std::thread::spawn(move || {
-                        let result = if uncommitted {
-                            local_diff::discover_local_diff_uncommitted(&path)
-                        } else {
-                            local_diff::discover_local_diff(&path)
-                        }
-                        .map(|r| (r.pr, r.files));
-                        let _ = tx.send(result);
-                    });
+            let DiffSource::Local { path } = source;
+            std::thread::spawn(move || {
+                let result = if uncommitted {
+                    local_diff::discover_local_diff_uncommitted(&path)
+                } else {
+                    local_diff::discover_local_diff(&path)
                 }
-                DiffSource::Ssh { ssh_host, .. } => {
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                        let result = rt
-                            .block_on(local_diff::discover_ssh_diff(&ssh_host))
-                            .map(|result| (result.pr, result.files));
-                        let _ = tx.send(result);
-                    });
-                }
-            }
+                .map(|result| result.files);
+                let _ = tx.send(result);
+            });
 
             let result = rx.await;
 
             match result {
-                Ok(Ok((pr, files))) => {
+                Ok(Ok(files)) => {
                     cx.update(|cx| {
                         let _ = this.update(cx, |view, cx| {
                             for f in &files {
                                 view.expanded_files.insert(f.file_path.clone());
                             }
-                            view.pr = pr;
                             view.files = files;
                             view.status = DiffStatus::Loaded;
                             view.rebuild_flat_rows();
@@ -171,7 +156,6 @@ impl DiffView {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.status = DiffStatus::Loading;
         self.files.clear();
-        self.pr = None;
         self.flat_rows.clear();
         cx.notify();
         Self::spawn_discovery(self.source.clone(), self.show_uncommitted, cx);
@@ -861,60 +845,6 @@ impl DiffView {
         .track_scroll(&self.scroll_handle)
         .into_any_element()
     }
-
-    fn render_pr_header(&self, pr: &PullRequest, theme: &Theme) -> gpui::AnyElement {
-        let state_text = match pr.state {
-            PrState::Open => "Open",
-            PrState::Closed => "Closed",
-            PrState::Merged => "Merged",
-        };
-        let state_color = match pr.state {
-            PrState::Open => theme.status_running,
-            PrState::Closed => theme.git_deletions,
-            PrState::Merged => gpui::hsla(270.0 / 360.0, 0.6, 0.6, 1.0),
-        };
-
-        div()
-            .px_3()
-            .py_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.diff_controls_bg)
-            .text_size(px(11.0))
-            .child(
-                div()
-                    .text_color(theme.muted)
-                    .child(format!("#{}", pr.number)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(theme.foreground)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .overflow_hidden()
-                    .child(pr.title.clone()),
-            )
-            .child(
-                div()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
-                    .bg(state_color)
-                    .text_size(px(9.0))
-                    .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
-                    .child(state_text),
-            )
-            .child(
-                div()
-                    .text_color(theme.accent)
-                    .text_size(px(10.0))
-                    .child(format!("{} → {}", pr.head_ref, pr.base_ref)),
-            )
-            .into_any_element()
-    }
 }
 
 // ── Trait impls ──────────────────────────────────────────────────────────
@@ -992,10 +922,6 @@ impl Render for DiffView {
                     .on_action(cx.listener(Self::toggle_file_action))
                     .on_action(cx.listener(Self::refresh_action))
                     .on_action(cx.listener(Self::focus_search));
-
-                if let Some(pr) = &self.pr {
-                    container = container.child(self.render_pr_header(pr, &theme));
-                }
 
                 container = container.child(self.render_controls(&theme, cx));
                 container = container.child(self.render_search_bar(&theme, cx));

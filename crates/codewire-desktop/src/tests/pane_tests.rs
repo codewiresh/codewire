@@ -6,7 +6,7 @@
 use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
 use crate::chat::ChatPanel;
-use crate::pane_tree::{RemoteConnection, SplitDirection};
+use crate::pane_tree::{SplitDirection, TerminalConnection};
 use crate::split_container::SplitContainer;
 
 /// Helper: create a SplitContainer with a window for testing.
@@ -72,9 +72,7 @@ async fn test_add_tab_to_active_pane(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "test-host".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
@@ -97,9 +95,7 @@ async fn test_tab_switching(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "test-host".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
@@ -155,18 +151,14 @@ async fn test_close_tab(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "host1".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
         sc.open_terminal(
             "ws-test".to_string(),
             "session-2".to_string(),
-            RemoteConnection::Ssh {
-                host: "host2".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
@@ -193,9 +185,7 @@ async fn test_next_prev_tab(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "host1".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );

@@ -25,13 +25,11 @@ actions!(
 
 // ── Types ────────────────────────────────────────────────────────────────
 
-/// Source of file data — either a local folder or a remote SSH host
+/// Source of file data.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum FileSource {
     /// Local directory on disk
     Local { root_path: String },
-    /// Remote directory accessible via SSH
-    Ssh { ssh_host: String, root_path: String },
 }
 
 impl FileSource {
@@ -39,12 +37,6 @@ impl FileSource {
     pub fn source_id(&self) -> String {
         match self {
             FileSource::Local { root_path } => format!("explorer-local:{}", root_path),
-            FileSource::Ssh {
-                ssh_host,
-                root_path,
-            } => {
-                format!("explorer-ssh:{}:{}", ssh_host, root_path)
-            }
         }
     }
 
@@ -56,7 +48,6 @@ impl FileSource {
                 .and_then(|n| n.to_str())
                 .unwrap_or(root_path)
                 .to_string(),
-            FileSource::Ssh { ssh_host, .. } => ssh_host.clone(),
         }
     }
 }
@@ -186,31 +177,16 @@ impl FileExplorer {
             let (tx, rx) = futures::channel::oneshot::channel();
             let rel_path = relative_path.clone();
 
-            match source {
-                FileSource::Local { root_path } => {
-                    std::thread::spawn(move || {
-                        let full_path = if rel_path.is_empty() {
-                            root_path.clone()
-                        } else {
-                            format!("{}/{}", root_path, rel_path)
-                        };
-                        let result = read_local_directory(&full_path, &rel_path);
-                        let _ = tx.send(result);
-                    });
-                }
-                FileSource::Ssh {
-                    ssh_host,
-                    root_path,
-                } => {
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                        let result = rt.block_on(async {
-                            read_ssh_directory(&ssh_host, &root_path, &rel_path).await
-                        });
-                        let _ = tx.send(result);
-                    });
-                }
-            }
+            let FileSource::Local { root_path } = source;
+            std::thread::spawn(move || {
+                let full_path = if rel_path.is_empty() {
+                    root_path.clone()
+                } else {
+                    format!("{}/{}", root_path, rel_path)
+                };
+                let result = read_local_directory(&full_path, &rel_path);
+                let _ = tx.send(result);
+            });
 
             let result = rx.await;
 
@@ -487,24 +463,11 @@ impl FileExplorer {
         cx.spawn(async move |this, cx| {
             let (tx, rx) = futures::channel::oneshot::channel();
 
-            match source {
-                FileSource::Local { root_path } => {
-                    std::thread::spawn(move || {
-                        let result = run_git_status_local(&root_path);
-                        let _ = tx.send(result);
-                    });
-                }
-                FileSource::Ssh {
-                    ssh_host,
-                    root_path,
-                } => {
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                        let result = rt.block_on(run_git_status_ssh(&ssh_host, &root_path));
-                        let _ = tx.send(result);
-                    });
-                }
-            }
+            let FileSource::Local { root_path } = source;
+            std::thread::spawn(move || {
+                let result = run_git_status_local(&root_path);
+                let _ = tx.send(result);
+            });
 
             if let Ok(Ok(statuses)) = rx.await {
                 cx.update(|cx| {
@@ -956,100 +919,6 @@ fn read_local_directory(full_path: &str, relative_prefix: &str) -> Result<Vec<Fi
     Ok(nodes)
 }
 
-/// Read directory listing via SSH
-async fn read_ssh_directory(
-    ssh_host: &str,
-    root_path: &str,
-    relative_path: &str,
-) -> Result<Vec<FileNode>, String> {
-    use codewire_platform_native::RusshClient;
-
-    let ssh_client = RusshClient::new();
-    let connection = ssh_client
-        .connect(ssh_host)
-        .await
-        .map_err(|e| format!("SSH connection failed: {}", e))?;
-
-    let full_path = if relative_path.is_empty() {
-        root_path.to_string()
-    } else {
-        format!("{}/{}", root_path, relative_path)
-    };
-
-    // Use ls -1Fp to get entries with type indicators
-    let cmd = format!(
-        "ls -1Fp --group-directories-first '{}' 2>/dev/null || ls -1Fp '{}'",
-        full_path, full_path
-    );
-    let output = connection
-        .exec(&cmd)
-        .await
-        .map_err(|e| format!("Failed to list directory: {}", e))?;
-
-    let mut nodes: Vec<FileNode> = Vec::new();
-
-    for raw_line in output.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let (name, entry_type) = if line.ends_with('/') {
-            (
-                line.trim_end_matches('/').to_string(),
-                FileEntryType::Directory,
-            )
-        } else if line.ends_with('@') {
-            (
-                line.trim_end_matches('@').to_string(),
-                FileEntryType::Symlink,
-            )
-        } else if line.ends_with('*') {
-            (line.trim_end_matches('*').to_string(), FileEntryType::File)
-        } else {
-            (line.to_string(), FileEntryType::File)
-        };
-
-        // Skip hidden files, . and ..
-        if name.starts_with('.') || name == "." || name == ".." {
-            continue;
-        }
-
-        let rel_path = if relative_path.is_empty() {
-            name.clone()
-        } else {
-            format!("{}/{}", relative_path, name)
-        };
-
-        nodes.push(FileNode {
-            name,
-            relative_path: rel_path,
-            entry_type,
-            size: 0,
-            git_status: None,
-            children: None,
-            load_state: if entry_type == FileEntryType::Directory {
-                LoadState::NotLoaded
-            } else {
-                LoadState::Loaded
-            },
-        });
-    }
-
-    // Sort: directories first, then alphabetical
-    nodes.sort_by(|a, b| {
-        let a_is_dir = a.entry_type == FileEntryType::Directory;
-        let b_is_dir = b.entry_type == FileEntryType::Directory;
-        match (a_is_dir, b_is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
-    });
-
-    Ok(nodes)
-}
-
 // ── Git status helpers ──────────────────────────────────────────────────
 
 fn parse_git_status_porcelain(output: &str) -> HashMap<String, FileGitStatus> {
@@ -1099,23 +968,13 @@ fn run_git_status_local(root_path: &str) -> Result<HashMap<String, FileGitStatus
     Ok(parse_git_status_porcelain(&stdout))
 }
 
-async fn run_git_status_ssh(
-    ssh_host: &str,
-    root_path: &str,
-) -> Result<HashMap<String, FileGitStatus>, String> {
-    use codewire_platform_native::RusshClient;
+#[cfg(test)]
+mod tests {
+    use super::FileSource;
 
-    let ssh_client = RusshClient::new();
-    let connection = ssh_client
-        .connect(ssh_host)
-        .await
-        .map_err(|e| format!("SSH connection failed: {}", e))?;
-
-    let cmd = format!("cd '{}' && git status --porcelain 2>/dev/null", root_path);
-    let output = connection
-        .exec(&cmd)
-        .await
-        .map_err(|e| format!("Failed to run git status: {}", e))?;
-
-    Ok(parse_git_status_porcelain(&output))
+    #[test]
+    fn retired_ssh_file_source_is_rejected() {
+        let retired = r#"{"Ssh":{"ssh_host":"example.invalid","root_path":"/workspace"}}"#;
+        assert!(serde_json::from_str::<FileSource>(retired).is_err());
+    }
 }

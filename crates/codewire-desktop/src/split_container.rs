@@ -8,10 +8,10 @@
 use crate::chat::ChatPanel;
 use crate::diff_view::DiffView;
 use crate::file_browser::{FileExplorer, FileSelected, FileSource};
-use crate::layout_storage::{LayoutState, LayoutStorage};
+use crate::layout_storage::LayoutState;
 use crate::pane_tree::{
-    CloseResult, LeafPane, PaneId, PaneNode, RemoteConnection, SplitDirection, SplitId, Tab,
-    TabContent, TabId,
+    CloseResult, LeafPane, PaneId, PaneNode, SplitDirection, SplitId, Tab, TabContent, TabId,
+    TerminalConnection,
 };
 use crate::terminal::TerminalView;
 use crate::theme::Theme;
@@ -148,8 +148,6 @@ pub struct SplitContainer {
     unsaved_dialog: Option<UnsavedChangesDialog>,
     /// Measured container sizes for each split node (for accurate drag calculations)
     split_sizes: HashMap<SplitId, f32>,
-    /// Persistent layout storage
-    layout_storage: Option<LayoutStorage>,
     focus_handle: FocusHandle,
 }
 
@@ -158,13 +156,8 @@ impl EventEmitter<ActivePaneChanged> for SplitContainer {}
 
 impl SplitContainer {
     pub fn new(chat_panel: Entity<ChatPanel>, cx: &mut Context<Self>) -> Self {
-        let layout_storage = LayoutStorage::new().ok();
-
-        // Always start fresh — each workspace gets a new SplitContainer with
-        // a Home tab added by open_home(). Restoring a persisted layout is
-        // unreliable because entity-backed tabs (Terminal, Explorer, Diff, Editor)
-        // have no backing entities after restart, and the single global layout
-        // file doesn't distinguish between workspaces.
+        // AppLayout applies a validated current pane tree after construction
+        // when restoring a window.
         let initial_pane = LeafPane::new_with_tab(Tab::new_chat());
         let active_pane = initial_pane.id;
         let root = PaneNode::Leaf(initial_pane);
@@ -189,7 +182,6 @@ impl SplitContainer {
             context_menu: None,
             unsaved_dialog: None,
             split_sizes: HashMap::new(),
-            layout_storage,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -237,19 +229,6 @@ impl SplitContainer {
     /// Get the currently active pane (mutable)
     pub fn active_pane_mut(&mut self) -> Option<&mut LeafPane> {
         self.root.find_pane_mut(self.active_pane)
-    }
-
-    /// Persist the current layout to disk.
-    fn save_layout(&self) {
-        if let Some(storage) = &self.layout_storage {
-            let state = LayoutState {
-                root: self.root.clone(),
-                active_pane: self.active_pane,
-            };
-            if let Err(e) = storage.save(&state) {
-                tracing::warn!("Failed to save layout: {}", e);
-            }
-        }
     }
 
     /// Open a home tab for a workspace.
@@ -350,7 +329,7 @@ impl SplitContainer {
         &mut self,
         workspace_id: String,
         session_name: String,
-        connection: RemoteConnection,
+        connection: TerminalConnection,
         session_type: String,
         cx: &mut Context<Self>,
     ) {
@@ -381,11 +360,10 @@ impl SplitContainer {
             pane.add_tab(tab);
         }
 
-        self.save_layout();
         cx.notify();
     }
 
-    /// Open a local terminal tab (no SSH, spawns local shell).
+    /// Open a local terminal tab.
     pub fn open_local_terminal(&mut self, cx: &mut Context<Self>) {
         let n = self.terminals.len() + 1;
         let session_name = format!("local-{}", n);
@@ -402,9 +380,7 @@ impl SplitContainer {
         let tab = Tab::new_terminal(
             workspace_id,
             session_name,
-            RemoteConnection::Ssh {
-                host: "local".to_string(),
-            },
+            TerminalConnection::Local,
             "local".to_string(),
         );
         if let Some(pane) = self.active_pane_mut() {
@@ -413,7 +389,7 @@ impl SplitContainer {
         cx.notify();
     }
 
-    /// Open a diff view tab for a given source (local folder or SSH)
+    /// Open a diff view tab for a local folder.
     ///
     /// If the tab already exists, switches to it. Otherwise creates a new tab.
     pub fn open_diff(&mut self, source: crate::local_diff::DiffSource, cx: &mut Context<Self>) {
@@ -493,18 +469,9 @@ impl SplitContainer {
         event: &FileSelected,
         cx: &mut Context<Self>,
     ) {
-        // Build a FileSource for the specific file
-        let file_source = match &event.source {
-            FileSource::Local { root_path } => FileSource::Local {
-                root_path: format!("{}/{}", root_path, event.path),
-            },
-            FileSource::Ssh {
-                ssh_host,
-                root_path,
-            } => FileSource::Ssh {
-                ssh_host: ssh_host.clone(),
-                root_path: format!("{}/{}", root_path, event.path),
-            },
+        let FileSource::Local { root_path } = &event.source;
+        let file_source = FileSource::Local {
+            root_path: format!("{}/{}", root_path, event.path),
         };
 
         self.open_editor(file_source, cx);
@@ -626,7 +593,6 @@ impl SplitContainer {
             }
         }
 
-        self.save_layout();
         cx.notify();
     }
 
@@ -636,7 +602,6 @@ impl SplitContainer {
         if let Some(pane) = self.root.find_pane_mut(pane_id) {
             pane.set_active_tab(tab_id);
         }
-        self.save_layout();
         cx.notify();
     }
 
@@ -654,7 +619,6 @@ impl SplitContainer {
         if let Some(_new_pane_id) = self.root.split(self.active_pane, direction) {
             // Keep focus on the original pane
             // User can click the new pane to activate it
-            self.save_layout();
             cx.notify();
         }
     }
@@ -667,14 +631,12 @@ impl SplitContainer {
         cx: &mut Context<Self>,
     ) {
         self.root.split(pane_id, direction);
-        self.save_layout();
         cx.notify();
     }
 
     /// Update the split ratio for a divider
     pub fn set_split_ratio(&mut self, pane_id: PaneId, ratio: f32, cx: &mut Context<Self>) {
         self.root.set_ratio(pane_id, ratio);
-        self.save_layout();
         cx.notify();
     }
 
@@ -759,7 +721,6 @@ impl SplitContainer {
 
             // Switch to target pane
             self.active_pane = target_pane_id;
-            self.save_layout();
             cx.notify();
         }
     }
@@ -798,7 +759,6 @@ impl SplitContainer {
 
         // Switch to target pane
         self.active_pane = target_pane_id;
-        self.save_layout();
         cx.notify();
     }
 
@@ -1363,17 +1323,15 @@ impl SplitContainer {
 }
 
 impl SplitContainer {
-    /// Connect a terminal view based on the RemoteConnection type.
+    /// Connect a terminal view based on the persisted connection type.
     fn connect_terminal(
         t: &mut TerminalView,
-        connection: &RemoteConnection,
+        connection: &TerminalConnection,
         cx: &mut Context<TerminalView>,
     ) {
         match connection {
-            RemoteConnection::Ssh { host } => {
-                t.connect_ssh(host, cx);
-            }
-            RemoteConnection::CodewireEnv {
+            TerminalConnection::Local => t.connect_local(cx),
+            TerminalConnection::CodewireEnvironment {
                 org_id,
                 env_id,
                 env_name,
@@ -1498,7 +1456,6 @@ impl SplitContainer {
             self.active_pane = self.root.first_leaf().id;
         }
 
-        self.save_layout();
         cx.notify();
     }
 
@@ -1522,7 +1479,6 @@ impl SplitContainer {
             self.cleanup_tab_entity(content);
         }
 
-        self.save_layout();
         cx.notify();
     }
 
@@ -1549,7 +1505,6 @@ impl SplitContainer {
             self.cleanup_tab_entity(content);
         }
 
-        self.save_layout();
         cx.notify();
     }
 
@@ -1576,7 +1531,6 @@ impl SplitContainer {
             self.cleanup_tab_entity(content);
         }
 
-        self.save_layout();
         cx.notify();
     }
 
@@ -1605,7 +1559,6 @@ impl SplitContainer {
                 self.cleanup_tab_entity(content);
             }
 
-            self.save_layout();
             cx.notify();
         }
     }

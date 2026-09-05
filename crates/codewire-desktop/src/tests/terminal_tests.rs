@@ -6,7 +6,7 @@
 use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, point, px};
 
 use crate::chat::ChatPanel;
-use crate::pane_tree::RemoteConnection;
+use crate::pane_tree::TerminalConnection;
 use crate::split_container::SplitContainer;
 
 /// Helper: create a SplitContainer with a window for testing.
@@ -27,9 +27,7 @@ async fn test_terminal_entity_created_on_open(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "test-host".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
@@ -46,9 +44,7 @@ async fn test_duplicate_terminal_reuses_tab(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "test-host".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
@@ -58,9 +54,7 @@ async fn test_duplicate_terminal_reuses_tab(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "test-host".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
@@ -86,9 +80,7 @@ async fn test_close_terminal_tab_removes_entity(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "test-host".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
@@ -123,18 +115,14 @@ async fn test_multiple_terminals_independent(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws1".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "host1".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );
         sc.open_terminal(
             "ws2".to_string(),
             "session-2".to_string(),
-            RemoteConnection::Ssh {
-                host: "host2".to_string(),
-            },
+            TerminalConnection::Local,
             "tmux".to_string(),
             cx,
         );
@@ -155,9 +143,7 @@ async fn test_click_on_pane_with_terminal_doesnt_crash(cx: &mut TestAppContext) 
         sc.open_terminal(
             "ws-test".to_string(),
             "session-1".to_string(),
-            RemoteConnection::Ssh {
-                host: "test-host".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );

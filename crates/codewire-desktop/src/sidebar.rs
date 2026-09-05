@@ -2,7 +2,7 @@
 
 use crate::theme::Theme;
 use crate::workspace::EnvironmentSummary;
-use codewire_types::{GitStatus, PrState, PullRequest};
+use codewire_types::GitStatus;
 use codewire_ui::{chevron, selection_bar, status_dot};
 use gpui::{
     App, Context, ElementId, EventEmitter, FocusHandle, Focusable, SharedString, Window, div,
@@ -74,7 +74,6 @@ pub struct LocalProject {
     pub path: String,
     pub name: String,
     pub git_status: Option<GitStatus>,
-    pub pr: Option<PullRequest>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -163,7 +162,6 @@ impl Sidebar {
             path: path.clone(),
             name,
             git_status: None,
-            pr: None,
         });
         self.expanded_local_projects.insert(path.clone());
         cx.emit(LocalProjectExpanded { path });
@@ -183,7 +181,6 @@ impl Sidebar {
         &mut self,
         path: &str,
         git_status: Option<GitStatus>,
-        pr: Option<PullRequest>,
         cx: &mut Context<Self>,
     ) {
         if let Some(project) = self
@@ -192,7 +189,6 @@ impl Sidebar {
             .find(|project| project.path == path)
         {
             project.git_status = git_status;
-            project.pr = pr;
             cx.notify();
         }
     }
@@ -446,7 +442,6 @@ impl Sidebar {
         let path_toggle = path.clone();
         let path_remove = path.clone();
         let git_status = project.git_status.clone();
-        let pr = project.pr.clone();
         let hover_bg = theme.hover;
 
         let mut container = div().flex().flex_col();
@@ -499,25 +494,6 @@ impl Sidebar {
                     .child(name),
             );
 
-        if let Some(pr) = &pr {
-            let pr_color = match pr.state {
-                PrState::Open => theme.status_running,
-                PrState::Closed => theme.git_deletions,
-                PrState::Merged => gpui::hsla(270.0 / 360.0, 0.6, 0.6, 1.0),
-            };
-            project_row = project_row.child(
-                div()
-                    .px(px(4.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
-                    .bg(pr_color)
-                    .text_size(px(9.0))
-                    .text_color(gpui::hsla(0.0, 0.0, 1.0, 1.0))
-                    .flex_shrink_0()
-                    .child(format!("#{}", pr.number)),
-            );
-        }
-
         if let Some(status) = &git_status {
             project_row = project_row.child(self.git_status_indicator(status, theme));
         }
@@ -558,7 +534,7 @@ impl Sidebar {
                     ),
             );
 
-            if git_status.is_some() || pr.is_some() {
+            if git_status.is_some() {
                 let diff_path = path.clone();
                 container = container.child(
                     div()
