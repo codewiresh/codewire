@@ -118,6 +118,49 @@ selected prior source release so its embedded migration history is applied from
 empty state. The PostgreSQL cluster, other databases, credentials, and external
 secret material remain outside this rollback boundary.
 
+### Typed platform credential storage
+
+Migration `0018_platform_credentials.sql` adds two tables without translating
+or importing another credential representation:
+
+- `platform_credentials` contains typed, non-secret metadata. Each row belongs
+  to exactly one existing user or organization. Display names are unique,
+  ignoring case, within that owner. Authentication kind, status, expiry and
+  positive revocation/material versions are constrained by the database.
+- `platform_credential_material` contains one protected envelope per
+  credential, using only the OpenBao Transit KEK provider. The ciphertext,
+  nonce, wrapped DEK and format/version fields have explicit size and range
+  constraints. A composite foreign key requires its material version to match
+  the metadata row. Metadata contains no protected reference or plaintext.
+
+The placement library prepares the new envelope before acquiring database
+locks. Replacement then deletes the old material, updates the owner-fenced
+metadata version and inserts the matching envelope in one transaction. The
+foreign key is immediate, not deferred; mixed versions cannot be committed.
+Deleting a credential, user or organization cascades to its protected material.
+This does not delete the shared OpenBao key or generic workload-secret DEKs.
+Storing credentials does not select how a workload receives access to them.
+
+The migration tests pin the accepted versions 1–17 from canonical
+`b794652d12ed1732215f0dc93b69a87dd87ffe46` and the accepted version-17 schema
+fingerprint. This proves deployment-history integrity, not compatibility with
+retired runtime models. Fresh apply and 17→18 upgrade use the standard SQLx
+migrator; upgrade retains unrelated current user/organization rows, creates
+empty credential tables, and preserves the exact prior ledger. A second run
+must leave both the ledger and synthetic credential rows unchanged. Constraint
+proof covers owner/name isolation, envelope bounds, generation mismatch,
+transaction rollback and owner deletion cascades.
+
+There is no in-place down migration. For a rollback to version 17, stop the
+new credential writers and use the selected prior source release with an
+empty, disposable application `public` schema. Resetting that schema discards
+its credential records; it does not retain or translate their material.
+The rollback test proves that replay ends at the accepted version-17 ledger
+and schema and leaves a separate schema untouched. PostgreSQL clusters, other
+databases/schemas, credentials and external OpenBao key material are outside
+this reset boundary. This documents the boundary; it does not authorize a live
+database reset or a migration-ledger rewrite.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

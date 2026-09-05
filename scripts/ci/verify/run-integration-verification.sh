@@ -168,7 +168,13 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 17
+  assert_passed_count "server-core migration matrix" "$logfile" 20
+
+  logfile="$RUN_DIR/platform-credential-storage.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-platform-credentials --test storage \
+      -- --ignored --nocapture --test-threads=4 | tee "$logfile"
+  assert_passed_count "platform credential storage matrix" "$logfile" 12
 
   logfile="$RUN_DIR/session-hash-only.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

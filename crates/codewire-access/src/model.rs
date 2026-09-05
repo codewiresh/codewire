@@ -78,6 +78,8 @@ pub struct CredentialMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_hint: Option<String>,
     pub status: CredentialStatus,
+    /// Hard deadline for credential use, including refresh. OAuth access-token
+    /// expiry is a separate provider detail inside the protected material.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix: Option<u64>,
     pub revocation_generation: u64,

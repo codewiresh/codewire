@@ -51,9 +51,16 @@ mod tests {
 
     use super::*;
 
+    // Replace only after the synthetic database gate computes migration 18's
+    // complete schema fingerprint; preparation must not claim accepted proof.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "ab823697675ec3b378dddda17d3de6bd7f62c2d6070977409158a9d42f97b10b";
+    const ACCEPTED_PRE_PLATFORM_SCHEMA_FINGERPRINT: &str =
         "89054bb58aa891438dc98b13dc89a353480982506e91c43ce1ad5d5047377ce8";
     const APPLIED_BASELINE_CHECKSUM: &str = "3c739196dff29f03ccbe05af6dc45b0be2327bca39dbafaa9d29601ba3873aa99affe0492bfb4f0e3de7579d2e5da8fb";
+    // SHA-384 of the concatenated SHA-384 SQL checksums for versions 1..=17,
+    // bound to canonical b794652d12ed1732215f0dc93b69a87dd87ffe46, not this branch.
+    const APPLIED_PRE_PLATFORM_HISTORY_CHECKSUM: &str = "743aaf2f7fcafc2b1d100870505abbd09a7c184e0cbe39bea0b3e942c5d4427e6027a49e62dc0830ff448bfefe7bd130";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
     const ORGANIZATION_ROUTE_SLUGS_VERSION: i64 = 11;
     const OPENBAO_SECRET_AUTHORITY_VERSION: i64 = 12;
@@ -62,6 +69,7 @@ mod tests {
     const CONFIDENTIAL_STORAGE_PROFILE_VERSION: i64 = 15;
     const PROJECT_SPEC_CUTOVER_VERSION: i64 = 16;
     const OPAQUE_AUTH_CAPABILITIES_VERSION: i64 = 17;
+    const PLATFORM_CREDENTIALS_VERSION: i64 = 18;
     const LEGACY_USER_CREDENTIAL_SECRET_ERROR: &str =
         "credential product cutover requires legacy user credential secrets to be absent";
 
@@ -72,6 +80,11 @@ mod tests {
     #[test]
     fn embedded_baseline_matches_the_applied_pre_cutover_history() -> anyhow::Result<()> {
         assert_applied_baseline_checksum()
+    }
+
+    #[test]
+    fn embedded_pre_platform_history_matches_the_accepted_release() -> anyhow::Result<()> {
+        assert_applied_pre_platform_history()
     }
 
     #[tokio::test]
@@ -138,6 +151,7 @@ mod tests {
             assert_confidential_storage_manifest_schema(&pool).await?;
             assert_project_spec_schema(&pool).await?;
             assert_opaque_auth_capability_schema(&pool).await?;
+            assert_platform_credential_schema(&pool).await?;
             pool.close().await;
 
             ensure_schema(&test_db.url).await?;
@@ -152,6 +166,373 @@ mod tests {
             );
             pool.close().await;
             assert_confidential_storage_profile_upgrade(&admin_url).await?;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_credentials_upgrade_preserves_version_17_data_and_second_run_is_noop()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, PLATFORM_CREDENTIALS_VERSION).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            assert_pre_platform_credential_schema(&pool).await?;
+            let before = applied_migrations(&pool).await?;
+            anyhow::ensure!(before.len() == 17 && before.last().map(|row| row.0) == Some(17));
+            seed_platform_credential_owners(&pool).await?;
+            let owners_before: Vec<(String, String)> =
+                sqlx::query_as("SELECT id, email FROM users ORDER BY id")
+                    .fetch_all(&pool)
+                    .await?;
+            let organizations_before: Vec<(String, String, String, String)> =
+                sqlx::query_as("SELECT id, name, slug, created_by FROM organizations ORDER BY id")
+                    .fetch_all(&pool)
+                    .await?;
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            assert_platform_credential_schema(&pool).await?;
+            let after = applied_migrations(&pool).await?;
+            anyhow::ensure!(
+                after.len() == 18 && after[..17] == before && after[17].0 == 18,
+                "migration 18 did not append to the exact accepted prior ledger"
+            );
+            let owners_after: Vec<(String, String)> =
+                sqlx::query_as("SELECT id, email FROM users ORDER BY id")
+                    .fetch_all(&pool)
+                    .await?;
+            let organizations_after: Vec<(String, String, String, String)> =
+                sqlx::query_as("SELECT id, name, slug, created_by FROM organizations ORDER BY id")
+                    .fetch_all(&pool)
+                    .await?;
+            anyhow::ensure!(
+                owners_after == owners_before && organizations_after == organizations_before
+            );
+            let empty: bool = sqlx::query_scalar(
+                "SELECT NOT EXISTS(SELECT 1 FROM platform_credentials) \
+                 AND NOT EXISTS(SELECT 1 FROM platform_credential_material)",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(empty, "additive migration imported credential records");
+            seed_platform_credential(&pool, "credential", Some("credential-user-a"), None, "Work")
+                .await?;
+            seed_platform_credential_material(&pool, "credential", 1).await?;
+            let rows_before: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text, row_to_json(m)::text \
+                 FROM platform_credentials c JOIN platform_credential_material m \
+                 ON m.credential_id = c.id WHERE c.id = 'credential'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let fingerprint: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            ))
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
+                "application schema fingerprint changed: {fingerprint}"
+            );
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            anyhow::ensure!(applied_migrations(&pool).await? == after);
+            let rows_after: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text, row_to_json(m)::text \
+                 FROM platform_credentials c JOIN platform_credential_material m \
+                 ON m.credential_id = c.id WHERE c.id = 'credential'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                rows_after == rows_before,
+                "no-op startup changed credential storage"
+            );
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_credentials_schema_fences_owners_names_envelopes_and_generations()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            assert_platform_credential_schema(&pool).await?;
+            seed_platform_credential_owners(&pool).await?;
+            for (id, user_id, organization_id) in [
+                ("user-a", Some("credential-user-a"), None),
+                ("user-b", Some("credential-user-b"), None),
+                ("org-a", None, Some("credential-org-a")),
+                ("org-b", None, Some("credential-org-b")),
+            ] {
+                // Identical names are valid in different user/org scopes.
+                seed_platform_credential(&pool, id, user_id, organization_id, "Work").await?;
+                seed_platform_credential_material(&pool, id, 1).await?;
+            }
+            seed_platform_credential(&pool, "user-extra", Some("credential-user-a"), None, "Other").await?;
+            seed_platform_credential(&pool, "org-extra", None, Some("credential-org-a"), "Other").await?;
+            for query in [
+                "UPDATE platform_credentials SET display_name = 'wOrK' WHERE id = 'user-extra'",
+                "UPDATE platform_credentials SET display_name = 'wOrK' WHERE id = 'org-extra'",
+            ] {
+                assert_platform_credential_rejected(&pool, query, "23505").await?;
+            }
+            for assignment in [
+                "user_id = NULL",
+                "organization_id = 'credential-org-a'",
+                "authentication_kind = 'unsupported'",
+                "status = 'unsupported'",
+                "display_name = ''",
+                "display_name = repeat('x', 257)",
+                "display_name = repeat('é', 129)",
+                "account_hint = ''",
+                "account_hint = repeat('x', 257)",
+                "account_hint = repeat('é', 129)",
+                "expires_at_unix = -1",
+                "revocation_generation = 0",
+                "revocation_generation = -1",
+                "material_generation = 0",
+                "material_generation = -1",
+            ] {
+                assert_platform_credential_rejected(
+                    &pool,
+                    &format!("UPDATE platform_credentials SET {assignment} WHERE id = 'user-a'"),
+                    "23514",
+                ).await?;
+            }
+            for assignment in ["user_id = 'absent-user'", "material_generation = 2"] {
+                assert_platform_credential_rejected(
+                    &pool,
+                    &format!("UPDATE platform_credentials SET {assignment} WHERE id = 'user-a'"),
+                    "23503",
+                ).await?;
+            }
+            for column in [
+                "id", "provider", "authentication_kind", "display_name", "status",
+                "revocation_generation", "material_generation", "created_at", "updated_at",
+            ] {
+                assert_platform_credential_rejected(
+                    &pool,
+                    &format!("UPDATE platform_credentials SET {column} = NULL WHERE id = 'user-a'"),
+                    "23502",
+                ).await?;
+            }
+            assert_platform_credential_rejected(
+                &pool,
+                "UPDATE platform_credentials SET organization_id = 'absent-org' WHERE id = 'org-a'",
+                "23503",
+            ).await?;
+            for kind in ["oauth", "api_key", "access_token", "github_app"] {
+                sqlx::query("UPDATE platform_credentials SET authentication_kind = $1 WHERE id = 'user-a'")
+                    .bind(kind).execute(&pool).await?;
+            }
+            for status in ["active", "expired", "refresh_failed", "revoked"] {
+                sqlx::query("UPDATE platform_credentials SET status = $1 WHERE id = 'user-a'")
+                    .bind(status).execute(&pool).await?;
+            }
+            sqlx::query("UPDATE platform_credentials SET expires_at_unix = 0 WHERE id = 'user-a'")
+                .execute(&pool).await?;
+            sqlx::query("UPDATE platform_credentials SET expires_at_unix = NULL WHERE id = 'user-a'")
+                .execute(&pool).await?;
+            sqlx::query(
+                "UPDATE platform_credentials SET display_name = repeat('é', 128), \
+                 account_hint = repeat('é', 128) WHERE id = 'user-a'",
+            ).execute(&pool).await?;
+
+            for assignment in [
+                "material_generation = 0",
+                "kek_provider = 'unsupported'",
+                "key_version = 0",
+                "key_version = -1",
+                "key_version = 4294967296",
+                "wrapped_dek = decode('', 'hex')",
+                "wrapped_dek = decode(repeat('00', 65537), 'hex')",
+                "wrapped_format = 0",
+                "wrapped_format = 2",
+                "ciphertext = decode(repeat('00', 15), 'hex')",
+                "ciphertext = decode(repeat('00', 1048593), 'hex')",
+                "nonce = decode(repeat('00', 11), 'hex')",
+                "nonce = decode(repeat('00', 13), 'hex')",
+                "format = 0",
+                "format = 2",
+            ] {
+                assert_platform_credential_rejected(
+                    &pool,
+                    &format!("UPDATE platform_credential_material SET {assignment} WHERE credential_id = 'user-a'"),
+                    "23514",
+                ).await?;
+            }
+            for assignment in ["material_generation = 2", "credential_id = 'absent-credential'"] {
+                assert_platform_credential_rejected(
+                    &pool,
+                    &format!("UPDATE platform_credential_material SET {assignment} WHERE credential_id = 'user-a'"),
+                    "23503",
+                ).await?;
+            }
+            for column in [
+                "credential_id", "material_generation", "kek_provider", "key_name", "key_version",
+                "wrapped_dek", "wrapped_format", "ciphertext", "nonce", "format",
+            ] {
+                assert_platform_credential_rejected(
+                    &pool,
+                    &format!("UPDATE platform_credential_material SET {column} = NULL WHERE credential_id = 'user-a'"),
+                    "23502",
+                ).await?;
+            }
+            assert_platform_credential_rejected(
+                &pool,
+                "INSERT INTO platform_credential_material SELECT * \
+                 FROM platform_credential_material WHERE credential_id = 'user-a'",
+                "23505",
+            ).await?;
+            sqlx::query(
+                "UPDATE platform_credential_material SET key_version = 4294967295, \
+                 wrapped_dek = decode(repeat('00', 65536), 'hex'), \
+                 ciphertext = decode(repeat('00', 1048592), 'hex') WHERE credential_id = 'user-a'",
+            ).execute(&pool).await?;
+
+            // A failed or cancelled replacement must retain the old complete
+            // pair; the successful sequence needs no deferred FK or trigger.
+            let mut replacement = pool.begin().await?;
+            sqlx::query("DELETE FROM platform_credential_material WHERE credential_id = 'user-b'")
+                .execute(&mut *replacement).await?;
+            sqlx::query("UPDATE platform_credentials SET material_generation = 2 WHERE id = 'user-b'")
+                .execute(&mut *replacement).await?;
+            replacement.rollback().await?;
+            let generations: (i64, i64) = sqlx::query_as(
+                "SELECT c.material_generation, m.material_generation FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id = c.id WHERE c.id = 'user-b'",
+            ).fetch_one(&pool).await?;
+            anyhow::ensure!(generations == (1, 1), "rolled-back replacement changed stored generations");
+            let mut replacement = pool.begin().await?;
+            sqlx::query("DELETE FROM platform_credential_material WHERE credential_id = 'user-b'")
+                .execute(&mut *replacement).await?;
+            sqlx::query("UPDATE platform_credentials SET material_generation = 2 WHERE id = 'user-b'")
+                .execute(&mut *replacement).await?;
+            sqlx::query(
+                "INSERT INTO platform_credential_material \
+                 (credential_id, material_generation, kek_provider, key_name, key_version, \
+                  wrapped_dek, wrapped_format, ciphertext, nonce, format) \
+                 VALUES ('user-b', 2, 'openbao-transit', 'credential-key', 1, \
+                         decode('01', 'hex'), 1, decode(repeat('00', 16), 'hex'), \
+                         decode(repeat('00', 12), 'hex'), 1)",
+            ).execute(&mut *replacement).await?;
+            replacement.commit().await?;
+            let generations: (i64, i64) = sqlx::query_as(
+                "SELECT c.material_generation, m.material_generation FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id = c.id WHERE c.id = 'user-b'",
+            ).fetch_one(&pool).await?;
+            anyhow::ensure!(generations == (2, 2));
+
+            // Explicit credential deletion and both owner cascades remove
+            // ciphertext without touching another owner's records.
+            sqlx::query("DELETE FROM platform_credentials WHERE id = 'user-a'").execute(&pool).await?;
+            sqlx::query("DELETE FROM organizations WHERE id = 'credential-org-a'").execute(&pool).await?;
+            sqlx::query("DELETE FROM users WHERE id = 'credential-user-b'").execute(&pool).await?;
+            let remaining: Vec<String> = sqlx::query_scalar("SELECT id FROM platform_credentials ORDER BY id")
+                .fetch_all(&pool).await?;
+            let remaining_material: Vec<String> = sqlx::query_scalar(
+                "SELECT credential_id FROM platform_credential_material ORDER BY credential_id",
+            ).fetch_all(&pool).await?;
+            anyhow::ensure!(remaining == ["org-b", "user-extra"]);
+            anyhow::ensure!(remaining_material == ["org-b"]);
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_credentials_rollback_recreates_only_the_disposable_application_schema()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            assert_platform_credential_schema(&pool).await?;
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_credential(
+                &pool,
+                "rollback-credential",
+                Some("credential-user-a"),
+                None,
+                "Work",
+            )
+            .await?;
+            seed_platform_credential_material(&pool, "rollback-credential", 1).await?;
+            sqlx::query("CREATE SCHEMA rollback_boundary")
+                .execute(&pool)
+                .await?;
+            sqlx::query("CREATE TABLE rollback_boundary.retained (id integer PRIMARY KEY)")
+                .execute(&pool)
+                .await?;
+            sqlx::query("INSERT INTO rollback_boundary.retained VALUES (1)")
+                .execute(&pool)
+                .await?;
+            // No down migration or ledger rewrite: the selected prior release
+            // rebuilds only this test database's disposable public schema.
+            sqlx::query("DROP SCHEMA public CASCADE")
+                .execute(&pool)
+                .await?;
+            sqlx::query("CREATE SCHEMA public").execute(&pool).await?;
+            pool.close().await;
+
+            apply_migrations_before(&test_db.url, PLATFORM_CREDENTIALS_VERSION).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            assert_pre_platform_credential_schema(&pool).await?;
+            let history = applied_migrations(&pool).await?;
+            anyhow::ensure!(history.len() == 17 && history.last().map(|row| row.0) == Some(17));
+            let retained: Vec<i32> =
+                sqlx::query_scalar("SELECT id FROM rollback_boundary.retained")
+                    .fetch_all(&pool)
+                    .await?;
+            anyhow::ensure!(
+                retained == [1],
+                "rollback crossed the application-schema boundary"
+            );
+            pool.close().await;
             anyhow::Ok(())
         }
         .await;
@@ -1159,6 +1540,174 @@ mod tests {
         .await;
         let cleanup = test_db.drop().await;
         result.and(cleanup)
+    }
+
+    async fn assert_platform_credential_schema(pool: &PgPool) -> anyhow::Result<()> {
+        for (table, expected) in [
+            (
+                "platform_credentials",
+                &[
+                    "id",
+                    "user_id",
+                    "organization_id",
+                    "provider",
+                    "authentication_kind",
+                    "display_name",
+                    "account_hint",
+                    "status",
+                    "expires_at_unix",
+                    "revocation_generation",
+                    "material_generation",
+                    "created_at",
+                    "updated_at",
+                ][..],
+            ),
+            (
+                "platform_credential_material",
+                &[
+                    "credential_id",
+                    "material_generation",
+                    "kek_provider",
+                    "key_name",
+                    "key_version",
+                    "wrapped_dek",
+                    "wrapped_format",
+                    "ciphertext",
+                    "nonce",
+                    "format",
+                ][..],
+            ),
+        ] {
+            let columns: Vec<String> = sqlx::query_scalar(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await?;
+            anyhow::ensure!(
+                columns == expected,
+                "{table} columns changed; metadata must contain neither envelope nor protected reference"
+            );
+        }
+        let material_fk: (String, bool, bool) = sqlx::query_as(
+            "SELECT pg_get_constraintdef(oid), condeferrable, condeferred \
+             FROM pg_catalog.pg_constraint \
+             WHERE conrelid = 'public.platform_credential_material'::regclass \
+               AND conname = 'platform_credential_material_generation_fkey'",
+        )
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(
+            material_fk == (
+                "FOREIGN KEY (credential_id, material_generation) REFERENCES platform_credentials(id, material_generation) ON DELETE CASCADE".to_owned(),
+                false,
+                false,
+            ),
+            "protected material lost its immediate metadata-generation foreign key"
+        );
+        Ok(())
+    }
+
+    async fn assert_pre_platform_credential_schema(pool: &PgPool) -> anyhow::Result<()> {
+        let absent: bool = sqlx::query_scalar(
+            "SELECT to_regclass('public.platform_credentials') IS NULL \
+             AND to_regclass('public.platform_credential_material') IS NULL",
+        )
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(
+            absent,
+            "pre-platform schema already contains typed credentials"
+        );
+        let fingerprint: String = sqlx::query_scalar(include_str!(
+            "../tests/data/application_schema_fingerprint.sql"
+        ))
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(
+            fingerprint == ACCEPTED_PRE_PLATFORM_SCHEMA_FINGERPRINT,
+            "accepted version-17 schema changed: {fingerprint}"
+        );
+        Ok(())
+    }
+
+    async fn seed_platform_credential_owners(pool: &PgPool) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO users (id, email) VALUES \
+             ('credential-user-a', 'credential-a@example.test'), \
+             ('credential-user-b', 'credential-b@example.test')",
+        )
+        .execute(pool)
+        .await?;
+        // Both organizations belong to user A so deletion of user B isolates
+        // the user cascade from the independent organization-cascade proof.
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by) VALUES \
+             ('credential-org-a', 'Credential A', 'credential-a', 'credential-user-a'), \
+             ('credential-org-b', 'Credential B', 'credential-b', 'credential-user-a')",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn seed_platform_credential(
+        pool: &PgPool,
+        id: &str,
+        user_id: Option<&str>,
+        organization_id: Option<&str>,
+        display_name: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO platform_credentials \
+             (id, user_id, organization_id, provider, authentication_kind, display_name, \
+              status, revocation_generation, material_generation) \
+             VALUES ($1, $2, $3, 'openai', 'oauth', $4, 'active', 1, 1)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(organization_id)
+        .bind(display_name)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn seed_platform_credential_material(
+        pool: &PgPool,
+        id: &str,
+        generation: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO platform_credential_material \
+             (credential_id, material_generation, kek_provider, key_name, key_version, \
+              wrapped_dek, wrapped_format, ciphertext, nonce, format) \
+             VALUES ($1, $2, 'openbao-transit', 'credential-key', 1, decode('01', 'hex'), \
+                     1, decode(repeat('00', 16), 'hex'), decode(repeat('00', 12), 'hex'), 1)",
+        )
+        .bind(id)
+        .bind(generation)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn assert_platform_credential_rejected(
+        pool: &PgPool,
+        query: &str,
+        expected_code: &str,
+    ) -> anyhow::Result<()> {
+        let error = sqlx::query(query)
+            .execute(pool)
+            .await
+            .expect_err("invalid synthetic credential storage must be rejected");
+        let code = error.as_database_error().and_then(|error| error.code());
+        anyhow::ensure!(
+            code.as_deref() == Some(expected_code),
+            "credential constraint returned SQLSTATE {code:?}, expected {expected_code}"
+        );
+        Ok(())
     }
 
     async fn assert_tenant_secret_envelope_schema(pool: &PgPool) -> anyhow::Result<()> {
@@ -2376,10 +2925,33 @@ mod tests {
         Ok(())
     }
 
+    fn assert_applied_pre_platform_history() -> anyhow::Result<()> {
+        let mut digest = Sha384::new();
+        let mut count = 0;
+        for migration in MIGRATOR
+            .iter()
+            .filter(|migration| migration.version < PLATFORM_CREDENTIALS_VERSION)
+        {
+            count += 1;
+            anyhow::ensure!(
+                migration.version == count,
+                "accepted prior migration ordering changed"
+            );
+            digest.update(Sha384::digest(migration.sql.as_bytes()));
+        }
+        anyhow::ensure!(count == 17, "accepted version-17 history is incomplete");
+        anyhow::ensure!(
+            format!("{:x}", digest.finalize()) == APPLIED_PRE_PLATFORM_HISTORY_CHECKSUM,
+            "migrations 1 through 17 no longer match canonical accepted history"
+        );
+        Ok(())
+    }
+
     async fn apply_migrations_before(database_url: &str, version: i64) -> anyhow::Result<()> {
         // Do not manufacture an apparently valid old ledger from a baseline
         // rewritten by the same branch whose upgrade is being tested.
         assert_applied_baseline_checksum()?;
+        assert_applied_pre_platform_history()?;
         anyhow::ensure!(
             MIGRATOR.version_exists(version),
             "embedded migration {version} is missing"
