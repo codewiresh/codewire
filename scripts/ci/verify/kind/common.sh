@@ -293,7 +293,9 @@ validate_retained_cluster_identity() {
     return 1
   fi
 
-  RETAINED_KUBECONFIG="$RUN_DIR/retained-kubeconfig"
+  # A retained suite can invoke a narrower read-only suite. Each invocation
+  # owns its file so child cleanup cannot remove the parent's pinned context.
+  RETAINED_KUBECONFIG="$(mktemp "$RUN_DIR/retained-kubeconfig.XXXXXX")" || return $?
   if ! kind get kubeconfig --name "$KIND_CLUSTER_NAME" >"$RETAINED_KUBECONFIG"; then
     echo "::error::failed to pin kubeconfig for retained Kind cluster ${KIND_CLUSTER_NAME}"
     return 1
@@ -3448,7 +3450,8 @@ billing_contract_through_ingress() {
 
 rust_reconciler_ttl_e2e() {
   log "running Rust reconciler TTL Kubernetes e2e"
-  DATABASE_URL="$KIND_DATABASE_URL" \
+  KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" \
+    DATABASE_URL="$KIND_DATABASE_URL" \
     SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
     SMOKE_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     SMOKE_SESSION_TOKEN=contract-admin-session-token \

@@ -1,7 +1,8 @@
 //! Rust-owned deploy-shaped proof for TTL eviction in Kind.
 //!
 //! Creates a real environment through the Rust Connect service, waits for its
-//! SandboxClaim and workspace Pod, expires it in PostgreSQL, then proves the
+//! SandboxClaim and workspace Pod, verifies live image provenance, expires it
+//! in PostgreSQL, then proves the
 //! Rust reconciler and Temporal lifecycle delete every Kubernetes runtime and
 //! record the authoritative journal trail.
 
@@ -23,17 +24,13 @@ async fn main() -> anyhow::Result<()> {
     let namespace = required_env("SMOKE_SANDBOX_NAMESPACE")?;
     let session_token = required_env("SMOKE_SESSION_TOKEN")?;
     let org_id = required_env("SMOKE_ORG_ID")?;
+    let cluster_name = required_env("KIND_CLUSTER_NAME")?;
     let image = std::env::var("SMOKE_WORKSPACE_IMAGE")
         .unwrap_or_else(|_| "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into());
-    let repo_url = std::env::var("SMOKE_REPO_URL")
-        .unwrap_or_else(|_| "https://github.com/codewiresh/example".into());
+    // TTL and provenance need a real workspace, not an unrelated remote clone.
+    // Repository execution and clone-failure cleanup have their own Kind proof.
     let project_spec = codewire_project::ProjectSpec {
         image,
-        repositories: vec![codewire_project::RepositorySpec {
-            source: repo_url,
-            destination: "/workspace".to_owned(),
-            ..Default::default()
-        }],
         ..Default::default()
     };
     project_spec
@@ -100,6 +97,19 @@ async fn main() -> anyhow::Result<()> {
         !pods_before.is_empty(),
         "running environment had no workspace Pod"
     );
+
+    // Observe the product-created template before TTL cleanup removes it.
+    // Reuse the checked-in assertion; an empty template set must still fail.
+    let provenance = tokio::process::Command::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/ci/verify/kind-e2e.sh"
+    ))
+    .args(["suite", "sandbox-supply-chain"])
+    .env("KIND_CLUSTER_NAME", cluster_name)
+    .status()
+    .await
+    .context("run live sandbox provenance gate")?;
+    anyhow::ensure!(provenance.success(), "live sandbox provenance gate failed");
 
     sqlx::query(
         "UPDATE environments
