@@ -568,16 +568,23 @@ pub(crate) async fn check_owner<'e, E: Executor<'e, Database = Postgres>>(
     owner: &Owner,
     lock: bool,
 ) -> Result<(), Error> {
-    // SHARE, not KEY SHARE: organization deletion changes a non-key column.
-    // Metadata-only reads use plain SELECT and do not require UPDATE rights.
-    let sql = match (owner, lock) {
-        (Owner::User(_), false) => "SELECT id FROM users WHERE id=$1",
-        (Owner::User(_), true) => "SELECT id FROM users WHERE id=$1 FOR SHARE",
-        (Owner::Organization(_), false) => {
+    if lock {
+        // The fixed definer helper retains SHARE until this transaction ends,
+        // without giving enrollment/broker UPDATE authority over an owner.
+        let found: bool =
+            sqlx::query_scalar("SELECT public.codewire_platform_lock_owner($1::text,$2::text)")
+                .bind(owner_kind(owner))
+                .bind(owner.id().as_str())
+                .fetch_one(executor)
+                .await
+                .map_err(database_error)?;
+        return if found { Ok(()) } else { Err(Error::NotFound) };
+    }
+    // The metadata reader remains SELECT-only, with no helper EXECUTE grant.
+    let sql = match owner {
+        Owner::User(_) => "SELECT id FROM users WHERE id=$1",
+        Owner::Organization(_) => {
             "SELECT id FROM organizations WHERE id=$1 AND deletion_state='active'"
-        }
-        (Owner::Organization(_), true) => {
-            "SELECT id FROM organizations WHERE id=$1 AND deletion_state='active' FOR SHARE"
         }
     };
     sqlx::query_scalar::<_, String>(sql)

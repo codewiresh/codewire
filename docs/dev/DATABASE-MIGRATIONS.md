@@ -208,6 +208,48 @@ source's immutable history. It discards new records and leaves other schemas,
 databases and external OpenBao keys outside the reset boundary. This is a
 documented/tested recovery boundary, not authorization to reset live data.
 
+### Restricted broker lock authority
+
+Migration `0021_platform_broker_lock_authority.sql` adds exactly three
+fixed-query functions: `codewire_platform_lock_owner(text,text)`,
+`codewire_platform_lock_environment(text,text,text)`, and
+`codewire_platform_lock_profile(text,text,text)`. They take SHARE locks on the
+exact authorized metadata rows. PostgreSQL row locking normally needs UPDATE
+privilege; these helpers let the broker keep the lifecycle fence without
+permission to edit users, organizations, environments or profiles.
+The helpers lock the scope supplied by the caller; they do not authenticate it.
+The calling service must authorize that scope before using the store.
+
+The canonical migration owner owns these SECURITY DEFINER functions. Every
+object reference is schema-qualified, the search path is fixed to
+`pg_catalog, pg_temp`, and PUBLIC execution is revoked in the same migration
+transaction. No roles are created and no table privileges are granted here.
+Deployment must separately grant only these exact EXECUTE signatures to the
+restricted broker/enrollment login. That login must not own the functions or
+be able to assume the migration owner's role. Profile management remains an
+orchestration responsibility; credential CRUD and durable refresh transactions
+retain their own ordinary table privileges. Generic workload secrets are not
+part of the broker role.
+A non-owner orchestration/profile-management login also needs the relevant
+helper EXECUTE grants, since management operations retain these same owner and
+metadata fences. Its existing management DML rights are not granted to the broker.
+
+The 20→21 fixture independently pins migration bytes from the frozen
+`14806fb3acb3566c19c95d2be0a293579cec165c` dependency, retaining the existing
+canonical versions 1–18 pin. It checks unchanged history, credential rows,
+envelopes and table schema, plus exact installed function signatures, bodies,
+definer ownership, search path and ACLs. The existing table-schema fingerprint
+does not include functions and is not used as their security proof. Separate
+tests connect as real restricted PostgreSQL logins and exercise both permitted
+operations and denied DML/DDL/role/function access, including concurrent locks.
+
+There is no in-place downgrade. After stopping the new writers, rollback to
+version 20 uses that prior source release with only the disposable application
+`public` schema recreated. The fixture proves the three helpers and credential
+records are removed while another schema survives. Cluster roles, other
+databases and external OpenBao key material are outside this reset boundary.
+These tests and instructions do not authorize live database access or reset.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

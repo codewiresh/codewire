@@ -548,12 +548,20 @@ async fn profile_authority_role_cannot_read_material_or_call_a_provider() -> Res
         let (pool, role) = db.metadata_pool().await?;
         for statement in [
             format!("GRANT SELECT,INSERT,UPDATE,DELETE ON platform_access_profiles,platform_access_profile_revisions,platform_access_profile_entries,platform_environment_access_bindings TO {}", quote_ident(&role)),
-            format!("GRANT UPDATE(id) ON users,organizations,platform_credentials TO {}", quote_ident(&role)),
+            format!("GRANT UPDATE(id) ON platform_credentials TO {}", quote_ident(&role)),
             format!("GRANT SELECT(id,created_by,org_id,environment_operation_generation,desired_state,state),UPDATE(id) ON environments TO {}", quote_ident(&role)),
+            format!("GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text) TO {}", quote_ident(&role)),
+            format!("GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_environment(text,text,text) TO {}", quote_ident(&role)),
+            format!("GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_profile(text,text,text) TO {}", quote_ident(&role)),
         ] {
             sqlx::query(&statement).execute(&db.pool).await?;
         }
         let authority = PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog());
+        let can_edit_owners: bool = sqlx::query_scalar(
+            "SELECT pg_catalog.has_any_column_privilege(current_user,'public.users','UPDATE') \
+             OR pg_catalog.has_any_column_privilege(current_user,'public.organizations','UPDATE')",
+        ).fetch_one(&pool).await?;
+        ensure!(!can_edit_owners);
         let original = authority.create(&user, name("work"), entries(&credential.metadata.id)).await?;
         let selected = authority.create_binding(&context, binding(&context, &original)).await?;
         ensure!(authority.evaluate_grants(&context).await?.len() == 1);
