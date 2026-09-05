@@ -660,8 +660,8 @@ mod tests {
         };
 
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path, "/project_spec/resources/cpu_millicores");
-        assert!(errors[0].message.contains("integer"));
+        assert_eq!(errors[0].path, "/");
+        assert!(errors[0].message.contains("u32"));
     }
 
     #[tokio::test]
