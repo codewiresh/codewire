@@ -132,10 +132,10 @@ and secret options still fail explicitly while the remaining Forgejo #1910
 slices are completed. Repository, copy-mount, and direct-mount skills are
 captured into immutable environment-owned generations at create time and on
 explicit skill refresh. An owner-only SQLite WAL is the authoritative
-supervisor state; preview JSON state is imported exactly once. Lifecycle
-effects are journaled, disk shrink is rejected, and delete moves the
-environment tree to an operation-specific trash generation before removing
-only known runtime files.
+supervisor state. Preview JSON is not imported, and older SQLite schemas are
+unsupported. Lifecycle effects are journaled, disk shrink is rejected, and
+delete moves the environment tree to an operation-specific trash generation
+before removing only known runtime files.
 
 Developers with artifacts staged outside the default cache can point the CLI
 at them and run the complete product smoke:

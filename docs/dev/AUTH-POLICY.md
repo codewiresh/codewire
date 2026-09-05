@@ -5,15 +5,16 @@ and migration evidence live in
 `docs/plans/connect-rpc/15-auth-policy.md`; product and client code should link
 here instead of restating or extending the credential model.
 
-Codewire has exactly four credential flavors: three user-facing and one
-platform-internal.
+Codewire issues four authentication credential flavors: three user-facing and
+one platform-internal. Kubernetes supplies the separate Pod-bound identity used
+to bootstrap gateway binding.
 
 | # | Flavor | Presenter | Acquisition and boundary |
 |---|---|---|---|
 | 1 | Session cookie | Browsers | The IDP login page issues the HttpOnly, SameSite session cookie. Browsers use it for same-origin product calls and identity pages. |
 | 2 | OAuth user bearer | Native apps | PKCE authorization code where a system browser exists; OAuth device grant where none does. Both yield the same opaque access/refresh token species and use one `TokenProvider`. Product access requires exact `codewire.api`. |
 | 3 | `cw_` API key | Machines, SDKs, CI, and agents | `ApiKeyService` creates a revocable key bound to exactly one organization. It is not a user token or an OAuth client-credentials grant. |
-| 4 | HMAC sidecar token | Gateway/coordinator service hops | The control plane mints a short-lived service credential for the internal hot path. It never becomes a user credential. |
+| 4 | HMAC sidecar token | Gateway, coordinator, and daemon service hops | The control plane mints a scope-bound service credential for the internal hot path. It never becomes a user credential. |
 
 ## Credential rules
 
@@ -62,8 +63,9 @@ platform-internal.
   OAuth device grant; clients with a system browser use PKCE.
 - Public SDKs and non-interactive agents use an organization-scoped `cw_` API
   key through their generated Connect client wrapper.
-- Platform sidecars use only a scoped HMAC sidecar token; raw environment
-  bearer credentials are unsupported.
+- Gateway binding bootstrap uses an exact-audience, Pod-bound Kubernetes token.
+  Coordinator and daemon calls use distinct environment-scoped HMAC
+  capabilities; the retired environment bearer is unsupported.
 - Public repositories enter environment creation as explicit URL, revision,
   and destination data. Environment creation may resolve an already-saved
   canonical repository configuration, but the dashboard does not fetch or
