@@ -327,6 +327,9 @@ run_paths_case orchestration_host_key_authz pull_request refs/pull/910/head fals
 run_paths_case leaf_rust pull_request refs/pull/4/head false \
   'policy rust rust_pkg_codewire_cli' \
   crates/codewire-cli/src/commands/info.rs
+run_paths_case cli_bin_rust pull_request refs/pull/400/head false \
+  'policy rust rust_pkg_codewire_cli_bin' \
+  crates/codewire-cli-bin/Cargo.toml
 run_paths_case detached_desktop pull_request refs/pull/401/head false \
   'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-desktop/src/main.rs
@@ -547,10 +550,22 @@ run_paths_case preset_proto pull_request refs/pull/1101/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_proto sdk_go sdk_python sdk_ts web' \
   proto/codewire/v1/preset.proto
 run_paths_case admin_rust_proto_boundary pull_request refs/pull/1111/head false \
-  'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto' \
+  'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto rust_pkg_codewire_cli_bin' \
   crates/codewire-admin-proto/Cargo.toml \
   scripts/ci/proto/build-rust-descriptors.sh \
   scripts/ci/tests/test-admin-proto-boundary.sh
+run_paths_case admin_boundary_guard pull_request refs/pull/11110/head false \
+  'policy rust rust_pkg_codewire_cli_bin' \
+  scripts/ci/tests/test-admin-proto-boundary.sh
+run_paths_case rust_descriptor_generator pull_request refs/pull/11113/head false \
+  'contracts contracts_proto policy' \
+  scripts/ci/proto/build-rust-descriptors.sh
+run_paths_case admin_proto_crate pull_request refs/pull/11111/head false \
+  'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto' \
+  crates/codewire-admin-proto/build.rs
+run_paths_case customer_proto_crate pull_request refs/pull/11112/head false \
+  'contracts contracts_proto policy rust rust_pkg_codewire_proto' \
+  crates/codewire-proto/build.rs
 run_paths_case google_rpc_ts_template pull_request refs/pull/1114/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy' \
   proto/buf.gen.google-rpc-ts.yaml
@@ -2176,6 +2191,7 @@ for policy_owner in \
     'run_verification_shell_syntax' \
     'scripts/ci/tests/test-rust-owned-fixtures.sh' \
     'scripts/ci/tests/test-dashboard-image-network-probe.sh' \
+    'scripts/ci/tests/test-admin-proto-boundary.sh' \
     'scripts/checks/repo_checks.py license-map' \
     'scripts/checks/repo_checks.py permanent-raw-surface --self-test' \
     'scripts/checks/repo_checks.py rust-validation-source' \
@@ -2187,6 +2203,10 @@ for policy_owner in \
     exit 1
   fi
 done
+if grep -qF -- '--cli-dependencies' "$shared_policy_core"; then
+  echo 'shared Policy must not resolve the CLI dependency graph' >&2
+  exit 1
+fi
 desktop_package_args="$TMP/desktop-package-args.sh"
 # The lightweight policy lane must not resolve Rust dependencies. Exercise the
 # actual authority guard with a Cargo stub, then the actual Rust dispatch body
@@ -2201,7 +2221,16 @@ if [[ "${PRIMITIVE_CARGO_FAIL:-}" == all || "${PRIMITIVE_CARGO_FAIL:-}" == "$1" 
   exit 86
 fi
 if [[ "$1" == tree ]]; then
-  printf 'codewire-protected-store v0.0.0|%s\n' "${PRIMITIVE_GRAPH_FEATURES:-platform}"
+  if [[ " $* " == *' -p codewire-cli-bin '* ]]; then
+    case "${PRIMITIVE_CLI_GRAPH:-allowed}" in
+      allowed) printf 'codewire-cli-bin v0.0.0\ncodewire-proto v0.0.0\n' ;;
+      forbidden) printf 'codewire-cli-bin v0.0.0\ncodewire-admin-proto v0.0.0\n' ;;
+      missing_root) printf 'codewire-proto v0.0.0\n' ;;
+      *) exit 87 ;;
+    esac
+  else
+    printf 'codewire-protected-store v0.0.0|%s\n' "${PRIMITIVE_GRAPH_FEATURES:-platform}"
+  fi
 fi
 SH
 chmod +x "$primitive_probe/bin/cargo"
@@ -2220,6 +2249,79 @@ PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/default.
   echo 'default authority policy must not invoke Cargo' >&2
   exit 1
 }
+admin_guard="$ROOT/scripts/ci/tests/test-admin-proto-boundary.sh"
+: > "$primitive_probe/admin-default.log"
+PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/admin-default.log" \
+  PRIMITIVE_CARGO_FAIL=all "$admin_guard" > "$primitive_probe/admin-default.out" 2>&1
+[[ ! -s "$primitive_probe/admin-default.log" ]] || {
+  echo 'default administrator boundary Policy must not invoke Cargo' >&2
+  exit 1
+}
+grep -qF 'static customer and administrator contract boundaries passed' \
+  "$primitive_probe/admin-default.out"
+
+# Exercise every existing source/descriptor assertion against isolated copies.
+# The guard is unchanged, and even its failure cases must never invoke Cargo.
+admin_fixture="$primitive_probe/admin-static"
+mkdir -p "$admin_fixture/scripts/ci/tests" \
+  "$admin_fixture/crates/codewire-proto" "$admin_fixture/crates/codewire-admin-proto"
+cp "$admin_guard" "$admin_fixture/scripts/ci/tests/test-admin-proto-boundary.sh"
+run_admin_static_negative() {
+  local name="$1" path="$2" before="$3" after="$4" error="$5" status=0
+  local input
+  for input in crates/codewire-proto/build.rs crates/codewire-admin-proto/build.rs \
+      crates/codewire-proto/codewire_descriptor.bin \
+      crates/codewire-admin-proto/codewire_admin_descriptor.bin; do
+    cp "$ROOT/$input" "$admin_fixture/$input"
+  done
+  python3 - "$admin_fixture/$path" "$before" "$after" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+before, after = (value.encode() for value in sys.argv[2:])
+data = path.read_bytes()
+if before:
+    assert before in data, "static boundary fixture mutation no longer applies"
+    data = data.replace(before, after)
+else:
+    data += after
+path.write_bytes(data)
+PY
+  : > "$primitive_probe/admin-$name.log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$primitive_probe/admin-$name.log" \
+    PRIMITIVE_CARGO_FAIL=all "$admin_fixture/scripts/ci/tests/test-admin-proto-boundary.sh" \
+    > "$primitive_probe/admin-$name.out" 2>&1 || status=$?
+  [[ "$status" == 1 && ! -s "$primitive_probe/admin-$name.log" ]] || {
+    echo "$name: static administrator boundary did not fail without Cargo ($status)" >&2
+    exit 1
+  }
+  grep -qF "$error" "$primitive_probe/admin-$name.out"
+  if grep -qF 'boundaries passed' "$primitive_probe/admin-$name.out"; then
+    echo "$name: static administrator boundary printed success after failure" >&2
+    exit 1
+  fi
+}
+run_admin_static_negative customer_build crates/codewire-proto/build.rs \
+  '' 'codewire/admin/v1/admin.proto' \
+  'customer descriptor build includes a global-administrator proto'
+run_admin_static_negative admin_build_service crates/codewire-admin-proto/build.rs \
+  'codewire/admin/v1/admin.proto' 'removed.proto' 'admin descriptor omits AdminService'
+run_admin_static_negative admin_build_billing crates/codewire-admin-proto/build.rs \
+  'codewire/admin/v1/billing_catalog.proto' 'removed.proto' \
+  'admin descriptor omits BillingCatalogService'
+run_admin_static_negative admin_build_descriptor crates/codewire-admin-proto/build.rs \
+  'codewire_admin_descriptor.bin' 'removed.bin' \
+  'admin crate lacks a distinct checked-in descriptor input'
+run_admin_static_negative customer_descriptor crates/codewire-proto/codewire_descriptor.bin \
+  '' 'codewire.admin.v1' 'customer descriptor contains global-administrator contracts'
+run_admin_static_negative admin_descriptor_service \
+  crates/codewire-admin-proto/codewire_admin_descriptor.bin \
+  'AdminService' 'RemovedService' 'administrator descriptor omits AdminService'
+run_admin_static_negative admin_descriptor_billing \
+  crates/codewire-admin-proto/codewire_admin_descriptor.bin \
+  'BillingCatalogService' 'RemovedService' 'administrator descriptor omits BillingCatalogService'
+
 primitive_rust_body="$primitive_probe/run-rust.sh"
 awk '
   /^run_rust\(\) \{/ { capture = 1 }
@@ -2242,7 +2344,7 @@ run_rust
 SH
 run_primitive_rust_case() {
   local name="$1" token="$2" graph="$3" platform="$4" fail="${5:-}" features="${6:-platform}"
-  local log="$primitive_probe/$name.log" status=0 graph_count clippy_count test_count
+  local log="$primitive_probe/$name.log" status=0 graph_count cli_count clippy_count test_count
   : > "$log"
   PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$log" \
     PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
@@ -2259,6 +2361,12 @@ run_primitive_rust_case() {
   fi
   grep -qxF rust_pkg_ "$primitive_probe/$name.packages"
   graph_count="$(grep -c '^tree --locked -p codewire-orchestration --edges normal,build ' "$log" || true)"
+  cli_count="$(grep -cxF 'tree --locked -p codewire-cli-bin --prefix none' "$log" || true)"
+  if [[ "$token" == rust_workspace ]]; then
+    [[ "$cli_count" == 1 ]] || { echo "$name: missing or duplicate CLI graph" >&2; exit 1; }
+  else
+    [[ "$cli_count" == 0 ]] || { echo "$name: unrelated CLI graph selected" >&2; exit 1; }
+  fi
   clippy_count="$(grep -cxF 'clippy --locked -p codewire-protected-store --features platform --all-targets -- -D warnings' "$log" || true)"
   test_count="$(grep -cxF 'test --locked -p codewire-protected-store --features platform --all-targets' "$log" || true)"
   [[ "$graph_count" == "$graph" && "$clippy_count" == "$platform" ]] || {
@@ -2281,6 +2389,55 @@ run_primitive_rust_case unrelated rust_pkg_codewire_client 0 0
 run_primitive_rust_case graph_failure rust_pkg_codewire_protected_store 1 0 tree
 run_primitive_rust_case forbidden_provider rust_pkg_codewire_protected_store 1 0 '' platform,platform-test-support
 run_primitive_rust_case clippy_failure rust_pkg_codewire_protected_store 1 1 clippy
+
+run_admin_rust_case() {
+  local name="$1" tokens="$2" graph="$3" expected_status="$4" fail="${5:-}"
+  local log="$primitive_probe/admin-rust-$name.log" output="$primitive_probe/admin-rust-$name.out"
+  local status=0
+  : > "$log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$log" \
+    PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" PRIMITIVE_CARGO_FAIL="$fail" \
+    PRIMITIVE_PACKAGE_LOG="$primitive_probe/admin-rust-$name.packages" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" PRIMITIVE_CLI_GRAPH="$graph" \
+    SELECTION="|valid:v3|$tokens|complete|" \
+    bash "$primitive_probe/dispatch.sh" > "$output" 2>&1 || status=$?
+  [[ "$status" == "$expected_status" ]] || {
+    echo "$name: wrong CLI dependency boundary status ($status)" >&2
+    cat "$output" >&2
+    exit 1
+  }
+  [[ "$(grep -cxF 'tree --locked -p codewire-cli-bin --prefix none' "$log" || true)" == 1 ]] || {
+    echo "$name: missing or duplicate CLI dependency graph" >&2
+    exit 1
+  }
+  if [[ "$status" == 0 ]]; then
+    grep -qF 'customer CLI dependency boundary passed' "$output"
+  else
+    if grep -qF 'customer CLI dependency boundary passed' "$output"; then
+      echo "$name: CLI dependency boundary printed success after failure" >&2
+      exit 1
+    fi
+    [[ "$(wc -l < "$log")" == 1 ]] || {
+      echo "$name: Rust verification continued after failed CLI dependency graph" >&2
+      exit 1
+    }
+    case "$graph:$fail" in
+      *:tree) grep -qF 'CLI dependency graph failed (status=86)' "$output" ;;
+      forbidden:) grep -qF 'customer CLI transitively depends on administrator-only contracts' "$output" ;;
+      missing_root:) grep -qF 'dependency graph omits the customer CLI root' "$output" ;;
+    esac
+  fi
+}
+run_admin_rust_case cli rust_pkg_codewire_cli allowed 0
+run_admin_rust_case cli_bin rust_pkg_codewire_cli_bin allowed 0
+run_admin_rust_case admin_proto rust_pkg_codewire_admin_proto allowed 0
+run_admin_rust_case customer_proto rust_pkg_codewire_proto allowed 0
+run_admin_rust_case combined \
+  'rust_workspace|rust_pkg_codewire_cli|rust_pkg_codewire_cli_bin|rust_pkg_codewire_admin_proto|rust_pkg_codewire_proto' \
+  allowed 0
+run_admin_rust_case forbidden rust_workspace forbidden 1
+run_admin_rust_case missing_root rust_workspace missing_root 1
+run_admin_rust_case cargo_failure rust_workspace allowed 86 tree
 
 awk '
   /^rust_package_args\(\) \{/ { capture = 1 }
