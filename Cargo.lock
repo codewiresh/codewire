@@ -1869,6 +1869,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-platform-credentials"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "codewire-access",
+ "codewire-protected-store",
+ "codewire-server-core",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "codewire-project"
 version = "0.1.0"
 dependencies = [

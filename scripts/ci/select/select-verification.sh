@@ -885,10 +885,11 @@ if [ "$event_selected" = false ]; then
       crates/codewire-protected-store/src/secret_envelope.rs|\
       crates/codewire-protected-store/src/lib.rs|\
       crates/codewire-protected-store/Cargo.toml)
-        # Moving platform primitives must retain their orchestration consumer
-        # proof, including changes to the feature gates that expose them.
+        # Shared primitives retain both placement-store and orchestration
+        # consumer proof, including their exposing feature gates.
         select_token rust
         select_token rust_pkg_codewire_orchestration
+        select_token rust_pkg_codewire_platform_credentials
         select_token service_integration
         select_token service_orchestration
         ;;
@@ -899,6 +900,17 @@ if [ "$event_selected" = false ]; then
       crates/codewire-server-core/tests/go_consumer_interop.rs)
         select_token go_support
         select_token go_consumer_interop
+        ;;
+      crates/codewire-platform-credentials/*)
+        # Compilation cannot prove owner fencing, atomic material publication,
+        # least-privilege metadata access or deletion races in PostgreSQL.
+        select_token database
+        ;;
+      crates/codewire-access/*)
+        # The shared credential model is also interpreted by platform storage.
+        select_token rust
+        select_token rust_pkg_codewire_platform_credentials
+        select_token database
         ;;
       crates/codewire-server-core/tests/org_deletion_lifecycle.rs)
         # This PostgreSQL-backed lifecycle test exercises no service process,

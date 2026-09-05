@@ -113,6 +113,15 @@ assert_contract_field() {
 }
 
 policy=policy
+run_paths_case platform_credential_store pull_request refs/pull/1/head false \
+  'database policy rust rust_pkg_codewire_platform_credentials' \
+  crates/codewire-platform-credentials/src/store.rs
+run_paths_case platform_credential_store_database_tests pull_request refs/pull/1/head false \
+  'database policy rust rust_pkg_codewire_platform_credentials' \
+  crates/codewire-platform-credentials/tests/storage.rs
+run_paths_case platform_credential_shared_model pull_request refs/pull/1/head false \
+  'database policy rust rust_pkg_codewire_access rust_pkg_codewire_platform_credentials' \
+  crates/codewire-access/src/model.rs
 run_paths_case docs pull_request refs/pull/1/head false "$policy" \
   docs/guide.md README.md AGENTS.md crates/README.md
 run_paths_case ios pull_request refs/pull/1/head false 'ios policy' \
@@ -428,11 +437,11 @@ run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false 
   crates/codewire-orchestration/tests/wire_contract.rs \
   crates/codewire-orchestration/tests/wire_contract/environment.rs
 run_paths_case shared_platform_identity pull_request refs/pull/711/head false \
-  'policy rust rust_pkg_codewire_orchestration rust_pkg_codewire_protected_store service_integration service_orchestration' \
+  'policy rust rust_pkg_codewire_orchestration rust_pkg_codewire_platform_credentials rust_pkg_codewire_protected_store service_integration service_orchestration' \
   crates/codewire-protected-store/src/openbao_workload_identity.rs
 for primitive_input in src/secret_envelope.rs src/lib.rs Cargo.toml; do
   run_paths_case shared_platform_envelope pull_request refs/pull/712/head false \
-    'database policy rust rust_pkg_codewire_orchestration rust_pkg_codewire_protected_store service_integration service_orchestration service_temporal' \
+    'database policy rust rust_pkg_codewire_orchestration rust_pkg_codewire_platform_credentials rust_pkg_codewire_protected_store service_integration service_orchestration service_temporal' \
     "crates/codewire-protected-store/$primitive_input"
 done
 for store_consumer in postgres_secrets.rs tenant_secret_teardown.rs; do
