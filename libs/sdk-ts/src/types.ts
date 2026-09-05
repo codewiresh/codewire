@@ -51,13 +51,12 @@ export interface ProjectResources {
 
 export interface ProjectSecretBindings {
   project?: string;
-  include_org?: boolean;
-  include_user?: boolean;
+  organization?: boolean;
+  user?: boolean;
 }
 
-export interface ProjectCredentialReference {
-  provider?: string;
-  account: string;
+export interface ProjectAccessBinding {
+  profile: string;
 }
 
 export interface ProjectSpec {
@@ -75,7 +74,7 @@ export interface ProjectSpec {
   application_ports?: AppPort[];
   resources?: ProjectResources;
   secrets?: ProjectSecretBindings;
-  credentials?: { [key: string]: ProjectCredentialReference };
+  access?: ProjectAccessBinding;
 }
 
 interface SetupAgentInput {
@@ -354,6 +353,25 @@ export interface SecretMetadata {
   created_at?: string;
   key: string;
   updated_at?: string;
+}
+
+export type WorkloadSecretSource =
+  | "organization"
+  | "project"
+  | "user"
+  | "explicit_environment";
+
+export interface WorkloadSecretPreviewInput {
+  organization?: boolean;
+  secret_project_id?: string;
+  user?: boolean;
+  explicit_environment_keys?: string[];
+}
+
+export interface ResolvedWorkloadSecretMetadata {
+  key: string;
+  source: WorkloadSecretSource;
+  overridden_sources: WorkloadSecretSource[];
 }
 
 export interface SecretProject {

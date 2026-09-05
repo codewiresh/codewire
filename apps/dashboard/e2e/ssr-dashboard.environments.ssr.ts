@@ -13,13 +13,21 @@ const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const serverUrl = process.env.SERVER_URL || "http://127.0.0.1:8080";
-const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+const fixtureRunIdOverride = process.env.CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID;
+if (
+  fixtureRunIdOverride !== undefined
+  && !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(fixtureRunIdOverride)
+) {
+  throw new Error(
+    "CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID must be 1-32 lowercase letters, digits, or internal hyphens",
+  );
+}
+const runId = fixtureRunIdOverride ?? `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const slug = `ssr-environments-${runId}`;
 const orgName = "SSR Environment Workspace";
 const presetName = "ssr-environment-preset";
 const environmentName = "ssr-terminal-workspace";
 const repositoryUrl = `https://example.test/codewire/${slug}`;
-const seededSecretProjectName = "ssr-environment-secrets";
 const aiRepositoryUrl = "https://github.com/noeljackson/stocks";
 // Immutable workspace image accepted by the Connect-RPC C2 runtime evidence.
 // This browser proof must never turn a floating registry tag into a test input.
@@ -32,7 +40,6 @@ const workspaceRuntimeImage = process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || 
 let ownerId = "";
 let orgId = "";
 let presetId = "";
-let seededSecretProjectId = "";
 let environmentId = "";
 
 function watchDisallowedBrowserCalls(page: Page) {
@@ -121,16 +128,11 @@ async function closeTicketBeforeAttachment(page: Page, ticket: string) {
 
 async function seedPinnedPreset() {
   presetId = crypto.randomUUID();
-  seededSecretProjectId = crypto.randomUUID();
-  await sql`
-    INSERT INTO secret_projects (id, org_id, name)
-    VALUES (${seededSecretProjectId}, ${orgId}, ${seededSecretProjectName})
-  `;
   await sql`
     INSERT INTO environment_presets
       (id, org_id, name, description, build_status,
        default_cpu_millicores, default_memory_mb, default_disk_gb, default_ttl_seconds,
-       default_setup_config, default_secret_project_id)
+       default_setup_config)
     VALUES
       (${presetId}, ${orgId}, ${presetName}, 'Pinned SSR environment lifecycle preset', 'ready',
        1000, 2048, 10, 3600,
@@ -140,9 +142,8 @@ async function seedPinnedPreset() {
          agents: [{ type: "codex" }],
          app_ports: [{ port: 3000, label: "web", access: "creator" }],
          include_org_secrets: false,
-         include_user_secrets: true,
-       })},
-       ${seededSecretProjectId})
+         include_user_secrets: false,
+       })})
   `;
   await sql`
     INSERT INTO sandbox_template_config
@@ -309,7 +310,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(documentRequests).toBe(1);
   });
 
-  test("keeps image, repositories, mounts, secrets, agents, and runtime on one compact form", async ({ page, isMobile }) => {
+  test("keeps image, repositories, mounts, protected secret boundary, agents, and runtime on one compact form", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop environment-create contract");
     await page.setViewportSize({ width: 1066, height: 1103 });
 
@@ -349,9 +350,17 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
     await expect(page.getByLabel("Container port")).toHaveValue("3000");
     await expect(page.getByLabel("Port label")).toHaveValue("web");
-    await expect(page.getByLabel("Include user secrets")).toBeChecked();
-    await expect(page.getByLabel("Include organization secrets")).not.toBeChecked();
-    await expect(page.getByLabel("Project secrets")).toHaveValue(seededSecretProjectName);
+    await expect(page.getByRole("heading", { name: "Secrets", exact: true })).toBeVisible();
+    await expect(page.getByText(
+      "Saved secrets cannot be attached to a Sandbox until protected access is available.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(page.locator([
+      'input[name="secret_project"]',
+      'input[name="include_org_secrets"]',
+      'input[name="include_user_secrets"]',
+      'input[name^="agent_secret_"]',
+    ].join(","))).toHaveCount(0);
     await expect(page.getByLabel("Install Command")).toHaveValue(
       "printf 'prepared-by-preset\\n'",
     );
@@ -454,8 +463,6 @@ test.describe.serial("server-rendered environments", () => {
           memory: "",
           disk: "",
           ttl: "",
-          include_org_secrets: "true",
-          include_user_secrets: "true",
         },
         headers: { Origin: ssrUrl },
       },
@@ -495,7 +502,10 @@ test.describe.serial("server-rendered environments", () => {
     }));
     expect(dimensions.clientWidth).toBeGreaterThan(0);
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
-    await expect(page.getByLabel("Project secrets")).toHaveCSS("min-height", "37px");
+    await expect(page.getByText(
+      "Saved secrets cannot be attached to a Sandbox until protected access is available.",
+      { exact: true },
+    )).toBeVisible();
     await expect(page).toHaveScreenshot("environments-prepared-image-mobile.png");
   });
 
@@ -588,15 +598,15 @@ test.describe.serial("server-rendered environments", () => {
     expect(created.memory_mb).toBe(2048);
     expect(created.disk_gb).toBe(10);
     expect(created.ttl_seconds).toBe(3600);
-    expect(created.secret_project_id).toBe(seededSecretProjectId);
+    expect(created.secret_project_id).toBeNull();
     expect(created.setup_config).toMatchObject({
       install_command: "printf 'prepared-by-preset\\n'",
       startup_script: "printf 'started-by-preset\\n'",
       agents: [{ type: "codex" }],
       include_org_secrets: false,
+      include_user_secrets: false,
       app_ports: [{ port: 3000, label: "web", access: "creator" }],
     });
-    expect(created.setup_config.include_user_secrets ?? true).toBe(true);
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await page.reload();
     let row = page.locator("tr", { hasText: environmentName }).first();

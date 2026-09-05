@@ -4,8 +4,8 @@ description: Install the Codewire CLI and use its environment-first model.
 ---
 
 The Rust `cw` CLI creates Codewire environments and manages durable sessions
-owned by those environments. Local Docker/Lima and platform placements use the
-same session commands.
+owned by those environments. Native local and platform placements use the same
+session commands.
 
 ## Install
 
@@ -21,7 +21,6 @@ make cli-install
 
 ```bash
 cw env create --local \
-  --backend lima \
   --name my-app \
   --image workspace \
   --path .
@@ -32,8 +31,9 @@ cw logs my-app <session-id>
 cw attach my-app <session-id>
 ```
 
-Use `--backend docker` for Docker. The workspace image is the supported local
-runtime image; the retired full image is not used.
+On Linux, the local supervisor runs each environment as a native VM. The
+workspace image is the supported local runtime image; the retired full image is
+not used.
 
 ## Platform environment
 

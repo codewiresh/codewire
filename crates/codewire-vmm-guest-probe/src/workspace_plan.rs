@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{self, Read as _};
 use std::path::Path;
 
-use codewire_project::ProjectSpec;
+use codewire_project::{ProjectSpec, is_valid_environment_key};
 use oci_spec::image::ImageConfiguration;
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
@@ -22,9 +22,10 @@ use thiserror::Error;
 use crate::{SetupArchitecture, SetupHeader, Sha256Value};
 
 pub(crate) const WORKSPACE_PLAN_PATH: &str = "/generation/workspace-plan.json";
+pub(crate) const ACTIVE_WORKSPACE_PLAN_PATH: &str = "/run/codewire/workspace-plan.json";
 pub(crate) const CONTAINER_PLAN_PATH: &str = "/run/codewire-runtime/plan.json";
 
-pub(crate) const PLAN_SCHEMA_VERSION: u32 = 2;
+pub(crate) const PLAN_SCHEMA_VERSION: u32 = 5;
 pub(crate) const MAX_PLAN_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_ENTRIES: usize = 65_536;
@@ -62,8 +63,11 @@ impl fmt::Debug for WorkspaceIdentity {
 pub(crate) struct WorkspacePlan {
     pub schema_version: u32,
     pub root_generation: String,
+    pub project_sha256: String,
     pub identity: WorkspaceIdentity,
     pub environment: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explicit_environment_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workload_args: Vec<String>,
     pub workload_cwd: String,
@@ -72,6 +76,7 @@ pub(crate) struct WorkspacePlan {
     pub install_command: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub startup_script: String,
+    pub skills_selected: bool,
 }
 
 impl fmt::Debug for WorkspacePlan {
@@ -80,11 +85,17 @@ impl fmt::Debug for WorkspacePlan {
             .debug_struct("WorkspacePlan")
             .field("schema_version", &self.schema_version)
             .field("root_generation", &self.root_generation)
+            .field("project_sha256", &self.project_sha256)
             .field("identity", &self.identity)
             .field("environment_count", &self.environment.len())
+            .field(
+                "explicit_environment_key_count",
+                &self.explicit_environment_keys.len(),
+            )
             .field("workload_argument_count", &self.workload_args.len())
             .field("install_present", &!self.install_command.is_empty())
             .field("startup_present", &!self.startup_script.is_empty())
+            .field("skills_selected", &self.skills_selected)
             .finish_non_exhaustive()
     }
 }
@@ -142,6 +153,13 @@ impl WorkspacePlan {
         environment
             .entry("LANG".to_owned())
             .or_insert_with(|| "C.UTF-8".to_owned());
+        // This is a credential-free Codewire route, not inherited image or
+        // project authority. Reserve the variable so every daemon exec and
+        // image workload uses the same fail-closed protected-provider path.
+        environment.insert(
+            "CODEX_HOME".to_owned(),
+            crate::CODEX_GUEST_HOME_PATH.to_owned(),
+        );
         if let Some(shell) = environment.get("SHELL") {
             validate_absolute_path(shell)?;
             identity.shell.clone_from(shell);
@@ -177,16 +195,19 @@ impl WorkspacePlan {
         let plan = Self {
             schema_version: PLAN_SCHEMA_VERSION,
             root_generation: header.root_generation.to_string(),
+            project_sha256: Sha256Value::calculate(project_bytes).to_string(),
             identity,
             environment: environment
                 .into_iter()
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect(),
+            explicit_environment_keys: project.environment.keys().cloned().collect(),
             workload_args,
             workload_cwd,
             session_cwd: project.working_directory,
             install_command: project.install_command,
             startup_script: project.startup_script,
+            skills_selected: !project.skills.is_empty(),
         };
         plan.validate()?;
         Ok(plan)
@@ -216,6 +237,7 @@ impl WorkspacePlan {
     fn validate(&self) -> Result<(), WorkspacePlanError> {
         if self.schema_version != PLAN_SCHEMA_VERSION
             || !valid_sha256(&self.root_generation)
+            || !valid_sha256(&self.project_sha256)
             || self.identity.username.is_empty()
             || self.identity.username.len() > 256
             || !valid_account_name(&self.identity.username)
@@ -248,14 +270,31 @@ impl WorkspacePlan {
                 .checked_add(entry.len())
                 .filter(|value| *value <= MAX_PLAN_BYTES)
                 .ok_or(WorkspacePlanError::Plan)?;
-            let (key, _) = entry.split_once('=').ok_or(WorkspacePlanError::Plan)?;
+            let (key, value) = entry.split_once('=').ok_or(WorkspacePlanError::Plan)?;
             validate_environment_key(key)?;
+            if key == "CODEX_HOME" && value != crate::CODEX_GUEST_HOME_PATH {
+                return Err(WorkspacePlanError::Plan);
+            }
             if !keys.insert(key) {
                 return Err(WorkspacePlanError::Plan);
             }
         }
-        for required in ["HOME", "USER", "LOGNAME", "PATH", "SHELL"] {
+        for required in ["CODEX_HOME", "HOME", "USER", "LOGNAME", "PATH", "SHELL"] {
             if !keys.contains(required) {
+                return Err(WorkspacePlanError::Plan);
+            }
+        }
+        if self.explicit_environment_keys.len() > MAX_ENVIRONMENT
+            || self
+                .explicit_environment_keys
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(WorkspacePlanError::Plan);
+        }
+        for key in &self.explicit_environment_keys {
+            validate_environment_key(key)?;
+            if !keys.contains(key.as_str()) {
                 return Err(WorkspacePlanError::Plan);
             }
         }
@@ -317,13 +356,7 @@ fn merge_environment(
 }
 
 fn validate_environment_key(key: &str) -> Result<(), WorkspacePlanError> {
-    let mut bytes = key.bytes();
-    if key.len() > 256
-        || !bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
+    if !is_valid_environment_key(key) {
         return Err(WorkspacePlanError::Environment);
     }
     Ok(())
@@ -700,6 +733,24 @@ mod tests {
     use super::*;
     use crate::{LayerEncoding, SetupBlob, SetupLayerBlob, Sha256Value, oci_root_generation};
 
+    #[test]
+    fn guest_environment_names_use_the_canonical_project_boundary() {
+        let maximum = format!(
+            "A{}",
+            "_".repeat(codewire_project::MAX_ENVIRONMENT_KEY_BYTES - 1)
+        );
+        let too_long = format!(
+            "A{}",
+            "_".repeat(codewire_project::MAX_ENVIRONMENT_KEY_BYTES)
+        );
+
+        assert!(validate_environment_key(&maximum).is_ok());
+        assert!(matches!(
+            validate_environment_key(&too_long),
+            Err(WorkspacePlanError::Environment)
+        ));
+    }
+
     fn root() -> TempDir {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("etc")).unwrap();
@@ -764,7 +815,7 @@ mod tests {
             "os": "linux",
             "config": {
                 "User": "codewire",
-                "Env": ["PATH=/image/bin:/bin", "SHELL=/bin/bash", "IMAGE=yes"],
+                "Env": ["PATH=/image/bin:/bin", "SHELL=/bin/bash", "IMAGE=yes", "CODEX_HOME=/image/codex"],
                 "Entrypoint": ["/entrypoint.sh"],
                 "Cmd": ["sleep", "infinity"],
                 "WorkingDir": "/home/codewire"
@@ -804,9 +855,23 @@ mod tests {
         assert_eq!(plan.identity.shell, "/bin/bash");
         assert_eq!(plan.workload_cwd, "/home/codewire");
         assert_eq!(plan.session_cwd, "/workspace");
+        assert_eq!(
+            plan.project_sha256,
+            Sha256Value::calculate(&project()).to_string()
+        );
+        assert!(!plan.skills_selected);
         assert_eq!(plan.workload_args, ["/entrypoint.sh", "sleep", "infinity"]);
         assert!(plan.environment.contains(&"IMAGE=yes".to_owned()));
         assert!(plan.environment.contains(&"PROJECT=yes".to_owned()));
+        assert!(
+            plan.environment
+                .contains(&format!("CODEX_HOME={}", crate::CODEX_GUEST_HOME_PATH))
+        );
+        assert!(
+            !plan
+                .environment
+                .contains(&"CODEX_HOME=/image/codex".to_owned())
+        );
         assert_eq!(
             WorkspacePlan::decode(&plan.encode().unwrap()).unwrap(),
             plan
@@ -877,6 +942,15 @@ mod tests {
         value["schema_version"] = 1.into();
         assert!(WorkspacePlan::decode(&serde_json::to_vec(&value).unwrap()).is_err());
         assert!(WorkspacePlan::decode(&serde_json::to_vec_pretty(&plan).unwrap()).is_err());
+
+        let mut wrong_codex_home = plan.clone();
+        let entry = wrong_codex_home
+            .environment
+            .iter_mut()
+            .find(|entry| entry.starts_with("CODEX_HOME="))
+            .unwrap();
+        *entry = "CODEX_HOME=/tmp/attacker".to_owned();
+        assert!(wrong_codex_home.encode().is_err());
 
         plan.identity.username = "attacker-user-canary".into();
         plan.workload_args = vec!["attacker-command-canary".into()];

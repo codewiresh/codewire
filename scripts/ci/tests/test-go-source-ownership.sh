@@ -27,7 +27,6 @@ done
 
 expected_modules="$(cat <<'EOF'
 libs/gen-go/go.mod
-libs/sdk-examples/run-claude/go/go.mod
 libs/sdk-go/go.mod
 libs/tailnet/go.mod
 tests/contract/go.mod
@@ -38,7 +37,7 @@ actual_modules="$(
   find . -name go.mod -not -path './.git/*' -printf '%P\n' | LC_ALL=C sort
 )"
 if [ "$actual_modules" != "$expected_modules" ]; then
-  echo 'Go module ownership differs from the accepted six-module boundary' >&2
+  echo 'Go module ownership differs from the accepted four-module boundary' >&2
   diff -u <(printf '%s\n' "$expected_modules") <(printf '%s\n' "$actual_modules") >&2 || true
   exit 1
 fi

@@ -58,6 +58,7 @@ codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true }
+codewire-workload-secrets = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["ws"] }

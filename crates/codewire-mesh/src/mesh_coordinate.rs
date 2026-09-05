@@ -68,6 +68,7 @@ impl MeshCoordinatorService for MeshCoordinateService {
                 .derp_url
                 .as_deref()
                 .unwrap_or(&self.state.config.base_url),
+            &self.state.config.stun_servers,
         )
         .map_err(ConnectError::internal)?;
 
@@ -91,6 +92,43 @@ impl MeshCoordinateState {
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Registry::default())),
+        }
+    }
+
+    /// Disconnect the active peer addressed by this exact registered node.
+    /// A later connection needs a fresh one-use enrollment and is therefore a
+    /// separate authorization decision.
+    pub(crate) fn revoke_node(&self, network_id: &str, node_name: &str) {
+        let peer_id = stable_peer_id(network_id, "peer", node_name);
+        let updates = {
+            let mut registry = self.inner.lock().unwrap();
+            if registry
+                .peers
+                .get(&peer_id)
+                .is_none_or(|peer| peer.network_id != network_id)
+            {
+                return;
+            }
+            registry.peers.remove(&peer_id);
+            let affected = registry
+                .tunnels
+                .iter()
+                .filter_map(|(dial, target)| {
+                    ((*dial == peer_id) || (*target == peer_id)).then_some((*dial, *target))
+                })
+                .collect::<Vec<_>>();
+            let mut updates = Vec::new();
+            for (dial, target) in affected {
+                registry.tunnels.remove(&dial);
+                let recipient = if dial == peer_id { target } else { dial };
+                if let Some(peer) = registry.peers.get(&recipient) {
+                    updates.push(peer.tx.clone());
+                }
+            }
+            updates
+        };
+        for tx in updates {
+            let _ = tx.try_send(CoordinateEvent::Remove(peer_id));
         }
     }
 }
@@ -133,33 +171,47 @@ async fn authorize(
         .ok_or_else(|| AppError::BadRequest("coordinate role is required".into()))?;
     let credential =
         forwarded_mesh_credential(ctx.headers()).map_err(|_| AppError::Unauthorized)?;
-    let authorization = state
-        .product
-        .authorize_coordinate(&org_id, &network_id, credential)
-        .await?;
-
-    match role {
-        MeshCoordinateRole::Peer
-            if authorization.principal_kind == MeshAuthorizationPrincipalKind::Environment
-                && authorization.credential_kind
-                    == MeshAuthorizationCredentialKind::EnvironmentToken => {}
-        MeshCoordinateRole::Dial
-            if authorization.principal_kind == MeshAuthorizationPrincipalKind::User
-                && matches!(
+    let node_enrollment = credential.node_enrollment_code().is_some();
+    let peer_id = match role {
+        MeshCoordinateRole::Peer if node_enrollment => {
+            let redeemed = state
+                .product
+                .redeem_coordinate_enrollment(&org_id, &network_id, &credential)
+                .await?;
+            stable_peer_id(&network_id, "peer", &redeemed.node.name)
+        }
+        MeshCoordinateRole::Peer => {
+            let authorization = state
+                .product
+                .authorize_coordinate(&org_id, &network_id, credential)
+                .await?;
+            if authorization.principal_kind != MeshAuthorizationPrincipalKind::Environment
+                || authorization.credential_kind
+                    != MeshAuthorizationCredentialKind::EnvironmentToken
+            {
+                return Err(AppError::Forbidden);
+            }
+            stable_peer_id(&network_id, "peer", &authorization.principal_id)
+        }
+        MeshCoordinateRole::Dial if node_enrollment => return Err(AppError::Forbidden),
+        MeshCoordinateRole::Dial => {
+            let authorization = state
+                .product
+                .authorize_coordinate(&org_id, &network_id, credential)
+                .await?;
+            if authorization.principal_kind != MeshAuthorizationPrincipalKind::User
+                || !matches!(
                     authorization.credential_kind.as_known(),
                     Some(
                         MeshAuthorizationCredentialKind::OauthBearer
                             | MeshAuthorizationCredentialKind::ApiKey
                     )
-                ) => {}
-        _ => return Err(AppError::Forbidden),
-    }
-
-    let peer_id = match role {
-        MeshCoordinateRole::Peer => {
-            stable_peer_id(&network_id, "environment", &authorization.principal_id)
+                )
+            {
+                return Err(AppError::Forbidden);
+            }
+            Uuid::new_v4()
         }
-        MeshCoordinateRole::Dial => Uuid::new_v4(),
         MeshCoordinateRole::Unspecified => unreachable!("validated above"),
     };
     Ok(AuthorizedPeer {
@@ -251,7 +303,7 @@ async fn run_session(
                             }
                             continue;
                         }
-                        let target_id = stable_peer_id(&peer.network_id, "environment", target);
+                        let target_id = stable_peer_id(&peer.network_id, "peer", target);
                         add_tunnel(&state, peer.peer_id, target_id);
                     }
                     Some(mesh_coordinator_service_coordinate_request::Msg::Ping(_)) => {}
@@ -476,7 +528,10 @@ fn tailnet_node_to_proto(node: Node) -> Result<CoordinateNode, ConnectError> {
     .map_err(|_| ConnectError::internal("encode node"))
 }
 
-fn derp_map_from_base_url(base_url: &str) -> Result<JsonValue, String> {
+fn derp_map_from_base_url(
+    base_url: &str,
+    stun_servers: &[crate::config::StunServerConfig],
+) -> Result<JsonValue, String> {
     let url = Url::parse(base_url.trim()).map_err(|error| error.to_string())?;
     let hostname = url
         .host_str()
@@ -502,13 +557,23 @@ fn derp_map_from_base_url(base_url: &str) -> Result<JsonValue, String> {
     if url.scheme() == "http" {
         node.insert("InsecureForTests".to_owned(), JsonValue::Bool(true));
     }
+    let mut nodes = vec![JsonValue::Object(node)];
+    for (index, server) in stun_servers.iter().enumerate() {
+        nodes.push(serde_json::json!({
+            "Name": if index == 0 { "1s".to_owned() } else { format!("1s{}", index + 1) },
+            "RegionID": 1,
+            "HostName": server.host,
+            "STUNOnly": true,
+            "STUNPort": server.port,
+        }));
+    }
     Ok(serde_json::json!({
         "Regions": {
             "1": {
                 "RegionID": 1,
                 "RegionCode": "cw",
                 "RegionName": "Codewire Embedded",
-                "Nodes": [JsonValue::Object(node)],
+                "Nodes": nodes,
             }
         }
     }))
@@ -520,19 +585,21 @@ mod tests {
     use codewire_proto::codewire::internal::v1::{
         MeshCoordinatorServiceClient, mesh_coordinator_service_coordinate_response,
     };
+    use codewire_proto::codewire::v1::{MeshNodeServiceClient, RevokeMeshNodeRequest};
     use codewire_tailnet::node::{DiscoPublic, NodePublic, prefix_from_uuid};
     use connectrpc::Protocol;
     use connectrpc::client::{ClientConfig, HttpClient};
 
     use crate::config::{Config, LocalMeshAuthorizationConfig};
     use crate::mesh_authorization::hash_local_environment_token;
-    use crate::store::{MemoryStore, MeshStore};
+    use crate::store::{MemoryStore, MeshStore, NodeEnrollment, NodeRecord};
 
     fn config() -> Config {
         Config {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             base_url: "http://mesh.test".to_owned(),
             derp_url: None,
+            stun_servers: Vec::new(),
             database_url: None,
             mesh_authorization: None,
             local_authorization: Some(LocalMeshAuthorizationConfig {
@@ -550,6 +617,12 @@ mod tests {
             .network_create_owned("network-test", "org-test")
             .await
             .unwrap();
+        start_with_store(store).await
+    }
+
+    async fn start_with_store(
+        store: Arc<MemoryStore>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let app = crate::server::router_with_store(config(), store);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -568,6 +641,24 @@ mod tests {
         (address, task)
     }
 
+    async fn seed_enrollment(store: &MemoryStore, code: &str, node_name: &str) {
+        store
+            .node_enrollment_create(NodeEnrollment {
+                id: format!("enrollment-{}", code.trim_start_matches("cw_enr_")),
+                network_id: "network-test".to_owned(),
+                owner_subject: "local-machine:environment-test".to_owned(),
+                issued_by: "local-machine:environment-test".to_owned(),
+                node_name: node_name.to_owned(),
+                token_hash: format!("{:x}", Sha256::digest(code.as_bytes())),
+                uses_remaining: 1,
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+                created_at: chrono::Utc::now(),
+                redeemed_at: None,
+            })
+            .await
+            .unwrap();
+    }
+
     fn client(
         address: std::net::SocketAddr,
         token: &str,
@@ -584,6 +675,17 @@ mod tests {
             HttpClient::plaintext_http2_only(),
             ClientConfig::new(format!("http://{address}").parse().unwrap())
                 .with_protocol(protocol)
+                .with_default_header(axum::http::header::AUTHORIZATION, format!("Bearer {token}")),
+        )
+    }
+
+    fn node_client(
+        address: std::net::SocketAddr,
+        token: &str,
+    ) -> MeshNodeServiceClient<HttpClient> {
+        MeshNodeServiceClient::new(
+            HttpClient::plaintext_http2_only(),
+            ClientConfig::new(format!("http://{address}").parse().unwrap())
                 .with_default_header(axum::http::header::AUTHORIZATION, format!("Bearer {token}")),
         )
     }
@@ -642,7 +744,7 @@ mod tests {
         let state = MeshCoordinateState::new();
         let network_id = "network-test".to_owned();
         let dial_id = Uuid::new_v4();
-        let target_id = stable_peer_id(&network_id, "environment", "environment-test");
+        let target_id = stable_peer_id(&network_id, "peer", "environment-test");
         let (dial_tx, mut dial_rx) = mpsc::channel(4);
         let (target_tx, _target_rx) = mpsc::channel(4);
         register(
@@ -739,7 +841,7 @@ mod tests {
         assert_eq!(update.nodes.len(), 1);
         assert_eq!(
             update.nodes[0].id,
-            stable_peer_id("network-test", "environment", "environment-test").to_string()
+            stable_peer_id("network-test", "peer", "environment-test").to_string()
         );
 
         replacement_peer.close_send();
@@ -749,6 +851,253 @@ mod tests {
             Some(mesh_coordinator_service_coordinate_response::Msg::PeerRemove(_))
         ));
         dial.close_send();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn one_use_enrollment_opens_one_named_peer_and_revocation_closes_it() {
+        let store = Arc::new(MemoryStore::new());
+        store
+            .network_create_owned("network-test", "org-test")
+            .await
+            .unwrap();
+        let code = "cw_enr_coordinate-once";
+        let standby_code = "cw_enr_coordinate-standby";
+        let node_name = "native-environment";
+        seed_enrollment(&store, code, node_name).await;
+        seed_enrollment(&store, standby_code, node_name).await;
+        let (address, server) = start_with_store(Arc::clone(&store)).await;
+
+        let mut peer = client(address, code).coordinate().await.unwrap();
+        peer.send(request(hello(MeshCoordinateRole::Peer)))
+            .await
+            .unwrap();
+        assert!(matches!(
+            response(&mut peer).await.msg,
+            Some(mesh_coordinator_service_coordinate_response::Msg::DerpMap(
+                _
+            ))
+        ));
+        let registered = store
+            .node_get("network-test", node_name)
+            .await
+            .unwrap()
+            .expect("coordinate enrollment did not register its fixed node");
+        assert_eq!(registered.enrollment_id, "enrollment-coordinate-once");
+        assert_eq!(registered.peer_url, "");
+
+        let mut replay = client(address, code).coordinate().await.unwrap();
+        replay
+            .send(request(hello(MeshCoordinateRole::Peer)))
+            .await
+            .unwrap();
+        let error = replay
+            .message::<MeshCoordinatorServiceCoordinateResponse>()
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::PermissionDenied);
+
+        node_client(address, "cw_test")
+            .revoke_mesh_node(RevokeMeshNodeRequest {
+                org_id: "org-test".to_owned(),
+                network_id: "network-test".to_owned(),
+                node_name: node_name.to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .node_get("network-test", node_name)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let standby = store
+            .node_enrollment_get_by_token_hash(&format!(
+                "{:x}",
+                Sha256::digest(standby_code.as_bytes())
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(standby.uses_remaining, 0);
+        let mut revoked_standby = client(address, standby_code).coordinate().await.unwrap();
+        revoked_standby
+            .send(request(hello(MeshCoordinateRole::Peer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            revoked_standby
+                .message::<MeshCoordinatorServiceCoordinateResponse>()
+                .await
+                .unwrap_err()
+                .code,
+            connectrpc::ErrorCode::PermissionDenied
+        );
+        let ended = tokio::time::timeout(
+            Duration::from_secs(2),
+            peer.message::<MeshCoordinatorServiceCoordinateResponse>(),
+        )
+        .await
+        .expect("revocation did not close the active coordinate stream")
+        .expect("revoked coordinate stream returned a transport error");
+        assert!(ended.is_none(), "revoked coordinate stream remained active");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn enrollment_coordinate_setup_rejects_scope_role_and_unnamed_capabilities() {
+        let store = Arc::new(MemoryStore::new());
+        store
+            .network_create_owned("network-test", "org-test")
+            .await
+            .unwrap();
+        for (code, node_name) in [
+            ("cw_enr_wrong-role", "role-node"),
+            ("cw_enr_wrong-org", "org-node"),
+            ("cw_enr_wrong-network", "network-node"),
+            ("cw_enr_unnamed", ""),
+            ("cw_enr_owned", "owned-node"),
+        ] {
+            seed_enrollment(&store, code, node_name).await;
+        }
+        store
+            .node_register(NodeRecord {
+                network_id: "network-test".to_owned(),
+                name: "owned-node".to_owned(),
+                peer_url: "https://existing.mesh.test".to_owned(),
+                github_id: None,
+                owner_subject: "different-owner".to_owned(),
+                authorized_by: "different-owner".to_owned(),
+                enrollment_id: "existing-enrollment".to_owned(),
+                authorized_at: chrono::Utc::now(),
+                last_seen_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let (address, server) = start_with_store(Arc::clone(&store)).await;
+
+        let mut wrong_role = client(address, "cw_enr_wrong-role")
+            .coordinate()
+            .await
+            .unwrap();
+        wrong_role
+            .send(request(hello(MeshCoordinateRole::Dial)))
+            .await
+            .unwrap();
+        assert_eq!(
+            wrong_role
+                .message::<MeshCoordinatorServiceCoordinateResponse>()
+                .await
+                .unwrap_err()
+                .code,
+            connectrpc::ErrorCode::PermissionDenied
+        );
+
+        let mut wrong_org = client(address, "cw_enr_wrong-org")
+            .coordinate()
+            .await
+            .unwrap();
+        let mut wrong_org_hello = hello(MeshCoordinateRole::Peer);
+        wrong_org_hello.org_id = "org-other".to_owned();
+        wrong_org.send(request(wrong_org_hello)).await.unwrap();
+        assert_eq!(
+            wrong_org
+                .message::<MeshCoordinatorServiceCoordinateResponse>()
+                .await
+                .unwrap_err()
+                .code,
+            connectrpc::ErrorCode::PermissionDenied
+        );
+
+        let mut wrong_network = client(address, "cw_enr_wrong-network")
+            .coordinate()
+            .await
+            .unwrap();
+        let mut wrong_network_hello = hello(MeshCoordinateRole::Peer);
+        wrong_network_hello.network_id = "network-other".to_owned();
+        wrong_network
+            .send(request(wrong_network_hello))
+            .await
+            .unwrap();
+        assert_eq!(
+            wrong_network
+                .message::<MeshCoordinatorServiceCoordinateResponse>()
+                .await
+                .unwrap_err()
+                .code,
+            connectrpc::ErrorCode::PermissionDenied
+        );
+
+        let mut unnamed = client(address, "cw_enr_unnamed")
+            .coordinate()
+            .await
+            .unwrap();
+        unnamed
+            .send(request(hello(MeshCoordinateRole::Peer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            unnamed
+                .message::<MeshCoordinatorServiceCoordinateResponse>()
+                .await
+                .unwrap_err()
+                .code,
+            connectrpc::ErrorCode::PermissionDenied
+        );
+
+        let mut owned = client(address, "cw_enr_owned").coordinate().await.unwrap();
+        owned
+            .send(request(hello(MeshCoordinateRole::Peer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            owned
+                .message::<MeshCoordinatorServiceCoordinateResponse>()
+                .await
+                .unwrap_err()
+                .code,
+            connectrpc::ErrorCode::AlreadyExists
+        );
+        let existing = store
+            .node_get("network-test", "owned-node")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(existing.owner_subject, "different-owner");
+        assert_eq!(existing.enrollment_id, "existing-enrollment");
+
+        for (code, node_name) in [
+            ("cw_enr_wrong-role", "role-node"),
+            ("cw_enr_wrong-org", "org-node"),
+            ("cw_enr_wrong-network", "network-node"),
+            ("cw_enr_unnamed", ""),
+            ("cw_enr_owned", "owned-node"),
+        ] {
+            let enrollment = store
+                .node_enrollment_get_by_token_hash(&format!(
+                    "{:x}",
+                    Sha256::digest(code.as_bytes())
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                enrollment.uses_remaining, 1,
+                "rejected coordinate setup consumed {node_name:?}"
+            );
+        }
+
+        let mut correctly_bound = client(address, "cw_enr_wrong-role")
+            .coordinate()
+            .await
+            .unwrap();
+        correctly_bound
+            .send(request(hello(MeshCoordinateRole::Peer)))
+            .await
+            .unwrap();
+        let _ = response(&mut correctly_bound).await;
         server.abort();
     }
 

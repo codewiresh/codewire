@@ -66,6 +66,20 @@ impl fmt::Debug for ForwardedMeshCredential {
     }
 }
 
+impl ForwardedMeshCredential {
+    /// Return the setup-only node enrollment capability when the caller
+    /// presented that exact bearer class. Callers must consume it locally and
+    /// must not fall through to hosted authorization forwarding.
+    pub(crate) fn node_enrollment_code(&self) -> Option<&str> {
+        let Self::Authorization(value) = self else {
+            return None;
+        };
+        value
+            .strip_prefix("Bearer ")
+            .filter(|value| value.starts_with("cw_enr_") && value.len() > "cw_enr_".len())
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ForwardedMeshCredentialError {
     #[error("exactly one session cookie or Authorization header is required")]

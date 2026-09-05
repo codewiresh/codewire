@@ -7,6 +7,7 @@ use std::process::Stdio;
 use portable_pty::CommandBuilder;
 use serde::Serialize;
 use uuid::Uuid;
+use zeroize::Zeroize as _;
 
 const MAX_PROCESS_SPEC_BYTES: usize = 1024 * 1024;
 
@@ -161,6 +162,9 @@ impl PreparedProcess {
 
 impl Drop for PreparedProcess {
     fn drop(&mut self) {
+        for (_, value) in &mut self.environment {
+            value.zeroize();
+        }
         if let Some(path) = self.pending_process_spec.take() {
             let _ = fs::remove_file(path);
         }

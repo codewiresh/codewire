@@ -6,6 +6,7 @@ import {
 } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
 import {
   AppPortSchema,
+  ProjectAccessBindingSchema,
   ProjectAgentsSchema,
   ProjectCredentialReferenceSchema,
   ProjectResourcesSchema,
@@ -49,8 +50,10 @@ import {
   type Preset as ProtoPreset,
 } from "@codewire/proto-ts/gen/codewire/v1/preset_pb";
 import {
+  WorkloadSecretSource as ProtoWorkloadSecretSource,
   SecretMetadataSchema,
   SecretProjectSchema,
+  type ResolvedWorkloadSecretMetadata as ProtoResolvedWorkloadSecretMetadata,
   type SecretMetadata as ProtoSecretMetadata,
   type SecretProject as ProtoSecretProject,
 } from "@codewire/proto-ts/gen/codewire/v1/secret_pb";
@@ -70,10 +73,12 @@ import type {
   ListEnvironmentsParams,
   ProjectSkillSelection,
   ProjectSpec,
+  ResolvedWorkloadSecretMetadata,
   SecretMetadata,
   SecretProject,
   TemplateData,
   UpdateTemplateRequest,
+  WorkloadSecretSource,
 } from "./types.js";
 
 const apiKeyDescriptorFields = new Map([
@@ -414,15 +419,11 @@ function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec 
     secrets: value.secrets
       ? {
           project: optionalString(value.secrets.project),
-          include_org: value.secrets.includeOrg,
-          include_user: value.secrets.includeUser,
+          organization: value.secrets.organization,
+          user: value.secrets.user,
         }
       : undefined,
-    credentials: Object.keys(value.credentials).length
-      ? Object.fromEntries(Object.entries(value.credentials).map(([alias, credential]) => [alias, {
-          provider: optionalString(credential.provider), account: credential.account,
-        }]))
-      : undefined,
+    access: value.access ? { profile: value.access.profile } : undefined,
   };
 }
 
@@ -463,15 +464,11 @@ function toProtoProjectSpec(value: ProjectSpec | undefined) {
     secrets: value.secrets
       ? {
           project: value.secrets.project ?? "",
-          includeOrg: value.secrets.include_org,
-          includeUser: value.secrets.include_user,
+          organization: value.secrets.organization ?? false,
+          user: value.secrets.user ?? false,
         }
       : undefined,
-    credentials: value.credentials
-      ? Object.fromEntries(Object.entries(value.credentials).map(([alias, credential]) => [alias, {
-          provider: credential.provider ?? "", account: credential.account,
-        }]))
-      : {},
+    access: value.access ? { profile: value.access.profile } : undefined,
   };
 }
 
@@ -683,6 +680,31 @@ export function fromProtoSecretMetadata(value: ProtoSecretMetadata): SecretMetad
   };
 }
 
+function workloadSecretSource(value: ProtoWorkloadSecretSource): WorkloadSecretSource {
+  switch (value) {
+    case ProtoWorkloadSecretSource.ORGANIZATION:
+      return "organization";
+    case ProtoWorkloadSecretSource.PROJECT:
+      return "project";
+    case ProtoWorkloadSecretSource.USER:
+      return "user";
+    case ProtoWorkloadSecretSource.EXPLICIT_ENVIRONMENT:
+      return "explicit_environment";
+    default:
+      throw new Error(`codewire: invalid workload-secret source ${value}`);
+  }
+}
+
+export function fromProtoResolvedWorkloadSecretMetadata(
+  value: ProtoResolvedWorkloadSecretMetadata,
+): ResolvedWorkloadSecretMetadata {
+  return {
+    key: value.key,
+    source: workloadSecretSource(value.source),
+    overridden_sources: value.overriddenSources.map(workloadSecretSource),
+  };
+}
+
 export function fromProtoSecretProject(value: ProtoSecretProject): SecretProject {
   return {
     created_at: timestampString(value.createdAt) ?? "",
@@ -872,13 +894,18 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "cpu_millicores"], [2, "memory_mib"], [3, "disk_gib"],
   ]));
   assertDescriptorCoverage("project secrets", ProjectSecretBindingsSchema.fields, new Map([
-    [1, "project"], [2, "include_org"], [3, "include_user"],
+    [1, "project"], [2, "include_org"], [3, "include_user"], [4, "organization"], [5, "user"],
   ]));
-  assertDescriptorCoverage("project credential reference", ProjectCredentialReferenceSchema.fields, new Map([
+  // Deprecated preview descriptors remain as wire tombstones but are not part
+  // of the ergonomic SDK model or its outbound conversion.
+  assertDescriptorCoverage("project credential tombstone", ProjectCredentialReferenceSchema.fields, new Map([
     [1, "provider"], [2, "account"],
   ]));
+  assertDescriptorCoverage("project access", ProjectAccessBindingSchema.fields, new Map([
+    [1, "profile"],
+  ]));
   assertDescriptorCoverage("project spec", ProjectSpecSchema.fields, new Map([
-    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [10, "agent_environment"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [15, "credentials"], [16, "workspace_mode"],
+    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [10, "agent_environment"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [15, "credentials"], [16, "workspace_mode"], [17, "access"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"],

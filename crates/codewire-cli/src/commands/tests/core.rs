@@ -12,16 +12,6 @@
         assert!(!stopped.to_ascii_lowercase().contains("deleted"));
     }
 
-    fn named_local_instance(backend: &str) -> config::LocalInstanceConfig {
-        config::LocalInstanceConfig {
-            name: "repo".to_string(),
-            backend: backend.to_string(),
-            runtime_name: "cw-repo".to_string(),
-            workdir: LOCAL_WORKSPACE_PATH.to_string(),
-            ..config::LocalInstanceConfig::default()
-        }
-    }
-
     #[test]
     fn replace_managed_ssh_section_appends_go_compatible_block() {
         let rendered =
@@ -343,6 +333,45 @@
         save_login_platform_config(&paths, "https://new.codewire.sh", &credentials, None).unwrap();
         let saved = config::load_platform_config(&paths.platform_config_dir).unwrap();
         assert!(saved.default_org.is_empty());
+    }
+
+    #[test]
+    fn platform_login_projects_only_hosted_mesh_owner_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = ResolvePaths::from_home_and_env(
+            home.path().to_path_buf(),
+            &config::MapEnv::default(),
+        );
+        let credentials = codewire_client::OAuthCredentials::new(
+            "https://api.codewire-dev.sh",
+            codewire_client::CODEWIRE_CLI_OAUTH_CLIENT_ID,
+            "synthetic-access-canary",
+            "synthetic-refresh-canary",
+            u64::MAX,
+            codewire_client::CODEWIRE_CLI_OAUTH_SCOPES,
+        )
+        .unwrap();
+
+        save_login_platform_config(
+            &paths,
+            "https://api.codewire-dev.sh",
+            &credentials,
+            Some("org-alpha"),
+        )
+        .unwrap();
+
+        let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.auth_source, LocalMeshOwnerAuthSource::HostedCurrent);
+        assert_eq!(owner.mesh_url, "https://mesh.codewire-dev.sh");
+        assert_eq!(owner.organization_id, "org-alpha");
+        assert!(owner.selected_network.is_none());
+        assert!(!owner.auto_connect);
+        let encoded = fs::read_to_string(local_mesh_owner_context_path(&paths.mesh_data_dir))
+            .unwrap();
+        assert!(!encoded.contains("synthetic-access-canary"));
+        assert!(!encoded.contains("synthetic-refresh-canary"));
     }
 
     #[test]
@@ -761,11 +790,11 @@
         let target = config::default_current_target();
 
         assert_eq!(
-            format_current_target_text(&target, None, None, Some("project-alpha"), false),
+            format_current_target_text(&target, None, Some("project-alpha"), false),
             "local  network: project-alpha\n"
         );
         assert_eq!(
-            format_current_target_text(&target, None, None, Some("project-alpha"), true),
+            format_current_target_text(&target, None, Some("project-alpha"), true),
             concat!(
                 "Kind:      local\n",
                 "Network:   project-alpha\n",

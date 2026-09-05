@@ -44,34 +44,33 @@ type ProjectResources struct {
 
 // ProjectSecretBindings selects workload-secret scopes without carrying values.
 type ProjectSecretBindings struct {
-	Project     string `json:"project,omitempty"`
-	IncludeOrg  *bool  `json:"include_org,omitempty"`
-	IncludeUser *bool  `json:"include_user,omitempty"`
+	Project      string `json:"project,omitempty"`
+	Organization bool   `json:"organization,omitempty"`
+	User         bool   `json:"user,omitempty"`
 }
 
-// ProjectCredentialReference selects an opaque placement-owned account.
-type ProjectCredentialReference struct {
-	Provider string `json:"provider,omitempty"`
-	Account  string `json:"account"`
+// ProjectAccessBinding selects one scope-qualified access profile.
+type ProjectAccessBinding struct {
+	Profile string `json:"profile"`
 }
 
 // ProjectSpec is the versioned placement-neutral codewire.yaml model.
 type ProjectSpec struct {
-	SchemaVersion    uint32                                `json:"schema_version"`
-	Preset           string                                `json:"preset,omitempty"`
-	Image            string                                `json:"image,omitempty"`
-	Repositories     []RepoEntry                           `json:"repositories,omitempty"`
-	WorkingDirectory string                                `json:"working_directory"`
-	InstallCommand   string                                `json:"install_command,omitempty"`
-	StartupScript    string                                `json:"startup_script,omitempty"`
-	Environment      map[string]string                     `json:"environment,omitempty"`
-	Agents           *ProjectAgents                        `json:"agents,omitempty"`
-	AgentEnvironment map[string]string                     `json:"agent_environment,omitempty"`
-	Skills           []ProjectSkillSelection               `json:"skills,omitempty"`
-	ApplicationPorts []AppPort                             `json:"application_ports,omitempty"`
-	Resources        *ProjectResources                     `json:"resources,omitempty"`
-	Secrets          *ProjectSecretBindings                `json:"secrets,omitempty"`
-	Credentials      map[string]ProjectCredentialReference `json:"credentials,omitempty"`
+	SchemaVersion    uint32                  `json:"schema_version"`
+	Preset           string                  `json:"preset,omitempty"`
+	Image            string                  `json:"image,omitempty"`
+	Repositories     []RepoEntry             `json:"repositories,omitempty"`
+	WorkingDirectory string                  `json:"working_directory"`
+	InstallCommand   string                  `json:"install_command,omitempty"`
+	StartupScript    string                  `json:"startup_script,omitempty"`
+	Environment      map[string]string       `json:"environment,omitempty"`
+	Agents           *ProjectAgents          `json:"agents,omitempty"`
+	AgentEnvironment map[string]string       `json:"agent_environment,omitempty"`
+	Skills           []ProjectSkillSelection `json:"skills,omitempty"`
+	ApplicationPorts []AppPort               `json:"application_ports,omitempty"`
+	Resources        *ProjectResources       `json:"resources,omitempty"`
+	Secrets          *ProjectSecretBindings  `json:"secrets,omitempty"`
+	Access           *ProjectAccessBinding   `json:"access,omitempty"`
 }
 
 // SetupConfig describes the setup configuration embedded in a preset.
@@ -380,6 +379,31 @@ type SecretMetadata struct {
 	CreatedAt *string `json:"created_at,omitempty"`
 	Key       string  `json:"key"`
 	UpdatedAt *string `json:"updated_at,omitempty"`
+}
+
+// WorkloadSecretSource names one source in workload-secret precedence order.
+type WorkloadSecretSource string
+
+const (
+	WorkloadSecretSourceOrganization        WorkloadSecretSource = "organization"
+	WorkloadSecretSourceProject             WorkloadSecretSource = "project"
+	WorkloadSecretSourceUser                WorkloadSecretSource = "user"
+	WorkloadSecretSourceExplicitEnvironment WorkloadSecretSource = "explicit_environment"
+)
+
+// WorkloadSecretPreviewInput selects the metadata sources to preview.
+type WorkloadSecretPreviewInput struct {
+	Organization            bool     `json:"organization,omitempty"`
+	SecretProjectID         string   `json:"secret_project_id,omitempty"`
+	User                    bool     `json:"user,omitempty"`
+	ExplicitEnvironmentKeys []string `json:"explicit_environment_keys,omitempty"`
+}
+
+// ResolvedWorkloadSecretMetadata describes one winning key without its value.
+type ResolvedWorkloadSecretMetadata struct {
+	Key               string                 `json:"key"`
+	Source            WorkloadSecretSource   `json:"source"`
+	OverriddenSources []WorkloadSecretSource `json:"overridden_sources,omitempty"`
 }
 
 // ListSecretsOutputBody holds organization or user secret metadata.

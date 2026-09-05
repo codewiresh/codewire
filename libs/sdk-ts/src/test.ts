@@ -22,6 +22,7 @@ import {
   SecretMetadataSchema,
   SecretProjectSchema,
   SecretService,
+  WorkloadSecretSource as ProtoWorkloadSecretSource,
 } from "@codewire/proto-ts/gen/codewire/v1/secret_pb";
 import { Codewire } from "./index.js";
 import { Environment } from "./environment.js";
@@ -502,6 +503,25 @@ async function runTests() {
       requireTestKey(context);
       return {};
     },
+    previewWorkloadSecretResolution: (request, context) => {
+      requireTestKey(context);
+      assert(
+        request.orgId === "org_test" &&
+          request.organization &&
+          request.secretProjectId === "sp_1" &&
+          request.user &&
+          request.explicitEnvironmentKeys.length === 1 &&
+          request.explicitEnvironmentKeys[0] === "EXPLICIT",
+        "workload-secret preview request keeps every source selector",
+      );
+      return {
+        secrets: [{
+          key: "TOKEN",
+          source: ProtoWorkloadSecretSource.USER,
+          overriddenSources: [ProtoWorkloadSecretSource.ORGANIZATION],
+        }],
+      };
+    },
   });
 
   async function* rawBody(req: IncomingMessage): AsyncIterable<Uint8Array> {
@@ -613,14 +633,14 @@ async function runTests() {
       working_directory: "/workspace/platform",
       skills: [{ source: "repository", reference: ".agents/skills/rust", agents: ["codex"] }],
       resources: { cpu_millicores: 2000, memory_mib: 16384, disk_gib: 40 },
-      credentials: { work: { provider: "openai", account: "acct-work" } },
+      access: { profile: "user/work" },
     },
   });
   assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
   assert(createEnvironment.repos[0]?.mountPath === "/workspace/platform", "create environment preserves repository mount paths");
   assert(createEnvironment.repos[0]?.revision === "deadbeef", "create environment preserves repository revisions");
   assert(createEnvironment.projectSpec?.resources?.memoryMib === 16384n, "create environment preserves project resource units");
-  assert(createEnvironment.projectSpec?.credentials.work?.account === "acct-work", "create environment preserves opaque account references");
+  assert(createEnvironment.projectSpec?.access?.profile === "user/work", "create environment preserves access profile references");
   let rejectedUnknownIsolation = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {
@@ -1017,6 +1037,22 @@ async function runTests() {
 
     await cw.secrets.deleteUser("USER_TOKEN");
 
+    const preview = await cw.secrets.preview({
+      organization: true,
+      secret_project_id: "sp_1",
+      user: true,
+      explicit_environment_keys: ["EXPLICIT"],
+    });
+    assert(preview.length === 1, "workload-secret preview returns metadata");
+    assert(
+      preview[0].key === "TOKEN" && preview[0].source === "user",
+      "workload-secret preview converts the winning source",
+    );
+    assert(
+      preview[0].overridden_sources[0] === "organization",
+      "workload-secret preview converts overridden sources",
+    );
+
     // Test: File Operations
     console.log("Test: File Operations");
     await env2.upload(new Uint8Array([1, 2, 3]), "/workspace/test.bin");
@@ -1100,7 +1136,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 105;
+  const expectedAssertions = 109;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

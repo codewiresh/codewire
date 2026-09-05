@@ -12,14 +12,14 @@ Local environment and Mesh client state live under `~/.codewire/`:
 ```text
 ~/.codewire/
 ├── config.toml
-├── local_instances.toml
+├── native-v1/
 ├── mesh_runtime.json
 └── codewire-mesh.log
 ```
 
-`local_instances.toml` contains local lifecycle metadata and the managed
-per-environment daemon endpoint/token. The directory and file are hardened and
-the token is not printed by normal CLI output.
+`native-v1/` contains the native supervisor's owner-only lifecycle database and
+runtime state. Managed daemon and credential-broker capabilities are not stored
+in that database or printed by normal CLI output.
 
 Session records and output live inside the selected environment. There is no
 host-owned session database.

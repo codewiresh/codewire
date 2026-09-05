@@ -9,20 +9,28 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use codewire_project::RepositorySpec;
+use codewire_access::AccessProfileId;
+use codewire_local_credentials::{
+    AuthorityRuntimeConfig, LocalCredentialControlClient, validate_github_https_source,
+};
+use codewire_project::{ProjectSpec, RepositorySpec};
+use codewire_vmm_guest_probe::{DirectShareMount, DirectSharePlan};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::time::timeout;
 use url::Url;
 use uuid::Uuid;
 
+use crate::direct_share::{
+    AdmittedDirectShare, DirectShareIdentity, admit_direct_share, reopen_direct_share,
+};
 use crate::linux::path::{PathError, PrivateRoot, current_uid};
 use crate::oci::{ContentStore, ContentStoreError, Sha256Digest};
 use crate::workspace::{WorkspaceSource, WorkspaceSourceMode};
@@ -50,6 +58,12 @@ pub(crate) enum WorkspaceInput {
         mode: WorkspaceSourceMode,
         destination: String,
     },
+    Direct {
+        source_path: Vec<u8>,
+        identity: DirectShareIdentity,
+        destination: String,
+        read_only: bool,
+    },
     Repository {
         source: String,
         commit: String,
@@ -62,14 +76,13 @@ pub(crate) enum WorkspaceInput {
 
 impl WorkspacePlan {
     pub(crate) fn local(source: &WorkspaceSource) -> Result<Self, WorkspacePlanError> {
+        Self::from_inputs(vec![WorkspaceInput::local(source, "/workspace")])
+    }
+
+    pub(crate) fn from_inputs(inputs: Vec<WorkspaceInput>) -> Result<Self, WorkspacePlanError> {
         let plan = Self {
             schema_version: WORKSPACE_PLAN_SCHEMA_VERSION,
-            inputs: vec![WorkspaceInput::Local {
-                source_path: source.source_path.as_os_str().as_bytes().to_vec(),
-                identity: source.commit.clone(),
-                mode: source.mode,
-                destination: "/workspace".to_owned(),
-            }],
+            inputs,
         };
         plan.validate()?;
         Ok(plan)
@@ -78,7 +91,8 @@ impl WorkspacePlan {
     pub(crate) fn validate(&self) -> Result<(), WorkspacePlanError> {
         if self.schema_version != WORKSPACE_PLAN_SCHEMA_VERSION
             || self.inputs.is_empty()
-            || self.inputs.len() > codewire_project::MAX_REPOSITORIES + 1
+            || self.inputs.len()
+                > codewire_project::MAX_REPOSITORIES + codewire_project::MAX_LOCAL_MOUNTS
         {
             return Err(WorkspacePlanError::InvalidPlan);
         }
@@ -91,14 +105,24 @@ impl WorkspacePlan {
                 WorkspaceInput::Local {
                     source_path,
                     identity,
+                    mode,
                     destination,
-                    ..
                 } => {
                     let path = PathBuf::from(OsString::from_vec(source_path.clone()));
                     if !path.is_absolute()
                         || !valid_object_id(identity)
-                        || destination != "/workspace"
+                        || (*mode == WorkspaceSourceMode::Clone && destination != "/workspace")
                     {
+                        return Err(WorkspacePlanError::InvalidPlan);
+                    }
+                }
+                WorkspaceInput::Direct {
+                    source_path,
+                    identity,
+                    ..
+                } => {
+                    let path = PathBuf::from(OsString::from_vec(source_path.clone()));
+                    if !path.is_absolute() || identity.validate().is_err() {
                         return Err(WorkspacePlanError::InvalidPlan);
                     }
                 }
@@ -129,6 +153,53 @@ impl WorkspacePlan {
             {
                 return Err(WorkspacePlanError::OverlappingDestinations);
             }
+        }
+        self.direct_share_plan()?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_for_project(
+        &self,
+        project: &ProjectSpec,
+    ) -> Result<(), WorkspacePlanError> {
+        self.validate()?;
+        if project.repositories.len() > self.inputs.len() {
+            return Err(WorkspacePlanError::InvalidPlan);
+        }
+        for (repository, input) in project.repositories.iter().zip(&self.inputs) {
+            let WorkspaceInput::Repository {
+                source,
+                branch,
+                destination,
+                ..
+            } = input
+            else {
+                return Err(WorkspacePlanError::InvalidPlan);
+            };
+            if source != &repository.source
+                || destination != &repository.destination
+                || (!repository.branch.is_empty() && branch != &repository.branch)
+            {
+                return Err(WorkspacePlanError::InvalidPlan);
+            }
+        }
+        if self.inputs[project.repositories.len()..]
+            .iter()
+            .any(|input| matches!(input, WorkspaceInput::Repository { .. }))
+        {
+            return Err(WorkspacePlanError::InvalidPlan);
+        }
+        if project.working_directory != "/workspace"
+            && !self.inputs.iter().any(|input| {
+                let destination = input.destination();
+                project.working_directory == destination
+                    || project
+                        .working_directory
+                        .strip_prefix(destination)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+        {
+            return Err(WorkspacePlanError::InvalidPlan);
         }
         Ok(())
     }
@@ -166,15 +237,62 @@ impl WorkspacePlan {
                 bundle_size,
                 ..
             } => Some((bundle_digest, *bundle_size)),
-            WorkspaceInput::Local { .. } => None,
+            WorkspaceInput::Local { .. } | WorkspaceInput::Direct { .. } => None,
         })
+    }
+
+    pub(crate) fn direct_share_plan(&self) -> Result<Option<DirectSharePlan>, WorkspacePlanError> {
+        let mounts = self
+            .inputs
+            .iter()
+            .filter_map(|input| match input {
+                WorkspaceInput::Direct {
+                    destination,
+                    read_only,
+                    ..
+                } => Some((destination, *read_only)),
+                WorkspaceInput::Local { .. } | WorkspaceInput::Repository { .. } => None,
+            })
+            .enumerate()
+            .map(|(index, (destination, read_only))| {
+                DirectShareMount::for_index(index, destination.clone(), read_only)
+                    .map_err(|_| WorkspacePlanError::InvalidPlan)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if mounts.is_empty() {
+            Ok(None)
+        } else {
+            DirectSharePlan::new(mounts)
+                .map(Some)
+                .map_err(|_| WorkspacePlanError::InvalidPlan)
+        }
     }
 }
 
 impl WorkspaceInput {
+    pub(crate) fn local(source: &WorkspaceSource, destination: &str) -> Self {
+        Self::Local {
+            source_path: source.source_path.as_os_str().as_bytes().to_vec(),
+            identity: source.commit.clone(),
+            mode: source.mode,
+            destination: destination.to_owned(),
+        }
+    }
+
+    pub(crate) fn direct(source: &AdmittedDirectShare, destination: &str, read_only: bool) -> Self {
+        Self::Direct {
+            source_path: source.path().as_os_str().as_bytes().to_vec(),
+            identity: source.identity().clone(),
+            destination: destination.to_owned(),
+            read_only,
+        }
+    }
+
     pub(crate) fn destination(&self) -> &str {
         match self {
-            Self::Local { destination, .. } | Self::Repository { destination, .. } => destination,
+            Self::Local { destination, .. }
+            | Self::Direct { destination, .. }
+            | Self::Repository { destination, .. } => destination,
         }
     }
 
@@ -191,13 +309,56 @@ impl WorkspaceInput {
                 mode: *mode,
             }),
             Self::Repository { .. } => None,
+            Self::Direct { .. } => None,
         }
     }
+
+    pub(crate) fn direct_source(
+        &self,
+        forbidden_roots: &[PathBuf],
+    ) -> Result<Option<AdmittedDirectShare>, WorkspacePlanError> {
+        let Self::Direct {
+            source_path,
+            identity,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(OsString::from_vec(source_path.clone()));
+        reopen_direct_share(&path, identity, forbidden_roots)
+            .map(Some)
+            .map_err(|_| WorkspacePlanError::DirectShareChanged)
+    }
+}
+
+pub(crate) fn prepare_direct_input(
+    requested_source: &Path,
+    destination: &str,
+    read_only: bool,
+    forbidden_roots: &[PathBuf],
+) -> Result<WorkspaceInput, WorkspacePlanError> {
+    validate_local_mount_destination(destination)?;
+    let admitted = admit_direct_share(requested_source, forbidden_roots)
+        .map_err(|_| WorkspacePlanError::DirectShareInvalid)?;
+    Ok(WorkspaceInput::direct(&admitted, destination, read_only))
+}
+
+pub(crate) fn validate_local_mount_destination(
+    destination: &str,
+) -> Result<(), WorkspacePlanError> {
+    validate_destination(destination)?;
+    if destination == "/workspace" {
+        return Err(WorkspacePlanError::InvalidPlan);
+    }
+    Ok(())
 }
 
 pub(crate) async fn prepare_repository_plan(
     engine_state_root: &Path,
     repositories: &[RepositorySpec],
+    credential_access: Option<&RepositoryCredentialAccess>,
+    credential_authority: &AuthorityRuntimeConfig,
 ) -> Result<WorkspacePlan, WorkspacePlanError> {
     if repositories.is_empty() || repositories.len() > codewire_project::MAX_REPOSITORIES {
         return Err(WorkspacePlanError::InvalidPlan);
@@ -206,17 +367,54 @@ pub(crate) async fn prepare_repository_plan(
     let content = ContentStore::create(&root)?;
     let mut inputs = Vec::with_capacity(repositories.len());
     for repository in repositories {
-        inputs.push(prepare_repository(&root, &content, repository).await?);
+        inputs.push(
+            prepare_repository(
+                &root,
+                &content,
+                repository,
+                credential_access,
+                credential_authority,
+            )
+            .await?,
+        );
     }
-    let plan = WorkspacePlan {
-        schema_version: WORKSPACE_PLAN_SCHEMA_VERSION,
-        inputs,
-    };
-    plan.validate()?;
-    Ok(plan)
+    WorkspacePlan::from_inputs(inputs)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepositoryCredentialAccess {
+    pub(crate) request_id: Uuid,
+    pub(crate) profile_id: AccessProfileId,
+    pub(crate) profile_revision: u64,
 }
 
 async fn prepare_repository(
+    root: &PrivateRoot,
+    content: &ContentStore,
+    repository: &RepositorySpec,
+    credential_access: Option<&RepositoryCredentialAccess>,
+    credential_authority: &AuthorityRuntimeConfig,
+) -> Result<WorkspaceInput, WorkspacePlanError> {
+    match prepare_anonymous_repository(root, content, repository).await {
+        Ok(input) => Ok(input),
+        Err(WorkspacePlanError::GitCommandFailed)
+            if credential_access.is_some()
+                && validate_github_https_source(&repository.source).is_ok() =>
+        {
+            prepare_authenticated_repository(
+                root,
+                content,
+                repository,
+                credential_access.expect("credential access checked"),
+                credential_authority,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn prepare_anonymous_repository(
     root: &PrivateRoot,
     content: &ContentStore,
     repository: &RepositorySpec,
@@ -309,6 +507,130 @@ async fn prepare_repository(
         source: repository.source.clone(),
         commit,
         branch,
+        destination: repository.destination.clone(),
+        bundle_digest: digest,
+        bundle_size: size,
+    })
+}
+
+async fn prepare_authenticated_repository(
+    root: &PrivateRoot,
+    content: &ContentStore,
+    repository: &RepositorySpec,
+    access: &RepositoryCredentialAccess,
+    credential_authority: &AuthorityRuntimeConfig,
+) -> Result<WorkspaceInput, WorkspacePlanError> {
+    validate_github_https_source(&repository.source)
+        .map_err(|_| WorkspacePlanError::UnsupportedRepositorySource)?;
+    let staging_name = format!("repository-prepare-{}", Uuid::new_v4());
+    let staging = root.create_dir(Path::new(&staging_name), 0o700)?;
+    let mut cleanup = PreparationCleanup::new(staging.clone());
+    let bare = staging.join("source.git");
+    git_status(
+        &staging,
+        [
+            OsStr::new("init"),
+            OsStr::new("--bare"),
+            OsStr::new("--quiet"),
+            bare.as_os_str(),
+        ],
+    )
+    .await?;
+    let mut client = LocalCredentialControlClient::connect(credential_authority)
+        .await
+        .map_err(|_| WorkspacePlanError::CredentialAuthorityUnavailable)?;
+    let mut prepared = client
+        .prepare_git_repository(
+            access.request_id,
+            &access.profile_id,
+            access.profile_revision,
+            repository.source.clone(),
+            repository.branch.clone(),
+            repository.revision.clone(),
+        )
+        .await
+        .map_err(|_| WorkspacePlanError::CredentialRepositoryUnavailable)?;
+    if (!repository.branch.is_empty() && prepared.branch != repository.branch)
+        || (!repository.revision.is_empty() && !prepared.branch.is_empty())
+    {
+        return Err(WorkspacePlanError::CredentialRepositoryInvalid);
+    }
+    let bundle = staging.join("source.bundle");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&bundle)
+        .map_err(|source| WorkspacePlanError::Io {
+            path: bundle.clone(),
+            source,
+        })?;
+    let mut file = tokio::fs::File::from_std(file);
+    let mut written = 0_u64;
+    while let Some(chunk) = prepared
+        .next_bundle_chunk()
+        .await
+        .map_err(|_| WorkspacePlanError::CredentialRepositoryInvalid)?
+    {
+        written = written
+            .checked_add(
+                u64::try_from(chunk.len()).map_err(|_| WorkspacePlanError::BundleTooLarge)?,
+            )
+            .ok_or(WorkspacePlanError::BundleTooLarge)?;
+        if written > MAXIMUM_GIT_BUNDLE_BYTES {
+            return Err(WorkspacePlanError::BundleTooLarge);
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|source| WorkspacePlanError::Io {
+                path: bundle.clone(),
+                source,
+            })?;
+    }
+    file.flush()
+        .await
+        .map_err(|source| WorkspacePlanError::Io {
+            path: bundle.clone(),
+            source,
+        })?;
+    drop(file);
+    if written != prepared.bundle_size {
+        return Err(WorkspacePlanError::CredentialRepositoryInvalid);
+    }
+    git_status(
+        &bare,
+        [
+            OsStr::new("bundle"),
+            OsStr::new("verify"),
+            bundle.as_os_str(),
+        ],
+    )
+    .await?;
+    let listed = git_text(
+        &bare,
+        [
+            OsStr::new("bundle"),
+            OsStr::new("list-heads"),
+            bundle.as_os_str(),
+            OsStr::new("refs/codewire/source"),
+        ],
+        512,
+    )
+    .await?;
+    if listed.trim() != format!("{} refs/codewire/source", prepared.commit) {
+        return Err(WorkspacePlanError::CredentialRepositoryInvalid);
+    }
+    let (digest, size, file) = digest_bundle(&bundle)?;
+    if size != prepared.bundle_size {
+        return Err(WorkspacePlanError::CredentialRepositoryInvalid);
+    }
+    content.admit_file(&digest, size, file).await?;
+    cleanup.remove()?;
+
+    Ok(WorkspaceInput::Repository {
+        source: repository.source.clone(),
+        commit: prepared.commit,
+        branch: prepared.branch,
         destination: repository.destination.clone(),
         bundle_digest: digest,
         bundle_size: size,
@@ -652,6 +974,12 @@ pub enum WorkspacePlanError {
     GitUnavailable,
     #[error("remote Git preparation failed")]
     GitCommandFailed,
+    #[error("local credential authority is unavailable for protected repository preparation")]
+    CredentialAuthorityUnavailable,
+    #[error("protected GitHub repository preparation is unavailable")]
+    CredentialRepositoryUnavailable,
+    #[error("protected GitHub repository output is invalid")]
+    CredentialRepositoryInvalid,
     #[error("remote Git preparation timed out")]
     GitTimeout,
     #[error("remote Git output exceeded the safety limit")]
@@ -662,6 +990,10 @@ pub enum WorkspacePlanError {
     BundleTooLarge,
     #[error("remote Git bundle changed while it was admitted")]
     BundleChanged,
+    #[error("direct-share source is unsafe or unsupported")]
+    DirectShareInvalid,
+    #[error("direct-share source changed after admission")]
+    DirectShareChanged,
     #[error("remote repository preparation path is unsafe: {0}")]
     UnsafePreparation(PathBuf),
     #[error(transparent)]
@@ -722,6 +1054,53 @@ mod tests {
         let plan = WorkspacePlan::local(&source).unwrap();
         let bytes = plan.encode_canonical().unwrap();
         assert_eq!(WorkspacePlan::decode_canonical(&bytes).unwrap(), plan);
+    }
+
+    #[test]
+    fn mixed_plans_bind_project_destinations_and_working_directory() {
+        let source = WorkspaceSource {
+            source_path: PathBuf::from("/host/fixtures"),
+            commit: "d".repeat(40),
+            mode: WorkspaceSourceMode::Copy,
+        };
+        let digest = Sha256Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap();
+        let plan = WorkspacePlan::from_inputs(vec![
+            WorkspaceInput::Repository {
+                source: "https://example.test/org/app.git".to_owned(),
+                commit: "b".repeat(40),
+                branch: "main".to_owned(),
+                destination: "/workspace/app".to_owned(),
+                bundle_digest: digest,
+                bundle_size: 1,
+            },
+            WorkspaceInput::local(&source, "/workspace/fixtures"),
+        ])
+        .unwrap();
+        let project = ProjectSpec {
+            repositories: vec![RepositorySpec {
+                source: "https://example.test/org/app.git".to_owned(),
+                revision: String::new(),
+                branch: "main".to_owned(),
+                destination: "/workspace/app".to_owned(),
+            }],
+            working_directory: "/workspace/fixtures/subdir".to_owned(),
+            ..ProjectSpec::default()
+        };
+        plan.validate_for_project(&project).unwrap();
+
+        let mut mismatched = project;
+        mismatched.working_directory = "/workspace/missing".to_owned();
+        assert!(matches!(
+            plan.validate_for_project(&mismatched),
+            Err(WorkspacePlanError::InvalidPlan)
+        ));
+    }
+
+    #[test]
+    fn explicit_local_mount_destinations_must_be_below_workspace_root() {
+        assert!(validate_local_mount_destination("/workspace/fixtures").is_ok());
+        assert!(validate_local_mount_destination("/workspace").is_err());
+        assert!(validate_local_mount_destination("/tmp/fixtures").is_err());
     }
 
     #[tokio::test]

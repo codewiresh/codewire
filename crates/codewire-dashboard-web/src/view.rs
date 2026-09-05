@@ -409,17 +409,8 @@ pub(crate) struct EnvironmentPresetOption {
     pub(crate) default_startup_script: String,
     pub(crate) default_agents: Vec<String>,
     pub(crate) default_app_ports: Vec<EnvironmentAppPortFormRow>,
-    pub(crate) default_include_org_secrets: bool,
-    pub(crate) default_include_user_secrets: bool,
-    pub(crate) secret_project: String,
+    pub(crate) uses_legacy_secret_sources: bool,
     pub(crate) official: bool,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct EnvironmentSecretProjectOption {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) secret_count: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -451,18 +442,9 @@ impl EnvironmentAppPortFormRow {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct EnvironmentAgentSecretView {
-    pub(crate) key: &'static str,
-    pub(crate) label: &'static str,
-    pub(crate) placeholder: &'static str,
-    pub(crate) configured: bool,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct EnvironmentAgentView {
     pub(crate) id: &'static str,
     pub(crate) label: &'static str,
-    pub(crate) secrets: Vec<EnvironmentAgentSecretView>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -497,16 +479,12 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) show_confidential_controls: bool,
     pub(crate) confidential_price: String,
     pub(crate) selected_agents: Vec<String>,
-    pub(crate) secret_project: String,
-    pub(crate) include_org_secrets: bool,
-    pub(crate) include_user_secrets: bool,
     pub(crate) app_ports: Vec<EnvironmentAppPortFormRow>,
     pub(crate) github_connected: bool,
     pub(crate) github_username: String,
     pub(crate) github_repositories_available: bool,
     pub(crate) github_repositories: Vec<GitHubRepositoryOption>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
-    pub(crate) secret_projects: Vec<EnvironmentSecretProjectOption>,
     pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) detection: EnvironmentDetectionView,
     pub(crate) repo_error: String,
@@ -547,10 +525,6 @@ impl EnvironmentCreateFormView {
             .iter()
             .find(|repository| repository.url == value)
             .map_or("", |repository| repository.mount_suffix())
-    }
-
-    pub(crate) fn secret_project_selected(&self, value: &str) -> bool {
-        self.secret_project == value
     }
 
     pub(crate) fn agent_selected(&self, value: &str) -> bool {

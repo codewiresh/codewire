@@ -3,6 +3,7 @@ resolver = "2"
 # The root workspace is for server/runtime/shared crates. Desktop app crates
 # are excluded so non-desktop Cargo commands never resolve GPUI/font-kit.
 members = [
+    "crates/codewire-access",
     "crates/codewire-admin-proto",
     "crates/codewire-billing",
     "crates/codewire-client",
@@ -11,15 +12,21 @@ members = [
     "crates/codewire-daemon",
     "crates/codewire-daemon-bridge",
     "crates/codewire-derp",
+    "crates/codewire-egress-broker",
+    "crates/codewire-egress-policy",
     "crates/codewire-gateway",
     "crates/codewire-gateway-proto",
     "crates/codewire-idp",
     "crates/codewire-cli",
     "crates/codewire-cli-bin",
+    "crates/codewire-credential-broker",
+    "crates/codewire-local-credentials",
     "crates/codewire-local-vmm",
     "crates/codewire-project",
     "crates/codewire-project-proto",
+    "crates/codewire-protected-store",
     "crates/codewire-mesh",
+    "crates/codewire-netstack",
     "crates/codewire-oidc",
     "crates/codewire-orchestration",
     "crates/codewire-proto",
@@ -28,6 +35,7 @@ members = [
     "crates/codewire-types",
     "crates/codewire-udp-relay",
     "crates/codewire-vmm-guest-probe",
+    "crates/codewire-workload-secrets",
 ]
 exclude = [
     "crates/codewire-desktop",
@@ -44,6 +52,7 @@ authors = ["Sonica"]
 
 [workspace.dependencies]
 # Internal crates
+codewire-access = { path = "crates/codewire-access" }
 codewire-client = { path = "crates/codewire-client" }
 codewire-types = { path = "crates/codewire-types" }
 codewire-server-core = { path = "crates/codewire-server-core" }
@@ -60,19 +69,29 @@ codewire-admin-proto = { path = "crates/codewire-admin-proto", default-features 
 codewire-daemon = { path = "crates/codewire-daemon" }
 codewire-daemon-bridge = { path = "crates/codewire-daemon-bridge" }
 codewire-derp = { path = "crates/codewire-derp" }
+codewire-egress-broker = { path = "crates/codewire-egress-broker" }
+codewire-egress-policy = { path = "crates/codewire-egress-policy" }
+codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 codewire-udp-relay = { path = "crates/codewire-udp-relay" }
 codewire-vmm-guest-probe = { path = "crates/codewire-vmm-guest-probe" }
 codewire-project = { path = "crates/codewire-project" }
 codewire-project-proto = { path = "crates/codewire-project-proto" }
+codewire-protected-store = { path = "crates/codewire-protected-store" }
+codewire-credential-broker = { path = "crates/codewire-credential-broker" }
+codewire-local-credentials = { path = "crates/codewire-local-credentials" }
+codewire-workload-secrets = { path = "crates/codewire-workload-secrets" }
 
 # FFI
 uniffi = "0.31"
 
 # AI/HTTP
+av-credential-proxy = { git = "https://github.com/noeljackson/av.git", rev = "32ef60cbbe58dfb00a3ffda76f7b2e3b8900baaa", default-features = false }
 oci-spec = { version = "=0.10.0", default-features = false, features = ["image"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "stream", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+hickory-resolver = { version = "=0.26.1", default-features = false, features = ["system-config", "tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
@@ -86,7 +105,9 @@ alacritty_terminal = "0.25"
 portable-pty = "0.9"
 
 # Async utilities
+async-io = "2"
 async-trait = "0.1"
+futures-lite = "2"
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
@@ -108,6 +129,7 @@ rustix = { version = "=1.1.4", features = ["fs", "process", "thread"] }
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 
 # OAuth & Keychain
+secret-service = "5.2"
 keyring = "3"
 tiny_http = "0.12"
 open = "5"

@@ -36,6 +36,9 @@ mod linux {
         state_root: PathBuf,
         artifact_root: PathBuf,
         artifact_lock: PathBuf,
+        mesh_data_dir: PathBuf,
+        platform_config_dir: PathBuf,
+        credential_authority_root: PathBuf,
         cw_bin: PathBuf,
         target: String,
     }
@@ -44,9 +47,12 @@ mod linux {
         let args = Args::parse(std::env::args().skip(1))?;
         let client = NativePublicDataClient::connect_or_start(
             &NativeRuntimeConfig {
-                root: args.state_root,
+                root: args.state_root.clone(),
                 artifact_root: args.artifact_root,
                 artifact_lock: args.artifact_lock,
+                mesh_data_dir: args.mesh_data_dir,
+                platform_config_dir: args.platform_config_dir,
+                credential_authority_root: args.credential_authority_root,
                 executable: args.cw_bin,
             },
             &args.target,
@@ -153,6 +159,9 @@ mod linux {
             let mut state_root = None;
             let mut artifact_root = None;
             let mut artifact_lock = None;
+            let mut mesh_data_dir = None;
+            let mut platform_config_dir = None;
+            let mut credential_authority_root = None;
             let mut cw_bin = None;
             let mut target = None;
             while let Some(flag) = arguments.next() {
@@ -161,6 +170,9 @@ mod linux {
                     "--state-root" => &mut state_root,
                     "--artifact-root" => &mut artifact_root,
                     "--artifact-lock" => &mut artifact_lock,
+                    "--mesh-data-dir" => &mut mesh_data_dir,
+                    "--platform-config-dir" => &mut platform_config_dir,
+                    "--credential-authority-root" => &mut credential_authority_root,
                     "--cw-bin" => &mut cw_bin,
                     "--target" => &mut target,
                     _ => return Err(failed()),
@@ -173,6 +185,9 @@ mod linux {
                 state_root: absolute_path(state_root)?,
                 artifact_root: absolute_path(artifact_root)?,
                 artifact_lock: absolute_path(artifact_lock)?,
+                mesh_data_dir: absolute_path(mesh_data_dir)?,
+                platform_config_dir: absolute_path(platform_config_dir)?,
+                credential_authority_root: absolute_path(credential_authority_root)?,
                 cw_bin: absolute_path(cw_bin)?,
                 target: target
                     .filter(|value| !value.is_empty())

@@ -12,12 +12,13 @@ use anyhow::{Context, Result, ensure};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::routing::get;
+use codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use codewire_gateway_proto::daemon::v1::daemon_service_server::DaemonServiceServer;
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::futures::OwnedNotified;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, watch};
 use tokio::time::timeout;
 use tokio_stream::{Stream, StreamExt};
 use tonic::service::Routes;
@@ -201,25 +202,72 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     validate_injected_config(&config)?;
+    let implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
+    let ingress = implementation
+        .credential_bridge()
+        .prepare_ingress()
+        .context("prepare credential bridge guest ingress")?;
     let transport_shutdown = TransportShutdown::new();
     let incoming_shutdown = Arc::clone(&transport_shutdown);
     let incoming = incoming
         .map(move |result| result.map(|io| ShutdownIo::new(io, Arc::clone(&incoming_shutdown))));
-    let (shutdown_started_tx, shutdown_started_rx) = oneshot::channel();
-    let observed_shutdown = async move {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let observer_tx = shutdown_tx.clone();
+    let shutdown_observer = tokio::spawn(async move {
         shutdown.await;
-        let _ = shutdown_started_tx.send(());
-    };
+        let _ = observer_tx.send(true);
+    });
+    let observed_shutdown = wait_for_shutdown(shutdown_rx.clone());
     let serving = Server::builder()
-        .add_service(grpc_service_with_runtime_state(config, runtime_state))
+        .add_service(configure_grpc_service(implementation))
         .serve_with_incoming_shutdown(incoming, observed_shutdown);
-    tokio::pin!(serving);
-
-    tokio::select! {
-        result = &mut serving => {
-            result.context("serve workspace daemon gRPC transport")?;
+    let mut shutdown_started = shutdown_rx.clone();
+    let ingress_shutdown = shutdown_rx.clone();
+    let ingress_serving = async move {
+        match ingress {
+            Some(ingress) => ingress
+                .serve(wait_for_shutdown(ingress_shutdown))
+                .await
+                .context("serve credential bridge guest ingress"),
+            None => {
+                wait_for_shutdown(ingress_shutdown).await;
+                Ok(())
+            }
         }
-        _ = shutdown_started_rx => {
+    };
+    tokio::pin!(serving);
+    tokio::pin!(ingress_serving);
+
+    let result = tokio::select! {
+        result = &mut serving => {
+            let _ = shutdown_tx.send(true);
+            timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut ingress_serving)
+                .await
+                .context("stop credential bridge guest ingress timed out")??;
+            result.context("serve workspace daemon gRPC transport")
+        }
+        ingress_result = &mut ingress_serving => {
+            let shutting_down = *shutdown_rx.borrow();
+            let _ = shutdown_tx.send(true);
+            match timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut serving).await {
+                Ok(result) => result.context("serve workspace daemon gRPC transport")?,
+                Err(error) => {
+                    tracing::warn!(%error, "workspace daemon gRPC shutdown after credential ingress exit timed out; closing active transports");
+                    transport_shutdown.trigger();
+                    timeout(GRPC_FORCED_SHUTDOWN_TIMEOUT, &mut serving)
+                        .await
+                        .context("force-close workspace daemon gRPC transports timed out")?
+                        .context("serve workspace daemon gRPC transport")?;
+                }
+            }
+            ingress_result?;
+            if shutting_down {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("credential bridge guest ingress stopped unexpectedly"))
+            }
+        }
+        _ = shutdown_started.changed() => {
             match timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut serving).await {
                 Ok(result) => {
                     result.context("serve workspace daemon gRPC transport")?;
@@ -233,16 +281,36 @@ where
                         .context("serve workspace daemon gRPC transport")?;
                 }
             }
+            timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut ingress_serving)
+                .await
+                .context("stop credential bridge guest ingress timed out")??;
+            Ok(())
+        }
+    };
+    shutdown_observer.abort();
+    let _ = shutdown_observer.await;
+    result
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return;
         }
     }
-    Ok(())
 }
 
 fn grpc_service_with_runtime_state(
     config: Config,
     runtime_state: DaemonRuntimeState,
 ) -> DaemonGrpcService {
-    DaemonServiceServer::new(DaemonServiceImpl::with_runtime_state(config, runtime_state))
+    configure_grpc_service(DaemonServiceImpl::with_runtime_state(config, runtime_state))
+}
+
+fn configure_grpc_service(implementation: DaemonServiceImpl) -> DaemonGrpcService {
+    DaemonServiceServer::new(implementation)
+        .max_decoding_message_size(CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES)
+        .max_encoding_message_size(CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES)
 }
 
 fn validate_injected_config(config: &Config) -> Result<()> {

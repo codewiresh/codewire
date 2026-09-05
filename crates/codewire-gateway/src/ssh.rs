@@ -293,8 +293,14 @@ async fn forward_exec_daemon_outputs(
                 }
             }
             Ok(None) => {
-                output.send(SshSessionOutput::Exit(0)).await?;
-                return Ok(());
+                let error = SshSessionRunnerError(
+                    "workspace exec session ended without an exit status".into(),
+                );
+                output
+                    .send(SshSessionOutput::Error(error.to_string()))
+                    .await?;
+                output.send(SshSessionOutput::Exit(1)).await?;
+                return Err(error);
             }
             Err(err) => {
                 output
@@ -324,8 +330,14 @@ async fn forward_pty_daemon_outputs(
                 }
             }
             Ok(None) => {
-                output.send(SshSessionOutput::Exit(0)).await?;
-                return Ok(());
+                let error = SshSessionRunnerError(
+                    "workspace PTY session ended without an exit status".into(),
+                );
+                output
+                    .send(SshSessionOutput::Error(error.to_string()))
+                    .await?;
+                output.send(SshSessionOutput::Exit(1)).await?;
+                return Err(error);
             }
             Err(err) => {
                 output
@@ -2081,6 +2093,8 @@ mod tests {
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
+        type CredentialBridgeStream =
+            ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
 
         async fn get_capabilities(
             &self,
@@ -2094,6 +2108,13 @@ mod tests {
             _request: Request<v1::GetHealthRequest>,
         ) -> Result<Response<v1::GetHealthResponse>, Status> {
             Err(Status::unimplemented("get health"))
+        }
+
+        async fn credential_bridge(
+            &self,
+            _request: Request<tonic::Streaming<v1::CredentialBridgeHostMessage>>,
+        ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
+            Err(Status::unimplemented("credential bridge"))
         }
 
         async fn launch_session(

@@ -5,21 +5,41 @@ package codewire.local.v1;
 // This package is a private host-process contract. It is deliberately not
 // part of codewire.v1 and carries no platform compatibility promise.
 service LocalSupervisorService {
+  // Mandatory compatibility fence. Clients call this before every other
+  // supervisor RPC and reject anything except their exact private protocol.
+  rpc GetSupervisorInfo(GetSupervisorInfoRequest) returns (SupervisorInfo);
   rpc CreateEnvironment(CreateEnvironmentRequest) returns (Operation);
   rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
   rpc GetEnvironment(EnvironmentSelector) returns (Environment);
+  rpc SelectEnvironment(EnvironmentSelector) returns (Environment);
   rpc ListOrphans(ListOrphansRequest) returns (ListOrphansResponse);
   rpc StartEnvironment(EnvironmentSelector) returns (Operation);
   rpc StopEnvironment(EnvironmentSelector) returns (Operation);
   rpc RestartEnvironment(EnvironmentSelector) returns (Operation);
+  rpc RefreshEnvironmentSkills(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
+  rpc ApplyEnvironmentAccess(ApplyEnvironmentAccessRequest) returns (Operation);
   rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
   rpc GetOperation(GetOperationRequest) returns (Operation);
   rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
+  // Starts or reuses the authority-owned broker for the exact running
+  // environment generation. The response and request are material-free.
+  rpc EnsureCredentialBroker(EnvironmentSelector) returns (CredentialBrokerRuntime);
   rpc GetDaemonAccess(EnvironmentSelector) returns (DaemonAccess);
 }
 
+message GetSupervisorInfoRequest {}
+
+message SupervisorInfo {
+  uint32 protocol_version = 1;
+  // SHA-256 of the supervisor's exact NativeRuntimeConfig path bytes.
+  bytes configuration_sha256 = 2;
+}
+
 service EnvironmentRunnerService {
+  // Mandatory immutable compatibility fence. Supervisors call this before
+  // adoption or any RPC that can observe or change runner/VM state.
+  rpc GetRunnerProtocolInfo(GetRunnerProtocolInfoRequest) returns (RunnerProtocolInfo);
   rpc AdoptRunner(AdoptRunnerRequest) returns (RunnerInfo);
   rpc GetRunnerInfo(GetRunnerInfoRequest) returns (RunnerInfo);
   rpc WatchRunner(WatchRunnerRequest) returns (stream RunnerEvent);
@@ -30,6 +50,12 @@ service EnvironmentRunnerService {
   // never removes environment storage; only the supervisor may tombstone it.
   rpc PrepareRetireRunner(PrepareRetireRunnerRequest) returns (PrepareRetireRunnerResponse);
   rpc GetDaemonAccess(GetDaemonAccessRequest) returns (DaemonAccess);
+}
+
+message GetRunnerProtocolInfoRequest {}
+
+message RunnerProtocolInfo {
+  uint32 protocol_version = 1;
 }
 
 enum EnvironmentState {
@@ -52,6 +78,7 @@ enum OperationKind {
   OPERATION_KIND_DELETE = 7;
   OPERATION_KIND_GROW_DISK = 8;
   OPERATION_KIND_RECONCILE = 9;
+  OPERATION_KIND_APPLY_ENVIRONMENT_ACCESS = 10;
 }
 
 enum OperationPhase {
@@ -64,7 +91,8 @@ enum OperationPhase {
 }
 
 // The next bounded, auditable lifecycle effect. Raw host paths, process output,
-// guest serial data, credentials and daemon capabilities never enter this API.
+// guest serial data, credentials and daemon capabilities never enter operation
+// progress or its public projection.
 enum OperationStage {
   OPERATION_STAGE_UNSPECIFIED = 0;
   OPERATION_STAGE_RECORD_ENVIRONMENT = 1;
@@ -92,6 +120,11 @@ enum OperationStage {
   OPERATION_STAGE_COMPLETED = 23;
   OPERATION_STAGE_FAILED = 24;
   OPERATION_STAGE_INTERRUPTED = 25;
+  OPERATION_STAGE_BIND_ENVIRONMENT_ACCESS = 26;
+  OPERATION_STAGE_REVOKE_ENVIRONMENT_ACCESS = 27;
+  OPERATION_STAGE_REQUIRE_ENVIRONMENT_ACCESS = 28;
+  OPERATION_STAGE_APPLY_ENVIRONMENT_ACCESS = 29;
+  OPERATION_STAGE_RECORD_ENVIRONMENT_ACCESS = 30;
 }
 
 message Operation {
@@ -152,6 +185,61 @@ message CreateEnvironmentRequest {
   // when the portable project declares repositories; otherwise exactly clone
   // or copy after CLI-side auto resolution.
   string implicit_path_mode = 9;
+  // Local-only explicit filesystem grants. Source paths are canonical host
+  // bytes and never enter the portable project contract or the guest. Copy is
+  // supported first; direct remains fail-closed until its VMM attachment and
+  // confinement contract is implemented.
+  repeated LocalMountInput local_mounts = 10;
+  // Canonical creation-time loopback TCP publications. These are local-only
+  // host resources and are not part of the placement-neutral ProjectSpec.
+  repeated HostPortBinding host_ports = 11;
+  // Optional non-secret binding to one exact Mesh network. The supervisor
+  // persists only this status-visible metadata; setup authority remains in an
+  // isolated host process and never enters this API.
+  MeshAttachment mesh = 12;
+  // Material-free exact revision resolved from project_spec_json.access.profile.
+  // Both fields are empty/zero when the project selects no credential access.
+  string access_profile_id = 13;
+  uint64 access_profile_revision = 14;
+  // Dedicated guest-local Docker data disk. Zero disables Docker for this
+  // environment; nonzero values are whole-MiB ext4 disk sizes.
+  uint64 docker_disk_bytes = 15;
+}
+
+message HostPortBinding {
+  uint32 host_port = 1;
+  uint32 guest_port = 2;
+}
+
+message MeshAttachment {
+  string mesh_url = 1;
+  string organization_id = 2;
+  string network_id = 3;
+  string node_name = 4;
+  // Canonical immutable application-port set admitted for Mesh TCP ingress.
+  repeated uint32 guest_ports = 5;
+  // Explicit non-secret owner store used to mint one fresh enrollment for
+  // every VM generation. Unspecified is always rejected.
+  MeshEnrollmentAuthSource auth_source = 6;
+}
+
+enum MeshEnrollmentAuthSource {
+  MESH_ENROLLMENT_AUTH_SOURCE_UNSPECIFIED = 0;
+  MESH_ENROLLMENT_AUTH_SOURCE_STANDALONE_LOCAL = 1;
+  MESH_ENROLLMENT_AUTH_SOURCE_HOSTED_CURRENT = 2;
+}
+
+enum LocalMountMode {
+  LOCAL_MOUNT_MODE_UNSPECIFIED = 0;
+  LOCAL_MOUNT_MODE_COPY = 1;
+  LOCAL_MOUNT_MODE_DIRECT = 2;
+}
+
+message LocalMountInput {
+  bytes source_path = 1;
+  string destination = 2;
+  LocalMountMode mode = 3;
+  optional bool read_only = 4;
 }
 
 message EnvironmentSelector {
@@ -179,6 +267,20 @@ message ResizeEnvironmentRequest {
   string public_disruption_policy = 8;
 }
 
+message ApplyEnvironmentAccessRequest {
+  string name = 1;
+  string request_id = 2;
+  // Stable identity precondition so delete-and-recreate cannot redirect an
+  // access mutation by name.
+  string environment_id = 3;
+  // Material-free exact target resolved by the local credential authority.
+  // Set all three target fields, or set clear=true with all three empty/zero.
+  string access_profile = 4;
+  string access_profile_id = 5;
+  uint64 access_profile_revision = 6;
+  bool clear = 7;
+}
+
 message Environment {
   string id = 1;
   string name = 2;
@@ -196,6 +298,28 @@ message Environment {
   uint32 workspace_input_count = 13;
   // Canonical session default from the recorded portable project intent.
   string working_directory = 14;
+  repeated HostPortBinding host_ports = 15;
+  MeshAttachment mesh = 16;
+  // Bounded machine-readable cause reported by the current runner. Empty
+  // unless state is ENVIRONMENT_STATE_ERROR and the runner remains owned.
+  string error_code = 17;
+  // Logical scope-qualified profile reference selected for this environment.
+  // The placement-private profile ID remains supervisor/authority metadata.
+  string access_profile = 18;
+  // Exact bound revision safe to display. The placement-private profile ID is
+  // deliberately omitted.
+  uint64 access_profile_revision = 19;
+  // Environment-owned immutable skill snapshot identity and explicit refresh
+  // generation. Empty/zero means the project selected no skills.
+  string skill_snapshot_sha256 = 20;
+  uint64 skill_snapshot_generation = 21;
+  uint32 skill_snapshot_count = 22;
+  // Dedicated guest-local Docker data disk. Zero means Docker is disabled.
+  uint64 docker_disk_bytes = 23;
+  // Material-free startup hint. True when lifecycle/session operations need
+  // the local credential authority for an access profile or protected secret
+  // selection.
+  bool requires_credential_authority = 24;
 }
 
 message ListEnvironmentsRequest {}
@@ -235,6 +359,12 @@ message DaemonAccess {
   string generation_capability = 3;
 }
 
+message CredentialBrokerRuntime {
+  string environment_id = 1;
+  uint64 environment_generation = 2;
+  bool running = 3;
+}
+
 message AdoptRunnerRequest {
   string environment_id = 1;
 }
@@ -247,6 +377,9 @@ message RunnerInfo {
   uint64 generation = 3;
   // Exact immutable runtime bundle selected when this runner process started.
   string artifact_generation = 4;
+  // Bounded machine-readable cause for an error state. Empty for every
+  // non-error state.
+  string error_code = 5;
 }
 
 enum RunnerStage {
@@ -322,6 +455,35 @@ message StartVmRequest {
   // separate from root_generation so a runtime artifact change rotates host
   // storage without changing the verified registry/content identity.
   string setup_root_generation = 12;
+  // Exact durable loopback TCP bindings selected by the supervisor for this
+  // boot. The runner atomically reserves them before starting the VMM.
+  repeated HostPortBinding host_ports = 13;
+  // Non-secret network identity and immutable guest-port admission for this
+  // generation. No enrollment or steady-state credential is allowed.
+  MeshAttachment mesh = 14;
+  // Exact host-only direct-share admissions for this generation. Source paths
+  // and filesystem identity never enter the guest-visible plan or VMM argv.
+  repeated DirectShareAttachment direct_shares = 15;
+  // Digest of the canonical immutable skill-snapshot plan embedded in the
+  // selected root generation. Empty means the project selected no skills.
+  string skill_snapshot_sha256 = 16;
+  // Dedicated preformatted Docker data disk. Zero means no Docker device is
+  // attached and the guest must not start dockerd.
+  uint64 docker_disk_bytes = 17;
+  reserved 18, 19, 20;
+  reserved "workload_secret_total_bytes", "workload_secret_sha256", "workload_secret_entry_count";
+}
+
+message DirectShareAttachment {
+  bytes source_path = 1;
+  uint32 device_major = 2;
+  uint32 device_minor = 3;
+  uint64 inode = 4;
+  uint64 mount_id = 5;
+  uint32 owner_uid = 6;
+  sint64 filesystem_magic = 7;
+  string destination = 8;
+  bool read_only = 9;
 }
 
 message StopVmRequest {}

@@ -490,11 +490,43 @@ where
         Some(v1::session_attach_message::Payload::Output(chunk)) => {
             proto::attach_session_response::Event::Output(Box::new(public_output_chunk(chunk)))
         }
-        Some(v1::session_attach_message::Payload::Status(_)) => {
-            let record = attachment
+        Some(v1::session_attach_message::Payload::Status(status)) => {
+            if status.session_id != session_id {
+                return Err(AttachOutputError::InvalidFrame);
+            }
+            let state = v1::SessionLifecycleState::try_from(status.state)
+                .ok()
+                .filter(|state| *state != v1::SessionLifecycleState::Unspecified)
+                .ok_or(AttachOutputError::InvalidFrame)?;
+            let mut record = attachment
                 .session(session_id)
                 .await
                 .map_err(AttachOutputError::Backend)?;
+            if record.session_id != session_id {
+                return Err(AttachOutputError::InvalidFrame);
+            }
+
+            // The private attach stream orders each status against its output
+            // cursor. A fresh GetSession may already be terminal for a fast
+            // command while output queued after this earlier status still has
+            // to cross the bridge. Keep static record fields from the lookup,
+            // but preserve the streamed lifecycle snapshot so terminal status
+            // remains the final public event.
+            record.state = status.state;
+            record.exit_code = status.exit_code;
+            record.output_end_offset = status.output_end_offset;
+            record.status_message = status.message;
+            if state == v1::SessionLifecycleState::Starting {
+                record.started_at = None;
+            }
+            if matches!(
+                state,
+                v1::SessionLifecycleState::Starting
+                    | v1::SessionLifecycleState::Running
+                    | v1::SessionLifecycleState::Stopping
+            ) {
+                record.finished_at = None;
+            }
             proto::attach_session_response::Event::Status(Box::new(proto::AttachSessionStatus {
                 session: Some(public_session(record)).into(),
                 ..Default::default()
@@ -512,6 +544,7 @@ where
     })
 }
 
+#[derive(Debug)]
 enum AttachOutputError {
     Backend(connectrpc::ConnectError),
     InvalidFrame,
@@ -934,7 +967,13 @@ mod tests {
                 },
                 v1::SessionAttachMessage {
                     payload: Some(v1::session_attach_message::Payload::Status(
-                        v1::SessionStatus::default(),
+                        v1::SessionStatus {
+                            session_id: "session-1".into(),
+                            state: v1::SessionLifecycleState::Exited as i32,
+                            exit_code: Some(0),
+                            output_end_offset: 12,
+                            message: "session exited with status 0".into(),
+                        },
                     )),
                 },
             ]),
@@ -1034,6 +1073,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_nonterminal_status_is_not_promoted_ahead_of_output() {
+        let mut attachment = RecordingAttachment {
+            inputs: Arc::new(Mutex::new(Vec::new())),
+            half_closed: Arc::new(AtomicBool::new(true)),
+            half_close_notify: Arc::new(Notify::new()),
+            outputs: VecDeque::new(),
+            session_result: Ok(v1::SessionRecord {
+                session_id: "session-1".into(),
+                state: v1::SessionLifecycleState::Exited as i32,
+                exit_code: Some(0),
+                output_end_offset: 12,
+                status_message: "session exited with status 0".into(),
+                finished_at: Some(prost_types::Timestamp::default()),
+                ..Default::default()
+            }),
+        };
+        let output = v1::SessionAttachMessage {
+            payload: Some(v1::session_attach_message::Payload::Status(
+                v1::SessionStatus {
+                    session_id: "session-1".into(),
+                    state: v1::SessionLifecycleState::Running as i32,
+                    exit_code: None,
+                    output_end_offset: 0,
+                    message: "session running".into(),
+                },
+            )),
+        };
+
+        let response = public_attach_output(output, &mut attachment, "session-1")
+            .await
+            .expect("the streamed running snapshot must remain nonterminal");
+        let Some(proto::attach_session_response::Event::Status(status)) = response.event else {
+            panic!("bridge response must contain status");
+        };
+        let session = status.session.into_option().unwrap();
+        assert_eq!(
+            session.state.as_known(),
+            Some(proto::EnvironmentSessionState::Running)
+        );
+        assert_eq!(session.exit_code, None);
+        assert_eq!(session.output_end_offset, 0);
+        assert_eq!(session.status_message, "session running");
+        assert!(session.finished_at.as_option().is_none());
+    }
+
+    #[tokio::test]
     async fn status_lookup_errors_are_not_reclassified_as_invalid_frames() {
         let mut attachment = RecordingAttachment {
             inputs: Arc::new(Mutex::new(Vec::new())),
@@ -1047,7 +1132,11 @@ mod tests {
         };
         let output = v1::SessionAttachMessage {
             payload: Some(v1::session_attach_message::Payload::Status(
-                v1::SessionStatus::default(),
+                v1::SessionStatus {
+                    session_id: "session-1".into(),
+                    state: v1::SessionLifecycleState::Running as i32,
+                    ..Default::default()
+                },
             )),
         };
 

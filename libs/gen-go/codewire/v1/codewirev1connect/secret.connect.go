@@ -77,6 +77,9 @@ const (
 	// SecretServiceRenameProjectSecretProcedure is the fully-qualified name of the SecretService's
 	// RenameProjectSecret RPC.
 	SecretServiceRenameProjectSecretProcedure = "/codewire.v1.SecretService/RenameProjectSecret"
+	// SecretServicePreviewWorkloadSecretResolutionProcedure is the fully-qualified name of the
+	// SecretService's PreviewWorkloadSecretResolution RPC.
+	SecretServicePreviewWorkloadSecretResolutionProcedure = "/codewire.v1.SecretService/PreviewWorkloadSecretResolution"
 )
 
 // SecretServiceClient is a client for the codewire.v1.SecretService service.
@@ -96,6 +99,9 @@ type SecretServiceClient interface {
 	SetProjectSecret(context.Context, *connect.Request[v1.SetProjectSecretRequest]) (*connect.Response[v1.SetProjectSecretResponse], error)
 	DeleteProjectSecret(context.Context, *connect.Request[v1.DeleteProjectSecretRequest]) (*connect.Response[v1.DeleteProjectSecretResponse], error)
 	RenameProjectSecret(context.Context, *connect.Request[v1.RenameProjectSecretRequest]) (*connect.Response[v1.RenameProjectSecretResponse], error)
+	// Resolves only key/source metadata for one canonical environment intent.
+	// The implementation must not read or return secret values.
+	PreviewWorkloadSecretResolution(context.Context, *connect.Request[v1.PreviewWorkloadSecretResolutionRequest]) (*connect.Response[v1.PreviewWorkloadSecretResolutionResponse], error)
 }
 
 // NewSecretServiceClient constructs a client for the codewire.v1.SecretService service. By default,
@@ -203,26 +209,34 @@ func NewSecretServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(secretServiceMethods.ByName("RenameProjectSecret")),
 			connect.WithClientOptions(opts...),
 		),
+		previewWorkloadSecretResolution: connect.NewClient[v1.PreviewWorkloadSecretResolutionRequest, v1.PreviewWorkloadSecretResolutionResponse](
+			httpClient,
+			baseURL+SecretServicePreviewWorkloadSecretResolutionProcedure,
+			connect.WithSchema(secretServiceMethods.ByName("PreviewWorkloadSecretResolution")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // secretServiceClient implements SecretServiceClient.
 type secretServiceClient struct {
-	listSecrets         *connect.Client[v1.ListSecretsRequest, v1.ListSecretsResponse]
-	setSecret           *connect.Client[v1.SetSecretRequest, v1.SetSecretResponse]
-	deleteSecret        *connect.Client[v1.DeleteSecretRequest, v1.DeleteSecretResponse]
-	renameSecret        *connect.Client[v1.RenameSecretRequest, v1.RenameSecretResponse]
-	listUserSecrets     *connect.Client[v1.ListUserSecretsRequest, v1.ListUserSecretsResponse]
-	setUserSecret       *connect.Client[v1.SetUserSecretRequest, v1.SetUserSecretResponse]
-	deleteUserSecret    *connect.Client[v1.DeleteUserSecretRequest, v1.DeleteUserSecretResponse]
-	renameUserSecret    *connect.Client[v1.RenameUserSecretRequest, v1.RenameUserSecretResponse]
-	listSecretProjects  *connect.Client[v1.ListSecretProjectsRequest, v1.ListSecretProjectsResponse]
-	createSecretProject *connect.Client[v1.CreateSecretProjectRequest, v1.CreateSecretProjectResponse]
-	deleteSecretProject *connect.Client[v1.DeleteSecretProjectRequest, v1.DeleteSecretProjectResponse]
-	listProjectSecrets  *connect.Client[v1.ListProjectSecretsRequest, v1.ListProjectSecretsResponse]
-	setProjectSecret    *connect.Client[v1.SetProjectSecretRequest, v1.SetProjectSecretResponse]
-	deleteProjectSecret *connect.Client[v1.DeleteProjectSecretRequest, v1.DeleteProjectSecretResponse]
-	renameProjectSecret *connect.Client[v1.RenameProjectSecretRequest, v1.RenameProjectSecretResponse]
+	listSecrets                     *connect.Client[v1.ListSecretsRequest, v1.ListSecretsResponse]
+	setSecret                       *connect.Client[v1.SetSecretRequest, v1.SetSecretResponse]
+	deleteSecret                    *connect.Client[v1.DeleteSecretRequest, v1.DeleteSecretResponse]
+	renameSecret                    *connect.Client[v1.RenameSecretRequest, v1.RenameSecretResponse]
+	listUserSecrets                 *connect.Client[v1.ListUserSecretsRequest, v1.ListUserSecretsResponse]
+	setUserSecret                   *connect.Client[v1.SetUserSecretRequest, v1.SetUserSecretResponse]
+	deleteUserSecret                *connect.Client[v1.DeleteUserSecretRequest, v1.DeleteUserSecretResponse]
+	renameUserSecret                *connect.Client[v1.RenameUserSecretRequest, v1.RenameUserSecretResponse]
+	listSecretProjects              *connect.Client[v1.ListSecretProjectsRequest, v1.ListSecretProjectsResponse]
+	createSecretProject             *connect.Client[v1.CreateSecretProjectRequest, v1.CreateSecretProjectResponse]
+	deleteSecretProject             *connect.Client[v1.DeleteSecretProjectRequest, v1.DeleteSecretProjectResponse]
+	listProjectSecrets              *connect.Client[v1.ListProjectSecretsRequest, v1.ListProjectSecretsResponse]
+	setProjectSecret                *connect.Client[v1.SetProjectSecretRequest, v1.SetProjectSecretResponse]
+	deleteProjectSecret             *connect.Client[v1.DeleteProjectSecretRequest, v1.DeleteProjectSecretResponse]
+	renameProjectSecret             *connect.Client[v1.RenameProjectSecretRequest, v1.RenameProjectSecretResponse]
+	previewWorkloadSecretResolution *connect.Client[v1.PreviewWorkloadSecretResolutionRequest, v1.PreviewWorkloadSecretResolutionResponse]
 }
 
 // ListSecrets calls codewire.v1.SecretService.ListSecrets.
@@ -300,6 +314,11 @@ func (c *secretServiceClient) RenameProjectSecret(ctx context.Context, req *conn
 	return c.renameProjectSecret.CallUnary(ctx, req)
 }
 
+// PreviewWorkloadSecretResolution calls codewire.v1.SecretService.PreviewWorkloadSecretResolution.
+func (c *secretServiceClient) PreviewWorkloadSecretResolution(ctx context.Context, req *connect.Request[v1.PreviewWorkloadSecretResolutionRequest]) (*connect.Response[v1.PreviewWorkloadSecretResolutionResponse], error) {
+	return c.previewWorkloadSecretResolution.CallUnary(ctx, req)
+}
+
 // SecretServiceHandler is an implementation of the codewire.v1.SecretService service.
 type SecretServiceHandler interface {
 	ListSecrets(context.Context, *connect.Request[v1.ListSecretsRequest]) (*connect.Response[v1.ListSecretsResponse], error)
@@ -317,6 +336,9 @@ type SecretServiceHandler interface {
 	SetProjectSecret(context.Context, *connect.Request[v1.SetProjectSecretRequest]) (*connect.Response[v1.SetProjectSecretResponse], error)
 	DeleteProjectSecret(context.Context, *connect.Request[v1.DeleteProjectSecretRequest]) (*connect.Response[v1.DeleteProjectSecretResponse], error)
 	RenameProjectSecret(context.Context, *connect.Request[v1.RenameProjectSecretRequest]) (*connect.Response[v1.RenameProjectSecretResponse], error)
+	// Resolves only key/source metadata for one canonical environment intent.
+	// The implementation must not read or return secret values.
+	PreviewWorkloadSecretResolution(context.Context, *connect.Request[v1.PreviewWorkloadSecretResolutionRequest]) (*connect.Response[v1.PreviewWorkloadSecretResolutionResponse], error)
 }
 
 // NewSecretServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -420,6 +442,13 @@ func NewSecretServiceHandler(svc SecretServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(secretServiceMethods.ByName("RenameProjectSecret")),
 		connect.WithHandlerOptions(opts...),
 	)
+	secretServicePreviewWorkloadSecretResolutionHandler := connect.NewUnaryHandler(
+		SecretServicePreviewWorkloadSecretResolutionProcedure,
+		svc.PreviewWorkloadSecretResolution,
+		connect.WithSchema(secretServiceMethods.ByName("PreviewWorkloadSecretResolution")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.SecretService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case SecretServiceListSecretsProcedure:
@@ -452,6 +481,8 @@ func NewSecretServiceHandler(svc SecretServiceHandler, opts ...connect.HandlerOp
 			secretServiceDeleteProjectSecretHandler.ServeHTTP(w, r)
 		case SecretServiceRenameProjectSecretProcedure:
 			secretServiceRenameProjectSecretHandler.ServeHTTP(w, r)
+		case SecretServicePreviewWorkloadSecretResolutionProcedure:
+			secretServicePreviewWorkloadSecretResolutionHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -519,4 +550,8 @@ func (UnimplementedSecretServiceHandler) DeleteProjectSecret(context.Context, *c
 
 func (UnimplementedSecretServiceHandler) RenameProjectSecret(context.Context, *connect.Request[v1.RenameProjectSecretRequest]) (*connect.Response[v1.RenameProjectSecretResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.SecretService.RenameProjectSecret is not implemented"))
+}
+
+func (UnimplementedSecretServiceHandler) PreviewWorkloadSecretResolution(context.Context, *connect.Request[v1.PreviewWorkloadSecretResolutionRequest]) (*connect.Response[v1.PreviewWorkloadSecretResolutionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.SecretService.PreviewWorkloadSecretResolution is not implemented"))
 }

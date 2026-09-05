@@ -919,13 +919,50 @@ async fn reconcile_single_sandbox_liveness(
         }
     };
 
-    if !probe.pod_name.is_empty() || !probe.pod_ip.is_empty() {
-        sync_sandbox_backend_pod_info(ctx, &row, &probe).await;
+    if running_runtime_recovery_required(&row, &probe) {
+        if let Err(error) = enqueue_environment_reconcile(
+            ctx,
+            &row.id,
+            true,
+            "workspace Pod runtime identity is not current",
+        )
+        .await
+        {
+            tracing::warn!(
+                environment_id = row.id,
+                error = %error,
+                "sandbox liveness: enqueue runtime identity reconcile failed"
+            );
+        }
+        return;
     }
 
     if let Some(reason) = sandbox_liveness_reason(now, &row, &probe) {
         mark_sandbox_env_error(ctx, &row, &reason).await;
+        return;
     }
+
+    if !probe.pod_name.is_empty() || !probe.pod_ip.is_empty() {
+        sync_sandbox_backend_pod_info(ctx, &row, &probe).await;
+    }
+}
+
+fn running_runtime_recovery_required(row: &LivenessRow, probe: &ProbeResult) -> bool {
+    if row.state != "running"
+        || row.desired_state != "started"
+        || !probe.claim_exists
+        || is_terminal_claim_reason(&probe.claim_reason)
+        || matches!(probe.pod_phase.as_str(), "Failed" | "Succeeded")
+    {
+        return false;
+    }
+    !probe.claim_ready
+        || !probe.pod_exists
+        || probe.pod_name.is_empty()
+        || probe.pod_uid.is_empty()
+        || probe.pod_ip.is_empty()
+        || probe.pod_name != row.pod_name
+        || probe.pod_ip != row.pod_ip
 }
 
 fn setup_activity_active(row: &LivenessRow) -> bool {
@@ -975,6 +1012,8 @@ fn sandbox_liveness_reason(
                 }
             } else if !probe.pod_exists {
                 Some("sandbox pod missing".to_string())
+            } else if probe.pod_uid.is_empty() {
+                Some("sandbox pod missing UID".to_string())
             } else if probe.pod_phase == "Failed" || probe.pod_phase == "Succeeded" {
                 Some(format!(
                     "sandbox pod entered {} unexpectedly",
@@ -1185,10 +1224,10 @@ mod tests {
     #[test]
     fn warm_pool_revision_hash_matches_checked_in_goldens() {
         let isol8 = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&isol8), "1651238f");
+        assert_eq!(warm_pool_revision_hash(&isol8), "2944e433");
 
         let plain = warm_pool_template_opts(&warm_cfg(""), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&plain), "5c281c85");
+        assert_eq!(warm_pool_revision_hash(&plain), "bc913c68");
     }
 
     #[test]
@@ -1233,9 +1272,28 @@ mod tests {
             claim_reason: reason.into(),
             pod_exists: pod,
             pod_phase: phase.into(),
+            pod_uid: if pod { "pod-uid" } else { "" }.into(),
             pod_ip: ip.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn running_replacement_recovers_before_liveness_marks_error() {
+        let mut running = row("running", 300);
+        running.pod_name = "old-pod".into();
+        running.pod_ip = "10.1.1.1".into();
+
+        let pending = probe(true, false, "", false, "", "");
+        assert!(running_runtime_recovery_required(&running, &pending));
+
+        let mut replacement = probe(true, true, "", true, "Running", "10.1.1.2");
+        replacement.pod_name = "new-pod".into();
+        replacement.pod_uid = "new-pod-uid".into();
+        assert!(running_runtime_recovery_required(&running, &replacement));
+
+        let terminal = probe(true, false, "PodFailed", false, "", "");
+        assert!(!running_runtime_recovery_required(&running, &terminal));
     }
 
     #[test]

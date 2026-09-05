@@ -20,8 +20,6 @@
     syncRepositorySource(form);
     syncRepositorySelection(form);
     syncPresetSelection(form);
-    syncAgentCards(form);
-    syncSecretProject(form);
   };
 
   const syncRepositorySource = (form) => {
@@ -74,25 +72,6 @@
     if (!(picker instanceof HTMLSelectElement) || !(submit instanceof HTMLButtonElement)) return;
     submit.value = picker.value;
     submit.disabled = picker.value === "";
-  };
-
-  const syncAgentCards = (form) => {
-    const selected = new Set(
-      Array.from(form.querySelectorAll('input[name="agent"]:checked'), (input) => input.value),
-    );
-    form.querySelectorAll("[data-agent-card]").forEach((card) => {
-      card.hidden = !selected.has(card.getAttribute("data-agent-card"));
-    });
-  };
-
-  const syncSecretProject = (form) => {
-    const picker = form.querySelector("[data-secret-project-picker]");
-    const manage = form.querySelector("[data-manage-secret-project]");
-    if (!(picker instanceof HTMLSelectElement) || !(manage instanceof HTMLAnchorElement)) return;
-    const option = picker.selectedOptions[0];
-    const projectId = option?.dataset.projectId;
-    manage.hidden = !projectId;
-    if (projectId) manage.href = `${manage.href.replace(/\/secrets\/(?:[^/?#]+\/)?$/, "/secrets/")}${encodeURIComponent(projectId)}/`;
   };
 
   const nextIndex = (container, selector, minimum = 0) => {
@@ -220,10 +199,6 @@
       syncRepositorySelection(form);
     } else if (event.target.matches("[data-preset-picker]")) {
       syncPresetSelection(form);
-    } else if (event.target.matches('input[name="agent"]')) {
-      syncAgentCards(form);
-    } else if (event.target.matches("[data-secret-project-picker]")) {
-      syncSecretProject(form);
     }
   });
 
@@ -238,7 +213,7 @@
     if (duration) event.target.value = `${duration[1]}${duration[2]}`;
   });
 
-  document.addEventListener("click", async (event) => {
+  document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element)) return;
     const form = event.target.closest("[data-environment-prepare]");
     if (!(form instanceof HTMLFormElement)) return;
@@ -270,35 +245,6 @@
       if (image instanceof HTMLInputElement) image.value = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
     } else if (event.target.closest("[data-environment-cancel]")) {
       activeController?.abort();
-    } else if (event.target.closest("[data-create-secret-project]")) {
-      const button = event.target.closest("[data-create-secret-project]");
-      const input = form.querySelector("[data-new-secret-project-name]");
-      const error = form.querySelector("[data-secret-project-error]");
-      const csrf = form.querySelector('[name="_csrf"]');
-      if (!(button instanceof HTMLButtonElement) || !(input instanceof HTMLInputElement) || !(csrf instanceof HTMLInputElement)) return;
-      const name = input.value.trim();
-      if (!name) { if (error) { error.textContent = "Enter a project name."; error.hidden = false; } return; }
-      button.disabled = true;
-      try {
-        const body = new URLSearchParams({ _csrf: csrf.value, name });
-        const response = await fetch(button.dataset.action, { method: "POST", body, credentials: "same-origin", headers: { Accept: "application/json" } });
-        if (!response.ok) throw new Error((await response.text()) || "The secret project could not be created.");
-        const project = await response.json();
-        const picker = form.querySelector("[data-secret-project-picker]");
-        if (picker instanceof HTMLSelectElement) {
-          const option = new Option(`${project.name} — ${project.secret_count} secrets`, project.name, true, true);
-          option.dataset.projectId = project.id;
-          option.dataset.secretCount = String(project.secret_count);
-          picker.add(option);
-          syncSecretProject(form);
-        }
-        input.value = "";
-        if (error) error.hidden = true;
-      } catch (failure) {
-        if (error) { error.textContent = failure instanceof Error ? failure.message : "The secret project could not be created."; error.hidden = false; }
-      } finally {
-        button.disabled = false;
-      }
     }
   });
 

@@ -78,7 +78,15 @@ pub fn next_create_action(
     if !probe.claim_ready {
         return CreateAction::WaitForReady;
     }
-    if backend.pod_ip.is_empty() {
+    if !probe.pod_exists
+        || probe.pod_phase != "Running"
+        || probe.pod_name.is_empty()
+        || probe.pod_uid.is_empty()
+        || probe.pod_ip.is_empty()
+    {
+        return CreateAction::WaitForReady;
+    }
+    if backend.pod_ip != probe.pod_ip || backend.pod_name != probe.pod_name {
         return CreateAction::StoreBackend;
     }
     if state != "running" {
@@ -1414,16 +1422,16 @@ async fn run_environment_create(
             }
 
             CreateAction::MarkRunning => {
-                if let Some(backend) = backend.as_ref()
-                    && let Err(e) = ensure_gateway_stack_for_environment(
-                        ctx,
-                        cfg,
-                        &env,
-                        env_id,
-                        &backend.namespace,
-                        authority,
-                    )
-                    .await
+                let backend = backend.as_ref().expect("mark_running requires backend");
+                if let Err(e) = ensure_gateway_stack_for_environment(
+                    ctx,
+                    cfg,
+                    &env,
+                    env_id,
+                    &backend.namespace,
+                    authority,
+                )
+                .await
                 {
                     record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
                     return Err(e);
@@ -1670,6 +1678,11 @@ mod tests {
         BackendRow {
             namespace: ns.into(),
             claim_name: claim.into(),
+            pod_name: if ip.is_empty() {
+                String::new()
+            } else {
+                "sandbox-env".into()
+            },
             pod_ip: ip.into(),
             setup_complete,
             ..Default::default()
@@ -1680,6 +1693,11 @@ mod tests {
         ProbeResult {
             claim_exists: exists,
             claim_ready: ready,
+            pod_exists: ready,
+            pod_phase: if ready { "Running" } else { "" }.into(),
+            pod_name: if ready { "sandbox-env" } else { "" }.into(),
+            pod_uid: if ready { "pod-uid" } else { "" }.into(),
+            pod_ip: if ready { "10.0.0.5" } else { "" }.into(),
             ..Default::default()
         }
     }
@@ -1726,6 +1744,15 @@ mod tests {
         assert_eq!(
             next_create_action("creating", Some(&b), false, &probe(true, true)),
             CreateAction::MarkRunning
+        );
+        // Replacement identity must be stored before the new Pod is exposed.
+        let mut replaced = probe(true, true);
+        replaced.pod_name = "replacement".into();
+        replaced.pod_uid = "replacement-uid".into();
+        replaced.pod_ip = "10.0.0.6".into();
+        assert_eq!(
+            next_create_action("creating", Some(&b), false, &replaced),
+            CreateAction::StoreBackend
         );
         // Running but setup incomplete → publish setup.
         assert_eq!(

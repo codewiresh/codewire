@@ -68,7 +68,6 @@ help:
 	@echo "SDK (libs/sdk-{go,python,ts}):"
 	@echo "  make test-sdk     - Typecheck + unit tests across all 3 SDK languages"
 	@echo "  make sdk-e2e      - Run e2e tests against a running server (all 3 languages)"
-	@echo "  make sdk-run-claude - Parity smoke: run claude inside a local VM via each SDK"
 
 # Load environment from .env if it exists
 -include .env
@@ -477,13 +476,11 @@ ios-clean:
 	$(MAKE) -C apps/ios clean
 
 # --- SDK -------------------------------------------------------------------
-# Codewire SDK lives in libs/sdk-{go,python,ts}; examples live in
-# libs/sdk-examples. Targets here mirror what the old separate codewiresh/sdk
-# Makefile exposed.
+# Codewire SDK lives in libs/sdk-{go,python,ts}. Targets here mirror what the
+# old separate codewiresh/sdk Makefile exposed.
 
 .PHONY: test-sdk test-sdk-go test-sdk-python test-sdk-ts \
-        sdk-e2e sdk-e2e-go sdk-e2e-python sdk-e2e-ts \
-        sdk-run-claude sdk-run-claude-go sdk-run-claude-python sdk-run-claude-ts
+        sdk-e2e sdk-e2e-go sdk-e2e-python sdk-e2e-ts
 
 test-sdk: test-sdk-go test-sdk-python test-sdk-ts
 
@@ -515,22 +512,3 @@ sdk-e2e-python: test-sdk-python
 
 sdk-e2e-ts:
 	cd libs/sdk-ts && npm ci --silent --ignore-scripts && ./node_modules/.bin/tsx src/e2e.ts
-
-# End-to-end parity smoke test against a docker-backed local VM. Requires
-# docker, cw on PATH (or $CW_BIN), and a Claude auth env (ANTHROPIC_API_KEY
-# preferred for CI; CLAUDE_CODE_OAUTH_TOKEN works locally).
-sdk-run-claude: sdk-run-claude-go sdk-run-claude-python sdk-run-claude-ts
-
-sdk-run-claude-go:
-	cd libs/sdk-examples/run-claude/go && go run .
-
-sdk-run-claude-python: test-sdk-python
-	cd libs/sdk-examples/run-claude/python && \
-	  PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" \
-	  $(CURDIR)/libs/sdk-python/.venv/bin/python run_claude.py
-
-sdk-run-claude-ts:
-	cd libs/sdk-ts && npm ci --silent --ignore-scripts && npm run build
-	cd libs/sdk-examples/run-claude/typescript && \
-	  (test -d node_modules || npm ci --silent --ignore-scripts) && \
-	  npm run start --silent

@@ -239,6 +239,73 @@ owner after the Temporal cutover. Mesh and coordinator may use NATS behind
 their service boundaries when process-local state or database polling would be
 the wrong fit.
 
+### Protected values and saved state
+
+Storage is not delivery. Selecting a protected value only makes it eligible
+for a later binding:
+
+```text
+stored value
+  +-- brokered binding --> allowed operation; child never receives the value
+  `-- exposed binding  --> value enters one explicitly admitted child
+```
+
+The brokered path is the target default. It is a typed proxy, signer, or
+executor, not a generic secret-read API. New credential bindings are
+broker-only and never silently become exposed values.
+
+The secret-bearing broker stays outside the sandbox:
+
+```text
+local:    child -> local relay -> guest edge -> host broker -> provider
+platform: child -> local relay -> gateway Pod -> internal broker -> provider
+```
+
+The relay and edge hold no provider credential. The platform workspace daemon
+cannot be that edge because it shares the workload's container and process
+boundary. `av-credential-proxy` and `av-proxy-helper` are reusable libraries
+inside the placement-owned processes, not new control planes. Proxying is only
+cooperative credential non-disclosure while direct provider egress remains
+open; enforced mediation also requires denying bypass.
+
+The target command surface is:
+
+```text
+cw secrets run -- COMMAND           # brokered
+cw secrets run --expose -- COMMAND  # brokered plus permitted raw values
+```
+
+An **environment projection** is the child-visible value set built for one
+explicit launch. It is never a shared file or a second version history. A
+stored value without a matching binding is unavailable. An environment policy
+may apply the same launch choice automatically, so a configured plain `codex`
+can work without another login or wrapper.
+
+This command must not ship until both paths are real. The brokered form needs
+the reusable AV edge; the exposed form needs a trusted executor that launches
+the exact child. Both must reject stale runtime operations.
+
+Current status is narrower: local Codex brokerage and protected-value
+storage/metadata exist. General `cw secrets run`, raw per-child projection, and
+the platform broker boundary do not yet ship. The platform's older environment
+and credential injection paths remain legacy behavior until inputs, runtime,
+and existing-volume handling can change atomically.
+
+Saved-state names describe what can actually be restored:
+
+- A **skill snapshot** is immutable, reusable skill content and is implemented.
+- **Workspace storage** is the live mutable filesystem. Persistence across a
+  stop is not a snapshot.
+- A **workspace snapshot** will be restorable workspace filesystem state.
+- An **environment snapshot** will combine a workspace snapshot with the
+  Codewire settings needed to create an independent environment.
+- A **VM checkpoint** will contain backend-specific running-VM memory and device
+  state for a future hot environment snapshot.
+
+Workspace snapshots, environment snapshots, and VM checkpoints are reserved
+capability names; they are not implemented today. In short: projections launch
+processes, snapshots restore saved state, and checkpoints resume execution.
+
 > **Rust port status:** lifecycle execution, environment reconciliation,
 > sandbox liveness, warm-pool reconciliation, and sandbox billing-session
 > loops are Rust-owned by default in `crates/codewire-orchestration`. Billing

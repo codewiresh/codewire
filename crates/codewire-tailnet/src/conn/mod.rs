@@ -383,8 +383,9 @@ impl Conn {
         // Channels bridging the netstack and the pump:
         //   netstack.outbound -> pump (encrypt + relay)
         //   pump (decrypt)    -> netstack.inbound
-        let (ns_out_tx, ns_out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (ns_in_tx, ns_in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (ns_out_tx, ns_out_rx) =
+            mpsc::channel::<Vec<u8>>(crate::netstack::PACKET_QUEUE_CAPACITY);
+        let (ns_in_tx, ns_in_rx) = mpsc::channel::<Vec<u8>>(crate::netstack::PACKET_QUEUE_CAPACITY);
         let netstack = Netstack::new(local_ip, prefix_len, ns_in_rx, ns_out_tx);
 
         let peers = Arc::new(Mutex::new(HashMap::<[u8; 32], Peer>::new()));
@@ -665,8 +666,8 @@ fn parse_port(addr: &str) -> Result<u16, Error> {
 /// Everything the pump task owns. One struct keeps the spawn a single move.
 struct PumpCtx {
     peers: Arc<Mutex<HashMap<[u8; 32], Peer>>>,
-    ns_out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    ns_in_tx: mpsc::UnboundedSender<Vec<u8>>,
+    ns_out_rx: mpsc::Receiver<Vec<u8>>,
+    ns_in_tx: mpsc::Sender<Vec<u8>>,
     to_transport: mpsc::UnboundedSender<WgDatagram>,
     from_transport: mpsc::UnboundedReceiver<WgDatagram>,
 }
@@ -787,7 +788,7 @@ fn send_outbound(
 fn recv_inbound(
     peers: &Arc<Mutex<HashMap<[u8; 32], Peer>>>,
     to_transport: &mpsc::UnboundedSender<WgDatagram>,
-    ns_in_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    ns_in_tx: &mpsc::Sender<Vec<u8>>,
     dg: WgDatagram,
 ) {
     let key = *dg.peer.as_bytes();
@@ -822,7 +823,11 @@ fn recv_inbound(
                     ip_packet_len = p.len(),
                     "rust tailnet decrypted inbound WireGuard packet"
                 );
-                let _ = ns_in_tx.send(p.to_vec());
+                if ns_in_tx.try_send(p.to_vec()).is_err() {
+                    tracing::debug!(
+                        "rust tailnet dropped inbound IP packet at bounded netstack queue"
+                    );
+                }
                 break;
             }
             TunnResult::Done => break,

@@ -43,6 +43,18 @@ fn entrypoint() -> anyhow::Result<()> {
                 .context("create guest daemon Tokio runtime")?;
             runtime.block_on(guest::run_daemon())
         }
+        Some("network-agent") => {
+            ensure!(
+                arguments.next().is_none(),
+                "network agent accepts no arguments"
+            );
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .context("create guest network-agent Tokio runtime")?;
+            runtime.block_on(guest::run_network_agent())
+        }
         Some("identity") => {
             ensure!(arguments.next().is_none(), "identity accepts no arguments");
             guest::run_identity()
@@ -92,7 +104,19 @@ fn entrypoint() -> anyhow::Result<()> {
             );
             guest::run_workspace_init()
         }
+        Some("credential-forwarder") => {
+            ensure!(
+                arguments.next().is_none(),
+                "credential-forwarder accepts no arguments"
+            );
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("create credential forwarder Tokio runtime")?;
+            runtime.block_on(guest::run_credential_forwarder())
+        }
         Some("workspace-exec") => guest::run_workspace_exec(arguments.collect()),
+        Some("docker-fixture") => guest::run_docker_fixture(arguments.collect()),
         Some("newc") => build_newc(arguments),
         Some("newc-root") => build_guest_root_newc(arguments),
         Some(_) => {

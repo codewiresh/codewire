@@ -38,29 +38,39 @@ pub(crate) async fn resolve_named_execution_target(
     placement: Option<EnvironmentPlacement>,
 ) -> anyhow::Result<config::CurrentTargetConfig> {
     let target_ref = trimmed_required(target_ref, "target")?;
-    if target_ref == "local" && placement.is_none() {
-        return Ok(config::default_current_target());
-    }
-    let local = resolve_local_instance_target(&paths.mesh_data_dir, target_ref);
+    #[cfg(target_os = "linux")]
+    let local = if placement != Some(EnvironmentPlacement::Platform) {
+        native_environment(target_ref).await?
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let local: Option<()> = None;
     if placement == Some(EnvironmentPlacement::Local) {
-        let Some((key, instance)) = local else {
+        #[cfg(target_os = "linux")]
+        if let Some(environment) = local.as_ref() {
+            return Ok(config::CurrentTargetConfig {
+                kind: "local".to_string(),
+                target_ref: environment.name.clone(),
+                name: environment.name.clone(),
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = local;
+        {
             anyhow::bail!("local environment {target_ref:?} not found");
-        };
-        return Ok(config::CurrentTargetConfig {
-            kind: "local".to_string(),
-            target_ref: key.clone(),
-            name: local_instance_display_name(&key, &instance).to_string(),
-        });
+        }
     }
 
     let platform = match resolve_platform(globals, paths, env) {
         Ok(platform) => platform,
         Err(error) if placement.is_none() => {
-            if let Some((key, instance)) = local {
+            #[cfg(target_os = "linux")]
+            if let Some(environment) = local.as_ref() {
                 return Ok(config::CurrentTargetConfig {
                     kind: "local".to_string(),
-                    target_ref: key.clone(),
-                    name: local_instance_display_name(&key, &instance).to_string(),
+                    target_ref: environment.name.clone(),
+                    name: environment.name.clone(),
                 });
             }
             return Err(error);
@@ -88,6 +98,7 @@ pub(crate) async fn resolve_named_execution_target(
         return Ok(current_target_from_environment(&environment));
     }
 
+    #[cfg(target_os = "linux")]
     match (local, platform_match) {
         (_, Some((environment_id, EnvironmentMatchKind::ExactId))) => {
             let environment = environment_client
@@ -96,16 +107,17 @@ pub(crate) async fn resolve_named_execution_target(
                 .context("get environment")?;
             Ok(current_target_from_environment(&environment))
         }
-        (Some((_key, _)), Some((_environment_id, EnvironmentMatchKind::ExactName))) => {
+        (Some(environment), Some((_environment_id, EnvironmentMatchKind::ExactName)))
+            if environment.name == target_ref =>
+        {
             anyhow::bail!(
                 "environment {target_ref:?} exists in both placements; use `cw use --local {target_ref}` or `cw use --platform {target_ref}`"
             )
         }
-        (Some((key, instance)), Some((_, EnvironmentMatchKind::IdPrefix)))
-        | (Some((key, instance)), None) => Ok(config::CurrentTargetConfig {
+        (Some(environment), _) => Ok(config::CurrentTargetConfig {
             kind: "local".to_string(),
-            target_ref: key.clone(),
-            name: local_instance_display_name(&key, &instance).to_string(),
+            target_ref: environment.name.clone(),
+            name: environment.name,
         }),
         (None, Some((environment_id, _))) => {
             let environment = environment_client
@@ -115,6 +127,17 @@ pub(crate) async fn resolve_named_execution_target(
             Ok(current_target_from_environment(&environment))
         }
         (None, None) => anyhow::bail!("environment {target_ref:?} not found"),
+    }
+    #[cfg(not(target_os = "linux"))]
+    match platform_match {
+        Some((environment_id, _)) => {
+            let environment = environment_client
+                .get_environment(&org_id, &environment_id)
+                .await
+                .context("get environment")?;
+            Ok(current_target_from_environment(&environment))
+        }
+        None => anyhow::bail!("environment {target_ref:?} not found"),
     }
 }
 
@@ -144,35 +167,6 @@ pub(crate) async fn lookup_environment_for_target(
         .get_environment(&org_id, &target.target_ref)
         .await
         .ok()
-}
-
-pub(crate) fn resolve_local_instance_target(
-    data_dir: &Path,
-    target_ref: &str,
-) -> Option<(String, config::LocalInstanceConfig)> {
-    let target_ref = trimmed_str(target_ref)?;
-    let config = config::load_local_instances_config(data_dir).ok()?;
-    if let Some(instance) = config.instances.get(target_ref) {
-        return Some((target_ref.to_string(), instance.clone()));
-    }
-    config
-        .instances
-        .into_iter()
-        .find(|(_, instance)| trimmed_str(&instance.runtime_name) == Some(target_ref))
-}
-
-pub(crate) fn lookup_local_instance_for_target(
-    data_dir: &Path,
-    target: &config::CurrentTargetConfig,
-) -> Option<config::LocalInstanceConfig> {
-    if target.kind != "local" || target.target_ref.trim().is_empty() || target.target_ref == "local"
-    {
-        return None;
-    }
-    config::load_local_instances_config(data_dir)
-        .ok()?
-        .instances
-        .remove(&target.target_ref)
 }
 
 pub(crate) async fn resolve_environment_id(
@@ -279,13 +273,12 @@ pub(crate) fn resolve_environment_id_from_list(
 pub(crate) fn format_current_target_text(
     target: &config::CurrentTargetConfig,
     environment: Option<&Environment>,
-    local_instance: Option<&config::LocalInstanceConfig>,
     network: Option<&str>,
     verbose: bool,
 ) -> String {
     let network = network.and_then(trimmed_str);
     if !verbose {
-        let mut summary = target_summary_line(target, environment, local_instance);
+        let mut summary = target_summary_line(target, environment);
         if let Some(network) = network {
             summary.push_str("  network: ");
             summary.push_str(network);
@@ -307,22 +300,14 @@ pub(crate) fn format_current_target_text(
             output.push_str(&format!(
                 "{:<10} {}\n",
                 "Target:",
-                target_display_name(target, None, local_instance)
+                target_display_name(target, None)
             ));
-            if let Some(instance) = local_instance {
-                if let Some(backend) = trimmed_str(&instance.backend) {
-                    output.push_str(&format!("{:<10} {}\n", "Backend:", backend));
-                }
-                if let Some(runtime) = trimmed_str(&instance.runtime_name) {
-                    output.push_str(&format!("{:<10} {}\n", "Runtime:", runtime));
-                }
-            }
         }
         "env" => {
             output.push_str(&format!(
                 "{:<10} {}\n",
                 "Target:",
-                target_display_name(target, environment, None)
+                target_display_name(target, environment)
             ));
             output.push_str(&format!("{:<10} {}\n", "ID:", target.target_ref));
             output.push_str(&format!(
@@ -348,7 +333,7 @@ pub(crate) fn format_current_target_text(
             output.push_str(&format!(
                 "{:<10} {}\n",
                 "Target:",
-                target_display_name(target, environment, local_instance)
+                target_display_name(target, environment)
             ));
         }
     }
@@ -358,26 +343,17 @@ pub(crate) fn format_current_target_text(
 pub(crate) fn target_summary_line(
     target: &config::CurrentTargetConfig,
     environment: Option<&Environment>,
-    local_instance: Option<&config::LocalInstanceConfig>,
 ) -> String {
     if target.kind == "local" && target.target_ref == "local" {
         return "local".to_string();
     }
     if target.kind == "local" {
-        let mut summary = target_display_name(target, None, local_instance).to_string();
-        if let Some(instance) = local_instance
-            && let Some(backend) = trimmed_str(&instance.backend)
-        {
-            summary.push_str(" [");
-            summary.push_str(backend);
-            summary.push(']');
-        }
-        return summary;
+        return target_display_name(target, None).to_string();
     }
     if target.kind == "env" {
         let mut summary = format!(
             "{} [{}]",
-            target_display_name(target, environment, None),
+            target_display_name(target, environment),
             short_env_id(&target.target_ref)
         );
         if let Some(environment) = environment
@@ -388,18 +364,15 @@ pub(crate) fn target_summary_line(
         }
         return summary;
     }
-    target_display_name(target, environment, local_instance).to_string()
+    target_display_name(target, environment).to_string()
 }
 
 pub(crate) fn target_display_name<'a>(
     target: &'a config::CurrentTargetConfig,
     environment: Option<&'a Environment>,
-    local_instance: Option<&'a config::LocalInstanceConfig>,
 ) -> &'a str {
     if target.kind == "local" {
-        return local_instance
-            .and_then(|instance| trimmed_str(&instance.name))
-            .or_else(|| trimmed_str(&target.name))
+        return trimmed_str(&target.name)
             .or_else(|| trimmed_str(&target.target_ref))
             .unwrap_or("local");
     }
@@ -407,15 +380,6 @@ pub(crate) fn target_display_name<'a>(
         .map(environment_display_name)
         .or_else(|| trimmed_str(&target.name))
         .or_else(|| trimmed_str(&target.target_ref))
-        .unwrap_or("local")
-}
-
-pub(crate) fn local_instance_display_name<'a>(
-    key: &'a str,
-    instance: &'a config::LocalInstanceConfig,
-) -> &'a str {
-    trimmed_str(&instance.name)
-        .or_else(|| trimmed_str(key))
         .unwrap_or("local")
 }
 
@@ -632,7 +596,7 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
     config::save_platform_config(
         &paths.platform_config_dir,
         &config::PlatformConfig {
-            server_url,
+            server_url: server_url.clone(),
             session_token: String::new(),
             default_org: selected_org
                 .as_ref()
@@ -641,6 +605,11 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
         },
     )
     .context("save config")?;
+    refresh_hosted_mesh_owner_context(
+        &paths,
+        &server_url,
+        selected_org.as_ref().map(|org| org.id.as_str()),
+    )?;
 
     if let Some(org) = &selected_org {
         eprintln!("Default org: {} ({}).", org.name, org.slug);
@@ -892,7 +861,8 @@ pub(crate) fn save_login_platform_config(
         &codewire_client::FileCredentialStore::new(&paths.platform_config_dir),
         credentials,
     )
-    .context("save OAuth credentials")
+    .context("save OAuth credentials")?;
+    refresh_hosted_mesh_owner_context(paths, server_url, default_org)
 }
 
 pub(crate) fn oauth_user_display_name(user: &OAuthUserInfo) -> String {
@@ -975,6 +945,7 @@ pub(crate) async fn handle_org_command(
             saved.default_org = selected.id.clone();
             config::save_platform_config(&paths.platform_config_dir, &saved)
                 .context("save config")?;
+            refresh_hosted_mesh_owner_context(&paths, &saved.server_url, Some(&saved.default_org))?;
             eprintln!("Current org set to {} ({}).", selected.name, selected.slug);
         }
         OrgCommand::Create(args) => {
@@ -1201,7 +1172,7 @@ pub(crate) async fn handle_preset_command(
     Ok(())
 }
 
-pub(crate) async fn handle_secrets_command(
+pub(crate) async fn handle_platform_secrets_command(
     globals: &Globals,
     command: SecretsCommand,
 ) -> anyhow::Result<()> {
@@ -1215,108 +1186,197 @@ pub(crate) async fn handle_secrets_command(
         SecretsCommand::User { command } => {
             handle_user_secret_command(&client, command).await?;
         }
-        SecretsCommand::Org { command } => {
+        SecretsCommand::Organization { command } => {
             let orgs = organizations.list_orgs().await.context("list orgs")?;
             let org_id = current_org_id(&platform, &orgs)?;
             handle_org_secret_command(&client, &org_id, command).await?;
         }
-        SecretsCommand::Create(args) => {
+        SecretsCommand::List(args) => {
+            let inventory = platform_secret_inventory(globals).await?;
+            print_secret_inventory(&inventory, args.output)?;
+        }
+        SecretsCommand::Preview(args) => {
+            let intent = load_secret_preview_intent(&args.file)?;
             let orgs = organizations.list_orgs().await.context("list orgs")?;
             let org_id = current_org_id(&platform, &orgs)?;
-            let name = trimmed_required(&args.name, "secret project name")?;
-            let project = client
-                .create_secret_project(
+            let secret_project_id = if let Some(project_name) = intent.project.as_deref() {
+                Some(
+                    load_secret_project_by_name(&client, &org_id, project_name)
+                        .await?
+                        .id,
+                )
+            } else {
+                None
+            };
+            let secrets = client
+                .preview_workload_secret_resolution(
                     &org_id,
-                    &CreateSecretProjectRequest {
-                        name: name.to_string(),
-                    },
+                    intent.organization,
+                    secret_project_id.as_deref(),
+                    intent.user,
+                    intent.explicit_environment_keys,
                 )
                 .await
-                .context("create secret project")?;
-            eprintln!(
-                "Secret project {:?} created. (id: {})",
-                project.name, project.id
-            );
+                .context("preview platform workload-secret resolution")?;
+            print_secret_resolution("platform", &secrets, args.output)?;
         }
-        SecretsCommand::List(args) => {
+        SecretsCommand::Project { command } => {
             let orgs = organizations.list_orgs().await.context("list orgs")?;
             let org_id = current_org_id(&platform, &orgs)?;
-            let projects = client
-                .list_secret_projects(&org_id)
-                .await
-                .context("list secret projects")?;
-            if let Some(project_name) = args.project_name.as_deref().and_then(trimmed_str) {
-                let project = find_secret_project_by_name(&projects, project_name)
-                    .ok_or_else(|| anyhow::anyhow!("secret project {project_name:?} not found"))?;
-                let secrets = client
-                    .list_project_secrets(&org_id, &project.id)
-                    .await
-                    .context("list project secrets")?;
-                print_secret_metadata_list(
-                    &secrets,
-                    &format!("No secrets in project {project_name:?}."),
-                    args.output,
-                )?;
-            } else {
-                print_secret_project_list(&projects, args.output)?;
-            }
-        }
-        SecretsCommand::Set(args) => {
-            let orgs = organizations.list_orgs().await.context("list orgs")?;
-            let org_id = current_org_id(&platform, &orgs)?;
-            let project_name = trimmed_required(&args.project, "secret project")?;
-            let key = trimmed_required(&args.key, "secret key")?;
-            let project = load_secret_project_by_name(&client, &org_id, project_name).await?;
-            let value = prompt_secret_value()?;
-            client
-                .set_project_secret(&org_id, &project.id, key, &value)
-                .await
-                .context("set secret")?;
-            eprintln!("Secret {key} set in project {project_name:?}.");
-        }
-        SecretsCommand::Delete(args) => {
-            let orgs = organizations.list_orgs().await.context("list orgs")?;
-            let org_id = current_org_id(&platform, &orgs)?;
-            let project_name = trimmed_required(&args.project, "secret project")?;
-            let project = load_secret_project_by_name(&client, &org_id, project_name).await?;
-            if let Some(key) = args.key.as_deref().and_then(trimmed_str) {
-                client
-                    .delete_project_secret(&org_id, &project.id, key)
-                    .await
-                    .context("delete secret")?;
-                eprintln!("Secret {key} deleted from project {project_name:?}.");
-            } else {
-                if !args.yes
-                    && !prompt_confirm_default_yes(&format!(
-                        "Delete secret project {project_name:?} and all its secrets? [Y/n]"
-                    ))?
-                {
-                    eprintln!("Canceled.");
-                    return Ok(());
+            match command {
+                SecretProjectCommand::Create(args) => {
+                    let name = trimmed_required(&args.name, "secret project name")?;
+                    let project = client
+                        .create_secret_project(
+                            &org_id,
+                            &CreateSecretProjectRequest {
+                                name: name.to_string(),
+                            },
+                        )
+                        .await
+                        .context("create secret project")?;
+                    eprintln!(
+                        "Secret project {:?} created. (id: {})",
+                        project.name, project.id
+                    );
                 }
-                client
-                    .delete_secret_project(&org_id, &project.id)
-                    .await
-                    .context("delete secret project")?;
-                eprintln!("Secret project {project_name:?} deleted.");
+                SecretProjectCommand::List(args) => {
+                    let projects = client
+                        .list_secret_projects(&org_id)
+                        .await
+                        .context("list secret projects")?;
+                    if let Some(project_name) = args.project_name.as_deref().and_then(trimmed_str) {
+                        let project = find_secret_project_by_name(&projects, project_name)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("secret project {project_name:?} not found")
+                            })?;
+                        let secrets = client
+                            .list_project_secrets(&org_id, &project.id)
+                            .await
+                            .context("list project secrets")?;
+                        print_secret_metadata_list(
+                            &secrets,
+                            &format!("No secrets in project {project_name:?}."),
+                            args.output,
+                        )?;
+                    } else {
+                        print_secret_project_list(&projects, args.output)?;
+                    }
+                }
+                SecretProjectCommand::Set(args) => {
+                    let project_name = trimmed_required(&args.project, "secret project")?;
+                    let key = trimmed_required(&args.key, "secret key")?;
+                    let project =
+                        load_secret_project_by_name(&client, &org_id, project_name).await?;
+                    let value = prompt_platform_workload_secret_value()?;
+                    client
+                        .set_project_secret(&org_id, &project.id, key, &value)
+                        .await
+                        .context("set secret")?;
+                    eprintln!("Secret {key} set in project {project_name:?}.");
+                }
+                SecretProjectCommand::Delete(args) => {
+                    let project_name = trimmed_required(&args.project, "secret project")?;
+                    let project =
+                        load_secret_project_by_name(&client, &org_id, project_name).await?;
+                    if let Some(key) = args.key.as_deref().and_then(trimmed_str) {
+                        client
+                            .delete_project_secret(&org_id, &project.id, key)
+                            .await
+                            .context("delete secret")?;
+                        eprintln!("Secret {key} deleted from project {project_name:?}.");
+                    } else {
+                        if !args.yes
+                            && !prompt_confirm_default_yes(&format!(
+                                "Delete secret project {project_name:?} and all its secrets? [Y/n]"
+                            ))?
+                        {
+                            eprintln!("Canceled.");
+                            return Ok(());
+                        }
+                        client
+                            .delete_secret_project(&org_id, &project.id)
+                            .await
+                            .context("delete secret project")?;
+                        eprintln!("Secret project {project_name:?} deleted.");
+                    }
+                }
+                SecretProjectCommand::Rename(args) => {
+                    let project_name = trimmed_required(&args.project, "secret project")?;
+                    let old_key = trimmed_required(&args.old_key, "old secret key")?;
+                    let new_key = trimmed_required(&args.new_key, "new secret key")?;
+                    let project =
+                        load_secret_project_by_name(&client, &org_id, project_name).await?;
+                    client
+                        .rename_project_secret(&org_id, &project.id, old_key, new_key)
+                        .await
+                        .context("rename secret")?;
+                    eprintln!("Secret {old_key} renamed to {new_key} in project {project_name:?}.");
+                }
             }
-        }
-        SecretsCommand::Rename(args) => {
-            let orgs = organizations.list_orgs().await.context("list orgs")?;
-            let org_id = current_org_id(&platform, &orgs)?;
-            let project_name = trimmed_required(&args.project, "secret project")?;
-            let old_key = trimmed_required(&args.old_key, "old secret key")?;
-            let new_key = trimmed_required(&args.new_key, "new secret key")?;
-            let project = load_secret_project_by_name(&client, &org_id, project_name).await?;
-            client
-                .rename_project_secret(&org_id, &project.id, old_key, new_key)
-                .await
-                .context("rename secret")?;
-            eprintln!("Secret {old_key} renamed to {new_key} in project {project_name:?}.");
         }
     }
 
     Ok(())
+}
+
+pub(crate) async fn platform_secret_inventory(
+    globals: &Globals,
+) -> anyhow::Result<Vec<SecretInventoryView>> {
+    let env = OsEnv;
+    let paths = ResolvePaths::from_env(&env);
+    let platform = resolve_platform(globals, &paths, &env)?;
+    let client = SecretClient::new(&platform)?;
+    let organizations = organization_client(&platform)?;
+    let orgs = organizations.list_orgs().await.context("list orgs")?;
+    let org_id = current_org_id(&platform, &orgs)?;
+    let mut inventory = client
+        .list_user_secrets()
+        .await
+        .context("list user secrets")?
+        .into_iter()
+        .map(|secret| platform_secret_inventory_entry("user", None, secret))
+        .collect::<Vec<_>>();
+    inventory.extend(
+        client
+            .list_org_secrets(&org_id)
+            .await
+            .context("list organization secrets")?
+            .into_iter()
+            .map(|secret| platform_secret_inventory_entry("organization", None, secret)),
+    );
+    for project in client
+        .list_secret_projects(&org_id)
+        .await
+        .context("list secret projects")?
+    {
+        inventory.extend(
+            client
+                .list_project_secrets(&org_id, &project.id)
+                .await
+                .context("list project secrets")?
+                .into_iter()
+                .map(|secret| {
+                    platform_secret_inventory_entry("project", Some(project.name.clone()), secret)
+                }),
+        );
+    }
+    Ok(inventory)
+}
+
+fn platform_secret_inventory_entry(
+    scope: &'static str,
+    project: Option<String>,
+    secret: SecretMetadata,
+) -> SecretInventoryView {
+    SecretInventoryView {
+        placement: "platform",
+        scope,
+        project,
+        key: secret.key,
+        created_at: secret.created_at,
+        updated_at: secret.updated_at,
+    }
 }
 
 pub(crate) async fn handle_user_secret_command(
@@ -1333,7 +1393,7 @@ pub(crate) async fn handle_user_secret_command(
         }
         ScopedSecretCommand::Set(args) => {
             let key = trimmed_required(&args.key, "secret key")?;
-            let value = prompt_secret_value()?;
+            let value = prompt_platform_workload_secret_value()?;
             client
                 .set_user_secret(key, &value)
                 .await
@@ -1377,7 +1437,7 @@ pub(crate) async fn handle_org_secret_command(
         }
         ScopedSecretCommand::Set(args) => {
             let key = trimmed_required(&args.key, "secret key")?;
-            let value = prompt_secret_value()?;
+            let value = prompt_platform_workload_secret_value()?;
             client
                 .set_org_secret(org_id, key, &value)
                 .await

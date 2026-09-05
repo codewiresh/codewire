@@ -13,6 +13,7 @@ COPY deployments/docker/gateway.Cargo.lock ./Cargo.lock
 COPY crates/codewire-client ./crates/codewire-client
 COPY crates/codewire-gateway ./crates/codewire-gateway
 COPY crates/codewire-gateway-proto ./crates/codewire-gateway-proto
+COPY crates/codewire-netstack ./crates/codewire-netstack
 COPY crates/codewire-proto ./crates/codewire-proto
 COPY crates/codewire-tailnet ./crates/codewire-tailnet
 COPY proto ./proto

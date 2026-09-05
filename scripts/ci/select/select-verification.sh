@@ -147,7 +147,7 @@ select_all_transport() {
   select_token transport
   select_token transport_derp_contract
   for package in \
-      codewire_tailnet codewire_gateway codewire_daemon codewire_local_vmm \
+      codewire_netstack codewire_tailnet codewire_gateway codewire_daemon codewire_local_vmm \
       codewire_mesh codewire_derp codewire_udp_relay codewire_coordinator \
       codewire_vmm_guest_probe; do
     select_token "transport_pkg_${package}"
@@ -419,7 +419,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
       scripts/ci/verify/run-product-verification.sh|\
-      scripts/ci/tests/test-sdk-local-cli-contract.sh|\
+      scripts/ci/tests/test-retired-local-sdk-contract.sh|\
       scripts/checks/security/audit-rust-only-runtime.sh|\
       scripts/ci/setup/*.sh|scripts/ci/verify/*.sh|\
       scripts/ci/verify/rust-stack-rehearsal.sh)
@@ -659,24 +659,23 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      libs/sdk-go/*|\
-      libs/sdk-examples/run-claude/go/*)
+      libs/sdk-go/*)
         select_token sdk_go
         select_token go_support
         select_token go_consumer_interop
         recognized=true
         ;;
-      libs/sdk-ts/*|\
-      libs/sdk-examples/run-claude/typescript/*)
+      libs/sdk-ts/*)
         select_token sdk_ts
         recognized=true
         ;;
-      libs/sdk-python/*|libs/sdk-examples/run-claude/python/*)
+      libs/sdk-python/*)
         select_token sdk_python
         recognized=true
         ;;
-      libs/sdk-examples/run-claude/.gitignore|\
-      libs/sdk-examples/run-claude/README.md)
+      libs/sdk-examples/run-claude/*)
+        # Deletion-only tombstone for the retired Docker/Lima SDK example.
+        # The policy guard fails if this source tree is reintroduced.
         recognized=true
         ;;
     esac
@@ -696,9 +695,7 @@ if [ "$event_selected" = false ]; then
         ;;
       apps/dashboard/package.json|\
       packages/*/package.json|\
-      libs/sdk-ts/package.json|libs/sdk-ts/package-lock.json|\
-      libs/sdk-examples/run-claude/typescript/package.json|\
-      libs/sdk-examples/run-claude/typescript/package-lock.json)
+      libs/sdk-ts/package.json|libs/sdk-ts/package-lock.json)
         select_js_security
         recognized=true
         ;;
@@ -752,7 +749,7 @@ if [ "$event_selected" = false ]; then
           select_token rust
           select_token rust_pkg_codewire_desktop
           ;;
-        codewire-tailnet|codewire-gateway|codewire-daemon|codewire-local-vmm|\
+        codewire-netstack|codewire-tailnet|codewire-gateway|codewire-daemon|codewire-local-vmm|\
         codewire-mesh|codewire-derp|codewire-udp-relay|codewire-coordinator|\
         codewire-vmm-guest-probe)
           select_token transport
@@ -772,7 +769,7 @@ if [ "$event_selected" = false ]; then
       if [ "$path" = "crates/$crate/Cargo.toml" ]; then
         case "$crate" in
           codewire-daemon|codewire-gateway|codewire-gateway-proto|\
-          codewire-local-vmm|codewire-proto|codewire-tailnet|codewire-derp|\
+          codewire-local-vmm|codewire-netstack|codewire-proto|codewire-tailnet|codewire-derp|\
           codewire-vmm-guest-probe)
             select_token rust_curated_locks
             ;;
@@ -782,6 +779,19 @@ if [ "$event_selected" = false ]; then
     fi
 
     case "$path" in
+      testdata/local-vm-network/*)
+        # Shared authenticated packet fixtures are consumed by the guest probe
+        # and therefore by its local VMM host runner.
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        recognized=true
+        ;;
+      crates/codewire-netstack/*)
+        # The tailnet wrapper consumes the shared userspace TCP/IP engine.
+        select_token transport
+        select_token transport_pkg_codewire_tailnet
+        ;;
       crates/codewire-daemon/*|crates/codewire-gateway-proto/*)
         # The local VMM host and guest link the private daemon contract
         # directly; changes must verify those reverse dependencies too.

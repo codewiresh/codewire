@@ -951,8 +951,6 @@ create_environment() {
       --disk "$SMOKE_DISK" \
       --isolation "$SMOKE_ISOLATION_TIER" \
       --ttl "$SMOKE_TTL" \
-      --no-org-secrets \
-      --no-user-secrets \
       --no-network \
       --no-wait \
       --yes >"$create_out" 2>&1; then

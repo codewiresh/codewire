@@ -8,7 +8,10 @@ readonly LINUX_SUN_PATH_BYTES=108
 readonly LONGEST_SOCKET_SUFFIX='/engine/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock'
 
 CW_BIN=''
+MESH_BIN=''
+DERP_BIN=''
 DATA_PLANE_SMOKE_BIN=''
+CREDENTIAL_BRIDGE_SMOKE_BIN=''
 STATE_PROBE_BIN=''
 ARTIFACT_ROOT=''
 ARTIFACT_LOCK=''
@@ -21,50 +24,103 @@ SMOKE_ROOT=''
 SMOKE_HOME=''
 STATE_ROOT=''
 WORKSPACE=''
+MOUNT_SOURCE=''
+DIRECT_RO_SOURCE=''
+DIRECT_RW_SOURCE=''
+DIRECT_OUTSIDE_SOURCE=''
+REPOSITORY_SKILL_SOURCE=''
+DIRECT_SKILL_SOURCE=''
+USER_SKILL_SOURCE=''
+INITIAL_SKILL_SNAPSHOT=''
 PLATFORM_CONFIG=''
 TRIPWIRE=''
 TRANSCRIPT=''
 SOURCE_HOOK_MARKER=''
 SOURCE_CREDENTIAL_MARKER=''
 SOURCE_CONFIG_SHA256=''
+HOST_PORT=''
+MESH_PORT=''
+DERP_PORT=''
+DOCKER_HOST_PORT=''
+MESH_NETWORK='native-smoke-network'
+MESH_ORGANIZATION_ID=''
 GITEA_COMMIT='bcbae548ab2f4f0e407068aa8717cec341084d7a'
 GITEA_README_SHA256='d4911db7bc817528fbcbaaf39e76851700084b65494dac1e29afb997867ac006'
 GITHUB_COMMIT='93f68ba4abc9f6e222481265b9b759e71d332575'
 GITHUB_README_SHA256='3661bce99f8eba5e48077eeddb4840f4404c1ceafbf200b9e8470bc7b4f22e50'
+WORKSPACE_IMAGE='ghcr.io/codewiresh/workspace@sha256:fa5d2fa61bb03b0e9181915b57ce5f2f8fa053eec8b7c6a950ecaadf93bc3645'
+DOCKER_PUBLIC_IMAGE='ghcr.io/stargz-containers/alpine@sha256:237e28761b771d41d0b841bacfe39f4a49d30b1c8dfecc90aef09b68d86ebc99'
 SCRATCH_MOUNT_OPTIONS=''
 NAME='native-smoke'
 COMMAND_INDEX=0
 LAST_STDOUT=''
 LAST_STDERR=''
 ENV_CREATED=0
+MESH_STARTED=0
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
+MANAGED_CREDENTIAL_BROKER=0
+CREDENTIAL_ROOT=''
+CREDENTIAL_PROFILE_NAME='native-broker'
+CREDENTIAL_ID=''
+CREDENTIAL_CANARY=''
+CREDENTIAL_REFRESH_CANARY=''
+GITHUB_CREDENTIAL_ID=''
+GITHUB_CREDENTIAL_CANARY=''
+WORKLOAD_SECRET_CANARY=''
+KEYRING_ROOT=''
+KEYRING_RUNTIME=''
+KEYRING_RUNTIME_PARENT=''
+KEYRING_CONFIG=''
+KEYRING_DATA=''
+KEYRING_CONTROL=''
+KEYRING_DBUS_ADDRESS=''
+KEYRING_DBUS_PID=''
+KEYRING_DAEMON_PID=''
+CREATE_ACCESS_ARGS=()
+CREATE_DOCKER_ARGS=()
+DIRECT_SHARE_PIDS=()
 
 usage() {
   cat <<'USAGE' >&2
 usage: smoke-native-local-environment.sh \
   --cw-bin ABSOLUTE_PATH \
+  --mesh-bin ABSOLUTE_PATH \
+  --derp-bin ABSOLUTE_PATH \
   --data-plane-smoke-bin ABSOLUTE_PATH \
+  --credential-bridge-smoke-bin ABSOLUTE_PATH \
   --state-probe-bin ABSOLUTE_PATH \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
+  [--managed-credential-broker] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
 Runs the built cw Linux/KVM native-environment product smoke with 2 vCPUs and
 16 GiB of guest memory. The artifact root and lock must already contain the
-exact Cloud Hypervisor, kernel, and product guest-root artifacts admitted by
-codewire-local-vmm. Missing KVM, artifacts, or required tools fail nonzero.
+exact Cloud Hypervisor, virtiofsd, kernel, and product guest-root artifacts
+admitted by codewire-local-vmm. Missing KVM, artifacts, or required tools fail
+nonzero.
 
 The smoke uses an isolated HOME and short private native state root, poisons
-the platform destination, installs Docker/Lima/QEMU tripwires, and creates
-disposable multi-repository and filesystem-copy fixtures. Initial create
+the platform destination, installs Docker/Lima/QEMU tripwires, starts an
+isolated standalone Codewire Mesh/DERP pair, and creates disposable mixed
+repository/copy-mount and implicit filesystem-copy fixtures. Initial create
 permits direct registry and Git egress; every later command receives dead proxy
 endpoints. It proves digest-pinned OCI workspace execution, exact
 credential-free git.example.invalid/GitHub preparation, independent copy preparation,
-create/info, bounded daemon diagnostics and repair, bare run and shell, PTY
-behavior, saved output and nonzero status, cached-runtime restart after the
-installed artifact lock advances, offline disk/CPU/memory resize, supervisor
-crash recovery, and journaled exact deletion cleanup.
+create/info, loopback-only host-port publication, bounded daemon diagnostics and
+repair, stock Codex 0.149.0 over the synthetic credential bridge, bare run and
+shell, PTY behavior, saved output and nonzero status,
+cached-runtime restart after the installed artifact lock advances, offline
+disk/CPU/memory resize, supervisor crash recovery, Mesh attachment and typed
+transport-loss recovery, and journaled exact deletion cleanup.
+
+With --managed-credential-broker, it instead runs the focused protected-store
+product proof. That mode requires a specially featured cw binary named exactly
+cw-local-credential-broker-smoke, an isolated Secret Service implementation,
+and a private tmpfs-backed XDG runtime. It enrolls synthetic Codex and GitHub
+OAuth identities through the public commands; it never contacts either
+provider or reads the desktop session keyring or an ambient provider home.
 USAGE
 }
 
@@ -108,9 +164,24 @@ while [[ $# -gt 0 ]]; do
       CW_BIN="$2"
       shift 2
       ;;
+    --mesh-bin)
+      [[ $# -ge 2 && -z "$MESH_BIN" ]] || { usage; exit 2; }
+      MESH_BIN="$2"
+      shift 2
+      ;;
+    --derp-bin)
+      [[ $# -ge 2 && -z "$DERP_BIN" ]] || { usage; exit 2; }
+      DERP_BIN="$2"
+      shift 2
+      ;;
     --data-plane-smoke-bin)
       [[ $# -ge 2 && -z "$DATA_PLANE_SMOKE_BIN" ]] || { usage; exit 2; }
       DATA_PLANE_SMOKE_BIN="$2"
+      shift 2
+      ;;
+    --credential-bridge-smoke-bin)
+      [[ $# -ge 2 && -z "$CREDENTIAL_BRIDGE_SMOKE_BIN" ]] || { usage; exit 2; }
+      CREDENTIAL_BRIDGE_SMOKE_BIN="$2"
       shift 2
       ;;
     --state-probe-bin)
@@ -133,6 +204,11 @@ while [[ $# -gt 0 ]]; do
       SMOKE_PARENT="$2"
       shift 2
       ;;
+    --managed-credential-broker)
+      [[ "$MANAGED_CREDENTIAL_BROKER" -eq 0 ]] || { usage; exit 2; }
+      MANAGED_CREDENTIAL_BROKER=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -144,14 +220,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$CW_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
+[[ -n "$CW_BIN" && -n "$MESH_BIN" && -n "$DERP_BIN" && -n "$DATA_PLANE_SMOKE_BIN" && -n "$CREDENTIAL_BRIDGE_SMOKE_BIN" && -n "$STATE_PROBE_BIN" && -n "$ARTIFACT_ROOT" && -n "$ARTIFACT_LOCK" ]] || {
   usage
   exit 2
 }
 
-for tool in awk cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
+for tool in awk base64 cat chmod cp dirname e2fsck find findmnt git id jq ln mkdir mktemp python3 readlink realpath resize2fs rg script sha256sum sleep stat tail timeout touch tr uname; do
   require_cmd "$tool"
 done
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  for tool in busctl dbus-daemon gnome-keyring-daemon secret-tool; do
+    require_cmd "$tool"
+  done
+fi
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
 [[ "$(uname -m)" == x86_64 ]] || die 'the current native artifact set requires x86_64'
 [[ "$(id -u)" != 0 ]] || die 'the native local-environment smoke refuses root'
@@ -161,9 +242,19 @@ done
 
 require_absolute_canonical_file 'cw binary' "$CW_BIN"
 [[ -x "$CW_BIN" ]] || die "cw binary is not executable: $CW_BIN"
+require_absolute_canonical_file 'Mesh binary' "$MESH_BIN"
+[[ -x "$MESH_BIN" ]] || die "Mesh binary is not executable: $MESH_BIN"
+require_absolute_canonical_file 'DERP binary' "$DERP_BIN"
+[[ -x "$DERP_BIN" ]] || die "DERP binary is not executable: $DERP_BIN"
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "${CW_BIN##*/}" != cw-local-credential-broker-smoke ]]; then
+  die 'managed credential-broker smoke requires cw-local-credential-broker-smoke'
+fi
 require_absolute_canonical_file 'public data-plane smoke binary' "$DATA_PLANE_SMOKE_BIN"
 [[ -x "$DATA_PLANE_SMOKE_BIN" ]] ||
   die "public data-plane smoke binary is not executable: $DATA_PLANE_SMOKE_BIN"
+require_absolute_canonical_file 'Codex credential-bridge smoke binary' "$CREDENTIAL_BRIDGE_SMOKE_BIN"
+[[ -x "$CREDENTIAL_BRIDGE_SMOKE_BIN" ]] ||
+  die "Codex credential-bridge smoke binary is not executable: $CREDENTIAL_BRIDGE_SMOKE_BIN"
 require_absolute_canonical_file 'native state probe binary' "$STATE_PROBE_BIN"
 [[ -x "$STATE_PROBE_BIN" ]] ||
   die "native state probe binary is not executable: $STATE_PROBE_BIN"
@@ -196,6 +287,24 @@ TRIPWIRE="$SMOKE_ROOT/fallback-invoked"
 TRANSCRIPT="$SMOKE_ROOT/transcript"
 SOURCE_HOOK_MARKER="$SMOKE_ROOT/source-hook-invoked"
 SOURCE_CREDENTIAL_MARKER="$SMOKE_ROOT/source-credential-helper-invoked"
+CREDENTIAL_ROOT="$SMOKE_HOME/.codewire/credentials-v1"
+KEYRING_ROOT="$SMOKE_ROOT/keyring"
+KEYRING_CONFIG="$KEYRING_ROOT/config"
+KEYRING_DATA="$KEYRING_ROOT/data"
+KEYRING_CONTROL="$KEYRING_ROOT/control"
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  KEYRING_RUNTIME_PARENT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  require_absolute_canonical_dir 'XDG runtime parent' "$KEYRING_RUNTIME_PARENT"
+  [[ "$(stat -c '%u' "$KEYRING_RUNTIME_PARENT")" == "$(id -u)" &&
+     "$(stat -c '%a' "$KEYRING_RUNTIME_PARENT")" == 700 ]] ||
+    die 'XDG runtime parent must be private and owned by the smoke user'
+  [[ "$(findmnt -nro FSTYPE -T "$KEYRING_RUNTIME_PARENT")" == tmpfs ]] ||
+    die 'XDG runtime parent must be backed by tmpfs'
+  KEYRING_RUNTIME="$(mktemp -d "$KEYRING_RUNTIME_PARENT/.codewire-native-smoke-runtime.XXXXXX")"
+  chmod 0700 "$KEYRING_RUNTIME"
+  KEYRING_RUNTIME="$(realpath -e -- "$KEYRING_RUNTIME")"
+  KEYRING_DBUS_ADDRESS="unix:path=$KEYRING_RUNTIME/bus"
+fi
 mkdir -m 0700 "$SMOKE_HOME" "$STATE_ROOT" "$WORKSPACE" "$PLATFORM_CONFIG" "$SMOKE_ROOT/bin"
 touch "$TRANSCRIPT"
 chmod 0600 "$TRANSCRIPT"
@@ -242,8 +351,144 @@ env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
 printf '#!/bin/sh\ntouch %q\n' "$SOURCE_HOOK_MARKER" >"$WORKSPACE/.git/hooks/post-checkout"
 chmod 0700 "$WORKSPACE/.git/hooks/post-checkout"
 SOURCE_CONFIG_SHA256="$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')"
+mapfile -t LOCAL_PORTS < <(
+  /usr/bin/env python3 - <<'PY'
+import os
+import socket
+
+lower = 20_000
+upper = 29_999
+span = upper - lower + 1
+start = lower + (os.getpid() % span)
+listeners = []
+for offset in range(span):
+    port = lower + ((start - lower + offset) % span)
+    listener = None
+    try:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", port))
+    except OSError:
+        if listener is not None:
+            listener.close()
+        continue
+    listeners.append(listener)
+    if len(listeners) == 4:
+        break
+if len(listeners) != 4:
+    raise SystemExit("fewer than four loopback ports are free in the native smoke range")
+for listener in listeners:
+    print(listener.getsockname()[1])
+PY
+)
+[[ ${#LOCAL_PORTS[@]} -eq 4 ]] || die 'failed to select four loopback smoke ports'
+HOST_PORT="${LOCAL_PORTS[0]}"
+MESH_PORT="${LOCAL_PORTS[1]}"
+DERP_PORT="${LOCAL_PORTS[2]}"
+DOCKER_HOST_PORT="${LOCAL_PORTS[3]}"
+for port in "$HOST_PORT" "$MESH_PORT" "$DERP_PORT" "$DOCKER_HOST_PORT"; do
+  [[ "$port" =~ ^[0-9]+$ ]] || die 'failed to select a loopback smoke port'
+done
+MOUNT_SOURCE="$SMOKE_ROOT/m"
+mkdir -m 0700 "$MOUNT_SOURCE" "$MOUNT_SOURCE/nested"
+printf 'copy mount before creation\n' >"$MOUNT_SOURCE/data.txt"
+printf 'hidden copy mount content\n' >"$MOUNT_SOURCE/.hidden"
+printf 'nested copy mount content\n' >"$MOUNT_SOURCE/nested/file.txt"
+printf '#!/bin/sh\nprintf "copy-mount-executable-ok\\n"\n' >"$MOUNT_SOURCE/tool.sh"
+chmod 0755 "$MOUNT_SOURCE/tool.sh"
+cat >"$MOUNT_SOURCE/docker-smoke.sh" <<'DOCKER_SMOKE'
+#!/bin/sh
+set -eu
+
+host_port="$1"
+public_image="$2"
+root=/workspace/docker-smoke
+context="$root/context"
+rm -rf -- "$root"
+mkdir -p "$context"
+cp /run/codewire-runtime/init "$context/init"
+chmod 0755 "$context/init"
+cat >"$context/Dockerfile" <<'DOCKERFILE'
+FROM scratch
+COPY init /init
+ENTRYPOINT ["/init", "docker-fixture"]
+DOCKERFILE
+cat >"$root/compose.yaml" <<'COMPOSE'
+services:
+  fixture:
+    image: codewire-native-smoke:1913
+COMPOSE
+
+test -S /var/run/docker.sock
+test "$(stat -Lc '%u:%g:%a' /var/run/docker.sock)" = "0:$(id -g):660"
+test ! -S /run/containerd/containerd.sock
+test "$(docker info --format '{{.DockerRootDir}}|{{.Driver}}')" = '/var/lib/docker|overlay2'
+docker version >/dev/null
+docker compose version >/dev/null
+docker build --network=none --quiet -t codewire-native-smoke:1913 "$context" >/dev/null
+test "$(docker run --rm codewire-native-smoke:1913 emit docker-run-ok)" = docker-run-ok
+test "$(docker run --rm --privileged -v /:/host:ro codewire-native-smoke:1913 assert-boundary)" = docker-privileged-boundary-ok
+test "$(docker compose -p codewire-native-smoke -f "$root/compose.yaml" run --rm fixture emit docker-compose-ok)" = docker-compose-ok
+docker volume create codewire-native-smoke-volume >/dev/null
+docker run --rm -v codewire-native-smoke-volume:/data codewire-native-smoke:1913 \
+  write-volume generation-one
+docker run -d --name codewire-native-smoke-port -p "${host_port}:8080" \
+  codewire-native-smoke:1913 serve 8080 >/dev/null
+for attempt in $(seq 1 100); do
+  if response="$(curl -fsS "http://127.0.0.1:${host_port}/")" &&
+     test "$response" = docker-port-local; then
+    break
+  fi
+  test "$attempt" -lt 100 || exit 91
+  sleep 0.05
+done
+docker pull "$public_image" >/dev/null
+docker image inspect "$public_image" >/dev/null
+docker image rm "$public_image" >/dev/null
+if docker pull ghcr.io/codewiresh/private-native-docker-smoke:1913 \
+  >"$root/private-pull.stdout" 2>"$root/private-pull.stderr"; then
+  exit 92
+fi
+test -s "$root/private-pull.stderr"
+rm -f "$root/private-pull.stdout" "$root/private-pull.stderr"
+mkdir -p "$HOME/.docker"
+chmod 0700 "$HOME/.docker"
+auth="$(printf '%s' 'synthetic-user:synthetic-token' | base64 | tr -d '\n')"
+printf '{"auths":{"registry.invalid":{"auth":"%s"}}}\n' "$auth" >"$HOME/.docker/config.json"
+chmod 0600 "$HOME/.docker/config.json"
+unset auth
+printf '%s\n' docker-build-run-compose-ok docker-public-private-policy-ok \
+  docker-user-auth-visible-ok docker-vm-port-local-ok docker-privileged-boundary-ok
+DOCKER_SMOKE
+chmod 0755 "$MOUNT_SOURCE/docker-smoke.sh"
+ln "$MOUNT_SOURCE/data.txt" "$MOUNT_SOURCE/hardlink.txt"
+ln -s nested/file.txt "$MOUNT_SOURCE/link.txt"
+REPOSITORY_SKILL_SOURCE="$MOUNT_SOURCE/.agents/skills/repo-smoke"
+USER_SKILL_SOURCE="$SMOKE_HOME/.codewire/skills/user-smoke"
+mkdir -p "$REPOSITORY_SKILL_SOURCE/scripts" "$USER_SKILL_SOURCE"
+chmod 0700 \
+  "$MOUNT_SOURCE/.agents" "$MOUNT_SOURCE/.agents/skills" "$REPOSITORY_SKILL_SOURCE" \
+  "$REPOSITORY_SKILL_SOURCE/scripts" \
+  "$SMOKE_HOME/.codewire/skills" "$USER_SKILL_SOURCE"
+printf '%s\n' 'repository skill generation one' >"$REPOSITORY_SKILL_SOURCE/SKILL.md"
+printf '#!/bin/sh\nprintf "skill-executable-ok\\n"\n' >"$REPOSITORY_SKILL_SOURCE/scripts/verify.sh"
+chmod 0755 "$REPOSITORY_SKILL_SOURCE/scripts/verify.sh"
+printf '%s\n' 'user skill generation one' >"$USER_SKILL_SOURCE/SKILL.md"
+DIRECT_RO_SOURCE="$SMOKE_ROOT/direct-ro"
+DIRECT_RW_SOURCE="$SMOKE_ROOT/direct-rw"
+DIRECT_OUTSIDE_SOURCE="$SMOKE_ROOT/direct-outside"
+mkdir -m 0700 "$DIRECT_RO_SOURCE" "$DIRECT_RW_SOURCE" "$DIRECT_OUTSIDE_SOURCE"
+printf 'direct read-only before creation\n' >"$DIRECT_RO_SOURCE/data.txt"
+printf 'direct read-write before creation\n' >"$DIRECT_RW_SOURCE/data.txt"
+printf 'direct outside must remain isolated\n' >"$DIRECT_OUTSIDE_SOURCE/data.txt"
+ln -s "$DIRECT_OUTSIDE_SOURCE/data.txt" "$DIRECT_RO_SOURCE/outside.txt"
+ln -s "$DIRECT_OUTSIDE_SOURCE/data.txt" "$DIRECT_RW_SOURCE/outside.txt"
+DIRECT_SKILL_SOURCE="$DIRECT_RO_SOURCE/.agents/skills/direct-smoke"
+mkdir -p "$DIRECT_SKILL_SOURCE"
+chmod 0700 "$DIRECT_RO_SOURCE/.agents" "$DIRECT_RO_SOURCE/.agents/skills" "$DIRECT_SKILL_SOURCE"
+printf '%s\n' 'direct skill generation one' >"$DIRECT_SKILL_SOURCE/SKILL.md"
 cat >"$WORKSPACE/codewire.yaml" <<EOF
 version: 1
+image: $WORKSPACE_IMAGE
 repositories:
   - source: https://git.example.invalid/supplychain.git
     revision: $GITEA_COMMIT
@@ -251,19 +496,52 @@ repositories:
   - source: https://github.com/noeljackson/method.git
     revision: $GITHUB_COMMIT
     destination: /workspace/github
+mounts:
+  - source: ../m
+    destination: /workspace/fixtures
+    mode: copy
+  - source: ../direct-ro
+    destination: /workspace/direct-ro
+    mode: direct
+    read_only: true
+  - source: ../direct-rw
+    destination: /workspace/direct-rw
+    mode: direct
+    read_only: false
 working_directory: /workspace/github
+agents: [codex, claude-code]
+skills:
+  - path: fixtures/.agents/skills/repo-smoke
+    agents: [codex, claude-code]
+  - path: direct-ro/.agents/skills/direct-smoke
+    agents: [codex]
+  - source: user
+    name: user-smoke
+    agents: [codex]
+ports:
+  - $HOST_PORT:3000
 EOF
 
 cw_isolated() {
   (
     local -a proxy_environment=()
+    local -a credential_environment=()
     if [[ "$ALLOW_REGISTRY_EGRESS" -eq 0 ]]; then
       proxy_environment=(
         HTTP_PROXY=http://127.0.0.1:1
         HTTPS_PROXY=http://127.0.0.1:1
         ALL_PROXY=http://127.0.0.1:1
-        NO_PROXY=
+        'NO_PROXY=127.0.0.1,localhost'
       )
+    fi
+    if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+      credential_environment=(CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT")
+      if [[ -n "$KEYRING_DBUS_PID" && -n "$KEYRING_DAEMON_PID" ]]; then
+        credential_environment+=(
+          XDG_RUNTIME_DIR="$KEYRING_RUNTIME"
+          DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS"
+        )
+      fi
     fi
     cd "$WORKSPACE"
     env -i \
@@ -280,11 +558,44 @@ cw_isolated() {
       CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
       CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
       CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
+      "${credential_environment[@]}" \
       "${proxy_environment[@]}" \
       /usr/bin/timeout --foreground --signal=TERM --kill-after=5s \
       "${CW_COMMAND_TIMEOUT_SECONDS}s" \
       "$CW_BIN" "$@"
   )
+}
+
+run_cw_connect_synthetic_codex() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! cw_isolated credentials --local connect codex \
+    --name native-broker-codex >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'connecting the synthetic local Codex credential failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  LAST_STDOUT="$stdout_file"
+  LAST_STDERR="$stderr_file"
+}
+
+run_cw_connect_synthetic_github() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! cw_isolated credentials --local connect github \
+    --name native-broker-github >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'connecting the synthetic local GitHub credential failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  LAST_STDOUT="$stdout_file"
+  LAST_STDERR="$stderr_file"
 }
 
 run_cw() {
@@ -296,6 +607,23 @@ run_cw() {
     cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
     tail -n 80 "$stderr_file" >&2
     die "cw command $COMMAND_INDEX failed: $*"
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  LAST_STDOUT="$stdout_file"
+  LAST_STDERR="$stderr_file"
+}
+
+run_cw_with_secret_stdin() {
+  local secret_value="$1"
+  shift
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! printf '%s\n' "$secret_value" | cw_isolated "$@" >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die "cw secret-stdin command $COMMAND_INDEX failed: $*"
   fi
   cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
   LAST_STDOUT="$stdout_file"
@@ -316,6 +644,47 @@ run_cw_expect_failure() {
   LAST_STDERR="$stderr_file"
 }
 
+run_cw_disruptive() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if cw_isolated "$@" >"$stdout_file" 2>"$stderr_file"; then
+    :
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  LAST_STDOUT="$stdout_file"
+  LAST_STDERR="$stderr_file"
+}
+
+start_smoke_mesh() {
+  run_cw mesh up \
+    --binary "$MESH_BIN" \
+    --derp-binary "$DERP_BIN" \
+    --base-url "http://127.0.0.1:$MESH_PORT" \
+    --listen "127.0.0.1:$MESH_PORT" \
+    --derp-url "http://127.0.0.1:$DERP_PORT" \
+    --derp-listen "127.0.0.1:$DERP_PORT" \
+    --output json
+  jq -e \
+    --arg mesh_url "http://127.0.0.1:$MESH_PORT" \
+    --arg derp_url "http://127.0.0.1:$DERP_PORT" '
+      .started == true and
+      .base_url == $mesh_url and
+      .derp.url == $derp_url and
+      (.pid | type == "number" and . > 0) and
+      (.derp.pid | type == "number" and . > 0)
+    ' "$LAST_STDOUT" >/dev/null || die 'standalone Mesh startup metadata drifted'
+  MESH_STARTED=1
+}
+
+stop_smoke_mesh() {
+  run_cw mesh down --output json
+  jq -e '.stopped == true and .state == "stopped"' "$LAST_STDOUT" >/dev/null ||
+    die 'standalone Mesh shutdown metadata drifted'
+  MESH_STARTED=0
+}
+
 run_public_data_smoke() {
   local stdout_file stderr_file
   COMMAND_INDEX=$((COMMAND_INDEX + 1))
@@ -334,6 +703,9 @@ run_public_data_smoke() {
       --state-root "$STATE_ROOT" \
       --artifact-root "$ARTIFACT_ROOT" \
       --artifact-lock "$ARTIFACT_LOCK" \
+      --mesh-data-dir "$SMOKE_HOME/.codewire" \
+      --platform-config-dir "$PLATFORM_CONFIG" \
+      --credential-authority-root "$CREDENTIAL_ROOT" \
       --cw-bin "$CW_BIN" \
       --target "$NAME" >"$stdout_file" 2>"$stderr_file"; then
     cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
@@ -345,9 +717,94 @@ run_public_data_smoke() {
     die 'public Exec/File data-plane smoke receipt drifted'
 }
 
+run_docker_persistence_smoke() {
+  local marker="$1"
+  run_cw run --no-tty -- /bin/sh -c '
+    set -eu
+    test "$(docker info --format "{{.DockerRootDir}}|{{.Driver}}")" = "/var/lib/docker|overlay2"
+    docker image inspect codewire-native-smoke:1913 >/dev/null
+    test "$(docker run --rm -v codewire-native-smoke-volume:/data codewire-native-smoke:1913 read-volume)" = generation-one
+    node -e "
+      const fs = require(\"node:fs\");
+      const config = JSON.parse(fs.readFileSync(process.env.HOME + \"/.docker/config.json\", \"utf8\"));
+      const auth = config.auths?.[\"registry.invalid\"]?.auth;
+      process.exit(Buffer.from(auth ?? \"\", \"base64\").toString(\"utf8\") === \"synthetic-user:synthetic-token\" ? 0 : 1);
+    "
+    printf "%s\n" "$1"
+  ' docker-persistence "$marker"
+  rg -qxF "$marker" "$LAST_STDOUT" || die "Docker persistence marker drifted: $marker"
+}
+
+run_codex_credential_bridge_smoke() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! env -i \
+    PATH='/usr/bin:/bin' \
+    HOME="$SMOKE_HOME" \
+    USER="$(id -un)" \
+    LOGNAME="$(id -un)" \
+    SHELL='/bin/sh' \
+    TERM='xterm-256color' \
+    LC_ALL=C \
+    /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 180s \
+    "$CREDENTIAL_BRIDGE_SMOKE_BIN" \
+      --state-root "$STATE_ROOT" \
+      --artifact-root "$ARTIFACT_ROOT" \
+      --artifact-lock "$ARTIFACT_LOCK" \
+      --mesh-data-dir "$SMOKE_HOME/.codewire" \
+      --platform-config-dir "$PLATFORM_CONFIG" \
+      --credential-authority-root "$CREDENTIAL_ROOT" \
+      --cw-bin "$CW_BIN" \
+      --target "$NAME" >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'stock Codex credential-bridge smoke failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  [[ "$(cat "$stdout_file")" == 'codewire-local-codex-bridge-smoke: PASS' ]] ||
+    die 'stock Codex credential-bridge smoke receipt drifted'
+}
+
+run_managed_credential_broker_smoke() {
+  local stdout_file stderr_file
+  COMMAND_INDEX=$((COMMAND_INDEX + 1))
+  stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
+  stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
+  if ! env -i \
+    PATH='/usr/bin:/bin' \
+    HOME="$SMOKE_HOME" \
+    USER="$(id -un)" \
+    LOGNAME="$(id -un)" \
+    SHELL='/bin/sh' \
+    TERM='xterm-256color' \
+    LC_ALL=C \
+    /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 300s \
+    "$CREDENTIAL_BRIDGE_SMOKE_BIN" \
+      --state-root "$STATE_ROOT" \
+      --artifact-root "$ARTIFACT_ROOT" \
+      --artifact-lock "$ARTIFACT_LOCK" \
+      --mesh-data-dir "$SMOKE_HOME/.codewire" \
+      --platform-config-dir "$PLATFORM_CONFIG" \
+      --credential-authority-root "$CREDENTIAL_ROOT" \
+      --cw-bin "$CW_BIN" \
+      --target "$NAME" \
+      --managed-broker \
+      --credential-id "$CREDENTIAL_ID" >"$stdout_file" 2>"$stderr_file"; then
+    cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+    tail -n 80 "$stderr_file" >&2
+    die 'managed local credential-broker product smoke failed'
+  fi
+  cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
+  [[ "$(cat "$stdout_file")" == 'codewire-local-codex-bridge-smoke: PASS (managed broker)' ]] ||
+    die 'managed local credential-broker smoke receipt drifted'
+}
+
 wait_for_pid_exit() {
   local pid="$1"
-  for _attempt in {1..100}; do
+  # Match the direct VMM gate's 15-second process-identity termination bound.
+  for _attempt in {1..300}; do
     [[ ! -e "/proc/$pid" ]] && return 0
     sleep 0.05
   done
@@ -357,7 +814,7 @@ wait_for_pid_exit() {
 wait_for_pid_death() {
   local pid="$1"
   local stat suffix state
-  for _attempt in {1..100}; do
+  for _attempt in {1..300}; do
     [[ ! -r "/proc/$pid/stat" ]] && return 0
     stat="$(<"/proc/$pid/stat")"
     suffix="${stat##*) }"
@@ -366,6 +823,361 @@ wait_for_pid_death() {
     sleep 0.05
   done
   return 1
+}
+
+exact_isolated_process() {
+  local pid="$1"
+  local executable="$2"
+  local marker="$3"
+  local argument
+  local -a argv=()
+  [[ "$pid" =~ ^[0-9]+$ && -d "/proc/$pid" ]] || return 1
+  [[ "$(stat -c '%u' "/proc/$pid" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
+  [[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)" == "$(readlink -f "$executable")" ]] ||
+    return 1
+  mapfile -d '' -t argv <"/proc/$pid/cmdline" 2>/dev/null || return 1
+  for argument in "${argv[@]}"; do
+    [[ "$argument" == "$marker" ]] && return 0
+  done
+  return 1
+}
+
+wait_for_exact_isolated_process() {
+  local pid="$1"
+  local executable="$2"
+  local marker="$3"
+  for _attempt in {1..100}; do
+    exact_isolated_process "$pid" "$executable" "$marker" && return 0
+    [[ -d "/proc/$pid" ]] || return 1
+    sleep 0.01
+  done
+  return 1
+}
+
+stop_exact_isolated_process() {
+  local pid="$1"
+  local executable="$2"
+  local marker="$3"
+  [[ -n "$pid" ]] || return 0
+  [[ -d "/proc/$pid" ]] || return 0
+  exact_isolated_process "$pid" "$executable" "$marker" || return 1
+  kill -TERM -- "$pid" 2>/dev/null || return 1
+  if ! wait_for_pid_death "$pid"; then
+    exact_isolated_process "$pid" "$executable" "$marker" || return 1
+    kill -KILL -- "$pid" 2>/dev/null || return 1
+    wait_for_pid_death "$pid" || return 1
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+keyring_service_ready() {
+  /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
+    status org.freedesktop.secrets >/dev/null 2>&1
+}
+
+start_isolated_keyring() {
+  mkdir -m 0700 \
+    "$KEYRING_ROOT" "$KEYRING_CONFIG" "$KEYRING_DATA" "$KEYRING_CONTROL"
+  [[ -d "$KEYRING_RUNTIME" && ! -L "$KEYRING_RUNTIME" &&
+     "$(stat -c '%u' "$KEYRING_RUNTIME")" == "$(id -u)" &&
+     "$(stat -c '%a' "$KEYRING_RUNTIME")" == 700 &&
+     "$(findmnt -nro FSTYPE -T "$KEYRING_RUNTIME")" == tmpfs ]] ||
+    die 'isolated keyring runtime is not a private tmpfs directory'
+  env -i PATH='/usr/bin:/bin' LC_ALL=C XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
+    /usr/bin/dbus-daemon --session --address="$KEYRING_DBUS_ADDRESS" \
+      --nofork --nopidfile >"$KEYRING_ROOT/dbus.stdout" 2>"$KEYRING_ROOT/dbus.stderr" &
+  KEYRING_DBUS_PID=$!
+  wait_for_exact_isolated_process \
+    "$KEYRING_DBUS_PID" /usr/bin/dbus-daemon "--address=$KEYRING_DBUS_ADDRESS" ||
+    die 'isolated D-Bus process identity drifted'
+  for _attempt in {1..200}; do
+    /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
+      status org.freedesktop.DBus >/dev/null 2>&1 && break
+    [[ -d "/proc/$KEYRING_DBUS_PID" ]] || break
+    sleep 0.05
+  done
+  if ! /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
+    status org.freedesktop.DBus >/dev/null 2>&1; then
+    tail -n 40 "$KEYRING_ROOT/dbus.stderr" >&2
+    die 'isolated D-Bus did not become ready'
+  fi
+
+  printf '%s' 'codewire-local-smoke-keyring-password' | env -i PATH='/usr/bin:/bin' LC_ALL=C \
+    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
+    XDG_CONFIG_HOME="$KEYRING_CONFIG" \
+    XDG_DATA_HOME="$KEYRING_DATA" \
+    DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
+    /usr/bin/gnome-keyring-daemon --foreground --unlock --components=secrets \
+      --control-directory="$KEYRING_CONTROL" \
+      >"$KEYRING_ROOT/keyring.stdout" 2>"$KEYRING_ROOT/keyring.stderr" &
+  KEYRING_DAEMON_PID=$!
+  wait_for_exact_isolated_process \
+    "$KEYRING_DAEMON_PID" /usr/bin/gnome-keyring-daemon \
+    "--control-directory=$KEYRING_CONTROL" ||
+    die 'isolated keyring process identity drifted'
+  for _attempt in {1..200}; do
+    keyring_service_ready && break
+    [[ -d "/proc/$KEYRING_DAEMON_PID" ]] || break
+    sleep 0.05
+  done
+  if ! keyring_service_ready; then
+    tail -n 40 "$KEYRING_ROOT/keyring.stderr" >&2
+    die 'isolated Secret Service did not become ready'
+  fi
+}
+
+stop_isolated_keyring() {
+  local failed=0
+  stop_exact_isolated_process \
+    "$KEYRING_DAEMON_PID" /usr/bin/gnome-keyring-daemon \
+    "--control-directory=$KEYRING_CONTROL" || failed=1
+  KEYRING_DAEMON_PID=''
+  stop_exact_isolated_process \
+    "$KEYRING_DBUS_PID" /usr/bin/dbus-daemon "--address=$KEYRING_DBUS_ADDRESS" || failed=1
+  KEYRING_DBUS_PID=''
+  [[ "$failed" -eq 0 ]]
+}
+
+remove_isolated_keyring_runtime() {
+  local expected_prefix
+  [[ -n "$KEYRING_RUNTIME" ]] || return 0
+  expected_prefix="$KEYRING_RUNTIME_PARENT/.codewire-native-smoke-runtime."
+  [[ -n "$KEYRING_RUNTIME_PARENT" && "$KEYRING_RUNTIME" == "$expected_prefix"* &&
+     -d "$KEYRING_RUNTIME" && ! -L "$KEYRING_RUNTIME" &&
+     "$(stat -c '%u' "$KEYRING_RUNTIME")" == "$(id -u)" ]] || return 1
+  rm -rf -- "$KEYRING_RUNTIME"
+  KEYRING_RUNTIME=''
+  KEYRING_DBUS_ADDRESS=''
+}
+
+install_synthetic_codex() {
+  cat >"$SMOKE_ROOT/bin/codex" <<'EOF'
+#!/bin/sh
+set -eu
+
+case "${1-}" in
+  login)
+    [ "$#" -eq 4 ]
+    [ "$2" = '--device-auth' ]
+    [ "$3" = '-c' ]
+    [ "$4" = 'cli_auth_credentials_store="file"' ]
+    [ "$HOME" = "$CODEX_HOME" ]
+    [ "$XDG_CONFIG_HOME" = "$CODEX_HOME" ]
+    [ "$XDG_CACHE_HOME" = "$CODEX_HOME" ]
+    [ "$TMPDIR" = "$CODEX_HOME" ]
+    [ "$(pwd -P)" = "$CODEX_HOME" ]
+    [ -z "${XDG_RUNTIME_DIR+x}" ]
+    [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
+    [ -z "${OPENAI_API_KEY+x}" ]
+    login_parent=${CODEX_HOME%/*}
+    [ -f "$login_parent/.codewire-synthetic-login-root" ]
+    [ "$(findmnt -nro FSTYPE -T "$CODEX_HOME")" = tmpfs ]
+    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
+    [ "${#boot_id}" -eq 32 ]
+    access_token="cwlocalbroker$boot_id"
+    refresh_token="cwlocalrefresh$boot_id"
+    jwt_header=$(printf '%s' '{"alg":"none"}' | /usr/bin/base64 -w 0 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=')
+    jwt_payload=$(printf '%s' '{"email":"native-smoke@example.test","https://api.openai.com/auth":{"chatgpt_account_id":"account-native-broker","chatgpt_account_is_fedramp":false}}' | /usr/bin/base64 -w 0 | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '=')
+    id_token="$jwt_header.$jwt_payload.synthetic-signature"
+    umask 077
+    printf '%s' "{\"auth_mode\":\"chatgpt\",\"OPENAI_API_KEY\":null,\"tokens\":{\"id_token\":\"$id_token\",\"access_token\":\"$access_token\",\"refresh_token\":\"$refresh_token\",\"account_id\":\"account-native-broker\"}}" >"$CODEX_HOME/auth.json"
+    chmod 0600 "$CODEX_HOME/auth.json"
+    ;;
+  logout)
+    [ "$#" -eq 3 ]
+    [ "$2" = '-c' ]
+    [ "$3" = 'cli_auth_credentials_store="file"' ]
+    rm -f -- "$CODEX_HOME/auth.json"
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+EOF
+  chmod 0700 "$SMOKE_ROOT/bin/codex"
+  touch "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
+  chmod 0600 "$KEYRING_RUNTIME/.codewire-synthetic-login-root"
+}
+
+install_synthetic_github() {
+  cat >"$SMOKE_ROOT/bin/gh" <<'EOF'
+#!/bin/sh
+set -eu
+
+case "${1-}:${2-}" in
+  auth:login)
+    [ "$#" -eq 9 ]
+    [ "$3" = '--hostname' ]
+    [ "$4" = 'github.com' ]
+    [ "$5" = '--git-protocol' ]
+    [ "$6" = 'https' ]
+    [ "$7" = '--web' ]
+    [ "$8" = '--insecure-storage' ]
+    [ "$9" = '--skip-ssh-key' ]
+    [ "$HOME" = "$GH_CONFIG_DIR" ]
+    [ "$XDG_CONFIG_HOME" = "$GH_CONFIG_DIR" ]
+    [ "$XDG_CACHE_HOME" = "$GH_CONFIG_DIR" ]
+    [ "$TMPDIR" = "$GH_CONFIG_DIR" ]
+    [ "$(pwd -P)" = "$GH_CONFIG_DIR" ]
+    [ "$PATH" = '/usr/bin:/bin' ]
+    [ -z "${XDG_RUNTIME_DIR+x}" ]
+    [ -z "${DBUS_SESSION_BUS_ADDRESS+x}" ]
+    [ -z "${GH_TOKEN+x}" ]
+    [ -z "${GITHUB_TOKEN+x}" ]
+    login_parent=${GH_CONFIG_DIR%/*}
+    [ -f "$login_parent/.codewire-synthetic-login-root" ]
+    [ "$(findmnt -nro FSTYPE -T "$GH_CONFIG_DIR")" = tmpfs ]
+    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
+    [ "${#boot_id}" -eq 32 ]
+    oauth_token="cwlocalgithub$boot_id"
+    umask 077
+    printf 'github.com:\n  user: synthetic-smoke\n  oauth_token: %s\n  git_protocol: https\n' \
+      "$oauth_token" >"$GH_CONFIG_DIR/hosts.yml"
+    chmod 0600 "$GH_CONFIG_DIR/hosts.yml"
+    ;;
+  auth:token)
+    [ "$#" -eq 4 ]
+    [ "$3" = '--hostname' ]
+    [ "$4" = 'github.com' ]
+    [ -f "$GH_CONFIG_DIR/hosts.yml" ]
+    boot_id=$(tr -d '-' </proc/sys/kernel/random/boot_id)
+    [ "${#boot_id}" -eq 32 ]
+    printf '%s\n' "cwlocalgithub$boot_id"
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+EOF
+  chmod 0700 "$SMOKE_ROOT/bin/gh"
+}
+
+secret_tool_isolated() {
+  env -i PATH='/usr/bin:/bin' LC_ALL=C \
+    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
+    DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
+    /usr/bin/secret-tool "$@"
+}
+
+find_exact_credential_authority_pid() {
+  local proc pid
+  local -a argv
+  for proc in /proc/[0-9]*; do
+    [[ "$(readlink -f "$proc/exe" 2>/dev/null || true)" == "$CW_BIN" ]] || continue
+    [[ "$(stat -c '%u' "$proc" 2>/dev/null || true)" == "$(id -u)" ]] || continue
+    argv=()
+    mapfile -d '' -t argv <"$proc/cmdline" 2>/dev/null || continue
+    [[ ${#argv[@]} -eq 4 ]] || continue
+    if [[ "${argv[1]}" == '__local-credential-authority' &&
+          "${argv[2]}" == '--root' && "${argv[3]}" == "$CREDENTIAL_ROOT" ]]; then
+      pid="${proc#/proc/}"
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done
+  return 1
+}
+
+shutdown_credential_authority() {
+  local pid
+  if ! pid="$(find_exact_credential_authority_pid)"; then
+    [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+    return
+  fi
+  if ! cw_isolated __local-credential-authority-probe \
+    --root "$CREDENTIAL_ROOT" --shutdown >/dev/null 2>&1; then
+    return 1
+  fi
+  wait_for_pid_death "$pid" || return 1
+  [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+}
+
+terminate_exact_credential_authority() {
+  local pid
+  shutdown_credential_authority && return 0
+  pid="$(find_exact_credential_authority_pid)" || return 1
+  kill -TERM -- "$pid" 2>/dev/null || return 1
+  if ! wait_for_pid_death "$pid"; then
+    [[ "$(find_exact_credential_authority_pid)" == "$pid" ]] || return 1
+    kill -KILL -- "$pid" 2>/dev/null || return 1
+    wait_for_pid_death "$pid" || return 1
+  fi
+  [[ ! -e "$CREDENTIAL_ROOT/authority.sock" ]]
+}
+
+scan_for_credential_canary() {
+  local label="$1"
+  local canary="$2"
+  local report="$SMOKE_ROOT/canary-scan-$label.report"
+  if ! printf '%s' "$canary" | /usr/bin/python3 -c '
+import errno
+import os
+import stat
+import sys
+
+needle = sys.stdin.buffer.read()
+root = os.fsencode(sys.argv[1])
+if len(needle) < 16 or not os.path.isabs(root):
+    raise SystemExit(2)
+
+def allocated_ranges(descriptor, size):
+    if not hasattr(os, "SEEK_DATA"):
+        yield 0, size
+        return
+    offset = 0
+    while offset < size:
+        try:
+            data = os.lseek(descriptor, offset, os.SEEK_DATA)
+        except OSError as error:
+            if error.errno == errno.ENXIO:
+                return
+            if error.errno in (errno.EINVAL, errno.ENOTSUP):
+                yield 0, size
+                return
+            raise
+        hole = os.lseek(descriptor, data, os.SEEK_HOLE)
+        yield data, min(hole, size)
+        offset = max(hole, data + 1)
+
+def contains(descriptor, start, end):
+    carry = b""
+    offset = start
+    while offset < end:
+        chunk = os.pread(descriptor, min(1024 * 1024, end - offset), offset)
+        if not chunk:
+            return False
+        combined = carry + chunk
+        if needle in combined:
+            return True
+        carry = combined[-(len(needle) - 1):]
+        offset += len(chunk)
+    return False
+
+found = []
+for directory, directories, files in os.walk(root, followlinks=False):
+    directories[:] = [
+        name for name in directories
+        if not os.path.islink(os.path.join(directory, name))
+    ]
+    for name in files:
+        path = os.path.join(directory, name)
+        metadata = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode):
+            continue
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            if any(contains(descriptor, start, end) for start, end in allocated_ranges(descriptor, metadata.st_size)):
+                found.append(os.fsdecode(os.path.relpath(path, root)))
+        finally:
+            os.close(descriptor)
+for path in found:
+    print(path)
+raise SystemExit(1 if found else 0)
+' "$SMOKE_ROOT" >"$report"; then
+    tail -n 20 "$report" >&2
+    die "synthetic $label canary entered durable smoke state"
+  fi
+  [[ ! -s "$report" ]] || die "$label canary scanner emitted unexpected output"
 }
 
 wait_for_environment_state() {
@@ -478,11 +1290,15 @@ find_exact_supervisor_pid() {
     [[ "$(readlink -f "$proc/exe" 2>/dev/null || true)" == "$CW_BIN" ]] || continue
     argv=()
     mapfile -d '' -t argv <"$proc/cmdline" 2>/dev/null || continue
-    [[ ${#argv[@]} -eq 8 ]] || continue
+    [[ ${#argv[@]} -eq 14 ]] || continue
     if [[ "${argv[1]}" == '__native-supervisor' &&
           "${argv[2]}" == '--root' && "${argv[3]}" == "$STATE_ROOT" &&
           "${argv[4]}" == '--artifact-root' && "${argv[5]}" == "$ARTIFACT_ROOT" &&
-          "${argv[6]}" == '--artifact-lock' && "${argv[7]}" == "$ARTIFACT_LOCK" ]]; then
+          "${argv[6]}" == '--artifact-lock' && "${argv[7]}" == "$ARTIFACT_LOCK" &&
+          "${argv[8]}" == '--mesh-data-dir' && "${argv[9]}" == "$SMOKE_HOME/.codewire" &&
+          "${argv[10]}" == '--platform-config-dir' && "${argv[11]}" == "$PLATFORM_CONFIG" &&
+          "${argv[12]}" == '--credential-authority-root' &&
+          "${argv[13]}" == "$SMOKE_HOME/.codewire/credentials-v1" ]]; then
       pid="${proc#/proc/}"
       printf '%s\n' "$pid"
       return 0
@@ -506,7 +1322,8 @@ owned_processes() {
   for proc in /proc/[0-9]*; do
     [[ -r "$proc/cmdline" ]] || continue
     cmdline="$(tr '\0' '\n' <"$proc/cmdline" 2>/dev/null || true)"
-    if [[ "$cmdline" == *"$STATE_ROOT"* ]]; then
+    if [[ "$cmdline" == *"$STATE_ROOT"* ||
+          ( "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "$cmdline" == *"$CREDENTIAL_ROOT"* ) ]]; then
       printf '%s\n' "${proc#/proc/}"
     fi
   done
@@ -578,10 +1395,12 @@ prepare_advanced_artifact_source() {
   ADVANCED_ARTIFACT_LOCK="$advanced_parent/artifacts.lock.json"
   mkdir -m 0700 "$advanced_parent" "$ADVANCED_ARTIFACT_ROOT"
   copy_advanced_artifact '.cloud_hypervisor.path' 'advanced-cloud-hypervisor' 0500
+  copy_advanced_artifact '.virtiofsd.path' 'advanced-virtiofsd' 0500
   copy_advanced_artifact '.kernel.path' 'advanced-kernel' 0400
   copy_advanced_artifact '.initramfs.path' 'advanced-initramfs' 0400
   jq '
     .cloud_hypervisor.path = "advanced-cloud-hypervisor" |
+    .virtiofsd.path = "advanced-virtiofsd" |
     .kernel.path = "advanced-kernel" |
     .initramfs.path = "advanced-initramfs"
   ' "$ORIGINAL_ARTIFACT_LOCK" >"$ADVANCED_ARTIFACT_LOCK"
@@ -593,6 +1412,68 @@ prepare_advanced_artifact_source() {
   [[ "$(sha256sum "$ADVANCED_ARTIFACT_LOCK" | awk '{print $1}')" != \
      "$(sha256sum "$ORIGINAL_ARTIFACT_LOCK" | awk '{print $1}')" ]] ||
     die 'advanced artifact lock did not change'
+}
+
+assert_direct_share_processes() {
+  local generation_manifest virtiofsd_sha256 virtiofsd_executable index source socket pid_file pid
+  local no_new_privileges effective_capabilities seccomp_mode argument host_uid host_gid
+  local -a argv=()
+  generation_manifest="$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json"
+  virtiofsd_sha256="$(jq -er '.virtiofsd.sha256 | select(test("^[0-9a-f]{64}$"))' \
+    "$generation_manifest")" || die 'cached runtime generation is missing virtiofsd'
+  virtiofsd_executable="$(realpath -e -- \
+    "$STATE_ROOT/engine/runtime-artifacts/blobs/x-$virtiofsd_sha256")" ||
+    die 'cached virtiofsd executable is unavailable'
+  host_uid="$(id -u)"
+  host_gid="$(id -g)"
+  DIRECT_SHARE_PIDS=()
+  for index in 00 01; do
+    if [[ "$index" == 00 ]]; then
+      source="$DIRECT_RO_SOURCE"
+    else
+      source="$DIRECT_RW_SOURCE"
+    fi
+    socket="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/fs/$index.sock"
+    pid_file="$socket.pid"
+    [[ -S "$socket" && "$(stat -c '%a' "$socket")" == 600 ]] ||
+      die "direct-share socket $index is absent or not private"
+    [[ -f "$pid_file" && ! -L "$pid_file" && "$(stat -c '%a' "$pid_file")" == 600 ]] ||
+      die "direct-share PID file $index is absent or not private"
+    pid="$(tr -d '[:space:]' <"$pid_file")"
+    [[ "$pid" =~ ^[0-9]+$ ]] || die "direct-share PID $index is invalid"
+    exact_isolated_process "$pid" "$virtiofsd_executable" "/proc/self/fd/3/" ||
+      die "direct-share process $index identity or fixed descriptor argument drifted"
+    [[ "$(readlink -f "/proc/$pid/fd/3")" == "$source" ]] ||
+      die "direct-share process $index does not hold the admitted source descriptor"
+    argv=()
+    mapfile -d '' -t argv <"/proc/$pid/cmdline" ||
+      die "direct-share process $index command line is unreadable"
+    for argument in "${argv[@]}"; do
+      [[ "$argument" != *"$DIRECT_RO_SOURCE"* && "$argument" != *"$DIRECT_RW_SOURCE"* ]] ||
+        die "direct-share process $index leaked a host source path into argv"
+    done
+    printf '%s\n' "${argv[@]}" | grep -Fxq "squash-guest:0:$host_uid:4294967295" ||
+      die "direct-share process $index omitted its unprivileged UID translation"
+    printf '%s\n' "${argv[@]}" | grep -Fxq "squash-guest:0:$host_gid:4294967295" ||
+      die "direct-share process $index omitted its unprivileged GID translation"
+    no_new_privileges="$(awk '$1 == "NoNewPrivs:" { print $2 }' "/proc/$pid/status")"
+    effective_capabilities="$(awk '$1 == "CapEff:" { print $2 }' "/proc/$pid/status")"
+    seccomp_mode="$(awk '$1 == "Seccomp:" { print $2 }' "/proc/$pid/status")"
+    [[ "$no_new_privileges" == 1 && "$effective_capabilities" == 0000000000000000 &&
+       "$seccomp_mode" == 2 ]] ||
+      die "direct-share process $index confinement status drifted"
+    DIRECT_SHARE_PIDS+=("$pid")
+  done
+}
+
+assert_direct_share_processes_stopped() {
+  local pid
+  for pid in "${DIRECT_SHARE_PIDS[@]}"; do
+    wait_for_pid_death "$pid" || die "direct-share process $pid survived VM stop"
+  done
+  [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/fs" -mindepth 1 -print -quit)" ]] ||
+    die 'direct-share runtime endpoints remained after VM stop'
+  DIRECT_SHARE_PIDS=()
 }
 
 runtime_artifact_manifest_count() {
@@ -627,7 +1508,23 @@ cleanup() {
   if ! terminate_exact_supervisor; then
     cleanup_status=1
   fi
+  if [[ "$MESH_STARTED" -eq 1 ]]; then
+    if ! cw_isolated mesh down --output json >/dev/null 2>&1; then
+      cleanup_status=1
+    else
+      MESH_STARTED=0
+    fi
+  fi
+  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! terminate_exact_credential_authority; then
+    cleanup_status=1
+  fi
   if [[ "$status" -ne 0 ]] && ! terminate_remaining_owned_processes; then
+    cleanup_status=1
+  fi
+  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! stop_isolated_keyring; then
+    cleanup_status=1
+  fi
+  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! remove_isolated_keyring_runtime; then
     cleanup_status=1
   fi
   if [[ "$status" -eq 0 && "$cleanup_status" -eq 0 ]]; then
@@ -645,21 +1542,175 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-log 'checking native and legacy local names cannot collide'
-run_cw_expect_failure env create --local --name legacy --cpu 2 --memory 16Gi --path "$WORKSPACE"
-rg -qF 'already exists in the legacy Docker/Lima state' "$LAST_STDERR" ||
-  die 'native creation did not report the legacy-name collision'
-[[ ! -e "$STATE_ROOT/state.json" && ! -e "$STATE_ROOT/supervisor.db" ]] ||
-  die 'rejected native creation wrote native state'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'checking the specially named synthetic-broker build before creating protected material'
+  run_cw __local-credential-broker-synthetic-smoke-check
+  [[ "$(cat "$LAST_STDOUT")" == 'codewire-local-credential-broker-synthetic-smoke:v1' ]] ||
+    die 'synthetic credential-broker build marker drifted'
+fi
 
-log 'creating account-free 2-vCPU, 16-GiB native environment'
+log 'starting isolated standalone Mesh and selecting the smoke network'
+start_smoke_mesh
+MESH_OWNER_CONTEXT="$SMOKE_HOME/.codewire/mesh_owner.json"
+[[ -f "$MESH_OWNER_CONTEXT" && ! -L "$MESH_OWNER_CONTEXT" ]] ||
+  die 'standalone Mesh did not write its credential-free owner projection'
+[[ "$(stat -c '%a' "$MESH_OWNER_CONTEXT")" == 600 ]] ||
+  die 'standalone Mesh owner projection is not mode 0600'
+jq -e \
+  --arg mesh_url "http://127.0.0.1:$MESH_PORT" '
+    .schema_version == 1 and
+    .auth_source == "standalone_local" and
+    .mesh_url == $mesh_url and
+    (.organization_id | type == "string" and length > 0) and
+    .selected_network == null and
+    .auto_connect == false
+  ' "$MESH_OWNER_CONTEXT" >/dev/null || die 'standalone Mesh owner projection drifted'
+if rg -qi 'token|secret|credential|api[_-]?key' "$MESH_OWNER_CONTEXT"; then
+  die 'credential material or a credential field entered the Mesh owner projection'
+fi
+MESH_ORGANIZATION_ID="$(jq -er '.organization_id' "$MESH_OWNER_CONTEXT")"
+run_cw network create "$MESH_NETWORK" --org "$MESH_ORGANIZATION_ID"
+rg -qF "Network \"$MESH_NETWORK\" created and selected" "$LAST_STDERR" ||
+  die 'standalone smoke network was not selected'
+run_cw network use "$MESH_NETWORK" --auto-connect
+rg -qF 'new environments connect automatically' "$LAST_STDERR" ||
+  die 'standalone smoke network did not enable automatic attachment'
+jq -e --arg network "$MESH_NETWORK" '
+  .selected_network == $network and .auto_connect == true
+' \
+  "$MESH_OWNER_CONTEXT" >/dev/null || die 'selected network did not reach the owner projection'
+run_cw mesh status --output json
+jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT" '
+  .configured == true and
+  .mesh_url == $mesh_url and
+  .selected_network == $network and
+  .auto_connect == true and
+  .local.state == "running" and
+  .local.derp.state == "running"
+' "$LAST_STDOUT" >/dev/null || die 'standalone Mesh status drifted after default selection'
+
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'starting a private D-Bus and Secret Service instance'
+  start_isolated_keyring
+  CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  CREDENTIAL_REFRESH_CANARY="cwlocalrefresh$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  GITHUB_CREDENTIAL_CANARY="cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  WORKLOAD_SECRET_CANARY="cwworkload$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  [[ ${#CREDENTIAL_CANARY} -ge 16 && ${#CREDENTIAL_CANARY} -le 256 &&
+     "$CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated credential canary is invalid'
+  [[ ${#CREDENTIAL_REFRESH_CANARY} -ge 16 && ${#CREDENTIAL_REFRESH_CANARY} -le 256 &&
+     "$CREDENTIAL_REFRESH_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated credential refresh canary is invalid'
+  [[ ${#GITHUB_CREDENTIAL_CANARY} -ge 16 && ${#GITHUB_CREDENTIAL_CANARY} -le 256 &&
+     "$GITHUB_CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated GitHub credential canary is invalid'
+  [[ ${#WORKLOAD_SECRET_CANARY} -ge 16 && ${#WORKLOAD_SECRET_CANARY} -le 256 &&
+     "$WORKLOAD_SECRET_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated workload-secret canary is invalid'
+  install_synthetic_codex
+  install_synthetic_github
+  for canary in "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY" \
+    "$GITHUB_CREDENTIAL_CANARY"; do
+    if rg -qF "$canary" "$SMOKE_ROOT/bin/codex" "$SMOKE_ROOT/bin/gh"; then
+      die 'synthetic provider executable contains a generated credential canary'
+    fi
+  done
+
+  log 'enrolling synthetic protected Codex and GitHub OAuth credentials through public commands'
+  run_cw_connect_synthetic_codex
+  run_cw_connect_synthetic_github
+  run_cw_with_secret_stdin "$WORKLOAD_SECRET_CANARY" \
+    secrets --local user set CW_NATIVE_SMOKE_SECRET
+  run_cw secrets --local list --output json
+  jq -e '
+    length == 1 and
+    .[0].placement == "local" and
+    .[0].scope == "user" and
+    .[0].key == "CW_NATIVE_SMOKE_SECRET" and
+    (tostring | contains("cwworkload") | not)
+  ' "$LAST_STDOUT" >/dev/null || die 'local workload-secret inventory was not key-only'
+  [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
+    -name '.codewire-codex-login-*' -print -quit)" ]] ||
+    die 'transient Codex login directory remained after enrollment'
+  [[ -z "$(find "$KEYRING_RUNTIME" -mindepth 1 -maxdepth 1 -type d \
+    -name '.codewire-github-login-*' -print -quit)" ]] ||
+    die 'transient GitHub login directory remained after enrollment'
+  run_cw credentials --local list --output json
+  jq -e '
+    length == 2 and
+    any(.[];
+      .placement == "local" and
+      .owner == "user/local-user" and
+      .provider == "openai" and
+      .authentication_kind == "oauth" and
+      .name == "native-broker-codex" and
+      .account_hint == "native-smoke@example.test" and
+      .status == "active" and
+      .revocation_generation == 1 and
+      .protected_store_persistence == "operating_system" and
+      .cleanup_pending == false
+    ) and
+    any(.[];
+      .placement == "local" and
+      .owner == "user/local-user" and
+      .provider == "github" and
+      .authentication_kind == "oauth" and
+      .name == "native-broker-github" and
+      .account_hint == null and
+      .status == "active" and
+      .revocation_generation == 1 and
+      .protected_store_persistence == "operating_system" and
+      .cleanup_pending == false
+    )
+  ' "$LAST_STDOUT" >/dev/null || die 'synthetic protected credential metadata drifted'
+  CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "openai") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+    die 'synthetic protected credential ID is invalid'
+  GITHUB_CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "github") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+    die 'synthetic protected GitHub credential ID is invalid'
+  run_cw credentials --local profile create "$CREDENTIAL_PROFILE_NAME"
+  run_cw credentials --local profile set \
+    "$CREDENTIAL_PROFILE_NAME" codex "$CREDENTIAL_ID"
+  run_cw credentials --local profile set \
+    "$CREDENTIAL_PROFILE_NAME" github "$GITHUB_CREDENTIAL_ID"
+  run_cw credentials --local profile get "$CREDENTIAL_PROFILE_NAME" --output json
+  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" '
+    length == 1 and
+    .[0].placement == "local" and
+    .[0].owner == "user/local-user" and
+    .[0].name == "native-broker" and
+    .[0].revision == 3 and
+    (.[0].entries | length) == 2 and
+    .[0].entries.codex == $credential and
+    .[0].entries.github == $github
+  ' "$LAST_STDOUT" >/dev/null || die 'synthetic access profile metadata drifted'
+  CREATE_ACCESS_ARGS=(--access-profile "user/$CREDENTIAL_PROFILE_NAME")
+else
+  log 'checking native and legacy local names cannot collide'
+  run_cw_expect_failure env create --local --name legacy --cpu 2 --memory 16Gi --path "$WORKSPACE"
+  rg -qF 'already exists in the legacy Docker/Lima state' "$LAST_STDERR" ||
+    die 'native creation did not report the legacy-name collision'
+  [[ ! -e "$STATE_ROOT/state.json" && ! -e "$STATE_ROOT/supervisor.db" ]] ||
+    die 'rejected native creation wrote native state'
+fi
+
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'creating a broker-bound 2-vCPU, 16-GiB native environment'
+  CREATE_DOCKER_ARGS=(--no-docker)
+  EXPECTED_OWNED_OBJECT_COUNT=6
+else
+  log 'creating account-free 2-vCPU, 16-GiB native environment'
+  CREATE_DOCKER_ARGS=(--docker-disk 1Gi)
+  EXPECTED_OWNED_OBJECT_COUNT=7
+fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
-run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi --path "$WORKSPACE" --output json
+run_cw env create --local --name "$NAME" --cpu 2 --memory 16GB \
+  --path "$WORKSPACE" "${CREATE_ACCESS_ARGS[@]}" "${CREATE_DOCKER_ARGS[@]}" --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
-jq -e '
+jq -e --arg listen "127.0.0.1:$HOST_PORT" --arg network "$MESH_NETWORK" '
   .name == "native-smoke" and
   .backend == "cloud-hypervisor" and
   .state == "running" and
@@ -667,31 +1718,61 @@ jq -e '
   .cpu == 2 and
   .memory == "16Gi" and
   .working_directory == "/workspace/github" and
-  .workspace_inputs == 2 and
+  .workspace_inputs == 5 and
+  .skill_count == 3 and
+  .skill_snapshot_generation == 1 and
+  (.skill_snapshot | test("^[0-9a-f]{64}$")) and
+  .network == $network and
+  (has("error_code") | not) and
+  .ports == [{"listen": $listen, "guest_port": 3000}] and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'created native environment metadata drifted'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  jq -e 'has("docker_disk") | not' "$LAST_STDOUT" >/dev/null ||
+    die 'Docker-disabled broker environment metadata drifted'
+else
+  jq -e '.docker_disk == "1Gi"' "$LAST_STDOUT" >/dev/null ||
+    die 'native Docker disk metadata drifted'
+fi
+INITIAL_SKILL_SNAPSHOT="$(jq -er '.skill_snapshot | select(test("^[0-9a-f]{64}$"))' "$LAST_STDOUT")" ||
+  die 'created native environment omitted its immutable skill snapshot identity'
+rg -qF 'direct mounts let guest root inspect every file' "$LAST_STDERR" ||
+  die 'native creation did not present the direct-share guest-root warning'
+rg -qF 'Read-write grants let guest root modify or delete that host content' "$LAST_STDERR" ||
+  die 'native creation did not present the direct-share write warning'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  jq -e '
+    .access_profile == "user/native-broker" and
+    .access_profile_revision == 3
+  ' "$LAST_STDOUT" >/dev/null || die 'created native environment access profile drifted'
+fi
 [[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'
 [[ ! -e "$SOURCE_CREDENTIAL_MARKER" ]] ||
   die 'source Git credential helper ran during native clone preparation'
 printf 'host changed after environment creation\n' >"$WORKSPACE/README.md"
 printf 'host-only untracked content\n' >"$WORKSPACE/host-only.txt"
+printf 'copy mount host changed after creation\n' >"$MOUNT_SOURCE/data.txt"
+printf 'copy mount host-only content\n' >"$MOUNT_SOURCE/host-only.txt"
+printf '%s\n' 'repository skill generation two' >"$REPOSITORY_SKILL_SOURCE/SKILL.md"
+printf '%s\n' 'direct skill generation two' >"$DIRECT_SKILL_SOURCE/SKILL.md"
+printf '%s\n' 'user skill generation two' >"$USER_SKILL_SOURCE/SKILL.md"
+printf 'direct read-only host changed after creation\n' >"$DIRECT_RO_SOURCE/data.txt"
 run_cw env list --local --output json
 jq -e '
-  length == 2 and
-  any(.[];
+  length == 1 and
+  (.[0] |
     .name == "native-smoke" and
     .placement == "local" and
     .selected == true and
     .state == "running" and
-    .daemon_health == "ready"
-  ) and
-  any(.[];
-    .name == "legacy" and
-    .placement == "local" and
-    .selected == false and
-    .id == "cw-legacy"
-  )
+    .daemon_health == "ready")
 ' "$LAST_STDOUT" >/dev/null || die 'native environment list metadata drifted'
+run_cw use --local "$NAME"
+rg -qxF 'Current target set to native-smoke.' "$LAST_STDERR" ||
+  die 'native environment selection output drifted'
+run_cw current
+rg -qxF 'native-smoke  network: native-smoke-network' "$LAST_STDOUT" ||
+  die 'native current-target output drifted'
 [[ "$(stat -c '%a' "$STATE_ROOT")" == 700 ]] || die 'native state root is not mode 0700'
 [[ "$(stat -c '%a' "$STATE_ROOT/supervisor.db")" == 600 ]] ||
   die 'native supervisor database is not mode 0600'
@@ -699,11 +1780,11 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:5:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:10:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
-[[ "$(native_database_value ownership)" == '64:6' ]] ||
+[[ "$(native_database_value ownership)" == "64:$EXPECTED_OWNED_OBJECT_COUNT" ]] ||
   die 'native artifact generation or owned-object manifest was not recorded'
 if ! ORIGINAL_ARTIFACT_GENERATION="$(native_database_value active_artifact_generation)"; then
   die 'active runtime artifact generation is missing'
@@ -728,9 +1809,204 @@ RUNNER_PID="$(native_database_value runner_pid)"
   die 'one-boot guest seed remained after readiness'
 [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/generations" -name setup.raw -print -quit)" ]] ||
   die 'credential-free one-boot setup pack remained after readiness'
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  [[ ! -e "$KEYRING_RUNTIME/codewire/workload-secrets-v1" ]] ||
+    die 'stored workload-secret inventory materialized a guest delivery'
+  run_cw run --no-tty -- /bin/sh -lc 'test -z "${CW_NATIVE_SMOKE_SECRET+x}"'
+fi
+
+log 'checking confined live read-only and acknowledged read-write direct shares'
+assert_direct_share_processes
+run_cw run --no-tty -- /bin/sh -lc \
+  'set -eu; grep -qx "direct read-only host changed after creation" /workspace/direct-ro/data.txt; grep -qx "direct read-write before creation" /workspace/direct-rw/data.txt; if cat /workspace/direct-ro/outside.txt >/dev/null 2>&1; then exit 81; fi; if printf forbidden > /workspace/direct-ro/guest-write.txt 2>/dev/null; then exit 82; fi; test ! -e /workspace/direct-ro/guest-write.txt; printf "direct guest write\n" > /workspace/direct-rw/guest-write.txt; if printf forbidden > /workspace/direct-rw/outside.txt 2>/dev/null; then exit 83; fi'
+[[ "$(cat "$DIRECT_RW_SOURCE/guest-write.txt")" == 'direct guest write' ]] ||
+  die 'acknowledged direct read-write guest change did not reach the selected host source'
+[[ ! -e "$DIRECT_RO_SOURCE/guest-write.txt" ]] ||
+  die 'read-only direct share changed its selected host source'
+[[ "$(cat "$DIRECT_OUTSIDE_SOURCE/data.txt")" == 'direct outside must remain isolated' ]] ||
+  die 'direct-share symlink access mutated unselected host content'
+
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
+  run_managed_credential_broker_smoke
+  run_cw credentials --local get "$CREDENTIAL_ID" --output json
+  jq -e '
+    length == 1 and
+    .[0].status == "revoked" and
+    .[0].revocation_generation == 2 and
+    .[0].protected_store_persistence == "operating_system" and
+    .[0].cleanup_pending == false
+  ' "$LAST_STDOUT" >/dev/null || die 'synthetic credential revocation metadata drifted'
+
+  log 'stopping the VM before scanning all durable test-owned state'
+  run_cw env stop --local "$NAME" --output json
+  jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
+    die 'broker-bound native environment did not stop'
+  wait_for_journal_complete ||
+    die 'broker-bound native stop returned before its lifecycle journal became terminal'
+  assert_direct_share_processes_stopped
+  printf 'direct read-only offline host change\n' >"$DIRECT_RO_SOURCE/restart.txt"
+  printf 'direct read-write offline host change\n' >"$DIRECT_RW_SOURCE/restart.txt"
+  log 'checking offline restart reopens the exact direct-share roots'
+  run_cw env start --local "$NAME" --output json
+  jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
+    die 'broker-bound native environment did not restart'
+  assert_direct_share_processes
+  run_cw run --no-tty -- /bin/sh -lc \
+    'set -eu; grep -qx "direct read-only offline host change" /workspace/direct-ro/restart.txt; grep -qx "direct read-write offline host change" /workspace/direct-rw/restart.txt; grep -qx "direct guest write" /workspace/direct-rw/guest-write.txt; printf "direct restarted guest write\n" > /workspace/direct-rw/restarted.txt'
+  [[ "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
+    die 'restarted direct read-write share was not live'
+  run_cw env stop --local "$NAME" --output json
+  jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
+    die 'restarted broker-bound native environment did not stop'
+  wait_for_journal_complete ||
+    die 'restarted broker-bound native stop did not finish its journal'
+  assert_direct_share_processes_stopped
+  scan_for_credential_canary before-delete-access-token "$CREDENTIAL_CANARY"
+  scan_for_credential_canary before-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
+  scan_for_credential_canary before-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
+  scan_for_credential_canary before-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
+
+  log 'deleting the environment, profile, credential, and protected-store entry'
+  run_cw env rm --local "$NAME" --yes
+  ENV_CREATED=0
+  [[ -d "$DIRECT_RO_SOURCE" && -d "$DIRECT_RW_SOURCE" ]] ||
+    die 'environment deletion removed a direct-share host root'
+  [[ "$(cat "$DIRECT_RW_SOURCE/guest-write.txt")" == 'direct guest write' &&
+     "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
+    die 'environment deletion changed acknowledged direct-share host content'
+  run_cw credentials --local profile delete "$CREDENTIAL_PROFILE_NAME" --yes
+  run_cw credentials --local delete "$CREDENTIAL_ID" --yes
+  run_cw credentials --local delete "$GITHUB_CREDENTIAL_ID" --yes
+  run_cw secrets --local user delete CW_NATIVE_SMOKE_SECRET
+  run_cw secrets --local list --output json
+  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
+    die 'synthetic workload-secret metadata remained after deletion'
+  run_cw credentials --local list --output json
+  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
+    die 'synthetic credential metadata remained after deletion'
+  run_cw credentials --local profile list --output json
+  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
+    die 'synthetic access profile remained after deletion'
+  keyring_service_ready || die 'isolated Secret Service exited before deletion proof'
+  if secret_tool_isolated lookup \
+    application codewire \
+    service sh.codewire.credentials \
+    entry "local/credentials/$CREDENTIAL_ID/material-v1" \
+    >/dev/null 2>"$SMOKE_ROOT/deleted-keyring-entry.stderr"; then
+    die 'synthetic protected-store entry remained after credential deletion'
+  fi
+  if secret_tool_isolated lookup \
+    application codewire \
+    service sh.codewire.credentials \
+    entry "local/credentials/$GITHUB_CREDENTIAL_ID/material-v1" \
+    >/dev/null 2>"$SMOKE_ROOT/deleted-github-keyring-entry.stderr"; then
+    die 'synthetic GitHub protected-store entry remained after credential deletion'
+  fi
+  scan_for_credential_canary after-delete-access-token "$CREDENTIAL_CANARY"
+  scan_for_credential_canary after-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
+  scan_for_credential_canary after-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
+  scan_for_credential_canary after-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
+  unset CREDENTIAL_CANARY
+  unset CREDENTIAL_REFRESH_CANARY
+  unset GITHUB_CREDENTIAL_CANARY
+  unset WORKLOAD_SECRET_CANARY
+
+  [[ ! -e "$TRIPWIRE" ]] ||
+    die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
+  [[ "$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')" == "$LEGACY_SHA256" ]] ||
+    die 'pre-existing legacy local state changed'
+  terminate_exact_credential_authority || die 'bounded credential-authority teardown failed'
+  terminate_exact_supervisor || die 'bounded supervisor teardown failed'
+  [[ -z "$(owned_processes)" ]] ||
+    die 'a native runtime or credential process remained after bounded teardown'
+  stop_isolated_keyring || die 'bounded isolated keyring teardown failed'
+  log 'PASS (Linux/KVM isolated protected credential-broker product flow)'
+  exit 0
+fi
 
 log 'checking public Exec/File over the owner-only supervisor UDS'
 run_public_data_smoke
+
+log 'checking binary file transfer through cw and the public supervisor FileService'
+CW_UPLOAD="$SMOKE_ROOT/cw-upload.bin"
+CW_DOWNLOAD="$SMOKE_ROOT/cw-download.bin"
+/usr/bin/env python3 - "$CW_UPLOAD" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_bytes(bytes(range(256)) * 257 + b"\x00codewire-cp\xff")
+PY
+CW_UPLOAD_SHA256="$(sha256sum "$CW_UPLOAD" | cut -d' ' -f1)"
+run_cw env cp --local "$CW_UPLOAD" "$NAME:/workspace/cw-upload.bin"
+run_cw run --no-tty -- /bin/sh -lc \
+  "test \"\$(sha256sum /workspace/cw-upload.bin | cut -d' ' -f1)\" = '$CW_UPLOAD_SHA256'"
+run_cw env cp --local "$NAME:/workspace/cw-upload.bin" "$CW_DOWNLOAD"
+cmp "$CW_UPLOAD" "$CW_DOWNLOAD" || die 'cw binary file transfer changed content'
+
+log 'checking codewire.yaml loopback host-port publication through the native VM'
+HOST_PORT_SERVER='const net=require("node:net");const server=net.createServer((socket)=>{const chunks=[];socket.on("data",(chunk)=>chunks.push(chunk));socket.on("end",()=>{const request=Buffer.concat(chunks).toString("utf8");socket.end(request==="codewire-host-port-request"?"codewire-host-port-response":"unexpected-request",()=>server.close());});});server.listen(3000,"0.0.0.0",()=>process.stdout.write("codewire-host-port-ready\n"));'
+run_cw run --detach --no-tty --output json -- node -e "$HOST_PORT_SERVER"
+HOST_PORT_SESSION_ID="$(jq -er '.session_id | select(type == "string" and length > 0)' "$LAST_STDOUT")" ||
+  die 'host-port guest session did not return an identity'
+HOST_PORT_SESSION_READY=0
+for _attempt in {1..200}; do
+  run_cw logs "$NAME" "$HOST_PORT_SESSION_ID" --raw
+  if rg -qxF 'codewire-host-port-ready' "$LAST_STDOUT"; then
+    HOST_PORT_SESSION_READY=1
+    break
+  fi
+  sleep 0.05
+done
+[[ "$HOST_PORT_SESSION_READY" -eq 1 ]] ||
+  die 'host-port guest listener did not become ready'
+if ! /usr/bin/env python3 - "$HOST_PORT" \
+  >"$SMOKE_ROOT/host-port.stdout" 2>"$SMOKE_ROOT/host-port.stderr" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+request = b"codewire-host-port-request"
+expected = b"codewire-host-port-response"
+with socket.create_connection(("127.0.0.1", port), timeout=2) as stream:
+    stream.settimeout(2)
+    stream.sendall(request)
+    stream.shutdown(socket.SHUT_WR)
+    response = bytearray()
+    while chunk := stream.recv(4096):
+        response.extend(chunk)
+if bytes(response) != expected:
+    raise SystemExit(f"unexpected host-port response: {bytes(response)!r}")
+print("codewire-native-host-port: PASS")
+PY
+then
+  cat "$SMOKE_ROOT/host-port.stdout" "$SMOKE_ROOT/host-port.stderr" >>"$TRANSCRIPT"
+  tail -n 80 "$SMOKE_ROOT/host-port.stderr" >&2
+  die 'native host-port round trip failed'
+fi
+cat "$SMOKE_ROOT/host-port.stdout" "$SMOKE_ROOT/host-port.stderr" >>"$TRANSCRIPT"
+[[ "$(cat "$SMOKE_ROOT/host-port.stdout")" == 'codewire-native-host-port: PASS' ]] ||
+  die 'native host-port receipt drifted'
+HOST_PORT_SESSION_EXITED=0
+for _attempt in {1..100}; do
+  run_cw list --output json
+  if jq -e --arg session_id "$HOST_PORT_SESSION_ID" '
+    any(.[];
+      .session_id == $session_id and
+      .state == "Exited" and
+      .exit_code == 0
+    )
+  ' "$LAST_STDOUT" >/dev/null; then
+    HOST_PORT_SESSION_EXITED=1
+    break
+  fi
+  sleep 0.05
+done
+[[ "$HOST_PORT_SESSION_EXITED" -eq 1 ]] ||
+  die 'host-port guest session did not exit successfully'
+
+log 'checking stock Codex 0.149.0 over the synthetic guest credential bridge'
+run_codex_credential_bridge_smoke
 
 log 'checking bounded public daemon status over the owner-only supervisor UDS'
 run_cw env --local daemon status "$NAME" --output json
@@ -741,6 +2017,7 @@ jq -e '
   (.daemon_version | type == "string" and length > 0) and
   .capabilities == [
     "attach.v1",
+    "credential_bridge.v1",
     "exec.v1",
     "files.v1",
     "health.v1",
@@ -780,7 +2057,7 @@ log 'checking guest identity, live resources, workspace, and durable output'
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; printf "guest-machine-id="; cat /etc/machine-id; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d /workspace/github/.git; test -d /workspace/gitea/.git; test -z "$(git -C /workspace/github status --porcelain=v1 --untracked-files=all)"; test -z "$(git -C /workspace/gitea status --porcelain=v1 --untracked-files=all)"; printf "guest-github-head="; git -C /workspace/github rev-parse HEAD; printf "guest-gitea-head="; git -C /workspace/gitea rev-parse HEAD; printf "guest-github-readme-sha="; sha256sum /workspace/github/README.md | cut -d " " -f 1; printf "guest-gitea-readme-sha="; sha256sum /workspace/gitea/README.md | cut -d " " -f 1; printf "guest-github-origin="; git -C /workspace/github config --local --get remote.origin.url; printf "guest-gitea-origin="; git -C /workspace/gitea config --local --get remote.origin.url; git -C /workspace/github config --local --list; git -C /workspace/gitea config --local --list; printf persistence-ok > /workspace/sentinel.txt'
+  'printf "guest-cwd=%s\n" "$PWD"; printf "guest-pid1-comm="; cat /proc/1/comm; if readlink /proc/1/exe >/dev/null 2>&1; then printf "guest-pid1-exe=exposed\n"; else printf "guest-pid1-exe=confined\n"; fi; printf "guest-sealed-init="; /run/codewire-runtime/init identity; printf "guest-machine-id="; cat /etc/machine-id; awk "/^NoNewPrivs:/ { printf \"guest-no-new-privileges=%s\\n\", \$2 } /^CapEff:/ { printf \"guest-effective-capabilities=%s\\n\", \$2 }" /proc/self/status; printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; printf "workspace-node="; node --version; test -d /workspace/github/.git; test -d /workspace/gitea/.git; test -z "$(git -C /workspace/github status --porcelain=v1 --untracked-files=all)"; test -z "$(git -C /workspace/gitea status --porcelain=v1 --untracked-files=all)"; grep -qx "copy mount before creation" /workspace/fixtures/data.txt; grep -qx "hidden copy mount content" /workspace/fixtures/.hidden; grep -qx "nested copy mount content" /workspace/fixtures/nested/file.txt; test "$(readlink /workspace/fixtures/link.txt)" = nested/file.txt; test "$(stat -c %h /workspace/fixtures/data.txt)" = 1; test "$(stat -c %h /workspace/fixtures/hardlink.txt)" = 1; test ! -e /workspace/fixtures/host-only.txt; /workspace/fixtures/tool.sh; grep -qx "repository skill generation one" "$CODEX_HOME/skills/repo-smoke/SKILL.md"; grep -qx "repository skill generation one" "$HOME/.claude/skills/repo-smoke/SKILL.md"; "$CODEX_HOME/skills/repo-smoke/scripts/verify.sh"; grep -qx "direct skill generation one" "$CODEX_HOME/skills/direct-smoke/SKILL.md"; grep -qx "user skill generation one" "$CODEX_HOME/skills/user-smoke/SKILL.md"; test ! -e "$HOME/.codex/skills/repo-smoke"; if printf forbidden >"$CODEX_HOME/skills/repo-smoke/SKILL.md" 2>/dev/null; then exit 84; fi; grep -qx "repository skill generation one" "$CODEX_HOME/skills/repo-smoke/SKILL.md"; printf guest-copy-mount-write > /workspace/fixtures/guest-only.txt; printf "guest-github-head="; git -C /workspace/github rev-parse HEAD; printf "guest-gitea-head="; git -C /workspace/gitea rev-parse HEAD; printf "guest-github-readme-sha="; sha256sum /workspace/github/README.md | cut -d " " -f 1; printf "guest-gitea-readme-sha="; sha256sum /workspace/gitea/README.md | cut -d " " -f 1; printf "guest-github-origin="; git -C /workspace/github config --local --get remote.origin.url; printf "guest-gitea-origin="; git -C /workspace/gitea config --local --get remote.origin.url; git -C /workspace/github config --local --list; git -C /workspace/gitea config --local --list; printf persistence-ok > /workspace/sentinel.txt'
 rg -qF 'guest-cwd=/workspace/github' "$LAST_STDOUT" ||
   die 'session did not start in the configured repository working directory'
 rg -qF 'guest-pid1-comm=init' "$LAST_STDOUT" ||
@@ -799,6 +2076,8 @@ rg -qF 'guest-effective-capabilities=0000000000000000' "$LAST_STDOUT" ||
 rg -qF 'guest-cpus=2' "$LAST_STDOUT" || die 'guest did not observe exactly 2 vCPUs'
 rg -q '^workspace-node=v[0-9]+\.' "$LAST_STDOUT" ||
   die 'session did not execute from the canonical Codewire workspace image'
+rg -qF 'copy-mount-executable-ok' "$LAST_STDOUT" ||
+  die 'explicit copy mount executable content was unavailable in the guest'
 rg -qF "guest-github-head=$GITHUB_COMMIT" "$LAST_STDOUT" ||
   die 'GitHub workspace does not identify the pinned commit'
 rg -qF "guest-gitea-head=$GITEA_COMMIT" "$LAST_STDOUT" ||
@@ -812,19 +2091,124 @@ rg -qF 'guest-github-origin=https://github.com/noeljackson/method.git' "$LAST_ST
 rg -qF 'guest-gitea-origin=https://git.example.invalid/supplychain.git' "$LAST_STDOUT" ||
   die 'git.example.invalid workspace origin metadata is not the sanitized public source'
 if rg -qF 'host-secret' "$LAST_STDOUT" || rg -qF 'credential.helper' "$LAST_STDOUT" ||
-   rg -qF "$WORKSPACE" "$LAST_STDOUT"; then
+   rg -qF "$WORKSPACE" "$LAST_STDOUT" || rg -qF "$MOUNT_SOURCE" "$LAST_STDOUT"; then
   die 'host Git credential or source-path metadata entered the guest clone'
 fi
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 15000000 && "$MEMORY_KIB" -le 17500000 ]] ||
   die "guest MemTotal is not consistent with 16 GiB: ${MEMORY_KIB:-missing} KiB"
 
+DOCKER_DISK_PATH="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/docker.raw"
+[[ -f "$DOCKER_DISK_PATH" && ! -L "$DOCKER_DISK_PATH" ]] ||
+  die 'dedicated Docker data disk is not an exact regular file'
+[[ "$(stat -c '%s' "$DOCKER_DISK_PATH")" == 1073741824 ]] ||
+  die 'dedicated Docker data disk is not exactly 1 GiB'
+[[ "$(stat -c '%d:%i' "$DOCKER_DISK_PATH")" != \
+   "$(stat -c '%d:%i' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/state.raw")" ]] ||
+  die 'Docker and workspace state disks share an inode'
+
+log 'checking private guest Docker build, run, Compose, pulls, and VM-only publication'
+CW_COMMAND_TIMEOUT_SECONDS=900
+run_cw run --no-tty -- /workspace/fixtures/docker-smoke.sh \
+  "$DOCKER_HOST_PORT" "$DOCKER_PUBLIC_IMAGE"
+CW_COMMAND_TIMEOUT_SECONDS=180
+for marker in docker-build-run-compose-ok docker-public-private-policy-ok \
+  docker-user-auth-visible-ok docker-vm-port-local-ok docker-privileged-boundary-ok; do
+  rg -qxF "$marker" "$LAST_STDOUT" || die "guest Docker marker drifted: $marker"
+done
+if /usr/bin/env python3 - "$DOCKER_HOST_PORT" <<'PY'
+import socket
+import sys
+
+try:
+    socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1)
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+then
+  die 'docker -p escaped the VM through an unadmitted host port'
+fi
+run_cw run --no-tty -- docker rm -f codewire-native-smoke-port
+[[ ! -e "$WORKSPACE/.docker/config.json" && ! -e "$MOUNT_SOURCE/.docker/config.json" ]] ||
+  die 'guest-visible Docker login state escaped into a selected host source'
+
+log 'checking bounded Docker logs and recoverable block and inode exhaustion'
+CW_COMMAND_TIMEOUT_SECONDS=900
+run_cw run --no-tty -- /bin/sh -lc '
+  set -eu
+  docker volume create codewire-native-smoke-bytes >/dev/null
+  test "$(docker run --rm --log-driver=none -v codewire-native-smoke-bytes:/data codewire-native-smoke:1913 fill-bytes)" = docker-byte-enospc-ok
+  docker volume rm codewire-native-smoke-bytes >/dev/null
+  docker volume create codewire-native-smoke-inodes >/dev/null
+  test "$(docker run --rm --log-driver=none -v codewire-native-smoke-inodes:/data codewire-native-smoke:1913 fill-inodes)" = docker-inode-enospc-ok
+  docker volume rm codewire-native-smoke-inodes >/dev/null
+  docker run --name codewire-native-smoke-log codewire-native-smoke:1913 spam-log 41943040 >/dev/null
+  log_bytes="$(docker logs codewire-native-smoke-log | wc -c)"
+  test "$log_bytes" -gt 0
+  test "$log_bytes" -le 33554432
+  docker rm codewire-native-smoke-log >/dev/null
+  test "$(cat /workspace/sentinel.txt)" = persistence-ok
+  docker info >/dev/null
+  printf "%s\n" docker-byte-enospc-ok docker-inode-enospc-ok docker-log-bound-ok
+'
+for marker in docker-byte-enospc-ok docker-inode-enospc-ok docker-log-bound-ok; do
+  rg -qxF "$marker" "$LAST_STDOUT" || die "Docker exhaustion marker drifted: $marker"
+done
+[[ "$(stat -c '%s' "$DOCKER_DISK_PATH")" == 1073741824 ]] ||
+  die 'Docker exhaustion changed the dedicated data disk boundary'
+
+log 'checking explicit native restart and persistent workspace identity'
+PRE_RESTART_VMM_PID="$(recorded_vmm_pid)"
+PRE_RESTART_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")"
+run_cw env restart --local "$NAME" --output json
+jq -e '.name == "native-smoke" and .state == "running"' "$LAST_STDOUT" >/dev/null ||
+  die 'explicit native restart did not return the running environment'
+wait_for_journal_complete ||
+  die 'explicit native restart returned before its lifecycle journal became terminal'
+POST_RESTART_VMM_PID="$(recorded_vmm_pid)"
+POST_RESTART_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")"
+[[ "$POST_RESTART_VMM_PID" != "$PRE_RESTART_VMM_PID" &&
+   -d "/proc/$POST_RESTART_VMM_PID" ]] ||
+  die 'explicit native restart did not replace the VMM process'
+[[ "$POST_RESTART_GENERATION" -eq "$((PRE_RESTART_GENERATION + 1))" ]] ||
+  die 'explicit native restart did not advance exactly one VM generation'
+run_cw run --no-tty -- /bin/sh -lc \
+  'printf "sentinel="; cat /workspace/sentinel.txt; printf "\nmachine-id="; cat /etc/machine-id'
+rg -qxF 'sentinel=persistence-ok' "$LAST_STDOUT" ||
+  die 'workspace sentinel did not survive explicit native restart'
+rg -qxF "machine-id=$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
+  die 'environment identity did not survive explicit native restart'
+run_docker_persistence_smoke docker-explicit-restart-persistence-ok
+
+log 'checking explicit offline immutable skill refresh and read-only reprojection'
+# Refreshing the snapshot can materialize a new OCI root generation. Retain the
+# same bounded budget as the preceding guest storage workloads for that rebuild.
+run_cw env refresh-skills --local "$NAME" --output json
+CW_COMMAND_TIMEOUT_SECONDS=180
+jq -e --arg prior "$INITIAL_SKILL_SNAPSHOT" '
+  .name == "native-smoke" and
+  .state == "running" and
+  .skill_count == 3 and
+  .skill_snapshot_generation == 2 and
+  (.skill_snapshot | test("^[0-9a-f]{64}$")) and
+  .skill_snapshot != $prior
+' "$LAST_STDOUT" >/dev/null || die 'refreshed native skill snapshot metadata drifted'
+# The quoted expression is evaluated by the guest shell, not this host script.
+# shellcheck disable=SC2016
+run_cw run --no-tty -- /bin/sh -lc \
+  'set -eu; grep -qx "repository skill generation two" "$CODEX_HOME/skills/repo-smoke/SKILL.md"; grep -qx "repository skill generation two" "$HOME/.claude/skills/repo-smoke/SKILL.md"; grep -qx "direct skill generation two" "$CODEX_HOME/skills/direct-smoke/SKILL.md"; grep -qx "user skill generation two" "$CODEX_HOME/skills/user-smoke/SKILL.md"; if printf forbidden >"$CODEX_HOME/skills/user-smoke/SKILL.md" 2>/dev/null; then exit 85; fi; grep -qx "user skill generation two" "$CODEX_HOME/skills/user-smoke/SKILL.md"'
+[[ "$(cat "$REPOSITORY_SKILL_SOURCE/SKILL.md")" == 'repository skill generation two' &&
+   "$(cat "$DIRECT_SKILL_SOURCE/SKILL.md")" == 'direct skill generation two' &&
+   "$(cat "$USER_SKILL_SOURCE/SKILL.md")" == 'user skill generation two' ]] ||
+  die 'skill refresh mutated a selected host skill source'
+
 log 'checking daemon logs contain only trusted lifecycle journal fields'
 DAEMON_GUEST_SENTINEL='guest-output-must-not-enter-daemon-logs-1909'
 run_cw run --no-tty -- /bin/sh -lc "printf '%s\\n' '$DAEMON_GUEST_SENTINEL'"
 rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT" || die 'guest diagnostic sentinel was not emitted'
 run_cw env --local daemon logs "$NAME"
-rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=7 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
+rg -q '^time_unix_ms=[0-9]+ operation=[0-9a-f-]{36} kind=create phase=completed checkpoint=9 stage=OPERATION_STAGE_[A-Z_]+ error=-$' "$LAST_STDOUT" ||
   die 'native daemon logs did not expose the trusted create journal record'
 [[ "$(stat -c '%s' "$LAST_STDOUT")" -le 65536 ]] || die 'native daemon logs exceeded their public bound'
 if rg -qF "$DAEMON_GUEST_SENTINEL" "$LAST_STDOUT"; then
@@ -851,7 +2235,7 @@ if ! (
       CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
       CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
       HTTP_PROXY='http://127.0.0.1:1' HTTPS_PROXY='http://127.0.0.1:1' \
-      ALL_PROXY='http://127.0.0.1:1' NO_PROXY='' \
+      ALL_PROXY='http://127.0.0.1:1' NO_PROXY='127.0.0.1,localhost' \
       /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 30s \
       /usr/bin/script -qefc "$CW_BIN shell" "$PTY_LOG"
 ) >"$SMOKE_ROOT/pty.stdout" 2>"$SMOKE_ROOT/pty.stderr"; then
@@ -882,6 +2266,9 @@ run_cw env stop --local "$NAME" --output json
 jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null || die 'native environment did not stop'
 wait_for_journal_complete ||
   die 'native stop returned before its lifecycle journal became terminal'
+assert_direct_share_processes_stopped
+printf 'direct read-only offline host change\n' >"$DIRECT_RO_SOURCE/restart.txt"
+printf 'direct read-write offline host change\n' >"$DIRECT_RW_SOURCE/restart.txt"
 STOPPED_RUNNER_PID="$(native_database_value runner_pid)"
 STOPPED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
   die 'native supervisor process was not found before installed artifact advance'
@@ -911,15 +2298,21 @@ REPLACEMENT_RUNNER_PID="$(native_database_value runner_pid)"
 [[ -f "$STATE_ROOT/engine/runtime-artifacts/generations/$ORIGINAL_ARTIFACT_GENERATION.json" ]] ||
   die 'restart removed the environment-pinned runtime generation manifest'
 RUNNER_PID="$REPLACEMENT_RUNNER_PID"
-run_cw run --no-tty -- /bin/sh -lc 'cat /workspace/sentinel.txt; git -C /workspace/github rev-parse HEAD; git -C /workspace/gitea rev-parse HEAD; cat /etc/machine-id'
+assert_direct_share_processes
+run_cw run --no-tty -- /bin/sh -lc 'set -eu; cat /workspace/sentinel.txt; cat /workspace/fixtures/guest-only.txt; grep -qx "copy mount before creation" /workspace/fixtures/data.txt; test ! -e /workspace/fixtures/host-only.txt; grep -qx "direct read-only offline host change" /workspace/direct-ro/restart.txt; grep -qx "direct read-write offline host change" /workspace/direct-rw/restart.txt; grep -qx "direct guest write" /workspace/direct-rw/guest-write.txt; printf "direct restarted guest write\n" > /workspace/direct-rw/restarted.txt; git -C /workspace/github rev-parse HEAD; git -C /workspace/gitea rev-parse HEAD; cat /etc/machine-id'
 rg -qF 'persistence-ok' "$LAST_STDOUT" ||
   die 'workspace sentinel did not survive cached-runtime restart'
+rg -qF 'guest-copy-mount-write' "$LAST_STDOUT" ||
+  die 'explicit copy mount guest state did not survive cached-runtime restart'
 rg -qF "$GITHUB_COMMIT" "$LAST_STDOUT" ||
   die 'GitHub workspace did not survive cached-runtime restart'
 rg -qF "$GITEA_COMMIT" "$LAST_STDOUT" ||
   die 'git.example.invalid workspace did not survive cached-runtime restart'
 rg -qF "$EXPECTED_MACHINE_ID" "$LAST_STDOUT" ||
   die 'environment-specific machine identity did not survive restart'
+[[ "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
+  die 'restarted direct read-write share was not live'
+run_docker_persistence_smoke docker-runtime-generation-persistence-ok
 
 log 'checking exact runner adoption after supervisor crash'
 SUPERVISOR_PID="$(find_exact_supervisor_pid)" || die 'native supervisor process was not found exactly'
@@ -932,6 +2325,39 @@ jq -e '.state == "running" and .cpu == 2 and .memory == "16Gi" and .disk == "20G
 [[ "$(native_database_value runner_pid)" == "$RUNNER_PID" ]] ||
   die 'replacement supervisor substituted a different runner'
 run_public_data_smoke
+
+log 'checking typed Mesh transport loss and repair through normal CLI status'
+stop_smoke_mesh
+wait_for_environment_state error ||
+  die 'coordinator loss was not classified as an environment error'
+jq -e --arg network "$MESH_NETWORK" '
+  .state == "error" and
+  .network == $network and
+  .error_code == "mesh_transport_exit"
+' "$LAST_STDOUT" >/dev/null || die 'typed Mesh transport failure did not reach CLI status'
+run_cw env --local daemon status "$NAME" --output json
+jq -e '
+  .state == "unhealthy" and
+  .message == "local environment runtime requires repair"
+' "$LAST_STDOUT" >/dev/null || die 'daemon status remained healthy after Mesh transport loss'
+start_smoke_mesh
+jq -e --arg network "$MESH_NETWORK" '
+  .selected_network == $network and .auto_connect == true
+' \
+  "$MESH_OWNER_CONTEXT" >/dev/null || die 'Mesh restart lost the selected network projection'
+run_cw env --local daemon repair "$NAME" --output json
+jq -e '
+  .replaced_pod_name == "" and
+  .status.state == "ready" and
+  .status.message == "local environment daemon is ready"
+' "$LAST_STDOUT" >/dev/null || die 'native daemon did not repair after Mesh transport loss'
+run_cw env info --local "$NAME" --output json
+jq -e --arg network "$MESH_NETWORK" '
+  .state == "running" and
+  .network == $network and
+  (has("error_code") | not)
+' "$LAST_STDOUT" >/dev/null || die 'Mesh repair did not clear the typed runtime failure'
+RUNNER_PID="$(native_database_value runner_pid)"
 
 log 'checking exact 2-vCPU, 16-GiB VMM death classification and daemon repair'
 VMM_PID="$(recorded_vmm_pid)" || die 'persisted VMM process identity was not readable'
@@ -978,6 +2404,7 @@ RECOVERED_VMM_GENERATION="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRO
 run_cw run --no-tty -- /bin/sh -lc \
   "cat /workspace/sentinel.txt; test \"\$(git -C /workspace/github rev-parse HEAD)\" = '$GITHUB_COMMIT'; test \"\$(git -C /workspace/gitea rev-parse HEAD)\" = '$GITEA_COMMIT'"
 rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact VMM death'
+run_docker_persistence_smoke docker-vmm-recovery-persistence-ok
 
 log 'checking exact runner death, VMM parent-death containment, and recovery'
 RUNNER_PID="$(native_database_value runner_pid)"
@@ -1001,11 +2428,31 @@ RECOVERED_VMM_PID="$(recorded_vmm_pid)"
 run_cw run --no-tty -- /bin/sh -lc \
   "cat /workspace/sentinel.txt; test \"\$(git -C /workspace/github rev-parse HEAD)\" = '$GITHUB_COMMIT'; test \"\$(git -C /workspace/gitea rev-parse HEAD)\" = '$GITEA_COMMIT'"
 rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace did not survive exact runner death'
+run_docker_persistence_smoke docker-runner-recovery-persistence-ok
 wait_for_journal_complete ||
   die 'native lifecycle journal contains a pending or partial operation'
 
+log 'checking privileged nested Docker ownership remains confined to the guest'
+VMM_PID="$(recorded_vmm_pid)" || die 'persisted VMM process identity was not readable'
+run_cw_disruptive run --no-tty -- docker run --rm --privileged --pid=host \
+  codewire-native-smoke:1913 crash-dockerd
+wait_for_environment_state error ||
+  die 'guest-local dockerd crash was not classified as an environment error'
+wait_for_pid_death "$VMM_PID" || die 'VMM remained live after guest-local dockerd crashed'
+run_cw env --local daemon status "$NAME" --output json
+jq -e '.state == "unhealthy" and .message == "local environment runtime requires repair"' \
+  "$LAST_STDOUT" >/dev/null || die 'daemon remained healthy after guest-local dockerd crashed'
+run_cw env --local daemon repair "$NAME" --output json
+jq -e '.replaced_pod_name == "" and .status.state == "ready"' "$LAST_STDOUT" >/dev/null ||
+  die 'environment daemon did not repair after guest-local dockerd crashed'
+RECOVERED_VMM_PID="$(recorded_vmm_pid)" || die 'repaired Docker VMM identity was not readable'
+[[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
+  die 'Docker crash recovery did not produce a new live VMM process'
+run_cw run --no-tty -- /bin/sh -lc 'test "$(cat /workspace/sentinel.txt)" = persistence-ok'
+run_docker_persistence_smoke docker-crash-persistence-ok
+
 log 'checking journaled offline disk growth and restart-applied CPU and memory'
-run_cw env resize --local "$NAME" --cpu 3 --memory 12Gi --disk 21Gi --yes --force --output json
+run_cw env resize --local "$NAME" --cpu 3 --memory 12GB --disk 21GB --yes --force --output json
 jq -e '
   .state == "running" and
   .cpu == 3 and
@@ -1014,8 +2461,8 @@ jq -e '
 ' "$LAST_STDOUT" >/dev/null || die 'native resize result drifted'
 [[ "$(stat -c '%s' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/disks/state.raw")" == 22548578304 ]] ||
   die 'native state disk file did not grow to 21 GiB'
-[[ "$(native_database_value resize_operation)" == 'restart:completed:7' ]] ||
-  die 'native resize journal did not commit all six effect checkpoints'
+[[ "$(native_database_value resize_operation)" == 'restart:completed:9' ]] ||
+  die 'native resize journal did not commit all nine effect checkpoints'
 run_cw run --no-tty -- /bin/sh -lc \
   'printf "guest-cpus="; grep -c "^processor" /proc/cpuinfo; grep "^MemTotal:" /proc/meminfo; cat /workspace/sentinel.txt'
 rg -qF 'guest-cpus=3' "$LAST_STDOUT" || die 'resized guest did not observe exactly 3 vCPUs'
@@ -1023,6 +2470,7 @@ rg -qF 'persistence-ok' "$LAST_STDOUT" || die 'workspace sentinel did not surviv
 MEMORY_KIB="$(awk '$1 == "MemTotal:" { print $2 }' "$LAST_STDOUT")"
 [[ "$MEMORY_KIB" =~ ^[0-9]+$ && "$MEMORY_KIB" -ge 11000000 && "$MEMORY_KIB" -le 13000000 ]] ||
   die "guest MemTotal is not consistent with 12 GiB after resize: ${MEMORY_KIB:-missing} KiB"
+run_docker_persistence_smoke docker-resize-persistence-ok
 run_cw_expect_failure env resize --local "$NAME" --disk 20Gi --yes --output json
 rg -qF 'disk shrink is not supported' "$LAST_STDERR" ||
   die 'native disk shrink did not fail with an actionable error'
@@ -1055,6 +2503,21 @@ wait_for_journal_complete ||
   die 'host-only content changed during guest clone lifecycle'
 [[ ! -e "$WORKSPACE/sentinel.txt" ]] ||
   die 'guest writes escaped the environment-owned clone into the host source'
+[[ "$(cat "$MOUNT_SOURCE/data.txt")" == 'copy mount host changed after creation' ]] ||
+  die 'explicit copy mount guest read or write mutated the selected host source'
+[[ "$(cat "$MOUNT_SOURCE/host-only.txt")" == 'copy mount host-only content' ]] ||
+  die 'explicit copy mount deletion mutated host-only content'
+[[ ! -e "$MOUNT_SOURCE/guest-only.txt" ]] ||
+  die 'explicit copy mount guest writes escaped or synchronized into the host source'
+[[ -d "$DIRECT_RO_SOURCE" && -d "$DIRECT_RW_SOURCE" ]] ||
+  die 'environment deletion removed a direct-share host root'
+[[ ! -e "$DIRECT_RO_SOURCE/guest-write.txt" ]] ||
+  die 'read-only direct-share host content changed during the lifecycle'
+[[ "$(cat "$DIRECT_RW_SOURCE/guest-write.txt")" == 'direct guest write' &&
+   "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
+  die 'environment deletion changed acknowledged direct-share host content'
+[[ "$(cat "$DIRECT_OUTSIDE_SOURCE/data.txt")" == 'direct outside must remain isolated' ]] ||
+  die 'direct-share lifecycle changed unselected host content'
 [[ "$(sha256sum "$WORKSPACE/.git/config" | awk '{print $1}')" == "$SOURCE_CONFIG_SHA256" ]] ||
   die 'native clone preparation mutated the host Git configuration'
 [[ -x "$WORKSPACE/.git/hooks/post-checkout" ]] ||
@@ -1077,8 +2540,8 @@ ln "$WORKSPACE/data.txt" "$WORKSPACE/hardlink.txt"
 ln -s data.txt "$WORKSPACE/link.txt"
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
-run_cw env create --local --name "$NAME" --cpu 2 --memory 16Gi \
-  --path "$WORKSPACE" --path-mode copy --output json
+run_cw env create --local --name "$NAME" --cpu 2 --memory 16GB \
+  --path "$WORKSPACE" --path-mode copy --no-network --no-docker --output json
 ALLOW_REGISTRY_EGRESS=0
 CW_COMMAND_TIMEOUT_SECONDS=180
 ENV_CREATED=1
@@ -1086,16 +2549,20 @@ jq -e '
   .name == "native-copy-smoke" and
   .backend == "cloud-hypervisor" and
   .state == "running" and
+  (has("docker_disk") | not) and
   .working_directory == "/workspace" and
   .workspace_inputs == 1 and
   (.workspace_plan | test("^[0-9a-f]{64}$"))
 ' "$LAST_STDOUT" >/dev/null || die 'copy-mode environment metadata drifted'
+COPY_ENVIRONMENT_ID="$(native_database_value environment_id)"
+[[ ! -e "$STATE_ROOT/engine/vms/$COPY_ENVIRONMENT_ID/disks/docker.raw" ]] ||
+  die 'Docker-disabled environment created a Docker data disk'
 printf 'host changed after copy creation\n' >"$WORKSPACE/data.txt"
 printf 'host-only after copy\n' >"$WORKSPACE/host-only.txt"
 # The quoted expression is evaluated by the guest shell, not this host script.
 # shellcheck disable=SC2016
 run_cw run --no-tty -- /bin/sh -lc \
-  'test ! -e .git; grep -qx "copy source before creation" data.txt; grep -qx "hidden copy content" .hidden; test "$(readlink link.txt)" = data.txt; test "$(stat -c %h data.txt)" = 1; test "$(stat -c %h hardlink.txt)" = 1; test ! -e host-only.txt; ./tool.sh; printf guest-copy-write > guest-only.txt'
+  'test ! -e .git; test ! -S /var/run/docker.sock; if docker info >/dev/null 2>&1; then exit 86; fi; grep -qx "copy source before creation" data.txt; grep -qx "hidden copy content" .hidden; test "$(readlink link.txt)" = data.txt; test "$(stat -c %h data.txt)" = 1; test "$(stat -c %h hardlink.txt)" = 1; test ! -e host-only.txt; ./tool.sh; printf guest-copy-write > guest-only.txt'
 rg -qF 'copy-executable-ok' "$LAST_STDOUT" ||
   die 'copy-mode executable content was unavailable in the guest'
 [[ "$(cat "$WORKSPACE/data.txt")" == 'host changed after copy creation' ]] ||
@@ -1115,6 +2582,8 @@ ENV_CREATED=0
 run_cw doctor local --output json
 jq -e '.orphans == [] and .reclaimable_bytes == 0' "$LAST_STDOUT" >/dev/null ||
   die 'copy-mode deletion left native owned state'
+stop_smoke_mesh
+[[ ! -e "$MESH_OWNER_CONTEXT" ]] || die 'Mesh owner projection remained after Mesh shutdown'
 
 [[ ! -e "$TRIPWIRE" ]] || die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
 [[ "$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')" == "$LEGACY_SHA256" ]] ||

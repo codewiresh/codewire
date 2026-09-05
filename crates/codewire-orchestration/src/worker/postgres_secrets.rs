@@ -13,6 +13,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
+use codewire_workload_secrets::validate_workload_secret_value;
+
 use crate::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
 
 use super::secret_envelope::{
@@ -20,7 +22,7 @@ use super::secret_envelope::{
     OpenBaoTransitConfig, OpenBaoTransitProvider, SecretCoordinates, WrappedDek, decrypt_secret,
     encrypt_secret, verify_dek_fingerprint,
 };
-use super::secrets::{StoredSecret, is_valid_secret_key};
+use super::secrets::{StoredSecret, StoredSecretMetadata, is_valid_secret_key};
 
 const MAX_CACHED_DEKS: usize = 4096;
 const CANARY_LOCK_KEY: i64 = 0x4357_5453_4341_4e31;
@@ -52,6 +54,15 @@ struct SecretRow {
     ciphertext: Vec<u8>,
     nonce: Vec<u8>,
     format: i16,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SecretMetadataRow {
+    key: String,
+    scope: String,
+    scope_id: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -334,6 +345,63 @@ impl PostgresSecretStore {
             .collect()
     }
 
+    pub async fn get_secret_metadata_at_path(
+        &self,
+        secret_path: &str,
+    ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
+        let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
+        let rows: Vec<SecretMetadataRow> = sqlx::query_as(
+            "SELECT key, scope, scope_id, created_at, updated_at \
+             FROM tenant_secrets WHERE path = $1 ORDER BY key",
+        )
+        .bind(secret_path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| store_error("secret-metadata-query-failed"))?;
+        Self::metadata_rows(&context, rows)
+    }
+
+    pub async fn get_secret_metadata_at_path_bounded(
+        &self,
+        secret_path: &str,
+        maximum_rows: usize,
+    ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
+        let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
+        let maximum_rows = i64::try_from(maximum_rows)
+            .map_err(|_| store_error("secret-metadata-limit-invalid"))?;
+        let rows: Vec<SecretMetadataRow> = sqlx::query_as(
+            "SELECT key, scope, scope_id, created_at, updated_at \
+             FROM tenant_secrets WHERE path = $1 ORDER BY key LIMIT $2",
+        )
+        .bind(secret_path)
+        .bind(maximum_rows)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| store_error("secret-metadata-query-failed"))?;
+        Self::metadata_rows(&context, rows)
+    }
+
+    fn metadata_rows(
+        context: &DekContext,
+        rows: Vec<SecretMetadataRow>,
+    ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
+        rows.into_iter()
+            .map(|row| {
+                if row.scope != context.scope.as_str() || row.scope_id != context.scope_id {
+                    return Err(store_error("secret-metadata-scope-mismatch"));
+                }
+                if !is_valid_secret_key(&row.key) {
+                    return Err(store_error("invalid-persisted-secret-key"));
+                }
+                Ok(StoredSecretMetadata {
+                    key: row.key,
+                    created_at: row.created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+                    updated_at: row.updated_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+                })
+            })
+            .collect()
+    }
+
     pub async fn set_secret_at_path(
         &self,
         secret_path: &str,
@@ -341,9 +409,11 @@ impl PostgresSecretStore {
         value: &str,
     ) -> anyhow::Result<()> {
         let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
-        if !is_valid_secret_key(key) || key.len() > 255 {
+        if !is_valid_secret_key(key) {
             return Err(store_error("invalid-secret-key"));
         }
+        validate_workload_secret_value(value.as_bytes())
+            .map_err(|_| store_error("invalid-secret-value"))?;
         let mut tx = self
             .pool
             .begin()
@@ -402,7 +472,7 @@ impl PostgresSecretStore {
 
     pub async fn delete_secret_at_path(&self, secret_path: &str, key: &str) -> anyhow::Result<()> {
         let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
-        if !is_valid_secret_key(key) || key.len() > 255 {
+        if !is_valid_secret_key(key) {
             return Err(store_error("invalid-secret-key"));
         }
         let mut tx = self
@@ -500,7 +570,7 @@ impl PostgresSecretStore {
         let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
         if [old_key, new_key]
             .into_iter()
-            .any(|key| !is_valid_secret_key(key) || key.len() > 255)
+            .any(|key| !is_valid_secret_key(key))
         {
             return Err(store_error("invalid-secret-key"));
         }
@@ -704,6 +774,7 @@ impl PostgresSecretStore {
 mod tests {
     use super::super::secret_envelope::TestKekProvider;
     use super::*;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn dek_cache_is_bounded_and_evicts_the_least_recently_used_entry() {
@@ -719,6 +790,54 @@ mod tests {
         assert_eq!(cache.entries.len(), MAX_CACHED_DEKS);
         assert!(cache.get("dek-0").is_some());
         assert!(cache.get("dek-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_workload_secret_values_fail_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy test pool");
+        let store = PostgresSecretStore::new(pool, Arc::new(TestKekProvider));
+        for invalid in [
+            String::new(),
+            "synthetic\0value".to_string(),
+            "x".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_VALUE_BYTES + 1),
+        ] {
+            let error = store
+                .set_secret_at_path("/users/synthetic", "SAFE_KEY", &invalid)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("failure_class=invalid-secret-value")
+            );
+            if !invalid.is_empty() {
+                assert!(!error.to_string().contains(&invalid));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_workload_secret_keys_fail_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy test pool");
+        let store = PostgresSecretStore::new(pool, Arc::new(TestKekProvider));
+        let key = format!(
+            "A{}",
+            "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES)
+        );
+
+        let error = store
+            .set_secret_at_path("/users/synthetic", &key, "synthetic")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failure_class=invalid-secret-key")
+        );
     }
 
     #[tokio::test]
@@ -755,6 +874,21 @@ mod tests {
         store
             .set_secret_at_path(&org_path, "ORG_KEY", "org-private-value")
             .await?;
+
+        let metadata_store = PostgresSecretStore::new(pool.clone(), Arc::new(TestKekProvider));
+        assert_eq!(metadata_store.cached_dek_count().await, 0);
+        let metadata = metadata_store
+            .get_secret_metadata_at_path(&project_path)
+            .await?;
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].key, "OLD_KEY");
+        assert!(!metadata[0].created_at.is_empty());
+        assert!(!metadata[0].updated_at.is_empty());
+        assert_eq!(
+            metadata_store.cached_dek_count().await,
+            0,
+            "metadata listing must not unwrap or cache a DEK"
+        );
         let before: Vec<u8> = sqlx::query_scalar(
             "SELECT ciphertext FROM tenant_secrets WHERE path = $1 AND key = 'OLD_KEY'",
         )

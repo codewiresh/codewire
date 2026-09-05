@@ -12,7 +12,7 @@ memory: 4096
 disk: 20
 env: {B: two, A: one}
 agent: claude
-secrets: dev
+secrets: {project: dev}
 ports: [3000]
 "#,
     )
@@ -43,7 +43,33 @@ app_ports: [{port: 3000}]
 }
 
 #[test]
-fn normalizes_repositories_workdir_skills_and_credentials() {
+fn accepts_human_gigabyte_resource_quantities() {
+    let document = parse_project_yaml("memory: 8GB\ndisk: 40GB\n").unwrap();
+    assert_eq!(document.spec.resources.memory_mib, Some(8 * 1024));
+    assert_eq!(document.spec.resources.disk_gib, Some(40));
+
+    for (quantity, memory_mib) in [
+        ("16gi", 16 * 1024),
+        ("16gb", 16 * 1024),
+        ("1024mb", 1024),
+        ("2048mb", 2048),
+    ] {
+        let document = parse_project_yaml(&format!("memory: {quantity}\n")).unwrap();
+        assert_eq!(document.spec.resources.memory_mib, Some(memory_mib));
+    }
+}
+
+#[test]
+fn environment_names_use_the_workload_secret_key_boundary() {
+    let maximum = format!("A{}", "_".repeat(MAX_ENVIRONMENT_KEY_BYTES - 1));
+    let too_long = format!("A{}", "_".repeat(MAX_ENVIRONMENT_KEY_BYTES));
+
+    assert!(parse_project_yaml(&format!("environment:\n  {maximum}: value\n")).is_ok());
+    assert!(parse_project_yaml(&format!("environment:\n  {too_long}: value\n")).is_err());
+}
+
+#[test]
+fn normalizes_repositories_workdir_skills_and_access_profile() {
     let document = parse_project_yaml(
         r#"
 repositories:
@@ -55,9 +81,7 @@ skills:
   - path: .agents/skills/rust
     agents: [claude, codex]
   - user:personal
-credentials:
-  work: {provider: openai, account_ref: acct-work}
-  personal: acct-personal
+access: {profile: user/work}
 "#,
     )
     .unwrap();
@@ -65,12 +89,21 @@ credentials:
     assert_eq!(document.spec.repositories[1].destination, "/workspace/web");
     assert_eq!(document.spec.skills[0].agents, ["claude-code", "codex"]);
     assert_eq!(document.spec.skills[1].source, SkillSource::User);
-    assert_eq!(document.spec.credentials.len(), 2);
+    assert_eq!(
+        document
+            .spec
+            .access
+            .as_ref()
+            .expect("access binding")
+            .profile
+            .to_string(),
+        "user/work"
+    );
     document.ensure_platform_compatible().unwrap();
 }
 
 #[test]
-fn defaults_working_directory_from_repository_count() {
+fn defaults_working_directory_from_workspace_input_count() {
     let none = parse_project_yaml("{}\n").unwrap();
     assert_eq!(none.spec.working_directory, "/workspace");
 
@@ -82,6 +115,18 @@ fn defaults_working_directory_from_repository_count() {
     )
     .unwrap();
     assert_eq!(many.spec.working_directory, "/workspace");
+
+    let mount = parse_project_yaml(
+        "mounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: copy}]\n",
+    )
+    .unwrap();
+    assert_eq!(mount.spec.working_directory, "/workspace/fixtures");
+
+    let mixed = parse_project_yaml(
+        "repositories: [{url: https://example.com/app.git}]\nmounts: [{source: ./fixtures, destination: /workspace/fixtures, mode: copy}]\n",
+    )
+    .unwrap();
+    assert_eq!(mixed.spec.working_directory, "/workspace");
 }
 
 #[test]
@@ -164,12 +209,19 @@ fn rejects_unknown_unsafe_overlapping_and_nonportable_shapes() {
         "mounts: [{source: ./a, destination: /workspace/a, mode: copy, read_only: true}]\n",
         "repositories: [{source: https://x/a, destination: /workspace/a}]\nmounts: [{source: ./a, destination: /workspace/a, mode: copy}]\n",
         "mounts: [{source: ./a, destination: /workspace/a, mode: copy}, {source: ./b, destination: /workspace/a/b, mode: direct, read_only: true}]\n",
-        "credentials: {work: {provider: openai, account: ''}}\n",
+        "credentials: {work: {provider: openai, account: acct-work}}\n",
+        "secrets: development\n",
+        "secrets: {org: true}\n",
+        "secret_project: development\n",
+        "include_org_secrets: true\n",
+        "include_user_secrets: true\n",
+        "access: {profile: work}\n",
+        "access: {profile: local/work}\n",
+        "access: {profile: user/Work}\n",
+        "access: {profile: user/work, credential: codex-work}\n",
         "skills: [{path: ../outside}]\n",
         "workspace: {mode: clone, source: .}\n",
         "ports: [3000, 3000]\n",
-        "credentials: {Work: acct-a, work: acct-b}\n",
-        "credentials: {work: /home/user/.config/account}\n",
         "repositories: [{source: 'https://userinfo@example.com/org/app.git'}]\n",
         "repositories: [{source: 'ssh://git:password@example.com/org/app.git'}]\n",
         "repositories: [{source: 'ssh://git%3Apassword@example.com/org/app.git'}]\n",
@@ -290,16 +342,6 @@ fn schema_and_input_bounds_fail_closed() {
             ),
         ),
         (
-            "credentials",
-            format!(
-                "credentials: {{{}}}\n",
-                (0..=MAX_CREDENTIALS)
-                    .map(|index| format!("a{index}: acct-{index}"))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-        ),
-        (
             "mounts",
             format!(
                 "mounts: [{}]\n",
@@ -368,7 +410,7 @@ fn repository_destination_helper_preserves_legacy_defaults() {
 #[test]
 fn typed_specs_validate_before_crossing_adapter_boundaries() {
     let mut spec = parse_project_yaml(
-        "agents: [claude]\nskills: [.agents/skills/rust]\ncredentials: {work: acct-work}\n",
+        "agents: [claude]\nskills: [.agents/skills/rust]\naccess: {profile: user/work}\n",
     )
     .unwrap()
     .spec;

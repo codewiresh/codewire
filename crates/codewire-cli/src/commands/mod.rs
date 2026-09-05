@@ -2,7 +2,7 @@
 //!
 //! - `core`: hook, gateway, target selection, init, VS Code, shell, and CLI utilities.
 //! - `environment`: environment lifecycle, files, access, ports, logs, and list views.
-//! - `local`: local Docker/Lima environment lifecycle behind `cw env COMMAND --local`.
+//! - `native`: Codewire-owned native local environment lifecycle and public clients.
 //! - `platform_commands`: doctor, billing, login/setup, GitHub, organizations, API keys,
 //!   presets, and secrets.
 //! - `mesh_commands`: network, node, and local Mesh management.
@@ -18,9 +18,26 @@ use super::*;
 mod native;
 #[cfg(target_os = "linux")]
 pub(crate) use native::*;
-
-const LOCAL_DAEMON_READY_ATTEMPTS: usize = 25;
-const LOCAL_DAEMON_READY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+#[cfg(target_os = "linux")]
+mod credential_authority;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_authority::*;
+#[cfg(target_os = "linux")]
+mod credential_broker;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_broker::*;
+#[cfg(target_os = "linux")]
+mod credential_broker_confinement;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_broker_confinement::run_local_credential_broker_confinement_probe;
+#[cfg(target_os = "linux")]
+mod credential_repository;
+#[cfg(target_os = "linux")]
+pub(crate) use credential_repository::*;
+#[cfg(target_os = "linux")]
+mod credentials;
+#[cfg(target_os = "linux")]
+pub(crate) use credentials::*;
 
 #[derive(Debug, Args)]
 pub(crate) struct CompletionArgs {
@@ -198,6 +215,12 @@ pub(crate) struct NativeSupervisorArgs {
     pub(crate) artifact_root: PathBuf,
     #[arg(long)]
     pub(crate) artifact_lock: PathBuf,
+    #[arg(long)]
+    pub(crate) mesh_data_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) platform_config_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) credential_authority_root: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -211,6 +234,288 @@ pub(crate) struct NativeRunnerArgs {
     pub(crate) engine_state_root: PathBuf,
     #[arg(long)]
     pub(crate) artifact_generation: String,
+    #[arg(long)]
+    pub(crate) mesh_data_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) platform_config_dir: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct NativeNetworkWorkerArgs {
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) generation: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct NativeEgressBrokerArgs {
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) generation: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct NativeMeshTransportArgs {
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) generation: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct NativeMeshEnrollmentBrokerArgs {
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) generation: u64,
+    #[arg(long)]
+    pub(crate) mesh_data_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) platform_config_dir: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialAuthorityArgs {
+    #[arg(long)]
+    pub(crate) root: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialAuthorityProbeArgs {
+    #[arg(long)]
+    pub(crate) root: PathBuf,
+    #[arg(long)]
+    pub(crate) shutdown: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalCredentialBrokerArgs {
+    #[arg(long)]
+    pub(crate) authority_fd: i32,
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) environment_generation: u64,
+    #[arg(long)]
+    pub(crate) environment_name: String,
+    #[arg(long)]
+    pub(crate) supervisor_socket: PathBuf,
+    #[arg(long)]
+    pub(crate) credential_authentication_kind: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalGitRepositoryExecutorArgs {
+    #[arg(long)]
+    pub(crate) authority_fd: i32,
+    #[arg(long)]
+    pub(crate) request_id: String,
+    #[arg(long)]
+    pub(crate) staging_directory: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct LocalGitCredentialHelperArgs {
+    #[arg(long)]
+    pub(crate) credential_socket: PathBuf,
+    pub(crate) operation: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialsArgs {
+    #[arg(long, conflicts_with = "platform")]
+    pub(crate) local: bool,
+    #[arg(long, conflicts_with = "local")]
+    pub(crate) platform: bool,
+    #[command(subcommand)]
+    pub(crate) command: CredentialsCommand,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub(crate) enum CredentialsCommand {
+    #[command(about = "Connect an explicitly selected provider identity")]
+    Connect(CredentialConnectArgs),
+    #[command(about = "Add an explicitly supplied credential")]
+    Add(CredentialAddArgs),
+    #[command(about = "List credential metadata")]
+    List(CredentialListArgs),
+    #[command(about = "Show credential metadata")]
+    Get(CredentialSelectorArgs),
+    #[command(about = "Rename a credential")]
+    Rename(CredentialRenameArgs),
+    #[command(about = "Replace credential material")]
+    Rotate(CredentialRotateArgs),
+    #[command(about = "Revoke a credential immediately")]
+    Revoke(CredentialSelectorArgs),
+    #[command(alias = "rm", about = "Delete a credential")]
+    Delete(CredentialDeleteArgs),
+    #[command(about = "Manage access profiles")]
+    Profile {
+        #[command(subcommand)]
+        command: CredentialProfileCommand,
+    },
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialConnectArgs {
+    #[arg(value_enum, value_name = "PROVIDER")]
+    pub(crate) provider: CredentialConnectProviderArg,
+    #[arg(long, value_name = "NAME")]
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum CredentialConnectProviderArg {
+    Codex,
+    Github,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum CredentialAuthenticationKindArg {
+    Oauth,
+    ApiKey,
+    AccessToken,
+    GithubApp,
+    SshPrivateKey,
+    SshAgent,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialAddArgs {
+    #[arg(value_name = "PROVIDER")]
+    pub(crate) provider: String,
+    #[arg(long, value_enum, value_name = "KIND")]
+    pub(crate) kind: CredentialAuthenticationKindArg,
+    #[arg(long, value_name = "NAME")]
+    pub(crate) name: String,
+    #[arg(long, value_name = "HINT")]
+    pub(crate) account_hint: Option<String>,
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub(crate) expires_at: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialListArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialSelectorArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialRenameArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(value_name = "NEW_NAME")]
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialRotateArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long, value_name = "UNIX_SECONDS")]
+    pub(crate) expires_at: Option<u64>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialDeleteArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) credential: String,
+    #[arg(long)]
+    pub(crate) yes: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+pub(crate) enum CredentialProfileCommand {
+    #[command(about = "Create an empty access profile")]
+    Create(CredentialProfileNameArgs),
+    #[command(about = "List access profiles")]
+    List(CredentialListArgs),
+    #[command(about = "Show an access profile")]
+    Get(CredentialProfileSelectorArgs),
+    #[command(about = "Select a credential for one capability slot")]
+    Set(CredentialProfileSetArgs),
+    #[command(about = "Remove one capability slot from a profile")]
+    Unset(CredentialProfileSlotArgs),
+    #[command(about = "List immutable profile revisions")]
+    Revisions(CredentialProfileSelectorArgs),
+    #[command(alias = "rm", about = "Delete an access profile")]
+    Delete(CredentialProfileDeleteArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileNameArgs {
+    #[arg(value_name = "NAME")]
+    pub(crate) name: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSelectorArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) profile: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSetArgs {
+    #[arg(value_name = "PROFILE")]
+    pub(crate) profile: String,
+    #[arg(value_name = "SLOT")]
+    pub(crate) slot: String,
+    #[arg(value_name = "CREDENTIAL")]
+    pub(crate) credential: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileSlotArgs {
+    #[arg(value_name = "PROFILE")]
+    pub(crate) profile: String,
+    #[arg(value_name = "SLOT")]
+    pub(crate) slot: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileDeleteArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    pub(crate) profile: String,
+    #[arg(long)]
+    pub(crate) yes: bool,
 }
 
 impl EnvArgs {
@@ -279,10 +584,6 @@ pub(crate) struct InitArgs {
     env: Vec<String>,
     #[arg(long = "secrets", help = "Secret project to bind")]
     secret_project: Option<String>,
-    #[arg(long, help = "Do not inject org-level secrets")]
-    no_org_secrets: bool,
-    #[arg(long, help = "Do not inject user-level secrets")]
-    no_user_secrets: bool,
     #[arg(long, default_value = "codewire.yaml", help = "Path to write")]
     file: PathBuf,
     #[arg(long, help = "Overwrite the target file if it exists")]
@@ -336,161 +637,6 @@ pub(crate) struct EnvironmentRunArgs {
     pub(crate) command: Vec<String>,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct LocalArgs {
-    #[arg(
-        short,
-        long,
-        global = true,
-        value_enum,
-        default_value_t = OutputFormat::Text,
-        help = "Output format"
-    )]
-    output: OutputFormat,
-    #[command(subcommand)]
-    command: LocalCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum LocalCommand {
-    #[command(about = "Create a local runtime instance from codewire.yaml")]
-    Create(Box<LocalCreateArgs>),
-    #[command(alias = "ls", about = "List local runtime instances")]
-    List,
-    #[command(about = "Show local runtime instance details")]
-    Info(LocalInfoArgs),
-    #[command(about = "Start an existing local runtime instance")]
-    Start(LocalInfoArgs),
-    #[command(about = "Stop an existing local runtime instance")]
-    Stop(LocalInfoArgs),
-    #[command(alias = "delete", about = "Delete an existing local runtime instance")]
-    Rm(LocalInfoArgs),
-    #[command(about = "Resize CPU, memory, or disk for a local runtime instance")]
-    Resize(LocalResizeArgs),
-    #[command(about = "Show configured local runtime ports")]
-    Ports(LocalPortsArgs),
-    #[command(about = "Upload, download, and list files inside a local runtime instance")]
-    Files(LocalFilesArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalInfoArgs {
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalResizeArgs {
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-    #[arg(long, default_value_t = 0, help = "CPU in millicores")]
-    cpu: i32,
-    #[arg(long, default_value_t = 0, help = "Memory in MB")]
-    memory: i32,
-    #[arg(long, default_value_t = 0, help = "Disk in GB")]
-    disk: i32,
-    #[arg(
-        long,
-        help = "Stop and restart a running Lima instance to apply VM-size changes"
-    )]
-    restart: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalPortsArgs {
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-    #[arg(
-        short = 'p',
-        long = "publish",
-        value_name = "HOST:GUEST",
-        help = "Port mapping host:guest (e.g. 8080:3000)"
-    )]
-    publish: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalCreateArgs {
-    #[arg(
-        long,
-        value_name = "BACKEND",
-        help = "Local runtime backend (docker or lima)"
-    )]
-    backend: String,
-    #[arg(long, value_name = "NAME", help = "Instance name")]
-    name: Option<String>,
-    #[arg(
-        long,
-        value_name = "PATH",
-        default_value = ".",
-        help = "Project directory to associate with the local instance"
-    )]
-    path: PathBuf,
-    #[arg(
-        long,
-        value_name = "FILE",
-        default_value = "codewire.yaml",
-        help = "Preset file path, relative to --path when not absolute"
-    )]
-    file: PathBuf,
-    #[arg(
-        long,
-        value_name = "SPEC",
-        help = "JSON spec file or '-' for stdin; overrides codewire.yaml"
-    )]
-    spec: Option<String>,
-    #[arg(long, value_name = "PRESET", help = "Preset slug override")]
-    preset: Option<String>,
-    #[arg(long, value_name = "IMAGE", help = "Container image override")]
-    image: Option<String>,
-    #[arg(long, value_name = "COMMAND", help = "Install command override")]
-    install: Option<String>,
-    #[arg(long, value_name = "COMMAND", help = "Startup script override")]
-    startup: Option<String>,
-    #[arg(long, value_name = "AGENT", help = "AI agent override")]
-    agent: Option<String>,
-    #[arg(long, value_name = "PROJECT", help = "Secret project override")]
-    secrets: Option<String>,
-    #[arg(long = "env", value_name = "KEY=VALUE", help = "Env vars")]
-    env: Vec<String>,
-    #[arg(long, default_value_t = 0, help = "CPU in millicores override")]
-    cpu: i32,
-    #[arg(long, default_value_t = 0, help = "Memory in MB override")]
-    memory: i32,
-    #[arg(long, default_value_t = 0, help = "Disk in GB override")]
-    disk: i32,
-    #[arg(long, help = "Don't inject org-level secrets")]
-    no_org_secrets: bool,
-    #[arg(long, help = "Don't inject user-level secrets")]
-    no_user_secrets: bool,
-    #[arg(
-        long,
-        value_name = "NETWORK",
-        help = "Join a specific mesh network on boot"
-    )]
-    network: Option<String>,
-    #[arg(long, help = "Don't join the selected private mesh network")]
-    no_network: bool,
-    #[arg(short = 'y', long, help = "Skip interactive prompts")]
-    yes: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct LocalFilesArgs {
-    #[command(subcommand)]
-    command: LocalFilesCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum LocalFilesCommand {
-    #[command(about = "Upload bytes from stdin to a path inside a local runtime instance")]
-    Upload(LocalFilesUploadArgs),
-    #[command(about = "Download a file from a local runtime instance to stdout")]
-    Download(LocalFilesPathArgs),
-    #[command(about = "List directory entries at a path inside a local runtime instance")]
-    List(LocalFilesListArgs),
-}
-
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvCommand {
     #[command(
@@ -513,6 +659,13 @@ pub(crate) enum EnvCommand {
     Stop(EnvTargetArgs),
     #[command(about = "Start an environment")]
     Start(EnvTargetArgs),
+    #[command(about = "Restart a native local environment")]
+    Restart(EnvTargetArgs),
+    #[command(
+        name = "refresh-skills",
+        about = "Refresh immutable skills for a native local environment"
+    )]
+    RefreshSkills(EnvTargetArgs),
     #[command(about = "Delete an environment")]
     Rm(EnvDeleteArgs),
     #[command(
@@ -541,8 +694,10 @@ pub(crate) enum EnvCommand {
     CancelDelete(EnvTargetArgs),
     #[command(about = "Extend the TTL of an environment")]
     Extend(EnvExtendArgs),
-    #[command(about = "Manage environment access")]
+    #[command(about = "Inspect or apply an environment access profile")]
     Access(EnvAccessArgs),
+    #[command(about = "Manage platform environment collaborators")]
+    Share(EnvShareArgs),
     #[command(about = "Manage environment ports")]
     Port(EnvPortArgs),
     #[command(about = "Show environment setup logs")]
@@ -564,7 +719,8 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "BACKEND",
-        help = "Local runtime backend (native by default; docker or lima for legacy); requires --local"
+        value_parser = ["native", "cloud-hypervisor"],
+        help = "Local runtime backend (native by default); requires --local"
     )]
     backend: Option<String>,
     #[arg(
@@ -596,10 +752,23 @@ pub(crate) struct EnvCreateArgs {
     ttl: Option<String>,
     #[arg(long, value_name = "QUANTITY", help = "CPU resource quantity")]
     cpu: Option<String>,
-    #[arg(long, value_name = "QUANTITY", help = "Memory resource quantity")]
+    #[arg(long, value_name = "QUANTITY", help = "Memory (for example 8GB)")]
     memory: Option<String>,
-    #[arg(long, value_name = "QUANTITY", help = "Disk resource quantity")]
+    #[arg(long, value_name = "QUANTITY", help = "Disk size (for example 40GB)")]
     disk: Option<String>,
+    #[arg(
+        long,
+        value_name = "QUANTITY",
+        conflicts_with = "no_docker",
+        help = "Dedicated guest Docker data disk (default 8Gi); requires the native local backend"
+    )]
+    docker_disk: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "docker_disk",
+        help = "Disable the guest-local Docker daemon; requires the native local backend"
+    )]
+    no_docker: bool,
     #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
     isolation: Option<String>,
     #[arg(
@@ -627,10 +796,12 @@ pub(crate) struct EnvCreateArgs {
     env: Vec<String>,
     #[arg(long = "secrets", help = "Secret project to bind")]
     secret_project: Option<String>,
-    #[arg(long, help = "Do not inject org-level secrets")]
-    no_org_secrets: bool,
-    #[arg(long, help = "Do not inject user-level secrets")]
-    no_user_secrets: bool,
+    #[arg(
+        long,
+        value_name = "SCOPE/NAME",
+        help = "Local access profile, for example user/work"
+    )]
+    access_profile: Option<String>,
     #[arg(long, help = "Join a specific mesh network on boot")]
     network: Option<String>,
     #[arg(long, help = "Do not join the selected private mesh network")]
@@ -691,10 +862,10 @@ pub(crate) struct EnvResizeArgs {
     #[arg(
         long,
         value_name = "MEMORY",
-        help = "Memory (for example 512Mi or 4Gi)"
+        help = "Memory (for example 512MB or 8GB)"
     )]
     pub(crate) memory: Option<String>,
-    #[arg(long, value_name = "DISK", help = "Disk size (for example 20Gi)")]
+    #[arg(long, value_name = "DISK", help = "Disk size (for example 40GB)")]
     pub(crate) disk: Option<String>,
     #[arg(
         long,
@@ -781,23 +952,63 @@ pub(crate) struct EnvExtendArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct EnvAccessArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    environment: Option<String>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    output: OutputFormat,
     #[command(subcommand)]
-    command: EnvAccessCommand,
+    command: Option<EnvAccessCommand>,
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum EnvAccessCommand {
-    #[command(about = "List access grants for an environment")]
-    List(EnvAccessTargetArgs),
-    #[command(about = "Grant a user access to an environment")]
-    Grant(EnvAccessGrantArgs),
-    #[command(about = "Revoke a user's access to an environment")]
-    Revoke(EnvAccessRevokeArgs),
+    #[command(about = "Apply an access-profile revision to an environment")]
+    Apply(EnvAccessApplyArgs),
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct EnvAccessTargetArgs {
+pub(crate) struct EnvAccessApplyArgs {
+    #[arg(value_name = "ID_OR_NAME")]
+    environment: String,
+    #[arg(
+        long,
+        value_name = "SCOPE/NAME",
+        required_unless_present = "clear",
+        conflicts_with = "clear",
+        help = "Access profile to bind, for example user/work"
+    )]
+    profile: Option<String>,
+    #[arg(
+        long,
+        required_unless_present = "profile",
+        conflicts_with = "profile",
+        help = "Remove the environment access profile"
+    )]
+    clear: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvShareArgs {
+    #[command(subcommand)]
+    command: EnvShareCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum EnvShareCommand {
+    #[command(about = "List collaborators for an environment")]
+    List(EnvShareTargetArgs),
+    #[command(about = "Share an environment with a user")]
+    Grant(EnvShareGrantArgs),
+    #[command(about = "Remove a user's access to an environment")]
+    Revoke(EnvShareRevokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EnvShareTargetArgs {
     #[arg(value_name = "ID_OR_NAME")]
     environment: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
@@ -805,7 +1016,7 @@ pub(crate) struct EnvAccessTargetArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct EnvAccessGrantArgs {
+pub(crate) struct EnvShareGrantArgs {
     #[arg(value_name = "ID_OR_NAME")]
     environment: String,
     #[arg(long, required = true, help = "User ID to grant access to")]
@@ -821,7 +1032,7 @@ pub(crate) struct EnvAccessGrantArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct EnvAccessRevokeArgs {
+pub(crate) struct EnvShareRevokeArgs {
     #[arg(value_name = "ID_OR_NAME")]
     environment: String,
     #[arg(long, required = true, help = "User ID to revoke access from")]
@@ -1108,68 +1319,111 @@ pub(crate) struct PresetRmArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretsCommand {
-    #[command(about = "Create a secret project")]
-    Create(SecretProjectCreateArgs),
-    #[command(about = "List secret projects, or secrets in a project")]
-    List(SecretsListArgs),
-    #[command(about = "Set a secret in a project")]
-    Set(ProjectSecretSetArgs),
-    #[command(alias = "rm", about = "Delete a secret or an entire project")]
-    Delete(ProjectSecretDeleteArgs),
-    #[command(about = "Rename a secret key in a project")]
-    Rename(ProjectSecretRenameArgs),
+    #[command(about = "List workload-secret metadata")]
+    List(SecretInventoryListArgs),
+    #[command(about = "Preview key/source resolution from codewire.yaml")]
+    Preview(SecretPreviewArgs),
     #[command(about = "Manage user-scoped secrets")]
     User {
         #[command(subcommand)]
         command: ScopedSecretCommand,
     },
     #[command(about = "Manage organization-scoped secrets")]
-    Org {
+    Organization {
         #[command(subcommand)]
         command: ScopedSecretCommand,
     },
+    #[command(about = "Manage named secret projects")]
+    Project {
+        #[command(subcommand)]
+        command: SecretProjectCommand,
+    },
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SecretsArgs {
+    #[arg(long, conflicts_with_all = ["platform", "all_placements"])]
+    pub(crate) local: bool,
+    #[arg(long, conflicts_with_all = ["local", "all_placements"])]
+    pub(crate) platform: bool,
+    #[arg(long, conflicts_with_all = ["local", "platform"])]
+    pub(crate) all_placements: bool,
+    #[command(subcommand)]
+    pub(crate) command: SecretsCommand,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SecretInventoryListArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SecretPreviewArgs {
+    #[arg(
+        long,
+        default_value = "codewire.yaml",
+        help = "Project document to preview"
+    )]
+    pub(crate) file: PathBuf,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
+    pub(crate) output: OutputFormat,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SecretProjectCommand {
+    #[command(about = "Create a secret project")]
+    Create(SecretProjectCreateArgs),
+    #[command(about = "List secret projects, or keys in one project")]
+    List(SecretsListArgs),
+    #[command(about = "Set a secret in a project")]
+    Set(ProjectSecretSetArgs),
+    #[command(about = "Delete a secret or an entire project")]
+    Delete(ProjectSecretDeleteArgs),
+    #[command(about = "Rename a secret key in a project")]
+    Rename(ProjectSecretRenameArgs),
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SecretProjectCreateArgs {
     #[arg(value_name = "NAME")]
-    name: String,
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct SecretsListArgs {
     #[arg(value_name = "PROJECT_NAME")]
-    project_name: Option<String>,
+    pub(crate) project_name: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ProjectSecretSetArgs {
     #[arg(value_name = "PROJECT")]
-    project: String,
+    pub(crate) project: String,
     #[arg(value_name = "KEY")]
-    key: String,
+    pub(crate) key: String,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ProjectSecretDeleteArgs {
     #[arg(value_name = "PROJECT")]
-    project: String,
+    pub(crate) project: String,
     #[arg(value_name = "KEY")]
-    key: Option<String>,
+    pub(crate) key: Option<String>,
     #[arg(long, help = "Skip project delete confirmation")]
-    yes: bool,
+    pub(crate) yes: bool,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ProjectSecretRenameArgs {
     #[arg(value_name = "PROJECT")]
-    project: String,
+    pub(crate) project: String,
     #[arg(value_name = "OLD_KEY")]
-    old_key: String,
+    pub(crate) old_key: String,
     #[arg(value_name = "NEW_KEY")]
-    new_key: String,
+    pub(crate) new_key: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1187,21 +1441,21 @@ pub(crate) enum ScopedSecretCommand {
 #[derive(Debug, Args)]
 pub(crate) struct ScopedSecretListArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
-    output: OutputFormat,
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ScopedSecretKeyArgs {
     #[arg(value_name = "KEY")]
-    key: String,
+    pub(crate) key: String,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct ScopedSecretRenameArgs {
     #[arg(value_name = "OLD_KEY")]
-    old_key: String,
+    pub(crate) old_key: String,
     #[arg(value_name = "NEW_KEY")]
-    new_key: String,
+    pub(crate) new_key: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1289,7 +1543,7 @@ pub(crate) struct MeshUpArgs {
     #[arg(
         long = "derp-listen",
         default_value = DEFAULT_LOCAL_DERP_LISTEN_ADDR,
-        help = "HTTP listen address for the local DERP process"
+        help = "TLS listen address for the managed local DERP process"
     )]
     derp_listen: String,
     #[arg(long = "no-derp", help = "Do not start a managed local DERP process")]
@@ -1340,6 +1594,11 @@ pub(crate) struct NetworkCreateArgs {
 pub(crate) struct NetworkUseArgs {
     #[arg(help = "Network name to select")]
     name: String,
+    #[arg(
+        long = "auto-connect",
+        help = "Automatically attach new environments to this network without prompting"
+    )]
+    auto_connect: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1472,24 +1731,23 @@ pub(crate) enum OutputFormat {
 mod collaboration;
 mod core;
 mod environment;
-mod local;
 mod mesh_commands;
 mod platform_commands;
+mod secrets;
 mod sessions;
 
 pub(crate) use collaboration::*;
 pub(crate) use core::*;
 pub(crate) use environment::*;
-pub(crate) use local::*;
 pub(crate) use mesh_commands::*;
 pub(crate) use platform_commands::*;
+pub(crate) use secrets::*;
 pub(crate) use sessions::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     include!("tests/core.rs");
-    include!("tests/local.rs");
     include!("tests/environment.rs");
     include!("tests/run.rs");
     include!("tests/platform.rs");

@@ -17,6 +17,7 @@ use kube::Api;
 use crate::runtime_transport::{
     RUNTIME_REGION_LABEL, RuntimeTransportBinding, TRANSPORT_ZONE_LABEL, load_enabled_zone,
 };
+use crate::sandbox::client::{ProbeResult, SandboxClient};
 use crate::worker::gatewayauth::{SCOPE_COORDINATE, issue_token};
 use crate::worker::github::{get_github_token_for_user, get_github_username_for_user};
 
@@ -29,6 +30,16 @@ struct BindingTarget {
     node_name: Option<String>,
     workspace_pod_ip: Option<String>,
 }
+
+#[derive(Debug)]
+struct BindingRuntime {
+    env_id: String,
+    namespace: String,
+    pod_name: String,
+    pod_ip: String,
+}
+
+type BindingRuntimeRow = (String, String, String, String, String, String);
 
 /// Shared service-layer result for `GatewayBindingService`.
 #[derive(Debug, Clone)]
@@ -125,86 +136,134 @@ async fn resolve_binding_target(
     pod: &str,
     namespace: &str,
 ) -> anyhow::Result<Option<BindingTarget>> {
-    let mut pod_node_name = None;
-    if let Some(client) = state.kube.as_ref() {
-        let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
-        match pods.get(pod).await {
-            Ok(pod_obj) => {
-                pod_node_name = pod_obj
-                    .spec
-                    .as_ref()
-                    .and_then(|spec| spec.node_name.clone());
-                let env_id = pod_obj
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|labels| labels.get("codewire.sh/environment-id"))
-                    .filter(|env_id| !env_id.trim().is_empty())
-                    .cloned();
-                match env_id {
-                    Some(env_id) if environment_is_active(state, &env_id).await? => {
-                        let workspace_pod_ip = binding_workspace_pod_ip(state, &env_id).await?;
-                        return Ok(Some(BindingTarget {
-                            env_id,
-                            node_name: pod_node_name,
-                            workspace_pod_ip,
-                        }));
-                    }
-                    _ => {}
-                }
-            }
-            Err(kube::Error::Api(e)) if e.code == 404 => {}
-            Err(e) => {
-                tracing::warn!(
-                    pod,
-                    namespace,
-                    error = %e,
-                    "gateway binding could not read requesting pod; falling back to backend lookup"
-                );
-            }
+    let Some(client) = state.kube.as_ref() else {
+        return Ok(None);
+    };
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let pod_obj = match pods.get(pod).await {
+        Ok(pod_obj) => pod_obj,
+        Err(kube::Error::Api(error)) if error.code == 404 => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "get requesting gateway pod {namespace}/{pod}: {error}"
+            ));
         }
+    };
+    let pod_node_name = pod_obj
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.node_name.clone());
+    let env_id = pod_obj
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("codewire.sh/environment-id"))
+        .map(|env_id| env_id.trim())
+        .filter(|env_id| !env_id.is_empty());
+    let runtime = match env_id {
+        Some(env_id) => binding_runtime_for_environment(state, env_id).await?,
+        None => binding_runtime_for_backend_pod(state, pod, namespace).await?,
+    };
+    let Some(runtime) = runtime else {
+        return Ok(None);
+    };
+    if runtime.namespace != namespace {
+        return Ok(None);
     }
 
-    let backend: Option<(String, Option<String>)> = sqlx::query_as(
-        r#"SELECT b.environment_id, b.pod_ip
-           FROM sandbox_environment_backend b
-           JOIN environments e ON e.id = b.environment_id
-           WHERE b.pod_name = $1 AND b.namespace = $2
-             AND e.state NOT IN ('destroyed', 'destroying')"#,
+    let probe = SandboxClient::new(client.clone(), &runtime.namespace)
+        .probe_environment(&runtime.env_id)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "probe workspace Pod for gateway binding {}: {error}",
+                runtime.env_id
+            )
+        })?;
+    if !binding_runtime_is_current(&runtime, &probe) {
+        return Ok(None);
+    }
+
+    Ok(Some(BindingTarget {
+        env_id: runtime.env_id,
+        node_name: pod_node_name,
+        workspace_pod_ip: Some(probe.pod_ip),
+    }))
+}
+
+async fn binding_runtime_for_environment(
+    state: &ApiState,
+    env_id: &str,
+) -> anyhow::Result<Option<BindingRuntime>> {
+    let row: Option<BindingRuntimeRow> = sqlx::query_as(
+        r#"SELECT b.environment_id,
+                  b.namespace,
+                  COALESCE(b.pod_name, ''),
+                  COALESCE(b.pod_ip, ''),
+                  e.state,
+                  e.desired_state
+             FROM sandbox_environment_backend b
+             JOIN environments e ON e.id = b.environment_id
+            WHERE b.environment_id = $1"#,
+    )
+    .bind(env_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("query environment gateway binding: {error}"))?;
+
+    Ok(row.and_then(binding_runtime_from_row))
+}
+
+async fn binding_runtime_for_backend_pod(
+    state: &ApiState,
+    pod: &str,
+    namespace: &str,
+) -> anyhow::Result<Option<BindingRuntime>> {
+    let row: Option<BindingRuntimeRow> = sqlx::query_as(
+        r#"SELECT b.environment_id,
+                  b.namespace,
+                  COALESCE(b.pod_name, ''),
+                  COALESCE(b.pod_ip, ''),
+                  e.state,
+                  e.desired_state
+             FROM sandbox_environment_backend b
+             JOIN environments e ON e.id = b.environment_id
+            WHERE b.pod_name = $1
+              AND b.namespace = $2"#,
     )
     .bind(pod)
     .bind(namespace)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| anyhow::anyhow!("query backend binding: {e}"))?;
+    .map_err(|error| anyhow::anyhow!("query backend gateway binding: {error}"))?;
 
-    Ok(backend.map(|(env_id, workspace_pod_ip)| BindingTarget {
-        env_id,
-        node_name: pod_node_name,
-        workspace_pod_ip: workspace_pod_ip
-            .map(|pod_ip| pod_ip.trim().to_string())
-            .filter(|pod_ip| !pod_ip.is_empty()),
-    }))
+    Ok(row.and_then(binding_runtime_from_row))
 }
 
-async fn binding_workspace_pod_ip(
-    state: &ApiState,
-    env_id: &str,
-) -> anyhow::Result<Option<String>> {
-    let pod_ip: Option<Option<String>> = sqlx::query_scalar(
-        r#"SELECT pod_ip
-           FROM sandbox_environment_backend
-           WHERE environment_id = $1"#,
-    )
-    .bind(env_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("query binding workspace pod IP: {e}"))?;
+fn binding_runtime_from_row(
+    (env_id, namespace, pod_name, pod_ip, state, desired_state): BindingRuntimeRow,
+) -> Option<BindingRuntime> {
+    if state != "running" || desired_state != "started" {
+        return None;
+    }
+    Some(BindingRuntime {
+        env_id,
+        namespace,
+        pod_name,
+        pod_ip,
+    })
+}
 
-    Ok(pod_ip
-        .flatten()
-        .map(|pod_ip| pod_ip.trim().to_string())
-        .filter(|pod_ip| !pod_ip.is_empty()))
+fn binding_runtime_is_current(runtime: &BindingRuntime, probe: &ProbeResult) -> bool {
+    probe.claim_exists
+        && probe.claim_ready
+        && probe.pod_exists
+        && probe.pod_phase == "Running"
+        && !probe.pod_name.is_empty()
+        && !probe.pod_uid.is_empty()
+        && !probe.pod_ip.is_empty()
+        && runtime.pod_name == probe.pod_name
+        && runtime.pod_ip == probe.pod_ip
 }
 
 async fn binding_app_ports(state: &ApiState, env_id: &str) -> anyhow::Result<Vec<i32>> {
@@ -221,20 +280,6 @@ async fn binding_app_ports(state: &ApiState, env_id: &str) -> anyhow::Result<Vec
     .map_err(|e| anyhow::anyhow!("query binding app ports: {e}"))?;
 
     Ok(rows.into_iter().map(|(port,)| port).collect())
-}
-
-async fn environment_is_active(state: &ApiState, env_id: &str) -> anyhow::Result<bool> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(
-             SELECT 1
-             FROM environments
-             WHERE id = $1 AND state NOT IN ('destroyed', 'destroying')
-           )"#,
-    )
-    .bind(env_id)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("query environment binding state: {e}"))
 }
 
 async fn runtime_transport_for_node(
@@ -367,4 +412,72 @@ async fn resolve_git_credential_username(pool: &sqlx::PgPool, user_id: &str, hos
     .await
     .unwrap_or(None);
     row.and_then(|(u,)| u).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn current_runtime() -> BindingRuntime {
+        BindingRuntime {
+            env_id: "env-current".into(),
+            namespace: "runtime".into(),
+            pod_name: "workspace-current".into(),
+            pod_ip: "10.0.0.9".into(),
+        }
+    }
+
+    fn current_probe() -> ProbeResult {
+        ProbeResult {
+            claim_exists: true,
+            claim_ready: true,
+            pod_exists: true,
+            pod_phase: "Running".into(),
+            pod_name: "workspace-current".into(),
+            pod_uid: "workspace-uid-current".into(),
+            pod_ip: "10.0.0.9".into(),
+            ..Default::default()
+        }
+    }
+
+    fn runtime_row(state: &str, desired_state: &str) -> BindingRuntimeRow {
+        (
+            "env-current".into(),
+            "runtime".into(),
+            "workspace-current".into(),
+            "10.0.0.9".into(),
+            state.into(),
+            desired_state.into(),
+        )
+    }
+
+    #[test]
+    fn gateway_binding_requires_running_started_environment() {
+        assert!(binding_runtime_from_row(runtime_row("running", "started")).is_some());
+        assert!(binding_runtime_from_row(runtime_row("starting", "started")).is_none());
+        assert!(binding_runtime_from_row(runtime_row("running", "stopped")).is_none());
+    }
+
+    #[test]
+    fn gateway_binding_requires_current_ready_workspace_runtime() {
+        let runtime = current_runtime();
+        let current = current_probe();
+        assert!(binding_runtime_is_current(&runtime, &current));
+
+        let mut replacement = current.clone();
+        replacement.pod_uid.clear();
+        assert!(!binding_runtime_is_current(&runtime, &replacement));
+
+        let mut wrong_name = current.clone();
+        wrong_name.pod_name = "workspace-replacement".into();
+        assert!(!binding_runtime_is_current(&runtime, &wrong_name));
+
+        let mut wrong_ip = current.clone();
+        wrong_ip.pod_ip = "10.0.0.10".into();
+        assert!(!binding_runtime_is_current(&runtime, &wrong_ip));
+
+        let mut not_ready = current;
+        not_ready.claim_ready = false;
+        assert!(!binding_runtime_is_current(&runtime, &not_ready));
+    }
 }

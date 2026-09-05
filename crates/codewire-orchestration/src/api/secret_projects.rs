@@ -12,7 +12,7 @@ use super::ApiState;
 use super::environments::format_time;
 use super::secrets::{
     ListSecretsResponse, ambiguous_secret_provider_error, forbidden, log_audit, org_role,
-    rename_provider_error, to_metadata, validate_secret_key,
+    rename_provider_error, to_metadata, validate_secret_key, validate_secret_value,
 };
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ pub struct SecretProject {
     pub created_at: String,
 }
 
-fn secret_project_path(org_id: &str, project_id: &str) -> String {
+pub(super) fn secret_project_path(org_id: &str, project_id: &str) -> String {
     format!("/projects/{org_id}/{project_id}")
 }
 
@@ -45,7 +45,11 @@ fn row_to_project(r: &sqlx::postgres::PgRow) -> Result<SecretProject, AppError> 
 
 /// Loads a project and verifies it belongs to `org_id` (404 on either miss),
 /// mirroring the Go `getSecretProject` + org-match guard.
-async fn get_project(state: &ApiState, project_id: &str, org_id: &str) -> AppResult<SecretProject> {
+pub(super) async fn get_project(
+    state: &ApiState,
+    project_id: &str,
+    org_id: &str,
+) -> AppResult<SecretProject> {
     let row = sqlx::query("SELECT id, org_id, name, created_at FROM secret_projects WHERE id = $1")
         .bind(project_id)
         .fetch_optional(&state.pool)
@@ -147,14 +151,22 @@ pub(crate) async fn list_secret_projects_core(
     let mut projects: Vec<SecretProject> = Vec::with_capacity(rows.len());
     for r in &rows {
         let mut p = row_to_project(r)?;
-        // Enrich with the secret count (best-effort, like Go).
-        if let Ok(secrets) = state
+        let secrets = state
             .secrets
-            .get_secrets_raw_at_path(&secret_project_path(org_id, &p.id))
+            .get_secret_metadata_at_path(&secret_project_path(org_id, &p.id))
             .await
-        {
-            p.secret_count = secrets.len() as i64;
-        }
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    project_id = p.id,
+                    "secret-projects: count failed"
+                );
+                AppError::InternalMsg("failed to list secret projects".into())
+            })?;
+        p.secret_count = i64::try_from(secrets.len()).map_err(|error| {
+            tracing::error!(error = %error, project_id = p.id, "secret-projects: count overflow");
+            AppError::InternalMsg("failed to list secret projects".into())
+        })?;
         projects.push(p);
     }
     Ok(projects)
@@ -229,7 +241,7 @@ pub(crate) async fn list_project_secrets_core(
 
     let secrets = state
         .secrets
-        .get_secrets_raw_at_path(&secret_project_path(org_id, &project.id))
+        .get_secret_metadata_at_path(&secret_project_path(org_id, &project.id))
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "secret-projects: list secrets failed");
@@ -256,6 +268,7 @@ pub(crate) async fn set_project_secret_core(
     )
     .await?;
     validate_secret_key(key)?;
+    validate_secret_value(value)?;
     let project = get_project(state, project_id, org_id).await?;
 
     run_organization_tenant_secret_mutation(&state.pool, org_id, async {

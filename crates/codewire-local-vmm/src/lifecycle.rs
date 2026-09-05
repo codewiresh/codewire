@@ -12,6 +12,8 @@ use crate::supervisor_store::OperationKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LifecycleEffect {
     RecordEnvironment,
+    BindEnvironmentAccess,
+    RequireEnvironmentAccess,
     ProvisionWorkspace,
     StageWorkspaceGeneration,
     RecordStarting,
@@ -27,8 +29,11 @@ pub(crate) enum LifecycleEffect {
     StageRollbackGeneration,
     RestoreDesiredPower,
     RecordWorkspaceTransition,
+    ApplyEnvironmentAccess,
+    RecordEnvironmentAccess,
     PrepareDelete,
     MoveToTrash,
+    RevokeEnvironmentAccess,
     RemoveEnvironment,
     CleanupTrash,
     RecordObservation,
@@ -52,17 +57,22 @@ impl LifecycleEffect {
             | Self::RecordResizeOutcome
             | Self::StageRollbackGeneration
             | Self::RecordWorkspaceTransition
+            | Self::RecordEnvironmentAccess
             | Self::RemoveEnvironment
             | Self::RecordObservation => EffectDurability::Transactional,
             Self::ProvisionWorkspace
+            | Self::BindEnvironmentAccess
+            | Self::RequireEnvironmentAccess
             | Self::EnsureRunner
             | Self::StartVm
             | Self::StopVm
             | Self::GrowDisk
             | Self::RestartVm
             | Self::RestoreDesiredPower
+            | Self::ApplyEnvironmentAccess
             | Self::PrepareDelete
             | Self::MoveToTrash
+            | Self::RevokeEnvironmentAccess
             | Self::CleanupTrash => EffectDurability::ExternalIdempotent,
         }
     }
@@ -70,13 +80,16 @@ impl LifecycleEffect {
 
 const CREATE: &[LifecycleEffect] = &[
     LifecycleEffect::RecordEnvironment,
+    LifecycleEffect::BindEnvironmentAccess,
     LifecycleEffect::ProvisionWorkspace,
     LifecycleEffect::StageWorkspaceGeneration,
+    LifecycleEffect::RecordStarting,
     LifecycleEffect::EnsureRunner,
     LifecycleEffect::StartVm,
     LifecycleEffect::RecordRunning,
 ];
 const START: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::RecordStarting,
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::EnsureRunner,
@@ -84,27 +97,40 @@ const START: &[LifecycleEffect] = &[
     LifecycleEffect::RecordRunning,
 ];
 const STOP: &[LifecycleEffect] = &[LifecycleEffect::StopVm, LifecycleEffect::RecordStopped];
-const RESIZE: &[LifecycleEffect] = &[
+const RESTART: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
     LifecycleEffect::GrowDisk,
     LifecycleEffect::RecordResources,
+    LifecycleEffect::RecordStarting,
     LifecycleEffect::RestartVm,
     LifecycleEffect::RecordResizeOutcome,
 ];
+const GROW_DISK: &[LifecycleEffect] = &[
+    LifecycleEffect::StopVm,
+    LifecycleEffect::RecordStopped,
+    LifecycleEffect::GrowDisk,
+    LifecycleEffect::RecordResources,
+    LifecycleEffect::RecordResizeOutcome,
+];
 const UPDATE_WORKSPACE: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StageWorkspaceGeneration,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
+    LifecycleEffect::RecordStarting,
     LifecycleEffect::EnsureRunner,
     LifecycleEffect::StartVm,
     LifecycleEffect::RestoreDesiredPower,
     LifecycleEffect::RecordWorkspaceTransition,
 ];
 const ROLLBACK_WORKSPACE: &[LifecycleEffect] = &[
+    LifecycleEffect::RequireEnvironmentAccess,
     LifecycleEffect::StageRollbackGeneration,
     LifecycleEffect::StopVm,
     LifecycleEffect::RecordStopped,
+    LifecycleEffect::RecordStarting,
     LifecycleEffect::EnsureRunner,
     LifecycleEffect::StartVm,
     LifecycleEffect::RestoreDesiredPower,
@@ -113,8 +139,13 @@ const ROLLBACK_WORKSPACE: &[LifecycleEffect] = &[
 const DELETE: &[LifecycleEffect] = &[
     LifecycleEffect::PrepareDelete,
     LifecycleEffect::MoveToTrash,
+    LifecycleEffect::RevokeEnvironmentAccess,
     LifecycleEffect::RemoveEnvironment,
     LifecycleEffect::CleanupTrash,
+];
+const APPLY_ENVIRONMENT_ACCESS: &[LifecycleEffect] = &[
+    LifecycleEffect::ApplyEnvironmentAccess,
+    LifecycleEffect::RecordEnvironmentAccess,
 ];
 const RECONCILE: &[LifecycleEffect] = &[LifecycleEffect::RecordObservation];
 
@@ -123,9 +154,11 @@ pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
         OperationKind::Create => CREATE,
         OperationKind::Start => START,
         OperationKind::Stop => STOP,
-        OperationKind::Restart | OperationKind::GrowDisk => RESIZE,
+        OperationKind::Restart => RESTART,
+        OperationKind::GrowDisk => GROW_DISK,
         OperationKind::UpdateWorkspace => UPDATE_WORKSPACE,
         OperationKind::RollbackWorkspace => ROLLBACK_WORKSPACE,
+        OperationKind::ApplyEnvironmentAccess => APPLY_ENVIRONMENT_ACCESS,
         OperationKind::Delete => DELETE,
         OperationKind::Reconcile => RECONCILE,
     }
@@ -169,6 +202,7 @@ mod tests {
         OperationKind::Restart,
         OperationKind::UpdateWorkspace,
         OperationKind::RollbackWorkspace,
+        OperationKind::ApplyEnvironmentAccess,
         OperationKind::GrowDisk,
         OperationKind::Delete,
         OperationKind::Reconcile,
@@ -326,6 +360,7 @@ mod tests {
                         | LifecycleEffect::RecordResizeOutcome
                         | LifecycleEffect::StageRollbackGeneration
                         | LifecycleEffect::RecordWorkspaceTransition
+                        | LifecycleEffect::RecordEnvironmentAccess
                         | LifecycleEffect::RemoveEnvironment
                         | LifecycleEffect::RecordObservation
                 );
@@ -334,6 +369,39 @@ mod tests {
                     expected
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_booting_plan_reserves_its_generation_before_runner_mutation() {
+        for kind in [
+            OperationKind::Create,
+            OperationKind::Start,
+            OperationKind::Restart,
+            OperationKind::UpdateWorkspace,
+            OperationKind::RollbackWorkspace,
+        ] {
+            let plan = effects(kind);
+            let reservation = plan
+                .iter()
+                .position(|effect| *effect == LifecycleEffect::RecordStarting)
+                .unwrap();
+            let runner_mutation = plan
+                .iter()
+                .position(|effect| {
+                    matches!(
+                        effect,
+                        LifecycleEffect::EnsureRunner
+                            | LifecycleEffect::StartVm
+                            | LifecycleEffect::RestartVm
+                    )
+                })
+                .unwrap();
+            assert!(reservation < runner_mutation, "{kind:?}");
+            assert_eq!(
+                plan[reservation].durability(),
+                EffectDurability::Transactional
+            );
         }
     }
 

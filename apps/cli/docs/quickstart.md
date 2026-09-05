@@ -1,7 +1,7 @@
 # Codewire Quick Start
 
 Codewire environments own durable sessions. The same session grammar works for
-local Docker/Lima environments and platform environments.
+native local environments and platform environments.
 
 ## Install
 
@@ -17,18 +17,16 @@ cargo build -p codewire-cli-bin --bin cw
 
 ## Create an environment
 
-Create a local Lima environment using the workspace image:
+Create a native local environment using the workspace image:
 
 ```bash
 cw env create --local \
-  --backend lima \
   --name my-app \
   --image workspace \
   --path .
 ```
 
-Use `--backend docker` for a local Docker environment. Platform environments
-use the same `env` family without `--local`:
+Platform environments use the same `env` family without `--local`:
 
 ```bash
 cw login
@@ -40,7 +38,7 @@ agent for either placement:
 
 ```bash
 cw init --image workspace --coding-agent codex
-cw env create --local --backend lima --name my-app --file codewire.yaml
+cw env create --local --name my-app --file codewire.yaml
 ```
 
 ## Coding-agent tools and credentials
@@ -49,12 +47,12 @@ The canonical `workspace` image includes Codex, Claude Code, Gemini CLI, Kimi
 Code, Pi, and Aider as the `codewire` user. Agent selection records the tool
 you intend to use; setup validates that the selected command is present and
 does not download packages. Choose a current `workspace` image or recreate a
-legacy environment rather than modifying it in place.
+local environment that still references an older image rather than modifying
+the image in place.
 
-Use the normal vendor login or update command inside the workspace. The Web
-form can save the supported agent credential fields as user secrets for
-injection during setup. Kimi Code follows its own configuration flow, so it is
-deliberately not represented as a generic raw environment-variable field.
+Protected local provider accounts are enrolled on the host with
+`cw credentials --local` and exposed only through an explicit access profile.
+The managed credential value is never copied into the workspace.
 
 ## Run durable sessions
 
@@ -94,6 +92,7 @@ the other documented `Ctrl+B` actions.
 cw env info --local my-app
 cw env stop --local my-app
 cw env start --local my-app
+cw env restart --local my-app
 cw env daemon status --local my-app
 cw env daemon repair --local my-app
 cw env rm --local my-app

@@ -7,7 +7,7 @@ use std::{
 
 use askama::Template as _;
 use axum::{
-    Form, Json,
+    Form,
     body::{Body, Bytes},
     extract::{Path, Query, RawForm, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -20,7 +20,7 @@ use codewire_proto::codewire::v1::{
     ResizeEnvironmentRequest, SetupAgent,
 };
 use connectrpc::{ConnectError, ErrorCode, http_body};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use url::Url;
 
@@ -52,6 +52,8 @@ const MAX_REPOSITORIES: usize = 108;
 const MAX_APP_PORTS: usize = 16;
 const MAX_FIELD: usize = 16_384;
 const DEFAULT_TTL: &str = "infinity";
+const PROTECTED_SECRET_ACCESS_UNAVAILABLE: &str =
+    "Saved secrets cannot be attached to a Sandbox until protected access is available.";
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct EnvironmentsQuery {
@@ -125,8 +127,8 @@ pub(super) struct ResizeApplySubmission {
     force: String,
 }
 
-// Deliberately not Debug. Agent credential values are write-only and must not
-// become available to derived diagnostics, retained form models, or errors.
+// Deliberately not Debug. Secret-source inputs must not become available to
+// derived diagnostics, retained form models, or errors.
 struct EnvironmentSubmission {
     csrf: String,
     mode: String,
@@ -143,25 +145,11 @@ struct EnvironmentSubmission {
     isolation_tier: String,
     repositories: Vec<(String, String, String)>,
     agents: Vec<String>,
-    secret_project: String,
+    secret_project_supplied: bool,
     include_org_secrets: bool,
     include_user_secrets: bool,
     app_ports: Vec<(String, String, String)>,
-    agent_secrets: HashMap<String, String>,
-}
-
-#[derive(Deserialize)]
-pub(super) struct InlineSecretProjectSubmission {
-    #[serde(rename = "_csrf")]
-    csrf: String,
-    name: String,
-}
-
-#[derive(Serialize)]
-struct InlineSecretProjectResponse {
-    id: String,
-    name: String,
-    secret_count: i64,
+    agent_secret_supplied: bool,
 }
 
 impl EnvironmentSubmission {
@@ -170,7 +158,8 @@ impl EnvironmentSubmission {
         let mut repositories = BTreeMap::<usize, (String, String, String)>::new();
         let mut app_ports = BTreeMap::<usize, (String, String, String)>::new();
         let mut agents = Vec::new();
-        let mut agent_secrets = HashMap::<String, String>::new();
+        let mut secret_project_supplied = false;
+        let mut agent_secret_supplied = false;
 
         for (key, value) in url::form_urlencoded::parse(bytes) {
             if key.len() > 128 || value.len() > MAX_FIELD {
@@ -213,12 +202,13 @@ impl EnvironmentSubmission {
                     return Err(());
                 }
                 app_ports.entry(index).or_default().2 = value;
-            } else if let Some(secret_key) = key.strip_prefix("agent_secret_") {
-                if valid_agent_secret_key(secret_key) {
-                    let current = agent_secrets.entry(secret_key.to_owned()).or_default();
-                    if current.is_empty() || !value.is_empty() {
-                        *current = value;
-                    }
+            } else if key == "secret_project" {
+                if !value.trim().is_empty() {
+                    secret_project_supplied = true;
+                }
+            } else if key.starts_with("agent_secret_") {
+                if !value.trim().is_empty() {
+                    agent_secret_supplied = true;
                 }
             } else {
                 values.entry(key).or_insert(value);
@@ -241,11 +231,11 @@ impl EnvironmentSubmission {
             isolation_tier: take(&mut values, "isolation_tier"),
             repositories: repositories.into_values().collect(),
             agents,
-            secret_project: take(&mut values, "secret_project"),
+            secret_project_supplied,
             include_org_secrets: values.contains_key("include_org_secrets"),
             include_user_secrets: values.contains_key("include_user_secrets"),
             app_ports: app_ports.into_values().collect(),
-            agent_secrets,
+            agent_secret_supplied,
         })
     }
 
@@ -275,16 +265,12 @@ impl EnvironmentSubmission {
             show_confidential_controls: false,
             confidential_price: String::new(),
             selected_agents: self.agents.clone(),
-            secret_project: self.secret_project.trim().to_owned(),
-            include_org_secrets: self.include_org_secrets,
-            include_user_secrets: self.include_user_secrets,
             app_ports: app_port_rows(&self.app_ports),
             github_connected: false,
             github_username: String::new(),
             github_repositories_available: false,
             github_repositories: Vec::new(),
             presets: Vec::new(),
-            secret_projects: Vec::new(),
             agents: Vec::new(),
             detection: EnvironmentDetectionView::default(),
             repo_error: String::new(),
@@ -346,13 +332,6 @@ impl EnvironmentSubmission {
                 .iter()
                 .map(|port| (port.port.clone(), port.label.clone(), port.access.clone()))
                 .collect();
-        }
-        if !self.prepared && self.secret_project.trim().is_empty() {
-            self.secret_project = preset.secret_project.clone();
-        }
-        if !self.prepared {
-            self.include_org_secrets = preset.default_include_org_secrets;
-            self.include_user_secrets = preset.default_include_user_secrets;
         }
     }
 
@@ -453,6 +432,14 @@ impl EnvironmentSubmission {
             });
         }
 
+        if self.secret_project_supplied
+            || self.include_org_secrets
+            || self.include_user_secrets
+            || self.agent_secret_supplied
+        {
+            form.form_error = PROTECTED_SECRET_ACCESS_UNAVAILABLE.to_owned();
+        }
+
         if form.has_errors() {
             return None;
         }
@@ -480,21 +467,61 @@ impl EnvironmentSubmission {
             install_command: self.install_command.clone(),
             startup_script: self.startup_script.clone(),
             agents,
-            secret_project: self.secret_project.trim().to_owned(),
+            secret_project: String::new(),
             app_ports: ports,
-            include_org_secrets: (!self.include_org_secrets).then_some(false),
-            include_user_secrets: (!self.include_user_secrets).then_some(false),
+            include_org_secrets: Some(false),
+            include_user_secrets: Some(false),
             isolation_tier: isolation_tier.into(),
             ..Default::default()
         })
     }
+}
 
-    fn take_secret_values(&mut self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.agent_secrets)
-            .into_iter()
-            .filter_map(|(key, value)| (!value.trim().is_empty()).then_some((key, value)))
-            .collect()
+fn validate_secret_free_draft(
+    draft: &CreateEnvironmentRequest,
+    presets: &[crate::view::EnvironmentPresetOption],
+) -> Result<(), &'static str> {
+    let project_spec_uses_secrets = draft
+        .project_spec
+        .as_option()
+        .and_then(|project| project.secrets.as_option())
+        .is_some_and(|secrets| {
+            !secrets.project.trim().is_empty()
+                || secrets.organization
+                || secrets.user
+                || secrets.include_org.unwrap_or(false)
+                || secrets.include_user.unwrap_or(false)
+        });
+    let preset_is_safe = match draft
+        .preset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|preset_id| !preset_id.is_empty())
+    {
+        Some(preset_id) => presets
+            .iter()
+            .find(|preset| preset.id == preset_id)
+            .is_some_and(|preset| !preset.uses_legacy_secret_sources),
+        None => true,
+    };
+    if !draft.secret_project.trim().is_empty()
+        || draft.include_org_secrets != Some(false)
+        || draft.include_user_secrets != Some(false)
+        || project_spec_uses_secrets
+        || !preset_is_safe
+    {
+        return Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE);
     }
+    Ok(())
+}
+
+fn with_secret_free_draft<T>(
+    draft: CreateEnvironmentRequest,
+    presets: &[crate::view::EnvironmentPresetOption],
+    dispatch: impl FnOnce(CreateEnvironmentRequest) -> T,
+) -> Result<T, &'static str> {
+    validate_secret_free_draft(&draft, presets)?;
+    Ok(dispatch(draft))
 }
 
 pub(super) async fn page(
@@ -666,15 +693,31 @@ pub(super) async fn prepare(
         .repositories
         .iter()
         .any(|(url, _, _)| !url.trim().is_empty());
-    let mut events = match environment_connect::prepare_events(
-        &state,
-        cookie.clone(),
-        organization.id.clone(),
-        draft,
-        analyze_repositories,
-    )
-    .await
-    {
+    let prepare = match with_secret_free_draft(draft, &form.presets, |draft| {
+        environment_connect::prepare_events(
+            &state,
+            cookie.clone(),
+            organization.id.clone(),
+            draft,
+            analyze_repositories,
+        )
+    }) {
+        Ok(prepare) => prepare,
+        Err(message) => {
+            form.form_error = message.to_owned();
+            return render_action_page(
+                &state,
+                &headers,
+                dashboard,
+                organization,
+                cookie,
+                form,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+            .await;
+        }
+    };
+    let mut events = match prepare.await {
         Ok(events) => events,
         Err(error) => {
             apply_prepare_error(&mut form, &error);
@@ -693,9 +736,20 @@ pub(super) async fn prepare(
     while let Some(event) = events.recv().await {
         match event {
             Ok(EnvironmentPrepareEvent::Complete { draft, detection }) => {
-                apply_prepared_draft(&mut form, *draft, *detection);
-                if !preset_was_selected {
-                    apply_automatically_resolved_preset_defaults(&mut form);
+                if let Err(message) =
+                    apply_checked_prepared_draft(&mut form, *draft, *detection, preset_was_selected)
+                {
+                    form.form_error = message.to_owned();
+                    return render_action_page(
+                        &state,
+                        &headers,
+                        dashboard,
+                        organization,
+                        cookie,
+                        form,
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                    )
+                    .await;
                 }
                 return render_action_page(
                     &state,
@@ -782,15 +836,28 @@ pub(super) async fn prepare_events(
         .repositories
         .iter()
         .any(|(url, _, _)| !url.trim().is_empty());
-    let mut upstream = match environment_connect::prepare_events(
-        &state,
-        cookie,
-        organization.id.clone(),
-        draft,
-        analyze_repositories,
-    )
-    .await
-    {
+    let prepare = match with_secret_free_draft(draft, &form.presets, |draft| {
+        environment_connect::prepare_events(
+            &state,
+            cookie,
+            organization.id.clone(),
+            draft,
+            analyze_repositories,
+        )
+    }) {
+        Ok(prepare) => prepare,
+        Err(message) => {
+            form.form_error = message.to_owned();
+            return render_template(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                EnvironmentCreateFormTemplate {
+                    organization: &organization,
+                    form: &form,
+                },
+            );
+        }
+    };
+    let mut upstream = match prepare.await {
         Ok(events) => events,
         Err(error) => {
             apply_prepare_error(&mut form, &error);
@@ -833,20 +900,26 @@ pub(super) async fn prepare_events(
                     sse_event("repo", &format!("{index}|{}|{ok}", safe_event_text(&repo)))
                 }
                 Ok(EnvironmentPrepareEvent::Complete { draft, detection }) => {
-                    apply_prepared_draft(&mut form, *draft, *detection);
-                    if !preset_was_selected {
-                        apply_automatically_resolved_preset_defaults(&mut form);
+                    match apply_checked_prepared_draft(
+                        &mut form,
+                        *draft,
+                        *detection,
+                        preset_was_selected,
+                    ) {
+                        Ok(()) => {
+                            let html = EnvironmentCreateFormTemplate {
+                                organization: &organization,
+                                form: &form,
+                            }
+                            .render()
+                            .unwrap_or_else(|_| {
+                                "<div role=\"alert\">The prepared form could not be rendered.</div>"
+                                    .to_owned()
+                            });
+                            sse_event("complete", &STANDARD.encode(html))
+                        }
+                        Err(message) => sse_event("error", message),
                     }
-                    let html = EnvironmentCreateFormTemplate {
-                        organization: &organization,
-                        form: &form,
-                    }
-                    .render()
-                    .unwrap_or_else(|_| {
-                        "<div role=\"alert\">The prepared form could not be rendered.</div>"
-                            .to_owned()
-                    });
-                    sse_event("complete", &STANDARD.encode(html))
                 }
                 Err(error) => sse_event("error", prepare_error_message(&error)),
             };
@@ -905,29 +978,25 @@ pub(super) async fn create(
         .await;
     };
 
-    let secret_values = submission.take_secret_values();
-    if !secret_values.is_empty()
-        && let Err(error) =
-            environment_connect::set_user_secrets(&state, cookie.clone(), secret_values).await
-    {
-        form.form_error =
-            "The selected agent credential could not be saved. No Sandbox was created.".to_owned();
-        if error.code == ErrorCode::Unauthenticated {
-            return login_redirect(&environments_path(&slug), &headers);
+    let create = match with_secret_free_draft(draft, &form.presets, |draft| {
+        environment_connect::create_environment(&state, cookie.clone(), draft)
+    }) {
+        Ok(create) => create,
+        Err(message) => {
+            form.form_error = message.to_owned();
+            return render_action_page(
+                &state,
+                &headers,
+                dashboard,
+                organization,
+                cookie,
+                form,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+            .await;
         }
-        return render_action_page(
-            &state,
-            &headers,
-            dashboard,
-            organization,
-            cookie,
-            form,
-            StatusCode::UNPROCESSABLE_ENTITY,
-        )
-        .await;
-    }
-
-    match environment_connect::create_environment(&state, cookie.clone(), draft).await {
+    };
+    match create.await {
         Ok(_) => mutation_redirect(
             &state,
             environments_path(&slug),
@@ -952,86 +1021,6 @@ pub(super) async fn create(
             .await
         }
     }
-}
-
-pub(super) async fn create_secret_project(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-    headers: HeaderMap,
-    Form(submission): Form<InlineSecretProjectSubmission>,
-) -> Response {
-    let (_, organization, cookie) = match action_context(
-        &state,
-        &headers,
-        &slug,
-        &submission.csrf,
-        environments_path(&slug),
-    )
-    .await
-    {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
-    let name = submission.name.trim();
-    if !organization.can_admin || name.is_empty() || name.len() > 128 {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "Enter a project name up to 128 characters.",
-        )
-            .into_response();
-    }
-    if let Err(error) = crate::secrets_presets_connect::create_secret_project(
-        &state,
-        cookie.clone(),
-        organization.id.clone(),
-        name.to_owned(),
-    )
-    .await
-    {
-        return match error.code {
-            ErrorCode::AlreadyExists => (
-                StatusCode::CONFLICT,
-                "A secret project with that name already exists.",
-            )
-                .into_response(),
-            ErrorCode::PermissionDenied => {
-                (StatusCode::FORBIDDEN, "You cannot create secret projects.").into_response()
-            }
-            _ => (
-                StatusCode::BAD_GATEWAY,
-                "The secret service is temporarily unavailable.",
-            )
-                .into_response(),
-        };
-    }
-    let options = match environment_connect::create_options(&state, cookie, &organization.id).await
-    {
-        Ok(options) => options,
-        Err(_) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                "The project was created, but its details could not be refreshed.",
-            )
-                .into_response();
-        }
-    };
-    let Some(project) = options
-        .secret_projects
-        .into_iter()
-        .find(|project| project.name == name)
-    else {
-        return (
-            StatusCode::BAD_GATEWAY,
-            "The project was created, but its details could not be refreshed.",
-        )
-            .into_response();
-    };
-    Json(InlineSecretProjectResponse {
-        id: project.id,
-        name: project.name,
-        secret_count: project.secret_count,
-    })
-    .into_response()
 }
 
 pub(super) async fn start(
@@ -1710,16 +1699,12 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         show_confidential_controls: false,
         confidential_price: String::new(),
         selected_agents: Vec::new(),
-        secret_project: String::new(),
-        include_org_secrets: true,
-        include_user_secrets: true,
         app_ports: Vec::new(),
         github_connected: false,
         github_username: String::new(),
         github_repositories_available: false,
         github_repositories: Vec::new(),
         presets: Vec::new(),
-        secret_projects: Vec::new(),
         agents: Vec::new(),
         detection: EnvironmentDetectionView::default(),
         repo_error: String::new(),
@@ -1739,10 +1724,23 @@ fn hydrate_options(form: &mut EnvironmentCreateFormView, options: EnvironmentCre
     form.github_repositories_available = options.github_repositories_available;
     form.github_repositories = options.github_repositories;
     form.presets = options.presets;
-    form.secret_projects = options.secret_projects;
     form.agents = options.agents;
     form.confidential_available = options.confidential_available;
     form.confidential_price = options.confidential_price;
+}
+
+fn apply_checked_prepared_draft(
+    form: &mut EnvironmentCreateFormView,
+    draft: CreateEnvironmentRequest,
+    detection: Option<codewire_proto::codewire::v1::DetectionResult>,
+    preset_was_selected: bool,
+) -> Result<(), &'static str> {
+    validate_secret_free_draft(&draft, &form.presets)?;
+    apply_prepared_draft(form, draft, detection);
+    if !preset_was_selected {
+        apply_automatically_resolved_preset_defaults(form);
+    }
+    Ok(())
 }
 
 fn apply_prepared_draft(
@@ -1778,9 +1776,6 @@ fn apply_prepared_draft(
         _ => "standard".to_owned(),
     };
     form.selected_agents = draft.agents.into_iter().map(|agent| agent.r#type).collect();
-    form.secret_project = draft.secret_project;
-    form.include_org_secrets = draft.include_org_secrets.unwrap_or(true);
-    form.include_user_secrets = draft.include_user_secrets.unwrap_or(true);
     form.app_ports = draft
         .app_ports
         .into_iter()
@@ -1836,11 +1831,6 @@ fn apply_automatically_resolved_preset_defaults(form: &mut EnvironmentCreateForm
     if form.app_ports.is_empty() {
         form.app_ports = preset.default_app_ports;
     }
-    if form.secret_project.trim().is_empty() {
-        form.secret_project = preset.secret_project;
-    }
-    form.include_org_secrets = preset.default_include_org_secrets;
-    form.include_user_secrets = preset.default_include_user_secrets;
 }
 
 fn apply_create_error(form: &mut EnvironmentCreateFormView, error: &ConnectError) {
@@ -2081,13 +2071,6 @@ fn allowlisted_agents(values: &[String]) -> Vec<SetupAgent> {
         .collect()
 }
 
-fn valid_agent_secret_key(value: &str) -> bool {
-    matches!(
-        value,
-        "ANTHROPIC_API_KEY" | "CLAUDE_CODE_OAUTH_TOKEN" | "OPENAI_API_KEY" | "GEMINI_API_KEY"
-    )
-}
-
 fn valid_port_label(value: &str) -> bool {
     let bytes = value.as_bytes();
     (2..=22).contains(&bytes.len())
@@ -2280,6 +2263,28 @@ mod tests {
         }
     }
 
+    fn test_preset(
+        id: &str,
+        uses_legacy_secret_sources: bool,
+    ) -> crate::view::EnvironmentPresetOption {
+        crate::view::EnvironmentPresetOption {
+            id: id.to_owned(),
+            name: "Preset".to_owned(),
+            description: String::new(),
+            image: "example.test/workspace@sha256:abc".to_owned(),
+            default_cpu_millicores: 1_000,
+            default_memory_mb: 2_048,
+            default_disk_gb: 10,
+            default_ttl_seconds: None,
+            default_install_command: String::new(),
+            default_startup_script: String::new(),
+            default_agents: Vec::new(),
+            default_app_ports: Vec::new(),
+            uses_legacy_secret_sources,
+            official: false,
+        }
+    }
+
     #[test]
     fn confidential_controls_are_hidden_by_the_dashboard_gate() {
         let organization = test_organization();
@@ -2395,25 +2400,169 @@ mod tests {
     }
 
     #[test]
-    fn raw_submission_never_puts_agent_values_in_the_form_view() {
-        let bytes = b"_csrf=token&mode=image&image=example.test%2Fworkspace&agent=codex&agent_secret_OPENAI_API_KEY=write-only-marker";
-        let mut submission = EnvironmentSubmission::parse(bytes).expect("submission");
-        let form = submission.form_view("token".to_owned());
-        let values = submission.take_secret_values();
-        assert_eq!(values.len(), 1);
-        let rendered_metadata = format!("{}{}", form.image, form.selected_agents.join(""));
-        assert!(!rendered_metadata.contains("write-only-marker"));
+    fn direct_secret_sources_are_rejected_without_retaining_values() {
+        for bytes in [
+            &b"image=example.test%2Fworkspace&secret_project=development"[..],
+            &b"image=example.test%2Fworkspace&secret_project=&secret_project=development"[..],
+            &b"image=example.test%2Fworkspace&include_org_secrets=true"[..],
+            &b"image=example.test%2Fworkspace&include_user_secrets=true"[..],
+            &b"image=example.test%2Fworkspace&agent_secret_OPENAI_API_KEY=write-only-marker"[..],
+            &b"image=example.test%2Fworkspace&agent_secret_forged-name=write-only-marker"[..],
+            &b"image=example.test%2Fworkspace&agent_secret_OPENAI_API_KEY=&agent_secret_OPENAI_API_KEY=write-only-marker&agent_secret_OPENAI_API_KEY="[..],
+        ] {
+            let submission = EnvironmentSubmission::parse(bytes).expect("submission");
+            let mut form = submission.form_view("token".to_owned());
+
+            assert!(
+                submission
+                    .validate_and_draft("org-test", &mut form)
+                    .is_none()
+            );
+            assert_eq!(form.form_error, PROTECTED_SECRET_ACCESS_UNAVAILABLE);
+            assert!(!form.form_error.contains("write-only-marker"));
+        }
     }
 
     #[test]
-    fn duplicate_agent_inputs_do_not_erase_a_supplied_secret() {
-        let bytes = b"agent_secret_OPENAI_API_KEY=&agent_secret_OPENAI_API_KEY=write-only-marker&agent_secret_OPENAI_API_KEY=";
-        let mut submission = EnvironmentSubmission::parse(bytes).expect("submission");
-        let values = submission.take_secret_values();
-        assert_eq!(
-            values,
-            vec![("OPENAI_API_KEY".to_owned(), "write-only-marker".to_owned())]
+    fn safe_submissions_emit_explicitly_disabled_secret_sources() {
+        let submission =
+            EnvironmentSubmission::parse(b"image=example.test%2Fworkspace").expect("submission");
+        let mut form = submission.form_view("token".to_owned());
+
+        let draft = submission
+            .validate_and_draft("org-test", &mut form)
+            .expect("safe draft");
+
+        assert!(draft.secret_project.is_empty());
+        assert_eq!(draft.include_org_secrets, Some(false));
+        assert_eq!(draft.include_user_secrets, Some(false));
+        assert!(validate_secret_free_draft(&draft, &[]).is_ok());
+    }
+
+    #[test]
+    fn unsafe_drafts_never_invoke_the_dispatch_closure() {
+        fn assert_not_dispatched(
+            draft: CreateEnvironmentRequest,
+            presets: &[crate::view::EnvironmentPresetOption],
+        ) {
+            let dispatched = std::cell::Cell::new(false);
+            let result = with_secret_free_draft(draft, presets, |_| dispatched.set(true));
+            assert_eq!(result, Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE));
+            assert!(!dispatched.get());
+        }
+
+        let safe = CreateEnvironmentRequest {
+            image: "example.test/workspace@sha256:abc".to_owned(),
+            include_org_secrets: Some(false),
+            include_user_secrets: Some(false),
+            ..Default::default()
+        };
+        assert_not_dispatched(
+            CreateEnvironmentRequest {
+                include_org_secrets: None,
+                ..safe.clone()
+            },
+            &[],
         );
+        assert_not_dispatched(
+            CreateEnvironmentRequest {
+                include_user_secrets: Some(true),
+                ..safe.clone()
+            },
+            &[],
+        );
+        assert_not_dispatched(
+            CreateEnvironmentRequest {
+                secret_project: "development".to_owned(),
+                ..safe.clone()
+            },
+            &[],
+        );
+        for secrets in [
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                project: "development".to_owned(),
+                ..Default::default()
+            },
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                organization: true,
+                ..Default::default()
+            },
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                user: true,
+                ..Default::default()
+            },
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                include_org: Some(true),
+                ..Default::default()
+            },
+            codewire_proto::codewire::v1::ProjectSecretBindings {
+                include_user: Some(true),
+                ..Default::default()
+            },
+        ] {
+            assert_not_dispatched(
+                CreateEnvironmentRequest {
+                    project_spec: Some(codewire_proto::codewire::v1::ProjectSpec {
+                        secrets: Some(secrets).into(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    ..safe.clone()
+                },
+                &[],
+            );
+        }
+        assert_not_dispatched(
+            CreateEnvironmentRequest {
+                preset_id: Some("missing-preset".to_owned()),
+                ..safe.clone()
+            },
+            &[],
+        );
+        assert_not_dispatched(
+            CreateEnvironmentRequest {
+                preset_id: Some("unsafe-preset".to_owned()),
+                ..safe.clone()
+            },
+            &[test_preset("unsafe-preset", true)],
+        );
+
+        let dispatched = std::cell::Cell::new(false);
+        let result = with_secret_free_draft(
+            CreateEnvironmentRequest {
+                preset_id: Some("safe-preset".to_owned()),
+                ..safe
+            },
+            &[test_preset("safe-preset", false)],
+            |_| {
+                dispatched.set(true);
+                "sent"
+            },
+        );
+        assert_eq!(result, Ok("sent"));
+        assert!(dispatched.get());
+    }
+
+    #[test]
+    fn unsafe_prepared_drafts_are_rejected_before_form_mutation() {
+        let mut form = default_create_form("token".to_owned(), true);
+        let original_image = form.image.clone();
+        let result = apply_checked_prepared_draft(
+            &mut form,
+            CreateEnvironmentRequest {
+                image: "example.test/prepared@sha256:def".to_owned(),
+                secret_project: "development".to_owned(),
+                include_org_secrets: Some(false),
+                include_user_secrets: Some(false),
+                ..Default::default()
+            },
+            None,
+            false,
+        );
+
+        assert_eq!(result, Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE));
+        assert!(!form.prepared);
+        assert_eq!(form.image, original_image);
     }
 
     #[test]
@@ -2445,12 +2594,9 @@ mod tests {
                     label: "web".to_owned(),
                     access: "creator".to_owned(),
                 }],
-                default_include_org_secrets: false,
-                default_include_user_secrets: true,
-                secret_project: "development".to_owned(),
+                uses_legacy_secret_sources: true,
                 official: false,
             }],
-            secret_projects: Vec::new(),
             agents: Vec::new(),
         };
 
@@ -2464,10 +2610,20 @@ mod tests {
         assert_eq!(submission.install_command, "install-dependencies");
         assert_eq!(submission.startup_script, "start-services");
         assert_eq!(submission.agents, vec!["codex"]);
-        assert_eq!(submission.secret_project, "development");
+        assert!(!submission.secret_project_supplied);
         assert!(!submission.include_org_secrets);
-        assert!(submission.include_user_secrets);
+        assert!(!submission.include_user_secrets);
         assert_eq!(submission.app_ports[0].0, "3000");
+
+        let mut form = submission.form_view("token".to_owned());
+        form.presets = options.presets;
+        let draft = submission
+            .validate_and_draft("org-test", &mut form)
+            .expect("source-free submitted fields");
+        assert_eq!(
+            validate_secret_free_draft(&draft, &form.presets),
+            Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE)
+        );
     }
 
     #[test]
@@ -2493,9 +2649,7 @@ mod tests {
                 label: "web".to_owned(),
                 access: "creator".to_owned(),
             }],
-            default_include_org_secrets: false,
-            default_include_user_secrets: true,
-            secret_project: "development".to_owned(),
+            uses_legacy_secret_sources: false,
             official: false,
         }];
 
@@ -2508,9 +2662,6 @@ mod tests {
         assert_eq!(form.ttl, "3600s");
         assert_eq!(form.selected_agents, vec!["codex"]);
         assert_eq!(form.app_ports[0].port, "3000");
-        assert_eq!(form.secret_project, "development");
-        assert!(!form.include_org_secrets);
-        assert!(form.include_user_secrets);
     }
 
     #[test]
@@ -2586,9 +2737,7 @@ mod tests {
             default_startup_script: String::new(),
             default_agents: Vec::new(),
             default_app_ports: Vec::new(),
-            default_include_org_secrets: true,
-            default_include_user_secrets: true,
-            secret_project: String::new(),
+            uses_legacy_secret_sources: false,
             official: false,
         }];
         form.detection = EnvironmentDetectionView {
@@ -2626,6 +2775,15 @@ mod tests {
         assert!(html.contains("data-repository-virtual-row"));
         assert!(html.contains("data-selected-mounts hidden"));
         assert!(html.contains("data-repository-mount-option=\"0\" hidden"));
+        assert!(html.contains(PROTECTED_SECRET_ACCESS_UNAVAILABLE));
+        for forbidden in [
+            "name=\"secret_project\"",
+            "name=\"include_org_secrets\"",
+            "name=\"include_user_secrets\"",
+            "name=\"agent_secret_",
+        ] {
+            assert!(!html.contains(forbidden), "unexpected field {forbidden}");
+        }
 
         form.repositories = vec![EnvironmentRepositoryFormRow {
             index: 0,

@@ -788,6 +788,8 @@ mod tests {
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
+        type CredentialBridgeStream =
+            ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
 
         async fn get_capabilities(
             &self,
@@ -801,6 +803,13 @@ mod tests {
             _request: Request<v1::GetHealthRequest>,
         ) -> Result<Response<v1::GetHealthResponse>, Status> {
             Err(Status::unimplemented("get health"))
+        }
+
+        async fn credential_bridge(
+            &self,
+            _request: Request<tonic::Streaming<v1::CredentialBridgeHostMessage>>,
+        ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
+            Err(Status::unimplemented("credential bridge"))
         }
 
         async fn launch_session(

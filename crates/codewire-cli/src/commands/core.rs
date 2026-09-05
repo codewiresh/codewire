@@ -18,6 +18,7 @@ pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<(
         }
     }
     let _ = config::delete_platform_config(&paths.platform_config_dir);
+    remove_hosted_mesh_owner_context(&paths.mesh_data_dir)?;
     eprintln!("Logged out.");
     Ok(())
 }
@@ -60,22 +61,26 @@ pub(crate) async fn handle_use_command(
     };
     let target =
         resolve_named_execution_target(globals, &paths, &env, &args.target, placement).await?;
+    #[cfg(target_os = "linux")]
+    if target.kind == "local" && target.target_ref != "local" {
+        select_native_environment(&target.target_ref).await?;
+    }
     config::save_current_target(&paths.mesh_data_dir, &target).context("save current target")?;
 
     match target.kind.as_str() {
         "local" if target.target_ref == "local" => eprintln!("Current target set to local."),
         "local" => eprintln!(
             "Current target set to {}.",
-            target_display_name(&target, None, None)
+            target_display_name(&target, None)
         ),
         "env" => eprintln!(
             "Current target set to {} ({}).",
-            target_display_name(&target, None, None),
+            target_display_name(&target, None),
             short_env_id(&target.target_ref)
         ),
         _ => eprintln!(
             "Current target set to {}.",
-            target_display_name(&target, None, None)
+            target_display_name(&target, None)
         ),
     }
     Ok(())
@@ -90,13 +95,11 @@ pub(crate) async fn handle_current_command(
     let target = config::current_target(&paths.mesh_data_dir)?;
     let network = config::selected_mesh_network(&paths, &env);
     let environment = lookup_environment_for_target(globals, &paths, &env, &target).await;
-    let local_instance = lookup_local_instance_for_target(&paths.mesh_data_dir, &target);
     print!(
         "{}",
         format_current_target_text(
             &target,
             environment.as_ref(),
-            local_instance.as_ref(),
             network.as_deref(),
             args.verbose
         )
@@ -318,8 +321,6 @@ pub(crate) fn init_has_direct_yaml_inputs(args: &InitArgs) -> bool {
             .as_deref()
             .and_then(trimmed_str)
             .is_some()
-        || args.no_org_secrets
-        || args.no_user_secrets
 }
 
 pub(crate) fn env_create_request_from_init_args(
@@ -348,6 +349,8 @@ pub(crate) fn env_create_request_from_init_args(
         cpu: args.cpu.map(|value| value.to_string()),
         memory: args.memory.map(|value| value.to_string()),
         disk: args.disk.map(|value| value.to_string()),
+        docker_disk: None,
+        no_docker: false,
         isolation: args.isolation.clone(),
         repo_flags: args.repo_flags.clone(),
         branch: args.branch.clone(),
@@ -357,8 +360,7 @@ pub(crate) fn env_create_request_from_init_args(
         coding_agent: args.coding_agent.clone(),
         env: args.env.clone(),
         secret_project: args.secret_project.clone(),
-        no_org_secrets: args.no_org_secrets,
-        no_user_secrets: args.no_user_secrets,
+        access_profile: None,
         network: None,
         no_network: false,
         follow: true,

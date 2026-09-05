@@ -1,0 +1,15 @@
+version: 1
+default: deny
+rules:
+  - id: developer-public-dns
+    action: allow
+    protocols: [dns]
+    ports: [53]
+    destinations: ["*"]
+    route_classes: [general]
+  - id: developer-public-tcp
+    action: allow
+    protocols: [tcp]
+    ports: [22, 80, 443]
+    cidrs: [0.0.0.0/0, "::/0"]
+    route_classes: [general]

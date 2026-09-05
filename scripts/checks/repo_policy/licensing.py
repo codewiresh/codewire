@@ -59,27 +59,34 @@ def check_license_map(_args: argparse.Namespace) -> int:
         )
 
     cargo_declarations = {
+        "crates/codewire-access/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-admin-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-billing/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-cli-bin/Cargo.toml": "workspace",
         "crates/codewire-cli/Cargo.toml": "workspace",
         "crates/codewire-client/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-coordinator/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-credential-broker/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-dashboard-web/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-daemon/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-daemon-bridge/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-derp/Cargo.toml": "BSD-3-Clause",
+        "crates/codewire-egress-broker/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-egress-policy/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-desktop/Cargo.toml": "MIT",
         "crates/codewire-gateway-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-gateway/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-idp/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-local-credentials/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-local-vmm/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-mesh/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-netstack/Cargo.toml": "BSD-3-Clause",
         "crates/codewire-oidc/Cargo.toml": "MIT OR Apache-2.0",
         "crates/codewire-orchestration/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-platform-native/Cargo.toml": "MIT",
         "crates/codewire-project-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-project/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-protected-store/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-server-core/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-tailnet/Cargo.toml": "BSD-3-Clause",
@@ -87,6 +94,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-udp-relay/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-ui/Cargo.toml": "MIT",
         "crates/codewire-vmm-guest-probe/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-workload-secrets/Cargo.toml": "workspace",
     }
     actual_cargo_manifests = {
         path.relative_to(ROOT).as_posix()
@@ -125,7 +133,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
     npm_licenses = {
         "package.json": "AGPL-3.0-only",
         "apps/dashboard/package.json": "AGPL-3.0-only",
-        "libs/sdk-examples/run-claude/typescript/package.json": "MIT",
         "libs/sdk-ts/package.json": "MIT",
         "packages/codewire-proto-ts/package.json": "MIT",
     }
@@ -185,7 +192,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
 
     go_licenses = {
         "libs/gen-go/go.mod": "MIT",
-        "libs/sdk-examples/run-claude/go/go.mod": "MIT",
         "libs/sdk-go/go.mod": "MIT",
         "libs/tailnet/go.mod": "BSD-3-Clause",
         "tests/contract/go.mod": "AGPL-3.0-only",

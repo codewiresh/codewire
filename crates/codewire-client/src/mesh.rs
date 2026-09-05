@@ -10,6 +10,8 @@ use connectrpc::client::CallOptions;
 
 use crate::{ClientError, CodewireClient};
 
+const MAX_MESH_ENROLLMENT_RESPONSE_BYTES: usize = 16 * 1024;
+
 impl CodewireClient {
     pub async fn list_mesh_networks(
         &self,
@@ -70,8 +72,13 @@ impl CodewireClient {
         &self,
         request: CreateMeshNodeEnrollmentRequest,
     ) -> Result<CreateMeshNodeEnrollmentResponse, ClientError> {
+        let options = self
+            .auth_options()
+            .await?
+            .with_timeout(self.config.unary_timeout())
+            .with_max_message_size(MAX_MESH_ENROLLMENT_RESPONSE_BYTES);
         self.mesh_nodes
-            .create_mesh_node_enrollment_with_options(request, self.auth_options().await?)
+            .create_mesh_node_enrollment_with_options(request, options)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
@@ -163,6 +170,40 @@ mod tests {
                 .expect("request recording")
                 .is_empty(),
             "Mesh RPC escaped to the primary origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_node_enrollment_response_is_bounded() {
+        let mesh = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/codewire.v1.MeshNodeService/CreateMeshNodeEnrollment",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(vec![0_u8; MAX_MESH_ENROLLMENT_RESPONSE_BYTES + 1]),
+            )
+            .expect(1)
+            .mount(&mesh)
+            .await;
+
+        let client = CodewireClient::new(
+            ClientConfig::new(mesh.uri()).expect("Mesh origin"),
+            StaticTokenProvider::new("cw_bounded_enrollment").expect("API key"),
+        )
+        .expect("client");
+        assert!(
+            client
+                .create_mesh_node_enrollment(CreateMeshNodeEnrollmentRequest {
+                    org_id: "org-alpha".into(),
+                    network_id: "network-alpha".into(),
+                    node_name: "builder".into(),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
         );
     }
 

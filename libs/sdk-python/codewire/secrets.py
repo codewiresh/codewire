@@ -13,12 +13,14 @@ from codewire.v1.secret_pb2 import (
     ListSecretProjectsRequest,
     ListSecretsRequest,
     ListUserSecretsRequest,
+    PreviewWorkloadSecretResolutionRequest,
     RenameProjectSecretRequest,
     RenameSecretRequest,
     RenameUserSecretRequest,
     SetProjectSecretRequest,
     SetSecretRequest,
     SetUserSecretRequest,
+    WorkloadSecretSource,
 )
 
 
@@ -74,6 +76,27 @@ class Secrets:
             self._client.rename_user_secret,
             RenameUserSecretRequest(key=old_key, new_key=new_key),
         )
+
+    def preview(
+        self,
+        *,
+        organization: bool = False,
+        secret_project_id: str = "",
+        user: bool = False,
+        explicit_environment_keys: list[str] | None = None,
+    ) -> list[dict]:
+        """Resolve selected workload-secret key precedence without reading values."""
+        response = self._context.unary(
+            self._client.preview_workload_secret_resolution,
+            PreviewWorkloadSecretResolutionRequest(
+                org_id=self._context.resolve_org_id(),
+                organization=organization,
+                secret_project_id=secret_project_id,
+                user=user,
+                explicit_environment_keys=explicit_environment_keys or [],
+            ),
+        )
+        return [_resolved_secret_to_dict(secret) for secret in response.secrets]
 
 
 class SecretProjects:
@@ -153,3 +176,22 @@ def _list_all(context: ConnectContext, call, request, field_name: str) -> list[d
         if not response.next_page_token:
             return values
         request.page_token = response.next_page_token
+
+
+def _resolved_secret_to_dict(secret) -> dict:
+    return {
+        "key": secret.key,
+        "source": _workload_secret_source_name(secret.source),
+        "overridden_sources": [
+            _workload_secret_source_name(source)
+            for source in secret.overridden_sources
+        ],
+    }
+
+
+def _workload_secret_source_name(source: int) -> str:
+    name = WorkloadSecretSource.Name(source)
+    prefix = "WORKLOAD_SECRET_SOURCE_"
+    if not name.startswith(prefix) or name == f"{prefix}UNSPECIFIED":
+        raise RuntimeError("invalid workload-secret source")
+    return name.removeprefix(prefix).lower()

@@ -1,5 +1,6 @@
 pub mod client;
 pub mod config;
+mod credential_bridge;
 mod durable_session;
 pub mod env;
 pub mod execution;
@@ -9,8 +10,8 @@ pub mod service;
 pub mod session;
 
 pub use config::{
-    Config, DEFAULT_HOME_ROOT, DEFAULT_LISTEN_ADDR, DEFAULT_WORKSPACE_ROOT, HOME_ROOT_ENV,
-    SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV,
+    Config, CredentialBridgeConfig, DEFAULT_HOME_ROOT, DEFAULT_LISTEN_ADDR, DEFAULT_WORKSPACE_ROOT,
+    HOME_ROOT_ENV, SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV,
 };
 pub use server::{run, serve_grpc_with_incoming};
 

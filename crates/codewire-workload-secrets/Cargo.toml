@@ -1,0 +1,11 @@
+[package]
+name = "codewire-workload-secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Bounded workload-secret metadata resolution and validation"
+
+[dependencies]
+thiserror = { workspace = true }

@@ -16,7 +16,9 @@
             "--cpu",
             "2",
             "--memory",
-            "16Gi",
+            "8GB",
+            "--docker-disk",
+            "12Gi",
             "--path",
             ".",
             "--path-mode",
@@ -38,26 +40,43 @@
         assert_eq!(args.backend, None);
         assert_eq!(args.name.as_deref(), Some("workspace"));
         assert_eq!(args.cpu.as_deref(), Some("2"));
-        assert_eq!(args.memory.as_deref(), Some("16Gi"));
+        assert_eq!(args.memory.as_deref(), Some("8GB"));
+        assert_eq!(args.docker_disk.as_deref(), Some("12Gi"));
+        assert!(!args.no_docker);
         assert_eq!(args.path.as_deref(), Some(std::path::Path::new(".")));
         assert_eq!(args.path_mode, Some(PathModeArg::Copy));
         assert_eq!(args.output, OutputFormat::Json);
 
-        // The pre-native spelling remains a compatibility form for explicit
-        // legacy backends while help and documentation use the order above.
-        assert!(
-            Cli::try_parse_from([
-                "cw",
-                "env",
-                "--local",
-                "create",
-                "--backend",
-                "docker",
-                "--name",
-                "legacy",
-            ])
-            .is_ok()
-        );
+        for backend in ["docker", "lima"] {
+            assert!(
+                Cli::try_parse_from([
+                    "cw",
+                    "env",
+                    "--local",
+                    "create",
+                    "--backend",
+                    backend,
+                    "--name",
+                    "legacy",
+                ])
+                .is_err()
+            );
+        }
+        for backend in ["native", "cloud-hypervisor"] {
+            assert!(
+                Cli::try_parse_from([
+                    "cw",
+                    "env",
+                    "--local",
+                    "create",
+                    "--backend",
+                    backend,
+                    "--name",
+                    "workspace",
+                ])
+                .is_ok()
+            );
+        }
 
         let cli = Cli::try_parse_from(["cw", "env", "--platform", "list"]).unwrap();
         let Command::Env(EnvArgs {
@@ -73,6 +92,18 @@
 
         assert!(Cli::try_parse_from(["cw", "env", "--local", "--platform", "list"]).is_err());
         assert!(Cli::try_parse_from(["cw", "environment", "list"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "cw",
+                "env",
+                "create",
+                "--local",
+                "--docker-disk",
+                "8Gi",
+                "--no-docker",
+            ])
+            .is_err()
+        );
         let cli = Cli::try_parse_from([
             "cw",
             "env",
@@ -82,9 +113,9 @@
             "--cpu",
             "0.5",
             "--memory",
-            "512Mi",
+            "512MB",
             "--disk",
-            "20Gi",
+            "40GB",
             "--yes",
         ])
         .unwrap();
@@ -100,8 +131,8 @@
         assert!(!platform);
         assert_eq!(args.environment, "workspace");
         assert_eq!(args.cpu.as_deref(), Some("0.5"));
-        assert_eq!(args.memory.as_deref(), Some("512Mi"));
-        assert_eq!(args.disk.as_deref(), Some("20Gi"));
+        assert_eq!(args.memory.as_deref(), Some("512MB"));
+        assert_eq!(args.disk.as_deref(), Some("40GB"));
         assert!(args.yes);
     }
 
@@ -129,8 +160,19 @@
         assert!(parse_resize_cpu("1.2345").is_err());
         assert_eq!(parse_resize_memory("512Mi").unwrap(), 512);
         assert_eq!(parse_resize_memory("4Gi").unwrap(), 4096);
-        assert!(parse_resize_memory("4GB").is_err());
+        assert_eq!(parse_resize_memory("16gi").unwrap(), 16 * 1024);
+        assert_eq!(parse_resize_memory("16gb").unwrap(), 16 * 1024);
+        assert_eq!(parse_resize_memory("1024mb").unwrap(), 1024);
+        assert_eq!(parse_resize_memory("2048mb").unwrap(), 2048);
+        assert_eq!(parse_resize_memory("8GB").unwrap(), 8192);
+        assert_eq!(parse_resize_memory("8GiB").unwrap(), 8192);
         assert_eq!(parse_resize_disk("20Gi").unwrap(), 20);
+        assert_eq!(parse_resize_disk("1024mb").unwrap(), 1);
+        assert_eq!(parse_resize_disk("2048mb").unwrap(), 2);
+        assert!(parse_resize_disk("1536mb").is_err());
+        assert_eq!(parse_resize_disk("40gb").unwrap(), 40);
+        assert_eq!(parse_resize_disk("40GB").unwrap(), 40);
+        assert_eq!(parse_resize_disk("40GiB").unwrap(), 40);
         assert!(parse_resize_disk("0Gi").is_err());
 
         let args = EnvResizeArgs {
@@ -161,50 +203,6 @@
             false
         )
         .is_ok());
-    }
-
-    #[test]
-    fn local_resize_plan_normalizes_lima_cpu_and_warns_before_irreversible_work() {
-        let args = EnvResizeArgs {
-            environment: "workspace".to_string(),
-            cpu: Some("0.5".to_string()),
-            memory: Some("12Gi".to_string()),
-            disk: Some("120Gi".to_string()),
-            force: false,
-            allow_restart: false,
-            yes: false,
-            output: OutputFormat::Text,
-        };
-        let current = LocalLimaResources {
-            cpu_millicores: 4000,
-            memory_mb: 8192,
-            disk_gb: 100,
-        };
-        let plan =
-            resolve_local_resize_plan(&args, current.clone(), vec!["session-a".to_string()])
-                .unwrap();
-        assert_eq!(plan.desired.cpu_millicores, 1000);
-        assert_eq!(plan.desired.memory_mb, 12 * 1024);
-        assert_eq!(plan.desired.disk_gb, 120);
-        let rendered = format_local_resize_plan("workspace", &plan);
-        assert!(rendered.contains("session-a"));
-        assert!(rendered.contains("500m is normalized to 1"));
-        assert!(rendered.contains("Disk growth cannot be reversed"));
-
-        let shrink = EnvResizeArgs {
-            environment: "workspace".to_string(),
-            cpu: Some("0.5".to_string()),
-            memory: Some("12Gi".to_string()),
-            disk: Some("99Gi".to_string()),
-            force: false,
-            allow_restart: false,
-            yes: false,
-            output: OutputFormat::Text,
-        };
-        assert!(resolve_local_resize_plan(&shrink, current, Vec::new())
-            .unwrap_err()
-            .to_string()
-            .contains("disk shrink"));
     }
 
     #[test]
@@ -282,30 +280,7 @@
     }
 
     #[test]
-    fn unified_environment_list_marks_selection_and_daemon_health() {
-        let local = LocalInstanceEntry {
-            name: "workbench".to_string(),
-            backend: "docker".to_string(),
-            status: "running".to_string(),
-            runtime_name: "cw-workbench".to_string(),
-            repo_path: String::new(),
-            workdir: "/workspace".to_string(),
-            image: String::new(),
-            preset: String::new(),
-            install: String::new(),
-            startup: String::new(),
-            secrets: String::new(),
-            agent: String::new(),
-            env: BTreeMap::new(),
-            ports: Vec::new(),
-            mounts: Vec::new(),
-            cpu: 0,
-            memory: 0,
-            disk: 0,
-            created_at: String::new(),
-            last_used_at: String::new(),
-            lima: None,
-        };
+    fn platform_environment_list_marks_selection_and_daemon_health() {
         let platform = test_environment("env-platform", Some("cloud"), "running");
         let current = config::CurrentTargetConfig {
             kind: "env".to_string(),
@@ -313,29 +288,42 @@
             name: "cloud".to_string(),
         };
 
-        let entries = unified_environment_list_entries(
-            std::slice::from_ref(&local),
-            &[(platform, "ready".to_string())],
-            Some(&current),
-        );
+        let entries =
+            unified_environment_list_entries(&[(platform, "ready".to_string())], Some(&current));
 
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "cloud");
         assert_eq!(entries[0].placement, "platform");
         assert!(entries[0].selected);
         assert_eq!(entries[0].daemon_health, "ready");
-        assert_eq!(entries[1].name, "workbench");
-        assert_eq!(entries[1].placement, "local");
-        assert!(!entries[1].selected);
-        assert_eq!(entries[1].daemon_health, "unknown");
+    }
 
-        let selected_local = config::CurrentTargetConfig {
-            kind: "local".to_string(),
-            target_ref: "local-instance-key".to_string(),
-            name: "workbench".to_string(),
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_environment_list_uses_explicit_current_then_supervisor_selection() {
+        let environment = codewire_local_vmm::control::v1::Environment {
+            id: "native-id".to_owned(),
+            name: "native-name".to_owned(),
+            selected: true,
+            ..Default::default()
         };
-        let entries = unified_environment_list_entries(&[local], &[], Some(&selected_local));
-        assert!(entries[0].selected);
+        assert!(native_environment_is_selected(&environment, None));
+        assert!(native_environment_is_selected(
+            &environment,
+            Some(&config::CurrentTargetConfig {
+                kind: "local".to_owned(),
+                target_ref: "native-id".to_owned(),
+                name: "native-name".to_owned(),
+            })
+        ));
+        assert!(!native_environment_is_selected(
+            &environment,
+            Some(&config::CurrentTargetConfig {
+                kind: "env".to_owned(),
+                target_ref: "platform-id".to_owned(),
+                name: "platform-name".to_owned(),
+            })
+        ));
     }
 
     #[test]
@@ -380,39 +368,14 @@
     }
 
     #[test]
-    fn local_and_platform_create_options_do_not_cross_placements() {
-        let cli = Cli::try_parse_from([
-            "cw",
-            "env",
-            "--local",
-            "create",
-            "--backend",
-            "docker",
-            "--repo",
-            "https://example.invalid/repo.git",
-        ])
-        .unwrap();
-        let Command::Env(EnvArgs {
-            command: EnvCommand::Create(args),
-            ..
-        }) = cli.command
-        else {
-            panic!("expected local environment create");
-        };
-        assert_eq!(
-            local_create_args_from_environment_args(*args)
-                .unwrap_err()
-                .to_string(),
-            "repository arguments are only supported for --platform environment creation"
-        );
-
+    fn platform_create_rejects_native_only_options() {
         let cli = Cli::try_parse_from([
             "cw",
             "env",
             "--platform",
             "create",
             "--backend",
-            "docker",
+            "native",
         ])
         .unwrap();
         let Command::Env(EnvArgs {
@@ -424,7 +387,49 @@
         };
         assert_eq!(
             reject_local_create_options(&args).unwrap_err().to_string(),
-            "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
+            "--backend, --path, --path-mode, --file, --spec, --docker-disk, and --no-docker require `cw env create --local`"
+        );
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--local",
+            "create",
+            "--name",
+            "dev",
+            "--access-profile",
+            "user/work",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            command: EnvCommand::Create(args),
+            ..
+        }) = cli.command
+        else {
+            panic!("expected native local environment create");
+        };
+        assert_eq!(args.access_profile.as_deref(), Some("user/work"));
+        assert!(native_create_selected(&args).unwrap());
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--platform",
+            "create",
+            "--access-profile",
+            "user/work",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            command: EnvCommand::Create(args),
+            ..
+        }) = cli.command
+        else {
+            panic!("expected platform environment create");
+        };
+        assert_eq!(
+            reject_local_create_options(&args).unwrap_err().to_string(),
+            "--access-profile is not yet available for platform environments"
         );
 
         assert!(
@@ -531,9 +536,9 @@
             "--cpu",
             "2000",
             "--memory",
-            "4096",
+            "8gb",
             "--disk",
-            "40",
+            "40gb",
             "--image",
             "workspace",
             "--install",
@@ -546,8 +551,6 @@
             "FOO=bar",
             "--secrets",
             "prod",
-            "--no-org-secrets",
-            "--no-user-secrets",
             "--no-wait",
             "--yes",
         ])
@@ -569,14 +572,28 @@
         assert_eq!(args.name.as_deref(), Some("builder"));
         assert_eq!(args.ttl.as_deref(), Some("1h"));
         assert_eq!(args.cpu.as_deref(), Some("2000"));
-        assert_eq!(args.memory.as_deref(), Some("4096"));
-        assert_eq!(args.disk.as_deref(), Some("40"));
+        assert_eq!(args.memory.as_deref(), Some("8gb"));
+        assert_eq!(args.disk.as_deref(), Some("40gb"));
         assert_eq!(args.image.as_deref(), Some("workspace"));
         assert_eq!(args.coding_agent.as_deref(), Some("codex"));
-        assert!(args.no_org_secrets);
-        assert!(args.no_user_secrets);
         assert!(args.no_wait);
         assert!(args.yes);
+
+        for unsupported in [
+            "--no-org-secrets",
+            "--no-user-secrets",
+            "--organization-secrets",
+            "--user-secrets",
+        ] {
+            assert!(
+                Cli::try_parse_from(["cw", "env", "create", unsupported]).is_err(),
+                "unsupported secret-scope flag {unsupported:?} must fail closed"
+            );
+            assert!(
+                Cli::try_parse_from(["cw", "init", unsupported]).is_err(),
+                "unsupported init secret-scope flag {unsupported:?} must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -597,9 +614,9 @@
             "--cpu",
             "2000",
             "--memory",
-            "4096",
+            "8gb",
             "--disk",
-            "40",
+            "40gb",
             "--image",
             "workspace",
             "--install",
@@ -612,8 +629,6 @@
             "FOO=bar",
             "--secrets",
             "prod",
-            "--no-org-secrets",
-            "--no-user-secrets",
         ])
         .unwrap();
         let Command::Env(EnvArgs { command, .. }) = cli.command else {
@@ -628,7 +643,7 @@
         assert_eq!(request.preset_id.as_deref(), Some("preset_123"));
         assert_eq!(request.name.as_deref(), Some("builder"));
         assert_eq!(request.cpu_millicores, Some(2000));
-        assert_eq!(request.memory_mb, Some(4096));
+        assert_eq!(request.memory_mb, Some(8 * 1024));
         assert_eq!(request.disk_gb, Some(40));
         assert_eq!(request.ttl_seconds, Some(5400));
         assert_eq!(request.preset_slug, "go");
@@ -643,8 +658,11 @@
         assert_eq!(request.agents[0].agent_type, "codex");
         assert_eq!(request.agent, "codex");
         assert_eq!(request.secret_project, "prod");
-        assert_eq!(request.include_org_secrets, Some(false));
-        assert_eq!(request.include_user_secrets, Some(false));
+        assert_eq!(request.include_org_secrets, None);
+        assert_eq!(request.include_user_secrets, None);
+        let secrets = &request.project_spec.as_ref().unwrap().secrets;
+        assert!(!secrets.organization);
+        assert!(!secrets.user);
     }
 
     #[test]
@@ -695,6 +713,11 @@
         assert!(request.preset_id.is_none());
         assert!(request.preset_slug.is_empty());
         assert!(request.repo_url.is_empty());
+        assert_eq!(request.include_org_secrets, None);
+        assert_eq!(request.include_user_secrets, None);
+        let secrets = &request.project_spec.as_ref().unwrap().secrets;
+        assert!(!secrets.organization);
+        assert!(!secrets.user);
     }
 
     #[test]
@@ -716,8 +739,6 @@
             "RUST_LOG=info",
             "--secrets",
             "development",
-            "--no-org-secrets",
-            "--no-user-secrets",
             "--cpu",
             "2000",
             "--memory",
@@ -751,7 +772,7 @@ agents: [claude-code]
 cpu: 2000m
 memory: 4096
 disk: 40
-secrets: {project: development, org: false, user: false}
+secrets: {project: development, organization: false, user: false}
 "#,
         )
         .unwrap()
@@ -827,7 +848,6 @@ secrets: {project: development, org: false, user: false}
             "FOO=bar",
             "--secrets",
             "prod",
-            "--no-user-secrets",
             "--file",
             "project/codewire.yaml",
             "--force",
@@ -845,7 +865,6 @@ secrets: {project: development, org: false, user: false}
         assert_eq!(args.coding_agent.as_deref(), Some("codex"));
         assert_eq!(args.env, vec!["FOO=bar"]);
         assert_eq!(args.secret_project.as_deref(), Some("prod"));
-        assert!(args.no_user_secrets);
         assert_eq!(args.file, PathBuf::from("project/codewire.yaml"));
         assert!(args.force);
         assert!(args.yes);
@@ -876,7 +895,6 @@ secrets: {project: development, org: false, user: false}
             "4096".to_string(),
             "--disk".to_string(),
             "40".to_string(),
-            "--no-user-secrets".to_string(),
             "--file".to_string(),
             path.display().to_string(),
         ])
@@ -892,20 +910,19 @@ secrets: {project: development, org: false, user: false}
         handle_init_command(&globals, args).await.unwrap();
 
         let yaml = fs::read_to_string(&path).unwrap();
-        let parsed = config::parse_codewire_config(&yaml).unwrap();
-        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
-        assert_eq!(parsed.install, "pnpm install");
-        assert_eq!(parsed.startup, "pnpm dev");
-        assert_eq!(parsed.env["FOO"], "bar");
-        assert_eq!(parsed.cpu, 2000);
-        assert_eq!(parsed.memory, 4096);
-        assert_eq!(parsed.disk, 40);
-        assert_eq!(parsed.secrets.as_ref().unwrap().project, "prod");
-        assert_eq!(parsed.secrets.as_ref().unwrap().user, Some(false));
-        assert_eq!(
-            parsed.agents.as_ref().unwrap().tools,
-            vec!["claude-code".to_string()]
-        );
+        let parsed = codewire_project::parse_project_yaml(&yaml).unwrap();
+        let spec = parsed.spec;
+        assert_eq!(spec.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
+        assert_eq!(spec.install_command, "pnpm install");
+        assert_eq!(spec.startup_script, "pnpm dev");
+        assert_eq!(spec.environment["FOO"], "bar");
+        assert_eq!(spec.resources.cpu_millicores, Some(2000));
+        assert_eq!(spec.resources.memory_mib, Some(4096));
+        assert_eq!(spec.resources.disk_gib, Some(40));
+        assert_eq!(spec.secrets.project, "prod");
+        assert!(!spec.secrets.organization);
+        assert!(!spec.secrets.user);
+        assert_eq!(spec.agents.tools, vec!["claude-code".to_string()]);
     }
 
     #[tokio::test]
@@ -964,7 +981,6 @@ secrets: {project: development, org: false, user: false}
             "FOO=bar",
             "--secrets",
             "prod",
-            "--no-user-secrets",
         ])
         .unwrap();
         let Command::Init(args) = cli.command else {
@@ -996,7 +1012,8 @@ secrets: {project: development, org: false, user: false}
         assert_eq!(request.draft.env_vars["FOO"], "bar");
         assert_eq!(request.draft.agents[0].agent_type, "codex");
         assert_eq!(request.draft.secret_project, "prod");
-        assert_eq!(request.draft.include_user_secrets, Some(false));
+        assert_eq!(request.draft.include_org_secrets, None);
+        assert_eq!(request.draft.include_user_secrets, None);
     }
 
     #[test]
@@ -1097,7 +1114,7 @@ secrets: {project: development, org: false, user: false}
                 agent_type: "claude-code".to_string(),
             }],
             secret_project: "prod".to_string(),
-            include_user_secrets: Some(false),
+            include_user_secrets: Some(true),
             app_ports: vec![crate::presentation::AppPort {
                 port: 8080,
                 label: "web".to_string(),
@@ -1106,25 +1123,23 @@ secrets: {project: development, org: false, user: false}
             ..CreateEnvironmentRequest::default()
         };
         let yaml = serde_yaml::to_string(&codewire_yaml_from_request(&request)).unwrap();
-        let parsed = config::parse_codewire_config(&yaml).unwrap();
+        let parsed = codewire_project::parse_project_yaml(&yaml).unwrap();
+        let spec = parsed.spec;
 
         assert!(!yaml.contains("preset:"));
-        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
-        assert_eq!(parsed.install, "bun install");
-        assert_eq!(parsed.startup, "bun dev");
-        assert_eq!(parsed.env["FOO"], "bar");
-        assert_eq!(parsed.cpu, 2000);
-        assert_eq!(parsed.memory, 4096);
-        assert_eq!(parsed.disk, 40);
-        assert_eq!(parsed.ports[0].port, 8080);
-        assert_eq!(parsed.ports[0].label, "web");
-        assert_eq!(
-            parsed.agents.as_ref().unwrap().tools,
-            vec!["claude-code".to_string()]
-        );
-        let secrets = parsed.secrets.as_ref().unwrap();
-        assert_eq!(secrets.org, Some(true));
-        assert_eq!(secrets.user, Some(false));
+        assert_eq!(spec.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
+        assert_eq!(spec.install_command, "bun install");
+        assert_eq!(spec.startup_script, "bun dev");
+        assert_eq!(spec.environment["FOO"], "bar");
+        assert_eq!(spec.resources.cpu_millicores, Some(2000));
+        assert_eq!(spec.resources.memory_mib, Some(4096));
+        assert_eq!(spec.resources.disk_gib, Some(40));
+        assert_eq!(spec.application_ports[0].port, 8080);
+        assert_eq!(spec.application_ports[0].label, "web");
+        assert_eq!(spec.agents.tools, vec!["claude-code".to_string()]);
+        let secrets = spec.secrets;
+        assert!(!secrets.organization);
+        assert!(secrets.user);
         assert_eq!(secrets.project, "prod");
     }
 
@@ -1140,9 +1155,11 @@ secrets: {project: development, org: false, user: false}
 
         write_resolved_codewire_yaml(&path, &request).unwrap();
 
-        let parsed = config::load_codewire_config(&path).unwrap();
-        assert_eq!(parsed.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
-        assert_eq!(parsed.install, "go mod download");
+        let parsed = config::load_project_document(&path).unwrap();
+        assert_eq!(parsed.spec.image, "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467");
+        assert_eq!(parsed.spec.install_command, "go mod download");
+        assert!(!parsed.spec.secrets.organization);
+        assert!(!parsed.spec.secrets.user);
     }
 
     #[test]
@@ -1433,6 +1450,60 @@ secrets: {project: development, org: false, user: false}
     }
 
     #[test]
+    fn platform_env_mesh_bootstrap_honors_only_the_matching_auto_connect_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let env = config::MapEnv::default();
+        let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env);
+        save_local_mesh_owner_context(
+            &paths.mesh_data_dir,
+            &LocalMeshOwnerContext {
+                schema_version: 1,
+                auth_source: LocalMeshOwnerAuthSource::HostedCurrent,
+                mesh_url: "https://mesh.codewire-dev.sh".to_owned(),
+                organization_id: "org-alpha".to_owned(),
+                selected_network: Some("shared-dev".to_owned()),
+                auto_connect: true,
+            },
+        )
+        .unwrap();
+        let platform = config::ResolvedPlatformConfig::static_token(
+            "https://codewire-dev.sh",
+            "platform-token",
+            true,
+            None,
+        );
+
+        let automatic = resolve_env_create_mesh_bootstrap(
+            &paths,
+            &env,
+            &platform,
+            "org-alpha",
+            false,
+            None,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(automatic.network_id, "shared-dev");
+        assert_eq!(automatic.mesh.mesh_url, "https://mesh.codewire-dev.sh");
+
+        assert!(
+            resolve_env_create_mesh_bootstrap(
+                &paths,
+                &env,
+                &platform,
+                "org-beta",
+                false,
+                None,
+                false,
+            )
+            .unwrap()
+            .is_none(),
+            "a default from another organization must not attach"
+        );
+    }
+
+    #[test]
     fn platform_env_mesh_bootstrap_does_not_inherit_saved_local_mesh_pairing() {
         let home = tempfile::tempdir().unwrap();
         let env = config::MapEnv::default();
@@ -1444,11 +1515,6 @@ secrets: {project: development, org: false, user: false}
         )
         .unwrap();
         config::save_selected_mesh_network(&paths.mesh_data_dir, "local-dev").unwrap();
-        let identity = config::ensure_local_mesh_identity(&paths.mesh_data_dir).unwrap();
-        let globals = Globals {
-            server: None,
-            token: Some("platform-token".to_string()),
-        };
         let platform = config::ResolvedPlatformConfig::static_token(
             "https://codewire-dev.sh",
             "platform-token",
@@ -1470,13 +1536,6 @@ secrets: {project: development, org: false, user: false}
             .is_none(),
             "a saved local origin-network pair must not become a platform bootstrap"
         );
-
-        let local = resolve_local_mesh_bootstrap(&globals, &paths, &env, true, None, false)
-            .unwrap()
-            .unwrap();
-        assert_eq!(local.mesh.mesh_url, "http://127.0.0.1:18090");
-        assert_eq!(local.organization_id, identity.organization_id);
-        assert_eq!(local.network_id, "local-dev");
 
         config::save_mesh_connection(
             &paths.mesh_data_dir,
@@ -1541,6 +1600,46 @@ secrets: {project: development, org: false, user: false}
         let EnvCommand::Start(args) = command else {
             panic!("expected env start command");
         };
+        assert_eq!(args.environment, "builder");
+        assert!(matches!(args.output, OutputFormat::Json));
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "restart",
+            "--local",
+            "builder",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, local, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::Restart(args) = command else {
+            panic!("expected env restart command");
+        };
+        assert!(local);
+        assert_eq!(args.environment, "builder");
+        assert!(matches!(args.output, OutputFormat::Json));
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "refresh-skills",
+            "--local",
+            "builder",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, local, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::RefreshSkills(args) = command else {
+            panic!("expected env refresh-skills command");
+        };
+        assert!(local);
         assert_eq!(args.environment, "builder");
         assert!(matches!(args.output, OutputFormat::Json));
 
@@ -1631,21 +1730,6 @@ secrets: {project: development, org: false, user: false}
     }
 
     #[test]
-    fn local_daemon_state_names_match_public_diagnostic_vocabulary() {
-        use codewire_daemon::client::v1::DaemonState;
-
-        assert_eq!(local_daemon_state_name(DaemonState::Unspecified), "unspecified");
-        assert_eq!(local_daemon_state_name(DaemonState::Unsupported), "unsupported");
-        assert_eq!(local_daemon_state_name(DaemonState::Starting), "starting");
-        assert_eq!(local_daemon_state_name(DaemonState::Ready), "ready");
-        assert_eq!(local_daemon_state_name(DaemonState::Unhealthy), "unhealthy");
-        assert_eq!(
-            local_daemon_state_name(DaemonState::UpgradeRequired),
-            "upgrade_required"
-        );
-    }
-
-    #[test]
     fn env_daemon_status_renders_actionable_upgrade_state_without_credentials() {
         let status = EnvironmentDaemonStatus {
             state: "upgrade_required".into(),
@@ -1675,13 +1759,21 @@ secrets: {project: development, org: false, user: false}
             "cw",
             "env",
             "cp",
+            "--local",
             "local.txt",
             "builder:/workspace/local.txt",
         ])
         .unwrap();
-        let Command::Env(EnvArgs { command, .. }) = cli.command else {
+        let Command::Env(EnvArgs {
+            local,
+            platform,
+            command,
+        }) = cli.command
+        else {
             panic!("expected env command");
         };
+        assert!(local);
+        assert!(!platform);
         let EnvCommand::Cp(args) = command else {
             panic!("expected env cp command");
         };
@@ -1756,18 +1848,96 @@ secrets: {project: development, org: false, user: false}
     }
 
     #[test]
-    fn env_access_parsers_accept_targets_user_and_permission() {
-        let cli =
-            Cli::try_parse_from(["cw", "env", "access", "list", "builder", "--output", "json"])
-                .unwrap();
+    fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
+        let cli = Cli::try_parse_from([
+            "cw", "env", "--local", "access", "builder", "--output", "json",
+        ])
+        .unwrap();
         let Command::Env(EnvArgs { command, .. }) = cli.command else {
             panic!("expected env command");
         };
         let EnvCommand::Access(args) = command else {
             panic!("expected env access command");
         };
-        let EnvAccessCommand::List(args) = args.command else {
-            panic!("expected env access list command");
+        assert_eq!(args.environment.as_deref(), Some("builder"));
+        assert!(args.command.is_none());
+        assert!(matches!(args.output, OutputFormat::Json));
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--local",
+            "access",
+            "apply",
+            "builder",
+            "--profile",
+            "user/work",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs { command, .. }) = cli.command else {
+            panic!("expected env command");
+        };
+        let EnvCommand::Access(args) = command else {
+            panic!("expected env access command");
+        };
+        let Some(EnvAccessCommand::Apply(args)) = args.command else {
+            panic!("expected env access apply command");
+        };
+        assert_eq!(args.environment, "builder");
+        assert_eq!(args.profile.as_deref(), Some("user/work"));
+        assert!(!args.clear);
+        assert!(matches!(args.output, OutputFormat::Json));
+
+        assert!(
+            Cli::try_parse_from([
+                "cw",
+                "env",
+                "--local",
+                "access",
+                "apply",
+                "builder",
+                "--profile",
+                "user/work",
+                "--clear",
+            ])
+            .is_err()
+        );
+
+        for retired in ["list", "grant", "revoke"] {
+            assert!(
+                Cli::try_parse_from(["cw", "env", "access", retired, "builder"]).is_err(),
+                "retired environment-access collaborator command {retired:?} must fail closed"
+            );
+        }
+
+        let cli = Cli::try_parse_from([
+            "cw",
+            "env",
+            "--platform",
+            "share",
+            "list",
+            "builder",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Env(EnvArgs {
+            local,
+            platform,
+            command,
+        }) = cli.command
+        else {
+            panic!("expected env command");
+        };
+        assert!(!local);
+        assert!(platform);
+        let EnvCommand::Share(args) = command else {
+            panic!("expected env share command");
+        };
+        let EnvShareCommand::List(args) = args.command else {
+            panic!("expected env share list command");
         };
         assert_eq!(args.environment, "builder");
         assert!(matches!(args.output, OutputFormat::Json));
@@ -1775,7 +1945,7 @@ secrets: {project: development, org: false, user: false}
         let cli = Cli::try_parse_from([
             "cw",
             "env",
-            "access",
+            "share",
             "grant",
             "builder",
             "--user",
@@ -1787,31 +1957,52 @@ secrets: {project: development, org: false, user: false}
         let Command::Env(EnvArgs { command, .. }) = cli.command else {
             panic!("expected env command");
         };
-        let EnvCommand::Access(args) = command else {
-            panic!("expected env access command");
+        let EnvCommand::Share(args) = command else {
+            panic!("expected env share command");
         };
-        let EnvAccessCommand::Grant(args) = args.command else {
-            panic!("expected env access grant command");
+        let EnvShareCommand::Grant(args) = args.command else {
+            panic!("expected env share grant command");
         };
         assert_eq!(args.environment, "builder");
         assert_eq!(args.user, "user-2");
         assert_eq!(args.permission, "operator");
 
         let cli = Cli::try_parse_from([
-            "cw", "env", "access", "revoke", "builder", "--user", "user-2",
+            "cw", "env", "share", "revoke", "builder", "--user", "user-2",
         ])
         .unwrap();
         let Command::Env(EnvArgs { command, .. }) = cli.command else {
             panic!("expected env command");
         };
-        let EnvCommand::Access(args) = command else {
-            panic!("expected env access command");
+        let EnvCommand::Share(args) = command else {
+            panic!("expected env share command");
         };
-        let EnvAccessCommand::Revoke(args) = args.command else {
-            panic!("expected env access revoke command");
+        let EnvShareCommand::Revoke(args) = args.command else {
+            panic!("expected env share revoke command");
         };
         assert_eq!(args.environment, "builder");
         assert_eq!(args.user, "user-2");
+
+        assert!(Cli::try_parse_from(["cw", "env", "share", "ls", "builder"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn env_share_rejects_local_before_platform_resolution() {
+        let cli =
+            Cli::try_parse_from(["cw", "env", "--local", "share", "list", "builder"]).unwrap();
+        let Command::Env(args) = cli.command else {
+            panic!("expected env command");
+        };
+        let globals = Globals {
+            server: None,
+            token: None,
+        };
+
+        let error = handle_env_command(&globals, args).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "environment sharing is available only with --platform"
+        );
     }
 
     #[test]
@@ -1993,7 +2184,7 @@ secrets: {project: development, org: false, user: false}
     }
 
     #[test]
-    fn env_access_text_matches_go_messages() {
+    fn env_share_text_preserves_platform_access_grant_messages() {
         assert_eq!(
             format_env_access_list_text(&[]),
             "No explicit access grants (creator has implicit owner access).\n"

@@ -259,8 +259,6 @@ create_environment() {
       --repo "$SMOKE_REPO" \
       --name "$SMOKE_NAME" \
       --ttl "$SMOKE_TTL" \
-      --no-org-secrets \
-      --no-user-secrets \
       --no-network \
       --no-wait \
       --yes >"$output" 2>&1; then

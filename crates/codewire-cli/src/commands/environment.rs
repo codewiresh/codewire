@@ -10,6 +10,114 @@ const PLATFORM_READY_TIMEOUT: Duration = Duration::from_secs(600);
 const PLATFORM_CONFIDENTIAL_READY_TIMEOUT: Duration = Duration::from_secs(1800);
 const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
 
+#[derive(Clone, Debug)]
+pub(crate) struct LocalMeshBootstrap {
+    pub(crate) mesh: config::ResolvedMeshConfig,
+    pub(crate) organization_id: String,
+    pub(crate) network_id: String,
+}
+
+pub(crate) fn resolve_env_create_mesh_bootstrap(
+    paths: &ResolvePaths,
+    env: &impl config::Env,
+    platform: &config::ResolvedPlatformConfig,
+    organization_id: &str,
+    assume_yes: bool,
+    requested_network: Option<&str>,
+    disable_network: bool,
+) -> anyhow::Result<Option<LocalMeshBootstrap>> {
+    if disable_network {
+        return Ok(None);
+    }
+
+    let requested_network = requested_network.and_then(trimmed_str);
+    let explicit_network = requested_network.is_some();
+    let Some(mesh_url) = config::derive_hosted_mesh_url_for_server(&platform.server_url) else {
+        if explicit_network {
+            anyhow::bail!(
+                "selected platform {} does not provide a hosted Mesh service",
+                platform.server_url
+            );
+        }
+        return Ok(None);
+    };
+
+    let organization_id = trimmed_required(organization_id, "organization ID")?.to_string();
+    let owner = load_local_mesh_owner_context(&paths.mesh_data_dir)?;
+    let owner_network = owner
+        .as_ref()
+        .filter(|owner| {
+            owner.auth_source == LocalMeshOwnerAuthSource::HostedCurrent
+                && config::same_mesh_url(&owner.mesh_url, &mesh_url)
+                && owner.organization_id == organization_id
+        })
+        .and_then(|owner| owner.selected_network.as_deref())
+        .and_then(trimmed_str)
+        .map(str::to_owned);
+    let selected_override = requested_network
+        .map(str::to_owned)
+        .or_else(|| {
+            env.var(config::CODEWIRE_MESH_NETWORK_ENV)
+                .and_then(|network| trimmed_str(&network).map(str::to_owned))
+        })
+        .or(owner_network);
+    let mesh = match config::resolve_mesh_with_token_provider(
+        config::MeshResolveOptions {
+            mesh_url: Some(mesh_url),
+            auth_token: None,
+            network_id: selected_override,
+            platform_server_url: Some(platform.server_url.clone()),
+        },
+        paths,
+        env,
+        platform.token_provider()?,
+        config::MeshAuthSource::PlatformConfig,
+    ) {
+        Ok(mesh) => mesh,
+        Err(err) if !explicit_network => {
+            let _ = err;
+            return Ok(None);
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let Some(network_id) = mesh
+        .selected_network
+        .as_deref()
+        .and_then(trimmed_str)
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+
+    let auto_connect = owner.as_ref().is_some_and(|owner| {
+        owner.auth_source == LocalMeshOwnerAuthSource::HostedCurrent
+            && config::same_mesh_url(&owner.mesh_url, &mesh.mesh_url)
+            && owner.organization_id == organization_id
+            && owner.selected_network.as_deref() == Some(network_id.as_str())
+            && owner.auto_connect
+    });
+    if !explicit_network && !assume_yes && !auto_connect {
+        if !stdin_is_interactive() {
+            return Ok(None);
+        }
+        if !prompt_confirm_default_no(&env_create_mesh_prompt(&mesh.mesh_url, &network_id))? {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(LocalMeshBootstrap {
+        mesh,
+        organization_id,
+        network_id,
+    }))
+}
+
+pub(crate) fn env_create_mesh_prompt(mesh_url: &str, network_id: &str) -> String {
+    format!(
+        "Join hosted Mesh network {network_id:?} at {mesh_url} for this platform environment. Continue"
+    )
+}
+
 pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyhow::Result<()> {
     let placement = args.placement();
     match args.command {
@@ -37,6 +145,17 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             )
             .await
         }
+        EnvCommand::Restart(target) => {
+            handle_unified_environment_lifecycle(
+                globals,
+                placement,
+                UnifiedEnvironmentLifecycle::Restart(target),
+            )
+            .await
+        }
+        EnvCommand::RefreshSkills(target) => {
+            handle_unified_environment_refresh_skills(globals, placement, target).await
+        }
         EnvCommand::Rm(target) => {
             handle_unified_environment_lifecycle(
                 globals,
@@ -45,16 +164,122 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
             )
             .await
         }
+        EnvCommand::Access(access) => {
+            handle_unified_environment_access(globals, placement, access).await
+        }
+        EnvCommand::Share(share) => {
+            handle_unified_environment_share(globals, placement, share).await
+        }
         EnvCommand::Daemon(args) => {
             handle_unified_environment_daemon_command(globals, placement, args.command).await
         }
+        EnvCommand::Cp(args) => handle_unified_environment_cp(globals, placement, args).await,
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, list, info, start, stop, rm, and daemon diagnostics"
+                    "--local and --platform currently support only create, list, info, start, stop, restart, refresh-skills, rm, cp, access, share, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
+        }
+    }
+}
+
+async fn handle_unified_environment_cp(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvCpArgs,
+) -> anyhow::Result<()> {
+    let (src_remote, dst_remote) = env_cp_remote_paths(&args.src, &args.dst)?;
+    let target_ref = src_remote
+        .or(dst_remote)
+        .map(|(environment, _)| environment)
+        .expect("validated copy direction has one remote environment");
+    let target = resolve_unified_environment_target(globals, placement, target_ref, "cp").await?;
+    match target {
+        #[cfg(target_os = "linux")]
+        UnifiedEnvironmentTarget::NativeLocal(name) => match (src_remote, dst_remote) {
+            (None, Some((_environment, remote_path))) => {
+                let data = fs::read(&args.src).context("open local file")?;
+                native_environment_data_client(&name)
+                    .await?
+                    .upload_file(remote_path, &data)
+                    .await
+                    .context("upload")?;
+                print!(
+                    "{}",
+                    format_env_cp_upload_text(&args.src, &name, remote_path)
+                );
+                Ok(())
+            }
+            (Some((_environment, remote_path)), None) => {
+                let downloaded = native_environment_data_client(&name)
+                    .await?
+                    .download_file(remote_path)
+                    .await
+                    .context("download")?;
+                let mut out = fs::File::create(&args.dst).context("create local file")?;
+                out.write_all(&downloaded.data)
+                    .context("write local file")?;
+                print!(
+                    "{}",
+                    format_env_cp_download_text(
+                        &name,
+                        remote_path,
+                        &args.dst,
+                        downloaded.data.len(),
+                    )
+                );
+                Ok(())
+            }
+            _ => unreachable!("validated copy direction"),
+        },
+        UnifiedEnvironmentTarget::Platform(_) => {
+            let env = OsEnv;
+            let paths = ResolvePaths::from_env(&env);
+            let platform = resolve_platform(globals, &paths, &env)?;
+            let orgs = organization_client(&platform)?.list_orgs().await?;
+            let org_id = current_org_id(&platform, &orgs)?;
+            let environment_client = EnvironmentClient::new(&platform)?;
+            handle_env_cp_command(&environment_client, &org_id, args).await
+        }
+    }
+}
+
+async fn handle_unified_environment_access(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvAccessArgs,
+) -> anyhow::Result<()> {
+    match placement {
+        Some(EnvironmentPlacement::Local) => {
+            #[cfg(target_os = "linux")]
+            {
+                handle_native_environment_access(args).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = args;
+                anyhow::bail!("native local environment access currently requires Linux")
+            }
+        }
+        Some(EnvironmentPlacement::Platform) | None => {
+            handle_platform_env_command(globals, EnvCommand::Access(args)).await
+        }
+    }
+}
+
+async fn handle_unified_environment_share(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvShareArgs,
+) -> anyhow::Result<()> {
+    match placement {
+        Some(EnvironmentPlacement::Local) => {
+            anyhow::bail!("environment sharing is available only with --platform")
+        }
+        Some(EnvironmentPlacement::Platform) | None => {
+            handle_platform_env_command(globals, EnvCommand::Share(args)).await
         }
     }
 }
@@ -96,7 +321,7 @@ pub(crate) async fn handle_platform_env_command(
     match command {
         EnvCommand::Create(args) => {
             let mut request = prepare_platform_env_create_request(&args)?;
-            match resolve_env_create_mesh_bootstrap(
+            if let Some(bootstrap) = resolve_env_create_mesh_bootstrap(
                 &paths,
                 &env,
                 &platform,
@@ -104,26 +329,16 @@ pub(crate) async fn handle_platform_env_command(
                 args.yes,
                 args.network.as_deref(),
                 args.no_network,
-            ) {
-                Ok(Some(bootstrap)) => match create_env_mesh_invite(&bootstrap).await {
-                    Ok(invite) => inject_env_create_mesh_bootstrap(
-                        &mut request,
-                        &bootstrap.mesh.mesh_url,
-                        &bootstrap.network_id,
-                        &invite.invite_code,
-                    )?,
-                    Err(err) => {
-                        eprintln!(
-                            "Warning: mesh enrollment failed ({err}), continuing without network"
-                        );
-                    }
-                },
-                Ok(None) => {}
-                Err(err) => {
-                    eprintln!(
-                        "Warning: mesh enrollment failed ({err}), continuing without network"
-                    );
-                }
+            )? {
+                let invite = create_env_mesh_invite(&bootstrap)
+                    .await
+                    .context("create Mesh enrollment for platform environment")?;
+                inject_env_create_mesh_bootstrap(
+                    &mut request,
+                    &bootstrap.mesh.mesh_url,
+                    &bootstrap.network_id,
+                    &invite.invite_code,
+                )?;
             }
             let environment = environment_client
                 .create_environment(&org_id, &request)
@@ -215,6 +430,12 @@ pub(crate) async fn handle_platform_env_command(
             .await
             .context("wait for environment daemon readiness")?;
             print_env_status(&args.environment, &response, args.output)?;
+        }
+        EnvCommand::Restart(_) => {
+            anyhow::bail!("restart is supported only for native local environments");
+        }
+        EnvCommand::RefreshSkills(_) => {
+            anyhow::bail!("refresh-skills is supported only for native local environments");
         }
         EnvCommand::Rm(args) => {
             let _skip_confirmation = args.yes;
@@ -350,8 +571,16 @@ pub(crate) async fn handle_platform_env_command(
                 .context("extend TTL")?;
             print_env_extend_status(&args.environment, &response, hours, args.output)?;
         }
-        EnvCommand::Access(args) => {
-            handle_env_access_command(&environment_client, &org_id, args.command).await?;
+        EnvCommand::Access(args) => match args.command {
+            None => anyhow::bail!(
+                "environment access-profile inspection is not yet available for platform environments"
+            ),
+            Some(EnvAccessCommand::Apply(_)) => anyhow::bail!(
+                "environment access-profile apply is not yet available for platform environments"
+            ),
+        },
+        EnvCommand::Share(args) => {
+            handle_env_share_command(&environment_client, &org_id, args.command).await?;
         }
         EnvCommand::Port(args) => {
             handle_env_port_command(
@@ -389,13 +618,14 @@ pub(crate) async fn handle_platform_env_command(
 enum UnifiedEnvironmentLifecycle {
     Start(EnvTargetArgs),
     Stop(EnvTargetArgs),
+    Restart(EnvTargetArgs),
     Remove(EnvDeleteArgs),
 }
 
 impl UnifiedEnvironmentLifecycle {
     fn environment(&self) -> &str {
         match self {
-            Self::Start(args) | Self::Stop(args) => &args.environment,
+            Self::Start(args) | Self::Stop(args) | Self::Restart(args) => &args.environment,
             Self::Remove(args) => &args.environment,
         }
     }
@@ -404,6 +634,7 @@ impl UnifiedEnvironmentLifecycle {
         match self {
             Self::Start(_) => "start",
             Self::Stop(_) => "stop",
+            Self::Restart(_) => "restart",
             Self::Remove(_) => "rm",
         }
     }
@@ -413,16 +644,7 @@ impl UnifiedEnvironmentLifecycle {
 enum UnifiedEnvironmentTarget {
     #[cfg(target_os = "linux")]
     NativeLocal(String),
-    Local(String),
     Platform(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalResizePlan {
-    pub(crate) current: LocalLimaResources,
-    pub(crate) desired: LocalLimaResources,
-    pub(crate) active_sessions: Vec<String>,
-    pub(crate) normalized_cpu_request: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -498,11 +720,16 @@ pub(crate) fn parse_resize_cpu(value: &str) -> anyhow::Result<i32> {
     Ok(millicores)
 }
 
-fn parse_resize_binary_quantity(value: &str, unit: &str, label: &str) -> anyhow::Result<i32> {
+fn parse_resize_binary_quantity(value: &str, units: &[&str], label: &str) -> anyhow::Result<i32> {
     let value = value.trim();
-    let amount = value.strip_suffix(unit).ok_or_else(|| {
-        anyhow::anyhow!("invalid {label} quantity {value:?}; use a value such as 512Mi or 4Gi")
-    })?;
+    let lowercase = value.to_ascii_lowercase();
+    let amount = units
+        .iter()
+        .find(|unit| lowercase.ends_with(**unit))
+        .map(|unit| &value[..value.len() - unit.len()])
+        .ok_or_else(|| {
+            anyhow::anyhow!("invalid {label} quantity {value:?}; use a value such as 512MB or 8GB")
+        })?;
     let amount: i32 = amount
         .parse()
         .with_context(|| format!("invalid {label} quantity {value:?}"))?;
@@ -513,16 +740,31 @@ fn parse_resize_binary_quantity(value: &str, unit: &str, label: &str) -> anyhow:
 }
 
 pub(crate) fn parse_resize_memory(value: &str) -> anyhow::Result<i32> {
-    if value.trim().ends_with("Mi") {
-        return parse_resize_binary_quantity(value, "Mi", "memory");
+    let lowercase = value.trim().to_ascii_lowercase();
+    if ["mib", "mi", "mb"]
+        .iter()
+        .any(|unit| lowercase.ends_with(unit))
+    {
+        return parse_resize_binary_quantity(value, &["mib", "mi", "mb"], "memory");
     }
-    let gib = parse_resize_binary_quantity(value, "Gi", "memory")?;
+    let gib = parse_resize_binary_quantity(value, &["gib", "gi", "gb"], "memory")?;
     gib.checked_mul(1024)
         .ok_or_else(|| anyhow::anyhow!("memory quantity {value:?} is too large"))
 }
 
 pub(crate) fn parse_resize_disk(value: &str) -> anyhow::Result<i32> {
-    parse_resize_binary_quantity(value, "Gi", "disk")
+    let lowercase = value.trim().to_ascii_lowercase();
+    if ["mib", "mi", "mb"]
+        .iter()
+        .any(|unit| lowercase.ends_with(unit))
+    {
+        let mib = parse_resize_binary_quantity(value, &["mib", "mi", "mb"], "disk")?;
+        if mib % 1024 != 0 {
+            anyhow::bail!("disk quantity must resolve to a whole GB");
+        }
+        return Ok(mib / 1024);
+    }
+    parse_resize_binary_quantity(value, &["gib", "gi", "gb"], "disk")
 }
 
 fn format_resize_cpu(millicores: i32) -> String {
@@ -543,50 +785,6 @@ fn format_resize_memory(memory_mb: i32) -> String {
 
 fn format_resize_disk(disk_gb: i32) -> String {
     format!("{disk_gb} Gi")
-}
-
-pub(crate) fn resolve_local_resize_plan(
-    args: &EnvResizeArgs,
-    current: LocalLimaResources,
-    active_sessions: Vec<String>,
-) -> anyhow::Result<LocalResizePlan> {
-    let (cpu_millicores, normalized_cpu_request) = match args.cpu.as_deref() {
-        Some(value) => {
-            let requested = parse_resize_cpu(value)?;
-            let normalized = lima_cpus_from_millicores(requested).saturating_mul(1000);
-            (normalized, (requested != normalized).then_some(requested))
-        }
-        None => (current.cpu_millicores, None),
-    };
-    let memory_mb = match args.memory.as_deref() {
-        Some(value) => parse_resize_memory(value)?,
-        None => current.memory_mb,
-    };
-    let disk_gb = match args.disk.as_deref() {
-        Some(value) => parse_resize_disk(value)?,
-        None => current.disk_gb,
-    };
-    if disk_gb < current.disk_gb {
-        anyhow::bail!(
-            "Lima disk shrink is not supported (current: {}, requested: {})",
-            format_resize_disk(current.disk_gb),
-            format_resize_disk(disk_gb)
-        );
-    }
-    let desired = LocalLimaResources {
-        cpu_millicores,
-        memory_mb,
-        disk_gb,
-    };
-    if desired == current {
-        anyhow::bail!("the requested resources already match the current Lima environment");
-    }
-    Ok(LocalResizePlan {
-        current,
-        desired,
-        active_sessions,
-        normalized_cpu_request,
-    })
 }
 
 pub(crate) fn resolve_native_resize_plan(
@@ -730,39 +928,6 @@ pub(crate) fn resolve_platform_resize_plan(
     })
 }
 
-pub(crate) fn format_local_resize_plan(name: &str, plan: &LocalResizePlan) -> String {
-    let mut output = format!(
-        "Environment: {name} (local · Lima)\n\n              Current   Desired\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
-        format_resize_cpu(plan.current.cpu_millicores),
-        format_resize_cpu(plan.desired.cpu_millicores),
-        format_resize_memory(plan.current.memory_mb),
-        format_resize_memory(plan.desired.memory_mb),
-        format_resize_disk(plan.current.disk_gb),
-        format_resize_disk(plan.desired.disk_gb),
-    );
-    if plan.active_sessions.is_empty() {
-        output.push_str("Active sessions: none\n");
-    } else {
-        output.push_str(&format!(
-            "Active sessions ({}): {}\n",
-            plan.active_sessions.len(),
-            plan.active_sessions.join(", ")
-        ));
-        output.push_str("The required Lima restart will terminate these sessions.\n");
-    }
-    if let Some(requested) = plan.normalized_cpu_request {
-        output.push_str(&format!(
-            "Lima uses whole CPU cores; {} is normalized to {}.\n",
-            format_resize_cpu(requested),
-            format_resize_cpu(plan.desired.cpu_millicores)
-        ));
-    }
-    output.push_str(
-        "Lima will stop, resize, and restart this environment. Disk growth cannot be reversed.\n",
-    );
-    output
-}
-
 pub(crate) fn format_platform_resize_plan(name: &str, plan: &PlatformResizePlan) -> String {
     let mut output = format!(
         "Environment: {name} (platform)\n\n              Current   Requested\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
@@ -879,22 +1044,19 @@ async fn handle_unified_environment_create(
         Some(EnvironmentPlacement::Local) => {
             let output = args.output;
             #[cfg(target_os = "linux")]
-            if native_create_selected(&args)? {
+            {
+                native_create_selected(&args)?;
                 let environment = create_native_environment(*args).await?;
                 if matches!(output, OutputFormat::Text) {
                     eprintln!("Local environment created: {}.", environment.name);
                 }
-                return print_native_environment(&environment, output);
+                print_native_environment(&environment, output)
             }
-            let create = local_create_args_from_environment_args(*args)?;
-            handle_local_command(
-                globals,
-                LocalArgs {
-                    output,
-                    command: LocalCommand::Create(Box::new(create)),
-                },
-            )
-            .await
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (globals, output, args);
+                anyhow::bail!("native local environments currently require Linux")
+            }
         }
         Some(EnvironmentPlacement::Platform) | None => {
             reject_local_create_options(&args)?;
@@ -919,23 +1081,6 @@ async fn handle_unified_environment_list(
     #[cfg(target_os = "linux")]
     let native = if placement != Some(EnvironmentPlacement::Platform) {
         native_environments().await?
-    } else {
-        Vec::new()
-    };
-
-    let local = if placement != Some(EnvironmentPlacement::Platform) {
-        let config = config::load_local_instances_config(&paths.mesh_data_dir)?;
-        #[cfg(target_os = "linux")]
-        if !native.is_empty() {
-            // Native inventory must not execute a legacy runtime merely to
-            // render its disjoint saved metadata. Explicit legacy-only usage
-            // retains the existing live-status observation below.
-            sorted_local_instance_entries(&config)
-        } else {
-            observed_local_environment_entries(&config)
-        }
-        #[cfg(not(target_os = "linux"))]
-        observed_local_environment_entries(&config)
     } else {
         Vec::new()
     };
@@ -970,14 +1115,18 @@ async fn handle_unified_environment_list(
         Vec::new()
     };
 
-    let current = config::current_target(&paths.mesh_data_dir).ok();
+    let current = config::current_target(&paths.mesh_data_dir)
+        .ok()
+        .filter(|target| !(target.kind == "local" && target.target_ref == "local"));
     #[cfg(target_os = "linux")]
-    let current = (!native.iter().any(|environment| environment.selected))
-        .then_some(current.as_ref())
-        .flatten();
-    #[cfg(not(target_os = "linux"))]
+    let current = current.filter(|target| {
+        target.kind != "local"
+            || native.iter().any(|environment| {
+                target.target_ref == environment.name || target.target_ref == environment.id
+            })
+    });
     let current = current.as_ref();
-    let mut entries = unified_environment_list_entries(&local, &platform, current);
+    let mut entries = unified_environment_list_entries(&platform, current);
     #[cfg(target_os = "linux")]
     entries.extend(
         native
@@ -985,7 +1134,7 @@ async fn handle_unified_environment_list(
             .map(|environment| UnifiedEnvironmentListEntry {
                 name: environment.name.clone(),
                 placement: "local".to_string(),
-                selected: environment.selected,
+                selected: native_environment_is_selected(environment, current),
                 state: native_state_label(environment.state).to_string(),
                 daemon_health: if environment.state
                     == codewire_local_vmm::control::v1::EnvironmentState::Running as i32
@@ -1005,20 +1154,15 @@ async fn handle_unified_environment_list(
     print_unified_environment_list(&entries, args.output)
 }
 
-fn observed_local_environment_entries(
-    config: &config::LocalInstancesConfig,
-) -> Vec<LocalInstanceEntry> {
-    let mut entries = config
-        .instances
-        .iter()
-        .map(|(key, instance)| {
-            let state = local_environment_lifecycle_status(instance)
-                .unwrap_or_else(|_| "unavailable".to_string());
-            local_instance_entry(key, instance, &state)
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.name.cmp(&right.name));
-    entries
+#[cfg(target_os = "linux")]
+pub(crate) fn native_environment_is_selected(
+    environment: &codewire_local_vmm::control::v1::Environment,
+    current: Option<&config::CurrentTargetConfig>,
+) -> bool {
+    current.is_some_and(|target| {
+        target.kind == "local"
+            && (target.target_ref == environment.name || target.target_ref == environment.id)
+    }) || (current.is_none() && environment.selected)
 }
 
 async fn handle_unified_environment_info(
@@ -1034,16 +1178,6 @@ async fn handle_unified_environment_info(
             let environment = get_native_environment(&name).await?;
             print_native_environment(&environment, args.output)
         }
-        UnifiedEnvironmentTarget::Local(name) => {
-            handle_local_command(
-                globals,
-                LocalArgs {
-                    output: args.output,
-                    command: LocalCommand::Info(LocalInfoArgs { name: Some(name) }),
-                },
-            )
-            .await
-        }
         UnifiedEnvironmentTarget::Platform(id) => {
             handle_platform_env_command(
                 globals,
@@ -1055,32 +1189,6 @@ async fn handle_unified_environment_info(
             .await
         }
     }
-}
-
-async fn active_local_resize_sessions(
-    instance: &config::LocalInstanceConfig,
-    lifecycle_state: &str,
-) -> anyhow::Result<Vec<String>> {
-    if lifecycle_state != "running" {
-        return Ok(Vec::new());
-    }
-    let sessions = super::sessions::local_environment_session_client(instance)
-        .await?
-        .list()
-        .await?;
-    Ok(sessions
-        .into_iter()
-        .filter(|session| {
-            !matches!(
-                codewire_daemon::client::v1::SessionLifecycleState::try_from(session.state),
-                Ok(codewire_daemon::client::v1::SessionLifecycleState::Stopped
-                    | codewire_daemon::client::v1::SessionLifecycleState::Exited
-                    | codewire_daemon::client::v1::SessionLifecycleState::Failed
-                    | codewire_daemon::client::v1::SessionLifecycleState::Interrupted)
-            )
-        })
-        .map(|session| session.session_id)
-        .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -1160,78 +1268,16 @@ async fn handle_unified_environment_resize(
 ) -> anyhow::Result<()> {
     let target =
         resolve_unified_environment_target(globals, placement, &args.environment, "resize").await?;
-    let name = match target {
+    match target {
         #[cfg(target_os = "linux")]
         UnifiedEnvironmentTarget::NativeLocal(name) => {
-            return handle_native_environment_resize(name, args).await;
+            handle_native_environment_resize(name, args).await
         }
-        UnifiedEnvironmentTarget::Local(name) => name,
         UnifiedEnvironmentTarget::Platform(environment_id) => {
             args.environment = environment_id;
-            return handle_platform_env_command(globals, EnvCommand::Resize(args)).await;
+            handle_platform_env_command(globals, EnvCommand::Resize(args)).await
         }
-    };
-
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
-    let config = config::load_local_instances_config(&paths.mesh_data_dir)?;
-    let instance = config
-        .instances
-        .get(&name)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("local environment {name:?} not found"))?;
-    if instance.backend != "lima" {
-        anyhow::bail!(
-            "local resize is currently only supported for Lima-backed environments; {:?} uses {}",
-            name,
-            instance.backend
-        );
     }
-
-    let current = local_lima_instance_resources(local_lima_instance_name(&instance)?)?;
-    if resize_requires_interactive_wizard(&args, stdin_is_interactive())? {
-        args.cpu = prompt_resize_quantity("CPU", &format_resize_cpu(current.cpu_millicores))?;
-        args.memory = prompt_resize_quantity("Memory", &format_resize_memory(current.memory_mb))?;
-        args.disk = prompt_resize_quantity("Disk", &format_resize_disk(current.disk_gb))?;
-    }
-    let lifecycle_state = local_environment_lifecycle_status(&instance)?;
-    let active_sessions = active_local_resize_sessions(&instance, &lifecycle_state).await?;
-    let plan = resolve_local_resize_plan(&args, current, active_sessions)?;
-
-    if matches!(args.output, OutputFormat::Text) {
-        print!("{}", format_local_resize_plan(&name, &plan));
-    }
-    if !args.yes && !prompt_confirm_default_no("Apply this resize")? {
-        println!("Aborted.");
-        return Ok(());
-    }
-
-    handle_local_command(
-        globals,
-        LocalArgs {
-            output: args.output,
-            command: LocalCommand::Resize(LocalResizeArgs {
-                name: Some(name),
-                cpu: if plan.desired.cpu_millicores != plan.current.cpu_millicores {
-                    plan.desired.cpu_millicores
-                } else {
-                    0
-                },
-                memory: if plan.desired.memory_mb != plan.current.memory_mb {
-                    plan.desired.memory_mb
-                } else {
-                    0
-                },
-                disk: if plan.desired.disk_gb != plan.current.disk_gb {
-                    plan.desired.disk_gb
-                } else {
-                    0
-                },
-                restart: true,
-            }),
-        },
-    )
-    .await
 }
 
 async fn handle_platform_environment_resize(
@@ -1363,16 +1409,6 @@ async fn handle_unified_environment_daemon_command(
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             handle_native_environment_daemon_command(&name, command).await
         }
-        UnifiedEnvironmentTarget::Local(name) => {
-            let env = OsEnv;
-            let paths = ResolvePaths::from_env(&env);
-            let config = config::load_local_instances_config(&paths.mesh_data_dir)?;
-            let instance = config
-                .instances
-                .get(&name)
-                .ok_or_else(|| anyhow::anyhow!("local environment {name:?} not found"))?;
-            handle_local_environment_daemon_command(instance, command).await
-        }
         UnifiedEnvironmentTarget::Platform(environment_id) => {
             handle_platform_env_command(
                 globals,
@@ -1450,18 +1486,19 @@ async fn resolve_unified_environment_daemon_target(
 
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
-    #[cfg(target_os = "linux")]
-    if placement != Some(EnvironmentPlacement::Platform)
-        && let Some(environment) = native_selected_environment().await?
-    {
-        return Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name));
-    }
     let current = config::current_target(&paths.mesh_data_dir).map_err(|_| {
         anyhow::anyhow!(
             "no environment selected; use `cw use ENV` or pass ENV to `cw env {}`",
             command.command_name()
         )
     })?;
+    let default_local = current.kind == "local" && current.target_ref == "local";
+    #[cfg(target_os = "linux")]
+    if (placement == Some(EnvironmentPlacement::Local) || (placement.is_none() && default_local))
+        && let Some(environment) = native_selected_environment().await?
+    {
+        return Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name));
+    }
     match (placement, current.kind.as_str()) {
         (Some(EnvironmentPlacement::Local), "env") => {
             anyhow::bail!("the selected environment is platform-backed; pass a local ENV")
@@ -1469,8 +1506,12 @@ async fn resolve_unified_environment_daemon_target(
         (Some(EnvironmentPlacement::Platform), "local") => {
             anyhow::bail!("the selected environment is local; pass a platform ENV")
         }
-        (_, "local") if !current.target_ref.trim().is_empty() && current.target_ref != "local" => {
-            Ok(UnifiedEnvironmentTarget::Local(current.target_ref))
+        #[cfg(target_os = "linux")]
+        (_, "local") if !current.target_ref.trim().is_empty() && !default_local => {
+            let environment = native_environment(&current.target_ref)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("selected local environment was not found"))?;
+            Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name))
         }
         (_, "env") if !current.target_ref.trim().is_empty() => {
             Ok(UnifiedEnvironmentTarget::Platform(current.target_ref))
@@ -1480,124 +1521,6 @@ async fn resolve_unified_environment_daemon_target(
             command.command_name()
         ),
     }
-}
-
-async fn handle_local_environment_daemon_command(
-    instance: &config::LocalInstanceConfig,
-    command: EnvDaemonCommand,
-) -> anyhow::Result<()> {
-    match command {
-        EnvDaemonCommand::Status(args) => {
-            let status = wait_for_local_environment_daemon_ready(instance).await?;
-            print_environment_daemon_status(&status, args.output)?;
-        }
-        EnvDaemonCommand::Logs(_) => {
-            let logs = read_local_daemon_logs(instance)?;
-            std::io::stdout()
-                .write_all(logs.as_bytes())
-                .context("write local environment daemon logs")?;
-        }
-        EnvDaemonCommand::Repair(args) => {
-            repair_local_daemon(instance)?;
-            let status = wait_for_local_environment_daemon_ready(instance).await?;
-            let repair = EnvironmentDaemonRepair {
-                status,
-                replaced_pod_name: String::new(),
-            };
-            match args.output {
-                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&repair)?),
-                OutputFormat::Text => {
-                    println!(
-                        "Environment daemon repaired: {}",
-                        display_str(&repair.status.state)
-                    );
-                    print!("{}", format_environment_daemon_status(&repair.status));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn local_environment_daemon_status(
-    instance: &config::LocalInstanceConfig,
-) -> anyhow::Result<EnvironmentDaemonStatus> {
-    let client = local_environment_daemon_client(instance).await?;
-    let capabilities = client.get_capabilities(&[]).await?;
-    let health = client.get_health().await?;
-    let capabilities_state = codewire_daemon::client::v1::DaemonState::try_from(capabilities.state)
-        .unwrap_or(codewire_daemon::client::v1::DaemonState::Unspecified);
-    let health_state = codewire_daemon::client::v1::DaemonState::try_from(health.state)
-        .unwrap_or(codewire_daemon::client::v1::DaemonState::Unspecified);
-    let state = if capabilities_state == codewire_daemon::client::v1::DaemonState::Ready {
-        health_state
-    } else {
-        capabilities_state
-    };
-    let message = if capabilities_state == codewire_daemon::client::v1::DaemonState::Ready {
-        health.message
-    } else {
-        capabilities.message
-    };
-    Ok(EnvironmentDaemonStatus {
-        state: local_daemon_state_name(state).to_string(),
-        protocol_version: capabilities.protocol_version,
-        minimum_protocol_version: capabilities.minimum_protocol_version,
-        daemon_version: capabilities.daemon_version,
-        capabilities: capabilities.capabilities,
-        message,
-        diagnostics: health
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| EnvironmentDaemonDiagnostic {
-                name: diagnostic.name,
-                healthy: diagnostic.healthy,
-                message: diagnostic.message,
-            })
-            .collect(),
-        pod_name: String::new(),
-    })
-}
-
-pub(crate) fn local_daemon_state_name(
-    state: codewire_daemon::client::v1::DaemonState,
-) -> &'static str {
-    match state {
-        codewire_daemon::client::v1::DaemonState::Unspecified => "unspecified",
-        codewire_daemon::client::v1::DaemonState::Unsupported => "unsupported",
-        codewire_daemon::client::v1::DaemonState::Starting => "starting",
-        codewire_daemon::client::v1::DaemonState::Ready => "ready",
-        codewire_daemon::client::v1::DaemonState::Unhealthy => "unhealthy",
-        codewire_daemon::client::v1::DaemonState::UpgradeRequired => "upgrade_required",
-    }
-}
-
-pub(super) async fn wait_for_local_environment_daemon_ready(
-    instance: &config::LocalInstanceConfig,
-) -> anyhow::Result<EnvironmentDaemonStatus> {
-    let mut last_error = None;
-    for attempt in 0..LOCAL_DAEMON_READY_ATTEMPTS {
-        match local_environment_daemon_status(instance).await {
-            Ok(status) if status.state == "ready" => return Ok(status),
-            Ok(status) if status.state == "starting" => {
-                last_error = Some(anyhow::anyhow!("daemon is still starting"));
-            }
-            Ok(status) => {
-                anyhow::bail!(
-                    "local environment daemon returned state {:?}: {}",
-                    status.state,
-                    display_str(&status.message)
-                );
-            }
-            Err(error) => last_error = Some(error),
-        }
-        if attempt + 1 < LOCAL_DAEMON_READY_ATTEMPTS {
-            tokio::time::sleep(LOCAL_DAEMON_READY_RETRY_INTERVAL).await;
-        }
-    }
-    Err(last_error
-        .unwrap_or_else(|| anyhow::anyhow!("local environment daemon did not become ready")))
-    .context("wait for local environment daemon readiness")
 }
 
 async fn handle_unified_environment_lifecycle(
@@ -1626,9 +1549,18 @@ async fn handle_unified_environment_lifecycle(
         #[cfg(target_os = "linux")]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
+            UnifiedEnvironmentLifecycle::Restart(args),
+        ) => {
+            let environment = restart_native_environment(&name).await?;
+            print_native_environment(&environment, args.output)
+        }
+        #[cfg(target_os = "linux")]
+        (
+            UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Remove(args),
         ) => {
             let removed = delete_native_environment(&name).await?;
+            reconcile_native_current_after_delete(&removed.name).await;
             match args.output {
                 OutputFormat::Json => println!(
                     "{}",
@@ -1648,36 +1580,6 @@ async fn handle_unified_environment_lifecycle(
                 }
             }
             Ok(())
-        }
-        (UnifiedEnvironmentTarget::Local(name), UnifiedEnvironmentLifecycle::Start(args)) => {
-            handle_local_command(
-                globals,
-                LocalArgs {
-                    output: args.output,
-                    command: LocalCommand::Start(LocalInfoArgs { name: Some(name) }),
-                },
-            )
-            .await
-        }
-        (UnifiedEnvironmentTarget::Local(name), UnifiedEnvironmentLifecycle::Stop(args)) => {
-            handle_local_command(
-                globals,
-                LocalArgs {
-                    output: args.output,
-                    command: LocalCommand::Stop(LocalInfoArgs { name: Some(name) }),
-                },
-            )
-            .await
-        }
-        (UnifiedEnvironmentTarget::Local(name), UnifiedEnvironmentLifecycle::Remove(args)) => {
-            handle_local_command(
-                globals,
-                LocalArgs {
-                    output: args.output,
-                    command: LocalCommand::Rm(LocalInfoArgs { name: Some(name) }),
-                },
-            )
-            .await
         }
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Start(args)) => {
             handle_platform_env_command(
@@ -1699,6 +1601,9 @@ async fn handle_unified_environment_lifecycle(
             )
             .await
         }
+        (UnifiedEnvironmentTarget::Platform(_), UnifiedEnvironmentLifecycle::Restart(_)) => {
+            anyhow::bail!("restart is supported only for native local environments")
+        }
         (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Remove(args)) => {
             handle_platform_env_command(
                 globals,
@@ -1709,6 +1614,55 @@ async fn handle_unified_environment_lifecycle(
                 }),
             )
             .await
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn reconcile_native_current_after_delete(deleted_name: &str) {
+    let env = OsEnv;
+    let paths = ResolvePaths::from_env(&env);
+    let Ok(current) = config::current_target(&paths.mesh_data_dir) else {
+        return;
+    };
+    if current.kind != "local"
+        || (current.target_ref != deleted_name && current.name != deleted_name)
+    {
+        return;
+    }
+    let replacement = match native_selected_environment().await {
+        Ok(Some(environment)) => config::CurrentTargetConfig {
+            kind: "local".to_owned(),
+            target_ref: environment.name.clone(),
+            name: environment.name,
+        },
+        Ok(None) => config::CurrentTargetConfig::default(),
+        Err(error) => {
+            eprintln!("Warning: could not reconcile the current local target: {error}");
+            return;
+        }
+    };
+    if let Err(error) = config::save_current_target(&paths.mesh_data_dir, &replacement) {
+        eprintln!("Warning: could not save the current local target: {error}");
+    }
+}
+
+async fn handle_unified_environment_refresh_skills(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    args: EnvTargetArgs,
+) -> anyhow::Result<()> {
+    let target =
+        resolve_unified_environment_target(globals, placement, &args.environment, "refresh-skills")
+            .await?;
+    match target {
+        #[cfg(target_os = "linux")]
+        UnifiedEnvironmentTarget::NativeLocal(name) => {
+            let environment = refresh_native_environment_skills(&name).await?;
+            print_native_environment(&environment, args.output)
+        }
+        UnifiedEnvironmentTarget::Platform(_) => {
+            anyhow::bail!("refresh-skills is supported only for native local environments")
         }
     }
 }
@@ -1728,7 +1682,6 @@ async fn resolve_unified_environment_target(
     } else {
         None
     };
-    let local = resolve_local_instance_target(&paths.mesh_data_dir, target_ref);
     if placement == Some(EnvironmentPlacement::Local) {
         #[cfg(target_os = "linux")]
         if let Some(environment) = native.as_ref() {
@@ -1736,22 +1689,22 @@ async fn resolve_unified_environment_target(
                 environment.name.clone(),
             ));
         }
-        let Some((key, _)) = local else {
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!("native local environments currently require Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
             anyhow::bail!("local environment {target_ref:?} not found");
-        };
-        return Ok(UnifiedEnvironmentTarget::Local(key));
-    }
-
-    #[cfg(target_os = "linux")]
-    if let Some(environment) = native {
-        return Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name));
+        }
     }
 
     let platform = match resolve_platform(globals, &paths, &env) {
         Ok(platform) => platform,
         Err(error) if placement.is_none() => {
-            if let Some((key, _)) = local {
-                return Ok(UnifiedEnvironmentTarget::Local(key));
+            #[cfg(target_os = "linux")]
+            if let Some(environment) = native {
+                return Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name));
             }
             return Err(error);
         }
@@ -1774,19 +1727,24 @@ async fn resolve_unified_environment_target(
         return Ok(UnifiedEnvironmentTarget::Platform(id));
     }
 
-    match (local, platform_match) {
+    #[cfg(target_os = "linux")]
+    match (native, platform_match) {
         (_, Some((id, EnvironmentMatchKind::ExactId))) => {
             Ok(UnifiedEnvironmentTarget::Platform(id))
         }
-        (Some((_key, _)), Some((_id, EnvironmentMatchKind::ExactName))) => {
+        (Some(environment), Some((_id, EnvironmentMatchKind::ExactName)))
+            if environment.name == target_ref =>
+        {
             Err(ambiguous_environment_placement_error(command, target_ref))
         }
-        (Some((key, _)), Some((_id, EnvironmentMatchKind::IdPrefix))) => {
-            Ok(UnifiedEnvironmentTarget::Local(key))
-        }
-        (Some((key, _)), None) => Ok(UnifiedEnvironmentTarget::Local(key)),
+        (Some(environment), _) => Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name)),
         (None, Some((id, _))) => Ok(UnifiedEnvironmentTarget::Platform(id)),
         (None, None) => anyhow::bail!("environment {target_ref:?} not found"),
+    }
+    #[cfg(not(target_os = "linux"))]
+    match platform_match {
+        Some((id, _)) => Ok(UnifiedEnvironmentTarget::Platform(id)),
+        None => anyhow::bail!("environment {target_ref:?} not found"),
     }
 }
 
@@ -1799,109 +1757,41 @@ pub(crate) fn ambiguous_environment_placement_error(
     )
 }
 
-pub(crate) fn local_create_args_from_environment_args(
-    args: EnvCreateArgs,
-) -> anyhow::Result<LocalCreateArgs> {
-    if !args.repo_urls.is_empty() || !args.repo_flags.is_empty() {
-        anyhow::bail!(
-            "repository arguments are only supported for --platform environment creation"
-        );
-    }
-    if args.path_mode.is_some()
-        || args.preset_id.is_some()
-        || args.ttl.is_some()
-        || !args.follow
-        || args.no_wait
-        || args.write_preset
-        || args.save_preset.is_some()
-    {
-        anyhow::bail!("the selected create option is only supported for --platform environments");
-    }
-    let backend = args.backend.ok_or_else(|| {
-        anyhow::anyhow!("legacy local creation requires --backend docker or --backend lima")
-    })?;
-    let cpu = parse_legacy_create_quantity(args.cpu.as_deref(), "CPU")?;
-    let memory = parse_legacy_create_quantity(args.memory.as_deref(), "memory")?;
-    let disk = parse_legacy_create_quantity(args.disk.as_deref(), "disk")?;
-    Ok(LocalCreateArgs {
-        backend,
-        name: args.name,
-        path: args.path.unwrap_or_else(|| PathBuf::from(".")),
-        file: args.file.unwrap_or_else(|| PathBuf::from("codewire.yaml")),
-        spec: args.spec,
-        preset: args.preset_slug,
-        image: args.image,
-        install: args.install,
-        startup: args.startup,
-        agent: args.coding_agent,
-        secrets: args.secret_project,
-        env: args.env,
-        cpu,
-        memory,
-        disk,
-        no_org_secrets: args.no_org_secrets,
-        no_user_secrets: args.no_user_secrets,
-        network: args.network,
-        no_network: args.no_network,
-        yes: args.yes,
-    })
-}
-
-fn parse_legacy_create_quantity(value: Option<&str>, label: &str) -> anyhow::Result<i32> {
-    let Some(value) = value else {
-        return Ok(0);
-    };
-    value
-        .parse::<i32>()
-        .with_context(|| format!("legacy local {label} must use the existing integer unit"))
-}
-
 pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
     if args.backend.is_some()
         || args.path.is_some()
         || args.path_mode.is_some()
         || args.file.is_some()
         || args.spec.is_some()
+        || args.docker_disk.is_some()
+        || args.no_docker
     {
         anyhow::bail!(
-            "--backend, --path, --path-mode, --file, and --spec require `cw env create --local`"
+            "--backend, --path, --path-mode, --file, --spec, --docker-disk, and --no-docker require `cw env create --local`"
         );
+    }
+    if args.access_profile.is_some() {
+        anyhow::bail!("--access-profile is not yet available for platform environments");
     }
     Ok(())
 }
 
 pub(crate) fn unified_environment_list_entries(
-    local: &[LocalInstanceEntry],
     platform: &[(Environment, String)],
     current: Option<&config::CurrentTargetConfig>,
 ) -> Vec<UnifiedEnvironmentListEntry> {
-    let mut entries =
-        local
-            .iter()
-            .map(|entry| UnifiedEnvironmentListEntry {
-                name: entry.name.clone(),
-                placement: "local".to_string(),
-                selected: current.is_some_and(|target| {
-                    target.kind == "local"
-                        && (target.target_ref == entry.name || target.name == entry.name)
-                }),
-                state: entry.status.clone(),
-                daemon_health: "unknown".to_string(),
-                id: entry.runtime_name.clone(),
-            })
-            .chain(platform.iter().map(|(environment, daemon_health)| {
-                UnifiedEnvironmentListEntry {
-                    name: environment_display_name(environment).to_string(),
-                    placement: "platform".to_string(),
-                    selected: current.is_some_and(|target| {
-                        target.kind == "env" && target.target_ref == environment.id
-                    }),
-                    state: environment.state.clone(),
-                    daemon_health: daemon_health.clone(),
-                    id: environment.id.clone(),
-                }
-            }))
-            .collect::<Vec<_>>();
+    let mut entries = platform
+        .iter()
+        .map(|(environment, daemon_health)| UnifiedEnvironmentListEntry {
+            name: environment_display_name(environment).to_string(),
+            placement: "platform".to_string(),
+            selected: current
+                .is_some_and(|target| target.kind == "env" && target.target_ref == environment.id),
+            state: environment.state.clone(),
+            daemon_health: daemon_health.clone(),
+            id: environment.id.clone(),
+        })
+        .collect::<Vec<_>>();
     entries.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
@@ -2181,14 +2071,8 @@ pub(crate) fn env_create_request_from_args(
         preset_id,
         name: trimmed_optional(args.name.clone()),
         cpu_millicores: positive_i32(parse_platform_create_quantity(args.cpu.as_deref(), "CPU")?),
-        memory_mb: positive_i32(parse_platform_create_quantity(
-            args.memory.as_deref(),
-            "memory",
-        )?),
-        disk_gb: positive_i32(parse_platform_create_quantity(
-            args.disk.as_deref(),
-            "disk",
-        )?),
+        memory_mb: positive_i32(parse_create_memory(args.memory.as_deref())?),
+        disk_gb: positive_i32(parse_create_disk(args.disk.as_deref())?),
         ttl_seconds,
         preset_slug,
         repo_url,
@@ -2204,8 +2088,8 @@ pub(crate) fn env_create_request_from_args(
         agent_env: BTreeMap::new(),
         secret_project: trimmed_optional(args.secret_project.clone()).unwrap_or_default(),
         app_ports: Vec::new(),
-        include_org_secrets: args.no_org_secrets.then_some(false),
-        include_user_secrets: args.no_user_secrets.then_some(false),
+        include_org_secrets: None,
+        include_user_secrets: None,
         isolation_tier: args.isolation.clone().unwrap_or_default(),
         project_spec: None,
     };
@@ -2277,8 +2161,8 @@ fn project_spec_from_create_request(
         },
         secrets: codewire_project::SecretBindings {
             project: request.secret_project.clone(),
-            include_org: request.include_org_secrets,
-            include_user: request.include_user_secrets,
+            organization: request.include_org_secrets.unwrap_or(false),
+            user: request.include_user_secrets.unwrap_or(false),
         },
         ..codewire_project::ProjectSpec::default()
     };
@@ -2292,6 +2176,26 @@ fn parse_platform_create_quantity(value: Option<&str>, label: &str) -> anyhow::R
             value
                 .parse::<i32>()
                 .with_context(|| format!("platform {label} must use the existing integer unit"))
+        })
+        .transpose()
+}
+
+fn parse_create_memory(value: Option<&str>) -> anyhow::Result<Option<i32>> {
+    value
+        .map(|value| match value.parse::<i32>() {
+            Ok(value) => Ok(value),
+            Err(_) => parse_resize_memory(value)
+                .context("memory must be an integer MiB value or use MB/GB units"),
+        })
+        .transpose()
+}
+
+fn parse_create_disk(value: Option<&str>) -> anyhow::Result<Option<i32>> {
+    value
+        .map(|value| match value.parse::<i32>() {
+            Ok(value) => Ok(value),
+            Err(_) => parse_resize_disk(value)
+                .context("disk must be an integer GiB value or use GB units"),
         })
         .transpose()
 }
@@ -2380,6 +2284,10 @@ pub(crate) struct ResolvedCodewireYaml {
     pub(crate) agents: Option<ResolvedCodewireAgentsYaml>,
 }
 
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct ResolvedCodewirePortYaml {
     pub(crate) port: i32,
@@ -2397,7 +2305,7 @@ pub(crate) struct ResolvedCodewireAgentsYaml {
 
 #[derive(serde::Serialize)]
 pub(crate) struct ResolvedCodewireSecretsYaml {
-    pub(crate) org: bool,
+    pub(crate) organization: bool,
     pub(crate) user: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) project: String,
@@ -2426,8 +2334,8 @@ pub(crate) fn codewire_yaml_from_request(
         install: request.install_command.clone(),
         startup: request.startup_script.clone(),
         secrets: Some(ResolvedCodewireSecretsYaml {
-            org: request.include_org_secrets.unwrap_or(true),
-            user: request.include_user_secrets.unwrap_or(true),
+            organization: request.include_org_secrets.unwrap_or(false),
+            user: request.include_user_secrets.unwrap_or(false),
             project: request.secret_project.clone(),
         }),
         env: request.env_vars.clone(),
@@ -2594,13 +2502,13 @@ pub(crate) fn format_env_create_text(environment: &Environment) -> String {
     )
 }
 
-pub(crate) async fn handle_env_access_command(
+pub(crate) async fn handle_env_share_command(
     client: &EnvironmentClient,
     org_id: &str,
-    command: EnvAccessCommand,
+    command: EnvShareCommand,
 ) -> anyhow::Result<()> {
     match command {
-        EnvAccessCommand::List(args) => {
+        EnvShareCommand::List(args) => {
             let environment_id = resolve_environment_id(client, org_id, &args.environment).await?;
             let grants = client
                 .list_environment_access(org_id, &environment_id)
@@ -2608,7 +2516,7 @@ pub(crate) async fn handle_env_access_command(
                 .context("list access")?;
             print_env_access_list(&grants, args.output)?;
         }
-        EnvAccessCommand::Grant(args) => {
+        EnvShareCommand::Grant(args) => {
             let user_id = trimmed_str(&args.user)
                 .ok_or_else(|| anyhow::anyhow!("--user is required"))?
                 .to_string();
@@ -2635,7 +2543,7 @@ pub(crate) async fn handle_env_access_command(
                 args.output,
             )?;
         }
-        EnvAccessCommand::Revoke(args) => {
+        EnvShareCommand::Revoke(args) => {
             let user_id =
                 trimmed_str(&args.user).ok_or_else(|| anyhow::anyhow!("--user is required"))?;
             let environment_id = resolve_environment_id(client, org_id, &args.environment).await?;

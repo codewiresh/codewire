@@ -157,7 +157,7 @@ run_paths_case ci_rewrite pull_request refs/pull/20/head false \
   scripts/ci/verify/integration-postgres.sh \
   scripts/ci/verify/resolve-cargo-target-dir.sh \
   scripts/ci/verify/run-product-verification.sh \
-  scripts/ci/tests/test-sdk-local-cli-contract.sh \
+  scripts/ci/tests/test-retired-local-sdk-contract.sh \
   scripts/checks/security/audit-rust-only-runtime.sh \
   scripts/ci/verify/rust-stack-rehearsal.sh \
   scripts/ci/tests/test-integration-postgres.sh \
@@ -353,6 +353,9 @@ run_paths_case local_vmm_host_source pull_request refs/pull/5011/head false \
 run_paths_case local_vmm_guest_source pull_request refs/pull/5012/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-vmm-guest-probe/src/lib.rs
+run_paths_case local_vmm_network_fixture pull_request refs/pull/50121/head false \
+  'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  testdata/local-vm-network/protocol-v1.json
 run_paths_case local_vmm_initramfs_builder pull_request refs/pull/5013/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/build-local-vmm-initramfs.sh
@@ -489,6 +492,9 @@ run_paths_case retired_go_e2e_source pull_request refs/pull/87/head false \
 run_paths_case rust_tailnet pull_request refs/pull/9/head false \
   'policy transport transport_pkg_codewire_tailnet' \
   crates/codewire-tailnet/src/lib.rs
+run_paths_case rust_netstack pull_request refs/pull/90/head false \
+  'policy transport transport_pkg_codewire_netstack transport_pkg_codewire_tailnet' \
+  crates/codewire-netstack/src/lib.rs
 run_paths_case rust_derp pull_request refs/pull/91/head false \
   'policy transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/src/lib.rs
@@ -619,8 +625,8 @@ run_paths_case sdk_ts_runner pull_request refs/pull/1511/head false \
   'policy sdk_ts' \
   scripts/runtime/dev/run-sdk-ts-e2e.sh \
   scripts/runtime/tests/test-run-sdk-ts-e2e.sh
-run_paths_case sdk_examples pull_request refs/pull/1512/head false \
-  'go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
+run_paths_case retired_sdk_examples pull_request refs/pull/1512/head false \
+  'policy' \
   libs/sdk-examples/run-claude/README.md \
   libs/sdk-examples/run-claude/go/main.go \
   libs/sdk-examples/run-claude/python/run_claude.py \
@@ -750,7 +756,6 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   crates/codewire-cli/src/commands/collaboration.rs \
   crates/codewire-cli/src/commands/core.rs \
   crates/codewire-cli/src/commands/environment.rs \
-  crates/codewire-cli/src/commands/local.rs \
   crates/codewire-cli/src/commands/mesh_commands.rs \
   crates/codewire-cli/src/commands/mod.rs \
   crates/codewire-cli/src/commands/platform_commands.rs \
@@ -758,7 +763,6 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   crates/codewire-cli/src/commands/tests/collaboration.rs \
   crates/codewire-cli/src/commands/tests/core.rs \
   crates/codewire-cli/src/commands/tests/environment.rs \
-  crates/codewire-cli/src/commands/tests/local.rs \
   crates/codewire-cli/src/commands/tests/run.rs \
   crates/codewire-cli/src/commands/tests/sessions.rs \
   crates/codewire-cli/src/environment_client.rs \
@@ -791,25 +795,20 @@ run_paths_case ws17_wi_c3 pull_request refs/pull/173/head false \
   docs/runbooks/runtime-coco-trustee-test-resource.md \
   docs/runbooks/runtime-dev-commodity-smoke.md \
   docs/runbooks/rust-release-candidate-staging.md \
-  libs/sdk-examples/run-claude/README.md \
-  libs/sdk-examples/run-claude/go/main.go \
-  libs/sdk-examples/run-claude/python/run_claude.py \
-  libs/sdk-examples/run-claude/typescript/run_claude.ts \
   libs/sdk-go/local.go \
   libs/sdk-go/local_files.go \
   libs/sdk-python/codewire/__init__.py \
   libs/sdk-python/codewire/local.py \
   libs/sdk-ts/src/index.ts \
   libs/sdk-ts/src/local.ts \
-  scripts/ci/tests/test-sdk-local-cli-contract.sh \
-  scripts/ci/verify/smoke-local-environment.sh \
+  scripts/ci/tests/test-retired-local-sdk-contract.sh \
   scripts/ci/verify/smoke-prod.sh \
   scripts/runtime/dev/measure-dev-commodity-overhead.sh \
   scripts/runtime/dev/smoke-dev-commodity.sh
 run_paths_case tag push refs/tags/v1.2.3 false \
   'deploy go_consumer_interop go_support release runtime_confidential' docs/tag-path-is-ignored.md
 
-all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
+all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy" scripts/dev/dashboard-watch.py
 run_present_paths_case dashboard_watch_unlisted pull_request refs/pull/2003/head false \
@@ -901,7 +900,7 @@ assert_tokens dispatch_rust \
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=transport "$SELECTOR")"
 assert_tokens dispatch_transport \
-  'transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe' \
+  'transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe' \
   "$dispatch_output"
 dispatch_output="$(env -u GITHUB_OUTPUT GITHUB_EVENT_NAME=workflow_dispatch \
   VERIFICATION_REQUEST=contracts "$SELECTOR")"
@@ -2186,7 +2185,7 @@ bash -n \
   "$ROOT/scripts/ci/tests/test-verify-release-tag-receipt.sh" \
   "$ROOT/scripts/ci/tests/test-local-prepush-receipt.sh" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh" \
-  "$ROOT/scripts/ci/tests/test-sdk-local-cli-contract.sh" \
+  "$ROOT/scripts/ci/tests/test-retired-local-sdk-contract.sh" \
   "$ROOT/scripts/ci/verify/integration-postgres.sh" \
   "$ROOT/scripts/ci/verify/run-integration-verification.sh" \
   "$ROOT/scripts/ci/tests/test-integration-postgres.sh" \

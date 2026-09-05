@@ -21,7 +21,6 @@ libs/
   gateway-proto/      internal gateway/daemon Connect contract
   gen-go/, gen-python/  generated public Connect clients
   sdk-go/, sdk-ts/, sdk-python/  public language SDKs
-  sdk-examples/       end-to-end SDK parity smoke (run-claude)
   tailnet/            bounded Tailscale interoperability support
 
 crates/        Rust workspace for services, web UI, CLI, desktop, and shared clients
@@ -63,7 +62,7 @@ cargo build -p codewire-cli-bin --bin cw
 ./target/debug/cw env create --local \
   --name codewire-dev \
   --cpu 2 \
-  --memory 16Gi \
+  --memory 8GB \
   --path .
 
 # Creation selects it, so enter it without a platform login or target argument.
@@ -74,15 +73,20 @@ cargo build -p codewire-cli-bin --bin cw
 ./target/debug/cw env info --local codewire-dev
 ./target/debug/cw env stop --local codewire-dev
 ./target/debug/cw env start --local codewire-dev
+./target/debug/cw env restart --local codewire-dev
 
 # CPU and memory apply on restart; the persistent ext4 disk grows offline.
 ./target/debug/cw env resize --local codewire-dev \
-  --cpu 4 --memory 24Gi --disk 40Gi --yes
+  --cpu 4 --memory 16GB --disk 40GB --yes
 
 # Read-only inventory: this never adopts, repairs, or deletes an orphan.
 ./target/debug/cw doctor local
 ./target/debug/cw env rm --local codewire-dev --yes
 ```
+
+Familiar resource inputs are binary quantities: `8GB` of memory allocates 8192
+MiB, and `2048MB` of disk resolves to 2 GiB. `GiB`/`MiB` and their shorter
+`Gi`/`Mi` spellings also work, and suffixes are case-insensitive.
 
 An exact clean Git root becomes an independent clone of its checked-out commit;
 host hooks, credential helpers, embedded remote credentials, unrelated refs,
@@ -91,9 +95,38 @@ environment-owned point-in-time copy. Use `--path-mode clone` or
 `--path-mode copy` to override automatic classification; direct host access is
 never inferred from `--path`. The primary workspace runs directly in the
 canonical Codewire OCI workspace image beneath trusted guest init and runc;
-Docker does not own it. Custom image, network, secret, explicit mount, port, and
-multi-repository options still fail explicitly while the remaining Forgejo
-#1910 slices are completed. An owner-only SQLite WAL is the authoritative
+Docker does not own it. A `codewire.yaml` may combine portable `repositories`
+with local `mounts` using `mode: copy`; relative mount sources resolve from the
+configuration file, and each becomes an environment-owned point-in-time copy.
+Multi-repository entries use the same normalized project model as the platform.
+`image` in `codewire.yaml` and `--image` select any valid OCI workspace image. A
+bare `ports` entry declares
+a guest application port; an explicit `HOST:GUEST` entry also publishes it for
+the VM lifetime on `127.0.0.1:HOST` only:
+
+```yaml
+ports:
+  - 18080:8080
+```
+
+Native local environments join Mesh only when `--network NAME` is explicit or
+a selected network is confirmed; `--no-network` always disables attachment.
+Use `cw network use NAME --auto-connect` to make the selected network the
+durable no-prompt default for new local and platform environments at the
+matching Mesh origin and organization; running `cw network use NAME` without
+that flag restores confirmation. Native local creation with no selected network
+starts neither Mesh transport nor platform access. Once attachment is selected,
+native local and platform creation fail instead of silently creating a
+disconnected environment when enrollment cannot be completed.
+`cw mesh up` provides the standalone offline/self-hosted coordinator used by
+the product smoke. The host owns Mesh identity and transport, and the VM sees
+only admitted TCP streams for its declared application ports. Access profiles
+select material-free credential grants whose protected values remain in the
+isolated host broker. Preset, install/startup, environment, agent-installation,
+and secret options still fail explicitly while the remaining Forgejo #1910
+slices are completed. Repository, copy-mount, and direct-mount skills are
+captured into immutable environment-owned generations at create time and on
+explicit skill refresh. An owner-only SQLite WAL is the authoritative
 supervisor state; preview JSON state is imported exactly once. Lifecycle
 effects are journaled, disk shrink is rejected, and delete moves the
 environment tree to an operation-specific trash generation before removing
@@ -105,7 +138,11 @@ at them and run the complete product smoke:
 ```bash
 export CODEWIRE_NATIVE_ARTIFACT_ROOT=/absolute/path/to/artifacts
 export CODEWIRE_NATIVE_ARTIFACT_LOCK=/absolute/path/to/artifacts.lock.json
+cargo build -p codewire-cli-bin --bin cw \
+  -p codewire-mesh --bin codewire-mesh \
+  -p codewire-derp --bin codewire-derp
 cargo build -p codewire-local-vmm \
+  --bin codewire-local-codex-bridge-smoke \
   --bin codewire-local-public-data-smoke \
   --bin codewire-local-state-probe
 mkdir -p .tmp
@@ -113,36 +150,40 @@ chmod 0700 .tmp
 
 scripts/ci/verify/smoke-native-local-environment.sh \
   --cw-bin "$PWD/target/debug/cw" \
+  --mesh-bin "$PWD/target/debug/codewire-mesh" \
+  --derp-bin "$PWD/target/debug/codewire-derp" \
   --data-plane-smoke-bin "$PWD/target/debug/codewire-local-public-data-smoke" \
+  --credential-bridge-smoke-bin "$PWD/target/debug/codewire-local-codex-bridge-smoke" \
   --state-probe-bin "$PWD/target/debug/codewire-local-state-probe" \
   --artifact-root "$CODEWIRE_NATIVE_ARTIFACT_ROOT" \
   --artifact-lock "$CODEWIRE_NATIVE_ARTIFACT_LOCK" \
   --scratch-parent "$PWD/.tmp"
 ```
 
-The legacy Docker and Lima local backends remain available explicitly during
-the migration:
+The native smoke verifies that repository, copy-mount, and direct-mount skill
+inputs remain immutable until an explicit refresh, are projected read-only in
+the guest, and preserve executable helper modes.
+
+The native local supervisor is the only supported local environment owner:
 
 ```bash
 ./target/debug/cw env create --local \
-  --backend lima \
-  --name legacy-local \
+  --name native-local \
   --image workspace \
   --path .
 
-# Resize a Lima environment. A terminal shows the current-to-desired plan,
+# Resize a native environment. A terminal shows the current-to-desired plan,
 # active-session warning, and a default-no confirmation before the restart.
-./target/debug/cw env resize --local legacy-local --cpu 6 --memory 12Gi --disk 120Gi
+./target/debug/cw env resize --local native-local --cpu 6 --memory 12Gi --disk 120Gi
 
 # Automation must provide explicit resources and --yes.
-./target/debug/cw env resize --local legacy-local --cpu 6 --yes --output json
+./target/debug/cw env resize --local native-local --cpu 6 --yes --output json
 ```
 
 `cw env resize ENV` resolves the placement when it is unambiguous. Native and
-Lima local resize both restore a running VM after applying changes without
+platform resize both restore a running VM after applying changes without
 recreating the environment, and disk growth cannot be reversed. Native VMs use
-whole CPU cores and perform ext4 growth while stopped. Platform resize is
-tracked separately in #860.
+whole CPU cores and perform ext4 growth while stopped.
 
 ### Local database and dashboard loop
 

@@ -77,8 +77,8 @@ pub use codewire_proto::codewire::v1::{
     ListOrganizationsResponse, ListPortsRequest, ListPortsResponse, ListPresetsRequest,
     ListPresetsResponse, ListSessionsRequest, ListSessionsResponse, OrgInvitation, OrgRole,
     Organization, OrganizationDeletionState, OrganizationMembership, PlanEnvironmentResizeRequest,
-    PlanEnvironmentResizeResponse, Port, PortAccess, PrepareComplete, Preset, ProjectAgents,
-    ProjectCredentialReference, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
+    PlanEnvironmentResizeResponse, Port, PortAccess, PrepareComplete, Preset, ProjectAccessBinding,
+    ProjectAgents, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
     ProjectSkillSource, ProjectSpec, ProtectEnvironmentRequest, ProtectEnvironmentResponse,
     ReadSessionOutputRequest, ReadSessionOutputResponse, RepairEnvironmentDaemonRequest,
     RepairEnvironmentDaemonResponse, RepoConfig, RepoEntry, ResizeEnvironmentRequest,
@@ -107,10 +107,13 @@ pub use codewire_proto::codewire::v1::{
     DeleteSecretRequest, DeleteSecretResponse, DeleteUserSecretRequest, DeleteUserSecretResponse,
     ListProjectSecretsRequest, ListProjectSecretsResponse, ListSecretProjectsRequest,
     ListSecretProjectsResponse, ListSecretsRequest, ListSecretsResponse, ListUserSecretsRequest,
-    ListUserSecretsResponse, RenameProjectSecretRequest, RenameProjectSecretResponse,
-    RenameSecretRequest, RenameSecretResponse, RenameUserSecretRequest, RenameUserSecretResponse,
-    attach_session_request, attach_session_response, download_file_response, run_request,
-    run_response, stream_logs_response, upload_file_request, watch_environment_create_response,
+    ListUserSecretsResponse, PreviewWorkloadSecretResolutionRequest,
+    PreviewWorkloadSecretResolutionResponse, RenameProjectSecretRequest,
+    RenameProjectSecretResponse, RenameSecretRequest, RenameSecretResponse,
+    RenameUserSecretRequest, RenameUserSecretResponse, ResolvedWorkloadSecretMetadata,
+    WorkloadSecretSource, attach_session_request, attach_session_response, download_file_response,
+    run_request, run_response, stream_logs_response, upload_file_request,
+    watch_environment_create_response,
 };
 pub use config::{
     CODEWIRE_API_URL_ENV, CODEWIRE_URL_ENV, ClientConfig, DEFAULT_CODEWIRE_URL,
@@ -776,6 +779,17 @@ impl CodewireClient {
     ) -> Result<RenameProjectSecretResponse, ClientError> {
         self.secrets
             .rename_project_secret_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn preview_workload_secret_resolution(
+        &self,
+        request: PreviewWorkloadSecretResolutionRequest,
+    ) -> Result<PreviewWorkloadSecretResolutionResponse, ClientError> {
+        self.secrets
+            .preview_workload_secret_resolution_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
@@ -1602,7 +1616,7 @@ mod tests {
     use buffa::Message as _;
     use codewire_proto::google::rpc::{BadRequest, ErrorInfo as GoogleErrorInfo, RetryInfo};
     use connectrpc::{ConnectError, ErrorDetail};
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_bytes, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -1635,6 +1649,8 @@ mod tests {
     const SET_PROJECT_SECRET_PATH: &str = "/codewire.v1.SecretService/SetProjectSecret";
     const DELETE_PROJECT_SECRET_PATH: &str = "/codewire.v1.SecretService/DeleteProjectSecret";
     const RENAME_PROJECT_SECRET_PATH: &str = "/codewire.v1.SecretService/RenameProjectSecret";
+    const PREVIEW_WORKLOAD_SECRET_RESOLUTION_PATH: &str =
+        "/codewire.v1.SecretService/PreviewWorkloadSecretResolution";
     const GET_BILLING_OVERVIEW_PATH: &str =
         "/codewire.console.v1.BillingService/GetBillingOverview";
     const GET_GITHUB_CONFIG_PATH: &str = "/codewire.console.v1.GitHubService/GetGitHubConfig";
@@ -2372,6 +2388,14 @@ mod tests {
             secret_count: 1,
             ..Default::default()
         };
+        let preview_request = PreviewWorkloadSecretResolutionRequest {
+            org_id: "org_123".into(),
+            organization: true,
+            secret_project_id: "sp_123".into(),
+            user: true,
+            explicit_environment_keys: vec!["DATABASE_URL".into()],
+            ..Default::default()
+        };
         for (rpc_path, body) in [
             (
                 LIST_SECRETS_PATH,
@@ -2467,6 +2491,34 @@ mod tests {
                 .mount(&server)
                 .await;
         }
+        Mock::given(method("POST"))
+            .and(path(PREVIEW_WORKLOAD_SECRET_RESOLUTION_PATH))
+            .and(header("authorization", "Bearer test-token"))
+            .and(header("user-agent", "codewire-client-test/1"))
+            .and(body_bytes(preview_request.encode_to_vec()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(
+                        PreviewWorkloadSecretResolutionResponse {
+                            secrets: vec![ResolvedWorkloadSecretMetadata {
+                                key: "DATABASE_URL".into(),
+                                source: WorkloadSecretSource::ExplicitEnvironment.into(),
+                                overridden_sources: vec![
+                                    WorkloadSecretSource::Organization.into(),
+                                    WorkloadSecretSource::Project.into(),
+                                    WorkloadSecretSource::User.into(),
+                                ],
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let client = test_client(&server).await;
         assert_eq!(
@@ -2602,6 +2654,29 @@ mod tests {
             })
             .await
             .expect("rename project secret");
+
+        let preview = client
+            .preview_workload_secret_resolution(preview_request)
+            .await
+            .expect("preview workload secret resolution");
+        assert_eq!(preview.secrets.len(), 1);
+        assert_eq!(preview.secrets[0].key, "DATABASE_URL");
+        assert_eq!(
+            preview.secrets[0].source.as_known(),
+            Some(WorkloadSecretSource::ExplicitEnvironment)
+        );
+        assert_eq!(
+            preview.secrets[0]
+                .overridden_sources
+                .iter()
+                .map(|source| source.as_known())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(WorkloadSecretSource::Organization),
+                Some(WorkloadSecretSource::Project),
+                Some(WorkloadSecretSource::User),
+            ]
+        );
     }
 
     #[tokio::test]

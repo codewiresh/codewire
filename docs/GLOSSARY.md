@@ -14,6 +14,63 @@ The canonical product object. An environment is an isolated development machine 
 
 Environments have a lifecycle: pending, creating, starting, running, stopping, stopped, deleting, deleted, failed, suspended, and related operational states.
 
+## Stored material
+
+A protected value at rest. Storing material does not expose it to an
+environment and does not select how it will be used.
+
+## Secret-blind execution
+
+The target default for new secret delivery. A process receives only the
+non-secret configuration needed to exercise explicitly bound capabilities. AV
+adds protected material at the allowed operation boundary; the process cannot
+read or export it. A placement must not claim this property until its runtime
+boundary enforces it.
+
+## Environment projection
+
+The child-visible values assembled for one process launch after an explicit raw
+binding. A projection is ephemeral, is not a workload-readable shared file,
+and cannot restore a workspace or VM. It reuses the owning runtime operation's
+identity; there is no separate secret-generation history. This capability is
+not implemented yet.
+
+## Credential integration
+
+A typed AV adapter that uses protected material without giving that material to
+the workload. Examples include an HTTP credential proxy, request signer, or
+repository executor. The credential provider is the service being accessed,
+such as OpenAI or GitHub; the protected store is its material source, not its
+provider.
+
+## AV proxy helper
+
+Reusable edge code, not a secrets database or a separately named control
+plane. It gives a child a credential-free local endpoint and manages bounded
+relay/session lifecycle. The trusted broker outside the sandbox remains the
+only process that may resolve material, inject authorization, own a private CA
+key, or open the credential-bearing provider connection. Extraction of this
+library is planned; the existing local Codex bridge is its first Codewire
+building block.
+
+## Workspace storage
+
+The live, mutable files owned by an environment. It survives an ordinary stop
+or restart, but it is not an immutable point-in-time copy and is not a
+snapshot.
+
+## Snapshot
+
+Saved state that Codewire can reuse or restore. Always qualify what was saved:
+a skill snapshot, workspace snapshot, or environment snapshot. Only skill
+snapshots are implemented today.
+
+## VM checkpoint
+
+Saved running-VM execution state, including memory and device state. A
+checkpoint is backend-specific and is not an environment projection. Codewire
+does not implement VM checkpoints yet.
+
 ## Session
 
 A running process inside an environment, often an AI agent or shell command.

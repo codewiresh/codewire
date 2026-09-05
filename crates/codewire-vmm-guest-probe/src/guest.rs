@@ -1,7 +1,7 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::mem::size_of;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -10,9 +10,9 @@ use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,27 +24,42 @@ use rustix::fs::{
 use rustix::io::Errno as RustixErrno;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tokio::net::{TcpListener, UnixStream as TokioUnixStream};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::Semaphore;
 use tokio::sync::watch;
+use tokio::{
+    io::unix::AsyncFd,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 use tokio_stream::Stream;
 use tokio_vsock::{
     Incoming, VMADDR_CID_ANY, VMADDR_CID_HOST, VsockAddr, VsockListener, VsockStream,
 };
 use zeroize::Zeroizing;
 
+use crate::network::{
+    GUEST_NETWORK_VSOCK_PORT, NETWORK_FRAME_HEADER_LEN, NETWORK_HOST_HELLO_LEN,
+    NETWORK_HOST_READY_LEN, NETWORK_HOST_READY_TIMEOUT_SECONDS, NETWORK_MAX_PACKET_BYTES,
+    NetworkGuestAck, NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession,
+    encoded_network_frame_len,
+};
 use crate::setup_apply::{
     OCI_LOWER_ROOT_MODE, SetupApplyError, apply_setup_layers, verify_completed_setup_generation,
 };
 use crate::setup_archive::ArchiveError;
 use crate::setup_verify::{SetupContentError, verify_setup_contents};
 use crate::workspace_plan::{
-    CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH, WorkspaceIdentity, WorkspacePlan,
+    ACTIVE_WORKSPACE_PLAN_PATH, CONTAINER_PLAN_PATH, MAX_PLAN_BYTES, WORKSPACE_PLAN_PATH,
+    WorkspaceIdentity, WorkspacePlan,
 };
 use crate::{
-    GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, PROGRESS_FRAME_LEN, PROGRESS_REQUEST_LEN,
-    ProgressFrame, ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SEED_LEN,
-    SETUP_DISK_SERIAL, SETUP_HEADER_LEN, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
-    SetupHeader, Sha256Value,
+    DIRECT_SHARE_PLAN_PATH, DOCKER_DISK_SERIAL, DirectSharePlan, GUEST_PROGRESS_VSOCK_PORT,
+    GuestBootStage, MAX_DIRECT_SHARE_PLAN_BYTES, MAX_SKILL_SNAPSHOT_PLAN_BYTES, PROGRESS_FRAME_LEN,
+    PROGRESS_REQUEST_LEN, ProgressFrame, ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL,
+    SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN, SKILL_SNAPSHOT_CONTENT_PATH,
+    SKILL_SNAPSHOT_PLAN_PATH, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
+    SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan,
 };
 
 pub const INIT_PATH: &str = "/init";
@@ -53,11 +68,12 @@ pub const ROOT_MOUNT_PATH: &str = "/generation";
 pub const WORKSPACE_PATH: &str = "/workspace";
 pub const CONTROL_PATH: &str = "/state/codewire";
 pub const BOOT_STAGE_PATH: &str = "/state/codewire/boot-stage";
+pub const NETWORK_STATUS_PATH: &str = "/state/codewire/network-status";
 pub const NONCE_PATH: &str = "/state/codewire/nonce";
 pub const POWEROFF_MARKER_PATH: &str = "/state/codewire/poweroff.accepted";
 pub const IDENTITY_MARKER: &str = "CWIDENTITY1";
 pub const NONCE_MARKER: &str = "CWNONCE1";
-pub const NETWORK_MARKER: &str = "CWNETWORK1 loopback-only";
+pub const NETWORK_MARKER: &str = "CWNETWORK2 isolated-tun";
 pub const POWEROFF_MARKER: &str = "CWPOWEROFF1 accepted";
 pub const RUNC_PATH: &str = "/sbin/runc";
 pub const RUNC_STATE_PATH: &str = "/run/codewire/runc";
@@ -81,11 +97,25 @@ const ROOT_MERGED_PATH: &str = "/generation/merged";
 const CONTAINER_CONTROL_PATH: &str = "/run/codewire/container";
 const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
 const CONTAINER_MACHINE_ID_PATH: &str = "/run/codewire/container/machine-id";
+const CONTAINER_RESOLV_CONF_PATH: &str = "/run/codewire/container/resolv.conf";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
+const DOCKER_DATA_PATH: &str = "/var/lib/docker";
+const DOCKER_RUNTIME_PATH: &str = "/run/codewire/docker";
+const DOCKER_SOCKET_PATH: &str = "/run/codewire/docker/docker.sock";
+const DOCKER_ROOT_PATH: &str = "/run/codewire/docker-root";
+const DOCKER_ROOT_BINARY_PATH: &str = "/usr/local/bin/dockerd";
+const CONTAINER_DOCKER_RUNTIME_PATH: &str = "/run/codewire-docker";
+const CONTAINER_DOCKER_SOCKET_PATH: &str = "/run/codewire-docker/docker.sock";
+const CONTAINER_DEFAULT_DOCKER_SOCKET_PATH: &str = "/run/docker.sock";
+const DOCKERD_PATH: &str = "/generation/merged/usr/local/bin/dockerd";
+const DOCKER_START_TIMEOUT: Duration = Duration::from_secs(15);
+const CREDENTIAL_INGRESS_SOCKET: &str = "/run/codewire/container/credential.sock";
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
 const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
+const CONTAINER_RESOLV_CONF_DESTINATION: &str = "/etc/resolv.conf";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
+const CONTAINER_CREDENTIAL_SOCKET: &str = "/run/codewire-host/credential.sock";
 const INSTALL_STATE_PATH: &str = "/state/codewire/workspace-install.state";
 const CONTAINER_INSTALL_STATE_PATH: &str = "/run/codewire-runtime/install.state";
 const PERSISTENT_PROBE_PATH: &str = "/state/probe";
@@ -100,7 +130,63 @@ const WORKSPACE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNC_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 const CONTROL_MESSAGE_LIMIT: usize = 32;
 const WORKSPACE_READY_FD: RawFd = 3;
+const NETWORK_AGENT_READY_FD: RawFd = 3;
+const NETWORK_AGENT_READY: &[u8] = b"CWNETG1 namespace-ready\n";
+const NETWORK_AGENT_HOST_READY: &[u8] = b"CWNETG1 host-ready\n";
+const NETWORK_NAMESPACE_PATH: &str = "/run/codewire/netns/workspace";
+const NETWORK_NAMESPACE_DIRECTORY: &str = "/run/codewire/netns";
+const NETWORK_INTERFACE: &str = "cw0";
+const NETWORK_GUEST_ADDRESS: &str = "192.0.2.2/30";
+const NETWORK_GATEWAY_ADDRESS: &str = "192.0.2.1";
+const NETWORK_MTU: usize = 1_500;
+const NETWORK_AGENT_START_TIMEOUT: Duration = Duration::from_secs(10);
+const NETWORK_AGENT_HOST_TIMEOUT: Duration =
+    Duration::from_secs(NETWORK_HOST_READY_TIMEOUT_SECONDS);
+const NETWORK_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+const NSFS_MAGIC: u64 = 0x6e73_6673;
+const NETWORK_AGENT_FAILURE_STAGES: &[&str] = &[
+    "workspace-net-seed-failed",
+    "workspace-net-tun-open-failed",
+    "workspace-net-tun-attach-failed",
+    "workspace-net-loopback-failed",
+    "workspace-net-link-failed",
+    "workspace-net-address-failed",
+    "workspace-net-route-failed",
+    "workspace-net-ipv-six-failed",
+    "workspace-net-topology-failed",
+    "workspace-net-async-failed",
+    "workspace-net-vsock-failed",
+    "workspace-net-caps-failed",
+    "workspace-net-ready-failed",
+    "workspace-net-publish-failed",
+    "workspace-net-peer-failed",
+    "workspace-net-handshake-timeout",
+    "workspace-net-hello-read-failed",
+    "workspace-net-hello-auth-failed",
+    "workspace-net-ack-write-failed",
+    "workspace-net-ready-read-failed",
+    "workspace-net-ready-auth-failed",
+    "workspace-net-session-failed",
+];
+const NETWORK_AGENT_GENERIC_FAILURE_STAGE: &str = "workspace-net-start-failed";
+const NETWORK_AGENT_HOST_FAILURE_STAGE: &str = "workspace-net-host-failed";
+const NETWORK_STATUS_VALUES: &[&str] = &[
+    "network-listening",
+    "network-peer-rejected",
+    "network-handshake-timeout",
+    "network-hello-read-failed",
+    "network-hello-auth-failed",
+    "network-ack-write-failed",
+    "network-ready-read-failed",
+    "network-ready-auth-failed",
+    "network-session-failed",
+    "network-authenticated",
+];
+const CREDENTIAL_FORWARDER_READY_FD: RawFd = 4;
 const WORKSPACE_READY_LIMIT: usize = 96;
+const CREDENTIAL_FORWARDER_READY: &[u8] = b"CWCREDS1 ready\n";
+const CREDENTIAL_FORWARDER_START_TIMEOUT: Duration = Duration::from_secs(5);
+const CREDENTIAL_FORWARDER_CONNECTION_LIMIT: usize = 32;
 const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
     (
         b"CWFAIL1 workspace-identity-failed\n",
@@ -126,6 +212,10 @@ const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
         b"CWFAIL1 workspace-workload-failed\n",
         "workspace-workload-failed",
     ),
+    (
+        b"CWFAIL1 workspace-credential-forwarder-failed\n",
+        "workspace-credential-forwarder-failed",
+    ),
 ];
 
 const SYS_BLOCK_PATH: &str = "/sys/class/block";
@@ -140,6 +230,8 @@ const RUNC_PROCESS_SPEC_LIMIT: u64 = 1024 * 1024;
 const PERSISTENT_WORKSPACE_PATH: &str = "/state/workspace";
 const PERSISTENT_HOME_PATH: &str = "/state/home";
 const PERSISTENT_HOME_WORK_PATH: &str = "/state/home-work";
+const PERSISTENT_AGENT_HOMES_PATH: &str = "/state/agent-homes";
+const PERSISTENT_CODEX_HOME_PATH: &str = "/state/agent-homes/codex";
 
 static POWEROFF_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -208,15 +300,34 @@ pub fn run_init() -> Result<()> {
     );
     validate_block_device(&seed_device)?;
     validate_block_device(&root_device)?;
+    let seed = read_seed_file(&seed_device)?;
+    let docker_device = if seed.docker_data_disk() {
+        let device = wait_for_disk_by_serial(
+            Path::new(SYS_BLOCK_PATH),
+            Path::new(DEV_PATH),
+            DOCKER_DISK_SERIAL,
+            DISK_DISCOVERY_TIMEOUT,
+        )?;
+        ensure!(
+            device != state_device && device != root_device && device != seed_device,
+            "Docker data disk must be distinct from every existing guest disk"
+        );
+        validate_block_device(&device)?;
+        Some(device)
+    } else {
+        None
+    };
     record_boot_stage("disks-admitted")?;
     mount_root_generation(&root_device)?;
+    if let Some(device) = docker_device.as_deref() {
+        mount_docker_data(device)?;
+    }
     record_boot_stage("root-mounted")?;
     create_state_layout()?;
 
     // Validate the complete seed before starting anything that accepts guest
     // control traffic. The child deliberately rereads it from the immutable
     // disk rather than inheriting the token through argv or environment.
-    let seed = read_seed_file(&seed_device)?;
     start_boot_progress(&seed, GuestBootStage::RootMounted)?;
     let plan = if let Some(binding) = seed.setup() {
         let setup_device = wait_for_disk_by_serial(
@@ -228,8 +339,11 @@ pub fn run_init() -> Result<()> {
         ensure!(
             setup_device != state_device
                 && setup_device != root_device
-                && setup_device != seed_device,
-            "setup disk must be distinct from every persistent or secret-bearing disk"
+                && setup_device != seed_device
+                && docker_device
+                    .as_ref()
+                    .is_none_or(|docker_device| setup_device != *docker_device),
+            "setup disk must be distinct from every persistent disk"
         );
         validate_block_device(&setup_device)?;
         let mut setup = open_setup_device(&setup_device)?;
@@ -262,22 +376,59 @@ pub fn run_init() -> Result<()> {
     } else {
         require_persisted_workspace_plan(load_workspace_plan()?)?
     };
+    create_dir(Path::new("/run/codewire"), 0o700)?;
+    persist_active_workspace_plan(&plan)?;
     record_boot_stage("workspace-plan-ready")?;
     normalize_initial_persistent_ownership(&plan)?;
+    prepare_codex_projection(&plan)?;
     record_boot_stage("ownership-ready")?;
     prepare_install_state()?;
     let poweroff = prepare_container_control(&seed, &plan.identity)?;
+    prepare_docker_runtime(&seed, &plan.identity)?;
     record_boot_stage("container-control-ready")?;
+    let mut network = match spawn_guest_network_agent() {
+        Ok(network) => network,
+        Err(error) => {
+            record_network_agent_failure(NETWORK_AGENT_GENERIC_FAILURE_STAGE)?;
+            return Err(error);
+        }
+    };
     prepare_workspace_generation(&plan)?;
     record_boot_stage("root-generation-ready")?;
-    expose_persistent_layout(&plan)?;
+    if let Err(error) = mount_direct_shares(&seed) {
+        record_boot_stage("workspace-direct-share-failed")?;
+        return Err(error);
+    }
+    if let Err(error) = expose_persistent_layout(&plan) {
+        record_boot_stage("workspace-layout-failed")?;
+        return Err(error);
+    }
+    if let Err(error) = mount_skill_snapshots(&seed, &plan) {
+        record_boot_stage("workspace-skills-failed")?;
+        return Err(error);
+    }
+    if seed.docker_data_disk()
+        && let Err(error) = prepare_docker_root(&plan)
+    {
+        record_boot_stage("workspace-docker-root-failed")?;
+        return Err(error);
+    }
     record_boot_stage("persistent-layout-ready")?;
+    if let Err(error) = network.wait_for_host() {
+        record_network_agent_failure(NETWORK_AGENT_HOST_FAILURE_STAGE)?;
+        return Err(error);
+    }
+    let docker = if seed.docker_data_disk() {
+        Some(spawn_docker_daemon(&plan.identity)?)
+    } else {
+        None
+    };
     let workspace = spawn_workspace_container(&plan)?;
     record_boot_stage("workspace-running")?;
 
     let daemon = spawn_daemon()?;
     record_boot_stage("daemon-started")?;
-    supervise_guest(daemon, workspace, poweroff)
+    supervise_guest(daemon, workspace, network.into_child()?, docker, poweroff)
 }
 
 fn require_persisted_workspace_plan(plan: Option<WorkspacePlan>) -> Result<WorkspacePlan> {
@@ -294,8 +445,7 @@ pub async fn run_daemon() -> Result<()> {
         "guest daemon refuses an ambient environment"
     );
     let seed = read_seed_from_discovered_disk()?;
-    let plan = load_workspace_plan()?
-        .ok_or_else(|| anyhow::anyhow!("sealed workspace execution plan is absent"))?;
+    let plan = load_active_workspace_plan()?;
     let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, seed.daemon_vsock_port()))
         .with_context(|| {
             format!(
@@ -324,6 +474,13 @@ pub async fn run_daemon() -> Result<()> {
                 additional_gids: plan.identity.additional_gids.clone(),
             },
         ),
+        credential_bridge: Some(codewire_daemon::CredentialBridgeConfig {
+            environment_id: seed.vm_id(),
+            environment_generation: seed.generation(),
+            ingress_socket: PathBuf::from(CREDENTIAL_INGRESS_SOCKET),
+            ingress_uid: plan.identity.uid,
+            ingress_gid: plan.identity.gid,
+        }),
     };
 
     codewire_daemon::serve_grpc_with_incoming(
@@ -333,6 +490,482 @@ pub async fn run_daemon() -> Result<()> {
     )
     .await
     .context("serve authenticated guest daemon over AF_VSOCK")
+}
+
+/// Trusted guest-side end of the raw-IP seam. This process is created by PID
+/// 1 inside a fresh network namespace, configures exactly one TUN, drops every
+/// capability, and then accepts only authenticated host-CID sessions.
+pub async fn run_network_agent() -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } != 1,
+        "guest network agent must not be PID 1"
+    );
+    ensure!(
+        std::env::vars_os().next().is_none(),
+        "guest network agent refuses an ambient environment"
+    );
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1 {
+        record_boot_stage("workspace-net-caps-failed")?;
+        return Err(io::Error::last_os_error()).context("confine guest network agent state");
+    }
+
+    let mut readiness = network_agent_readiness_stream().inspect_err(|_| {
+        let _ = record_boot_stage("workspace-net-ready-failed");
+    })?;
+    let seed = network_agent_startup(
+        read_seed_from_discovered_disk(),
+        "workspace-net-seed-failed",
+    )?;
+    let vm_id = seed.vm_id();
+    let generation = seed.generation();
+    let key = network_agent_startup(
+        NetworkKey::derive(seed.auth_token(), vm_id, generation)
+            .context("derive guest network session key"),
+        "workspace-net-seed-failed",
+    )?;
+    let tun = Arc::new(network_agent_startup(
+        AsyncFd::new(open_and_configure_tun()?)
+            .context("register guest TUN with the async runtime"),
+        "workspace-net-async-failed",
+    )?);
+    let listener = network_agent_startup(
+        VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, GUEST_NETWORK_VSOCK_PORT))
+            .context("bind guest network AF_VSOCK port"),
+        "workspace-net-vsock-failed",
+    )?;
+    network_agent_startup(
+        clear_process_capabilities().context("drop guest network agent capabilities"),
+        "workspace-net-caps-failed",
+    )?;
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
+        record_boot_stage("workspace-net-caps-failed")?;
+        return Err(io::Error::last_os_error()).context("confine guest network agent privileges");
+    }
+
+    network_agent_startup(
+        publish_network_agent_message(&mut readiness, NETWORK_AGENT_READY),
+        "workspace-net-publish-failed",
+    )?;
+    let mut readiness = Some(readiness);
+    record_network_status("network-listening")?;
+
+    loop {
+        tokio::select! {
+            packet = read_tun_packet(&tun) => {
+                // With no authenticated host, consuming and discarding the
+                // bounded packet is the fail-closed path. It also prevents a
+                // later worker from receiving pre-authentication traffic.
+                let _ = packet?;
+            }
+            accepted = listener.accept() => {
+                let (stream, peer) = accepted.context("accept guest network AF_VSOCK session")?;
+                if peer.cid() != VMADDR_CID_HOST {
+                    record_network_status("network-peer-rejected")?;
+                    record_boot_stage("workspace-net-peer-failed")?;
+                    bail!("guest network peer is not the host CID");
+                }
+                let authenticated = tokio::time::timeout(
+                    NETWORK_HANDSHAKE_TIMEOUT,
+                    authenticate_guest_network(stream, &key, vm_id, generation),
+                )
+                .await;
+                let (stream, session) = match authenticated {
+                    Ok(Ok(authenticated)) => authenticated,
+                    Ok(Err(error)) => {
+                        let status = error.status();
+                        record_network_status(status)?;
+                        record_boot_stage(error.failure_stage())?;
+                        bail!("guest network authentication failed");
+                    }
+                    Err(_) => {
+                        record_network_status("network-handshake-timeout")?;
+                        record_boot_stage("workspace-net-handshake-timeout")?;
+                        bail!("guest network authentication timed out");
+                    }
+                };
+                record_network_status("network-authenticated")?;
+                if let Some(mut channel) = readiness.take() {
+                    publish_network_agent_message(&mut channel, NETWORK_AGENT_HOST_READY)?;
+                }
+                // A lost or malformed worker session never opens another
+                // route. Return to the host-only accept loop and drain/drop
+                // packets until a fresh authenticated worker arrives.
+                if bridge_guest_network(stream, session, Arc::clone(&tun))
+                    .await
+                    .is_err()
+                {
+                    record_network_status("network-session-failed")?;
+                }
+            }
+        }
+    }
+}
+
+async fn authenticate_guest_network(
+    mut stream: VsockStream,
+    key: &NetworkKey,
+    vm_id: uuid::Uuid,
+    generation: u64,
+) -> Result<(VsockStream, NetworkSession), GuestNetworkHandshakeError> {
+    let mut hello = [0_u8; NETWORK_HOST_HELLO_LEN];
+    AsyncReadExt::read_exact(&mut stream, &mut hello)
+        .await
+        .map_err(|_| GuestNetworkHandshakeError::ReadHello)?;
+    let hello = NetworkHostHello::decode(&hello, key, vm_id, generation)
+        .map_err(|_| GuestNetworkHandshakeError::AuthenticateHello)?;
+    let acknowledgement = NetworkGuestAck::new(hello.nonce)
+        .map_err(|_| GuestNetworkHandshakeError::AuthenticateHello)?
+        .encode(key);
+    AsyncWriteExt::write_all(&mut stream, &acknowledgement)
+        .await
+        .map_err(|_| GuestNetworkHandshakeError::WriteAcknowledgement)?;
+    let mut ready = [0_u8; NETWORK_HOST_READY_LEN];
+    AsyncReadExt::read_exact(&mut stream, &mut ready)
+        .await
+        .map_err(|_| GuestNetworkHandshakeError::ReadReady)?;
+    NetworkHostReady::decode(&ready, key, &hello.nonce)
+        .map_err(|_| GuestNetworkHandshakeError::AuthenticateReady)?;
+    let session = NetworkSession::new(key, &hello.nonce, NetworkRole::Guest)
+        .map_err(|_| GuestNetworkHandshakeError::Session)?;
+    Ok((stream, session))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuestNetworkHandshakeError {
+    ReadHello,
+    AuthenticateHello,
+    WriteAcknowledgement,
+    ReadReady,
+    AuthenticateReady,
+    Session,
+}
+
+impl GuestNetworkHandshakeError {
+    fn status(self) -> &'static str {
+        match self {
+            Self::ReadHello => "network-hello-read-failed",
+            Self::AuthenticateHello => "network-hello-auth-failed",
+            Self::WriteAcknowledgement => "network-ack-write-failed",
+            Self::ReadReady => "network-ready-read-failed",
+            Self::AuthenticateReady => "network-ready-auth-failed",
+            Self::Session => "network-session-failed",
+        }
+    }
+
+    fn failure_stage(self) -> &'static str {
+        match self {
+            Self::ReadHello => "workspace-net-hello-read-failed",
+            Self::AuthenticateHello => "workspace-net-hello-auth-failed",
+            Self::WriteAcknowledgement => "workspace-net-ack-write-failed",
+            Self::ReadReady => "workspace-net-ready-read-failed",
+            Self::AuthenticateReady => "workspace-net-ready-auth-failed",
+            Self::Session => "workspace-net-session-failed",
+        }
+    }
+}
+
+async fn bridge_guest_network(
+    stream: VsockStream,
+    session: NetworkSession,
+    tun: Arc<AsyncFd<OwnedFd>>,
+) -> Result<()> {
+    let session = Arc::new(tokio::sync::Mutex::new(session));
+    let (mut stream_read, mut stream_write) = tokio::io::split(stream);
+    let outbound_session = Arc::clone(&session);
+    let outbound_tun = Arc::clone(&tun);
+    let outbound = async move {
+        loop {
+            let packet = read_tun_packet(&outbound_tun).await?;
+            if !canonical_ipv4_packet(&packet) {
+                continue;
+            }
+            let frame = outbound_session
+                .lock()
+                .await
+                .encode_packet(&packet)
+                .context("authenticate guest network outbound packet")?;
+            stream_write
+                .write_all(&frame)
+                .await
+                .context("write guest network packet frame")?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
+    let inbound_session = Arc::clone(&session);
+    let inbound = async move {
+        loop {
+            let mut header = [0_u8; NETWORK_FRAME_HEADER_LEN];
+            stream_read
+                .read_exact(&mut header)
+                .await
+                .context("read guest network frame header")?;
+            let frame_len =
+                encoded_network_frame_len(&header).context("bound guest network frame")?;
+            let mut frame = vec![0_u8; frame_len];
+            frame[..NETWORK_FRAME_HEADER_LEN].copy_from_slice(&header);
+            stream_read
+                .read_exact(&mut frame[NETWORK_FRAME_HEADER_LEN..])
+                .await
+                .context("read guest network frame payload")?;
+            let packet = inbound_session
+                .lock()
+                .await
+                .decode_packet(&frame)
+                .context("authenticate guest network inbound packet")?;
+            ensure!(
+                canonical_ipv4_packet(&packet),
+                "host supplied a non-canonical IPv4 packet"
+            );
+            write_tun_packet(&tun, &packet).await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::try_join!(outbound, inbound)?;
+    Ok(())
+}
+
+fn canonical_ipv4_packet(packet: &[u8]) -> bool {
+    if !(20..=NETWORK_MTU).contains(&packet.len()) || packet[0] >> 4 != 4 {
+        return false;
+    }
+    let header_words = usize::from(packet[0] & 0x0f);
+    if header_words < 5
+        || header_words
+            .checked_mul(4)
+            .is_none_or(|length| length > packet.len())
+    {
+        return false;
+    }
+    usize::from(u16::from_be_bytes([packet[2], packet[3]])) == packet.len()
+}
+
+async fn read_tun_packet(tun: &AsyncFd<OwnedFd>) -> io::Result<Vec<u8>> {
+    let mut packet = vec![0_u8; NETWORK_MAX_PACKET_BYTES];
+    loop {
+        let mut ready = tun.readable().await?;
+        match ready.try_io(|descriptor| {
+            let length = unsafe {
+                libc::read(
+                    descriptor.get_ref().as_raw_fd(),
+                    packet.as_mut_ptr().cast(),
+                    packet.len(),
+                )
+            };
+            if length == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(length as usize)
+            }
+        }) {
+            Ok(Ok(0)) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            Ok(Ok(length)) => {
+                packet.truncate(length);
+                return Ok(packet);
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => continue,
+        }
+    }
+}
+
+async fn write_tun_packet(tun: &AsyncFd<OwnedFd>, packet: &[u8]) -> io::Result<()> {
+    loop {
+        let mut ready = tun.writable().await?;
+        match ready.try_io(|descriptor| {
+            let length = unsafe {
+                libc::write(
+                    descriptor.get_ref().as_raw_fd(),
+                    packet.as_ptr().cast(),
+                    packet.len(),
+                )
+            };
+            if length == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(length as usize)
+            }
+        }) {
+            Ok(Ok(length)) if length == packet.len() => return Ok(()),
+            Ok(Ok(_)) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => continue,
+        }
+    }
+}
+
+#[repr(C)]
+struct TunIfreq {
+    name: [libc::c_char; libc::IF_NAMESIZE],
+    flags: libc::c_short,
+    padding: [u8; 22],
+}
+
+fn open_and_configure_tun() -> Result<OwnedFd> {
+    let raw = unsafe {
+        libc::open(
+            c"/dev/net/tun".as_ptr(),
+            libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if raw == -1 {
+        record_boot_stage("workspace-net-tun-open-failed")?;
+        return Err(io::Error::last_os_error()).context("open guest TUN device");
+    }
+    let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut request = TunIfreq {
+        name: [0; libc::IF_NAMESIZE],
+        flags: (0x0001 | 0x1000) as libc::c_short,
+        padding: [0; 22],
+    };
+    for (destination, byte) in request.name.iter_mut().zip(NETWORK_INTERFACE.bytes()) {
+        *destination = byte as libc::c_char;
+    }
+    let tunsetiff = if cfg!(any(
+        target_arch = "mips",
+        target_arch = "mips64",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "sparc64"
+    )) {
+        0x8004_54ca_u64
+    } else {
+        0x4004_54ca_u64
+    } as libc::c_ulong;
+    if unsafe { libc::ioctl(descriptor.as_raw_fd(), tunsetiff as _, &mut request) } == -1 {
+        record_boot_stage("workspace-net-tun-attach-failed")?;
+        return Err(io::Error::last_os_error()).context("attach guest TUN interface");
+    }
+
+    for (arguments, failure_stage) in [
+        (
+            vec!["ip", "link", "set", "dev", "lo", "up"],
+            "workspace-net-loopback-failed",
+        ),
+        (
+            vec![
+                "ip",
+                "link",
+                "set",
+                "dev",
+                NETWORK_INTERFACE,
+                "mtu",
+                "1500",
+                "up",
+            ],
+            "workspace-net-link-failed",
+        ),
+        (
+            vec![
+                "ip",
+                "addr",
+                "add",
+                NETWORK_GUEST_ADDRESS,
+                "dev",
+                NETWORK_INTERFACE,
+            ],
+            "workspace-net-address-failed",
+        ),
+        (
+            vec![
+                "ip",
+                "route",
+                "add",
+                "default",
+                "via",
+                NETWORK_GATEWAY_ADDRESS,
+                "dev",
+                NETWORK_INTERFACE,
+            ],
+            "workspace-net-route-failed",
+        ),
+    ] {
+        network_agent_startup(run_fixed_busybox(&arguments), failure_stage)?;
+    }
+    for path in [
+        "/proc/sys/net/ipv6/conf/all/disable_ipv6",
+        "/proc/sys/net/ipv6/conf/default/disable_ipv6",
+        "/proc/sys/net/ipv6/conf/lo/disable_ipv6",
+        "/proc/sys/net/ipv6/conf/cw0/disable_ipv6",
+    ] {
+        network_agent_startup(
+            write_proc_value(Path::new(path), b"1\n"),
+            "workspace-net-ipv-six-failed",
+        )?;
+    }
+    network_agent_startup(
+        verify_isolated_tun(
+            Path::new("/proc/net/dev"),
+            Path::new("/proc/net/route"),
+            Path::new("/proc/net/ipv6_route"),
+        ),
+        "workspace-net-topology-failed",
+    )?;
+    Ok(descriptor)
+}
+
+fn network_agent_startup<T>(result: Result<T>, failure_stage: &'static str) -> Result<T> {
+    debug_assert!(NETWORK_AGENT_FAILURE_STAGES.contains(&failure_stage));
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            record_boot_stage(failure_stage)?;
+            Err(error)
+        }
+    }
+}
+
+fn run_fixed_busybox(arguments: &[&str]) -> Result<()> {
+    let status = Command::new("/bin/busybox")
+        .args(arguments)
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("configure isolated guest TUN")?;
+    ensure!(status.success(), "isolated guest TUN configuration failed");
+    Ok(())
+}
+
+fn write_proc_value(path: &Path, value: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open kernel network setting {}", path.display()))?;
+    file.write_all(value)
+        .with_context(|| format!("write kernel network setting {}", path.display()))
+}
+
+fn network_agent_readiness_stream() -> Result<UnixStream> {
+    let flags = unsafe { libc::fcntl(NETWORK_AGENT_READY_FD, libc::F_GETFD) };
+    ensure!(flags != -1, "guest network readiness descriptor is absent");
+    if unsafe {
+        libc::fcntl(
+            NETWORK_AGENT_READY_FD,
+            libc::F_SETFD,
+            flags | libc::FD_CLOEXEC,
+        )
+    } == -1
+    {
+        return Err(io::Error::last_os_error()).context("confine guest network readiness channel");
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(NETWORK_AGENT_READY_FD) };
+    let stat = rustix::fs::fstat(&stream).context("inspect guest network readiness channel")?;
+    ensure!(
+        RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Socket,
+        "guest network readiness descriptor is not a socket"
+    );
+    Ok(stream)
+}
+
+fn publish_network_agent_message(stream: &mut UnixStream, message: &[u8]) -> Result<()> {
+    stream
+        .write_all(message)
+        .context("publish guest network readiness")?;
+    stream.flush().context("flush guest network readiness")
 }
 
 struct HostOnlyIncoming {
@@ -424,15 +1057,76 @@ pub fn run_read_nonce() -> Result<()> {
 
 pub fn run_network_check() -> Result<()> {
     let _ = read_guest_identity()?;
-    verify_loopback_only(
-        Path::new("/sys/class/net"),
+    verify_isolated_tun(
+        Path::new("/proc/net/dev"),
         Path::new("/proc/net/route"),
         Path::new("/proc/net/ipv6_route"),
     )?;
-    verify_no_ip_egress_canaries()?;
+    for destination in [
+        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 53),
+        SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 19), 443),
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1),
+        SocketAddrV4::new(Ipv4Addr::new(169, 254, 169, 254), 80),
+    ] {
+        ensure!(
+            TcpStream::connect_timeout(&SocketAddr::V4(destination), Duration::from_millis(100),)
+                .is_err(),
+            "isolated workspace unexpectedly completed a TCP connection"
+        );
+    }
+    require_no_udp_response()?;
+    require_raw_icmp_denied()?;
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{NETWORK_MARKER}")?;
     stdout.flush()?;
+    Ok(())
+}
+
+fn require_no_udp_response() -> Result<()> {
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+        .context("bind isolated workspace UDP canary")?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .context("bound isolated workspace UDP canary")?;
+    let query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07fixture\x08codewire\x04test\x00\x00\x01\x00\x01";
+    let mut response = [0_u8; 512];
+    for destination in [
+        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 53),
+        SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53),
+        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 9),
+    ] {
+        let _ = socket.send_to(query, destination);
+        match socket.recv_from(&mut response) {
+            Ok(_) => bail!("isolated workspace unexpectedly received a UDP response"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn require_raw_icmp_denied() -> Result<()> {
+    let descriptor = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::IPPROTO_ICMP,
+        )
+    };
+    if descriptor != -1 {
+        unsafe {
+            libc::close(descriptor);
+        }
+        bail!("isolated workspace unexpectedly created a raw ICMP socket");
+    }
+    ensure!(
+        io::Error::last_os_error().raw_os_error() == Some(libc::EPERM),
+        "isolated workspace raw ICMP denial is not capability-enforced"
+    );
     Ok(())
 }
 
@@ -634,6 +1328,9 @@ pub fn run_workspace_init() -> Result<()> {
         Ok(plan) => plan,
         Err(error) => return fail_workspace_init("workspace-plan-invalid", error),
     };
+    if let Err(error) = prepare_container_docker_socket(&plan.identity) {
+        return fail_workspace_init("workspace-confinement-failed", error);
+    }
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = request_poweroff_signal as *const () as usize;
     action.sa_flags = libc::SA_NOCLDSTOP;
@@ -652,6 +1349,10 @@ pub fn run_workspace_init() -> Result<()> {
     if let Err(error) = run_workspace_install(&plan) {
         return fail_workspace_init("workspace-install-failed", error);
     }
+    let mut credential_forwarder = match spawn_credential_forwarder(&plan) {
+        Ok(forwarder) => forwarder,
+        Err(error) => return fail_workspace_init("workspace-credential-forwarder-failed", error),
+    };
     if !plan.workload_args.is_empty() {
         let _workload = match spawn_workspace_process(
             &plan,
@@ -684,13 +1385,24 @@ pub fn run_workspace_init() -> Result<()> {
         if POWEROFF_REQUESTED.load(Ordering::Acquire) {
             return Ok(());
         }
+        if credential_forwarder
+            .try_wait()
+            .context("observe credential loopback forwarder")?
+            .is_some()
+        {
+            bail!("credential loopback forwarder exited");
+        }
         let mut status = 0;
         let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if reaped > 0
-            || (reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD))
-        {
+        if reaped == libc::pid_t::try_from(credential_forwarder.id()).unwrap_or(-1) {
+            bail!("credential loopback forwarder exited");
+        }
+        if reaped > 0 {
             thread::sleep(Duration::from_millis(20));
             continue;
+        }
+        if reaped == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            bail!("workspace init lost its credential loopback forwarder");
         }
         if reaped == 0 || io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
             thread::sleep(Duration::from_millis(20));
@@ -698,6 +1410,268 @@ pub fn run_workspace_init() -> Result<()> {
         }
         return Err(io::Error::last_os_error()).context("reap workspace child");
     }
+}
+
+/// Synthetic, static workload used by the checked-in native acceptance gate.
+/// It deliberately has no provider, host, or ambient credential integration.
+pub fn run_docker_fixture(arguments: Vec<OsString>) -> Result<()> {
+    let mut arguments = arguments.into_iter();
+    let action = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or_else(|| anyhow::anyhow!("Docker fixture requires one action"))?;
+    match action.as_str() {
+        "emit" => {
+            let value = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| anyhow::anyhow!("Docker emit fixture requires one value"))?;
+            ensure!(arguments.next().is_none(), "Docker emit accepts one value");
+            println!("{value}");
+            Ok(())
+        }
+        "write-volume" => {
+            let value = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or_else(|| anyhow::anyhow!("Docker volume fixture requires one value"))?;
+            ensure!(
+                arguments.next().is_none(),
+                "Docker volume write accepts one value"
+            );
+            let mut file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open("/data/value")
+                .context("create Docker volume marker")?;
+            file.write_all(value.as_bytes())
+                .and_then(|()| file.write_all(b"\n"))
+                .and_then(|()| file.sync_all())
+                .context("persist Docker volume marker")
+        }
+        "read-volume" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker volume read accepts no value"
+            );
+            let bytes = read_bounded(Path::new("/data/value"), 4096)
+                .context("read Docker volume marker")?;
+            ensure!(bytes.len() < 4096, "Docker volume marker is too large");
+            io::stdout()
+                .write_all(&bytes)
+                .context("emit Docker volume marker")
+        }
+        "serve" => {
+            let port = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .and_then(|value| value.parse::<u16>().ok())
+                .filter(|port| *port != 0)
+                .ok_or_else(|| anyhow::anyhow!("Docker server fixture port is invalid"))?;
+            ensure!(arguments.next().is_none(), "Docker server accepts one port");
+            let listener = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))
+                .context("bind Docker fixture server")?;
+            loop {
+                let (mut stream, _) = listener.accept().context("accept Docker fixture request")?;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\nConnection: close\r\n\r\ndocker-port-local",
+                    )
+                    .context("write Docker fixture response")?;
+            }
+        }
+        "fill-bytes" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker byte fill accepts no value"
+            );
+            let path = Path::new("/data/fill");
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)
+                .context("create Docker byte exhaustion fixture")?;
+            let chunk = vec![0xa5_u8; 1024 * 1024];
+            let mut exhausted = false;
+            for _ in 0..2048 {
+                match file.write_all(&chunk) {
+                    Ok(()) => {}
+                    Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
+                        exhausted = true;
+                        break;
+                    }
+                    Err(error) => return Err(error).context("fill Docker data disk by bytes"),
+                }
+            }
+            drop(file);
+            ensure!(exhausted, "Docker byte fixture did not reach ENOSPC");
+            fs::remove_file(path).context("remove Docker byte exhaustion fixture")?;
+            File::open("/data")
+                .and_then(|directory| directory.sync_all())
+                .context("persist Docker byte exhaustion cleanup")?;
+            println!("docker-byte-enospc-ok");
+            Ok(())
+        }
+        "fill-inodes" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker inode fill accepts no value"
+            );
+            let root = Path::new("/data/inodes");
+            fs::create_dir(root).context("create Docker inode exhaustion directory")?;
+            let mut exhausted = false;
+            for index in 0..250_000_u32 {
+                let path = root.join(format!("{index:06x}"));
+                match OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(path)
+                {
+                    Ok(_) => {}
+                    Err(error) if error.raw_os_error() == Some(libc::ENOSPC) => {
+                        exhausted = true;
+                        break;
+                    }
+                    Err(error) => return Err(error).context("fill Docker data disk by inodes"),
+                }
+            }
+            ensure!(exhausted, "Docker inode fixture did not reach ENOSPC");
+            for entry in fs::read_dir(root).context("read Docker inode exhaustion directory")? {
+                fs::remove_file(entry?.path()).context("remove Docker inode exhaustion file")?;
+            }
+            fs::remove_dir(root).context("remove Docker inode exhaustion directory")?;
+            File::open("/data")
+                .and_then(|directory| directory.sync_all())
+                .context("persist Docker inode exhaustion cleanup")?;
+            println!("docker-inode-enospc-ok");
+            Ok(())
+        }
+        "spam-log" => {
+            let length = arguments
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|length| *length > 0 && *length <= 64 * 1024 * 1024)
+                .ok_or_else(|| anyhow::anyhow!("Docker log fixture length is invalid"))?;
+            ensure!(
+                arguments.next().is_none(),
+                "Docker log fixture accepts one length"
+            );
+            let chunk = [b'x'; 64 * 1024];
+            let mut remaining = length;
+            let mut stdout = io::stdout().lock();
+            while remaining != 0 {
+                let write_length = remaining.min(chunk.len());
+                stdout
+                    .write_all(&chunk[..write_length])
+                    .context("write Docker log fixture")?;
+                remaining -= write_length;
+            }
+            stdout.flush().context("flush Docker log fixture")
+        }
+        "assert-boundary" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker boundary fixture accepts no value"
+            );
+            for path in [
+                "/host/state",
+                "/host/generation",
+                "/host/run/codewire/container",
+                "/host/dev/vda",
+                "/host/dev/vdb",
+                "/host/dev/vdc",
+                "/host/dev/vdd",
+                "/host/dev/vsock",
+                "/host/dev/net/tun",
+            ] {
+                ensure!(
+                    fs::symlink_metadata(path)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+                    "private Docker root exposed forbidden guest authority"
+                );
+            }
+            ensure!(
+                Path::new("/host/workspace").is_dir(),
+                "private Docker root omitted the admitted workspace"
+            );
+            println!("docker-privileged-boundary-ok");
+            Ok(())
+        }
+        "crash-dockerd" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker crash fixture accepts no value"
+            );
+            let mut dockerd_pid = None;
+            for entry in fs::read_dir("/proc").context("read guest process table")? {
+                let entry = entry?;
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|value| value.parse::<libc::pid_t>().ok())
+                    .filter(|pid| *pid > 1)
+                else {
+                    continue;
+                };
+                let comm = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+                if comm.trim() == "dockerd" {
+                    ensure!(
+                        dockerd_pid.replace(pid).is_none(),
+                        "multiple dockerd processes found"
+                    );
+                }
+            }
+            let pid = dockerd_pid.ok_or_else(|| anyhow::anyhow!("dockerd process is absent"))?;
+            ensure!(
+                unsafe { libc::kill(pid, libc::SIGKILL) } == 0,
+                "kill guest-local dockerd: {}",
+                io::Error::last_os_error()
+            );
+            Ok(())
+        }
+        _ => bail!("unknown Docker fixture action"),
+    }
+}
+
+fn prepare_container_docker_socket(identity: &WorkspaceIdentity) -> Result<()> {
+    let source = Path::new(CONTAINER_DOCKER_SOCKET_PATH);
+    match fs::symlink_metadata(source) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.file_type().is_socket()
+                    && metadata.uid() == 0
+                    && metadata.gid() == identity.gid
+                    && metadata.permissions().mode() & 0o777 == 0o660,
+                "guest-local Docker socket metadata is invalid"
+            );
+            std::os::unix::fs::symlink(
+                CONTAINER_DOCKER_SOCKET_PATH,
+                CONTAINER_DEFAULT_DOCKER_SOCKET_PATH,
+            )
+            .context("publish standard guest-local Docker socket")?;
+            ensure!(
+                fs::read_link(CONTAINER_DEFAULT_DOCKER_SOCKET_PATH)
+                    .ok()
+                    .as_deref()
+                    == Some(source),
+                "standard guest-local Docker socket target changed"
+            );
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ensure!(
+                fs::symlink_metadata(CONTAINER_DEFAULT_DOCKER_SOCKET_PATH)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+                "Docker-disabled workspace contains an unexpected default socket"
+            );
+        }
+        Err(error) => return Err(error).context("inspect guest-local Docker socket"),
+    }
+    Ok(())
 }
 
 fn read_container_workspace_plan() -> Result<WorkspacePlan> {
@@ -842,6 +1816,158 @@ fn spawn_workspace_process(
         });
     }
     command.spawn().with_context(|| action)
+}
+
+fn spawn_credential_forwarder(plan: &WorkspacePlan) -> Result<std::process::Child> {
+    let (mut readiness, readiness_writer) =
+        UnixStream::pair().context("create credential forwarder readiness channel")?;
+    readiness
+        .set_read_timeout(Some(CREDENTIAL_FORWARDER_START_TIMEOUT))
+        .context("bound credential forwarder readiness wait")?;
+    let readiness_fd = readiness_writer.as_raw_fd();
+    let uid = plan.identity.uid;
+    let gid = plan.identity.gid;
+    let additional_gids = plan
+        .identity
+        .additional_gids
+        .iter()
+        .map(|gid| *gid as libc::gid_t)
+        .collect::<Vec<_>>();
+    let mut command = Command::new(CONTAINER_INIT_PATH);
+    command
+        .arg("credential-forwarder")
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if readiness_fd != CREDENTIAL_FORWARDER_READY_FD
+                && libc::dup2(readiness_fd, CREDENTIAL_FORWARDER_READY_FD) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(CREDENTIAL_FORWARDER_READY_FD, libc::F_SETFD, 0) == -1
+                || libc::setgroups(additional_gids.len(), additional_gids.as_ptr()) == -1
+                || libc::setgid(gid as libc::gid_t) == -1
+                || libc::setuid(uid as libc::uid_t) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            clear_process_capabilities()?;
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .spawn()
+        .context("start credential loopback forwarder")?;
+    drop(readiness_writer);
+    let mut actual = vec![0_u8; CREDENTIAL_FORWARDER_READY.len()];
+    if readiness.read_exact(&mut actual).is_err()
+        || actual != CREDENTIAL_FORWARDER_READY
+        || child
+            .try_wait()
+            .context("observe credential loopback forwarder readiness")?
+            .is_some()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("credential loopback forwarder did not become ready");
+    }
+    Ok(child)
+}
+
+pub async fn run_credential_forwarder() -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } != 1,
+        "credential forwarder must not be container PID 1"
+    );
+    ensure!(
+        std::env::vars_os().next().is_none(),
+        "credential forwarder refuses an ambient environment"
+    );
+    let _identity = read_guest_identity()?;
+    ensure_init_is_expected(true)?;
+    clear_process_capabilities().context("clear credential forwarder capabilities")?;
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1
+        || unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == -1
+    {
+        return Err(io::Error::last_os_error()).context("confine credential forwarder process");
+    }
+
+    let listener = TcpListener::bind((
+        std::net::Ipv4Addr::LOCALHOST,
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+    ))
+    .await
+    .context("bind credential forwarder IPv4 loopback")?;
+    let address = listener
+        .local_addr()
+        .context("inspect credential forwarder listener")?;
+    ensure!(
+        address.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            && address.port() == codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+        "credential forwarder listener identity is invalid"
+    );
+    publish_credential_forwarder_readiness()?;
+
+    let permits = Arc::new(Semaphore::new(CREDENTIAL_FORWARDER_CONNECTION_LIMIT));
+    loop {
+        let (mut client, _) = listener
+            .accept()
+            .await
+            .context("accept credential loopback connection")?;
+        let _ = client.set_nodelay(true);
+        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+            write_credential_unavailable(&mut client).await;
+            continue;
+        };
+        tokio::spawn(async move {
+            let _permit = permit;
+            let upstream = tokio::time::timeout(
+                Duration::from_secs(1),
+                TokioUnixStream::connect(CONTAINER_CREDENTIAL_SOCKET),
+            )
+            .await;
+            let Ok(Ok(mut upstream)) = upstream else {
+                write_credential_unavailable(&mut client).await;
+                return;
+            };
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        });
+    }
+}
+
+fn publish_credential_forwarder_readiness() -> Result<()> {
+    ensure!(
+        unsafe { libc::fcntl(CREDENTIAL_FORWARDER_READY_FD, libc::F_GETFD) } != -1,
+        "credential forwarder readiness descriptor is absent"
+    );
+    let mut stream = unsafe { UnixStream::from_raw_fd(CREDENTIAL_FORWARDER_READY_FD) };
+    let stat = rustix::fs::fstat(&stream).context("inspect credential readiness descriptor")?;
+    ensure!(
+        RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Socket,
+        "credential readiness descriptor is not a socket"
+    );
+    stream
+        .write_all(CREDENTIAL_FORWARDER_READY)
+        .context("publish credential forwarder readiness")?;
+    stream
+        .flush()
+        .context("flush credential forwarder readiness")
+}
+
+async fn write_credential_unavailable(stream: &mut tokio::net::TcpStream) {
+    let _ = stream
+        .write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\nConnection: close\r\n\r\ncredential route unavailable\n",
+        )
+        .await;
+    let _ = stream.shutdown().await;
 }
 
 fn clear_process_capabilities() -> io::Result<()> {
@@ -1119,6 +2245,32 @@ fn persist_workspace_plan(plan: &WorkspacePlan) -> Result<()> {
         .context("publish sealed workspace plan")
 }
 
+fn persist_active_workspace_plan(plan: &WorkspacePlan) -> Result<()> {
+    let bytes = Zeroizing::new(plan.encode().context("encode active workspace plan")?);
+    ensure_exact_bytes(Path::new(ACTIVE_WORKSPACE_PLAN_PATH), &bytes, 0o400)
+        .context("publish active workspace plan")
+}
+
+fn load_active_workspace_plan() -> Result<WorkspacePlan> {
+    let metadata = fs::symlink_metadata(ACTIVE_WORKSPACE_PLAN_PATH)
+        .context("inspect active workspace plan")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.gid() == unsafe { libc::getegid() }
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= MAX_PLAN_BYTES as u64,
+        "active workspace plan metadata is invalid"
+    );
+    let bytes = Zeroizing::new(
+        read_bounded(Path::new(ACTIVE_WORKSPACE_PLAN_PATH), MAX_PLAN_BYTES + 1)
+            .context("read active workspace plan")?,
+    );
+    WorkspacePlan::decode(&bytes).context("validate active workspace plan")
+}
+
 fn load_workspace_plan() -> Result<Option<WorkspacePlan>> {
     let metadata = match fs::symlink_metadata(WORKSPACE_PLAN_PATH) {
         Ok(metadata) => metadata,
@@ -1140,6 +2292,289 @@ fn load_workspace_plan() -> Result<Option<WorkspacePlan>> {
     WorkspacePlan::decode(&bytes)
         .map(Some)
         .context("validate sealed workspace plan")
+}
+
+fn mount_direct_shares(seed: &Seed) -> Result<()> {
+    let expected = seed.direct_shares_sha256();
+    let metadata = match fs::symlink_metadata(DIRECT_SHARE_PLAN_PATH) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("inspect direct-share guest plan"),
+    };
+    let (expected, metadata) = match (expected, metadata) {
+        (None, None) => return Ok(()),
+        (Some(expected), Some(metadata)) => (expected, metadata),
+        _ => bail!("direct-share guest plan does not match its seed binding"),
+    };
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= MAX_DIRECT_SHARE_PLAN_BYTES as u64,
+        "direct-share guest plan metadata is invalid"
+    );
+    let bytes = read_bounded(
+        Path::new(DIRECT_SHARE_PLAN_PATH),
+        MAX_DIRECT_SHARE_PLAN_BYTES + 1,
+    )
+    .context("read direct-share guest plan")?;
+    ensure!(
+        Sha256Value::calculate(&bytes) == expected,
+        "direct-share guest plan differs from its seed binding"
+    );
+    let plan =
+        DirectSharePlan::decode_canonical(&bytes).context("validate direct-share guest plan")?;
+    let workspace = rustix::fs::open(
+        PERSISTENT_WORKSPACE_PATH,
+        RustixOFlags::PATH
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open persistent workspace for direct-share admission")?;
+    for share in plan.mounts() {
+        let relative = Path::new(share.destination())
+            .strip_prefix(WORKSPACE_PATH)
+            .context("derive direct-share workspace destination")?;
+        let target_path = Path::new(PERSISTENT_WORKSPACE_PATH).join(relative);
+        let target_path = target_path
+            .to_str()
+            .context("direct-share guest destination is not UTF-8")?;
+        let target = rustix::fs::openat2(
+            &workspace,
+            relative,
+            RustixOFlags::PATH
+                | RustixOFlags::DIRECTORY
+                | RustixOFlags::CLOEXEC
+                | RustixOFlags::NOFOLLOW,
+            RustixMode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+        )
+        .context("admit direct-share guest destination")?;
+        let stat = rustix::fs::fstat(&target).context("inspect direct-share guest destination")?;
+        ensure!(
+            RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Directory,
+            "direct-share guest destination is not a directory"
+        );
+        drop(target);
+        let flags = libc::MS_NOSUID
+            | libc::MS_NODEV
+            | if share.read_only() {
+                libc::MS_RDONLY
+            } else {
+                0
+            };
+        mount_fs(share.tag(), target_path, "virtiofs", flags, "")
+            .with_context(|| format!("mount admitted direct share at {}", share.destination()))?;
+        if share.read_only() {
+            let target =
+                CString::new(target_path).context("direct-share guest destination contains NUL")?;
+            let mut status = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+            if unsafe { libc::statvfs(target.as_ptr(), status.as_mut_ptr()) } == -1 {
+                return Err(io::Error::last_os_error())
+                    .context("inspect read-only direct-share mount");
+            }
+            let status = unsafe { status.assume_init() };
+            ensure!(
+                status.f_flag & libc::ST_RDONLY != 0,
+                "direct-share mount is not read-only"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn mount_skill_snapshots(seed: &Seed, workspace: &WorkspacePlan) -> Result<()> {
+    let expected = seed.skill_snapshot_sha256();
+    let metadata = match fs::symlink_metadata(SKILL_SNAPSHOT_PLAN_PATH) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("inspect immutable skill snapshot plan"),
+    };
+    let (expected, metadata) = match (expected, metadata, workspace.skills_selected) {
+        (None, None, false) => return Ok(()),
+        (Some(expected), Some(metadata), true) => (expected, metadata),
+        _ => bail!("skill snapshot plan does not match the selected project and seed binding"),
+    };
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= MAX_SKILL_SNAPSHOT_PLAN_BYTES as u64,
+        "immutable skill snapshot plan metadata is invalid"
+    );
+    let bytes = read_bounded(
+        Path::new(SKILL_SNAPSHOT_PLAN_PATH),
+        MAX_SKILL_SNAPSHOT_PLAN_BYTES + 1,
+    )
+    .context("read immutable skill snapshot plan")?;
+    ensure!(
+        Sha256Value::calculate(&bytes) == expected,
+        "skill snapshot plan differs from its seed binding"
+    );
+    let plan = SkillSnapshotPlan::decode_canonical(&bytes)
+        .context("validate immutable skill snapshot plan")?;
+    ensure!(
+        plan.project_sha256() == workspace.project_sha256,
+        "skill snapshot project identity differs from the sealed workspace plan"
+    );
+
+    let content_root = rustix::fs::open(
+        SKILL_SNAPSHOT_CONTENT_PATH,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open immutable skill snapshot content root")?;
+    let home_root = rustix::fs::open(
+        HOME_MERGED_PATH,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open persistent workspace home projection")?;
+    let codex_root = rustix::fs::open(
+        PERSISTENT_CODEX_HOME_PATH,
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+    )
+    .context("open persistent Codex home projection")?;
+
+    for skill in plan.skills() {
+        let source = rustix::fs::openat2(
+            &content_root,
+            Path::new(skill.digest()),
+            RustixOFlags::RDONLY
+                | RustixOFlags::DIRECTORY
+                | RustixOFlags::CLOEXEC
+                | RustixOFlags::NOFOLLOW,
+            RustixMode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .context("open digest-addressed immutable skill snapshot")?;
+        for projection in skill.projections() {
+            let (root, root_path) = match projection.root() {
+                SkillProjectionRoot::UserHome => (&home_root, HOME_MERGED_PATH),
+                SkillProjectionRoot::CodexHome => (&codex_root, PERSISTENT_CODEX_HOME_PATH),
+            };
+            let target_path = Path::new(root_path).join(projection.relative_path());
+            let target = create_projection_directory(
+                root,
+                Path::new(projection.relative_path()),
+                workspace.identity.uid,
+                workspace.identity.gid,
+            )?;
+            bind_mount_fd_read_only(&source, &target, &target_path).with_context(|| {
+                format!(
+                    "project immutable skill for agent {} at {}",
+                    projection.agent(),
+                    projection.relative_path()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn create_projection_directory(
+    root: &OwnedFd,
+    relative: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<OwnedFd> {
+    let mut directory = rustix::fs::openat2(
+        root,
+        Path::new("."),
+        RustixOFlags::RDONLY
+            | RustixOFlags::DIRECTORY
+            | RustixOFlags::CLOEXEC
+            | RustixOFlags::NOFOLLOW,
+        RustixMode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .context("reopen skill projection root")?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            bail!("skill projection path is not relative and normalized");
+        };
+        match rustix::fs::mkdirat(&directory, name, RustixMode::from_raw_mode(0o700)) {
+            Ok(()) | Err(RustixErrno::EXIST) => {}
+            Err(error) => return Err(error).context("create confined skill projection directory"),
+        }
+        let next = rustix::fs::openat2(
+            &directory,
+            Path::new(name),
+            RustixOFlags::RDONLY
+                | RustixOFlags::DIRECTORY
+                | RustixOFlags::CLOEXEC
+                | RustixOFlags::NOFOLLOW,
+            RustixMode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .context("open confined skill projection directory")?;
+        rustix::fs::fchown(
+            &next,
+            Some(rustix::fs::Uid::from_raw(uid)),
+            Some(rustix::fs::Gid::from_raw(gid)),
+        )
+        .context("set skill projection directory ownership")?;
+        rustix::fs::fchmod(&next, RustixMode::from_raw_mode(0o700))
+            .context("set skill projection directory mode")?;
+        directory = next;
+    }
+    Ok(directory)
+}
+
+fn bind_mount_fd_read_only(source: &OwnedFd, target: &OwnedFd, target_path: &Path) -> Result<()> {
+    let source = format!("/proc/self/fd/{}", source.as_raw_fd());
+    let target_fd = format!("/proc/self/fd/{}", target.as_raw_fd());
+    mount_fs(&source, &target_fd, "none", libc::MS_BIND, "")
+        .context("bind immutable skill snapshot")?;
+    let target = target_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("immutable skill projection path is not UTF-8"))?;
+    // Linux resolves the descriptor opened before the overmount back to the
+    // underlying directory, so MS_REMOUNT through target_fd fails with EINVAL.
+    // No untrusted guest process exists yet, and target_path was assembled
+    // from a fixed root plus a canonical plan path whose components were all
+    // opened without following links above.
+    mount_fs(
+        &source,
+        target,
+        "none",
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )
+    .context("remount immutable skill snapshot read-only")?;
+    let target =
+        CString::new(target.as_bytes()).context("immutable skill projection path contains NUL")?;
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    if unsafe { libc::statvfs(target.as_ptr(), status.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error()).context("inspect immutable skill projection");
+    }
+    let status = unsafe { status.assume_init() };
+    ensure!(
+        status.f_flag & (libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV)
+            == (libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV),
+        "immutable skill projection lacks required mount confinement"
+    );
+    Ok(())
 }
 
 fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
@@ -1264,6 +2699,17 @@ fn mount_state(device: &Path) -> Result<()> {
         "errors=remount-ro",
     )
     .context("mount persistent state disk")
+}
+
+fn mount_docker_data(device: &Path) -> Result<()> {
+    create_dir(Path::new("/var"), 0o755)?;
+    create_dir(Path::new("/var/lib"), 0o755)?;
+    create_dir(Path::new(DOCKER_DATA_PATH), 0o700)?;
+    let device = device
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Docker data disk path is not UTF-8"))?;
+    mount_fs(device, DOCKER_DATA_PATH, "ext4", 0, "errors=remount-ro")
+        .context("mount dedicated Docker data disk")
 }
 
 fn mount_root_generation(device: &Path) -> Result<()> {
@@ -1434,6 +2880,36 @@ fn record_boot_stage(stage: &'static str) -> Result<()> {
     Ok(())
 }
 
+fn record_network_status(status: &'static str) -> Result<()> {
+    ensure!(
+        NETWORK_STATUS_VALUES.contains(&status),
+        "guest network status is outside the fixed allowlist"
+    );
+    let mut value = status.as_bytes().to_vec();
+    value.push(b'\n');
+    write_durable(Path::new(NETWORK_STATUS_PATH), &value, 0o600)
+        .context("persist bounded guest network status")
+}
+
+fn record_network_agent_failure(fallback: &'static str) -> Result<()> {
+    debug_assert!(
+        fallback == NETWORK_AGENT_GENERIC_FAILURE_STAGE
+            || fallback == NETWORK_AGENT_HOST_FAILURE_STAGE
+    );
+    let persisted = read_bounded(Path::new(BOOT_STAGE_PATH), 34)
+        .ok()
+        .and_then(|bytes| {
+            let value = bytes.strip_suffix(b"\n")?;
+            let value = std::str::from_utf8(value).ok()?;
+            NETWORK_AGENT_FAILURE_STAGES
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == value)
+        })
+        .unwrap_or(fallback);
+    record_boot_stage(persisted)
+}
+
 fn setup_content_failure_stage(error: &SetupContentError) -> &'static str {
     match error {
         SetupContentError::InvalidFraming => "setup-invalid-framing",
@@ -1504,10 +2980,16 @@ fn create_state_layout() -> Result<()> {
         (PERSISTENT_WORKSPACE_PATH, 0o700),
         (PERSISTENT_HOME_PATH, 0o700),
         (PERSISTENT_HOME_WORK_PATH, 0o700),
+        (PERSISTENT_AGENT_HOMES_PATH, 0o700),
+        (PERSISTENT_CODEX_HOME_PATH, 0o700),
         (PERSISTENT_PROBE_PATH, 0o700),
     ] {
         create_dir(Path::new(path), mode)?;
     }
+    // A host-prepared state image can already contain the digest-bound
+    // direct-share plan beneath this directory. Restore the trusted runtime
+    // owner before capability-dropped guest helpers publish bounded status.
+    lchown(Path::new(CONTROL_PATH), 0, 0)?;
     File::open(STATE_MOUNT_PATH)
         .context("open state mount for fsync")?
         .sync_all()
@@ -1566,7 +3048,7 @@ fn publish_install_completion(plan: &WorkspacePlan) -> Result<()> {
 fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
     let identity = &plan.identity;
     let expected_marker = format!(
-        "codewire-workspace-owner-v3 oci {}:{}\n",
+        "codewire-workspace-owner-v4 oci {}:{}\n",
         identity.uid, identity.gid,
     );
     match fs::symlink_metadata(WORKSPACE_OWNER_VERSION_PATH) {
@@ -1597,6 +3079,7 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
     let mut pending = vec![
         PathBuf::from(PERSISTENT_WORKSPACE_PATH),
         PathBuf::from(PERSISTENT_HOME_PATH),
+        PathBuf::from(PERSISTENT_CODEX_HOME_PATH),
         PathBuf::from(PERSISTENT_PROBE_PATH),
     ];
     let mut visited = 0_usize;
@@ -1644,7 +3127,8 @@ fn normalize_initial_persistent_ownership(plan: &WorkspacePlan) -> Result<()> {
 
 fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
     let Some(body) = bytes
-        .strip_prefix(b"codewire-workspace-owner-v3 oci ")
+        .strip_prefix(b"codewire-workspace-owner-v4 oci ")
+        .or_else(|| bytes.strip_prefix(b"codewire-workspace-owner-v3 oci "))
         .and_then(|value| value.strip_suffix(b"\n"))
         .and_then(|value| std::str::from_utf8(value).ok())
     else {
@@ -1660,6 +3144,53 @@ fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
             && value.parse::<u32>().is_ok()
     };
     canonical_id(uid) && canonical_id(gid)
+}
+
+fn prepare_codex_projection(plan: &WorkspacePlan) -> Result<()> {
+    prepare_codex_projection_at(Path::new(PERSISTENT_CODEX_HOME_PATH), plan)
+}
+
+fn prepare_codex_projection_at(root: &Path, plan: &WorkspacePlan) -> Result<()> {
+    let metadata = fs::symlink_metadata(root).context("inspect persistent Codex home")?;
+    ensure!(
+        metadata.file_type().is_dir()
+            && metadata.uid() == plan.identity.uid
+            && metadata.gid() == plan.identity.gid
+            && metadata.permissions().mode() & 0o777 == 0o700,
+        "persistent Codex home is invalid"
+    );
+    let projection = codewire_access::CodexProviderProjection::for_loopback_port(
+        codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+    )
+    .context("derive credential-free Codex provider projection")?;
+    let path = root.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+    write_durable(&path, projection.config_toml().as_bytes(), 0o600)
+        .context("publish credential-free Codex provider projection")?;
+    lchown(&path, plan.identity.uid, plan.identity.gid)?;
+    let metadata = fs::symlink_metadata(&path).context("inspect projected Codex config")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == plan.identity.uid
+            && metadata.gid() == plan.identity.gid
+            && metadata.permissions().mode() & 0o777 == 0o600
+            && metadata.nlink() == 1
+            && metadata.len() == projection.config_toml().len() as u64,
+        "projected Codex config metadata is invalid"
+    );
+    let actual = read_bounded(&path, projection.config_toml().len().saturating_add(1))
+        .context("verify projected Codex config")?;
+    ensure!(
+        actual == projection.config_toml().as_bytes(),
+        "projected Codex config changed"
+    );
+    File::open(&path)
+        .context("open projected Codex config for sync")?
+        .sync_all()
+        .context("sync projected Codex config ownership")?;
+    File::open(root)
+        .context("open persistent Codex home for sync")?
+        .sync_all()
+        .context("sync persistent Codex home")
 }
 
 fn lchown(path: &Path, uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
@@ -1699,13 +3230,21 @@ fn expose_persistent_layout(plan: &WorkspacePlan) -> Result<()> {
         HOME_MERGED_PATH,
         "overlay",
         libc::MS_NOSUID | libc::MS_NODEV,
-        &format!(
-            "lowerdir={},upperdir={PERSISTENT_HOME_PATH},workdir={PERSISTENT_HOME_WORK_PATH}",
-            lower.display()
-        ),
+        &persistent_home_overlay_options(&lower),
     )
     .context("mount persistent workspace home overlay")?;
     bind_mount(HOME_MERGED_PATH, &plan.identity.home)
+}
+
+fn persistent_home_overlay_options(lower: &Path) -> String {
+    // A workspace update replaces the admitted root filesystem while retaining
+    // the persistent home upper/work directories. Overlay origin, metadata-only
+    // copy-up, redirect, and inode-index features bind upper data to a specific
+    // lower tree, so pin them off for this deliberately changing-lower mount.
+    format!(
+        "lowerdir={},upperdir={PERSISTENT_HOME_PATH},workdir={PERSISTENT_HOME_WORK_PATH},index=off,metacopy=off,redirect_dir=off,xino=off,nfs_export=off",
+        lower.display()
+    )
 }
 
 fn confined_image_directory_exists(relative: &Path) -> Result<bool> {
@@ -1767,6 +3306,12 @@ fn prepare_container_control(
         0o444,
     )
     .context("publish environment-specific machine identity")?;
+    write_durable(
+        Path::new(CONTAINER_RESOLV_CONF_PATH),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        0o444,
+    )
+    .context("publish isolated workspace resolver configuration")?;
     lchown(
         Path::new(CONTAINER_IDENTITY_PATH),
         workspace_identity.uid,
@@ -1795,6 +3340,402 @@ fn prepare_container_control(
         .set_nonblocking(true)
         .context("make guest poweroff socket nonblocking")?;
     Ok(socket)
+}
+
+fn prepare_docker_runtime(seed: &Seed, workspace_identity: &WorkspaceIdentity) -> Result<()> {
+    create_dir(Path::new(DOCKER_RUNTIME_PATH), 0o750)?;
+    lchown(
+        Path::new(DOCKER_RUNTIME_PATH),
+        unsafe { libc::geteuid() },
+        workspace_identity.gid,
+    )?;
+    if !seed.docker_data_disk() {
+        return Ok(());
+    }
+    create_dir(Path::new("/etc"), 0o755)?;
+    write_durable(
+        Path::new("/etc/resolv.conf"),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        0o444,
+    )
+    .context("publish isolated Docker resolver configuration")
+}
+
+fn prepare_docker_root(plan: &WorkspacePlan) -> Result<()> {
+    create_dir(Path::new(DOCKER_ROOT_PATH), 0o700)?;
+    mount_fs(
+        "tmpfs",
+        DOCKER_ROOT_PATH,
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "mode=0700,size=4m",
+    )
+    .context("mount private Docker daemon root")?;
+    for (relative, mode) in [
+        ("usr", 0o755),
+        ("etc", 0o755),
+        ("etc/ssl", 0o755),
+        ("var", 0o755),
+        ("var/lib", 0o755),
+        ("var/lib/docker", 0o700),
+        ("run", 0o755),
+        ("run/codewire", 0o700),
+        ("run/codewire/bin", 0o700),
+        ("run/codewire/docker", 0o750),
+        ("tmp", 0o1777),
+        ("workspace", 0o700),
+        ("home", 0o755),
+        ("root", 0o700),
+        ("proc", 0o555),
+        ("sys", 0o555),
+        ("dev", 0o755),
+    ] {
+        create_dir(&Path::new(DOCKER_ROOT_PATH).join(relative), mode)?;
+    }
+    let home = Path::new(&plan.identity.home);
+    let docker_home = Path::new(DOCKER_ROOT_PATH).join(
+        home.strip_prefix("/")
+            .context("derive private Docker daemon home path")?,
+    );
+    fs::create_dir_all(&docker_home).context("create private Docker daemon home path")?;
+    create_dir(&docker_home, 0o700)?;
+
+    bind_mount_read_only(
+        &format!("{ROOT_MERGED_PATH}/usr"),
+        &format!("{DOCKER_ROOT_PATH}/usr"),
+    )?;
+    bind_mount_read_only(
+        &format!("{ROOT_MERGED_PATH}/etc/ssl"),
+        &format!("{DOCKER_ROOT_PATH}/etc/ssl"),
+    )?;
+    bind_mount_confined(
+        DOCKER_DATA_PATH,
+        &format!("{DOCKER_ROOT_PATH}{DOCKER_DATA_PATH}"),
+        false,
+    )?;
+    bind_mount_confined(
+        DOCKER_RUNTIME_PATH,
+        &format!("{DOCKER_ROOT_PATH}{DOCKER_RUNTIME_PATH}"),
+        false,
+    )?;
+    bind_mount_confined(
+        WORKSPACE_PATH,
+        &format!("{DOCKER_ROOT_PATH}{WORKSPACE_PATH}"),
+        true,
+    )?;
+    bind_mount_confined(
+        home.to_str()
+            .context("Docker workspace home is not UTF-8")?,
+        docker_home
+            .to_str()
+            .context("private Docker daemon home is not UTF-8")?,
+        true,
+    )?;
+
+    for (link, target) in [
+        ("bin", "usr/bin"),
+        ("sbin", "usr/sbin"),
+        ("var/run", "/run"),
+    ] {
+        create_symlink(target, &format!("{DOCKER_ROOT_PATH}/{link}"))?;
+    }
+    let (library_directory, loader_link, loader_target) = match std::env::consts::ARCH {
+        "x86_64" => (
+            "x86_64-linux-gnu",
+            "lib64/ld-linux-x86-64.so.2",
+            "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        ),
+        "aarch64" => (
+            "aarch64-linux-gnu",
+            "lib/ld-linux-aarch64.so.1",
+            "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+        ),
+        _ => bail!("private Docker daemon architecture is unsupported"),
+    };
+    create_dir(&Path::new(DOCKER_ROOT_PATH).join("lib"), 0o755)?;
+    create_dir(&Path::new(DOCKER_ROOT_PATH).join("lib64"), 0o755)?;
+    create_symlink(
+        &format!("/usr/lib/{library_directory}"),
+        &format!("{DOCKER_ROOT_PATH}/lib/{library_directory}"),
+    )?;
+    create_symlink(loader_target, &format!("{DOCKER_ROOT_PATH}/{loader_link}"))?;
+
+    let iptables = Path::new(DOCKER_ROOT_PATH).join("usr/sbin/xtables-nft-multi");
+    let metadata =
+        fs::symlink_metadata(&iptables).context("inspect sealed Docker iptables tool")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o111 != 0,
+        "sealed Docker iptables tool metadata is invalid"
+    );
+    for tool in [
+        "iptables",
+        "iptables-save",
+        "iptables-restore",
+        "ip6tables",
+        "ip6tables-save",
+        "ip6tables-restore",
+    ] {
+        create_symlink(
+            "/usr/sbin/xtables-nft-multi",
+            &format!("{DOCKER_ROOT_PATH}/run/codewire/bin/{tool}"),
+        )?;
+    }
+
+    write_durable(
+        &Path::new(DOCKER_ROOT_PATH).join("etc/resolv.conf"),
+        format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
+        0o444,
+    )?;
+    mount_fs(
+        "proc",
+        &format!("{DOCKER_ROOT_PATH}/proc"),
+        "proc",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "",
+    )
+    .context("mount private Docker procfs")?;
+    mount_fs(
+        "sysfs",
+        &format!("{DOCKER_ROOT_PATH}/sys"),
+        "sysfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY,
+        "",
+    )
+    .context("mount private Docker sysfs")?;
+    bind_mount_confined(
+        CGROUP_ROOT_PATH,
+        &format!("{DOCKER_ROOT_PATH}{CGROUP_ROOT_PATH}"),
+        true,
+    )?;
+    prepare_docker_devices()?;
+    Ok(())
+}
+
+fn prepare_docker_devices() -> Result<()> {
+    let dev = format!("{DOCKER_ROOT_PATH}/dev");
+    mount_fs(
+        "tmpfs",
+        &dev,
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        "mode=0755,size=16m",
+    )
+    .context("mount private Docker device filesystem")?;
+    create_dir(&Path::new(&dev).join("pts"), 0o755)?;
+    create_dir(&Path::new(&dev).join("shm"), 0o1777)?;
+    mount_fs(
+        "devpts",
+        &format!("{dev}/pts"),
+        "devpts",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        "newinstance,ptmxmode=0666,mode=0620,gid=5",
+    )
+    .context("mount private Docker devpts")?;
+    mount_fs(
+        "tmpfs",
+        &format!("{dev}/shm"),
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "mode=1777,size=64m",
+    )
+    .context("mount private Docker shared memory")?;
+    create_symlink("pts/ptmx", &format!("{dev}/ptmx"))?;
+    for device in ["null", "zero", "full", "random", "urandom", "tty"] {
+        let target = Path::new(&dev).join(device);
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&target)
+            .with_context(|| format!("create private Docker device target {device}"))?;
+        mount_fs(
+            &format!("/dev/{device}"),
+            target
+                .to_str()
+                .context("private Docker device target is not UTF-8")?,
+            "none",
+            libc::MS_BIND,
+            "",
+        )
+        .with_context(|| format!("bind private Docker device {device}"))?;
+    }
+    for (link, target) in [
+        ("fd", "/proc/self/fd"),
+        ("stdin", "/proc/self/fd/0"),
+        ("stdout", "/proc/self/fd/1"),
+        ("stderr", "/proc/self/fd/2"),
+    ] {
+        create_symlink(target, &format!("{dev}/{link}"))?;
+    }
+    Ok(())
+}
+
+struct GuestNetworkAgent {
+    child: Option<std::process::Child>,
+    readiness: UnixStream,
+}
+
+impl GuestNetworkAgent {
+    fn wait_for_host(&mut self) -> Result<()> {
+        wait_for_network_agent_message(
+            &mut self.readiness,
+            NETWORK_AGENT_HOST_READY,
+            NETWORK_AGENT_HOST_TIMEOUT,
+        )
+    }
+
+    fn into_child(mut self) -> Result<std::process::Child> {
+        self.child
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("guest network agent child is absent"))
+    }
+}
+
+impl Drop for GuestNetworkAgent {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn spawn_guest_network_agent() -> Result<GuestNetworkAgent> {
+    create_dir(Path::new(NETWORK_NAMESPACE_DIRECTORY), 0o700)?;
+    let namespace = Path::new(NETWORK_NAMESPACE_PATH);
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let namespace_file = options
+        .open(namespace)
+        .context("create private workspace network namespace mountpoint")?;
+    namespace_file
+        .sync_all()
+        .context("sync workspace network namespace mountpoint")?;
+    drop(namespace_file);
+
+    let (readiness, readiness_writer) =
+        UnixStream::pair().context("create guest network readiness channel")?;
+    readiness
+        .set_nonblocking(true)
+        .context("make guest network readiness channel nonblocking")?;
+    let readiness_fd = readiness_writer.as_raw_fd();
+    let expected_parent = unsafe { libc::getpid() };
+    let mut command = Command::new(INIT_PATH);
+    command
+        .arg("network-agent")
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1
+                || libc::getppid() != expected_parent
+                || libc::unshare(libc::CLONE_NEWNET) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if readiness_fd != NETWORK_AGENT_READY_FD
+                && libc::dup2(readiness_fd, NETWORK_AGENT_READY_FD) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(NETWORK_AGENT_READY_FD, libc::F_SETFD, 0) == -1
+                || libc::syscall(
+                    libc::SYS_close_range,
+                    4_u32,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command
+        .spawn()
+        .context("spawn trusted guest network agent")?;
+    let mut agent = GuestNetworkAgent {
+        child: Some(child),
+        readiness,
+    };
+    drop(readiness_writer);
+
+    let pid = agent
+        .child
+        .as_ref()
+        .map(std::process::Child::id)
+        .ok_or_else(|| anyhow::anyhow!("guest network agent PID is absent"))?;
+    let source = format!("/proc/{pid}/ns/net");
+    let link = fs::read_link(&source).context("inspect guest network agent namespace")?;
+    ensure!(
+        link.as_os_str().as_bytes().starts_with(b"net:["),
+        "guest network agent namespace identity is invalid"
+    );
+    mount_fs(&source, NETWORK_NAMESPACE_PATH, "none", libc::MS_BIND, "")
+        .context("pin workspace network namespace")?;
+    validate_network_namespace_mount(namespace)?;
+    wait_for_network_agent_message(
+        &mut agent.readiness,
+        NETWORK_AGENT_READY,
+        NETWORK_AGENT_START_TIMEOUT,
+    )?;
+    Ok(agent)
+}
+
+fn validate_network_namespace_mount(path: &Path) -> Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes())
+        .context("workspace network namespace path contains NUL")?;
+    let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(path.as_ptr(), &mut filesystem) } == -1 {
+        return Err(io::Error::last_os_error())
+            .context("inspect workspace network namespace mount");
+    }
+    ensure!(
+        filesystem.f_type as u64 == NSFS_MAGIC,
+        "workspace network namespace is not an nsfs mount"
+    );
+    Ok(())
+}
+
+fn wait_for_network_agent_message(
+    stream: &mut UnixStream,
+    expected: &[u8],
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut received = Vec::with_capacity(expected.len());
+    while Instant::now() < deadline {
+        let mut buffer = [0_u8; 64];
+        let remaining = expected.len().saturating_sub(received.len());
+        let chunk = remaining.min(buffer.len());
+        match stream.read(&mut buffer[..chunk]) {
+            Ok(0) => bail!("guest network readiness channel closed early"),
+            Ok(length) => {
+                received.extend_from_slice(&buffer[..length]);
+                ensure!(
+                    expected.starts_with(&received),
+                    "guest network readiness message is invalid"
+                );
+                if received == expected {
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error).context("read guest network readiness"),
+        }
+    }
+    bail!("guest network readiness timed out")
 }
 
 fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
@@ -1946,14 +3887,17 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"] },
             { "destination": "/run", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=0755", "size=16m"] },
             { "destination": CONTAINER_INIT_PATH, "type": "none", "source": INIT_PATH, "options": ["bind", "ro", "nosuid", "nodev", "exec"] },
-            { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": ACTIVE_WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_MACHINE_ID_DESTINATION, "type": "none", "source": CONTAINER_MACHINE_ID_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_RESOLV_CONF_DESTINATION, "type": "none", "source": CONTAINER_RESOLV_CONF_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
             { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": plan.identity.home, "type": "none", "source": HOME_MERGED_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
+            { "destination": crate::CODEX_GUEST_HOME_PATH, "type": "none", "source": PERSISTENT_CODEX_HOME_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
             { "destination": CONTAINER_CONTROL_DESTINATION, "type": "none", "source": CONTAINER_CONTROL_PATH, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] },
-            { "destination": CONTAINER_PROBE_DESTINATION, "type": "none", "source": PERSISTENT_PROBE_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
+            { "destination": CONTAINER_PROBE_DESTINATION, "type": "none", "source": PERSISTENT_PROBE_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_DOCKER_RUNTIME_PATH, "type": "none", "source": DOCKER_RUNTIME_PATH, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
         ],
         "linux": {
             "rootfsPropagation": "rslave",
@@ -1964,7 +3908,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             },
             "namespaces": [
                 { "type": "pid" },
-                { "type": "network" },
+                { "type": "network", "path": NETWORK_NAMESPACE_PATH },
                 { "type": "ipc" },
                 { "type": "uts" },
                 { "type": "mount" }
@@ -1994,6 +3938,33 @@ fn bind_mount(source: &str, target: &str) -> Result<()> {
         "",
     )
     .with_context(|| format!("confine persistent guest bind mount {target}"))
+}
+
+fn bind_mount_confined(source: &str, target: &str, recursive: bool) -> Result<()> {
+    let initial_flags = libc::MS_BIND | if recursive { libc::MS_REC } else { 0 };
+    mount_fs(source, target, "none", initial_flags, "")
+        .with_context(|| format!("bind private Docker path {target}"))?;
+    mount_fs(
+        source,
+        target,
+        "none",
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )
+    .with_context(|| format!("confine private Docker bind mount {target}"))
+}
+
+fn bind_mount_read_only(source: &str, target: &str) -> Result<()> {
+    mount_fs(source, target, "none", libc::MS_BIND, "")
+        .with_context(|| format!("bind sealed Docker path {target}"))?;
+    mount_fs(
+        source,
+        target,
+        "none",
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        "",
+    )
+    .with_context(|| format!("make sealed Docker path read-only {target}"))
 }
 
 fn create_dir(path: &Path, mode: u32) -> Result<()> {
@@ -2461,9 +4432,141 @@ fn spawn_daemon() -> Result<std::process::Child> {
         .context("spawn environment-free guest daemon")
 }
 
+fn spawn_docker_daemon(identity: &WorkspaceIdentity) -> Result<std::process::Child> {
+    let metadata = fs::symlink_metadata(DOCKERD_PATH).context("inspect sealed dockerd binary")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o111 != 0,
+        "sealed dockerd binary metadata is invalid"
+    );
+    let namespace = File::open(NETWORK_NAMESPACE_PATH)
+        .context("open pinned workspace network namespace for dockerd")?;
+    let namespace_fd = namespace.as_raw_fd();
+    let docker_root = CString::new(DOCKER_ROOT_PATH).context("encode private Docker root path")?;
+    let root = CString::new("/").expect("root path contains no NUL");
+    let mut command = Command::new(DOCKER_ROOT_BINARY_PATH);
+    command
+        .args([
+            "--host=unix:///run/codewire/docker/docker.sock",
+            "--data-root=/var/lib/docker",
+            "--exec-root=/run/codewire/docker/exec",
+            "--pidfile=/run/codewire/docker/dockerd.pid",
+            "--storage-driver=overlay2",
+            "--iptables=true",
+            "--ip-masq=true",
+            "--userland-proxy=false",
+            "--log-driver=local",
+            "--log-opt=max-size=10m",
+            "--log-opt=max-file=3",
+            "--log-level=error",
+            "--shutdown-timeout=5",
+        ])
+        .env_clear()
+        .env(
+            "PATH",
+            "/run/codewire/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+        // The Codewire resolver admits one bounded canonical question. Keep
+        // dockerd inside that seam instead of widening it to accept EDNS.
+        .env("GODEBUG", "netedns0=0")
+        .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1
+                || libc::getppid() != 1
+                || libc::setns(namespace_fd, libc::CLONE_NEWNET) == -1
+                || libc::chroot(docker_root.as_ptr()) == -1
+                || libc::chdir(root.as_ptr()) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().context("start guest-local Docker daemon")?;
+    drop(namespace);
+    let deadline = Instant::now() + DOCKER_START_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().context("observe Docker startup")? {
+            bail!("guest-local Docker daemon exited during startup: {status}");
+        }
+        if docker_socket_ready()? {
+            fs::set_permissions(DOCKER_SOCKET_PATH, fs::Permissions::from_mode(0o660))
+                .context("set guest-local Docker socket mode")?;
+            lchown(Path::new(DOCKER_SOCKET_PATH), 0, identity.gid)?;
+            let metadata = fs::symlink_metadata(DOCKER_SOCKET_PATH)
+                .context("inspect admitted guest-local Docker socket")?;
+            ensure!(
+                metadata.file_type().is_socket()
+                    && metadata.uid() == 0
+                    && metadata.gid() == identity.gid
+                    && metadata.permissions().mode() & 0o777 == 0o660,
+                "guest-local Docker socket admission failed"
+            );
+            return Ok(child);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("guest-local Docker daemon readiness timed out");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn docker_socket_ready() -> Result<bool> {
+    let mut stream = match UnixStream::connect(DOCKER_SOCKET_PATH) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error).context("connect guest-local Docker socket"),
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .context("bound Docker readiness read")?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(250)))
+        .context("bound Docker readiness write")?;
+    stream
+        .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+        .context("write Docker readiness request")?;
+    let mut response = [0_u8; 4096];
+    let length = match stream.read(&mut response) {
+        Ok(length) => length,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error).context("read Docker readiness response"),
+    };
+    Ok(response[..length].starts_with(b"HTTP/1.1 200")
+        && response[..length]
+            .windows(4)
+            .any(|window| window == b"\r\n\r\n"))
+}
+
 fn supervise_guest(
     mut daemon: std::process::Child,
     mut workspace: std::process::Child,
+    mut network: std::process::Child,
+    mut docker: Option<std::process::Child>,
     poweroff: UnixDatagram,
 ) -> Result<()> {
     loop {
@@ -2471,11 +4574,19 @@ fn supervise_guest(
         if POWEROFF_REQUESTED.load(Ordering::Acquire) || container_poweroff_requested(&poweroff)? {
             stop_daemon(&mut daemon);
             stop_workspace_container(&mut workspace);
+            if let Some(docker) = docker.as_mut() {
+                stop_docker_daemon(docker);
+            }
+            stop_network_agent(&mut network);
             return power_off();
         }
         if daemon.try_wait().context("observe guest daemon")?.is_some() {
             eprintln!("guest daemon exited; powering off generation");
             stop_workspace_container(&mut workspace);
+            if let Some(docker) = docker.as_mut() {
+                stop_docker_daemon(docker);
+            }
+            stop_network_agent(&mut network);
             return power_off();
         }
         if workspace
@@ -2485,11 +4596,80 @@ fn supervise_guest(
         {
             eprintln!("workspace container exited; powering off generation");
             stop_daemon(&mut daemon);
+            if let Some(docker) = docker.as_mut() {
+                stop_docker_daemon(docker);
+            }
+            stop_network_agent(&mut network);
             let _ = force_delete_workspace_container();
+            return power_off();
+        }
+        if network
+            .try_wait()
+            .context("observe trusted guest network agent")?
+            .is_some()
+        {
+            eprintln!("guest network agent exited; powering off generation");
+            stop_daemon(&mut daemon);
+            stop_workspace_container(&mut workspace);
+            if let Some(docker) = docker.as_mut() {
+                stop_docker_daemon(docker);
+            }
+            return power_off();
+        }
+        if let Some(docker) = docker.as_mut()
+            && docker
+                .try_wait()
+                .context("observe guest-local Docker daemon")?
+                .is_some()
+        {
+            eprintln!("guest-local Docker daemon exited; powering off generation");
+            stop_daemon(&mut daemon);
+            stop_workspace_container(&mut workspace);
+            stop_network_agent(&mut network);
             return power_off();
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn stop_docker_daemon(docker: &mut std::process::Child) {
+    if docker.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    if let Ok(pid) = libc::pid_t::try_from(docker.id()) {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+    let deadline = Instant::now() + DAEMON_SHUTDOWN_TIMEOUT;
+    while Instant::now() < deadline {
+        if docker.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = docker.kill();
+    let _ = docker.wait();
+}
+
+fn stop_network_agent(network: &mut std::process::Child) {
+    if network.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    if let Ok(pid) = libc::pid_t::try_from(network.id()) {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+    }
+    let deadline = Instant::now() + DAEMON_SHUTDOWN_TIMEOUT;
+    while Instant::now() < deadline {
+        if network.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = network.kill();
+    let _ = network.wait();
 }
 
 fn container_poweroff_requested(socket: &UnixDatagram) -> Result<bool> {
@@ -2723,32 +4903,66 @@ fn write_durable(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     bail!("durable temporary filename collisions exceeded limit")
 }
 
-fn verify_loopback_only(sys_net: &Path, route: &Path, ipv6_route: &Path) -> Result<()> {
+fn verify_isolated_tun(net_dev: &Path, route: &Path, ipv6_route: &Path) -> Result<()> {
+    // An inherited sysfs mount remains associated with the network namespace
+    // in which it was mounted. /proc/net is process-namespace aware, so use
+    // its bounded interface table to inspect this agent's actual namespace.
+    let devices = fs::read_to_string(net_dev)
+        .with_context(|| format!("read guest network interfaces {}", net_dev.display()))?;
+    let mut lines = devices.lines();
+    ensure!(
+        lines.next().is_some() && lines.next().is_some(),
+        "guest network interface table is malformed"
+    );
     let mut interfaces = Vec::new();
-    for entry in fs::read_dir(sys_net)
-        .with_context(|| format!("read guest network interfaces {}", sys_net.display()))?
-    {
-        interfaces.push(entry.context("read guest network interface")?.file_name());
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let (interface, counters) = line
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("guest network interface table is malformed"))?;
+        let interface = interface.trim();
+        let counters = counters.split_ascii_whitespace().collect::<Vec<_>>();
+        ensure!(
+            !interface.is_empty()
+                && counters.len() == 16
+                && counters
+                    .iter()
+                    .all(|value| !value.is_empty()
+                        && value.bytes().all(|byte| byte.is_ascii_digit())),
+            "guest network interface table is malformed"
+        );
+        interfaces.push(interface);
     }
     interfaces.sort();
     ensure!(
-        interfaces.as_slice() == [OsStr::new("lo")],
-        "guest has a non-loopback network interface"
+        interfaces.as_slice() == [NETWORK_INTERFACE, "lo"],
+        "guest network namespace does not contain exactly loopback and the trusted TUN"
     );
 
     let routes = fs::read_to_string(route)
         .with_context(|| format!("read guest route table {}", route.display()))?;
+    let mut default_route = false;
     for line in routes
         .lines()
         .skip(1)
         .filter(|line| !line.trim().is_empty())
     {
-        let interface = line
-            .split_ascii_whitespace()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("guest route table is malformed"))?;
-        ensure!(interface == "lo", "guest has a non-loopback route");
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        ensure!(fields.len() >= 8, "guest route table is malformed");
+        ensure!(
+            matches!(fields[0], "lo" | NETWORK_INTERFACE),
+            "guest has a route through an unexpected interface"
+        );
+        if fields[1] == "00000000" {
+            ensure!(
+                fields[0] == NETWORK_INTERFACE
+                    && fields[2].eq_ignore_ascii_case("010200C0")
+                    && fields[7] == "00000000",
+                "guest default route is not bound to the trusted TUN gateway"
+            );
+            default_route = true;
+        }
     }
+    ensure!(default_route, "guest trusted TUN default route is absent");
 
     match fs::read_to_string(ipv6_route) {
         Ok(routes) => {
@@ -2757,7 +4971,10 @@ fn verify_loopback_only(sys_net: &Path, route: &Path, ipv6_route: &Path) -> Resu
                     .split_ascii_whitespace()
                     .next_back()
                     .ok_or_else(|| anyhow::anyhow!("guest IPv6 route table is malformed"))?;
-                ensure!(interface == "lo", "guest has a non-loopback IPv6 route");
+                ensure!(
+                    interface == "lo",
+                    "guest TUN unexpectedly has an IPv6 route"
+                );
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -2766,103 +4983,6 @@ fn verify_loopback_only(sys_net: &Path, route: &Path, ipv6_route: &Path) -> Resu
         Err(error) => return Err(error).context("read guest IPv6 route table"),
     }
     Ok(())
-}
-
-fn verify_no_ip_egress_canaries() -> Result<()> {
-    // TEST-NET-1 is reserved for documentation and must never be routed by
-    // this no-net VM. Opening each socket is the positive control that the
-    // corresponding syscall/protocol path ran; connect must then fail at
-    // route lookup rather than silently succeeding.
-    for (label, socket_type, protocol, address, port) in [
-        (
-            "TCP",
-            libc::SOCK_STREAM,
-            libc::IPPROTO_TCP,
-            [192, 0, 2, 1],
-            9,
-        ),
-        (
-            "UDP",
-            libc::SOCK_DGRAM,
-            libc::IPPROTO_UDP,
-            [192, 0, 2, 1],
-            9,
-        ),
-        (
-            "DNS",
-            libc::SOCK_DGRAM,
-            libc::IPPROTO_UDP,
-            [192, 0, 2, 53],
-            53,
-        ),
-        (
-            "ICMP",
-            libc::SOCK_DGRAM,
-            libc::IPPROTO_ICMP,
-            [192, 0, 2, 1],
-            0,
-        ),
-    ] {
-        verify_unroutable_ipv4(label, socket_type, protocol, address, port)?;
-    }
-    Ok(())
-}
-
-fn verify_unroutable_ipv4(
-    label: &str,
-    socket_type: libc::c_int,
-    protocol: libc::c_int,
-    address: [u8; 4],
-    port: u16,
-) -> Result<()> {
-    let descriptor =
-        unsafe { libc::socket(libc::AF_INET, socket_type | libc::SOCK_CLOEXEC, protocol) };
-    if descriptor == -1 {
-        let error = io::Error::last_os_error();
-        if label == "ICMP" && acceptable_icmp_socket_denial(error.raw_os_error()) {
-            // Ping datagram sockets are subject to the kernel's ping-group and
-            // protocol policy even for a uid-0 process without capabilities.
-            // TCP/UDP/DNS above remain mandatory route-lookup canaries; an
-            // narrow kernel policy denial is itself a fail-closed result rather
-            // than evidence of an egress path. Unsupported protocol errors are
-            // rejected because they would skip the intended ICMP canary.
-            return Ok(());
-        }
-        return Err(error).with_context(|| format!("open {label} canary socket"));
-    }
-    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
-    let endpoint = libc::sockaddr_in {
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: port.to_be(),
-        sin_addr: libc::in_addr {
-            s_addr: u32::from_ne_bytes(address),
-        },
-        sin_zero: [0; 8],
-    };
-    let result = unsafe {
-        libc::connect(
-            std::os::fd::AsRawFd::as_raw_fd(&descriptor),
-            (&raw const endpoint).cast::<libc::sockaddr>(),
-            size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        )
-    };
-    ensure!(
-        result == -1,
-        "guest {label} canary unexpectedly found an IP route"
-    );
-    let error = io::Error::last_os_error();
-    ensure!(
-        matches!(
-            error.raw_os_error(),
-            Some(libc::ENETUNREACH) | Some(libc::EHOSTUNREACH) | Some(libc::ENODEV)
-        ),
-        "guest {label} canary failed for a reason other than no route: {error}"
-    );
-    Ok(())
-}
-
-fn acceptable_icmp_socket_denial(error: Option<libc::c_int>) -> bool {
-    matches!(error, Some(libc::EACCES | libc::EPERM))
 }
 
 fn ensure_init_is_expected(container: bool) -> Result<()> {
@@ -2960,6 +5080,8 @@ mod tests {
             schema_version: PLAN_SCHEMA_VERSION,
             root_generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
+            project_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
             identity: WorkspaceIdentity {
                 username: "root".to_owned(),
                 home: "/root".to_owned(),
@@ -2969,6 +5091,7 @@ mod tests {
                 additional_gids: Vec::new(),
             },
             environment: vec![
+                format!("CODEX_HOME={}", crate::CODEX_GUEST_HOME_PATH),
                 "HOME=/root".to_owned(),
                 "LANG=C.UTF-8".to_owned(),
                 "LOGNAME=root".to_owned(),
@@ -2976,11 +5099,13 @@ mod tests {
                 "SHELL=/bin/sh".to_owned(),
                 "USER=root".to_owned(),
             ],
+            explicit_environment_keys: Vec::new(),
             workload_args: Vec::new(),
             workload_cwd: "/workspace".to_owned(),
             session_cwd: "/workspace".to_owned(),
             install_command: String::new(),
             startup_script: String::new(),
+            skills_selected: false,
         }
     }
 
@@ -3037,40 +5162,84 @@ mod tests {
     }
 
     #[test]
-    fn network_check_requires_exactly_loopback() {
+    fn codex_projection_converges_without_following_guest_config_symlinks() {
         let temporary = TempDir::new().unwrap();
-        let sys = temporary.path().join("net");
-        fs::create_dir(&sys).unwrap();
-        fs::create_dir(sys.join("lo")).unwrap();
+        let codex_home = temporary.path().join("codex");
+        fs::create_dir(&codex_home).unwrap();
+        fs::set_permissions(&codex_home, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut plan = test_workspace_plan();
+        plan.identity.uid = unsafe { libc::geteuid() };
+        plan.identity.gid = unsafe { libc::getegid() };
+        let config = codex_home.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+        let expected = codewire_access::CodexProviderProjection::for_loopback_port(
+            codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
+        )
+        .unwrap()
+        .into_config_toml();
+
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+        let metadata = fs::symlink_metadata(&config).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), plan.identity.uid);
+        assert_eq!(metadata.gid(), plan.identity.gid);
+        assert_eq!(metadata.nlink(), 1);
+        assert!(!codex_home.join("auth.json").exists());
+
+        let outside = temporary.path().join("outside");
+        fs::write(&outside, b"outside-sentinel").unwrap();
+        fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(&outside, &config).unwrap();
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-sentinel");
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+        assert!(fs::symlink_metadata(&config).unwrap().file_type().is_file());
+
+        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
+
+        fs::remove_file(&config).unwrap();
+        fs::create_dir(&config).unwrap();
+        assert!(prepare_codex_projection_at(&codex_home, &plan).is_err());
+        assert!(fs::symlink_metadata(&config).unwrap().file_type().is_dir());
+    }
+
+    #[test]
+    fn network_check_requires_exactly_loopback_and_the_pinned_tun() {
+        let temporary = TempDir::new().unwrap();
+        let net_dev = temporary.path().join("dev");
+        fs::write(
+            &net_dev,
+            "Inter-| Receive | Transmit\n\
+             face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n\
+             lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
+             cw0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        )
+        .unwrap();
         let route = temporary.path().join("route");
-        fs::write(&route, "Iface Destination Gateway Flags\n").unwrap();
+        fs::write(
+            &route,
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
+             cw0 00000000 010200C0 0003 0 0 0 00000000 0 0 0\n\
+             cw0 000200C0 00000000 0001 0 0 0 00FFFFFF 0 0 0\n",
+        )
+        .unwrap();
         let ipv6_route = temporary.path().join("ipv6_route");
         fs::write(
             &ipv6_route,
             "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000 00000001 00000000 80200001 lo\n",
         )
         .unwrap();
-        verify_loopback_only(&sys, &route, &ipv6_route).unwrap();
+        verify_isolated_tun(&net_dev, &route, &ipv6_route).unwrap();
 
-        fs::create_dir(sys.join("eth0")).unwrap();
-        assert!(verify_loopback_only(&sys, &route, &ipv6_route).is_err());
-    }
-
-    #[test]
-    fn only_explicit_icmp_socket_policy_denials_are_accepted() {
-        for error in [libc::EACCES, libc::EPERM] {
-            assert!(acceptable_icmp_socket_denial(Some(error)));
-        }
-        for error in [
-            libc::EAFNOSUPPORT,
-            libc::EPROTONOSUPPORT,
-            libc::ENETUNREACH,
-            libc::EINVAL,
-            libc::EMFILE,
-        ] {
-            assert!(!acceptable_icmp_socket_denial(Some(error)));
-        }
-        assert!(!acceptable_icmp_socket_denial(None));
+        OpenOptions::new()
+            .append(true)
+            .open(&net_dev)
+            .unwrap()
+            .write_all(b"eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
+            .unwrap();
+        assert!(verify_isolated_tun(&net_dev, &route, &ipv6_route).is_err());
     }
 
     #[test]
@@ -3123,7 +5292,7 @@ mod tests {
             .iter()
             .find(|mount| mount["destination"] == CONTAINER_PLAN_PATH)
             .unwrap();
-        assert_eq!(plan_mount["source"], WORKSPACE_PLAN_PATH);
+        assert_eq!(plan_mount["source"], ACTIVE_WORKSPACE_PLAN_PATH);
         assert_eq!(
             plan_mount["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
@@ -3146,11 +5315,45 @@ mod tests {
             machine_id["options"],
             serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
         );
+        let resolver = mounts
+            .iter()
+            .find(|mount| mount["destination"] == CONTAINER_RESOLV_CONF_DESTINATION)
+            .unwrap();
+        assert_eq!(resolver["source"], CONTAINER_RESOLV_CONF_PATH);
+        assert_eq!(
+            resolver["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
+        );
         let home = mounts
             .iter()
             .find(|mount| mount["destination"] == plan.identity.home)
             .unwrap();
         assert_eq!(home["source"], HOME_MERGED_PATH);
+        let codex_home = mounts
+            .iter()
+            .find(|mount| mount["destination"] == crate::CODEX_GUEST_HOME_PATH)
+            .unwrap();
+        assert_eq!(codex_home["source"], PERSISTENT_CODEX_HOME_PATH);
+        assert_eq!(
+            codex_home["options"],
+            serde_json::json!(["rbind", "rw", "nosuid", "nodev"])
+        );
+        let docker_runtime = mounts
+            .iter()
+            .find(|mount| mount["destination"] == CONTAINER_DOCKER_RUNTIME_PATH)
+            .unwrap();
+        assert_eq!(docker_runtime["source"], DOCKER_RUNTIME_PATH);
+        assert_eq!(
+            docker_runtime["options"],
+            serde_json::json!(["rbind", "rw", "nosuid", "nodev", "noexec"])
+        );
+        assert!(mounts.iter().all(|mount| {
+            let source = mount["source"].as_str().unwrap_or_default();
+            source != "/var/run/docker.sock"
+                && source != "/run/docker.sock"
+                && source != "/run/containerd/containerd.sock"
+                && source != "/var/run/containerd/containerd.sock"
+        }));
         assert_eq!(
             config["process"]["capabilities"]["effective"],
             serde_json::json!(["CAP_SETGID", "CAP_SETUID"])
@@ -3158,6 +5361,25 @@ mod tests {
         assert_eq!(
             config["process"]["capabilities"]["ambient"],
             serde_json::json!([])
+        );
+        assert_eq!(
+            config["linux"]["namespaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|namespace| namespace["type"] == "network")
+                .collect::<Vec<_>>(),
+            vec![&serde_json::json!({
+                "type": "network",
+                "path": NETWORK_NAMESPACE_PATH
+            })]
+        );
+        assert!(
+            config["linux"]["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|device| device["path"] != "/dev/net/tun")
         );
     }
 
@@ -3238,10 +5460,13 @@ mod tests {
             b"codewire-workspace-install-v1 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
         ));
         assert!(valid_workspace_owner_marker(
+            b"codewire-workspace-owner-v4 oci 1000:998\n"
+        ));
+        assert!(valid_workspace_owner_marker(
             b"codewire-workspace-owner-v3 oci 1000:998\n"
         ));
         assert!(!valid_workspace_owner_marker(
-            b"codewire-workspace-owner-v3 oci 01000:998\n"
+            b"codewire-workspace-owner-v4 oci 01000:998\n"
         ));
         assert!(!valid_workspace_owner_marker(
             b"codewire-workspace-owner-v2 oci 1000:998\n"
@@ -3442,6 +5667,69 @@ mod tests {
         assert!(!is_host_cid(VMADDR_CID_ANY));
         assert!(!is_host_cid(3));
         assert!(!is_host_cid(u32::MAX));
+    }
+
+    #[test]
+    fn persistent_home_overlay_allows_only_the_generation_changing_contract() {
+        assert_eq!(
+            persistent_home_overlay_options(Path::new("/run/codewire/root/lower/root")),
+            concat!(
+                "lowerdir=/run/codewire/root/lower/root,",
+                "upperdir=/state/home,workdir=/state/home-work,",
+                "index=off,metacopy=off,redirect_dir=off,xino=off,nfs_export=off"
+            )
+        );
+    }
+
+    #[test]
+    fn network_startup_failures_are_fixed_bounded_progress_stages() {
+        let mut stages = NETWORK_AGENT_FAILURE_STAGES.to_vec();
+        stages.push(NETWORK_AGENT_GENERIC_FAILURE_STAGE);
+        stages.push(NETWORK_AGENT_HOST_FAILURE_STAGE);
+        let original_len = stages.len();
+        stages.sort_unstable();
+        stages.dedup();
+        assert_eq!(stages.len(), original_len);
+        for stage in stages {
+            assert!(!stage.is_empty() && stage.len() <= 32);
+            assert!(
+                stage
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+            );
+            assert_eq!(
+                GuestBootStage::from_persisted(stage),
+                Some(GuestBootStage::WorkspaceFailed)
+            );
+        }
+    }
+
+    #[test]
+    fn network_handshake_statuses_are_fixed_and_bounded() {
+        let mut statuses = NETWORK_STATUS_VALUES.to_vec();
+        let original_len = statuses.len();
+        statuses.sort_unstable();
+        statuses.dedup();
+        assert_eq!(statuses.len(), original_len);
+        for status in &statuses {
+            assert!(!status.is_empty() && status.len() <= 32);
+            assert!(
+                status
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+            );
+        }
+        for failure in [
+            GuestNetworkHandshakeError::ReadHello,
+            GuestNetworkHandshakeError::AuthenticateHello,
+            GuestNetworkHandshakeError::WriteAcknowledgement,
+            GuestNetworkHandshakeError::ReadReady,
+            GuestNetworkHandshakeError::AuthenticateReady,
+            GuestNetworkHandshakeError::Session,
+        ] {
+            assert!(NETWORK_STATUS_VALUES.contains(&failure.status()));
+            assert!(NETWORK_AGENT_FAILURE_STAGES.contains(&failure.failure_stage()));
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::AsFd as _;
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink};
 use std::path::{Component, Path, PathBuf};
@@ -19,9 +19,12 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::linux::path::{PrivateRoot, current_uid};
-use crate::linux::state::{MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths};
+use crate::linux::state::{
+    MINIMUM_DOCKER_DISK_BYTES, MINIMUM_STATE_DISK_BYTES, StateDiskIdentity, VmPaths,
+};
 use crate::oci::ContentStore;
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
+use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
 
 const GIT: &str = "/usr/bin/git";
 const MAX_GIT_CONTROL_OUTPUT: usize = 16 * 1024 * 1024;
@@ -83,8 +86,10 @@ struct SourceDirectory {
 }
 
 #[derive(Debug)]
-struct CopyManifest {
-    sha256: String,
+pub(crate) struct DirectorySnapshot {
+    pub(crate) sha256: String,
+    pub(crate) regular_bytes: u64,
+    pub(crate) entries: u64,
 }
 
 pub fn resolve_workspace_mode(
@@ -185,6 +190,7 @@ fn provision_workspace(
                 &open_source_directory(&source.source_path)?,
                 Some(&workspace),
                 content_limit,
+                MAXIMUM_COPY_ENTRIES,
             )?;
             manifest.sha256
         }
@@ -293,7 +299,7 @@ fn inspect_copy_workspace(
     maximum_bytes: u64,
 ) -> Result<WorkspaceSource, WorkspaceError> {
     let source = open_source_directory(requested_source)?;
-    let manifest = copy_directory_manifest(&source, None, maximum_bytes)?;
+    let manifest = copy_directory_manifest(&source, None, maximum_bytes, MAXIMUM_COPY_ENTRIES)?;
     Ok(WorkspaceSource {
         source_path: source.path,
         commit: manifest.sha256,
@@ -388,6 +394,93 @@ pub(crate) fn ensure_workspace_plan(
     }
 }
 
+/// Create or admit the environment-owned Docker data disk. The disk is
+/// formatted before a no-replace rename publishes it, so interruption leaves
+/// either the complete final disk or one exact, safely removable staging file.
+pub(crate) fn ensure_docker_data_disk(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    disk_bytes: u64,
+) -> Result<StateDiskIdentity, WorkspaceError> {
+    if disk_bytes < MINIMUM_DOCKER_DISK_BYTES || !disk_bytes.is_multiple_of(1024 * 1024) {
+        return Err(WorkspaceError::InvalidDockerDiskSize(disk_bytes));
+    }
+    let engine_root = PrivateRoot::open(engine_state_root)?;
+    let paths = VmPaths::create(&engine_root, vm_id)?;
+    let disks = PrivateRoot::open(&paths.disks_dir)?;
+    match fs::symlink_metadata(&paths.docker_disk) {
+        Ok(_) => {
+            let identity = StateDiskIdentity::capture(&paths.docker_disk)?;
+            if identity.file.size != disk_bytes {
+                return Err(WorkspaceError::ExistingDiskSizeMismatch {
+                    path: paths.docker_disk,
+                    expected: disk_bytes,
+                    actual: identity.file.size,
+                });
+            }
+            return Ok(identity);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(WorkspaceError::Io {
+                path: paths.docker_disk,
+                source,
+            });
+        }
+    }
+
+    let staging_name = Path::new("docker.raw.staging");
+    if disks
+        .open_regular(staging_name, true, None, false, Some(0o600))
+        .is_ok()
+    {
+        disks.remove_private_regular(staging_name, 0o600)?;
+    } else if fs::symlink_metadata(paths.disks_dir.join(staging_name)).is_ok() {
+        return Err(WorkspaceError::UnsafeDockerStaging(
+            paths.disks_dir.join(staging_name),
+        ));
+    }
+
+    let staging = disks.create_regular(staging_name, 0o600, true)?;
+    let operation = (|| {
+        staging
+            .file()
+            .set_len(disk_bytes)
+            .map_err(|source| WorkspaceError::Io {
+                path: paths.disks_dir.join(staging_name),
+                source,
+            })?;
+        drop(staging);
+        format_empty_ext4(&paths.disks_dir.join(staging_name))?;
+        File::open(paths.disks_dir.join(staging_name))
+            .and_then(|file| file.sync_all())
+            .map_err(|source| WorkspaceError::Io {
+                path: paths.disks_dir.join(staging_name),
+                source,
+            })?;
+        if !disks.publish_private_regular_no_replace(
+            staging_name,
+            Path::new("docker.raw"),
+            0o600,
+        )? {
+            disks.remove_private_regular(staging_name, 0o600)?;
+        }
+        let identity = StateDiskIdentity::capture(&paths.docker_disk)?;
+        if identity.file.size != disk_bytes {
+            return Err(WorkspaceError::ExistingDiskSizeMismatch {
+                path: paths.docker_disk,
+                expected: disk_bytes,
+                actual: identity.file.size,
+            });
+        }
+        Ok(identity)
+    })();
+    if operation.is_err() {
+        let _ = disks.remove_private_regular(staging_name, 0o600);
+    }
+    operation
+}
+
 fn provision_workspace_plan(
     engine_state_root: &Path,
     vm_id: Uuid,
@@ -463,16 +556,32 @@ fn provision_workspace_plan(
                         prepare_git_clone(&source, &destination, &staging_dir)?;
                     }
                     WorkspaceSourceMode::Copy => {
-                        let manifest = copy_directory_manifest(
-                            &open_source_directory(&source.source_path)?,
-                            Some(&destination),
+                        prepare_copy_input(
+                            &source,
+                            identity,
+                            &destination,
+                            &workspace,
                             workspace_content_limit(disk_bytes),
                         )?;
-                        if &manifest.sha256 != identity {
-                            return Err(WorkspaceError::SourceChanged);
-                        }
                     }
                 }
+            }
+            WorkspaceInput::Direct { .. } => {
+                let forbidden_roots = [engine_state_root.to_owned()];
+                input
+                    .direct_source(&forbidden_roots)
+                    .map_err(|_| WorkspaceError::SourceChanged)?
+                    .ok_or(WorkspaceError::InvalidWorkspacePlan)?;
+                fs::create_dir(&destination).map_err(|source| WorkspaceError::Io {
+                    path: destination.clone(),
+                    source,
+                })?;
+                fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).map_err(
+                    |source| WorkspaceError::Io {
+                        path: destination.clone(),
+                        source,
+                    },
+                )?;
             }
             WorkspaceInput::Repository {
                 source,
@@ -486,6 +595,35 @@ fn provision_workspace_plan(
                 prepare_git_bundle(&bundle, &destination, &staging_dir, source, commit, branch)?;
             }
         }
+    }
+    if let Some(direct_shares) = plan.direct_share_plan()? {
+        let bytes = direct_shares
+            .encode_canonical()
+            .map_err(|_| WorkspaceError::InvalidWorkspacePlan)?;
+        let path = staging_dir.join(DIRECT_SHARE_PLAN_RELATIVE_PATH);
+        let parent = path.parent().ok_or(WorkspaceError::InvalidWorkspacePlan)?;
+        fs::create_dir(parent).map_err(|source| WorkspaceError::Io {
+            path: parent.to_owned(),
+            source,
+        })?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            WorkspaceError::Io {
+                path: parent.to_owned(),
+                source,
+            }
+        })?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o400)
+            .open(&path)
+            .map_err(|source| WorkspaceError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|source| WorkspaceError::Io { path, source })?;
     }
     bounded_staging_regular_bytes(&workspace, workspace_content_limit(disk_bytes))?;
 
@@ -520,6 +658,41 @@ fn provision_workspace_plan(
         plan_sha256: plan.sha256()?,
         state_disk: paths.state_disk,
     })
+}
+
+fn prepare_copy_input(
+    source: &WorkspaceSource,
+    identity: &str,
+    destination: &Path,
+    workspace: &Path,
+    maximum_bytes: u64,
+) -> Result<(), WorkspaceError> {
+    let existing_bytes = bounded_staging_regular_bytes(workspace, maximum_bytes)?;
+    let remaining_bytes = maximum_bytes
+        .checked_sub(existing_bytes)
+        .ok_or(WorkspaceError::WorkspaceTooLarge)?;
+    if destination != workspace {
+        fs::create_dir(destination).map_err(|source| WorkspaceError::Io {
+            path: destination.to_owned(),
+            source,
+        })?;
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o755)).map_err(|source| {
+            WorkspaceError::Io {
+                path: destination.to_owned(),
+                source,
+            }
+        })?;
+    }
+    let manifest = copy_directory_manifest(
+        &open_source_directory(&source.source_path)?,
+        Some(destination),
+        remaining_bytes,
+        MAXIMUM_COPY_ENTRIES,
+    )?;
+    if manifest.sha256 != identity {
+        return Err(WorkspaceError::SourceChanged);
+    }
+    Ok(())
 }
 
 fn staging_workspace_destination(
@@ -723,18 +896,21 @@ struct CopyWalk {
     regular_bytes: u64,
     entries: u64,
     maximum_bytes: u64,
+    maximum_entries: u64,
 }
 
 fn copy_directory_manifest(
     source: &SourceDirectory,
     destination: Option<&Path>,
     maximum_bytes: u64,
-) -> Result<CopyManifest, WorkspaceError> {
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
     let mut walk = CopyWalk {
         hasher: Sha256::new(),
         regular_bytes: 0,
         entries: 0,
         maximum_bytes,
+        maximum_entries,
     };
     walk.hasher.update(COPY_MANIFEST_SCHEMA);
     copy_directory_level(
@@ -746,9 +922,139 @@ fn copy_directory_manifest(
         &mut walk,
     )?;
     verify_source_root(source)?;
-    Ok(CopyManifest {
+    Ok(DirectorySnapshot {
         sha256: format!("{:x}", walk.hasher.finalize()),
+        regular_bytes: walk.regular_bytes,
+        entries: walk.entries,
     })
+}
+
+/// Copy one exact relative directory beneath an already-selected root using
+/// the same no-follow, no-mount-crossing and race-detecting walk as workspace
+/// copies. The selected directory itself may not be a symlink.
+pub(crate) fn snapshot_confined_directory(
+    requested_root: &Path,
+    relative: &Path,
+    destination: &Path,
+    maximum_bytes: u64,
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
+    let root = open_source_directory(requested_root)?;
+    if root.path != requested_root {
+        return Err(WorkspaceError::SourceRootChanged(requested_root.to_owned()));
+    }
+    snapshot_confined_source_directory(root, relative, destination, maximum_bytes, maximum_entries)
+}
+
+/// Copy from an exact already-admitted directory descriptor. This keeps a
+/// direct-share identity pinned while the selected skill is snapshotted and
+/// still rejects a renamed or replaced host path.
+pub(crate) fn snapshot_confined_open_directory(
+    requested_root: &Path,
+    root_descriptor: BorrowedFd<'_>,
+    relative: &Path,
+    destination: &Path,
+    maximum_bytes: u64,
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
+    let directory = openat2(
+        root_descriptor,
+        Path::new("."),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: requested_root.to_owned(),
+        source,
+    })?;
+    let directory = File::from(directory);
+    let metadata = directory.metadata().map_err(|source| WorkspaceError::Io {
+        path: requested_root.to_owned(),
+        source,
+    })?;
+    let root = SourceDirectory {
+        path: requested_root.to_owned(),
+        directory,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    verify_source_root(&root)?;
+    snapshot_confined_source_directory(root, relative, destination, maximum_bytes, maximum_entries)
+}
+
+fn snapshot_confined_source_directory(
+    root: SourceDirectory,
+    relative: &Path,
+    destination: &Path,
+    maximum_bytes: u64,
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
+    if relative.as_os_str().is_empty() {
+        return copy_directory_manifest(&root, Some(destination), maximum_bytes, maximum_entries);
+    }
+    validate_copy_path(relative)?;
+    let selected_path = root.path.join(relative);
+    let directory = openat2(
+        root.directory.as_fd(),
+        relative,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: selected_path.clone(),
+        source,
+    })?;
+    let directory = File::from(directory);
+    let metadata = directory.metadata().map_err(|source| WorkspaceError::Io {
+        path: selected_path.clone(),
+        source,
+    })?;
+    if !metadata.is_dir() || metadata.dev() != root.device {
+        return Err(WorkspaceError::SourceMountBoundary(relative.to_owned()));
+    }
+    let source = SourceDirectory {
+        path: selected_path.clone(),
+        directory,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    let snapshot =
+        copy_directory_manifest(&source, Some(destination), maximum_bytes, maximum_entries)?;
+
+    let reopened = openat2(
+        root.directory.as_fd(),
+        relative,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        RESOLVE_SOURCE.union(ResolveFlags::NO_SYMLINKS),
+    )
+    .map_err(|source| WorkspaceError::SourceOpen {
+        path: selected_path.clone(),
+        source,
+    })?;
+    let reopened = rustix::fs::fstat(&reopened).map_err(|source| WorkspaceError::SourceOpen {
+        path: selected_path.clone(),
+        source,
+    })?;
+    if reopened.st_dev != metadata.dev() || reopened.st_ino != metadata.ino() {
+        return Err(WorkspaceError::SourceRootChanged(selected_path));
+    }
+    verify_source_root(&root)?;
+    Ok(snapshot)
+}
+
+pub(crate) fn manifest_directory(
+    requested_root: &Path,
+    maximum_bytes: u64,
+    maximum_entries: u64,
+) -> Result<DirectorySnapshot, WorkspaceError> {
+    let source = open_source_directory(requested_root)?;
+    if source.path != requested_root {
+        return Err(WorkspaceError::SourceRootChanged(requested_root.to_owned()));
+    }
+    copy_directory_manifest(&source, None, maximum_bytes, maximum_entries)
 }
 
 fn copy_directory_level(
@@ -786,7 +1092,7 @@ fn copy_directory_level(
         if bytes.is_empty() || bytes.contains(&b'/') {
             return Err(WorkspaceError::InvalidCopyPath(relative.to_owned()));
         }
-        if names.len() as u64 == MAXIMUM_COPY_ENTRIES {
+        if names.len() as u64 == walk.maximum_entries {
             return Err(WorkspaceError::CopyEntryLimitExceeded);
         }
         names.push(OsString::from_vec(bytes.to_vec()));
@@ -798,7 +1104,7 @@ fn copy_directory_level(
             .entries
             .checked_add(1)
             .ok_or(WorkspaceError::WorkspaceTooLarge)?;
-        if walk.entries > MAXIMUM_COPY_ENTRIES {
+        if walk.entries > walk.maximum_entries {
             return Err(WorkspaceError::CopyEntryLimitExceeded);
         }
         let entry_relative = relative.join(&name);
@@ -1120,7 +1426,7 @@ fn copy_regular_contents(
     Ok(())
 }
 
-fn prepare_git_clone(
+pub(crate) fn prepare_git_clone(
     source: &WorkspaceSource,
     workspace: &Path,
     staging: &Path,
@@ -1184,7 +1490,7 @@ fn prepare_git_clone(
     Ok(())
 }
 
-fn prepare_git_bundle(
+pub(crate) fn prepare_git_bundle(
     bundle: &Path,
     workspace: &Path,
     staging: &Path,
@@ -1611,6 +1917,27 @@ fn format_ext4(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
+fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {
+    let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).is_file())
+        .ok_or(WorkspaceError::MkfsUnavailable)?;
+    let status = Command::new(mkfs)
+        .args(["-q", "-F", "-m", "0"])
+        .arg(disk)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| WorkspaceError::MkfsUnavailable)?;
+    if !status.success() {
+        return Err(WorkspaceError::MkfsFailed);
+    }
+    Ok(())
+}
+
 struct ProvisionCleanup {
     staging: Option<PathBuf>,
     disk: Option<PathBuf>,
@@ -1655,6 +1982,10 @@ impl Drop for ProvisionCleanup {
 pub enum WorkspaceError {
     #[error("workspace disk size is invalid: {0}")]
     InvalidDiskSize(u64),
+    #[error("Docker data disk size is invalid: {0}")]
+    InvalidDockerDiskSize(u64),
+    #[error("Docker data disk staging path is unsafe: {0}")]
+    UnsafeDockerStaging(PathBuf),
     #[error("workspace source is not a directory: {0}")]
     SourceNotDirectory(PathBuf),
     #[error("workspace source root changed while it was being opened or copied: {0}")]
@@ -1672,7 +2003,7 @@ pub enum WorkspaceError {
     #[error("workspace input plan is invalid")]
     InvalidWorkspacePlan,
     #[error(
-        "workspace has local Git changes; commit them, use --path-mode copy for a point-in-time directory snapshot, or declare an explicit direct mount"
+        "workspace has local Git changes; commit them, use --path-mode copy for a point-in-time directory copy, or declare an explicit direct mount"
     )]
     DirtyWorktree,
     #[error("Git submodules are not supported by the native preview")]
@@ -1840,6 +2171,63 @@ mod tests {
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"preserve");
     }
 
+    #[test]
+    fn docker_data_disk_is_formatted_then_replayed_by_exact_identity() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let vm_id = Uuid::new_v4();
+
+        let admitted =
+            ensure_docker_data_disk(engine.path(), vm_id, MINIMUM_DOCKER_DISK_BYTES).unwrap();
+        let paths = VmPaths::create(&PrivateRoot::open(engine.path()).unwrap(), vm_id).unwrap();
+        assert_eq!(admitted.file.size, MINIMUM_DOCKER_DISK_BYTES);
+        assert!(!admitted.filesystem_uuid.is_nil());
+        assert_eq!(
+            fs::metadata(&paths.docker_disk)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(!paths.disks_dir.join("docker.raw.staging").exists());
+        assert_eq!(
+            ensure_docker_data_disk(engine.path(), vm_id, MINIMUM_DOCKER_DISK_BYTES).unwrap(),
+            admitted
+        );
+        assert!(matches!(
+            ensure_docker_data_disk(
+                engine.path(),
+                vm_id,
+                MINIMUM_DOCKER_DISK_BYTES + 1024 * 1024,
+            ),
+            Err(WorkspaceError::ExistingDiskSizeMismatch { path, .. })
+                if path == paths.docker_disk
+        ));
+    }
+
+    #[test]
+    fn docker_data_disk_rejects_invalid_size_and_unsafe_staging_object() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let vm_id = Uuid::new_v4();
+        assert!(matches!(
+            ensure_docker_data_disk(engine.path(), vm_id, MINIMUM_DOCKER_DISK_BYTES - 1),
+            Err(WorkspaceError::InvalidDockerDiskSize(_))
+        ));
+
+        let paths = VmPaths::create(&PrivateRoot::open(engine.path()).unwrap(), vm_id).unwrap();
+        let outside = engine.path().join("outside");
+        fs::write(&outside, b"preserve").unwrap();
+        symlink(&outside, paths.disks_dir.join("docker.raw.staging")).unwrap();
+        assert!(matches!(
+            ensure_docker_data_disk(engine.path(), vm_id, MINIMUM_DOCKER_DISK_BYTES),
+            Err(WorkspaceError::UnsafeDockerStaging(path))
+                if path == paths.disks_dir.join("docker.raw.staging")
+        ));
+        assert_eq!(fs::read(outside).unwrap(), b"preserve");
+    }
+
     fn git(source: &Path, arguments: &[&str]) {
         let status = Command::new(GIT)
             .args(arguments)
@@ -1910,6 +2298,7 @@ mod tests {
             &open_source_directory(source.path()).unwrap(),
             Some(destination.path()),
             MAXIMUM_COPY_BYTES,
+            MAXIMUM_COPY_ENTRIES,
         )
         .unwrap();
         assert_eq!(copied.sha256, admitted.commit);
@@ -1938,6 +2327,26 @@ mod tests {
         let changed =
             inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES).unwrap();
         assert_ne!(changed.commit, admitted.commit);
+    }
+
+    #[test]
+    fn confined_snapshot_enforces_its_narrow_entry_budget_during_copy() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("skill")).unwrap();
+        fs::write(source.path().join("skill/SKILL.md"), b"skill\n").unwrap();
+        fs::write(source.path().join("skill/extra"), b"extra\n").unwrap();
+        let destination = tempfile::tempdir().unwrap();
+
+        assert!(matches!(
+            snapshot_confined_directory(
+                source.path(),
+                Path::new("skill"),
+                destination.path(),
+                MAXIMUM_COPY_BYTES,
+                1,
+            ),
+            Err(WorkspaceError::CopyEntryLimitExceeded)
+        ));
     }
 
     #[test]
@@ -2013,6 +2422,7 @@ mod tests {
             regular_bytes: expected.len(),
             entries: 1,
             maximum_bytes: MAXIMUM_COPY_BYTES,
+            maximum_entries: MAXIMUM_COPY_ENTRIES,
         };
 
         assert!(matches!(
@@ -2230,5 +2640,56 @@ mod tests {
             fs::metadata(&snapshot.state_disk).unwrap().len(),
             MINIMUM_STATE_DISK_BYTES
         );
+    }
+
+    #[test]
+    fn nested_copy_input_provisioning_builds_the_ext4_workspace_disk() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("fixture.txt"), b"copied\n").unwrap();
+        let admitted =
+            inspect_workspace(source.path(), WorkspaceSelection::Copy, MAXIMUM_COPY_BYTES).unwrap();
+        let plan = WorkspacePlan::from_inputs(vec![WorkspaceInput::local(
+            &admitted,
+            "/workspace/fixtures",
+        )])
+        .unwrap();
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+        let snapshot = ensure_workspace_plan(
+            engine.path(),
+            Uuid::new_v4(),
+            &plan,
+            MINIMUM_STATE_DISK_BYTES,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.plan_sha256, plan.sha256().unwrap());
+        assert_eq!(
+            fs::metadata(&snapshot.state_disk).unwrap().len(),
+            MINIMUM_STATE_DISK_BYTES
+        );
+    }
+
+    #[test]
+    fn copy_input_respects_the_remaining_aggregate_workspace_budget() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("fixture.txt"), b"four").unwrap();
+        let admitted = inspect_workspace(source.path(), WorkspaceSelection::Copy, 4).unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let workspace = staging.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("existing.txt"), b"12345").unwrap();
+
+        assert!(matches!(
+            prepare_copy_input(
+                &admitted,
+                &admitted.commit,
+                &workspace.join("fixtures"),
+                &workspace,
+                8,
+            ),
+            Err(WorkspaceError::WorkspaceTooLarge)
+        ));
     }
 }

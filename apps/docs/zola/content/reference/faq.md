@@ -36,7 +36,7 @@ Isolation and AI agent support are the main differences. Codespaces uses shared-
 <details>
 <summary>Can I use the CLI without the web dashboard?</summary>
 
-Yes. Local Docker/Lima environments work without a Codewire account. Platform environments add hosted lifecycle, organizations, billing, and remote access while using the same session grammar.
+Yes. Native local environments work without a Codewire account. Platform environments add hosted lifecycle, organizations, billing, and remote access while using the same session grammar.
 
 </details>
 

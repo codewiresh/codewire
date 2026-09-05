@@ -1,8 +1,9 @@
 //! Host-owned root-generation disk preparation.
 //!
-//! This module creates only an empty ext4 filesystem. OCI descriptors and
-//! hostile layer bytes are never extracted on the host; the authenticated
-//! guest setup path owns their verification and application.
+//! This module creates an empty ext4 filesystem or seeds it with an exact
+//! host-prepared immutable skill snapshot. OCI descriptors and hostile layer
+//! bytes are never extracted on the host; the authenticated guest setup path
+//! owns their verification and application.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -35,6 +36,24 @@ pub fn ensure_empty_root_generation(
     vm_id: Uuid,
     generation: &str,
     disk_bytes: u64,
+) -> Result<RootGenerationDisk, GenerationError> {
+    ensure_root_generation(
+        engine_state_root,
+        vm_id,
+        generation,
+        disk_bytes,
+        false,
+        None,
+    )
+}
+
+pub(crate) fn ensure_root_generation(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    generation: &str,
+    disk_bytes: u64,
+    skill_snapshot_expected: bool,
+    seed_directory: Option<&Path>,
 ) -> Result<RootGenerationDisk, GenerationError> {
     if !valid_root_disk_bytes(disk_bytes) {
         return Err(GenerationError::InvalidDiskSize(disk_bytes));
@@ -74,6 +93,9 @@ pub fn ensure_empty_root_generation(
             });
         }
     }
+    if skill_snapshot_expected && seed_directory.is_none() {
+        return Err(GenerationError::SkillSnapshotSeedRequired);
+    }
 
     let mut cleanup = NewDiskCleanup::new(
         generation_paths.root_disk.clone(),
@@ -96,7 +118,7 @@ pub fn ensure_empty_root_generation(
             source,
         })?;
     drop(disk);
-    format_empty_ext4(&generation_paths.root_disk)?;
+    format_ext4(&generation_paths.root_disk, seed_directory)?;
     File::open(&generation_paths.root_disk)
         .and_then(|file| file.sync_all())
         .and_then(|()| File::open(&generation_paths.generation_dir)?.sync_all())
@@ -126,20 +148,33 @@ pub(crate) fn valid_root_disk_bytes(disk_bytes: u64) -> bool {
         && disk_bytes.is_multiple_of(1024 * 1024)
 }
 
-fn format_empty_ext4(disk: &Path) -> Result<(), GenerationError> {
+fn format_ext4(disk: &Path, seed_directory: Option<&Path>) -> Result<(), GenerationError> {
     let mkfs = ["/usr/sbin/mkfs.ext4", "/usr/bin/mkfs.ext4"]
         .into_iter()
         .find(|candidate| Path::new(candidate).is_file())
         .ok_or(GenerationError::MkfsUnavailable)?;
-    let status = Command::new(mkfs)
-        .args([
-            OsStr::new("-q"),
-            OsStr::new("-F"),
-            OsStr::new("-m"),
-            OsStr::new("0"),
-            OsStr::new("-L"),
-            OsStr::new("CWROOT"),
-        ])
+    if let Some(seed) = seed_directory {
+        let metadata = fs::symlink_metadata(seed).map_err(|source| GenerationError::Io {
+            path: seed.to_owned(),
+            source,
+        })?;
+        if !seed.is_absolute() || !metadata.is_dir() {
+            return Err(GenerationError::InvalidSeedDirectory(seed.to_owned()));
+        }
+    }
+    let mut command = Command::new(mkfs);
+    command.args([
+        OsStr::new("-q"),
+        OsStr::new("-F"),
+        OsStr::new("-m"),
+        OsStr::new("0"),
+        OsStr::new("-L"),
+        OsStr::new("CWROOT"),
+    ]);
+    if let Some(seed) = seed_directory {
+        command.arg("-d").arg(seed);
+    }
+    let status = command
         .arg(disk)
         .env_clear()
         .env("LC_ALL", "C")
@@ -199,6 +234,10 @@ pub enum GenerationError {
     MkfsUnavailable,
     #[error("mkfs.ext4 failed to create the root generation disk")]
     MkfsFailed,
+    #[error("skill snapshot material is required to create this root generation")]
+    SkillSnapshotSeedRequired,
+    #[error("root generation seed directory is invalid: {0}")]
+    InvalidSeedDirectory(PathBuf),
     #[error(transparent)]
     Path(#[from] crate::linux::path::PathError),
     #[error(transparent)]
@@ -309,6 +348,38 @@ mod tests {
                 Err(GenerationError::InvalidDiskSize(rejected)) if rejected == size
             ));
         }
+    }
+
+    #[test]
+    fn skill_snapshot_generation_requires_explicit_seed_before_publication() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let seed = tempfile::tempdir().unwrap();
+        fs::write(seed.path().join("skill-snapshot.json"), b"snapshot\n").unwrap();
+        let vm_id = Uuid::new_v4();
+        let generation = "c".repeat(64);
+
+        assert!(matches!(
+            ensure_root_generation(
+                engine.path(),
+                vm_id,
+                &generation,
+                MINIMUM_ROOT_DISK_BYTES,
+                true,
+                None,
+            ),
+            Err(GenerationError::SkillSnapshotSeedRequired)
+        ));
+        let created = ensure_root_generation(
+            engine.path(),
+            vm_id,
+            &generation,
+            MINIMUM_ROOT_DISK_BYTES,
+            true,
+            Some(seed.path()),
+        )
+        .unwrap();
+        assert!(created.created);
     }
 
     #[test]

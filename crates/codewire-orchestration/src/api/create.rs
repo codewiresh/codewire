@@ -170,6 +170,126 @@ pub struct Preset {
     pub default_memory_mb: i32,
     pub default_disk_gb: i32,
     pub default_ttl_seconds: Option<i32>,
+    pub default_setup_config: Option<SetupConfig>,
+    pub default_secret_project_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PresetRow {
+    id: String,
+    org_id: Option<String>,
+    official: bool,
+    default_cpu_millicores: i32,
+    default_memory_mb: i32,
+    default_disk_gb: i32,
+    default_ttl_seconds: Option<i32>,
+    default_setup_config: Option<serde_json::Value>,
+    default_secret_project_id: Option<String>,
+}
+
+impl PresetRow {
+    fn into_preset(self) -> Preset {
+        Preset {
+            id: self.id,
+            org_id: self.org_id,
+            official: self.official,
+            default_cpu_millicores: self.default_cpu_millicores,
+            default_memory_mb: self.default_memory_mb,
+            default_disk_gb: self.default_disk_gb,
+            default_ttl_seconds: self.default_ttl_seconds,
+            default_setup_config: self
+                .default_setup_config
+                .and_then(|value| serde_json::from_value::<SetupConfig>(value).ok()),
+            default_secret_project_id: self.default_secret_project_id,
+        }
+    }
+}
+
+fn secret_source_selection(project: bool, organization: bool, user: bool) -> AppResult<()> {
+    let field = if project {
+        Some("secrets.project")
+    } else if organization {
+        Some("secrets.organization")
+    } else if user {
+        Some("secrets.user")
+    } else {
+        None
+    };
+    let Some(field) = field else {
+        return Ok(());
+    };
+    Err(super::environments::coded_owned(
+        StatusCode::BAD_REQUEST,
+        "secret_delivery_pending",
+        format!(
+            "secret source {field} requires an explicit protected delivery mode that is not available for platform environments"
+        ),
+    ))
+}
+
+fn project_secret_source_selection(
+    spec: Option<&codewire_project::ProjectSpec>,
+) -> (bool, bool, bool) {
+    spec.map_or((false, false, false), |spec| {
+        (
+            !spec.secrets.project.is_empty(),
+            spec.secrets.organization,
+            spec.secrets.user,
+        )
+    })
+}
+
+/// Reject every represented legacy secret source before compatibility fields
+/// can overwrite one another. Selecting protected material does not choose a
+/// delivery mode, and the platform runtime does not yet provide a secret-blind
+/// one for these environment bindings.
+pub(crate) fn ensure_no_legacy_secret_delivery(body: &CreateEnvironmentBody) -> AppResult<()> {
+    let (project, organization, user) = project_secret_source_selection(body.project_spec.as_ref());
+    secret_source_selection(
+        !body.secret_project.is_empty() || project,
+        body.include_org_secrets == Some(true) || organization,
+        body.include_user_secrets == Some(true) || user,
+    )
+}
+
+pub(crate) fn ensure_no_legacy_setup_secret_delivery(config: &SetupConfig) -> AppResult<()> {
+    let (project, organization, user) =
+        project_secret_source_selection(config.project_spec.as_ref());
+    secret_source_selection(
+        project,
+        config.include_org_secrets == Some(true) || organization,
+        config.include_user_secrets == Some(true) || user,
+    )
+}
+
+fn ensure_no_legacy_detection_secret_delivery(detection: &DetectionResult) -> AppResult<()> {
+    let (project, organization, user) =
+        project_secret_source_selection(detection.project_spec.as_ref());
+    secret_source_selection(
+        !detection.secret_project.is_empty() || project,
+        detection.include_org_secrets == Some(true) || organization,
+        detection.include_user_secrets == Some(true) || user,
+    )
+}
+
+pub(crate) fn ensure_no_legacy_preset_secret_delivery(
+    default_secret_project_id: Option<&str>,
+) -> AppResult<()> {
+    if default_secret_project_id.is_none() {
+        return Ok(());
+    }
+    Err(super::environments::coded_owned(
+        StatusCode::BAD_REQUEST,
+        "secret_delivery_pending",
+        "preset secret source requires an explicit protected delivery mode that is not available for platform environments".to_owned(),
+    ))
+}
+
+fn ensure_no_legacy_preset_defaults(preset: &Preset) -> AppResult<()> {
+    if let Some(config) = preset.default_setup_config.as_ref() {
+        ensure_no_legacy_setup_secret_delivery(config)?;
+    }
+    ensure_no_legacy_preset_secret_delivery(preset.default_secret_project_id.as_deref())
 }
 
 /// Mirrors `normalizeCreateEnvironmentBody`.
@@ -204,6 +324,7 @@ pub fn normalize_create_environment_body(body: &mut CreateEnvironmentBody) {
 /// understood by the existing setup worker through its compatibility view.
 /// Fields already supplied by the caller remain explicit placement overrides.
 pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> AppResult<()> {
+    ensure_no_legacy_secret_delivery(body)?;
     let Some(spec) = body.project_spec.as_ref() else {
         return Ok(());
     };
@@ -275,10 +396,10 @@ pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> A
         body.secret_project = spec.secrets.project.clone();
     }
     if body.include_org_secrets.is_none() {
-        body.include_org_secrets = spec.secrets.include_org;
+        body.include_org_secrets = Some(spec.secrets.organization);
     }
     if body.include_user_secrets.is_none() {
-        body.include_user_secrets = spec.secrets.include_user;
+        body.include_user_secrets = Some(spec.secrets.user);
     }
     Ok(())
 }
@@ -300,8 +421,8 @@ pub(crate) fn apply_detected_project_spec(
         if !current.skills.is_empty() {
             merged.skills = current.skills;
         }
-        if !current.credentials.is_empty() {
-            merged.credentials = current.credentials;
+        if current.access.is_some() {
+            merged.access = current.access;
         }
         if current.working_directory != default_project_working_directory(&current.repositories) {
             merged.working_directory = current.working_directory;
@@ -385,8 +506,8 @@ pub(crate) fn synchronize_project_spec(body: &mut CreateEnvironmentBody) -> AppR
     };
     spec.secrets = codewire_project::SecretBindings {
         project: body.secret_project.clone(),
-        include_org: body.include_org_secrets,
-        include_user: body.include_user_secrets,
+        organization: body.include_org_secrets.unwrap_or(false),
+        user: body.include_user_secrets.unwrap_or(false),
     };
     spec.validate().map_err(invalid_project_spec)?;
     body.project_spec = Some(spec);
@@ -403,6 +524,8 @@ pub(crate) fn apply_detection_defaults(
     body: &mut CreateEnvironmentBody,
     detection: &DetectionResult,
 ) -> AppResult<()> {
+    ensure_no_legacy_secret_delivery(body)?;
+    ensure_no_legacy_detection_secret_delivery(detection)?;
     apply_detected_project_spec(body, detection.project_spec.as_ref())?;
     if body.install_command.is_empty() {
         body.install_command = detection.install_command.clone();
@@ -491,8 +614,8 @@ fn ensure_current_platform_runtime_support(body: &CreateEnvironmentBody) -> AppR
         };
         if !spec.skills.is_empty() {
             Some("skills")
-        } else if !spec.credentials.is_empty() {
-            Some("credentials")
+        } else if spec.access.is_some() {
+            Some("access")
         } else {
             let destinations =
                 codewire_project::validate_repository_destinations(spec.repositories.iter().map(
@@ -624,24 +747,17 @@ pub(crate) fn sanitize_image_name(image_ref: &str) -> String {
 }
 
 async fn get_preset(pool: &PgPool, preset_id: &str) -> Result<Preset, sqlx::Error> {
-    let row: (String, Option<String>, bool, i32, i32, i32, Option<i32>) = sqlx::query_as(
+    let row = sqlx::query_as::<_, PresetRow>(
         r#"SELECT et.id, et.org_id, et.official,
                   et.default_cpu_millicores, et.default_memory_mb, et.default_disk_gb,
-                  et.default_ttl_seconds
+                  et.default_ttl_seconds, et.default_setup_config,
+                  et.default_secret_project_id
            FROM environment_presets et WHERE et.id = $1"#,
     )
     .bind(preset_id)
     .fetch_one(pool)
     .await?;
-    Ok(Preset {
-        id: row.0,
-        org_id: row.1,
-        official: row.2,
-        default_cpu_millicores: row.3,
-        default_memory_mb: row.4,
-        default_disk_gb: row.5,
-        default_ttl_seconds: row.6,
-    })
+    Ok(row.into_preset())
 }
 
 /// Mirrors `getPresetBySlug` (org presets first, then official).
@@ -650,10 +766,11 @@ async fn get_preset_by_slug(
     org_id: &str,
     slug: &str,
 ) -> Result<Preset, sqlx::Error> {
-    let row: (String, Option<String>, bool, i32, i32, i32, Option<i32>) = sqlx::query_as(
+    let row = sqlx::query_as::<_, PresetRow>(
         r#"SELECT et.id, et.org_id, et.official,
                   et.default_cpu_millicores, et.default_memory_mb, et.default_disk_gb,
-                  et.default_ttl_seconds
+                  et.default_ttl_seconds, et.default_setup_config,
+                  et.default_secret_project_id
            FROM environment_presets et
            WHERE et.slug = $1 AND (et.org_id = $2 OR (et.official = true AND et.org_id IS NULL))
            ORDER BY CASE WHEN et.org_id = $2 THEN 0 ELSE 1 END
@@ -663,29 +780,44 @@ async fn get_preset_by_slug(
     .bind(org_id)
     .fetch_one(pool)
     .await?;
-    Ok(Preset {
-        id: row.0,
-        org_id: row.1,
-        official: row.2,
-        default_cpu_millicores: row.3,
-        default_memory_mb: row.4,
-        default_disk_gb: row.5,
-        default_ttl_seconds: row.6,
-    })
+    Ok(row.into_preset())
 }
 
-/// Mirrors `resolveFromRepoConfig`: saved repo config → its preset.
-async fn resolve_from_repo_config(pool: &PgPool, org_id: &str, repo_url: &str) -> Option<Preset> {
-    let preset_id: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT preset_id FROM repo_configs WHERE org_id = $1 AND repo_url = $2",
+fn resolved_repo_config_preset_id(
+    preset_id: Option<String>,
+    setup_config: Option<serde_json::Value>,
+) -> AppResult<Option<String>> {
+    if let Some(config) =
+        setup_config.and_then(|value| serde_json::from_value::<SetupConfig>(value).ok())
+    {
+        ensure_no_legacy_setup_secret_delivery(&config)?;
+    }
+    Ok(preset_id.filter(|preset_id| !preset_id.is_empty()))
+}
+
+/// Mirrors `resolveFromRepoConfig`: validate the saved setup intent, then
+/// resolve its preset. Lookup failures preserve the legacy detection fallback.
+async fn resolve_from_repo_config(
+    pool: &PgPool,
+    org_id: &str,
+    repo_url: &str,
+) -> AppResult<Option<Preset>> {
+    let row: Option<(Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT preset_id, setup_config FROM repo_configs WHERE org_id = $1 AND repo_url = $2",
     )
     .bind(org_id)
     .bind(repo_url)
     .fetch_optional(pool)
     .await
-    .ok()?;
-    let preset_id = preset_id??;
-    get_preset(pool, &preset_id).await.ok()
+    .ok()
+    .flatten();
+    let Some((preset_id, setup_config)) = row else {
+        return Ok(None);
+    };
+    let Some(preset_id) = resolved_repo_config_preset_id(preset_id, setup_config)? else {
+        return Ok(None);
+    };
+    Ok(get_preset(pool, &preset_id).await.ok())
 }
 
 /// Mirrors `findOrCreatePresetByImage`.
@@ -744,32 +876,6 @@ async fn find_or_create_preset_by_image(
     Ok(id)
 }
 
-/// Mirrors `getPresetDefaultSecretProject`.
-async fn get_preset_default_secret_project(pool: &PgPool, preset_id: &str) -> Option<String> {
-    sqlx::query_scalar::<_, Option<String>>(
-        "SELECT default_secret_project_id FROM environment_presets WHERE id = $1",
-    )
-    .bind(preset_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten()
-}
-
-/// Mirrors `getSecretProjectByName` (the ID slice).
-async fn get_secret_project_id_by_name(
-    pool: &PgPool,
-    org_id: &str,
-    name: &str,
-) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT id FROM secret_projects WHERE org_id = $1 AND name = $2")
-        .bind(org_id)
-        .bind(name)
-        .fetch_one(pool)
-        .await
-}
-
 // ── Insert (environment_db.go::insertEnvironment) ───────────────────────
 
 struct InsertEnvironmentParams<'a> {
@@ -784,7 +890,6 @@ struct InsertEnvironmentParams<'a> {
     isolation_tier: &'a str,
     ttl_seconds: Option<i32>,
     setup_config: Option<&'a SetupConfig>,
-    secret_project_id: Option<String>,
 }
 
 async fn insert_environment(
@@ -819,7 +924,7 @@ async fn insert_environment(
                  shutdown_at, auth_token, setup_config, secret_project_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
-                 gen_random_uuid()::text, $12, $13)
+                 gen_random_uuid()::text, $12, NULL)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
@@ -843,7 +948,6 @@ async fn insert_environment(
         .bind(p.ttl_seconds)
         .bind(p.ttl_seconds)
         .bind(setup_json)
-        .bind(p.secret_project_id)
         .fetch_one(&mut *transaction)
         .await?;
     transaction.commit().await?;
@@ -955,6 +1059,7 @@ pub(crate) async fn create_environment_core(
         }
     };
     require_interactive_access(state.confidential_storage_flags, user, isolation_tier)?;
+    ensure_no_legacy_secret_delivery(&body)?;
 
     // Rate limit environment creation per user (fail open on errors).
     match check_rate_limit(pool, &format!("env_create:{}", user.user_id), 60, 10).await {
@@ -1073,7 +1178,7 @@ pub(crate) async fn create_environment_core(
                 })?
             } else if !body.repo_url.is_empty() {
                 // Repo URL — check saved repo config first, then detect.
-                match resolve_from_repo_config(pool, org_id, &body.repo_url).await {
+                match resolve_from_repo_config(pool, org_id, &body.repo_url).await? {
                     Some(p) => {
                         tracing::info!(
                             repo_url = body.repo_url,
@@ -1093,6 +1198,8 @@ pub(crate) async fn create_environment_core(
                     "one of preset_id, preset_slug, image, or repo_url is required",
                 ));
             };
+
+            ensure_no_legacy_preset_defaults(&preset)?;
 
             let cpu = body.cpu_millicores.unwrap_or(preset.default_cpu_millicores);
             let mem = body.memory_mb.unwrap_or(preset.default_memory_mb);
@@ -1125,19 +1232,7 @@ pub(crate) async fn create_environment_core(
             }
 
             // Build setup_config if any smart fields are present.
-            let needs_setup_cfg = !body.repo_url.is_empty()
-                || !body.repos.is_empty()
-                || !body.install_command.is_empty()
-                || !body.startup_script.is_empty()
-                || !body.env_vars.is_empty()
-                || !body.agents.is_empty()
-                || body.install_agents.is_some()
-                || !body.agent.is_empty()
-                || !body.agent_env.is_empty()
-                || !body.app_ports.is_empty()
-                || body.include_org_secrets == Some(false)
-                || body.include_user_secrets == Some(false)
-                || body.project_spec.is_some();
+            let needs_setup_cfg = create_needs_setup_config(&body);
             let setup_cfg = needs_setup_cfg.then(|| SetupConfig {
                 repo_url: body.repo_url.clone(),
                 branch: body.branch.clone(),
@@ -1155,23 +1250,6 @@ pub(crate) async fn create_environment_core(
                 project_spec: body.project_spec.clone(),
             });
 
-            // Resolve secret project name → ID if provided.
-            let secret_project_id = if !body.secret_project.is_empty() {
-                let id = get_secret_project_id_by_name(pool, org_id, &body.secret_project)
-                    .await
-                    .map_err(|_| {
-                        super::environments::coded_owned(
-                            StatusCode::BAD_REQUEST,
-                            "secret_project_not_found",
-                            format!("secret project not found: {}", body.secret_project),
-                        )
-                    })?;
-                Some(id)
-            } else {
-                // Fall back to preset's default secret project.
-                get_preset_default_secret_project(pool, &preset.id).await
-            };
-
             let env = insert_environment(
                 pool,
                 InsertEnvironmentParams {
@@ -1186,7 +1264,6 @@ pub(crate) async fn create_environment_core(
                     isolation_tier,
                     ttl_seconds: ttl,
                     setup_config: setup_cfg.as_ref(),
-                    secret_project_id,
                 },
             )
             .await?;
@@ -1222,6 +1299,22 @@ pub(crate) async fn create_environment_core(
         }
     })
     .await
+}
+
+fn create_needs_setup_config(body: &CreateEnvironmentBody) -> bool {
+    !body.repo_url.is_empty()
+        || !body.repos.is_empty()
+        || !body.install_command.is_empty()
+        || !body.startup_script.is_empty()
+        || !body.env_vars.is_empty()
+        || !body.agents.is_empty()
+        || body.install_agents.is_some()
+        || !body.agent.is_empty()
+        || !body.agent_env.is_empty()
+        || !body.app_ports.is_empty()
+        || body.include_org_secrets.is_some()
+        || body.include_user_secrets.is_some()
+        || body.project_spec.is_some()
 }
 
 /// The repo-detection arm of `createEnvironment` (no saved config):
@@ -1466,7 +1559,7 @@ ports: [{port: 8080, label: api, access: private}]
 cpu: 2
 memory: 4Gi
 disk: 40Gi
-secrets: {project: development, org: false, user: true}
+secrets: {organization: false, user: false}
 "#,
         )
         .unwrap()
@@ -1489,9 +1582,218 @@ secrets: {project: development, org: false, user: true}
         assert_eq!(body.cpu_millicores, Some(2000));
         assert_eq!(body.memory_mb, Some(4096));
         assert_eq!(body.disk_gb, Some(40));
-        assert_eq!(body.secret_project, "development");
+        assert!(body.secret_project.is_empty());
         assert_eq!(body.include_org_secrets, Some(false));
-        assert_eq!(body.include_user_secrets, Some(true));
+        assert_eq!(body.include_user_secrets, Some(false));
+    }
+
+    fn assert_secret_delivery_pending(error: AppError, forbidden_value: Option<&str>) {
+        match error {
+            AppError::Coded {
+                status,
+                code: "secret_delivery_pending",
+                detail,
+            } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                if let Some(value) = forbidden_value {
+                    assert!(!detail.contains(value));
+                }
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn direct_and_project_secret_sources_fail_closed_before_synchronization() {
+        for body in [
+            CreateEnvironmentBody {
+                secret_project: "project-secret-value".to_owned(),
+                ..Default::default()
+            },
+            CreateEnvironmentBody {
+                include_org_secrets: Some(true),
+                ..Default::default()
+            },
+            CreateEnvironmentBody {
+                include_user_secrets: Some(true),
+                ..Default::default()
+            },
+        ] {
+            assert_secret_delivery_pending(
+                ensure_no_legacy_secret_delivery(&body).unwrap_err(),
+                Some("project-secret-value"),
+            );
+        }
+
+        for yaml in [
+            "secrets: {project: nested-project-secret-value}\n",
+            "secrets: {organization: true}\n",
+            "secrets: {user: true}\n",
+        ] {
+            let mut body = CreateEnvironmentBody {
+                include_org_secrets: Some(false),
+                include_user_secrets: Some(false),
+                project_spec: Some(codewire_project::parse_project_yaml(yaml).unwrap().spec),
+                ..Default::default()
+            };
+            assert_secret_delivery_pending(
+                apply_project_spec_defaults(&mut body).unwrap_err(),
+                Some("nested-project-secret-value"),
+            );
+        }
+
+        ensure_no_legacy_secret_delivery(&CreateEnvironmentBody {
+            include_org_secrets: Some(false),
+            include_user_secrets: Some(false),
+            project_spec: Some(
+                codewire_project::parse_project_yaml(
+                    "secrets: {organization: false, user: false}\n",
+                )
+                .unwrap()
+                .spec,
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn detection_secret_sources_fail_closed_before_explicit_false_can_mask_them() {
+        let detections = [
+            DetectionResult {
+                secret_project: "detected-project-secret-value".to_owned(),
+                ..Default::default()
+            },
+            DetectionResult {
+                include_org_secrets: Some(true),
+                ..Default::default()
+            },
+            DetectionResult {
+                include_user_secrets: Some(true),
+                ..Default::default()
+            },
+            DetectionResult {
+                project_spec: Some(
+                    codewire_project::parse_project_yaml("secrets: {organization: true}\n")
+                        .unwrap()
+                        .spec,
+                ),
+                ..Default::default()
+            },
+        ];
+        for detection in detections {
+            let mut body = CreateEnvironmentBody {
+                include_org_secrets: Some(false),
+                include_user_secrets: Some(false),
+                ..Default::default()
+            };
+            assert_secret_delivery_pending(
+                apply_detection_defaults(&mut body, &detection).unwrap_err(),
+                Some("detected-project-secret-value"),
+            );
+        }
+
+        let mut body = CreateEnvironmentBody {
+            include_org_secrets: Some(false),
+            include_user_secrets: Some(false),
+            ..Default::default()
+        };
+        apply_detection_defaults(
+            &mut body,
+            &DetectionResult {
+                include_org_secrets: Some(false),
+                include_user_secrets: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn preset_secret_defaults_fail_closed_without_rendering_identifiers() {
+        ensure_no_legacy_preset_defaults(&Preset::default()).unwrap();
+        assert_secret_delivery_pending(
+            ensure_no_legacy_preset_defaults(&Preset {
+                default_secret_project_id: Some("preset-project-secret-value".to_owned()),
+                ..Default::default()
+            })
+            .unwrap_err(),
+            Some("preset-project-secret-value"),
+        );
+        assert_secret_delivery_pending(
+            ensure_no_legacy_preset_defaults(&Preset {
+                default_setup_config: Some(SetupConfig {
+                    include_user_secrets: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap_err(),
+            None,
+        );
+    }
+
+    #[test]
+    fn saved_repo_config_secret_sources_fail_before_preset_resolution() {
+        for config in [
+            SetupConfig {
+                include_org_secrets: Some(true),
+                ..Default::default()
+            },
+            SetupConfig {
+                include_user_secrets: Some(true),
+                ..Default::default()
+            },
+            SetupConfig {
+                project_spec: Some(
+                    codewire_project::parse_project_yaml(
+                        "secrets: {project: saved-project-secret-value}\n",
+                    )
+                    .unwrap()
+                    .spec,
+                ),
+                ..Default::default()
+            },
+        ] {
+            assert_secret_delivery_pending(
+                resolved_repo_config_preset_id(
+                    Some("preset-test".to_owned()),
+                    Some(serde_json::to_value(config).unwrap()),
+                )
+                .unwrap_err(),
+                Some("saved-project-secret-value"),
+            );
+        }
+
+        assert_eq!(
+            resolved_repo_config_preset_id(
+                Some("preset-test".to_owned()),
+                Some(
+                    serde_json::to_value(SetupConfig {
+                        include_org_secrets: Some(false),
+                        include_user_secrets: Some(false),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .as_deref(),
+            Some("preset-test")
+        );
+    }
+
+    #[test]
+    fn explicit_false_secret_selection_persists_setup_config() {
+        let mut body = CreateEnvironmentBody::default();
+        assert!(!create_needs_setup_config(&body));
+
+        body.include_user_secrets = Some(false);
+        assert!(create_needs_setup_config(&body));
+
+        body.include_user_secrets = None;
+        body.include_org_secrets = Some(false);
+        assert!(create_needs_setup_config(&body));
     }
 
     #[test]
@@ -1596,7 +1898,7 @@ memory: 16Gi
         for yaml in [
             "repositories: [{source: https://example.test/app.git, revision: deadbeef}]\n",
             "skills: [.agents/skills/rust]\n",
-            "credentials: {work: {provider: openai, account: acct-work}}\n",
+            "access: {profile: user/work}\n",
             "repositories: [{source: https://example.test/app.git}]\nworking_directory: /workspace/app/subdir\n",
         ] {
             let spec = codewire_project::parse_project_yaml(yaml).unwrap().spec;
@@ -1892,8 +2194,7 @@ memory: 16Gi
 repositories:
   - source: https://example.test/org/app.git
     revision: deadbeef
-credentials:
-  work: {provider: openai, account: acct-work}
+access: {profile: user/work}
 "#,
         )
         .unwrap()
@@ -1905,10 +2206,7 @@ credentials:
         .unwrap();
 
         assert_eq!(value["project_spec"]["schema_version"], 1);
-        assert_eq!(
-            value["project_spec"]["credentials"]["work"]["account"],
-            "acct-work"
-        );
+        assert_eq!(value["project_spec"]["access"]["profile"], "user/work");
         let encoded = value.to_string();
         for forbidden in ["host_path", "token", "secret_value", "backend_socket"] {
             assert!(!encoded.contains(forbidden), "unexpected {forbidden}");

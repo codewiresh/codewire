@@ -338,7 +338,7 @@ done
 require_bounded_decimal '--cpus' "$CPUS" 1 32
 require_bounded_decimal '--memory-mib' "$MEMORY_MIB" 128 65536
 readonly CPUS MEMORY_MIB
-for tool in awk cargo cat chmod id jq mkdir mkfs.ext4 mktemp realpath setpriv sha256sum stat sync timeout tr truncate uname; do
+for tool in awk cargo cat chmod debugfs id jq mkdir mkfs.ext4 mktemp realpath setpriv sha256sum stat sync timeout tr truncate uname; do
   require_cmd "$tool"
 done
 [[ "$(uname -s)" == Linux ]] || die 'the Cloud Hypervisor smoke requires Linux'
@@ -444,6 +444,25 @@ fi
 SMOKE_TIMEOUT_PID=''
 SMOKE_TIMEOUT_START_TICKS=''
 if [[ "$SMOKE_STATUS" -ne 0 ]]; then
+  BOOT_STAGE="$(env -i PATH='/usr/bin:/bin' LC_ALL=C \
+    /usr/bin/debugfs -R 'cat codewire/boot-stage' "$STATE_DISK" 2>/dev/null || true)"
+  if [[ "$BOOT_STAGE" =~ ^[a-z][a-z-]{0,31}$ ]]; then
+    log "diagnostic guest.boot_stage=$BOOT_STAGE"
+  else
+    log 'diagnostic guest.boot_stage=unavailable'
+  fi
+  NETWORK_STATUS="$(env -i PATH='/usr/bin:/bin' LC_ALL=C \
+    /usr/bin/debugfs -R 'cat codewire/network-status' "$STATE_DISK" 2>/dev/null || true)"
+  case "$NETWORK_STATUS" in
+    network-listening|network-peer-rejected|network-handshake-timeout|network-hello-read-failed|\
+      network-hello-auth-failed|network-ack-write-failed|network-ready-read-failed|\
+      network-ready-auth-failed|network-session-failed|network-authenticated)
+      log "diagnostic guest.network_status=$NETWORK_STATUS"
+      ;;
+    *)
+      log 'diagnostic guest.network_status=unavailable'
+      ;;
+  esac
   exit "$SMOKE_STATUS"
 fi
 

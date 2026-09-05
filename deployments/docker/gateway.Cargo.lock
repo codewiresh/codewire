@@ -650,6 +650,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-netstack"
+version = "0.1.0"
+dependencies = [
+ "smoltcp",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "codewire-proto"
 version = "0.1.0"
 dependencies = [
@@ -668,6 +678,7 @@ dependencies = [
  "blake2 0.10.6",
  "boringtun",
  "chrono",
+ "codewire-netstack",
  "crc32fast",
  "crypto_box",
  "rand 0.8.6",
@@ -676,7 +687,6 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
- "smoltcp",
  "thiserror",
  "tokio",
  "tokio-rustls",

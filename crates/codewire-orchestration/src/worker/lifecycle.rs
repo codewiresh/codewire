@@ -27,10 +27,12 @@ use super::setup::{
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{Action, PgLifecycleStore, Service, Snapshot};
-use crate::sandbox::client::SandboxClient;
+use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
 
 const DELETED_TIMEOUT: Duration = Duration::from_secs(120);
 const POD_IP_POLL_TIMEOUT: Duration = Duration::from_secs(300); // start: 5-minute pod IP poll
+const RUNNING_RUNTIME_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+const RUNNING_RUNTIME_RECOVERY_POLL: Duration = Duration::from_millis(500);
 const START_MUTATION_STATES: &[&str] = &["starting"];
 const RUNNING_MUTATION_STATES: &[&str] = &["running"];
 const STOP_MUTATION_STATES: &[&str] = &["stopping"];
@@ -104,6 +106,78 @@ fn snapshot(id: &str, state: &str, desired: &str, external_cleanup_complete: boo
         desired_state: desired.to_string(),
         external_cleanup_complete,
     }
+}
+
+fn start_runtime_is_ready(probe: &ProbeResult) -> bool {
+    probe.claim_exists
+        && probe.claim_ready
+        && probe.pod_exists
+        && probe.pod_phase == "Running"
+        && !probe.pod_name.is_empty()
+        && !probe.pod_uid.is_empty()
+        && !probe.pod_ip.is_empty()
+}
+
+async fn reconcile_running_runtime_identity(
+    ctx: &WorkerContext,
+    environment: &super::env_data::EnvironmentRow,
+    authority: &ActivityAuthority,
+) -> anyhow::Result<()> {
+    let backend = load_backend_row(&ctx.pool, &environment.id)
+        .await
+        .map_err(|_| anyhow::anyhow!("environment runtime backend is unavailable"))?;
+    if backend.namespace.is_empty() {
+        anyhow::bail!("environment runtime backend is unavailable");
+    }
+    let sandbox = SandboxClient::new(
+        ctx.kube
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("environment runtime is unavailable"))?,
+        &backend.namespace,
+    );
+    let deadline = tokio::time::Instant::now() + RUNNING_RUNTIME_RECOVERY_TIMEOUT;
+    let probe = authority
+        .run_while_authoritative_for_states(RUNNING_MUTATION_STATES, async {
+            loop {
+                match sandbox.probe_environment(&environment.id).await {
+                    Ok(probe) if start_runtime_is_ready(&probe) => break Ok(probe),
+                    Ok(_) => {
+                        tracing::debug!(
+                            environment_id = environment.id,
+                            "waiting for current running workspace runtime"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            environment_id = environment.id,
+                            error = %error,
+                            "retrying workspace runtime probe"
+                        );
+                    }
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    anyhow::bail!("environment runtime Pod recovery timed out");
+                }
+                tokio::time::sleep(RUNNING_RUNTIME_RECOVERY_POLL).await;
+            }
+        })
+        .await?;
+    if backend.pod_name != probe.pod_name || backend.pod_ip != probe.pod_ip {
+        authority
+            .execute_for_states(
+                RUNNING_MUTATION_STATES,
+                sqlx::query(
+                    "UPDATE sandbox_environment_backend
+                        SET pod_name = $1, pod_ip = $2
+                      WHERE environment_id = $3",
+                )
+                .bind(&probe.pod_name)
+                .bind(&probe.pod_ip)
+                .bind(&environment.id),
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
@@ -475,22 +549,35 @@ pub async fn handle_environment_start(
     // Poll for pod IP — after scaling 0→1 the claim may still show
     // "Ready" (stale status) before the new pod exists.
     let deadline = tokio::time::Instant::now() + POD_IP_POLL_TIMEOUT;
-    let (pod_ip, pod_name) = await_reconcile_or_cancel(
+    let (pod_ip, pod) = await_reconcile_or_cancel(
         &activity_ctx,
         authority.run_while_authoritative_for_states(START_MUTATION_STATES, async {
             loop {
-                match client.get_pod_ip(env_id).await {
-                    Ok(ip) => {
-                        let name = client.get_pod_name(env_id).await.unwrap_or_default();
-                        break Ok((ip, name));
+                match client.probe_environment(env_id).await {
+                    Ok(probe) if start_runtime_is_ready(&probe) => {
+                        break Ok((
+                            probe.pod_ip,
+                            WorkspacePodIdentity {
+                                name: probe.pod_name,
+                                uid: probe.pod_uid,
+                            },
+                        ));
                     }
-                    Err(e) => {
+                    result => {
                         if tokio::time::Instant::now() >= deadline {
-                            record_environment_error(&svc, authority, env_id, &format!("{e:#}"))
-                                .await?;
-                            return Err(anyhow::anyhow!("get pod IP: {e:#}"));
+                            let detail = result
+                                .err()
+                                .map(|error| format!("{error:#}"))
+                                .unwrap_or_else(|| "workspace Pod identity is incomplete".into());
+                            record_environment_error(&svc, authority, env_id, &detail).await?;
+                            return Err(anyhow::anyhow!(
+                                "get current running workspace Pod identity: {detail}"
+                            ));
                         }
-                        tracing::debug!(env = env_id, error = %e, "waiting for pod after scale-up");
+                        tracing::debug!(
+                            env = env_id,
+                            "waiting for current running Pod after scale-up"
+                        );
                         tokio::time::sleep(jittered_duration(Duration::from_secs(2))).await;
                     }
                 }
@@ -506,7 +593,7 @@ pub async fn handle_environment_start(
                 "UPDATE sandbox_environment_backend SET pod_ip = $1, pod_name = $2 WHERE environment_id = $3",
             )
             .bind(&pod_ip)
-            .bind(&pod_name)
+            .bind(&pod.name)
             .bind(env_id),
         )
         .await
@@ -522,16 +609,9 @@ pub async fn handle_environment_start(
         return Err(e);
     }
 
-    // Mark the environment running as soon as the claim is Ready and the
-    // pod IP is recorded — mirroring the create path, where MarkRunning
-    // fires on (claim ready + pod IP) and the gateway/SSH steps run
-    // afterward in the separate Setup activity (and never fail the env to
-    // error). Doing the same here is what returns a stop→start back to
-    // `running`: a slow or flaky gateway port-forward on a freshly
-    // restarted pod must not trap the env in `starting`→`error`. The CAS
-    // is idempotent (a Temporal retry or a reconcile that already ran is a
-    // no-op) and, once `running`, the reconciler sees (started, running)
-    // → Noop, so there is no reconciler/retry fight.
+    // Persist the current Pod name/IP only after observing a ready claim and
+    // a running Pod with a nonempty UID. The backend schema does not persist
+    // that UID, so this is a current-runtime check, not an exact UID binding.
     if let Err(e) = svc.complete_start(env_id).await {
         record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
         return Err(e);
@@ -802,38 +882,52 @@ pub async fn handle_environment_reconcile(
         Action::Noop if env.state == "destroyed" && env.desired_state == "destroyed" => {
             Ok(ReconcileOutcome::Destroyed)
         }
-        Action::Noop
+        Action::Noop => {
             if needs_running_confidential_authorization(
                 &env.state,
                 &env.desired_state,
                 &env.isolation_tier,
-            ) =>
-        {
-            let storage = ctx.confidential_storage.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("confidential storage providers are not configured")
-            })?;
-            let manifest_uri = await_reconcile_or_cancel(
-                &activity_ctx,
-                authority.run_external_mutation(
+            ) {
+                let storage = ctx.confidential_storage.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("confidential storage providers are not configured")
+                })?;
+                let manifest_uri = await_reconcile_or_cancel(
+                    &activity_ctx,
+                    authority.run_external_mutation(
+                        RUNNING_MUTATION_STATES,
+                        storage.ensure_ready(env_id, env.disk_gb),
+                    ),
+                )
+                .await?;
+                await_reconcile_or_cancel(
+                    &activity_ctx,
+                    authorize_confidential_runtime_for_environment(
+                        ctx,
+                        &env,
+                        &manifest_uri,
+                        authority,
+                        RUNNING_MUTATION_STATES,
+                    ),
+                )
+                .await?;
+            }
+
+            if env.state == "running"
+                && env.desired_state == "started"
+                && let Err(error) = reconcile_running_runtime_identity(ctx, &env, authority).await
+            {
+                if is_lifecycle_control_loss(&error) {
+                    return Err(error);
+                }
+                svc.mark_error_for_states(
+                    env_id,
+                    &format!("environment runtime reconciliation failed: {error:#}"),
                     RUNNING_MUTATION_STATES,
-                    storage.ensure_ready(env_id, env.disk_gb),
-                ),
-            )
-            .await?;
-            await_reconcile_or_cancel(
-                &activity_ctx,
-                authorize_confidential_runtime_for_environment(
-                    ctx,
-                    &env,
-                    &manifest_uri,
-                    authority,
-                    RUNNING_MUTATION_STATES,
-                ),
-            )
-            .await?;
+                )
+                .await?;
+            }
             Ok(ReconcileOutcome::Continue)
         }
-        Action::Noop => Ok(ReconcileOutcome::Continue),
         Action::Create => {
             // D3 (Temporal-only): create chains setup inline rather than
             // publishing an env-setup NATS job. The primary create path
@@ -902,7 +996,7 @@ pub async fn handle_environment_reconcile(
 
 #[cfg(test)]
 mod tests {
-    use super::needs_running_confidential_authorization;
+    use super::*;
 
     #[test]
     fn authorization_backfill_selects_only_stable_running_confidential_environments() {
@@ -923,5 +1017,40 @@ mod tests {
                 candidate.2,
             ));
         }
+    }
+
+    fn ready_start_runtime() -> ProbeResult {
+        ProbeResult {
+            claim_exists: true,
+            claim_ready: true,
+            pod_exists: true,
+            pod_phase: "Running".into(),
+            pod_name: "workspace-current".into(),
+            pod_uid: "workspace-uid-current".into(),
+            pod_ip: "10.0.0.9".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn start_requires_ready_claim_and_complete_running_pod_identity() {
+        let ready = ready_start_runtime();
+        assert!(start_runtime_is_ready(&ready));
+
+        let mut probe = ready.clone();
+        probe.claim_ready = false;
+        assert!(!start_runtime_is_ready(&probe));
+
+        let mut probe = ready.clone();
+        probe.pod_phase = "Pending".into();
+        assert!(!start_runtime_is_ready(&probe));
+
+        let mut probe = ready.clone();
+        probe.pod_uid.clear();
+        assert!(!start_runtime_is_ready(&probe));
+
+        let mut probe = ready;
+        probe.pod_ip.clear();
+        assert!(!start_runtime_is_ready(&probe));
     }
 }

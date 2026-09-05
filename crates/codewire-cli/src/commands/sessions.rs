@@ -28,10 +28,6 @@ enum EnvironmentSessionTarget {
         name: String,
         working_dir: String,
     },
-    Local {
-        target: config::CurrentTargetConfig,
-        instance: Box<config::LocalInstanceConfig>,
-    },
     Platform {
         target: config::CurrentTargetConfig,
         org_id: String,
@@ -45,7 +41,6 @@ impl EnvironmentSessionTarget {
         match self {
             #[cfg(target_os = "linux")]
             Self::NativeLocal { .. } => Ok(()),
-            Self::Local { instance, .. } => ensure_local_environment_runtime_ready(instance),
             Self::Platform { .. } => Ok(()),
         }
     }
@@ -60,14 +55,6 @@ impl EnvironmentSessionTarget {
                 .map_err(anyhow::Error::from)?
                 .into_iter()
                 .map(platform_environment_session_view)
-                .collect()),
-            Self::Local { instance, .. } => Ok(local_environment_session_client(instance)
-                .await?
-                .list()
-                .await
-                .map_err(anyhow::Error::from)?
-                .into_iter()
-                .map(local_environment_session_view)
                 .collect()),
             Self::Platform {
                 org_id,
@@ -100,24 +87,6 @@ impl EnvironmentSessionTarget {
                 let response = native_environment_session_client(name)
                     .await?
                     .read_output(session_id, offset, 0)
-                    .await?;
-                Ok(EnvironmentSessionOutput {
-                    chunks: response
-                        .chunks
-                        .into_iter()
-                        .map(|chunk| chunk.data)
-                        .collect(),
-                    next_offset: response.next_offset,
-                })
-            }
-            Self::Local { instance, .. } => {
-                let response = local_environment_session_client(instance)
-                    .await?
-                    .read_output(codewire_daemon::client::v1::ReadSessionOutputRequest {
-                        session_id: session_id.to_string(),
-                        offset,
-                        limit: 0,
-                    })
                     .await?;
                 Ok(EnvironmentSessionOutput {
                     chunks: response
@@ -184,24 +153,6 @@ impl EnvironmentSessionTarget {
                     .await?;
                 Ok(platform_environment_session_view(session))
             }
-            Self::Local { instance, .. } => {
-                let session = local_environment_session_client(instance)
-                    .await?
-                    .launch(codewire_daemon::client::v1::LaunchSessionRequest {
-                        command,
-                        working_dir,
-                        env: env
-                            .into_iter()
-                            .map(|(key, value)| format!("{key}={value}"))
-                            .collect(),
-                        pty,
-                        term,
-                        width: i32::from(columns),
-                        height: i32::from(rows),
-                    })
-                    .await?;
-                Ok(local_environment_session_view(session))
-            }
             Self::Platform {
                 org_id,
                 environment_id,
@@ -241,12 +192,6 @@ impl EnvironmentSessionTarget {
                     .get(session_id)
                     .await?,
             )),
-            Self::Local { instance, .. } => Ok(local_environment_session_view(
-                local_environment_session_client(instance)
-                    .await?
-                    .get(session_id)
-                    .await?,
-            )),
             Self::Platform {
                 org_id,
                 environment_id,
@@ -280,12 +225,6 @@ impl EnvironmentSessionTarget {
                     .restart(session_id)
                     .await?,
             )),
-            Self::Local { instance, .. } => Ok(local_environment_session_view(
-                local_environment_session_client(instance)
-                    .await?
-                    .restart(session_id)
-                    .await?,
-            )),
             Self::Platform {
                 org_id,
                 environment_id,
@@ -314,7 +253,7 @@ impl EnvironmentSessionTarget {
         match self {
             #[cfg(target_os = "linux")]
             Self::NativeLocal { target, .. } => target,
-            Self::Local { target, .. } | Self::Platform { target, .. } => target,
+            Self::Platform { target, .. } => target,
         }
     }
 
@@ -322,7 +261,6 @@ impl EnvironmentSessionTarget {
         match self {
             #[cfg(target_os = "linux")]
             Self::NativeLocal { working_dir, .. } => working_dir.clone(),
-            Self::Local { instance, .. } => local_environment_session_working_dir(instance),
             Self::Platform { .. } => LOCAL_WORKSPACE_PATH.to_string(),
         }
     }
@@ -335,16 +273,30 @@ async fn resolve_environment_session_target(
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
     #[cfg(target_os = "linux")]
-    match environment.and_then(trimmed_str) {
-        Some(name) => {
-            if let Some(environment) = native_environment(name).await? {
+    if let Some(requested) = environment.and_then(trimmed_str)
+        && let Ok(target) = config::current_target(&paths.mesh_data_dir)
+        && target.kind == "local"
+        && target.target_ref != "local"
+        && let Some(environment) = native_environment(&target.target_ref).await?
+        && native_session_request_matches(&environment, requested)
+    {
+        return Ok(native_session_target(environment));
+    }
+    #[cfg(target_os = "linux")]
+    if environment.and_then(trimmed_str).is_none() {
+        if let Ok(target) = config::current_target(&paths.mesh_data_dir)
+            && !(target.kind == "local" && target.target_ref == "local")
+        {
+            if target.kind != "local" {
+                return environment_session_target_from_current(globals, &paths, &env, target)
+                    .await;
+            }
+            if let Some(environment) = native_environment(&target.target_ref).await? {
                 return Ok(native_session_target(environment));
             }
         }
-        None => {
-            if let Some(environment) = native_selected_environment().await? {
-                return Ok(native_session_target(environment));
-            }
+        if let Some(environment) = native_selected_environment().await? {
+            return Ok(native_session_target(environment));
         }
     }
     let target = match environment.and_then(trimmed_str) {
@@ -354,6 +306,14 @@ async fn resolve_environment_session_target(
         None => config::current_target(&paths.mesh_data_dir)?,
     };
     environment_session_target_from_current(globals, &paths, &env, target).await
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn native_session_request_matches(
+    environment: &codewire_local_vmm::control::v1::Environment,
+    requested: &str,
+) -> bool {
+    environment.name == requested || environment.id == requested
 }
 
 #[cfg(target_os = "linux")]
@@ -390,16 +350,18 @@ async fn environment_session_target_from_current(
 ) -> anyhow::Result<EnvironmentSessionTarget> {
     match target.kind.as_str() {
         "local" => {
-            let instance = lookup_local_instance_for_target(&paths.mesh_data_dir, &target)
+            #[cfg(target_os = "linux")]
+            let environment = native_environment(&target.target_ref)
+                .await?
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "no local environment selected; use `cw use --local ENV` or pass ENV"
                     )
                 })?;
-            Ok(EnvironmentSessionTarget::Local {
-                target,
-                instance: Box::new(instance),
-            })
+            #[cfg(target_os = "linux")]
+            return Ok(native_session_target(environment));
+            #[cfg(not(target_os = "linux"))]
+            anyhow::bail!("native local environments currently require Linux")
         }
         "env" => {
             let platform = resolve_platform(globals, paths, env)?;
@@ -416,61 +378,6 @@ async fn environment_session_target_from_current(
             "no environment selected; use `cw use ENV` or pass ENV to the session command"
         ),
     }
-}
-
-pub(crate) async fn local_environment_daemon_client(
-    instance: &config::LocalInstanceConfig,
-) -> anyhow::Result<codewire_daemon::client::SessionClient> {
-    let endpoint = format!("http://127.0.0.1:{}", local_daemon_host_port(instance)?);
-    codewire_daemon::client::SessionClient::connect(endpoint, local_daemon_auth_token(instance)?)
-        .await
-        .map_err(anyhow::Error::from)
-}
-
-pub(crate) async fn local_environment_session_client(
-    instance: &config::LocalInstanceConfig,
-) -> anyhow::Result<codewire_daemon::client::SessionClient> {
-    let mut last_error = None;
-    for attempt in 0..LOCAL_DAEMON_READY_ATTEMPTS {
-        match local_environment_daemon_client(instance).await {
-            Ok(client) => match client.require_ready().await {
-                Ok(()) => return Ok(client),
-                Err(error) => last_error = Some(anyhow::Error::from(error)),
-            },
-            Err(error) => last_error = Some(error),
-        }
-        if attempt + 1 < LOCAL_DAEMON_READY_ATTEMPTS {
-            tokio::time::sleep(LOCAL_DAEMON_READY_RETRY_INTERVAL).await;
-        }
-    }
-    Err(last_error
-        .unwrap_or_else(|| anyhow::anyhow!("local environment daemon did not become ready")))
-    .context("wait for local environment daemon session readiness")
-}
-
-fn local_environment_session_view(
-    session: codewire_daemon::client::v1::SessionRecord,
-) -> EnvironmentSessionView {
-    EnvironmentSessionView {
-        session_id: session.session_id,
-        state: codewire_daemon::client::v1::SessionLifecycleState::try_from(session.state)
-            .map(|state| format!("{state:?}"))
-            .unwrap_or_else(|_| "Unknown".to_string()),
-        command: session.command,
-        working_dir: session.working_dir,
-        pty: session.pty,
-        exit_code: session.exit_code,
-        output_end_offset: session.output_end_offset,
-        status_message: session.status_message,
-    }
-}
-
-pub(crate) fn local_environment_session_working_dir(
-    instance: &config::LocalInstanceConfig,
-) -> String {
-    trimmed_str(&instance.workdir)
-        .unwrap_or(LOCAL_WORKSPACE_PATH)
-        .to_string()
 }
 
 fn platform_environment_session_view(
@@ -782,13 +689,6 @@ async fn attach_environment_session(
                 let attachment = client.attach(&session.session_id, output_offset).await?;
                 attach_platform_environment_session(attachment, session.pty, true).await?
             }
-            EnvironmentSessionTarget::Local { instance, .. } => {
-                let client = local_environment_session_client(instance).await?;
-                let attachment = client
-                    .attach(session.session_id.clone(), output_offset)
-                    .await?;
-                attach_local_environment_session(attachment, session.pty, true).await?
-            }
             EnvironmentSessionTarget::Platform {
                 org_id,
                 environment_id,
@@ -862,84 +762,6 @@ async fn attach_environment_session(
             AttachExit::OpenWorkspaces => {
                 show_workspace_list(globals).await?;
                 return Ok(None);
-            }
-        }
-    }
-}
-
-async fn attach_local_environment_session(
-    mut attachment: codewire_daemon::client::SessionAttachment,
-    interactive: bool,
-    raw_output: bool,
-) -> anyhow::Result<AttachExit> {
-    let input = attachment.input_handle();
-    let mut stdin = tokio::io::stdin();
-    let mut stdin_buf = [0_u8; 4096];
-    let mut stdout = std::io::stdout();
-    let interactive =
-        interactive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let _raw = interactive
-        .then(RawModeGuard::enable)
-        .transpose()
-        .context("enabling raw mode")?;
-    let mut decoder = AttachNavigationDecoder::default();
-    let mut output_offset = 0;
-    let mut stdin_closed = !interactive;
-    let mut output_open = true;
-    let mut terminal = false;
-    loop {
-        if !output_open && stdin_closed {
-            return Ok(if terminal {
-                AttachExit::Terminal
-            } else {
-                AttachExit::StreamEnded { output_offset }
-            });
-        }
-        tokio::select! {
-            event = attachment.next_event(), if output_open => {
-                let Some(event) = event? else {
-                    if terminal && interactive {
-                        output_open = false;
-                        continue;
-                    }
-                    return Ok(AttachExit::StreamEnded { output_offset });
-                };
-                match event.payload {
-                    Some(codewire_daemon::client::v1::session_attach_message::Payload::Output(output)) => {
-                        write_session_output(&mut stdout, &output.data, raw_output)?;
-                        output_offset = output.next_offset;
-                    }
-                    Some(codewire_daemon::client::v1::session_attach_message::Payload::Status(status))
-                        if daemon_session_is_terminal(status.state) => {
-                        terminal = true;
-                        if !interactive {
-                            return Ok(AttachExit::Terminal);
-                        }
-                        eprintln!("\r\n[cw] session exited; Ctrl+B r restarts, Ctrl+B d detaches");
-                    }
-                    _ => {}
-                }
-            }
-            read = stdin.read(&mut stdin_buf), if !stdin_closed => {
-                let read = read.context("read terminal input")?;
-                if read == 0 {
-                    let pending = decoder.finish();
-                    if !pending.is_empty() {
-                        input.send_input(pending).await?;
-                    }
-                    stdin_closed = true;
-                    continue;
-                }
-                let (action, forward) = decoder.feed(&stdin_buf[..read]);
-                if !forward.is_empty() {
-                    input.send_input(forward).await?;
-                }
-                if let Some(action) = action {
-                    if matches!(action, AttachExit::Detached) && output_open {
-                        input.detach().await?;
-                    }
-                    return Ok(action);
-                }
             }
         }
     }
@@ -1149,16 +971,18 @@ async fn attachment_environment_targets(
     paths: &ResolvePaths,
     env: &impl config::Env,
 ) -> anyhow::Result<Vec<config::CurrentTargetConfig>> {
-    let local = config::load_local_instances_config(&paths.mesh_data_dir)?;
-    let mut targets = local
-        .instances
-        .iter()
-        .map(|(key, instance)| config::CurrentTargetConfig {
+    #[cfg(target_os = "linux")]
+    let mut targets = native_environments()
+        .await?
+        .into_iter()
+        .map(|environment| config::CurrentTargetConfig {
             kind: "local".to_string(),
-            target_ref: key.clone(),
-            name: local_instance_display_name(key, instance).to_string(),
+            target_ref: environment.name.clone(),
+            name: environment.name,
         })
         .collect::<Vec<_>>();
+    #[cfg(not(target_os = "linux"))]
+    let mut targets = Vec::new();
 
     match resolve_platform(globals, paths, env) {
         Ok(platform) => {
@@ -1196,16 +1020,6 @@ async fn attachment_environment_targets(
         anyhow::bail!("no environments are available for attachment navigation");
     }
     Ok(targets)
-}
-
-fn daemon_session_is_terminal(state: i32) -> bool {
-    matches!(
-        codewire_daemon::client::v1::SessionLifecycleState::try_from(state),
-        Ok(codewire_daemon::client::v1::SessionLifecycleState::Stopped
-            | codewire_daemon::client::v1::SessionLifecycleState::Exited
-            | codewire_daemon::client::v1::SessionLifecycleState::Failed
-            | codewire_daemon::client::v1::SessionLifecycleState::Interrupted)
-    )
 }
 
 fn platform_session_is_terminal(session: &codewire_client::EnvironmentSession) -> bool {
@@ -1317,17 +1131,6 @@ async fn follow_session_output(
                 let client = native_environment_session_client(name).await?;
                 attach_platform_environment_session(
                     client.attach(&session.session_id, output_offset).await?,
-                    false,
-                    raw_output,
-                )
-                .await?
-            }
-            EnvironmentSessionTarget::Local { instance, .. } => {
-                let client = local_environment_session_client(instance).await?;
-                attach_local_environment_session(
-                    client
-                        .attach(session.session_id.clone(), output_offset)
-                        .await?,
                     false,
                     raw_output,
                 )

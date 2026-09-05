@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -354,6 +354,8 @@ pub struct MeshConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_selected_network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_auto_connect: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_node_network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_target: Option<CurrentTargetConfig>,
@@ -422,284 +424,6 @@ pub struct CurrentTargetConfig {
     pub name: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct LocalInstancesConfig {
-    #[serde(default)]
-    pub instances: HashMap<String, LocalInstanceConfig>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct LocalInstanceConfig {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub backend: String,
-    #[serde(default)]
-    pub runtime_name: String,
-    #[serde(default)]
-    pub lima_instance_name: String,
-    #[serde(default)]
-    pub repo_path: String,
-    #[serde(default)]
-    pub workdir: String,
-    #[serde(default)]
-    pub preset: String,
-    #[serde(default)]
-    pub image: String,
-    #[serde(default)]
-    pub install: String,
-    #[serde(default)]
-    pub startup: String,
-    #[serde(default)]
-    pub secrets: String,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub ports: Vec<LocalPortConfig>,
-    #[serde(default)]
-    pub mounts: Vec<LocalMountConfig>,
-    #[serde(default)]
-    pub cpu: i32,
-    #[serde(default)]
-    pub memory: i32,
-    #[serde(default)]
-    pub disk: i32,
-    #[serde(default)]
-    pub agent: String,
-    #[serde(default)]
-    pub include_org_secrets: Option<bool>,
-    #[serde(default)]
-    pub include_user_secrets: Option<bool>,
-    #[serde(default)]
-    pub lima_mount_type: String,
-    #[serde(default)]
-    pub lima_vm_type: String,
-    #[serde(default)]
-    pub daemon_host_port: u16,
-    #[serde(default)]
-    pub daemon_auth_token: String,
-    #[serde(default)]
-    pub created_at: String,
-    #[serde(default)]
-    pub last_used_at: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct LocalPortConfig {
-    #[serde(default)]
-    pub port: i32,
-    #[serde(default)]
-    pub host_port: i32,
-    #[serde(default)]
-    pub guest_port: i32,
-    #[serde(default)]
-    pub label: String,
-}
-
-impl LocalPortConfig {
-    pub fn effective_guest_port(&self) -> i32 {
-        if self.guest_port > 0 {
-            self.guest_port
-        } else {
-            self.port
-        }
-    }
-
-    pub fn effective_host_port(&self) -> i32 {
-        if self.host_port > 0 {
-            self.host_port
-        } else {
-            self.effective_guest_port()
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct LocalMountConfig {
-    #[serde(default)]
-    pub source: String,
-    #[serde(default)]
-    pub target: String,
-    #[serde(default)]
-    pub readonly: Option<bool>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
-pub struct CodewireConfig {
-    #[serde(default)]
-    pub preset: String,
-    #[serde(default)]
-    pub image: String,
-    #[serde(default)]
-    pub install: String,
-    #[serde(default)]
-    pub startup: String,
-    #[serde(default)]
-    pub secrets: Option<CodewireSecretsConfig>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub ports: Vec<LocalPortConfig>,
-    #[serde(default)]
-    pub mounts: Vec<LocalMountConfig>,
-    #[serde(default)]
-    pub cpu: i32,
-    #[serde(default)]
-    pub memory: i32,
-    #[serde(default)]
-    pub disk: i32,
-    #[serde(default)]
-    pub agents: Option<CodewireAgentsConfig>,
-    #[serde(default)]
-    pub agent: String,
-    #[serde(default)]
-    pub install_agents: Option<bool>,
-    #[serde(default)]
-    pub include_org_secrets: Option<bool>,
-    #[serde(default)]
-    pub include_user_secrets: Option<bool>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
-pub struct CodewireAgentsConfig {
-    #[serde(default)]
-    pub install: Option<bool>,
-    #[serde(default)]
-    pub tools: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
-pub struct CodewireSecretsConfig {
-    #[serde(default)]
-    pub org: Option<bool>,
-    #[serde(default)]
-    pub user: Option<bool>,
-    #[serde(default)]
-    pub project: String,
-}
-
-fn legacy_codewire_config(
-    document: codewire_project::ProjectDocument,
-) -> Result<CodewireConfig, codewire_project::ProjectError> {
-    let spec = document.spec;
-    if !spec.repositories.is_empty() {
-        return Err(codewire_project::ProjectError::InvalidField {
-            field: "repositories",
-            detail: "the legacy Docker/Lima backend does not support multiple repositories"
-                .to_string(),
-        });
-    }
-    if spec.working_directory != "/workspace" {
-        return Err(codewire_project::ProjectError::InvalidField {
-            field: "working_directory",
-            detail: "the legacy Docker/Lima backend does not support an explicit workdir"
-                .to_string(),
-        });
-    }
-    if !spec.skills.is_empty() {
-        return Err(codewire_project::ProjectError::InvalidField {
-            field: "skills",
-            detail: "skill snapshots require the native workspace runtime".to_string(),
-        });
-    }
-    if !spec.credentials.is_empty() {
-        return Err(codewire_project::ProjectError::InvalidField {
-            field: "credentials",
-            detail: "credential grants require the native workspace runtime".to_string(),
-        });
-    }
-    if document
-        .local
-        .mounts
-        .iter()
-        .any(|mount| mount.mode == codewire_project::LocalMountMode::Copy)
-    {
-        return Err(codewire_project::ProjectError::InvalidField {
-            field: "mounts.mode",
-            detail: "copy mounts require the native workspace runtime".to_string(),
-        });
-    }
-    if !spec.agent_environment.is_empty() {
-        return Err(codewire_project::ProjectError::InvalidField {
-            field: "agent_env",
-            detail:
-                "agent-specific environment values are not supported by the legacy local backend"
-                    .to_string(),
-        });
-    }
-    if spec
-        .application_ports
-        .iter()
-        .any(|port| !port.access.is_empty())
-    {
-        return Err(codewire_project::ProjectError::InvalidField {
-            field: "ports.access",
-            detail: "port access policy is not supported by the legacy local backend".to_string(),
-        });
-    }
-
-    let host_ports = document
-        .local
-        .host_ports
-        .into_iter()
-        .map(|binding| (binding.guest_port, binding.host_port))
-        .collect::<BTreeMap<_, _>>();
-    let ports = spec
-        .application_ports
-        .into_iter()
-        .map(|port| match host_ports.get(&port.port).copied() {
-            Some(host_port) if host_port != port.port => LocalPortConfig {
-                host_port: i32::from(host_port),
-                guest_port: i32::from(port.port),
-                label: port.label,
-                ..LocalPortConfig::default()
-            },
-            _ => LocalPortConfig {
-                port: i32::from(port.port),
-                label: port.label,
-                ..LocalPortConfig::default()
-            },
-        })
-        .collect();
-    let agents = (!spec.agents.is_empty()).then_some(CodewireAgentsConfig {
-        install: spec.agents.install,
-        tools: spec.agents.tools,
-    });
-    let secrets = (!spec.secrets.is_empty()).then_some(CodewireSecretsConfig {
-        org: spec.secrets.include_org,
-        user: spec.secrets.include_user,
-        project: spec.secrets.project,
-    });
-
-    Ok(CodewireConfig {
-        preset: spec.preset,
-        image: spec.image,
-        install: spec.install_command,
-        startup: spec.startup_script,
-        secrets,
-        env: spec.environment,
-        ports,
-        mounts: document
-            .local
-            .mounts
-            .into_iter()
-            .map(|mount| LocalMountConfig {
-                source: mount.source,
-                target: mount.destination,
-                readonly: mount.read_only,
-            })
-            .collect(),
-        cpu: spec.resources.cpu_millicores.unwrap_or_default() as i32,
-        memory: spec.resources.memory_mib.unwrap_or_default() as i32,
-        disk: spec.resources.disk_gib.unwrap_or_default() as i32,
-        agents,
-        agent: String::new(),
-        install_agents: spec.agents.install,
-        include_org_secrets: None,
-        include_user_secrets: None,
-    })
-}
-
 pub fn canonical_agent_id(raw: &str) -> String {
     codewire_project::canonical_agent_id(raw)
         .ok()
@@ -714,133 +438,6 @@ pub fn display_agent_id(raw: &str) -> String {
         .flatten()
         .unwrap_or_else(|| raw.trim())
         .to_string()
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-pub struct LocalSpec {
-    #[serde(default)]
-    pub preset: String,
-    #[serde(default)]
-    pub image: String,
-    #[serde(default)]
-    pub install: String,
-    #[serde(default)]
-    pub startup: String,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub ports: Vec<LocalSpecPort>,
-    #[serde(default)]
-    pub mounts: Vec<LocalSpecMount>,
-    #[serde(default)]
-    pub cpu: i32,
-    #[serde(default)]
-    pub memory: i32,
-    #[serde(default)]
-    pub disk: i32,
-    #[serde(default)]
-    pub agent: String,
-    #[serde(default)]
-    pub secret_project: String,
-    #[serde(default)]
-    pub include_org_secrets: Option<bool>,
-    #[serde(default)]
-    pub include_user_secrets: Option<bool>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-pub struct LocalSpecPort {
-    #[serde(default)]
-    pub host_port: i32,
-    #[serde(default)]
-    pub guest_port: i32,
-    #[serde(default)]
-    pub port: i32,
-    #[serde(default)]
-    pub label: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-pub struct LocalSpecMount {
-    pub source: String,
-    #[serde(default)]
-    pub target: String,
-    #[serde(default)]
-    pub readonly: bool,
-}
-
-impl From<LocalSpec> for CodewireConfig {
-    fn from(spec: LocalSpec) -> Self {
-        let secrets = if spec.secret_project.trim().is_empty() {
-            None
-        } else {
-            Some(CodewireSecretsConfig {
-                project: spec.secret_project,
-                ..CodewireSecretsConfig::default()
-            })
-        };
-        Self {
-            preset: spec.preset,
-            image: spec.image,
-            install: spec.install,
-            startup: spec.startup,
-            secrets,
-            env: spec.env,
-            ports: spec
-                .ports
-                .into_iter()
-                .map(|port| {
-                    canonical_local_spec_port(LocalPortConfig {
-                        port: port.port,
-                        host_port: port.host_port,
-                        guest_port: port.guest_port,
-                        label: port.label,
-                    })
-                })
-                .collect(),
-            mounts: spec
-                .mounts
-                .into_iter()
-                .map(|mount| LocalMountConfig {
-                    source: mount.source,
-                    target: mount.target,
-                    readonly: Some(mount.readonly),
-                })
-                .collect(),
-            cpu: spec.cpu,
-            memory: spec.memory,
-            disk: spec.disk,
-            agent: spec.agent,
-            include_org_secrets: spec.include_org_secrets,
-            include_user_secrets: spec.include_user_secrets,
-            ..CodewireConfig::default()
-        }
-    }
-}
-
-fn canonical_local_spec_port(port: LocalPortConfig) -> LocalPortConfig {
-    let host = port.effective_host_port();
-    let guest = port.effective_guest_port();
-    let label = port.label;
-    if host <= 0 || guest <= 0 {
-        return LocalPortConfig {
-            label,
-            ..LocalPortConfig::default()
-        };
-    }
-    if host == guest {
-        return LocalPortConfig {
-            port: guest,
-            label,
-            ..LocalPortConfig::default()
-        };
-    }
-    LocalPortConfig {
-        host_port: host,
-        guest_port: guest,
-        label,
-        ..LocalPortConfig::default()
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1109,18 +706,28 @@ pub fn selected_mesh_network(paths: &ResolvePaths, env: &impl Env) -> Option<Str
 }
 
 pub fn save_selected_mesh_network(data_dir: &Path, network_id: &str) -> Result<(), ConfigError> {
+    save_selected_mesh_network_preference(data_dir, network_id, false)
+}
+
+pub fn save_selected_mesh_network_preference(
+    data_dir: &Path,
+    network_id: &str,
+    auto_connect: bool,
+) -> Result<(), ConfigError> {
     let network_id = network_id.trim();
     if network_id.is_empty() {
         return Err(ConfigError::InvalidMeshSelection);
     }
     update_mesh_config(data_dir, |config| {
         config.mesh_selected_network = Some(network_id.to_string());
+        config.mesh_auto_connect = Some(auto_connect);
     })
 }
 
 pub fn clear_selected_mesh_network(data_dir: &Path) -> Result<(), ConfigError> {
     update_mesh_config(data_dir, |config| {
         config.mesh_selected_network = None;
+        config.mesh_auto_connect = None;
     })
 }
 
@@ -1166,14 +773,6 @@ pub fn current_target(data_dir: &Path) -> Result<CurrentTargetConfig, ConfigErro
     Ok(current_target_from_config(&load_mesh_config(data_dir)?))
 }
 
-pub fn load_codewire_config(path: &Path) -> Result<CodewireConfig, ConfigError> {
-    let document = load_project_document(path)?;
-    legacy_codewire_config(document).map_err(|source| ConfigError::ParseCodewireConfig {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
 pub fn load_project_document(
     path: &Path,
 ) -> Result<codewire_project::ProjectDocument, ConfigError> {
@@ -1185,58 +784,6 @@ pub fn load_project_document(
         path: path.to_path_buf(),
         source,
     })
-}
-
-pub fn parse_codewire_config(data: &str) -> Result<CodewireConfig, codewire_project::ProjectError> {
-    legacy_codewire_config(codewire_project::parse_project_yaml(data)?)
-}
-
-pub fn parse_local_spec_json(data: &[u8]) -> Result<CodewireConfig, ConfigError> {
-    let spec: LocalSpec =
-        serde_json::from_slice(data).map_err(|source| ConfigError::ParseLocalSpec { source })?;
-    Ok(spec.into())
-}
-
-pub fn load_local_instances_config(data_dir: &Path) -> Result<LocalInstancesConfig, ConfigError> {
-    let path = data_dir.join("local_instances.toml");
-    let data = match fs::read_to_string(&path) {
-        Ok(data) => data,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LocalInstancesConfig::default());
-        }
-        Err(source) => return Err(ConfigError::ReadConfig { path, source }),
-    };
-    toml::from_str(&data).map_err(|source| ConfigError::ParseLocalInstances { path, source })
-}
-
-pub fn save_local_instances_config(
-    data_dir: &Path,
-    config: &LocalInstancesConfig,
-) -> Result<(), ConfigError> {
-    fs::create_dir_all(data_dir).map_err(|source| ConfigError::CreateConfigDir {
-        path: data_dir.to_path_buf(),
-        source,
-    })?;
-    harden_dir(data_dir)?;
-
-    let path = data_dir.join("local_instances.toml");
-    let data =
-        toml::to_string_pretty(config).map_err(|source| ConfigError::SerializeLocalInstances {
-            path: path.clone(),
-            source,
-        })?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&path)
-        .map_err(|source| ConfigError::WriteConfig {
-            path: path.clone(),
-            source,
-        })?;
-    harden_file(&path)?;
-    file.write_all(data.as_bytes())
-        .map_err(|source| ConfigError::WriteConfig { path, source })
 }
 
 pub fn save_current_target(
@@ -1298,6 +845,7 @@ pub fn save_joined_network(
             config.mesh_url = Some(mesh_url.to_string());
         }
         config.mesh_selected_network = Some(network_id.to_string());
+        config.mesh_auto_connect = Some(false);
     })
 }
 
@@ -1591,28 +1139,11 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-    #[error("parse local instances config {path}: {source}")]
-    ParseLocalInstances {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
     #[error("parse codewire config {path}: {source}")]
     ParseCodewireConfig {
         path: PathBuf,
         #[source]
         source: codewire_project::ProjectError,
-    },
-    #[error("parse local spec json: {source}")]
-    ParseLocalSpec {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("serialize local instances config {path}: {source}")]
-    SerializeLocalInstances {
-        path: PathBuf,
-        #[source]
-        source: toml::ser::Error,
     },
     #[error("serialize mesh config {path}: {source}")]
     SerializeMesh {
@@ -1679,246 +1210,6 @@ mod tests {
     fn write_mesh_config(dir: &Path, body: &str) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("config.toml"), body).unwrap();
-    }
-
-    #[test]
-    fn load_codewire_config_parses_compose_style_ports() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("codewire.yaml");
-        fs::write(
-            &path,
-            r#"
-ports:
-  - 3000
-  - "18080:8080"
-  - port: 4000
-    label: web
-  - published: 15432
-    target: 5432
-    label: postgres
-"#,
-        )
-        .unwrap();
-
-        let config = load_codewire_config(&path).unwrap();
-
-        assert_eq!(
-            config.ports,
-            vec![
-                LocalPortConfig {
-                    port: 3000,
-                    ..LocalPortConfig::default()
-                },
-                LocalPortConfig {
-                    host_port: 18080,
-                    guest_port: 8080,
-                    ..LocalPortConfig::default()
-                },
-                LocalPortConfig {
-                    port: 4000,
-                    label: "web".to_string(),
-                    ..LocalPortConfig::default()
-                },
-                LocalPortConfig {
-                    host_port: 15432,
-                    guest_port: 5432,
-                    label: "postgres".to_string(),
-                    ..LocalPortConfig::default()
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn load_codewire_config_rejects_partial_port_mappings() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("codewire.yaml");
-        fs::write(
-            &path,
-            r#"
-ports:
-  - host_port: 18080
-"#,
-        )
-        .unwrap();
-
-        let err = load_codewire_config(&path).unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("host_port and guest_port must both be greater than zero"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn load_codewire_config_parses_mounts_agents_and_secrets() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("codewire.yaml");
-        fs::write(
-            &path,
-            r#"
-preset: full
-image: ghcr.io/codewire/dev:latest
-install: npm install
-startup: npm test
-secrets:
-  org: false
-  user: true
-  project: dev
-agents:
-  install: true
-  tools:
-    - claude
-    - gemini
-mounts:
-  - source: ../agentic
-    target: /workspace/agentic
-    mode: direct
-    readonly: true
-  - source: /srv/shared
-    target: /workspace/shared
-    mode: direct
-    readonly: false
-"#,
-        )
-        .unwrap();
-
-        let config = load_codewire_config(&path).unwrap();
-
-        assert_eq!(config.preset, "full");
-        assert_eq!(config.image, "ghcr.io/codewire/dev:latest");
-        assert_eq!(
-            config.mounts,
-            vec![
-                LocalMountConfig {
-                    source: "../agentic".to_string(),
-                    target: "/workspace/agentic".to_string(),
-                    readonly: Some(true),
-                },
-                LocalMountConfig {
-                    source: "/srv/shared".to_string(),
-                    target: "/workspace/shared".to_string(),
-                    readonly: Some(false),
-                },
-            ]
-        );
-        assert_eq!(
-            config.secrets,
-            Some(CodewireSecretsConfig {
-                org: Some(false),
-                user: Some(true),
-                project: "dev".to_string(),
-            })
-        );
-        assert_eq!(
-            config.agents,
-            Some(CodewireAgentsConfig {
-                install: Some(true),
-                tools: vec!["claude-code".to_string(), "gemini-cli".to_string()],
-            })
-        );
-        assert_eq!(canonical_agent_id("gemini"), "gemini-cli");
-        assert_eq!(canonical_agent_id("kimi"), "kimi-code");
-        assert_eq!(canonical_agent_id("pi-coding-agent"), "pi");
-        assert_eq!(display_agent_id("claude-code"), "claude");
-        assert_eq!(display_agent_id("kimi-code"), "kimi");
-    }
-
-    #[test]
-    fn load_codewire_config_parses_scalar_agents_and_secrets() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("codewire.yaml");
-        fs::write(
-            &path,
-            r#"
-agents: codex
-secrets: project-dev
-"#,
-        )
-        .unwrap();
-
-        let config = load_codewire_config(&path).unwrap();
-
-        assert_eq!(
-            config.agents,
-            Some(CodewireAgentsConfig {
-                install: None,
-                tools: vec!["codex".to_string()],
-            })
-        );
-        assert_eq!(
-            config.secrets,
-            Some(CodewireSecretsConfig {
-                project: "project-dev".to_string(),
-                ..CodewireSecretsConfig::default()
-            })
-        );
-    }
-
-    #[test]
-    fn parse_local_spec_json_matches_go_conversion_shape() {
-        let config = parse_local_spec_json(
-            br#"
-{
-  "preset": "full",
-  "image": "ubuntu:24.04",
-  "install": "npm install",
-  "startup": "npm test",
-  "env": {"FOO": "bar"},
-  "ports": [
-    {"port": 3000, "label": "web"},
-    {"host_port": 18080, "guest_port": 8080}
-  ],
-  "mounts": [
-    {"source": "/tmp/data", "target": "/data", "readonly": true}
-  ],
-  "cpu": 2000,
-  "memory": 4096,
-  "disk": 20,
-  "agent": "claude",
-  "secret_project": "dev",
-  "include_org_secrets": false,
-  "include_user_secrets": true
-}
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(config.preset, "full");
-        assert_eq!(config.env.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(
-            config.ports,
-            vec![
-                LocalPortConfig {
-                    port: 3000,
-                    label: "web".to_string(),
-                    ..LocalPortConfig::default()
-                },
-                LocalPortConfig {
-                    host_port: 18080,
-                    guest_port: 8080,
-                    ..LocalPortConfig::default()
-                },
-            ]
-        );
-        assert_eq!(
-            config.mounts,
-            vec![LocalMountConfig {
-                source: "/tmp/data".to_string(),
-                target: "/data".to_string(),
-                readonly: Some(true),
-            }]
-        );
-        assert_eq!(
-            config.secrets,
-            Some(CodewireSecretsConfig {
-                project: "dev".to_string(),
-                ..CodewireSecretsConfig::default()
-            })
-        );
-        assert_eq!(config.include_org_secrets, Some(false));
-        assert_eq!(config.include_user_secrets, Some(true));
     }
 
     #[test]
@@ -2187,116 +1478,6 @@ mesh_selected_network = "project-alpha"
             .unwrap_err(),
             ConfigError::InvalidCurrentTarget
         ));
-    }
-
-    #[test]
-    fn load_local_instances_reads_go_compatible_state() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-
-        assert_eq!(
-            load_local_instances_config(&paths.mesh_data_dir).unwrap(),
-            LocalInstancesConfig::default()
-        );
-
-        fs::create_dir_all(&paths.mesh_data_dir).unwrap();
-        fs::write(
-            paths.mesh_data_dir.join("local_instances.toml"),
-            r#"
-[instances.repo]
-name = "repo"
-backend = "lima"
-runtime_name = "cw-repo"
-repo_path = "/home/user/src/repo"
-workdir = "/workspace"
-image = "ubuntu:24.04"
-preset = "full"
-install = "npm install"
-startup = "npm test"
-secrets = "dev"
-agent = "claude"
-cpu = 2000
-memory = 4096
-disk = 20
-lima_instance_name = "cw-repo-vm"
-lima_mount_type = "virtiofs"
-lima_vm_type = "vz"
-created_at = "2026-07-05T01:00:00Z"
-last_used_at = "2026-07-05T01:05:00Z"
-
-[instances.repo.env]
-FOO = "bar"
-
-[[instances.repo.ports]]
-host_port = 18080
-guest_port = 8080
-label = "web"
-
-[[instances.repo.mounts]]
-source = "/tmp/data"
-target = "/data"
-readonly = true
-"#,
-        )
-        .unwrap();
-
-        let loaded = load_local_instances_config(&paths.mesh_data_dir).unwrap();
-        let instance = loaded.instances.get("repo").unwrap();
-        assert_eq!(instance.name, "repo");
-        assert_eq!(instance.backend, "lima");
-        assert_eq!(instance.runtime_name, "cw-repo");
-        assert_eq!(instance.lima_instance_name, "cw-repo-vm");
-        assert_eq!(instance.repo_path, "/home/user/src/repo");
-        assert_eq!(instance.workdir, "/workspace");
-        assert_eq!(instance.image, "ubuntu:24.04");
-        assert_eq!(instance.preset, "full");
-        assert_eq!(instance.install, "npm install");
-        assert_eq!(instance.startup, "npm test");
-        assert_eq!(instance.secrets, "dev");
-        assert_eq!(instance.agent, "claude");
-        assert_eq!(instance.env.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(instance.ports[0].host_port, 18080);
-        assert_eq!(instance.ports[0].guest_port, 8080);
-        assert_eq!(instance.ports[0].label, "web");
-        assert_eq!(instance.mounts[0].source, "/tmp/data");
-        assert_eq!(instance.mounts[0].target, "/data");
-        assert_eq!(instance.mounts[0].readonly, Some(true));
-        assert_eq!(instance.cpu, 2000);
-        assert_eq!(instance.memory, 4096);
-        assert_eq!(instance.disk, 20);
-        assert_eq!(instance.lima_mount_type, "virtiofs");
-        assert_eq!(instance.lima_vm_type, "vz");
-        assert_eq!(instance.created_at, "2026-07-05T01:00:00Z");
-        assert_eq!(instance.last_used_at, "2026-07-05T01:05:00Z");
-    }
-
-    #[test]
-    fn save_local_instances_writes_go_compatible_state() {
-        let home = tempfile::tempdir().unwrap();
-        let env = MapEnv::default();
-        let paths = paths(home.path(), &env);
-        let mut config = LocalInstancesConfig::default();
-        config.instances.insert(
-            "repo".to_string(),
-            LocalInstanceConfig {
-                name: "repo".to_string(),
-                backend: "docker".to_string(),
-                runtime_name: "cw-repo".to_string(),
-                repo_path: "/home/user/src/repo".to_string(),
-                workdir: "/workspace".to_string(),
-                image: "ubuntu:24.04".to_string(),
-                ..LocalInstanceConfig::default()
-            },
-        );
-
-        save_local_instances_config(&paths.mesh_data_dir, &config).unwrap();
-
-        let loaded = load_local_instances_config(&paths.mesh_data_dir).unwrap();
-        assert_eq!(loaded, config);
-        let data = fs::read_to_string(paths.mesh_data_dir.join("local_instances.toml")).unwrap();
-        assert!(data.contains("[instances.repo]"));
-        assert!(data.contains("runtime_name = \"cw-repo\""));
     }
 
     #[tokio::test]
@@ -2629,8 +1810,32 @@ name = "builder"
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
         assert!(!data.contains("mesh_node_token"));
         assert!(data.contains("mesh_selected_network = \"project-alpha\""));
+        assert!(data.contains("mesh_auto_connect = false"));
         assert!(data.contains("[node]"));
         assert!(data.contains("name = \"builder\""));
+    }
+
+    #[test]
+    fn selected_mesh_network_auto_connect_is_an_explicit_scoped_preference() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::default();
+        let paths = paths(home.path(), &env);
+
+        save_selected_mesh_network_preference(&paths.mesh_data_dir, "project-alpha", true).unwrap();
+        let selected = load_mesh_config(&paths.mesh_data_dir).unwrap();
+        assert_eq!(
+            selected.mesh_selected_network.as_deref(),
+            Some("project-alpha")
+        );
+        assert_eq!(selected.mesh_auto_connect, Some(true));
+
+        save_selected_mesh_network(&paths.mesh_data_dir, "project-beta").unwrap();
+        let selected = load_mesh_config(&paths.mesh_data_dir).unwrap();
+        assert_eq!(
+            selected.mesh_selected_network.as_deref(),
+            Some("project-beta")
+        );
+        assert_eq!(selected.mesh_auto_connect, Some(false));
     }
 
     #[test]
@@ -2653,6 +1858,7 @@ mesh_node_token = "node-token"
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
         assert!(!data.contains("mesh_node_token"));
         assert!(!data.contains("mesh_selected_network"));
+        assert!(!data.contains("mesh_auto_connect"));
     }
 
     #[test]

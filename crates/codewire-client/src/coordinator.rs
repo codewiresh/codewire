@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +30,8 @@ use uuid::Uuid;
 const COORDINATOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 const HTTP2_REQUEST_BUFFER: usize = 32;
+const MAX_DERP_MAP_BYTES: usize = 256 * 1024;
+const MAX_RESOLVED_COORDINATOR_ADDRESSES: usize = 16;
 /// Maximum transport and hello-first setup time for a coordinator stream.
 pub const COORDINATOR_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -99,6 +102,12 @@ pub enum Error {
     /// Transport setup did not produce a usable coordinator response in time.
     #[error("coordinator setup timed out after {0:?}")]
     SetupTimeout(Duration),
+    /// The first usable setup response violated the coordinator contract.
+    #[error("coordinator setup response is invalid")]
+    InvalidSetupResponse,
+    /// A coordinator DERP map exceeded the bounded client contract.
+    #[error("coordinator DERP map exceeds its size limit")]
+    DerpMapTooLarge,
 }
 
 impl crate::CodewireClient {
@@ -651,7 +660,29 @@ impl MeshCoordinatorPeerSession {
     ) -> Result<Self, Error> {
         tokio::time::timeout(
             setup_timeout,
-            Self::connect_inner(url, bearer_token, identity, None),
+            Self::connect_inner(url, bearer_token, identity, None, None),
+        )
+        .await
+        .map_err(|_| Error::SetupTimeout(setup_timeout))?
+    }
+
+    /// Dial a Mesh coordinator using an already-resolved, bounded address set
+    /// while retaining the configured URL authority for HTTP and TLS.
+    ///
+    /// Isolated host transports use this after resolving through their
+    /// admitted resolver, so the credential-owning process never falls back to
+    /// libc name resolution or a Tokio blocking resolver thread.
+    pub async fn connect_resolved_with_setup_timeout(
+        url: &str,
+        bearer_token: &str,
+        identity: MeshCoordinateIdentity,
+        addresses: Vec<SocketAddr>,
+        setup_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let addresses = validated_resolved_addresses(url, addresses)?;
+        tokio::time::timeout(
+            setup_timeout,
+            Self::connect_inner(url, bearer_token, identity, None, Some(addresses)),
         )
         .await
         .map_err(|_| Error::SetupTimeout(setup_timeout))?
@@ -668,7 +699,7 @@ impl MeshCoordinatorPeerSession {
         let tls_config = coordinator_tls_config_with_root(root_certificate_der)?;
         tokio::time::timeout(
             COORDINATOR_SETUP_TIMEOUT,
-            Self::connect_inner(url, bearer_token, identity, Some(tls_config)),
+            Self::connect_inner(url, bearer_token, identity, Some(tls_config), None),
         )
         .await
         .map_err(|_| Error::SetupTimeout(COORDINATOR_SETUP_TIMEOUT))?
@@ -679,6 +710,7 @@ impl MeshCoordinatorPeerSession {
         bearer_token: &str,
         identity: MeshCoordinateIdentity,
         tls_config: Option<Arc<rustls::ClientConfig>>,
+        resolved_addresses: Option<Arc<[SocketAddr]>>,
     ) -> Result<Self, Error> {
         let base_uri = coordinator_origin(url)?;
         let scheme = base_uri
@@ -687,7 +719,19 @@ impl MeshCoordinatorPeerSession {
 
         let (connection, protocol) = match scheme {
             "http" => (
-                http2_builder().connect_plaintext(base_uri.clone()).await?,
+                match resolved_addresses.clone() {
+                    Some(addresses) => {
+                        http2_builder()
+                            .connect_with_connector(
+                                tower::service_fn(move |uri| {
+                                    connect_resolved_plain(uri, Arc::clone(&addresses))
+                                }),
+                                base_uri.clone(),
+                            )
+                            .await?
+                    }
+                    None => http2_builder().connect_plaintext(base_uri.clone()).await?,
+                },
                 Protocol::Connect,
             ),
             "https" => (
@@ -696,14 +740,32 @@ impl MeshCoordinatorPeerSession {
                         Some(tls_config) => tls_config,
                         None => coordinator_tls_config()?,
                     };
-                    http2_builder()
-                        .connect_with_connector(
-                            tower::service_fn(move |uri| {
-                                connect_ring_tls(uri, Arc::clone(&tls_config))
-                            }),
-                            base_uri.clone(),
-                        )
-                        .await?
+                    match resolved_addresses {
+                        Some(addresses) => {
+                            http2_builder()
+                                .connect_with_connector(
+                                    tower::service_fn(move |uri| {
+                                        connect_ring_tls_resolved(
+                                            uri,
+                                            Arc::clone(&tls_config),
+                                            Arc::clone(&addresses),
+                                        )
+                                    }),
+                                    base_uri.clone(),
+                                )
+                                .await?
+                        }
+                        None => {
+                            http2_builder()
+                                .connect_with_connector(
+                                    tower::service_fn(move |uri| {
+                                        connect_ring_tls(uri, Arc::clone(&tls_config))
+                                    }),
+                                    base_uri.clone(),
+                                )
+                                .await?
+                        }
+                    }
                 },
                 Protocol::Grpc,
             ),
@@ -751,6 +813,15 @@ impl MeshCoordinatorPeerSession {
     pub async fn update_node(&mut self, node: &Node) -> Result<(), Error> {
         self.stream.send(mesh_request(node_to_proto(node)?)).await?;
         Ok(())
+    }
+
+    /// Consume the DERP map received while establishing this exact session.
+    ///
+    /// Enrollment credentials are one-use, so a peer must build its transport
+    /// from this setup response instead of opening a second coordinator
+    /// connection merely to discover relay configuration.
+    pub fn take_setup_derp_map(&mut self) -> Result<serde_json::Value, Error> {
+        take_mesh_setup_derp_map(&mut self.pending_responses)
     }
 
     /// Subscribe a dial-only session to one target node.
@@ -909,6 +980,25 @@ impl MeshCoordinatorPeerSession {
     }
 }
 
+fn take_mesh_setup_derp_map(
+    pending: &mut VecDeque<MeshCoordinatorServiceCoordinateResponse>,
+) -> Result<serde_json::Value, Error> {
+    let response = pending.pop_front().ok_or(Error::InvalidSetupResponse)?;
+    let Some(mesh_coordinator_service_coordinate_response::Msg::DerpMap(derp)) = response.msg
+    else {
+        pending.push_front(response);
+        return Err(Error::InvalidSetupResponse);
+    };
+    decode_derp_map(&derp.derp_map_json)
+}
+
+fn decode_derp_map(bytes: &[u8]) -> Result<serde_json::Value, Error> {
+    if bytes.len() > MAX_DERP_MAP_BYTES {
+        return Err(Error::DerpMapTooLarge);
+    }
+    serde_json::from_slice(bytes).map_err(Error::from)
+}
+
 fn coordinator_tls_config() -> Result<Arc<rustls::ClientConfig>, Error> {
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
@@ -953,13 +1043,51 @@ async fn connect_ring_tls(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TLS URI has no host"))?
         .to_owned();
     let port = uri.port_u16().unwrap_or(443);
+    let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    finish_ring_tls(&uri, config, tcp).await
+}
+
+async fn connect_resolved_plain(
+    uri: http::Uri,
+    addresses: Arc<[SocketAddr]>,
+) -> Result<hyper_util::rt::TokioIo<tokio::net::TcpStream>, io::Error> {
+    ensure_resolved_connector_port(&uri, &addresses)?;
+    connect_resolved_tcp(&addresses)
+        .await
+        .map(hyper_util::rt::TokioIo::new)
+}
+
+async fn connect_ring_tls_resolved(
+    uri: http::Uri,
+    config: Arc<rustls::ClientConfig>,
+    addresses: Arc<[SocketAddr]>,
+) -> Result<
+    hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+    io::Error,
+> {
+    ensure_resolved_connector_port(&uri, &addresses)?;
+    let tcp = connect_resolved_tcp(&addresses).await?;
+    finish_ring_tls(&uri, config, tcp).await
+}
+
+async fn finish_ring_tls(
+    uri: &http::Uri,
+    config: Arc<rustls::ClientConfig>,
+    tcp: tokio::net::TcpStream,
+) -> Result<
+    hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+    io::Error,
+> {
+    let host = uri
+        .host()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TLS URI has no host"))?
+        .to_owned();
     let server_name = rustls_pki_types::ServerName::try_from(host.clone()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "TLS URI host is not a DNS name",
         )
     })?;
-    let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
     tcp.set_nodelay(true)?;
     let tls = tokio_rustls::TlsConnector::from(config)
         .connect(server_name, tcp)
@@ -971,6 +1099,70 @@ async fn connect_ring_tls(
         ));
     }
     Ok(hyper_util::rt::TokioIo::new(tls))
+}
+
+async fn connect_resolved_tcp(addresses: &[SocketAddr]) -> io::Result<tokio::net::TcpStream> {
+    let mut last_error = None;
+    for address in addresses {
+        match tokio::net::TcpStream::connect(*address).await {
+            Ok(stream) => {
+                stream.set_nodelay(true)?;
+                return Ok(stream);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "resolved coordinator address set is empty",
+        )
+    }))
+}
+
+fn validated_resolved_addresses(
+    url: &str,
+    addresses: Vec<SocketAddr>,
+) -> Result<Arc<[SocketAddr]>, Error> {
+    let uri = coordinator_origin(url)?;
+    let port = coordinator_port(&uri)?;
+    if addresses.is_empty() || addresses.len() > MAX_RESOLVED_COORDINATOR_ADDRESSES {
+        return Err(Error::Url(
+            "resolved coordinator address set is empty or exceeds its limit".into(),
+        ));
+    }
+    if addresses.iter().any(|address| {
+        address.port() != port || address.ip().is_unspecified() || address.ip().is_multicast()
+    }) {
+        return Err(Error::Url(
+            "resolved coordinator address does not match the configured authority".into(),
+        ));
+    }
+    let mut addresses = addresses;
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(Arc::from(addresses))
+}
+
+fn ensure_resolved_connector_port(uri: &http::Uri, addresses: &[SocketAddr]) -> io::Result<()> {
+    let port = coordinator_port(uri).map_err(io::Error::other)?;
+    if addresses.is_empty() || addresses.iter().any(|address| address.port() != port) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "resolved coordinator address port mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn coordinator_port(uri: &http::Uri) -> Result<u16, Error> {
+    uri.port_u16()
+        .or_else(|| match uri.scheme_str() {
+            Some("http") => Some(80),
+            Some("https") => Some(443),
+            _ => None,
+        })
+        .ok_or_else(|| Error::Url("coordinator URL has no supported port".into()))
 }
 
 fn handle_response<P, D>(
@@ -1007,7 +1199,7 @@ where
             (handlers.on_peers)(&snapshot);
         }
         Some(coordinate_response::Msg::DerpMap(derp)) => {
-            let map = serde_json::from_slice(&derp.derp_map_json)?;
+            let map = decode_derp_map(&derp.derp_map_json)?;
             (handlers.on_derp_map)(&map);
         }
         Some(coordinate_response::Msg::Ping(_)) | None => {}
@@ -1164,7 +1356,9 @@ fn node_conversion_error(message: &'static str) -> serde_json::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_proto::codewire::internal::v1::{CoordinatePeerRemove, CoordinatePeerUpdate};
+    use codewire_proto::codewire::internal::v1::{
+        CoordinateDerpMap, CoordinatePeerRemove, CoordinatePeerUpdate,
+    };
     use codewire_tailnet::node::{DiscoPublic, NodePublic, prefix_from_uuid};
     use std::future::Future;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1203,6 +1397,35 @@ mod tests {
             coordinator_origin("https://api.example.invalid").unwrap(),
             "https://api.example.invalid/".parse::<http::Uri>().unwrap()
         );
+    }
+
+    #[test]
+    fn resolved_coordinator_addresses_are_authority_bound_and_bounded() {
+        let addresses = validated_resolved_addresses(
+            "https://mesh.example.com:8443/path",
+            vec![
+                "[2001:db8::1]:8443".parse().unwrap(),
+                "192.0.2.10:8443".parse().unwrap(),
+                "192.0.2.10:8443".parse().unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(addresses.len(), 2);
+        assert!(
+            validated_resolved_addresses(
+                "https://mesh.example.com:8443",
+                vec!["192.0.2.10:443".parse().unwrap()]
+            )
+            .is_err()
+        );
+        assert!(
+            validated_resolved_addresses(
+                "https://mesh.example.com",
+                vec!["0.0.0.0:443".parse().unwrap()]
+            )
+            .is_err()
+        );
+        assert!(validated_resolved_addresses("https://mesh.example.com", Vec::new()).is_err());
     }
 
     #[tokio::test]
@@ -1308,6 +1531,37 @@ mod tests {
             CoordinatorWireProtocol::PublicEdgeGrpc.connectrpc(),
             Protocol::Grpc
         );
+    }
+
+    #[test]
+    fn mesh_setup_derp_map_is_consumed_from_the_live_session_only() {
+        let expected = serde_json::json!({"Regions": {"1": {"RegionID": 1}}});
+        let mut pending = VecDeque::from([MeshCoordinatorServiceCoordinateResponse {
+            msg: CoordinateDerpMap {
+                derp_map_json: serde_json::to_vec(&expected).unwrap(),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        }]);
+        assert_eq!(take_mesh_setup_derp_map(&mut pending).unwrap(), expected);
+        assert!(pending.is_empty());
+
+        let first = MeshCoordinatorServiceCoordinateResponse {
+            msg: CoordinatePing::default().into(),
+            ..Default::default()
+        };
+        let mut pending = VecDeque::from([first.clone()]);
+        assert!(matches!(
+            take_mesh_setup_derp_map(&mut pending),
+            Err(Error::InvalidSetupResponse)
+        ));
+        assert_eq!(pending.pop_front(), Some(first));
+
+        assert!(matches!(
+            decode_derp_map(&vec![b' '; MAX_DERP_MAP_BYTES + 1]),
+            Err(Error::DerpMapTooLarge)
+        ));
     }
 
     #[test]

@@ -40,17 +40,23 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
     };
 
     const ENSURE_USER_CMD: &str = "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group;";
-    const WAIT_DAEMON_CMD: &str = "while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done;";
+    const WAIT_DAEMON_CMD: &str =
+        "while [ ! -x /codewire/bin/codewire-daemon ]; do sleep 0.1; done;";
 
     let ws_command: Vec<Value> = if !opts.image_command.is_empty() {
-        let entrypoint = opts.image_command.join(" ");
+        let entrypoint = opts
+            .image_command
+            .iter()
+            .map(|argument| shell_quote(argument))
+            .collect::<Vec<_>>()
+            .join(" ");
         vec![
             "sh".into(),
             "-c".into(),
             custom_workspace_supervisor_command(
                 ENSURE_USER_CMD,
                 WAIT_DAEMON_CMD,
-                "/codewire/bin/cw daemon",
+                "/codewire/bin/codewire-daemon",
                 &entrypoint,
             )
             .into(),
@@ -59,7 +65,8 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
         vec![
             "sh".into(),
             "-c".into(),
-            format!("{ENSURE_USER_CMD} {WAIT_DAEMON_CMD} exec /codewire/bin/cw daemon").into(),
+            format!("{ENSURE_USER_CMD} {WAIT_DAEMON_CMD} exec /codewire/bin/codewire-daemon")
+                .into(),
         ]
     };
 
@@ -512,6 +519,10 @@ fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
         env.push(json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.gateway_token }));
     }
     env
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 pub fn render_workspace_daemon_service(namespace: &str, opts: &TemplateOpts) -> Value {

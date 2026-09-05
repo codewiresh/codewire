@@ -13,13 +13,12 @@ mod update;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
-use std::io::{IsTerminal as _, Read as _, Write as _};
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use base64::Engine as _;
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
@@ -36,31 +35,36 @@ use organization_client::{
     OrganizationClient, OrganizationDeletionOutcome, OrganizationDeletionStart, Preset,
 };
 use presentation::{
-    CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonDiagnostic,
-    EnvironmentDaemonRepair, EnvironmentDaemonStatus, EnvironmentLog, EnvironmentResizeResources,
-    EnvironmentTrustReport, ExtendTtlRequest, GrantEnvironmentAccessRequest,
-    PrepareEnvironmentRequest, RepoEntry, SetupAgent, StatusResponse,
+    CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonRepair,
+    EnvironmentDaemonStatus, EnvironmentLog, EnvironmentResizeResources, EnvironmentTrustReport,
+    ExtendTtlRequest, GrantEnvironmentAccessRequest, PrepareEnvironmentRequest, RepoEntry,
+    SetupAgent, StatusResponse,
 };
-use rand::{RngCore, rngs::OsRng};
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};
 
 const CLI_VERSION: &str = match option_env!("CODEWIRE_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+
+/// Reassert a credential-bearing child's non-dumpable state immediately after
+/// `execve`, which resets this flag for an ordinary executable. The selected
+/// hidden entrypoint performs its remaining confinement checks.
+#[cfg(target_os = "linux")]
+pub fn prepare_local_credential_broker_process() -> std::io::Result<()> {
+    // SAFETY: this scalar prctl affects only the current broker process.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
 const LOCAL_WORKSPACE_PATH: &str = "/workspace";
-const LIMA_CONTAINER_NAME: &str = "cw-workspace";
-const LIMA_DOCKER_SOCK_PATH: &str = "/var/run/docker.sock";
-const LIMA_DOCKER_HOST_VALUE: &str = "unix:///var/run/docker.sock";
 const DEFAULT_LOCAL_MESH_URL: &str = "http://127.0.0.1:18090";
 const DEFAULT_LOCAL_MESH_LISTEN_ADDR: &str = "127.0.0.1:18090";
 const DEFAULT_LOCAL_DERP_URL: &str = "http://127.0.0.1:18091";
 const DEFAULT_LOCAL_DERP_LISTEN_ADDR: &str = "127.0.0.1:18091";
-const LOCAL_RUNTIME_CLI_PATH: &str = "/usr/local/bin/cw";
-const LIMA_RUNTIME_CLI_COPY_PATH: &str = "/tmp/codewire-cw-stage";
-const LIMA_RUNTIME_CLI_STAGE_DIR: &str = "/var/lib/codewire";
-const LIMA_RUNTIME_CLI_STAGE_PATH: &str = "/var/lib/codewire/cw";
 const LOCAL_MESH_RUNTIME_FILE: &str = "mesh_runtime.json";
+const LOCAL_MESH_OWNER_CONTEXT_FILE: &str = "mesh_owner.json";
 const LOCAL_MESH_LOG_FILE: &str = "codewire-mesh.log";
 const LOCAL_DERP_LOG_FILE: &str = "codewire-derp.log";
 
@@ -158,10 +162,10 @@ enum Command {
         command: PresetCommand,
     },
     #[command(about = "Manage secrets and secret projects")]
-    Secrets {
-        #[command(subcommand)]
-        command: SecretsCommand,
-    },
+    Secrets(SecretsArgs),
+    #[cfg(target_os = "linux")]
+    #[command(about = "Manage protected credentials and access profiles")]
+    Credentials(CredentialsArgs),
     #[command(
         alias = "networks",
         about = "Manage Mesh networks for environments and nodes"
@@ -186,6 +190,39 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(name = "__native-runner", hide = true)]
     NativeRunner(NativeRunnerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-network-worker", hide = true)]
+    NativeNetworkWorker(NativeNetworkWorkerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-egress-broker", hide = true)]
+    NativeEgressBroker(NativeEgressBrokerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-mesh-transport", hide = true)]
+    NativeMeshTransport(NativeMeshTransportArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-mesh-enrollment-broker", hide = true)]
+    NativeMeshEnrollmentBroker(NativeMeshEnrollmentBrokerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-authority", hide = true)]
+    LocalCredentialAuthority(LocalCredentialAuthorityArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-authority-probe", hide = true)]
+    LocalCredentialAuthorityProbe(LocalCredentialAuthorityProbeArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-broker", hide = true)]
+    LocalCredentialBroker(LocalCredentialBrokerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
+    LocalCredentialBrokerConfinementProbe,
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-git-repository-executor", hide = true)]
+    LocalGitRepositoryExecutor(LocalGitRepositoryExecutorArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__local-git-credential-helper", hide = true)]
+    LocalGitCredentialHelper(LocalGitCredentialHelperArgs),
+    #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+    #[command(name = "__local-credential-broker-synthetic-smoke-check", hide = true)]
+    LocalCredentialBrokerSyntheticSmokeCheck,
     #[command(about = "List sessions for the selected or explicit environment")]
     List(ListArgs),
     #[command(
@@ -198,6 +235,8 @@ enum Command {
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+    require_local_broker_smoke_executable()?;
     let mut args = std::env::args().collect::<Vec<_>>();
     let invoked_as_daemon = args
         .first()
@@ -211,6 +250,54 @@ pub async fn run() -> anyhow::Result<()> {
         *program = "cw".to_string();
     }
     run_from(args).await
+}
+
+/// Preserve the fixed private worker failure taxonomy across the thin binary
+/// wrapper. Ordinary CLI failures continue to use the generic exit status.
+#[cfg(target_os = "linux")]
+pub fn native_network_worker_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_vmm::network_worker::NetworkWorkerError>()
+        .map(codewire_local_vmm::network_worker::NetworkWorkerError::exit_code)
+}
+
+/// Preserve the fixed private broker failure taxonomy across the thin binary
+/// wrapper without printing process-internal detail to ambient stderr.
+#[cfg(target_os = "linux")]
+pub fn native_egress_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_vmm::egress_broker::EgressBrokerProcessError>()
+        .map(codewire_local_vmm::egress_broker::EgressBrokerProcessError::exit_code)
+}
+
+/// Preserve the fixed private Mesh-process failure taxonomy without printing
+/// credential-adjacent process detail to ambient stderr.
+#[cfg(target_os = "linux")]
+pub fn native_mesh_transport_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_vmm::mesh_process::MeshTransportProcessError>()
+        .map(codewire_local_vmm::mesh_process::MeshTransportProcessError::exit_code)
+}
+
+/// Preserve the fixed one-shot enrollment-issuer failure taxonomy without
+/// exposing credential-adjacent detail on ambient stderr.
+#[cfg(target_os = "linux")]
+pub fn native_mesh_enrollment_broker_exit_code(error: &anyhow::Error) -> Option<i32> {
+    error
+        .downcast_ref::<codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError>()
+        .map(codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError::exit_code)
+}
+
+#[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+fn require_local_broker_smoke_executable() -> anyhow::Result<()> {
+    let executable =
+        std::env::current_exe().context("resolve synthetic broker smoke executable")?;
+    anyhow::ensure!(
+        executable.file_name().and_then(std::ffi::OsStr::to_str)
+            == Some("cw-local-credential-broker-smoke"),
+        "synthetic local credential broker build must be named cw-local-credential-broker-smoke"
+    );
+    Ok(())
 }
 
 pub async fn run_from<I, T>(args: I) -> anyhow::Result<()>
@@ -254,14 +341,45 @@ where
         Command::Org { command } => handle_org_command(&globals, command).await,
         Command::ApiKeys { command } => handle_api_keys_command(&globals, command).await,
         Command::Preset { command } => handle_preset_command(&globals, command).await,
-        Command::Secrets { command } => handle_secrets_command(&globals, command).await,
+        Command::Secrets(args) => handle_secrets_command(&globals, args).await,
+        #[cfg(target_os = "linux")]
+        Command::Credentials(args) => handle_credentials_command(args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
-        Command::Mesh { command } => handle_mesh_command(&globals, command),
+        Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         Command::Daemon => codewire_daemon::run_entrypoint().await,
         #[cfg(target_os = "linux")]
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,
         #[cfg(target_os = "linux")]
         Command::NativeRunner(args) => run_native_runner(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeEgressBroker(args) => run_native_egress_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeMeshEnrollmentBroker(args) => run_native_mesh_enrollment_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialAuthority(args) => run_local_credential_authority(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialAuthorityProbe(args) => {
+            run_local_credential_authority_probe(args).await
+        }
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialBroker(args) => run_local_credential_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalCredentialBrokerConfinementProbe => {
+            run_local_credential_broker_confinement_probe().await
+        }
+        #[cfg(target_os = "linux")]
+        Command::LocalGitRepositoryExecutor(args) => run_local_git_repository_executor(args).await,
+        #[cfg(target_os = "linux")]
+        Command::LocalGitCredentialHelper(args) => run_local_git_credential_helper(args),
+        #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
+        Command::LocalCredentialBrokerSyntheticSmokeCheck => {
+            println!("codewire-local-credential-broker-synthetic-smoke:v1");
+            Ok(())
+        }
         Command::List(args) => handle_list_command(&globals, args).await,
         Command::Attach(args) => handle_attach_command(&globals, args).await,
         Command::Logs(args) => handle_logs_command(&globals, args).await,

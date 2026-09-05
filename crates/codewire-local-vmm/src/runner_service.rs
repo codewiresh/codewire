@@ -2,7 +2,9 @@
 //! daemon capability. The supervisor may restart and reconnect to this socket;
 //! the capability never enters persistent state.
 
+use std::ffi::OsString;
 use std::io;
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,8 +20,9 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use codewire_vmm_guest_probe::{
-    GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN,
-    ProgressError, ProgressFrame, ProgressRequest, SetupBinding, Sha256Value,
+    DirectShareMount, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage, MAX_DIRECT_SHARES,
+    PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressError, ProgressFrame, ProgressRequest,
+    SetupBinding, Sha256Value,
 };
 
 use crate::artifact_store::RuntimeArtifactStore;
@@ -28,18 +31,28 @@ use crate::control::v1::environment_runner_service_client::EnvironmentRunnerServ
 use crate::control::v1::environment_runner_service_server::{
     EnvironmentRunnerService, EnvironmentRunnerServiceServer,
 };
+use crate::direct_share::{DirectShareIdentity, DirectShareRequest};
+use crate::host_port::{HostPortBinding, canonical_host_port_bindings};
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use crate::linux::path::PrivateRoot;
 use crate::linux::runner::ExitClass;
+use crate::mesh_ingress::{MeshAttachment, MeshEnrollmentAuthSource};
 use crate::uds::{UdsError, bind_owner_only, connect_owner_only, remove_bound_socket};
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerError, RunningVm};
 
-const DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+// A cached restart still cold-boots the kernel, trusted init, the OCI
+// workspace, and its daemon. Keep that path bounded, but give authenticated
+// guest progress the same product window as host-network attachment.
+const DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 const SETUP_DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 const DAEMON_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const PROGRESS_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 const MAXIMUM_GUEST_PROGRESS_FRAMES: usize = 64;
 const RUNNER_WATCH_BUFFER: usize = 8;
+// Bump for every detached-runner behavior change, even if the protobuf
+// message layout itself remains wire-compatible.
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 1;
+const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct RunnerEntrypointConfig {
@@ -47,6 +60,8 @@ pub struct RunnerEntrypointConfig {
     pub socket: PathBuf,
     pub engine_state_root: PathBuf,
     pub artifact_generation: String,
+    pub mesh_data_dir: PathBuf,
+    pub platform_config_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -57,9 +72,21 @@ pub struct RunnerClient {
 impl RunnerClient {
     pub async fn connect(socket: &std::path::Path) -> Result<Self, RunnerServiceError> {
         let channel = connect_owner_only(socket).await?;
-        Ok(Self {
+        let mut client = Self {
             inner: EnvironmentRunnerServiceClient::new(channel),
-        })
+        };
+        let info = tokio::time::timeout(
+            RUNNER_PROTOCOL_INFO_TIMEOUT,
+            client
+                .inner
+                .get_runner_protocol_info(v1::GetRunnerProtocolInfoRequest {}),
+        )
+        .await
+        .map_err(|_| RunnerServiceError::RunnerProtocolInfoUnavailable)?
+        .map_err(runner_protocol_info_rpc_error)?
+        .into_inner();
+        admit_runner_protocol_info(&info)?;
+        Ok(client)
     }
 
     pub async fn adopt(&mut self, environment_id: Uuid) -> Result<v1::RunnerInfo, Status> {
@@ -133,6 +160,24 @@ impl RunnerClient {
     }
 }
 
+fn runner_protocol_info_rpc_error(status: Status) -> RunnerServiceError {
+    if status.code() == tonic::Code::Unimplemented {
+        RunnerServiceError::RunnerProtocolUnavailable
+    } else {
+        RunnerServiceError::RunnerProtocolInfoUnavailable
+    }
+}
+
+fn admit_runner_protocol_info(info: &v1::RunnerProtocolInfo) -> Result<(), RunnerServiceError> {
+    if info.protocol_version != NATIVE_RUNNER_PROTOCOL_VERSION {
+        return Err(RunnerServiceError::RunnerProtocolMismatch {
+            expected: NATIVE_RUNNER_PROTOCOL_VERSION,
+            actual: info.protocol_version,
+        });
+    }
+    Ok(())
+}
+
 struct RunnerEvents {
     environment_id: Uuid,
     artifact_generation: String,
@@ -147,6 +192,7 @@ impl RunnerEvents {
             state: v1::EnvironmentState::Stopped as i32,
             generation,
             artifact_generation: artifact_generation.clone(),
+            error_code: String::new(),
         };
         let initial = v1::RunnerEvent {
             sequence: 1,
@@ -195,6 +241,7 @@ impl RunnerEvents {
                 state: state as i32,
                 generation,
                 artifact_generation: self.artifact_generation.clone(),
+                error_code: error_code.unwrap_or_default().to_owned(),
             }),
             stage: stage as i32,
             guest_sequence: guest.map_or(0, |update| update.sequence),
@@ -236,6 +283,9 @@ fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
 }
 
 pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerServiceError> {
+    if !config.mesh_data_dir.is_absolute() || !config.platform_config_dir.is_absolute() {
+        return Err(RunnerServiceError::Configuration);
+    }
     let engine = PrivateRoot::open(&config.engine_state_root).map_err(RunnerError::from)?;
     let artifacts = RuntimeArtifactStore::create(&engine)
         .map_err(|_| RunnerServiceError::ArtifactStore)?
@@ -264,7 +314,10 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             running: None,
             generation,
             state: v1::EnvironmentState::Stopped,
+            error_code: None,
             adopted: false,
+            mesh_data_dir: config.mesh_data_dir,
+            platform_config_dir: config.platform_config_dir,
         })),
         adoption: adoption_tx,
         events,
@@ -294,7 +347,10 @@ struct RunnerState {
     running: Option<RunningVm>,
     generation: u64,
     state: v1::EnvironmentState,
+    error_code: Option<&'static str>,
     adopted: bool,
+    mesh_data_dir: PathBuf,
+    platform_config_dir: PathBuf,
 }
 
 impl RunnerState {
@@ -304,26 +360,86 @@ impl RunnerState {
             state: self.state as i32,
             generation: self.generation,
             artifact_generation: self.artifact_generation.clone(),
+            error_code: self.error_code.unwrap_or_default().to_owned(),
         }
     }
 
-    fn observe_exit(&mut self) -> Result<(), RunnerError> {
+    async fn observe_exit(&mut self) -> Result<(), RunnerError> {
+        self.observe_exit_with_reason().await.map(drop)
+    }
+
+    async fn observe_exit_with_reason(&mut self) -> Result<Option<&'static str>, RunnerError> {
         let Some(running) = self.running.as_mut() else {
-            return Ok(());
+            return Ok(None);
         };
-        match running.try_exit()? {
-            ExitClass::StillRunning => Ok(()),
+        let exit = running.observe_exit().await?;
+        let error_code = runner_exit_error_code(exit);
+        match exit {
+            ExitClass::StillRunning => Ok(error_code),
             ExitClass::GuestShutdown => {
                 self.running = None;
-                self.state = v1::EnvironmentState::Stopped;
-                Ok(())
+                // A requested stop is handled synchronously by stop_vm below.
+                // Any shutdown first discovered by observation is therefore
+                // an unrequested guest/runtime exit and must require repair.
+                self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
+                Ok(error_code)
             }
             ExitClass::VmmFailure(_) => {
                 self.running = None;
                 self.state = v1::EnvironmentState::Error;
-                Ok(())
+                self.error_code = error_code;
+                Ok(error_code)
+            }
+            ExitClass::DirectShareFailure(_) => {
+                // Keep ownership of the live VM. Losing one separately
+                // confined filesystem server fails the admitted workspace
+                // layout closed until an explicit stop/restart.
+                self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
+                Ok(error_code)
+            }
+            ExitClass::NetworkWorkerFailure(_) => {
+                // Keep ownership of the live, now fail-closed VMM so an
+                // explicit stop/restart can reap it safely.
+                self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
+                Ok(error_code)
+            }
+            ExitClass::EgressBrokerFailure(_) => {
+                // The public packet path is fail-closed as soon as the
+                // separately confined policy broker disappears.
+                self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
+                Ok(error_code)
+            }
+            ExitClass::IngressForwarderFailure => {
+                self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
+                Ok(error_code)
+            }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                // Mesh ingress is fail-closed as soon as either the isolated
+                // transport or its authenticated runner receiver disappears.
+                self.state = v1::EnvironmentState::Error;
+                self.error_code = error_code;
+                Ok(error_code)
             }
         }
+    }
+}
+
+fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
+    match exit {
+        ExitClass::StillRunning => None,
+        ExitClass::GuestShutdown => Some("guest_shutdown"),
+        ExitClass::VmmFailure(_) => Some("vmm_exit"),
+        ExitClass::DirectShareFailure(_) => Some("direct_share_exit"),
+        ExitClass::NetworkWorkerFailure(_) => Some("network_worker_exit"),
+        ExitClass::EgressBrokerFailure(_) => Some("egress_broker_exit"),
+        ExitClass::IngressForwarderFailure => Some("ingress_forwarder_exit"),
+        ExitClass::MeshTransportFailure(_) => Some("mesh_transport_exit"),
+        ExitClass::MeshIngressReceiverFailure => Some("mesh_ingress_receiver_exit"),
     }
 }
 
@@ -340,6 +456,15 @@ struct AdoptionRequest {
 
 #[tonic::async_trait]
 impl EnvironmentRunnerService for RunnerRpc {
+    async fn get_runner_protocol_info(
+        &self,
+        _request: Request<v1::GetRunnerProtocolInfoRequest>,
+    ) -> Result<Response<v1::RunnerProtocolInfo>, Status> {
+        Ok(Response::new(v1::RunnerProtocolInfo {
+            protocol_version: NATIVE_RUNNER_PROTOCOL_VERSION,
+        }))
+    }
+
     async fn adopt_runner(
         &self,
         request: Request<v1::AdoptRunnerRequest>,
@@ -380,8 +505,9 @@ impl EnvironmentRunnerService for RunnerRpc {
     ) -> Result<Response<v1::RunnerInfo>, Status> {
         let mut state = self.state.lock().await;
         let prior = state.state;
-        state
-            .observe_exit()
+        let exit_reason = state
+            .observe_exit_with_reason()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         if state.state != prior {
             let stage = if state.state == v1::EnvironmentState::Stopped {
@@ -394,7 +520,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 state.generation,
                 stage,
                 None,
-                (stage == v1::RunnerStage::Error).then_some("vmm_exit"),
+                (stage == v1::RunnerStage::Error).then_some(exit_reason.unwrap_or("runtime_exit")),
             )?;
         }
         Ok(Response::new(state.info()))
@@ -437,6 +563,10 @@ impl EnvironmentRunnerService for RunnerRpc {
         let vcpus = u8::try_from(request.vcpus)
             .map_err(|_| Status::invalid_argument("invalid vCPU count"))?;
         let setup = parse_setup_binding(&request)?;
+        let host_ports = parse_host_ports(&request)?;
+        let mesh = parse_mesh_attachment(&request)?;
+        let direct_shares = parse_direct_shares(&request)?;
+        let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
@@ -447,11 +577,13 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state
             .observe_exit()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         if state.running.is_some() {
             return Err(Status::already_exists("environment is already running"));
         }
         state.state = v1::EnvironmentState::Starting;
+        state.error_code = None;
         self.events.publish(
             v1::EnvironmentState::Starting,
             request.generation,
@@ -467,17 +599,24 @@ impl EnvironmentRunnerService for RunnerRpc {
                 vsock_cid: request.vsock_cid,
                 daemon_vsock_port: request.daemon_vsock_port,
                 state_disk_bytes: request.state_disk_bytes,
+                docker_disk_bytes: (request.docker_disk_bytes != 0)
+                    .then_some(request.docker_disk_bytes),
                 root_generation: request.root_generation,
                 root_disk_bytes: request.root_disk_bytes,
                 vcpus,
                 memory_mib: request.memory_mib,
                 setup,
+                host_ports,
+                mesh,
+                direct_shares,
+                skill_snapshot_sha256,
             })
             .await
         {
             Ok(prepared) => prepared,
             Err(error) => {
                 state.state = v1::EnvironmentState::Error;
+                state.error_code = Some("prepare_failed");
                 self.events.publish(
                     v1::EnvironmentState::Error,
                     request.generation,
@@ -504,6 +643,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             Ok(running) => running,
             Err(error) => {
                 state.state = v1::EnvironmentState::Error;
+                state.error_code = Some("vmm_start_failed");
                 self.events.publish(
                     v1::EnvironmentState::Error,
                     request.generation,
@@ -514,6 +654,48 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(map_start_error(error));
             }
         };
+        let worker_executable = std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .ok_or(());
+        let worker_executable = match worker_executable {
+            Ok(executable) => executable,
+            Err(()) => {
+                let _ = running.stop().await;
+                state.state = v1::EnvironmentState::Error;
+                state.error_code = Some("network_worker_failed");
+                self.events.publish(
+                    v1::EnvironmentState::Error,
+                    request.generation,
+                    v1::RunnerStage::Error,
+                    None,
+                    Some("network_worker_failed"),
+                )?;
+                return Err(Status::internal("resolve network worker executable failed"));
+            }
+        };
+        if let Err(error) = running
+            .start_network_worker_with_mesh_credentials(
+                &worker_executable,
+                daemon_ready_timeout,
+                &state.mesh_data_dir,
+                &state.platform_config_dir,
+            )
+            .await
+        {
+            let _ = running.stop().await;
+            let error_code = network_start_error_code(&error);
+            state.state = v1::EnvironmentState::Error;
+            state.error_code = Some(error_code);
+            self.events.publish(
+                v1::EnvironmentState::Error,
+                request.generation,
+                v1::RunnerStage::Error,
+                None,
+                Some(error_code),
+            )?;
+            return Err(map_start_error(error));
+        }
         self.events.publish(
             v1::EnvironmentState::Starting,
             request.generation,
@@ -526,6 +708,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         {
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
+            state.error_code = Some("guest_start_failed");
             self.events.publish(
                 v1::EnvironmentState::Error,
                 request.generation,
@@ -538,6 +721,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         if running.discard_one_boot_inputs().is_err() {
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
+            state.error_code = Some("input_cleanup_failed");
             self.events.publish(
                 v1::EnvironmentState::Error,
                 request.generation,
@@ -549,6 +733,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state.generation = request.generation;
         state.state = v1::EnvironmentState::Running;
+        state.error_code = None;
         state.running = Some(running);
         self.events.publish(
             v1::EnvironmentState::Running,
@@ -567,6 +752,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mut state = self.state.lock().await;
         state
             .observe_exit()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         self.events.publish(
             state.state,
@@ -584,11 +770,19 @@ impl EnvironmentRunnerService for RunnerRpc {
                 ExitClass::StillRunning => {
                     return Err(Status::internal("owned VMM process is still running"));
                 }
-                ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {}
+                ExitClass::GuestShutdown
+                | ExitClass::VmmFailure(_)
+                | ExitClass::DirectShareFailure(_)
+                | ExitClass::NetworkWorkerFailure(_)
+                | ExitClass::EgressBrokerFailure(_)
+                | ExitClass::IngressForwarderFailure
+                | ExitClass::MeshTransportFailure(_)
+                | ExitClass::MeshIngressReceiverFailure => {}
             }
         }
         state.running = None;
         state.state = v1::EnvironmentState::Stopped;
+        state.error_code = None;
         self.events.publish(
             v1::EnvironmentState::Stopped,
             state.generation,
@@ -628,6 +822,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             .await
             .map_err(|_| Status::internal("tracked VMM cleanup failed"))?;
         state.state = v1::EnvironmentState::Stopped;
+        state.error_code = None;
         self.events.publish(
             v1::EnvironmentState::Stopped,
             state.generation,
@@ -653,6 +848,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state
             .observe_exit()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         if state.running.is_some() {
             return Err(Status::failed_precondition(
@@ -688,6 +884,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mut state = self.state.lock().await;
         state
             .observe_exit()
+            .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
         let running = state
             .running
@@ -736,8 +933,156 @@ fn parse_setup_binding(request: &v1::StartVmRequest) -> Result<Option<SetupBindi
     }
 }
 
+fn parse_host_ports(request: &v1::StartVmRequest) -> Result<Vec<HostPortBinding>, Status> {
+    let provided = request
+        .host_ports
+        .iter()
+        .map(|binding| {
+            Ok(HostPortBinding {
+                host_port: u16::try_from(binding.host_port)
+                    .map_err(|_| Status::invalid_argument("invalid host-port binding"))?,
+                guest_port: u16::try_from(binding.guest_port)
+                    .map_err(|_| Status::invalid_argument("invalid host-port binding"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, Status>>()?;
+    let canonical = canonical_host_port_bindings(provided.clone())
+        .map_err(|_| Status::invalid_argument("invalid host-port binding"))?;
+    if canonical != provided {
+        return Err(Status::invalid_argument(
+            "host-port bindings are not canonical",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn parse_mesh_attachment(request: &v1::StartVmRequest) -> Result<Option<MeshAttachment>, Status> {
+    let Some(raw) = request.mesh.as_ref() else {
+        return Ok(None);
+    };
+    let guest_ports = raw
+        .guest_ports
+        .iter()
+        .map(|port| u16::try_from(*port).map_err(|_| Status::invalid_argument("invalid Mesh port")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let auth_source = match v1::MeshEnrollmentAuthSource::try_from(raw.auth_source) {
+        Ok(v1::MeshEnrollmentAuthSource::StandaloneLocal) => {
+            MeshEnrollmentAuthSource::StandaloneLocal
+        }
+        Ok(v1::MeshEnrollmentAuthSource::HostedCurrent) => MeshEnrollmentAuthSource::HostedCurrent,
+        Ok(v1::MeshEnrollmentAuthSource::Unspecified) | Err(_) => {
+            return Err(Status::invalid_argument("invalid Mesh auth source"));
+        }
+    };
+    let attachment = MeshAttachment::new_with_auth_source(
+        auth_source,
+        &raw.mesh_url,
+        &raw.organization_id,
+        &raw.network_id,
+        &raw.node_name,
+        guest_ports,
+    )
+    .map_err(|_| Status::invalid_argument("invalid Mesh attachment"))?;
+    if attachment.mesh_url != raw.mesh_url
+        || attachment.organization_id != raw.organization_id
+        || attachment.network_id != raw.network_id
+        || attachment.node_name != raw.node_name
+        || match attachment.auth_source {
+            MeshEnrollmentAuthSource::StandaloneLocal => {
+                raw.auth_source != v1::MeshEnrollmentAuthSource::StandaloneLocal as i32
+            }
+            MeshEnrollmentAuthSource::HostedCurrent => {
+                raw.auth_source != v1::MeshEnrollmentAuthSource::HostedCurrent as i32
+            }
+        }
+        || attachment
+            .guest_ports
+            .iter()
+            .copied()
+            .map(u32::from)
+            .ne(raw.guest_ports.iter().copied())
+    {
+        return Err(Status::invalid_argument("noncanonical Mesh attachment"));
+    }
+    Ok(Some(attachment))
+}
+
+fn parse_direct_shares(request: &v1::StartVmRequest) -> Result<Vec<DirectShareRequest>, Status> {
+    if request.direct_shares.len() > MAX_DIRECT_SHARES {
+        return Err(Status::invalid_argument("too many direct shares"));
+    }
+    request
+        .direct_shares
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            if raw.source_path.is_empty() || raw.source_path.contains(&0) {
+                return Err(Status::invalid_argument("invalid direct share"));
+            }
+            let identity = DirectShareIdentity::new(
+                raw.device_major,
+                raw.device_minor,
+                raw.inode,
+                raw.mount_id,
+                raw.owner_uid,
+                raw.filesystem_magic,
+            )
+            .map_err(|_| Status::invalid_argument("invalid direct share"))?;
+            let mount = DirectShareMount::for_index(index, raw.destination.clone(), raw.read_only)
+                .map_err(|_| Status::invalid_argument("invalid direct share"))?;
+            DirectShareRequest::new(
+                PathBuf::from(OsString::from_vec(raw.source_path.clone())),
+                identity,
+                mount,
+            )
+            .map_err(|_| Status::invalid_argument("invalid direct share"))
+        })
+        .collect()
+}
+
+fn parse_skill_snapshot(request: &v1::StartVmRequest) -> Result<Option<Sha256Value>, Status> {
+    if request.skill_snapshot_sha256.is_empty() {
+        Ok(None)
+    } else {
+        Sha256Value::parse_hex(&request.skill_snapshot_sha256)
+            .map(Some)
+            .map_err(|_| Status::invalid_argument("invalid skill snapshot digest"))
+    }
+}
+
 fn map_start_error(error: RunnerError) -> Status {
     Status::failed_precondition(error.to_string())
+}
+
+fn network_start_error_code(error: &RunnerError) -> &'static str {
+    match error {
+        RunnerError::InvalidNetworkWorker => "network_worker_invalid",
+        RunnerError::NetworkWorkerSpawn => "network_worker_spawn",
+        RunnerError::NetworkWorkerStartTimeout => "network_worker_start_timeout",
+        RunnerError::NetworkWorkerBootstrap => "network_worker_bootstrap",
+        RunnerError::NetworkWorkerStartup(failure) => failure.runner_error_code(),
+        RunnerError::NetworkWorkerWait => "network_worker_wait",
+        RunnerError::NetworkWorkerKillTimeout => "network_worker_kill_timeout",
+        RunnerError::HostPortUnavailable(_) => "host_port_unavailable",
+        RunnerError::IngressControl => "ingress_forwarder_start",
+        RunnerError::EgressBrokerSpawn => "egress_broker_spawn",
+        RunnerError::EgressBrokerStartTimeout => "egress_broker_start_timeout",
+        RunnerError::EgressBrokerBootstrap => "egress_broker_bootstrap",
+        RunnerError::EgressBrokerStartup(failure) => failure.runner_error_code(),
+        RunnerError::EgressBrokerWait => "egress_broker_wait",
+        RunnerError::EgressBrokerKillTimeout => "egress_broker_kill_timeout",
+        RunnerError::MeshTransportSpawn => "mesh_transport_spawn",
+        RunnerError::MeshTransportStartTimeout => "mesh_transport_start_timeout",
+        RunnerError::MeshTransportBootstrap => "mesh_transport_bootstrap",
+        RunnerError::MeshTransportStartup(failure) => failure.runner_error_code(),
+        RunnerError::MeshEnrollmentBrokerSpawn => "mesh_enrollment_broker_spawn",
+        RunnerError::MeshEnrollmentBrokerStartTimeout => "mesh_enrollment_broker_start_timeout",
+        RunnerError::MeshEnrollmentBrokerBootstrap => "mesh_enrollment_broker_bootstrap",
+        RunnerError::MeshEnrollmentBrokerStartup(failure) => failure.runner_error_code(),
+        RunnerError::MeshProcessWait => "mesh_process_wait",
+        RunnerError::MeshProcessKillTimeout => "mesh_process_kill_timeout",
+        _ => "network_stack_failed",
+    }
 }
 
 fn map_grow_error(error: RunnerError) -> Status {
@@ -940,7 +1285,8 @@ async fn wait_for_guest_daemon(
                 },
                 _ = tokio::time::sleep(DAEMON_RETRY_DELAY) => {
                     match running
-                        .try_exit()
+                        .observe_exit()
+                        .await
                         .map_err(|error| Status::internal(error.to_string()))?
                     {
                         ExitClass::StillRunning => {}
@@ -953,6 +1299,36 @@ async fn wait_for_guest_daemon(
                             return Err(Status::unavailable(format!(
                                 "Cloud Hypervisor exited before guest daemon readiness with status {code:?}"
                             )));
+                        }
+                        ExitClass::DirectShareFailure(code) => {
+                            return Err(Status::unavailable(format!(
+                                "isolated direct-share server exited before guest daemon readiness with status {code:?}"
+                            )));
+                        }
+                        ExitClass::NetworkWorkerFailure(code) => {
+                            return Err(Status::unavailable(format!(
+                                "isolated network worker exited before guest daemon readiness with status {code:?}"
+                            )));
+                        }
+                        ExitClass::EgressBrokerFailure(code) => {
+                            return Err(Status::unavailable(format!(
+                                "isolated egress broker exited before guest daemon readiness with status {code:?}"
+                            )));
+                        }
+                        ExitClass::IngressForwarderFailure => {
+                            return Err(Status::unavailable(
+                                "ingress forwarder exited before guest daemon readiness",
+                            ));
+                        }
+                        ExitClass::MeshTransportFailure(code) => {
+                            return Err(Status::unavailable(format!(
+                                "isolated Mesh transport exited before guest daemon readiness with status {code:?}"
+                            )));
+                        }
+                        ExitClass::MeshIngressReceiverFailure => {
+                            return Err(Status::unavailable(
+                                "Mesh ingress receiver exited before guest daemon readiness",
+                            ));
                         }
                     }
                     if !daemon_ready
@@ -998,15 +1374,36 @@ pub enum RunnerServiceError {
     Serve,
     #[error("adopt private environment runner failed")]
     Adoption,
+    #[error("private environment runner configuration is invalid")]
+    Configuration,
+    #[error("the native environment runner does not implement the required compatibility protocol")]
+    RunnerProtocolUnavailable,
+    #[error(
+        "native environment runner protocol version mismatch: expected {expected}, running runner reported {actual}"
+    )]
+    RunnerProtocolMismatch { expected: u32, actual: u32 },
+    #[error("query native environment runner compatibility failed")]
+    RunnerProtocolInfoUnavailable,
+}
+
+impl RunnerServiceError {
+    pub(crate) fn incompatible_protocol(&self) -> bool {
+        matches!(
+            self,
+            Self::RunnerProtocolUnavailable | Self::RunnerProtocolMismatch { .. }
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::atomic::AtomicUsize;
 
     use tokio::net::UnixListener;
 
     use super::*;
+    use crate::uds::bind_owner_only_listener;
 
     const PROGRESS_TOKEN: &str = "runner-progress-test-token-0123456789abcdef";
 
@@ -1031,10 +1428,134 @@ mod tests {
     }
 
     #[test]
+    fn runner_protocol_requires_the_exact_current_version() {
+        admit_runner_protocol_info(&v1::RunnerProtocolInfo {
+            protocol_version: NATIVE_RUNNER_PROTOCOL_VERSION,
+        })
+        .unwrap();
+
+        for actual in [0, NATIVE_RUNNER_PROTOCOL_VERSION + 1] {
+            let error = admit_runner_protocol_info(&v1::RunnerProtocolInfo {
+                protocol_version: actual,
+            })
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                RunnerServiceError::RunnerProtocolMismatch {
+                    expected: NATIVE_RUNNER_PROTOCOL_VERSION,
+                    actual: reported,
+                } if reported == actual
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn runner_client_rejects_an_old_runner_before_adoption() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("runtime");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = root.join("runner.sock");
+        let (listener, socket_identity) = bind_owner_only_listener(&socket).unwrap();
+        let adoption_calls = Arc::new(AtomicUsize::new(0));
+        let adoption_counter = Arc::clone(&adoption_calls);
+        let app = axum::Router::new()
+            .route(
+                "/codewire.local.v1.EnvironmentRunnerService/GetRunnerProtocolInfo",
+                axum::routing::post(|| async {
+                    let mut response = axum::response::Response::new(axum::body::Body::empty());
+                    response.headers_mut().insert(
+                        http::header::CONTENT_TYPE,
+                        http::HeaderValue::from_static("application/grpc"),
+                    );
+                    response.headers_mut().insert(
+                        http::HeaderName::from_static("grpc-status"),
+                        http::HeaderValue::from_static("12"),
+                    );
+                    response
+                }),
+            )
+            .route(
+                "/codewire.local.v1.EnvironmentRunnerService/AdoptRunner",
+                axum::routing::post(move || {
+                    let adoption_counter = Arc::clone(&adoption_counter);
+                    async move {
+                        adoption_counter.fetch_add(1, Ordering::Relaxed);
+                        let mut response = axum::response::Response::new(axum::body::Body::empty());
+                        response.headers_mut().insert(
+                            http::header::CONTENT_TYPE,
+                            http::HeaderValue::from_static("application/grpc"),
+                        );
+                        response.headers_mut().insert(
+                            http::HeaderName::from_static("grpc-status"),
+                            http::HeaderValue::from_static("12"),
+                        );
+                        response
+                    }
+                }),
+            );
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let error = match RunnerClient::connect(&socket).await {
+            Ok(_) => panic!("old runner was admitted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            RunnerServiceError::RunnerProtocolUnavailable
+        ));
+        assert_eq!(
+            error.to_string(),
+            "the native environment runner does not implement the required compatibility protocol"
+        );
+        assert_eq!(adoption_calls.load(Ordering::Relaxed), 0);
+
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &socket_identity).unwrap();
+    }
+
+    #[test]
     fn start_failure_preserves_the_actionable_runner_cause() {
         let status = map_start_error(RunnerError::StartTimeout);
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
         assert_eq!(status.message(), "Cloud Hypervisor startup timed out");
+        assert_eq!(
+            network_start_error_code(&RunnerError::NetworkWorkerStartTimeout),
+            "network_worker_start_timeout"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::MeshTransportStartTimeout),
+            "mesh_transport_start_timeout"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::MeshTransportStartup(
+                crate::mesh_process::MeshTransportStartupFailure::TransportSetup,
+            )),
+            "mesh_transport_transport_setup"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::MeshEnrollmentBrokerStartup(
+                crate::mesh_enrollment::MeshEnrollmentStartupFailure::EnrollmentRequest,
+            )),
+            "mesh_enrollment_broker_enrollment_request"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::HostPortUnavailable(3_000)),
+            "host_port_unavailable"
+        );
+        assert_eq!(
+            network_start_error_code(&RunnerError::StartTimeout),
+            "network_stack_failed"
+        );
     }
 
     #[test]
@@ -1070,6 +1591,118 @@ mod tests {
             parse_setup_binding(&v1::StartVmRequest::default())
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn private_start_requires_an_exact_non_secret_mesh_attachment() {
+        let request = v1::StartVmRequest {
+            mesh: Some(v1::MeshAttachment {
+                mesh_url: "https://mesh.example.test/base".to_owned(),
+                organization_id: "org-test".to_owned(),
+                network_id: "network-test".to_owned(),
+                node_name: "dev".to_owned(),
+                guest_ports: vec![3_000, 8_080],
+                auth_source: v1::MeshEnrollmentAuthSource::StandaloneLocal as i32,
+            }),
+            ..Default::default()
+        };
+        let attachment = parse_mesh_attachment(&request).unwrap().unwrap();
+        assert_eq!(attachment.network_id, "network-test");
+        assert_eq!(attachment.guest_ports, vec![3_000, 8_080]);
+        assert_eq!(
+            attachment.auth_source,
+            MeshEnrollmentAuthSource::StandaloneLocal
+        );
+
+        let mut noncanonical = request.clone();
+        noncanonical.mesh.as_mut().unwrap().guest_ports.reverse();
+        assert_eq!(
+            parse_mesh_attachment(&noncanonical).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut credential_url = request.clone();
+        credential_url.mesh.as_mut().unwrap().mesh_url =
+            "https://user:secret@mesh.example.test".to_owned();
+        assert_eq!(
+            parse_mesh_attachment(&credential_url).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut unspecified = request;
+        unspecified.mesh.as_mut().unwrap().auth_source =
+            v1::MeshEnrollmentAuthSource::Unspecified as i32;
+        assert_eq!(
+            parse_mesh_attachment(&unspecified).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        assert!(
+            parse_mesh_attachment(&v1::StartVmRequest::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn private_start_binds_direct_shares_to_exact_host_identity_and_guest_order() {
+        let source = tempfile::tempdir().unwrap();
+        let source_path = std::fs::canonicalize(source.path()).unwrap();
+        let admitted = crate::direct_share::admit_direct_share(&source_path, &[]).unwrap();
+        let identity = admitted.identity();
+        let raw = v1::DirectShareAttachment {
+            source_path: std::os::unix::ffi::OsStrExt::as_bytes(source_path.as_os_str()).to_vec(),
+            device_major: identity.device_major(),
+            device_minor: identity.device_minor(),
+            inode: identity.inode(),
+            mount_id: identity.mount_id(),
+            owner_uid: identity.owner_uid(),
+            filesystem_magic: identity.filesystem_magic(),
+            destination: "/workspace/source".to_owned(),
+            read_only: true,
+        };
+        let request = v1::StartVmRequest {
+            direct_shares: vec![raw.clone()],
+            ..Default::default()
+        };
+        let parsed = parse_direct_shares(&request).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].mount.tag(), "cw-direct-00");
+        assert_eq!(parsed[0].mount.destination(), "/workspace/source");
+        assert!(parsed[0].mount.read_only());
+        assert!(!format!("{parsed:?}").contains(source_path.to_str().unwrap()));
+
+        let mut invalid = request;
+        invalid.direct_shares[0].inode = 0;
+        assert_eq!(
+            parse_direct_shares(&invalid).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        invalid.direct_shares = vec![raw; MAX_DIRECT_SHARES + 1];
+        assert_eq!(
+            parse_direct_shares(&invalid).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn skill_snapshot_parser_accepts_only_an_exact_optional_sha256() {
+        let digest = Sha256Value::calculate(b"skill-snapshot-plan");
+        let request = v1::StartVmRequest {
+            skill_snapshot_sha256: digest.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(parse_skill_snapshot(&request).unwrap(), Some(digest));
+        assert_eq!(
+            parse_skill_snapshot(&v1::StartVmRequest::default()).unwrap(),
+            None
+        );
+
+        let invalid = v1::StartVmRequest {
+            skill_snapshot_sha256: "not-a-sha256".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_skill_snapshot(&invalid).unwrap_err().code(),
+            tonic::Code::InvalidArgument
         );
     }
 
@@ -1209,6 +1842,58 @@ mod tests {
         assert_eq!(*receiver.borrow_and_update(), update);
         assert_eq!(update.sequence, 2);
         assert_eq!(update.guest_sequence, 5);
+        assert_eq!(update.runner.as_ref().unwrap().error_code, "");
         assert!(!format!("{update:?}").contains(PROGRESS_TOKEN));
+
+        let failed = events
+            .publish(
+                v1::EnvironmentState::Error,
+                1,
+                v1::RunnerStage::Error,
+                None,
+                Some("mesh_ingress_receiver_exit"),
+            )
+            .unwrap();
+        assert_eq!(
+            failed.runner.as_ref().unwrap().error_code,
+            "mesh_ingress_receiver_exit"
+        );
+    }
+
+    #[test]
+    fn internal_runner_exit_codes_preserve_the_failed_component() {
+        assert_eq!(runner_exit_error_code(ExitClass::StillRunning), None);
+        assert_eq!(
+            runner_exit_error_code(ExitClass::GuestShutdown),
+            Some("guest_shutdown")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::VmmFailure(Some(1))),
+            Some("vmm_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::DirectShareFailure(Some(7))),
+            Some("direct_share_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::NetworkWorkerFailure(Some(2))),
+            Some("network_worker_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::EgressBrokerFailure(Some(3))),
+            Some("egress_broker_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::IngressForwarderFailure),
+            Some("ingress_forwarder_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::MeshTransportFailure(Some(4))),
+            Some("mesh_transport_exit")
+        );
+        assert_eq!(
+            runner_exit_error_code(ExitClass::MeshIngressReceiverFailure),
+            Some("mesh_ingress_receiver_exit")
+        );
     }
 }

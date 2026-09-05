@@ -520,6 +520,19 @@ import time
 
 port = int(sys.argv[1])
 
+runtimes = {
+    "env_exec_contract_backend": {
+        "pod_name": "exec-contract-pod",
+        "pod_uid": "exec-contract-pod-uid",
+        "pod_ip": "10.244.0.21",
+    },
+    "env_exec_contract_unavailable": {
+        "pod_name": "exec-contract-unavailable-pod",
+        "pod_uid": "exec-contract-unavailable-pod-uid",
+        "pod_ip": "10.244.0.22",
+    },
+}
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -528,6 +541,81 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
         self.end_headers()
+
+    def json_response(self, value):
+        body = json.dumps(value, separators=(",", ":")).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def runtime_response(self):
+        path = self.path.split("?", 1)[0]
+        namespace = "exec-contract"
+        for environment_id, runtime in runtimes.items():
+            claim_name = "sandbox-" + environment_id
+            if path == (
+                "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/"
+                + namespace + "/sandboxclaims/" + claim_name
+            ):
+                self.json_response({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxClaim",
+                    "metadata": {
+                        "name": claim_name,
+                        "namespace": namespace,
+                        "uid": claim_name + "-uid",
+                    },
+                    "status": {
+                        "conditions": [{
+                            "type": "Ready",
+                            "status": "True",
+                            "reason": "ContractReady",
+                        }],
+                        "sandbox": {"name": runtime["pod_name"]},
+                    },
+                })
+                return True
+            if path == (
+                "/apis/agents.x-k8s.io/v1beta1/namespaces/"
+                + namespace + "/sandboxes/" + runtime["pod_name"]
+            ):
+                self.json_response({
+                    "apiVersion": "agents.x-k8s.io/v1beta1",
+                    "kind": "Sandbox",
+                    "metadata": {
+                        "name": runtime["pod_name"],
+                        "namespace": namespace,
+                        "uid": runtime["pod_uid"] + "-sandbox",
+                    },
+                    "spec": {"operatingMode": "Running"},
+                })
+                return True
+            if path == (
+                "/api/v1/namespaces/" + namespace
+                + "/pods/" + runtime["pod_name"]
+            ):
+                self.json_response({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": runtime["pod_name"],
+                        "namespace": namespace,
+                        "uid": runtime["pod_uid"],
+                    },
+                    "spec": {
+                        "containers": [],
+                        "nodeName": "exec-contract-node",
+                    },
+                    "status": {
+                        "phase": "Running",
+                        "podIP": runtime["pod_ip"],
+                    },
+                })
+                return True
+        return False
 
     def send_ws_frame(self, channel, payload):
         body = bytes([channel]) + payload
@@ -584,6 +672,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/healthz":
             self.empty_response(200)
+            return
+        if self.runtime_response():
             return
         if (
             "codewire-contract-exec-happy" in self.path

@@ -11,7 +11,9 @@ use sqlx::{PgPool, Row};
 use super::ApiState;
 use super::create::{
     CreateEnvironmentBody, SetupConfig, apply_detection_defaults, apply_project_spec_defaults,
-    normalize_create_environment_body, synchronize_project_spec,
+    ensure_no_legacy_preset_secret_delivery, ensure_no_legacy_secret_delivery,
+    ensure_no_legacy_setup_secret_delivery, normalize_create_environment_body,
+    synchronize_project_spec,
 };
 use super::detect::{
     self, DetectionResult, apply_detection_workspace_defaults, call_claude_detect,
@@ -280,7 +282,12 @@ fn should_analyze(analyze: Option<bool>, body: &CreateEnvironmentBody) -> bool {
 }
 
 /// Mirrors `applySetupConfigDefaults` (saved repo config fills gaps).
-fn apply_setup_config_defaults(body: &mut CreateEnvironmentBody, cfg: SetupConfig) {
+fn apply_setup_config_defaults(
+    body: &mut CreateEnvironmentBody,
+    cfg: SetupConfig,
+) -> AppResult<()> {
+    ensure_no_legacy_secret_delivery(body)?;
+    ensure_no_legacy_setup_secret_delivery(&cfg)?;
     if body.project_spec.is_none() {
         body.project_spec = cfg.project_spec;
     }
@@ -323,6 +330,17 @@ fn apply_setup_config_defaults(body: &mut CreateEnvironmentBody, cfg: SetupConfi
     if body.include_user_secrets.is_none() {
         body.include_user_secrets = cfg.include_user_secrets;
     }
+    Ok(())
+}
+
+fn ensure_resolved_preset_secret_delivery(preset: Option<&PresetWire>) -> AppResult<()> {
+    let Some(preset) = preset else {
+        return Ok(());
+    };
+    if let Some(config) = preset.default_setup_config.as_ref() {
+        ensure_no_legacy_setup_secret_delivery(config)?;
+    }
+    ensure_no_legacy_preset_secret_delivery(preset.secret_project_id.as_deref())
 }
 
 #[derive(Debug, Clone)]
@@ -395,6 +413,7 @@ async fn prepare_draft(
     progress: &ProgressTx,
 ) -> Result<PrepareResponse, AppError> {
     let pool = &state.pool;
+    ensure_no_legacy_secret_delivery(&body)?;
     apply_project_spec_defaults(&mut body)?;
     normalize_create_environment_body(&mut body);
     synchronize_project_spec(&mut body)?;
@@ -422,7 +441,7 @@ async fn prepare_draft(
                     body.preset_id = rc.preset_id.clone();
                 }
                 if let Ok(cfg) = serde_json::from_value::<SetupConfig>(rc.setup_config.clone()) {
-                    apply_setup_config_defaults(&mut body, cfg);
+                    apply_setup_config_defaults(&mut body, cfg)?;
                     apply_project_spec_defaults(&mut body)?;
                     normalize_create_environment_body(&mut body);
                     synchronize_project_spec(&mut body)?;
@@ -465,6 +484,7 @@ async fn prepare_draft(
             })?;
         resolved_preset = Some(preset);
     }
+    ensure_resolved_preset_secret_delivery(resolved_preset.as_ref())?;
 
     if !analyze || body.repo_url.is_empty() {
         return Ok(PrepareResponse {
@@ -607,6 +627,7 @@ async fn prepare_draft(
     {
         resolved_preset = Some(p);
     }
+    ensure_resolved_preset_secret_delivery(resolved_preset.as_ref())?;
 
     Ok(PrepareResponse {
         draft: body,
@@ -729,4 +750,122 @@ pub(crate) async fn detect_environment_repo_core(
     fixup_detection_result(&mut result, &repo_ctx);
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_secret_delivery_pending(error: AppError, forbidden_value: Option<&str>) {
+        match error {
+            AppError::Coded {
+                status,
+                code: "secret_delivery_pending",
+                detail,
+            } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                if let Some(value) = forbidden_value {
+                    assert!(!detail.contains(value));
+                }
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    fn preset_with_secret_defaults(
+        default_setup_config: Option<SetupConfig>,
+        secret_project_id: Option<&str>,
+    ) -> PresetWire {
+        PresetWire {
+            id: "preset-test".to_owned(),
+            org_id: Some("org-test".to_owned()),
+            name: "Test".to_owned(),
+            slug: None,
+            language: None,
+            official: false,
+            description: None,
+            build_status: "ready".to_owned(),
+            build_error: None,
+            default_cpu_millicores: 2000,
+            default_memory_mb: 4096,
+            default_disk_gb: 10,
+            default_ttl_seconds: None,
+            image: None,
+            default_setup_config,
+            secret_project_id: secret_project_id.map(str::to_owned),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn saved_setup_secret_sources_fail_before_explicit_false_can_mask_them() {
+        let configs = [
+            SetupConfig {
+                include_org_secrets: Some(true),
+                ..Default::default()
+            },
+            SetupConfig {
+                include_user_secrets: Some(true),
+                ..Default::default()
+            },
+            SetupConfig {
+                project_spec: Some(
+                    codewire_project::parse_project_yaml(
+                        "secrets: {project: saved-project-secret-value}\n",
+                    )
+                    .unwrap()
+                    .spec,
+                ),
+                ..Default::default()
+            },
+        ];
+        for config in configs {
+            let mut body = CreateEnvironmentBody {
+                include_org_secrets: Some(false),
+                include_user_secrets: Some(false),
+                ..Default::default()
+            };
+            assert_secret_delivery_pending(
+                apply_setup_config_defaults(&mut body, config).unwrap_err(),
+                Some("saved-project-secret-value"),
+            );
+        }
+
+        let mut body = CreateEnvironmentBody::default();
+        apply_setup_config_defaults(
+            &mut body,
+            SetupConfig {
+                include_org_secrets: Some(false),
+                include_user_secrets: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(body.include_org_secrets, Some(false));
+        assert_eq!(body.include_user_secrets, Some(false));
+    }
+
+    #[test]
+    fn resolved_preset_secret_defaults_fail_closed() {
+        ensure_resolved_preset_secret_delivery(Some(&preset_with_secret_defaults(None, None)))
+            .unwrap();
+
+        let preset = preset_with_secret_defaults(None, Some("preset-project-secret-value"));
+        assert_secret_delivery_pending(
+            ensure_resolved_preset_secret_delivery(Some(&preset)).unwrap_err(),
+            Some("preset-project-secret-value"),
+        );
+
+        let preset = preset_with_secret_defaults(
+            Some(SetupConfig {
+                include_user_secrets: Some(true),
+                ..Default::default()
+            }),
+            None,
+        );
+        assert_secret_delivery_pending(
+            ensure_resolved_preset_secret_delivery(Some(&preset)).unwrap_err(),
+            None,
+        );
+    }
 }

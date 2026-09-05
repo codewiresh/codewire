@@ -22,14 +22,12 @@ install_bun_dependencies() {
 
 GO_MODULE_DIRS=(
   libs/gen-go
-  libs/sdk-examples/run-claude/go
   libs/sdk-go
   libs/tailnet
   tests/contract
 )
 GO_PACKAGE_PATTERNS=(
   ./libs/gen-go/...
-  ./libs/sdk-examples/run-claude/go/...
   ./libs/sdk-go/...
   ./libs/tailnet/...
   ./tests/contract/...
@@ -147,7 +145,7 @@ run_policy_core() {
   scripts/ci/tests/test-source-approval-workflow.sh
   scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
-  scripts/ci/tests/test-sdk-local-cli-contract.sh
+  scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   python3 scripts/ci/tests/test-repo-checks-modules.py
   python3 scripts/checks/repo_checks.py license-map
@@ -533,6 +531,7 @@ run_edge() {
   done
   python3 scripts/checks/repo_checks.py connect-edge-routing --self-test
   scripts/ci/tests/test-kind-e2e-cleanup.sh
+  scripts/ci/tests/test-kind-e2e-ubuntu-snapshot-runner.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
   scripts/ci/tests/test-kind-forwards.sh
 }

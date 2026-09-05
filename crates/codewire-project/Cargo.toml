@@ -8,6 +8,8 @@ authors.workspace = true
 description = "I/O-free Codewire project document parsing and normalization"
 
 [dependencies]
+codewire-access = { workspace = true }
+codewire-workload-secrets = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

@@ -4,6 +4,7 @@ members = [
     "crates/codewire-client",
     "crates/codewire-gateway",
     "crates/codewire-gateway-proto",
+    "crates/codewire-netstack",
     "crates/codewire-proto",
     "crates/codewire-tailnet",
 ]
@@ -18,6 +19,7 @@ authors = ["Sonica"]
 [workspace.dependencies]
 codewire-client = { path = "crates/codewire-client" }
 codewire-gateway-proto = { path = "crates/codewire-gateway-proto" }
+codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-proto = { path = "crates/codewire-proto", default-features = false }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 
@@ -55,6 +57,7 @@ subtle = "=2.6.1"
 thiserror = "2"
 tiny_http = "0.12"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"
 tonic-prost = "0.14"

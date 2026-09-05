@@ -164,11 +164,10 @@ def check_go_source_classification(_args: argparse.Namespace) -> int:
             re.compile(r"^libs/gen-go/.*\.go$"),
         ),
         (
-            "public Go SDK and examples",
-            re.compile(r"^(libs/sdk-go|libs/sdk-examples/run-claude/go)/.*\.go$"),
+            "public Go SDK",
+            re.compile(r"^libs/sdk-go/.*\.go$"),
         ),
     ]
-    allowed_package_main = {"libs/sdk-examples/run-claude/go/main.go"}
     findings: list[str] = []
     counts = {name: 0 for name, _pattern in categories}
 
@@ -187,8 +186,8 @@ def check_go_source_classification(_args: argparse.Namespace) -> int:
             continue
         counts[category[0]] += 1
         package = package_name(rel)
-        if package == "main" and rel not in allowed_package_main:
-            findings.append(f"{rel}: package main is not allowed outside accepted SDK examples")
+        if package == "main":
+            findings.append(f"{rel}: package main is not an accepted Go consumer surface")
 
     if findings:
         print("Go source classification guard: unaccepted Go source found", file=sys.stderr)

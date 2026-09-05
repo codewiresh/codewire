@@ -20,14 +20,22 @@ async-trait = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }
 bytes = { workspace = true }
+codewire-access = { workspace = true }
 codewire-client = { workspace = true }
+codewire-local-credentials = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-project = { workspace = true }
+codewire-tailnet = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
+codewire-egress-broker = { workspace = true }
+codewire-egress-policy = { workspace = true }
+codewire-netstack = { workspace = true }
+codewire-gateway-proto = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 futures = { workspace = true }
+hmac = { workspace = true }
 http = { workspace = true }
 hyper-util = { workspace = true }
 libc = "0.2"
@@ -51,6 +59,7 @@ zeroize = { workspace = true }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
+codewire-protected-store = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["client"] }
 prost-types = { workspace = true }

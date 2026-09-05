@@ -12,9 +12,60 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-#[tokio::main]
-async fn main() {
-    if let Err(error) = linux::entry().await {
+fn main() {
+    let isolated_command = std::env::args_os().nth(1);
+    let network_worker = isolated_command.as_ref().is_some_and(|argument| {
+        argument == "__native-network-worker" || argument == "__native-network-worker-fixture"
+    });
+    let egress_broker = isolated_command
+        .as_ref()
+        .is_some_and(|argument| argument == "__native-egress-broker");
+    let mesh_transport = isolated_command
+        .as_ref()
+        .is_some_and(|argument| argument == "__native-mesh-transport");
+    let mesh_enrollment = isolated_command
+        .as_ref()
+        .is_some_and(|argument| argument == "__native-mesh-enrollment-broker");
+    let isolated_process = network_worker || egress_broker || mesh_transport || mesh_enrollment;
+    let mut runtime = if isolated_process {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+    };
+    if isolated_process {
+        runtime.enable_io().enable_time();
+    } else {
+        runtime.enable_all();
+    }
+    let runtime = runtime.build().unwrap_or_else(|_| {
+        eprintln!("codewire-local-vmm-smoke: ERROR: qualified-host proof failed");
+        std::process::exit(1);
+    });
+    if let Err(error) = runtime.block_on(linux::entry()) {
+        if network_worker {
+            let code = error
+                .downcast_ref::<codewire_local_vmm::network_worker::NetworkWorkerError>()
+                .map_or(1, |error| error.exit_code());
+            std::process::exit(code);
+        }
+        if egress_broker {
+            let code = error
+                .downcast_ref::<codewire_local_vmm::egress_broker::EgressBrokerProcessError>()
+                .map_or(1, |error| error.exit_code());
+            std::process::exit(code);
+        }
+        if mesh_transport {
+            let code = error
+                .downcast_ref::<codewire_local_vmm::mesh_process::MeshTransportProcessError>()
+                .map_or(1, |error| error.exit_code());
+            std::process::exit(code);
+        }
+        if mesh_enrollment {
+            let code = error
+                .downcast_ref::<codewire_local_vmm::mesh_enrollment::MeshEnrollmentProcessError>()
+                .map_or(1, |error| error.exit_code());
+            std::process::exit(code);
+        }
         eprintln!("{}", linux::top_level_failure_message(error.as_ref()));
         std::process::exit(1);
     }
@@ -25,31 +76,44 @@ mod linux {
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fs::{self, File, Metadata};
+    #[cfg(test)]
     use std::future::Future;
     use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use async_trait::async_trait;
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
+    use codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT;
     use codewire_local_vmm::ch_api::VmInfo;
     use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
+    use codewire_local_vmm::host_port::HostPortBinding;
     use codewire_local_vmm::linux::runner::ExitClass;
     use codewire_local_vmm::linux::state::{
         StateDiskIdentity, VmPhase, cleanup_trashed_vm, move_stopped_vm_to_trash,
     };
+    use codewire_local_vmm::mesh_ingress::MeshAttachment;
+    use codewire_local_vmm::network_worker::{
+        BoxedBrokerStream, BrokerDnsAnswer, EgressBroker, TcpFlow,
+    };
     use codewire_local_vmm::{
         CloudHypervisorRunner, CreateVmRequest, LiveProcess, PreparedVm, ProcessIdentity,
-        RecoveryError, RunnerConfig, RunningVm, VmPaths,
+        RecoveryError, RunnerConfig, RunnerError, RunningVm, VmPaths,
     };
+    use codewire_netstack::{DnsAnswer, DnsQuestion, DnsRecordType};
     use codewire_project::ProjectSpec;
     use codewire_vmm_guest_probe::guest::CONTAINER_INIT_PATH;
     use codewire_vmm_guest_probe::{
         LayerEncoding, SETUP_HEADER_LEN, SetupArchitecture, SetupBinding, SetupBlob, SetupHeader,
         SetupLayerBlob, SetupObject, Sha256Value, oci_root_generation,
     };
+    use rustix::process::Signal;
     use serde_json::Value;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tonic::Code;
     use uuid::Uuid;
 
@@ -60,9 +124,25 @@ mod linux {
     const ROOT_GENERATION: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(15);
+    const SETUP_NETWORK_READY_TIMEOUT: Duration = Duration::from_secs(30);
     const SESSION_TIMEOUT: Duration = Duration::from_secs(10);
     const VM_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
     const MAX_SESSION_OUTPUT: usize = 64 * 1024;
+    const FIXTURE_GUEST_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    const FIXTURE_RESOLVER: SocketAddr =
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 53);
+    const FIXTURE_TCP_DESTINATION: SocketAddr =
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 19)), 4_443);
+    const FIXTURE_DNS_NAME: &str = "allowed.codewire.test";
+    const FIXTURE_DNS_ANSWER: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 20);
+    const FIXTURE_THROUGHPUT_BYTES: usize = 1024 * 1024;
+    const HOST_PORT_GUEST_PORT: u16 = 3_000;
+    const HOST_PORT_REQUEST: &[u8] = b"CWPORT1 host";
+    const HOST_PORT_RESPONSE: &[u8] = b"CWPORT1 guest";
+    const MESH_GUEST_PORT: u16 = 3_001;
+    const MESH_REQUEST: &[u8] = b"CWMESH1 host";
+    const MESH_RESPONSE: &[u8] = b"CWMESH1 guest";
+    const MESH_ACKNOWLEDGEMENT: &[u8] = b"CWMESH1 ack";
     const PROBE_PTY_TERM: &str = "xterm-256color";
     const PROBE_PTY_WIDTH: i32 = 80;
     const PROBE_PTY_HEIGHT: i32 = 24;
@@ -103,7 +183,101 @@ mod linux {
     }
 
     pub async fn entry() -> SmokeResult<()> {
-        let arguments = match Args::parse(std::env::args().skip(1)) {
+        let raw_arguments = std::env::args().skip(1).collect::<Vec<_>>();
+        if let [
+            command,
+            environment_flag,
+            environment_id,
+            generation_flag,
+            generation,
+        ] = raw_arguments.as_slice()
+            && environment_flag == "--environment-id"
+            && generation_flag == "--generation"
+            && matches!(
+                command.as_str(),
+                "__native-network-worker"
+                    | "__native-network-worker-fixture"
+                    | "__native-egress-broker"
+                    | "__native-mesh-transport"
+            )
+        {
+            let environment_id = Uuid::parse_str(environment_id)
+                .map_err(|_| failure("network worker environment ID is invalid"))?;
+            let generation = generation
+                .parse::<u64>()
+                .map_err(|_| failure("network worker generation is invalid"))?;
+            return match command.as_str() {
+                "__native-network-worker" => {
+                    codewire_local_vmm::network_worker::run_inherited_worker(
+                        environment_id,
+                        generation,
+                    )
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+                }
+                "__native-network-worker-fixture" => {
+                    codewire_local_vmm::network_worker::run_inherited_worker_with_broker(
+                        environment_id,
+                        generation,
+                        Arc::new(SmokeNetworkBroker),
+                    )
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+                }
+                "__native-egress-broker" => {
+                    codewire_local_vmm::egress_broker::run_inherited_egress_broker(
+                        environment_id,
+                        generation,
+                    )
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+                }
+                "__native-mesh-transport" => {
+                    codewire_local_vmm::mesh_process::run_inherited_mesh_transport_fixture(
+                        environment_id,
+                        generation,
+                        MESH_REQUEST,
+                        MESH_RESPONSE,
+                        MESH_ACKNOWLEDGEMENT,
+                    )
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+                }
+                _ => unreachable!("isolated command was validated"),
+            };
+        }
+        if let [
+            command,
+            environment_flag,
+            environment_id,
+            generation_flag,
+            generation,
+            mesh_root_flag,
+            mesh_root,
+            platform_root_flag,
+            platform_root,
+        ] = raw_arguments.as_slice()
+            && command == "__native-mesh-enrollment-broker"
+            && environment_flag == "--environment-id"
+            && generation_flag == "--generation"
+            && mesh_root_flag == "--mesh-data-dir"
+            && platform_root_flag == "--platform-config-dir"
+            && Path::new(mesh_root).is_absolute()
+            && Path::new(platform_root).is_absolute()
+        {
+            let environment_id = Uuid::parse_str(environment_id)
+                .map_err(|_| failure("Mesh enrollment environment ID is invalid"))?;
+            let generation = generation
+                .parse::<u64>()
+                .map_err(|_| failure("Mesh enrollment generation is invalid"))?;
+            return codewire_local_vmm::mesh_enrollment::run_inherited_mesh_enrollment_fixture(
+                environment_id,
+                generation,
+            )
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>);
+        }
+        let arguments = match Args::parse(raw_arguments) {
             Ok(Some(arguments)) => arguments,
             Ok(None) => {
                 print_usage();
@@ -325,22 +499,66 @@ mod linux {
         observation("vm.requested_vcpus", resources.vcpus);
         observation("vm.requested_memory_mib", resources.memory_mib);
 
-        let provisioned = runner
+        let provisioned = match runner
             .prepare(request_with_setup(1, arguments, resources, setup))
-            .await?;
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                observation("vm.generation.1.prepare_error", runner_error_class(&error));
+                return Err(Box::new(error));
+            }
+        };
+        observation("vm.generation.1.prepared", true);
         let fixture_paths = provisioned.paths().clone();
         require_prepared_identity(&provisioned, arguments.vm_id, 1)?;
         let disk_identity = provisioned.state_disk_identity().clone();
         let provisioning_token = provisioned.auth_token_fingerprint();
-        let mut provisioning = runner.start(provisioned).await?;
+        let mut provisioning = match runner.start(provisioned).await {
+            Ok(running) => running,
+            Err(error) => {
+                observation("vm.generation.1.start_error", runner_error_class(&error));
+                return Err(Box::new(error));
+            }
+        };
+        observation("vm.generation.1.vmm_started", true);
+        let setup_network_started = Instant::now();
+        if let Err(error) =
+            attach_network_worker(&mut provisioning, SETUP_NETWORK_READY_TIMEOUT).await
+        {
+            observation(
+                "vm.generation.1.network_ready_elapsed_ms",
+                setup_network_started.elapsed().as_millis(),
+            );
+            observation(
+                "vm.generation.1.network_worker_error",
+                runner_error_class(&error),
+            );
+            return Err(Box::new(error));
+        }
+        observation(
+            "vm.generation.1.network_ready_elapsed_ms",
+            setup_network_started.elapsed().as_millis(),
+        );
+        observation("vm.generation.1.network_worker_attached", true);
         require_running_identity(&provisioning, arguments.vm_id, 1, &disk_identity)?;
         let provisioning_process = provisioning.process_identity().clone();
-        let provisioning_client = connect_ready_daemon(&provisioning).await?;
+        let provisioning_worker = provisioning
+            .network_worker_process_identity()
+            .cloned()
+            .ok_or_else(|| failure("provisioning network worker identity is absent"))?;
+        let provisioning_client = connect_ready_daemon(&mut provisioning).await?;
+        observation("vm.generation.1.daemon_ready", true);
         require_identity(
             &run_guest_command(&provisioning_client, &["identity"]).await?,
             arguments.vm_id,
             1,
         )?;
+        observation("vm.generation.1.identity_verified", true);
+        require_allowed_network_fixture(&provisioning_client).await?;
+        observation("network.fixture_dns", "allowed");
+        observation("network.fixture_tcp", "allowed");
+        observation("network.fixture_throughput_bytes", FIXTURE_THROUGHPUT_BYTES);
         provisioning.discard_one_boot_inputs()?;
         if provisioning.paths().seed_disk.exists()
             || provisioning
@@ -354,6 +572,14 @@ mod linux {
                 "provisioning inputs remained reachable after OCI workspace readiness",
             ));
         }
+        observation("vm.generation.1.inputs_discarded", true);
+        require_network_worker_boundary(&provisioning_worker, provisioning.paths())?;
+        observation("vm.generation.1.network_worker_boundary", true);
+        LiveProcess::recover(&provisioning_worker)?.signal(Signal::KILL)?;
+        wait_for_network_worker_failure(&mut provisioning).await?;
+        observation("vm.generation.1.network_worker_loss_observed", true);
+        require_network_probe(&run_guest_command(&provisioning_client, &["network-check"]).await?)?;
+        observation("network_worker.loss_fail_closed", true);
         drop(provisioning_client);
         match provisioning.stop().await? {
             ExitClass::GuestShutdown => {}
@@ -363,9 +589,25 @@ mod linux {
             ExitClass::VmmFailure(_) => {
                 return Err(failure("OCI provisioning VM required a failure signal"));
             }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("OCI provisioning direct-share server failed"));
+            }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("OCI provisioning network worker failed"));
+            }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("OCI provisioning egress broker failed"));
+            }
+            ExitClass::IngressForwarderFailure => {
+                return Err(failure("OCI provisioning host-port forwarder failed"));
+            }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("OCI provisioning Mesh transport failed"));
+            }
         }
         drop(provisioning);
         wait_for_identity_to_end(&provisioning_process).await?;
+        wait_for_identity_to_end(&provisioning_worker).await?;
         observation("guest.oci_setup_applied", true);
         observation("guest.oci_restart_without_setup", "pending");
 
@@ -385,6 +627,7 @@ mod linux {
             ));
         }
         let mut first = runner.start(prepared_one).await?;
+        attach_network_worker(&mut first, DAEMON_READY_TIMEOUT).await?;
         require_running_identity(&first, arguments.vm_id, 2, &disk_identity)?;
         if first.auth_token_fingerprint() != token_one {
             return Err(failure("daemon token changed between prepare and start"));
@@ -392,7 +635,7 @@ mod linux {
         let first_process = first.process_identity().clone();
         observe_process(&first_process);
 
-        let first_client = connect_ready_daemon(&first).await?;
+        let first_client = connect_ready_daemon(&mut first).await?;
         observation("guest.daemon_ready", true);
         observation("guest.oci_restart_without_setup", "verified");
         require_vmm_process_confinement(&first_process)?;
@@ -404,6 +647,8 @@ mod linux {
         )
         .await?;
         observation("guest.wrong_token_rejected", true);
+        require_credential_bridge(&first_client, arguments.vm_id, 2).await?;
+        observation("guest.credential_bridge_verified", true);
         require_pty_identity(&first_client, arguments.vm_id, 2).await?;
         observation("guest.identity_verified", true);
         observation("guest.pty_verified", true);
@@ -469,6 +714,21 @@ mod linux {
                     "guest-initiated poweroff was classified as VMM failure",
                 ));
             }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("direct-share server failed during guest poweroff"));
+            }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("network worker failed during guest poweroff"));
+            }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("egress broker failed during guest poweroff"));
+            }
+            ExitClass::IngressForwarderFailure => {
+                return Err(failure("host-port forwarder failed during guest poweroff"));
+            }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("Mesh transport failed during guest poweroff"));
+            }
         }
         drop(first);
         wait_for_identity_to_end(&first_process).await?;
@@ -484,8 +744,9 @@ mod linux {
             ));
         }
         let mut second = runner.start(prepared_two).await?;
+        attach_network_worker(&mut second, DAEMON_READY_TIMEOUT).await?;
         require_running_identity(&second, arguments.vm_id, 3, &disk_identity)?;
-        let second_client = connect_ready_daemon(&second).await?;
+        let second_client = connect_ready_daemon(&mut second).await?;
         require_identity(
             &run_guest_command(&second_client, &["identity"]).await?,
             arguments.vm_id,
@@ -507,6 +768,21 @@ mod linux {
                     "hard-killed VMM was misclassified as guest shutdown",
                 ));
             }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("direct-share server failed before hard VMM kill"));
+            }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("network worker failed before hard VMM kill"));
+            }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("egress broker failed before hard VMM kill"));
+            }
+            ExitClass::IngressForwarderFailure => {
+                return Err(failure("host-port forwarder failed before hard VMM kill"));
+            }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("Mesh transport failed before hard VMM kill"));
+            }
         }
         drop(second);
         wait_for_identity_to_end(&second_process).await?;
@@ -520,7 +796,9 @@ mod linux {
             return Err(failure("daemon token fingerprint repeated after crash"));
         }
         let third = runner.start(prepared_three).await?;
-        let third_client = connect_ready_daemon(&third).await?;
+        let mut third = third;
+        attach_network_worker(&mut third, DAEMON_READY_TIMEOUT).await?;
+        let third_client = connect_ready_daemon(&mut third).await?;
         require_identity(
             &run_guest_command(&third_client, &["identity"]).await?,
             arguments.vm_id,
@@ -555,7 +833,32 @@ mod linux {
             "identity-checked-orphan-terminated",
         );
 
-        let prepared_four = runner.prepare(request(5, arguments, resources)).await?;
+        let collision = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let host_port = collision.local_addr()?.port();
+        match runner
+            .prepare(request_with_host_port(5, arguments, resources, host_port))
+            .await
+        {
+            Err(RunnerError::HostPortUnavailable(port)) if port == host_port => {}
+            Err(error) => return Err(Box::new(error)),
+            Ok(_) => return Err(failure("runner admitted an occupied local host port")),
+        }
+        drop(collision);
+        observation("host_port.collision", "rejected");
+        let prepared_four = match runner
+            .prepare(request_with_host_port_and_mesh(
+                5, arguments, resources, host_port,
+            ))
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                observation("vm.generation.5.prepare_error", runner_error_class(&error));
+                return Err(Box::new(error));
+            }
+        };
+        require_loopback_port_reserved(host_port)?;
+        observation("host_port.prepare_reservation", host_port);
         require_same_disk(&disk_identity, prepared_four.state_disk_identity())?;
         let token_four = prepared_four.auth_token_fingerprint();
         if [provisioning_token, token_one, token_two, token_three].contains(&token_four) {
@@ -563,8 +866,49 @@ mod linux {
                 "daemon token fingerprint repeated after orphan recovery",
             ));
         }
-        let mut fourth = runner.start(prepared_four).await?;
-        let fourth_client = connect_ready_daemon(&fourth).await?;
+        let mut fourth = match runner.start(prepared_four).await {
+            Ok(running) => running,
+            Err(error) => {
+                observation("vm.generation.5.start_error", runner_error_class(&error));
+                return Err(Box::new(error));
+            }
+        };
+        let product_network_started = Instant::now();
+        if let Err(error) = attach_product_network_stack(&mut fourth).await {
+            observation(
+                "vm.generation.5.product_network_stack_elapsed_ms",
+                product_network_started.elapsed().as_millis(),
+            );
+            observation(
+                "vm.generation.5.product_network_stack_component",
+                runner_error_component(&error),
+            );
+            observation(
+                "vm.generation.5.product_network_stack_error",
+                runner_error_class(&error),
+            );
+            return Err(Box::new(error));
+        }
+        observation(
+            "vm.generation.5.product_network_stack_elapsed_ms",
+            product_network_started.elapsed().as_millis(),
+        );
+        observation("vm.generation.5.product_network_stack_attached", true);
+        let fourth_worker = fourth
+            .network_worker_process_identity()
+            .ok_or_else(|| failure("product network worker identity is absent"))?
+            .clone();
+        let fourth_broker = fourth
+            .egress_broker_process_identity()
+            .ok_or_else(|| failure("product egress broker identity is absent"))?
+            .clone();
+        let fourth_mesh = fourth
+            .mesh_transport_process_identity()
+            .ok_or_else(|| failure("product Mesh transport identity is absent"))?
+            .clone();
+        observation("vm.generation.5.product_process_identities", true);
+        let fourth_client = connect_ready_daemon(&mut fourth).await?;
+        observation("vm.generation.5.daemon_ready", true);
         require_identity(
             &run_guest_command(&fourth_client, &["identity"]).await?,
             arguments.vm_id,
@@ -574,6 +918,25 @@ mod linux {
             &run_guest_command(&fourth_client, &["read-nonce"]).await?,
             &nonce,
         )?;
+        observation("vm.generation.5.guest_state_verified", true);
+        if let Err(error) = require_host_port_round_trip(&fourth_client, host_port).await {
+            observation(
+                "host_port.generation_5_runner_state",
+                running_exit_class(&mut fourth),
+            );
+            return Err(error);
+        }
+        observation("host_port.generation_5_round_trip", true);
+        require_mesh_round_trip(&fourth_client, 5).await?;
+        observation("mesh.generation_5_round_trip", true);
+        fourth.force_kill_egress_broker_for_verification()?;
+        observation("vm.generation.5.egress_broker_kill_sent", true);
+        wait_for_egress_broker_failure(&mut fourth).await?;
+        observation("vm.generation.5.egress_broker_loss_observed", true);
+        wait_for_loopback_port_released(host_port).await?;
+        observation("host_port.broker_loss_release", true);
+        require_network_denied_after_broker_loss(&fourth_client).await?;
+        observation("egress_broker.loss_fail_closed", true);
         let fourth_process = fourth.process_identity().clone();
         drop(fourth_client);
         match fourth.stop().await? {
@@ -582,15 +945,341 @@ mod linux {
             ExitClass::VmmFailure(_) => {
                 return Err(failure("final VM stop required a failure signal"));
             }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("final direct-share server failed during stop"));
+            }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("final network worker failed during stop"));
+            }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("final egress broker failed during stop"));
+            }
+            ExitClass::IngressForwarderFailure => {
+                return Err(failure("final host-port forwarder failed during stop"));
+            }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("final Mesh transport failed during stop"));
+            }
         }
         drop(fourth);
         wait_for_identity_to_end(&fourth_process).await?;
+        wait_for_identity_to_end(&fourth_worker).await?;
+        wait_for_identity_to_end(&fourth_broker).await?;
+        wait_for_identity_to_end(&fourth_mesh).await?;
+
+        let prepared_five = runner
+            .prepare(request_with_host_port_and_mesh(
+                6, arguments, resources, host_port,
+            ))
+            .await?;
+        require_same_disk(&disk_identity, prepared_five.state_disk_identity())?;
+        require_loopback_port_reserved(host_port)?;
+        let mut fifth = runner.start(prepared_five).await?;
+        attach_product_network_stack(&mut fifth).await?;
+        let fifth_process = fifth.process_identity().clone();
+        let fifth_worker = fifth
+            .network_worker_process_identity()
+            .ok_or_else(|| failure("restarted product network worker identity is absent"))?
+            .clone();
+        let fifth_broker = fifth
+            .egress_broker_process_identity()
+            .ok_or_else(|| failure("restarted product egress broker identity is absent"))?
+            .clone();
+        let fifth_mesh = fifth
+            .mesh_transport_process_identity()
+            .ok_or_else(|| failure("restarted product Mesh transport identity is absent"))?
+            .clone();
+        if fifth_mesh == fourth_mesh {
+            return Err(failure(
+                "Mesh transport identity was reused across generations",
+            ));
+        }
+        let fifth_client = connect_ready_daemon(&mut fifth).await?;
+        require_identity(
+            &run_guest_command(&fifth_client, &["identity"]).await?,
+            arguments.vm_id,
+            6,
+        )?;
+        require_nonce_read(
+            &run_guest_command(&fifth_client, &["read-nonce"]).await?,
+            &nonce,
+        )?;
+        if let Err(error) = require_host_port_round_trip(&fifth_client, host_port).await {
+            observation(
+                "host_port.generation_6_runner_state",
+                running_exit_class(&mut fifth),
+            );
+            return Err(error);
+        }
+        observation("host_port.restart_restore", true);
+        require_mesh_round_trip(&fifth_client, 6).await?;
+        observation("mesh.restart_fresh_round_trip", true);
+        fifth.force_kill_mesh_transport_for_verification()?;
+        observation("vm.generation.6.mesh_transport_kill_sent", true);
+        wait_for_mesh_transport_failure(&mut fifth).await?;
+        observation("vm.generation.6.mesh_transport_loss_observed", true);
+        drop(fifth_client);
+        match fifth.stop().await? {
+            ExitClass::GuestShutdown => {}
+            ExitClass::StillRunning => return Err(failure("restarted VM stop remained running")),
+            ExitClass::VmmFailure(_) => {
+                return Err(failure("restarted VM stop required a failure signal"));
+            }
+            ExitClass::DirectShareFailure(_) => {
+                return Err(failure("restarted direct-share server failed during stop"));
+            }
+            ExitClass::NetworkWorkerFailure(_) => {
+                return Err(failure("restarted network worker failed during stop"));
+            }
+            ExitClass::EgressBrokerFailure(_) => {
+                return Err(failure("restarted egress broker failed during stop"));
+            }
+            ExitClass::IngressForwarderFailure => {
+                return Err(failure("restarted host-port forwarder failed during stop"));
+            }
+            ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                return Err(failure("restarted Mesh transport failed during stop"));
+            }
+        }
+        drop(fifth);
+        wait_for_identity_to_end(&fifth_process).await?;
+        wait_for_identity_to_end(&fifth_worker).await?;
+        wait_for_identity_to_end(&fifth_broker).await?;
+        wait_for_identity_to_end(&fifth_mesh).await?;
+        wait_for_loopback_port_released(host_port).await?;
+        observation("host_port.stop_release", true);
+
         let cleanup_id = Uuid::new_v4();
         move_stopped_vm_to_trash(&arguments.state_root, arguments.vm_id, cleanup_id)?;
         cleanup_trashed_vm(&arguments.state_root, arguments.vm_id, cleanup_id)?;
         require_deleted(&fixture_paths, &arguments.state_root)?;
         observation("vm.cleanup", "complete");
         Ok(())
+    }
+
+    async fn attach_network_worker(
+        running: &mut RunningVm,
+        timeout: Duration,
+    ) -> Result<(), RunnerError> {
+        let current = std::env::current_exe().map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        let executable =
+            std::fs::canonicalize(current).map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        running
+            .start_network_worker_with_injected_broker_for_verification(&executable, timeout)
+            .await?;
+        if running.network_worker_process_identity().is_none() {
+            return Err(RunnerError::InvalidNetworkWorker);
+        }
+        Ok(())
+    }
+
+    async fn attach_product_network_stack(running: &mut RunningVm) -> Result<(), RunnerError> {
+        let current = std::env::current_exe().map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        let executable =
+            std::fs::canonicalize(current).map_err(|_| RunnerError::InvalidNetworkWorker)?;
+        let credential_root = running.paths().vm_dir.clone();
+        running
+            .start_network_worker_with_mesh_credentials(
+                &executable,
+                DAEMON_READY_TIMEOUT,
+                &credential_root,
+                &credential_root,
+            )
+            .await?;
+        if running.network_worker_process_identity().is_none()
+            || running.egress_broker_process_identity().is_none()
+            || running.mesh_transport_process_identity().is_none()
+        {
+            return Err(RunnerError::InvalidNetworkWorker);
+        }
+        Ok(())
+    }
+
+    struct SmokeNetworkBroker;
+
+    #[async_trait]
+    impl EgressBroker for SmokeNetworkBroker {
+        async fn authorize_tcp(&self, flow: TcpFlow) -> io::Result<()> {
+            if flow.source.ip() == FIXTURE_GUEST_IP && flow.destination == FIXTURE_TCP_DESTINATION {
+                Ok(())
+            } else {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }
+        }
+
+        async fn connect_tcp(&self, flow: TcpFlow) -> io::Result<BoxedBrokerStream> {
+            self.authorize_tcp(flow).await?;
+            let (connected, mut fixture) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                let mut buffer = [0_u8; 16 * 1024];
+                loop {
+                    let read = match fixture.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    if fixture.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = fixture.shutdown().await;
+            });
+            Ok(Box::pin(connected))
+        }
+
+        async fn resolve_dns(&self, question: &DnsQuestion) -> io::Result<BrokerDnsAnswer> {
+            if question.source.ip() != FIXTURE_GUEST_IP
+                || question.server != FIXTURE_RESOLVER
+                || question.name != FIXTURE_DNS_NAME
+            {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            let answer = match question.record_type {
+                DnsRecordType::A => DnsAnswer::Ipv4(FIXTURE_DNS_ANSWER),
+                DnsRecordType::Aaaa => DnsAnswer::NoData,
+            };
+            Ok(BrokerDnsAnswer {
+                answer,
+                ttl_seconds: 30,
+            })
+        }
+    }
+
+    fn runner_error_class(error: &RunnerError) -> &'static str {
+        match error {
+            RunnerError::InvalidRequest => "invalid-request",
+            RunnerError::InvalidArtifactStagingLayout => "invalid-artifact-layout",
+            RunnerError::Artifact(_) => "artifact",
+            RunnerError::Path(_) => "path",
+            RunnerError::State(_) => "state",
+            RunnerError::Preflight(_) => "preflight",
+            RunnerError::Recovery(error) => recovery_error_class(error),
+            RunnerError::Config(_) => "config",
+            RunnerError::Api(_) => "api",
+            RunnerError::HybridVsock(_) => "hybrid-vsock",
+            RunnerError::Seed(_) => "seed",
+            RunnerError::MissingSeedAfterReadiness => "missing-seed-after-readiness",
+            RunnerError::MissingSetupAfterReadiness => "missing-setup-after-readiness",
+            RunnerError::SetupDiskIdentityChanged => "setup-disk-identity-changed",
+            RunnerError::MissingPreformattedStateDisk => "missing-state-disk",
+            RunnerError::MissingPreformattedDockerDisk => "missing-docker-disk",
+            RunnerError::UnexpectedDockerDisk => "unexpected-docker-disk",
+            RunnerError::MissingPreformattedRootDisk => "missing-root-disk",
+            RunnerError::StateDiskSizeMismatch { .. } => "state-disk-size-mismatch",
+            RunnerError::DockerDiskSizeMismatch { .. } => "docker-disk-size-mismatch",
+            RunnerError::RootDiskSizeMismatch { .. } => "root-disk-size-mismatch",
+            RunnerError::PersistedRootGenerationMismatch => "root-generation-mismatch",
+            RunnerError::InvalidDiskGrowth(_) => "invalid-disk-growth",
+            RunnerError::DiskShrinkUnsupported { .. } => "disk-shrink",
+            RunnerError::StateDiskGrowthIdentityMismatch(_) => "disk-growth-identity",
+            RunnerError::E2fsckUnavailable => "e2fsck-unavailable",
+            RunnerError::E2fsckFailed(_) => "e2fsck-failed",
+            RunnerError::Resize2fsUnavailable => "resize2fs-unavailable",
+            RunnerError::Resize2fsFailed(_) => "resize2fs-failed",
+            RunnerError::GenerationNotAdvanced { .. } => "generation-not-advanced",
+            RunnerError::InvalidNetworkWorker => "invalid-network-worker",
+            RunnerError::NetworkWorkerSpawn => "network-worker-spawn",
+            RunnerError::NetworkWorkerStartTimeout => "network-worker-start-timeout",
+            RunnerError::NetworkWorkerBootstrap => "network-worker-bootstrap",
+            RunnerError::NetworkWorkerStartup(failure) => failure.code(),
+            RunnerError::NetworkWorkerWait => "network-worker-wait",
+            RunnerError::NetworkWorkerKillTimeout => "network-worker-kill-timeout",
+            RunnerError::HostPortUnavailable(_) => "host-port-unavailable",
+            RunnerError::IngressControl => "ingress-control",
+            RunnerError::EgressBrokerSpawn => "egress-broker-spawn",
+            RunnerError::EgressBrokerStartTimeout => "egress-broker-start-timeout",
+            RunnerError::EgressBrokerBootstrap => "egress-broker-bootstrap",
+            RunnerError::EgressBrokerStartup(failure) => failure.code(),
+            RunnerError::EgressBrokerWait => "egress-broker-wait",
+            RunnerError::EgressBrokerKillTimeout => "egress-broker-kill-timeout",
+            RunnerError::MeshTransportSpawn => "mesh-transport-spawn",
+            RunnerError::MeshTransportStartTimeout => "mesh-transport-start-timeout",
+            RunnerError::MeshTransportBootstrap => "mesh-transport-bootstrap",
+            RunnerError::MeshTransportStartup(failure) => failure.code(),
+            RunnerError::MeshEnrollmentBrokerSpawn => "mesh-enrollment-broker-spawn",
+            RunnerError::MeshEnrollmentBrokerStartTimeout => "mesh-enrollment-broker-start-timeout",
+            RunnerError::MeshEnrollmentBrokerBootstrap => "mesh-enrollment-broker-bootstrap",
+            RunnerError::MeshEnrollmentBrokerStartup(failure) => failure.code(),
+            RunnerError::MeshProcessWait => "mesh-process-wait",
+            RunnerError::MeshProcessKillTimeout => "mesh-process-kill-timeout",
+            RunnerError::ExitedDuringStart => "vmm-exited-during-start",
+            RunnerError::StartTimeout => "vmm-start-timeout",
+            RunnerError::VirtiofsdUnavailable => "virtiofsd-unavailable",
+            RunnerError::DirectShareChanged => "direct-share-changed",
+            RunnerError::VirtiofsdSpawn => "virtiofsd-spawn",
+            RunnerError::VirtiofsdConfinement => "virtiofsd-confinement",
+            RunnerError::VirtiofsdExitedDuringStart => "virtiofsd-exited-during-start",
+            RunnerError::VirtiofsdStartTimeout => "virtiofsd-start-timeout",
+            RunnerError::VirtiofsdPidFile => "virtiofsd-pid-file",
+            RunnerError::VirtiofsdWait => "virtiofsd-wait",
+            RunnerError::VirtiofsdKillTimeout => "virtiofsd-kill-timeout",
+            RunnerError::Spawn => "vmm-spawn",
+            RunnerError::Wait => "vmm-wait",
+            RunnerError::KillTimeout => "vmm-kill-timeout",
+            RunnerError::GuestPoweroff => "guest-poweroff",
+            RunnerError::VmStillRunning => "vm-still-running",
+            RunnerError::PersistedIdentityMismatch => "persisted-identity-mismatch",
+            RunnerError::Io { .. } => "io",
+        }
+    }
+
+    fn running_exit_class(running: &mut RunningVm) -> &'static str {
+        match running.try_exit() {
+            Ok(ExitClass::StillRunning) => "running",
+            Ok(ExitClass::GuestShutdown) => "guest-shutdown",
+            Ok(ExitClass::VmmFailure(_)) => "vmm-failure",
+            Ok(ExitClass::DirectShareFailure(_)) => "direct-share-failure",
+            Ok(ExitClass::NetworkWorkerFailure(_)) => "network-worker-failure",
+            Ok(ExitClass::EgressBrokerFailure(_)) => "egress-broker-failure",
+            Ok(ExitClass::IngressForwarderFailure) => "ingress-forwarder-failure",
+            Ok(ExitClass::MeshTransportFailure(_)) => "mesh-transport-failure",
+            Ok(ExitClass::MeshIngressReceiverFailure) => "mesh-ingress-receiver-failure",
+            Err(_) => "unavailable",
+        }
+    }
+
+    fn runner_error_component(error: &RunnerError) -> &'static str {
+        match error {
+            RunnerError::InvalidNetworkWorker
+            | RunnerError::NetworkWorkerSpawn
+            | RunnerError::NetworkWorkerStartTimeout
+            | RunnerError::NetworkWorkerBootstrap
+            | RunnerError::NetworkWorkerStartup(_)
+            | RunnerError::NetworkWorkerWait
+            | RunnerError::NetworkWorkerKillTimeout => "network-worker",
+            RunnerError::EgressBrokerSpawn
+            | RunnerError::EgressBrokerStartTimeout
+            | RunnerError::EgressBrokerBootstrap
+            | RunnerError::EgressBrokerStartup(_)
+            | RunnerError::EgressBrokerWait
+            | RunnerError::EgressBrokerKillTimeout => "egress-broker",
+            RunnerError::MeshTransportSpawn
+            | RunnerError::MeshTransportStartTimeout
+            | RunnerError::MeshTransportBootstrap
+            | RunnerError::MeshTransportStartup(_) => "mesh-transport",
+            RunnerError::MeshEnrollmentBrokerSpawn
+            | RunnerError::MeshEnrollmentBrokerStartTimeout
+            | RunnerError::MeshEnrollmentBrokerBootstrap
+            | RunnerError::MeshEnrollmentBrokerStartup(_) => "mesh-enrollment-broker",
+            RunnerError::MeshProcessWait | RunnerError::MeshProcessKillTimeout => "mesh-process",
+            _ => "runner",
+        }
+    }
+
+    fn recovery_error_class(error: &RecoveryError) -> &'static str {
+        match error {
+            RecoveryError::InvalidPid(_) => "recovery-invalid-pid",
+            RecoveryError::ReadProcess(_) => "recovery-read-process",
+            RecoveryError::MalformedProcess => "recovery-malformed-process",
+            RecoveryError::IdentityMismatch => "recovery-identity-mismatch",
+            RecoveryError::UnexpectedSpawnedExecutable => "recovery-unexpected-executable",
+            RecoveryError::SpawnedIdentityChangedDuringCapture => "recovery-spawn-identity-changed",
+            RecoveryError::InvalidTargetFd(_) => "recovery-invalid-target-fd",
+            RecoveryError::ProcessExited => "recovery-process-exited",
+            RecoveryError::DuplicateProcessFd(_) => "recovery-duplicate-fd",
+            RecoveryError::InspectSocket(_) => "recovery-inspect-socket",
+            RecoveryError::MalformedSocketDomain => "recovery-socket-domain",
+            RecoveryError::Pidfd(_) => "recovery-pidfd",
+        }
     }
 
     async fn cleanup(arguments: Args) -> SmokeResult<()> {
@@ -611,11 +1300,16 @@ mod linux {
             vsock_cid: cid_for(arguments.vm_id),
             daemon_vsock_port: 7_777,
             state_disk_bytes: STATE_DISK_BYTES,
+            docker_disk_bytes: None,
             root_generation: ROOT_GENERATION.to_owned(),
             root_disk_bytes: ROOT_DISK_BYTES,
             vcpus: resources.vcpus,
             memory_mib: resources.memory_mib,
             setup: None,
+            host_ports: Vec::new(),
+            mesh: None,
+            direct_shares: Vec::new(),
+            skill_snapshot_sha256: None,
         }
     }
 
@@ -627,6 +1321,40 @@ mod linux {
     ) -> CreateVmRequest {
         let mut request = request(generation, arguments, resources);
         request.setup = Some(setup);
+        request
+    }
+
+    fn request_with_host_port(
+        generation: u64,
+        arguments: &Args,
+        resources: RunResources,
+        host_port: u16,
+    ) -> CreateVmRequest {
+        let mut request = request(generation, arguments, resources);
+        request.host_ports = vec![
+            HostPortBinding::new(host_port, HOST_PORT_GUEST_PORT)
+                .expect("smoke host-port constants are valid"),
+        ];
+        request
+    }
+
+    fn request_with_host_port_and_mesh(
+        generation: u64,
+        arguments: &Args,
+        resources: RunResources,
+        host_port: u16,
+    ) -> CreateVmRequest {
+        let mut request = request_with_host_port(generation, arguments, resources, host_port);
+        request.mesh = Some(
+            MeshAttachment::new(
+                "http://127.0.0.1:1",
+                "org-qualified-smoke",
+                "network-qualified-smoke",
+                "native-qualified-smoke",
+                [MESH_GUEST_PORT],
+            )
+            .expect("qualified Mesh attachment is canonical"),
+        );
         request
     }
 
@@ -763,7 +1491,7 @@ mod linux {
             None,
             busybox,
         )?;
-        for applet in ["grep", "sh", "sleep", "tr"] {
+        for applet in ["grep", "sh", "sleep", "tr", "wget"] {
             append_smoke_tar_entry(
                 &mut builder,
                 &format!("bin/{applet}"),
@@ -989,6 +1717,262 @@ mod linux {
         Ok(())
     }
 
+    fn require_network_worker_boundary(
+        identity: &ProcessIdentity,
+        paths: &VmPaths,
+    ) -> SmokeResult<()> {
+        if ProcessIdentity::capture(identity.pid)? != *identity {
+            return Err(failure(
+                "network worker identity changed before boundary inspection",
+            ));
+        }
+        let supervisor = parse_process_confinement(&fs::read_to_string("/proc/self/status")?)?;
+        let worker = parse_process_confinement(&fs::read_to_string(format!(
+            "/proc/{}/status",
+            identity.pid
+        ))?)?;
+        if worker.seccomp != 2
+            || worker.seccomp_filters <= supervisor.seccomp_filters
+            || worker.no_new_privs != 1
+            || !capability_sets_empty(&worker)
+        {
+            return Err(failure(
+                "network worker lacks its dedicated seccomp/capability boundary",
+            ));
+        }
+        let tasks =
+            fs::read_dir(format!("/proc/{}/task", identity.pid))?.collect::<Result<Vec<_>, _>>()?;
+        if tasks.len() != 1 {
+            return Err(failure(
+                "network worker is not running on its required single-threaded runtime",
+            ));
+        }
+        let cwd = fs::read_link(format!("/proc/{}/cwd", identity.pid))?;
+        if cwd != paths.vm_dir {
+            return Err(failure(
+                "network worker working directory is not its private VM directory",
+            ));
+        }
+
+        // The worker intentionally sets PR_SET_DUMPABLE=0, which makes
+        // pidfd_getfd fail its ptrace access check even for the parent. Match
+        // every live socket descriptor to the exact kernel AF_UNIX table
+        // instead. The child inherited only its admitted bootstrap stream,
+        // receives one validated connected AF_UNIX stream, and installs a
+        // filter denying socket/socketpair/connect before guest bytes arrive.
+        let unix_sockets = unix_socket_records(identity.pid)?;
+        let mut socket_inodes = BTreeMap::<u64, usize>::new();
+        let mut socket_count = 0_usize;
+        let mut descriptor_count = 0_usize;
+        for entry in fs::read_dir(format!("/proc/{}/fd", identity.pid))? {
+            let entry = entry?;
+            descriptor_count += 1;
+            let _fd = entry
+                .file_name()
+                .to_string_lossy()
+                .parse::<u32>()
+                .map_err(|_| failure("network worker descriptor number is malformed"))?;
+            let target = fs::read_link(entry.path())?;
+            let text = target.to_string_lossy();
+            if matches!(
+                text.as_ref(),
+                "/dev/kvm"
+                    | "/dev/vhost-vsock"
+                    | "/dev/net/tun"
+                    | "/dev/net/tap"
+                    | "/dev/vhost-net"
+            ) || text.starts_with("/dev/tap")
+                || target == paths.seed_disk
+                || target == paths.state_disk
+                || target.starts_with(&paths.generations_dir)
+            {
+                return Err(failure(
+                    "network worker owns a forbidden device or VM-content descriptor",
+                ));
+            }
+            if text.starts_with("socket:") {
+                let inode = socket_inode(&text).ok_or_else(|| {
+                    failure("network worker socket descriptor target is malformed")
+                })?;
+                let record = unix_sockets.get(&inode).ok_or_else(|| {
+                    failure("network worker socket is absent from the kernel AF_UNIX table")
+                })?;
+                if record.socket_type != libc::SOCK_STREAM as u16
+                    || record.state != 3
+                    || record.path.is_some()
+                {
+                    return Err(failure(
+                        "network worker owns a socket outside its inherited AF_UNIX path",
+                    ));
+                }
+                *socket_inodes.entry(inode).or_default() += 1;
+                socket_count += 1;
+            }
+        }
+        let mut socket_multiplicity = socket_inodes.values().copied().collect::<Vec<_>>();
+        socket_multiplicity.sort_unstable();
+        if descriptor_count == 0
+            || socket_count != 4
+            || socket_inodes.len() != 3
+            || socket_multiplicity != [1, 1, 2]
+        {
+            return Err(failure(
+                "network worker socket topology differs from one admitted stream and the fixed Tokio runtime pair",
+            ));
+        }
+        if ProcessIdentity::capture(identity.pid)? != *identity {
+            return Err(failure(
+                "network worker identity changed during boundary inspection",
+            ));
+        }
+        observation("network_worker.pid", identity.pid);
+        observation("network_worker.seccomp", worker.seccomp);
+        observation("network_worker.seccomp_filters", worker.seccomp_filters);
+        observation("network_worker.task_count", tasks.len());
+        observation("network_worker.fd_count", descriptor_count);
+        observation("network_worker.socket_count", socket_count);
+        observation("network_worker.boundary_verified", true);
+        Ok(())
+    }
+
+    async fn wait_for_network_worker_failure(running: &mut RunningVm) -> SmokeResult<()> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match running.try_exit()? {
+                    ExitClass::NetworkWorkerFailure(_) => return Ok(()),
+                    ExitClass::StillRunning => tokio::time::sleep(Duration::from_millis(20)).await,
+                    ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {
+                        return Err(failure(
+                            "VMM exited while proving isolated network worker loss",
+                        ));
+                    }
+                    ExitClass::DirectShareFailure(_) => {
+                        return Err(failure(
+                            "direct-share server exited while proving isolated network worker loss",
+                        ));
+                    }
+                    ExitClass::EgressBrokerFailure(_) => {
+                        return Err(failure(
+                            "egress broker exited while proving isolated network worker loss",
+                        ));
+                    }
+                    ExitClass::IngressForwarderFailure => {
+                        return Err(failure(
+                            "host-port forwarder exited while proving isolated network worker loss",
+                        ));
+                    }
+                    ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                        return Err(failure(
+                            "Mesh transport exited while proving isolated network worker loss",
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| failure("network worker did not exit after exact pidfd kill"))?
+    }
+
+    async fn wait_for_egress_broker_failure(running: &mut RunningVm) -> SmokeResult<()> {
+        match tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match running.try_exit()? {
+                    ExitClass::EgressBrokerFailure(_) => {
+                        observation("vm.egress_broker_loss_exit", "egress-broker");
+                        return Ok(());
+                    }
+                    ExitClass::StillRunning => tokio::time::sleep(Duration::from_millis(20)).await,
+                    ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {
+                        observation("vm.egress_broker_loss_exit", "vmm");
+                        return Err(failure(
+                            "VMM exited while proving isolated egress broker loss",
+                        ));
+                    }
+                    ExitClass::DirectShareFailure(_) => {
+                        observation("vm.egress_broker_loss_exit", "direct-share");
+                        return Err(failure(
+                            "direct-share server exited before egress broker loss was observed",
+                        ));
+                    }
+                    ExitClass::NetworkWorkerFailure(_) => {
+                        observation("vm.egress_broker_loss_exit", "network-worker");
+                        return Err(failure(
+                            "network worker exited before egress broker loss was observed",
+                        ));
+                    }
+                    ExitClass::IngressForwarderFailure => {
+                        observation("vm.egress_broker_loss_exit", "host-port-forwarder");
+                        return Err(failure(
+                            "host-port forwarder exited before egress broker loss was observed",
+                        ));
+                    }
+                    ExitClass::MeshTransportFailure(_) | ExitClass::MeshIngressReceiverFailure => {
+                        observation("vm.egress_broker_loss_exit", "mesh-transport");
+                        return Err(failure(
+                            "Mesh transport exited before egress broker loss was observed",
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                observation("vm.egress_broker_loss_exit", "timeout");
+                Err(failure("egress broker did not exit after exact pidfd kill"))
+            }
+        }
+    }
+
+    async fn wait_for_mesh_transport_failure(running: &mut RunningVm) -> SmokeResult<()> {
+        match tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match running.try_exit()? {
+                    ExitClass::MeshTransportFailure(_) => return Ok(()),
+                    ExitClass::StillRunning => tokio::time::sleep(Duration::from_millis(20)).await,
+                    ExitClass::GuestShutdown | ExitClass::VmmFailure(_) => {
+                        return Err(failure(
+                            "VMM exited while proving isolated Mesh transport loss",
+                        ));
+                    }
+                    ExitClass::DirectShareFailure(_) => {
+                        return Err(failure(
+                            "direct-share server exited before Mesh transport loss was observed",
+                        ));
+                    }
+                    ExitClass::NetworkWorkerFailure(_) => {
+                        return Err(failure(
+                            "network worker exited before Mesh transport loss was observed",
+                        ));
+                    }
+                    ExitClass::EgressBrokerFailure(_) => {
+                        return Err(failure(
+                            "egress broker exited before Mesh transport loss was observed",
+                        ));
+                    }
+                    ExitClass::IngressForwarderFailure => {
+                        return Err(failure(
+                            "host-port forwarder exited before Mesh transport loss was observed",
+                        ));
+                    }
+                    ExitClass::MeshIngressReceiverFailure => {
+                        return Err(failure(
+                            "Mesh ingress receiver exited before transport loss was observed",
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(failure(
+                "Mesh transport did not exit after exact pidfd kill",
+            )),
+        }
+    }
+
     fn parse_process_confinement(status: &str) -> SmokeResult<ProcessConfinement> {
         let seccomp = parse_status_decimal(unique_status_value(status, "Seccomp")?)?;
         let seccomp_filters =
@@ -1184,19 +2168,121 @@ mod linux {
         Ok(())
     }
 
-    async fn connect_ready_daemon(running: &RunningVm) -> SmokeResult<SessionClient> {
-        wait_for_daemon_ready_with_timeout(
-            DAEMON_READY_TIMEOUT,
-            Duration::from_millis(50),
-            || async {
-                let client = running.daemon_client().await.ok()?;
-                require_daemon(&client).await.ok()?;
-                Some(client)
-            },
-        )
-        .await
+    async fn connect_ready_daemon(running: &mut RunningVm) -> SmokeResult<SessionClient> {
+        let stage = match running
+            .authenticated_guest_terminal_stage(DAEMON_READY_TIMEOUT)
+            .await
+        {
+            Ok(stage) => stage,
+            Err(error) => {
+                observation("guest.authenticated_terminal_stage", "unavailable");
+                return Err(Box::new(error));
+            }
+        };
+        observation("guest.authenticated_terminal_stage", format!("{stage:?}"));
+        if stage.is_failure() {
+            return Err(failure("authenticated guest initialization failed"));
+        }
+        let deadline = tokio::time::Instant::now() + DAEMON_READY_TIMEOUT;
+        let mut attempts = 0_u64;
+        loop {
+            let exit = match running.try_exit() {
+                Ok(exit) => exit,
+                Err(error) => {
+                    observation("vmm.exit_inspection", "failed");
+                    return Err(Box::new(error));
+                }
+            };
+            match exit {
+                ExitClass::StillRunning => {}
+                ExitClass::NetworkWorkerFailure(code) => {
+                    observation(
+                        "network_worker.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure(
+                        "network worker exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::DirectShareFailure(code) => {
+                    observation(
+                        "direct_share.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure(
+                        "direct-share server exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::EgressBrokerFailure(code) => {
+                    observation(
+                        "egress_broker.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure(
+                        "egress broker exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::IngressForwarderFailure => {
+                    return Err(failure(
+                        "host-port forwarder exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::MeshTransportFailure(code) => {
+                    observation(
+                        "mesh_transport.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure(
+                        "Mesh transport exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::MeshIngressReceiverFailure => {
+                    return Err(failure(
+                        "Mesh ingress receiver exited before guest daemon readiness",
+                    ));
+                }
+                ExitClass::GuestShutdown => {
+                    observation("vmm.unexpected_exit", "guest-shutdown");
+                    return Err(failure("VMM exited before guest daemon readiness"));
+                }
+                ExitClass::VmmFailure(code) => {
+                    observation(
+                        "vmm.unexpected_exit",
+                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    );
+                    return Err(failure("VMM exited before guest daemon readiness"));
+                }
+            }
+            attempts += 1;
+            let attempt = tokio::time::timeout_at(deadline, async {
+                let client = running.daemon_client().await.map_err(|_| "transport")?;
+                require_daemon(&client).await.map_err(|_| "rpc-or-state")?;
+                Ok::<_, &'static str>(client)
+            })
+            .await;
+            let attempt_failure = match attempt {
+                Ok(Ok(client)) => return Ok(client),
+                Ok(Err(failure)) => failure,
+                Err(_) => {
+                    observation("daemon.readiness_attempts", attempts);
+                    observation("daemon.last_failure", "attempt-timeout");
+                    return Err(failure(
+                        "authenticated guest daemon did not become ready within its bound",
+                    ));
+                }
+            };
+            if tokio::time::Instant::now() >= deadline {
+                observation("daemon.readiness_attempts", attempts);
+                observation("daemon.last_failure", attempt_failure);
+                return Err(failure(
+                    "authenticated guest daemon did not become ready within its bound",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
+    #[cfg(test)]
     async fn wait_for_daemon_ready_with_timeout<T, Attempt, AttemptFuture>(
         timeout: Duration,
         retry_interval: Duration,
@@ -1232,6 +2318,111 @@ mod linux {
             )),
             Ok(()) => Err(failure("wrong daemon token was accepted")),
         }
+    }
+
+    async fn require_credential_bridge(
+        client: &SessionClient,
+        vm_id: Uuid,
+        generation: u64,
+    ) -> SmokeResult<()> {
+        let mut bridge = client.open_credential_bridge(vm_id, generation).await?;
+        let ready = tokio::time::timeout(SESSION_TIMEOUT, bridge.receive())
+            .await
+            .map_err(|_| failure("credential bridge readiness timed out"))??
+            .ok_or_else(|| failure("credential bridge ended before readiness"))?;
+        let Some(v1::credential_bridge_guest_message::Payload::Ready(ready)) = ready.payload else {
+            return Err(failure("credential bridge did not begin with readiness"));
+        };
+        if ready.protocol_version != codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+            || ready.environment_id != vm_id.to_string()
+            || ready.environment_generation != generation
+        {
+            return Err(failure("credential bridge readiness identity drifted"));
+        }
+
+        let body = r#"{"model":"codewire-synthetic"}"#;
+        let command = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "exec /bin/wget -qO- --header='Content-Type: application/json' --post-data='{body}' http://127.0.0.1:{CREDENTIAL_BRIDGE_LOOPBACK_PORT}/v1/responses"
+            ),
+        ];
+        let admitted = client
+            .launch(v1::LaunchSessionRequest {
+                command: command.clone(),
+                working_dir: "/workspace".to_owned(),
+                env: Vec::new(),
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await?;
+        if admitted.command != command || admitted.session_id.is_empty() {
+            return Err(failure("credential bridge probe was not admitted"));
+        }
+
+        let request = tokio::time::timeout(SESSION_TIMEOUT, bridge.receive())
+            .await
+            .map_err(|_| failure("credential bridge request timed out"))??
+            .ok_or_else(|| failure("credential bridge ended before request"))?;
+        let Some(v1::credential_bridge_guest_message::Payload::Request(request)) = request.payload
+        else {
+            return Err(failure(
+                "credential bridge emitted an unexpected request frame",
+            ));
+        };
+        if Uuid::parse_str(&request.request_id).is_err()
+            || request.method != "POST"
+            || request.path != "/responses"
+            || !request.query.is_empty()
+            || request.body != body.as_bytes()
+            || !request
+                .headers
+                .iter()
+                .any(|header| header.name == "content-type" && header.value == b"application/json")
+            || request.headers.iter().any(|header| {
+                matches!(
+                    header.name.as_str(),
+                    "authorization" | "proxy-authorization" | "cookie"
+                )
+            })
+        {
+            return Err(failure("credential bridge request boundary drifted"));
+        }
+
+        bridge
+            .send_response_start(v1::CredentialBridgeResponseStart {
+                request_id: request.request_id.clone(),
+                status_code: 200,
+                headers: vec![v1::CredentialHttpHeader {
+                    name: "content-type".to_owned(),
+                    value: b"text/plain".to_vec(),
+                }],
+            })
+            .await?;
+        bridge
+            .send_response_body(v1::CredentialBridgeResponseBody {
+                request_id: request.request_id.clone(),
+                data: b"CWCREDS1 synthetic\n".to_vec(),
+            })
+            .await?;
+        bridge
+            .send_response_end(v1::CredentialBridgeResponseEnd {
+                request_id: request.request_id,
+            })
+            .await?;
+
+        let record = wait_for_terminal_session(client, &admitted.session_id).await?;
+        if record.command != command
+            || record.state != v1::SessionLifecycleState::Exited as i32
+            || record.exit_code != Some(0)
+            || read_session_stdout(client, &record.session_id).await? != "CWCREDS1 synthetic\n"
+        {
+            return Err(failure("credential bridge probe did not complete exactly"));
+        }
+        Ok(())
     }
 
     fn launch_request(command: Vec<String>) -> v1::LaunchSessionRequest {
@@ -1431,6 +2622,293 @@ mod linux {
             return Err(failure("guest probe session did not exit successfully"));
         }
         read_session_stdout(client, &record.session_id).await
+    }
+
+    async fn run_workspace_command(client: &SessionClient, script: String) -> SmokeResult<String> {
+        let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), script];
+        let record = client.launch(launch_request(command.clone())).await?;
+        let record = wait_for_terminal_session(client, &record.session_id).await?;
+        if record.command != command
+            || record.state != v1::SessionLifecycleState::Exited as i32
+            || record.exit_code != Some(0)
+        {
+            return Err(failure("workspace network fixture command failed"));
+        }
+        read_session_stdout(client, &record.session_id).await
+    }
+
+    fn require_loopback_port_reserved(port: u16) -> SmokeResult<()> {
+        match StdTcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => Ok(()),
+            Err(error) => Err(Box::new(error)),
+            Ok(listener) => {
+                drop(listener);
+                Err(failure(
+                    "runner did not retain its loopback host-port reservation",
+                ))
+            }
+        }
+    }
+
+    async fn wait_for_loopback_port_released(port: u16) -> SmokeResult<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match StdTcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+                Ok(listener) => {
+                    drop(listener);
+                    return Ok(());
+                }
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(failure("loopback host port remained reserved after loss"));
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(Box::new(error)),
+            }
+        }
+    }
+
+    async fn require_host_port_round_trip(
+        client: &SessionClient,
+        host_port: u16,
+    ) -> SmokeResult<()> {
+        let script = host_port_guest_script(host_port);
+        let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), script];
+        let received_path = host_port_received_path(host_port);
+        let admitted = client
+            .launch(v1::LaunchSessionRequest {
+                command: command.clone(),
+                working_dir: "/workspace".to_owned(),
+                env: Vec::new(),
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await?;
+        wait_for_session_stdout_line(client, &admitted.session_id, "CWPORT1 handler-ready").await?;
+        observation("host_port.guest_handler_executable", true);
+        wait_for_session_stdout_line(client, &admitted.session_id, "CWPORT1 ready").await?;
+        observation("host_port.guest_listener_ready", host_port);
+
+        tokio::time::timeout(SESSION_TIMEOUT, async {
+            let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, host_port))
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
+            observation("host_port.host_connected", host_port);
+            stream
+                .write_all(HOST_PORT_REQUEST)
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
+            observation("host_port.host_request_written", true);
+            stream
+                .shutdown()
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
+            observation("host_port.host_write_half_closed", true);
+            let mut response = vec![0_u8; HOST_PORT_RESPONSE.len()];
+            stream
+                .read_exact(&mut response)
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
+            if response != HOST_PORT_RESPONSE {
+                return Err(failure("host port returned an invalid guest response"));
+            }
+            observation("host_port.host_response_read", true);
+            let mut trailing = [0_u8; 1];
+            if stream
+                .read(&mut trailing)
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?
+                != 0
+            {
+                return Err(failure("host port returned unexpected trailing bytes"));
+            }
+            observation("host_port.host_read_eof", true);
+            observation("host_port.bidirectional_bytes", "verified");
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        })
+        .await
+        .map_err(|_| failure("host-port round trip exceeded its bound"))??;
+
+        let record = wait_for_terminal_session(client, &admitted.session_id).await?;
+        if record.command != command
+            || record.state != v1::SessionLifecycleState::Exited as i32
+            || record.exit_code != Some(0)
+            || read_session_stdout(client, &record.session_id).await?
+                != "CWPORT1 handler-ready\nCWPORT1 ready\nCWPORT1 done\n"
+        {
+            return Err(failure("guest host-port fixture did not exit cleanly"));
+        }
+        observation("host_port.guest_session", "clean");
+        let verified = run_workspace_command(
+            client,
+            format!(
+                "test \"$(/bin/busybox cat {received_path})\" = 'CWPORT1 host' && /bin/busybox rm -f {received_path} && printf 'CWPORT1 verified\\n'"
+            ),
+        )
+        .await?;
+        if verified != "CWPORT1 verified\n" {
+            return Err(failure("guest did not receive exact host-port bytes"));
+        }
+        observation("host_port.guest_received_bytes", "verified");
+        Ok(())
+    }
+
+    async fn require_mesh_round_trip(client: &SessionClient, generation: u64) -> SmokeResult<()> {
+        let script = mesh_guest_script(generation);
+        let command = vec!["/bin/sh".to_owned(), "-c".to_owned(), script];
+        let received_path = mesh_received_path(generation);
+        let admitted = client
+            .launch(v1::LaunchSessionRequest {
+                command: command.clone(),
+                working_dir: "/workspace".to_owned(),
+                env: Vec::new(),
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await?;
+        wait_for_session_stdout_line(client, &admitted.session_id, "CWMESH1 handler-ready").await?;
+        wait_for_session_stdout_line(client, &admitted.session_id, "CWMESH1 ready").await?;
+
+        let record = wait_for_terminal_session(client, &admitted.session_id).await?;
+        if record.command != command
+            || record.state != v1::SessionLifecycleState::Exited as i32
+            || record.exit_code != Some(0)
+            || read_session_stdout(client, &record.session_id).await?
+                != "CWMESH1 handler-ready\nCWMESH1 ready\nCWMESH1 done\n"
+        {
+            return Err(failure("guest Mesh fixture did not exit cleanly"));
+        }
+        let verified = run_workspace_command(
+            client,
+            format!(
+                "test \"$(/bin/busybox cat {received_path})\" = 'CWMESH1 host|CWMESH1 ack' && /bin/busybox rm -f {received_path} && printf 'CWMESH1 verified\\n'"
+            ),
+        )
+        .await?;
+        if verified != "CWMESH1 verified\n" {
+            return Err(failure(
+                "guest did not complete exact Mesh request/response",
+            ));
+        }
+        Ok(())
+    }
+
+    fn host_port_received_path(host_port: u16) -> String {
+        format!("/workspace/.cw-host-port-{host_port}")
+    }
+
+    fn mesh_received_path(generation: u64) -> String {
+        format!("/workspace/.cw-mesh-{generation}")
+    }
+
+    fn mesh_guest_script(generation: u64) -> String {
+        let received_path = mesh_received_path(generation);
+        let handler_path = format!("/workspace/.cw-mesh-handler-{generation}");
+        let guest_port_hex = format!("{MESH_GUEST_PORT:04X}");
+        format!(
+            "/bin/busybox rm -f {received_path} {handler_path}; \
+             /bin/busybox printf '#!/bin/sh\\nrequest=\"$(/bin/busybox dd bs={} count=1 2>/dev/null)\"\\ntest \"$request\" = \"CWMESH1 host\" || exit 71\\nprintf \"CWMESH1 guest\"\\nack=\"$(/bin/busybox dd bs={} count=1 2>/dev/null)\"\\ntest \"$ack\" = \"CWMESH1 ack\" || exit 72\\nprintf \"%%s|%%s\" \"$request\" \"$ack\" > {received_path}\\n' > {handler_path}; \
+             /bin/busybox chmod 0700 {handler_path}; printf 'CWMESH1 handler-ready\\n'; \
+             /bin/busybox nc -l -s 0.0.0.0 -p {MESH_GUEST_PORT} -e {handler_path} & \
+             server=\"$!\"; ready=0; i=0; \
+             while test \"$i\" -lt 200; do \
+               if /bin/busybox grep -q ':{guest_port_hex} .* 0A ' /proc/net/tcp; then ready=1; break; fi; \
+               i=$((i + 1)); /bin/busybox sleep 0.05; \
+             done; \
+             test \"$ready\" -eq 1; printf 'CWMESH1 ready\\n'; \
+             wait \"$server\"; /bin/busybox rm -f {handler_path}; printf 'CWMESH1 done\\n'",
+            MESH_REQUEST.len(),
+            MESH_ACKNOWLEDGEMENT.len(),
+        )
+    }
+
+    fn host_port_guest_script(host_port: u16) -> String {
+        let received_path = host_port_received_path(host_port);
+        let handler_path = format!("/workspace/.cw-host-port-handler-{host_port}");
+        let guest_port_hex = format!("{HOST_PORT_GUEST_PORT:04X}");
+        format!(
+            "/bin/busybox rm -f {received_path} {handler_path}; \
+             /bin/busybox printf '#!/bin/sh\\n/bin/busybox cat > {received_path}\\nprintf \"CWPORT1 guest\"\\n' > {handler_path}; \
+             /bin/busybox chmod 0700 {handler_path}; \
+             test \"$({handler_path} </dev/null)\" = 'CWPORT1 guest'; /bin/busybox rm -f {received_path}; printf 'CWPORT1 handler-ready\\n'; \
+             /bin/busybox nc -l -s 0.0.0.0 -p {HOST_PORT_GUEST_PORT} -e {handler_path} & \
+             server=\"$!\"; ready=0; i=0; \
+             while test \"$i\" -lt 200; do \
+               if /bin/busybox grep -q ':{guest_port_hex} .* 0A ' /proc/net/tcp; then ready=1; break; fi; \
+               i=$((i + 1)); /bin/busybox sleep 0.05; \
+             done; \
+             test \"$ready\" -eq 1; printf 'CWPORT1 ready\\n'; \
+             wait \"$server\"; /bin/busybox rm -f {handler_path}; printf 'CWPORT1 done\\n'"
+        )
+    }
+
+    async fn require_allowed_network_fixture(client: &SessionClient) -> SmokeResult<()> {
+        let dns = run_workspace_command(
+            client,
+            format!(
+                "/bin/busybox nslookup {FIXTURE_DNS_NAME} 2>/dev/null | /bin/busybox grep -Fq '{FIXTURE_DNS_ANSWER}' && printf 'CWDNS1 allowed\\n'"
+            ),
+        )
+        .await?;
+        if dns != "CWDNS1 allowed\n" {
+            return Err(failure(
+                "fixture DNS did not cross the isolated network seam",
+            ));
+        }
+
+        let tcp = run_workspace_command(
+            client,
+            format!(
+                "response=\"$(printf 'CWTCP1 echo' | /bin/busybox nc -n -w 1 {} {})\"; test \"$response\" = 'CWTCP1 echo' && printf 'CWTCP1 allowed\\n'",
+                FIXTURE_TCP_DESTINATION.ip(),
+                FIXTURE_TCP_DESTINATION.port(),
+            ),
+        )
+        .await?;
+        if tcp != "CWTCP1 allowed\n" {
+            return Err(failure(
+                "fixture TCP did not cross the isolated network seam",
+            ));
+        }
+
+        let throughput = run_workspace_command(
+            client,
+            format!(
+                "count=\"$(/bin/busybox dd if=/dev/zero bs=65536 count=16 2>/dev/null | /bin/busybox nc -n -w 1 {} {} | /bin/busybox wc -c)\"; test \"$count\" -eq {FIXTURE_THROUGHPUT_BYTES} && printf 'CWTHROUGHPUT1 {FIXTURE_THROUGHPUT_BYTES}\\n'",
+                FIXTURE_TCP_DESTINATION.ip(),
+                FIXTURE_TCP_DESTINATION.port(),
+            ),
+        )
+        .await?;
+        if throughput != format!("CWTHROUGHPUT1 {FIXTURE_THROUGHPUT_BYTES}\n") {
+            return Err(failure(
+                "fixture TCP did not meet the one-MiB round-trip session floor",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn require_network_denied_after_broker_loss(client: &SessionClient) -> SmokeResult<()> {
+        let output = run_workspace_command(
+            client,
+            format!(
+                "if /bin/busybox nc -n -w 1 {} {} </dev/null >/dev/null 2>&1; then exit 1; fi; printf 'CWBROKER1 denied\\n'",
+                FIXTURE_TCP_DESTINATION.ip(),
+                FIXTURE_TCP_DESTINATION.port(),
+            ),
+        )
+        .await?;
+        if output != "CWBROKER1 denied\n" {
+            return Err(failure(
+                "guest TCP did not fail closed after isolated egress broker loss",
+            ));
+        }
+        Ok(())
     }
 
     async fn observe_network_failure_class(client: &SessionClient, session_id: &str) {
@@ -1653,7 +3131,7 @@ mod linux {
     }
 
     fn require_network_probe(output: &str) -> SmokeResult<()> {
-        if output != "CWNETWORK1 loopback-only\n" {
+        if output != "CWNETWORK2 isolated-tun\n" {
             return Err(failure("guest network boundary probe did not pass"));
         }
         Ok(())
@@ -1903,6 +3381,13 @@ mod linux {
         unix_paths: BTreeSet<PathBuf>,
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UnixSocketRecord {
+        socket_type: u16,
+        state: u16,
+        path: Option<PathBuf>,
+    }
+
     fn require_supervisor_socket_boundary() -> SmokeResult<()> {
         let identity = ProcessIdentity::capture(std::process::id())?;
         let live = LiveProcess::recover(&identity)?;
@@ -2055,6 +3540,18 @@ mod linux {
 
     fn unix_socket_paths(pid: u32) -> SmokeResult<BTreeMap<u64, PathBuf>> {
         let contents = fs::read_to_string(format!("/proc/{pid}/net/unix"))?;
+        Ok(parse_unix_socket_table(&contents)?
+            .into_iter()
+            .filter_map(|(inode, record)| record.path.map(|path| (inode, path)))
+            .collect())
+    }
+
+    fn unix_socket_records(pid: u32) -> SmokeResult<BTreeMap<u64, UnixSocketRecord>> {
+        let contents = fs::read_to_string(format!("/proc/{pid}/net/unix"))?;
+        parse_unix_socket_table(&contents)
+    }
+
+    fn parse_unix_socket_table(contents: &str) -> SmokeResult<BTreeMap<u64, UnixSocketRecord>> {
         let mut result = BTreeMap::new();
         for line in contents.lines().skip(1) {
             let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
@@ -2064,8 +3561,17 @@ mod linux {
             let inode = fields[6]
                 .parse()
                 .map_err(|_| failure("kernel Unix socket inode is malformed"))?;
-            if let Some(path) = fields.get(7) {
-                result.insert(inode, PathBuf::from(path));
+            let socket_type = u16::from_str_radix(fields[4], 16)
+                .map_err(|_| failure("kernel Unix socket type is malformed"))?;
+            let state = u16::from_str_radix(fields[5], 16)
+                .map_err(|_| failure("kernel Unix socket state is malformed"))?;
+            let record = UnixSocketRecord {
+                socket_type,
+                state,
+                path: fields.get(7).map(PathBuf::from),
+            };
+            if result.insert(inode, record).is_some() {
+                return Err(failure("kernel Unix socket inode is duplicated"));
             }
         }
         Ok(result)
@@ -2146,6 +3652,29 @@ mod linux {
         }
 
         #[test]
+        fn host_port_guest_fixture_binds_all_guest_addresses_without_a_peer_filter() {
+            let script = host_port_guest_script(18_080);
+            assert!(script.contains(
+                "/bin/busybox nc -l -s 0.0.0.0 -p 3000 -e /workspace/.cw-host-port-handler-18080"
+            ));
+            assert!(!script.contains("nc -l 0.0.0.0"));
+            assert!(script.contains("/workspace/.cw-host-port-18080"));
+        }
+
+        #[test]
+        fn mesh_guest_fixture_binds_only_the_declared_guest_port() {
+            let script = mesh_guest_script(7);
+            assert!(script.contains(
+                "/bin/busybox nc -l -s 0.0.0.0 -p 3001 -e /workspace/.cw-mesh-handler-7"
+            ));
+            assert!(!script.contains("nc -l 0.0.0.0"));
+            assert!(script.contains("/workspace/.cw-mesh-7"));
+            assert!(script.contains("CWMESH1 host"));
+            assert!(script.contains("CWMESH1 guest"));
+            assert!(script.contains("CWMESH1 ack"));
+        }
+
+        #[test]
         fn pty_output_normalizes_crlf_and_nothing_else() {
             assert_eq!(
                 normalize_pty_crlf("first\r\nsecond\nthird\rfourth"),
@@ -2169,7 +3698,7 @@ mod linux {
                 assert!(entries.insert(path, (kind, mode, link, contents)).is_none());
             }
 
-            assert_eq!(entries.len(), 13);
+            assert_eq!(entries.len(), 14);
             assert_eq!(
                 entries.get(Path::new("bin/busybox")),
                 Some(&(
@@ -2179,7 +3708,7 @@ mod linux {
                     b"sealed-busybox".to_vec()
                 ))
             );
-            for applet in ["grep", "sh", "sleep", "tr"] {
+            for applet in ["grep", "sh", "sleep", "tr", "wget"] {
                 assert_eq!(
                     entries.get(Path::new(&format!("bin/{applet}"))),
                     Some(&(
@@ -2237,6 +3766,7 @@ mod linux {
             let vm_dir = PathBuf::from("/state/vms/00000000-0000-4000-8000-000000000001");
             let api_dir = vm_dir.join("api");
             let vsock_dir = vm_dir.join("vsock");
+            let virtiofs_dir = vm_dir.join("fs");
             let disks_dir = vm_dir.join("disks");
             let generations_dir = vm_dir.join("generations");
             let seed_dir = vm_dir.join("seed");
@@ -2244,7 +3774,9 @@ mod linux {
             VmPaths {
                 api_socket: api_dir.join("api.sock"),
                 vsock_socket: vsock_dir.join("vsock.sock"),
+                virtiofs_dir,
                 state_disk: disks_dir.join("state.raw"),
+                docker_disk: disks_dir.join("docker.raw"),
                 generations_dir,
                 seed_disk: seed_dir.join("seed.raw"),
                 serial_log: diagnostics_dir.join("serial.log"),
@@ -2480,6 +4012,37 @@ mod linux {
             assert_eq!(socket_inode("socket:[1234]"), Some(1234));
             assert_eq!(socket_inode("socket:[1234] trailing"), None);
             assert_eq!(socket_inode("pipe:[1234]"), None);
+        }
+
+        #[test]
+        fn unix_socket_table_preserves_named_and_unnamed_socket_inodes() {
+            let table = concat!(
+                "Num RefCount Protocol Flags Type St Inode Path\n",
+                "0000000000000000: 00000002 00000000 00000000 0001 03 1234\n",
+                "0000000000000001: 00000002 00000000 00010000 0001 01 5678 /run/codewire.sock\n",
+            );
+            let parsed = parse_unix_socket_table(table).unwrap();
+            assert_eq!(
+                parsed.get(&1234),
+                Some(&UnixSocketRecord {
+                    socket_type: 1,
+                    state: 3,
+                    path: None,
+                })
+            );
+            assert_eq!(
+                parsed.get(&5678),
+                Some(&UnixSocketRecord {
+                    socket_type: 1,
+                    state: 1,
+                    path: Some(PathBuf::from("/run/codewire.sock")),
+                })
+            );
+
+            let duplicate =
+                format!("{table}0000000000000002: 00000002 00000000 00000000 0001 03 1234\n");
+            assert!(parse_unix_socket_table(&duplicate).is_err());
+            assert!(parse_unix_socket_table("header\nmalformed\n").is_err());
         }
 
         #[test]
