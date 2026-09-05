@@ -268,6 +268,7 @@ require_available_deployment() {
 
 validate_retained_cluster_identity() {
   local expected_context current_context clusters
+  local -a kubeconfig_args=()
 
   if [ "${KIND_CLUSTER_NAME_EXPLICIT:-0}" != "1" ] || [ -z "$KIND_CLUSTER_NAME" ]; then
     echo "::error::retained suites require an explicit non-empty KIND_CLUSTER_NAME"
@@ -295,8 +296,15 @@ validate_retained_cluster_identity() {
 
   # A retained suite can invoke a narrower read-only suite. Each invocation
   # owns its file so child cleanup cannot remove the parent's pinned context.
+  # Keep the API endpoint in the caller's existing topology. Remote DinD's
+  # published loopback endpoint belongs to the daemon, not the job container.
+  # This only chooses the export; it must not reconnect or start forwarding.
+  if is_remote_dind_kind_job; then
+    kubeconfig_args+=(--internal)
+  fi
   RETAINED_KUBECONFIG="$(mktemp "$RUN_DIR/retained-kubeconfig.XXXXXX")" || return $?
-  if ! kind get kubeconfig --name "$KIND_CLUSTER_NAME" >"$RETAINED_KUBECONFIG"; then
+  if ! kind get kubeconfig "${kubeconfig_args[@]}" --name "$KIND_CLUSTER_NAME" \
+      >"$RETAINED_KUBECONFIG"; then
     echo "::error::failed to pin kubeconfig for retained Kind cluster ${KIND_CLUSTER_NAME}"
     return 1
   fi
@@ -691,6 +699,11 @@ start_remote_dind_kind_forwarding() {
   return 1
 }
 
+is_remote_dind_kind_job() {
+  [ -n "${HOSTNAME:-}" ] \
+    && docker container inspect "$HOSTNAME" >/dev/null 2>&1
+}
+
 configure_remote_dind_kind_network() {
   local self_container="${HOSTNAME:-}"
   local node="${KIND_CLUSTER_NAME}-control-plane"
@@ -702,8 +715,7 @@ configure_remote_dind_kind_network() {
   # socket for a sibling DinD daemon, making that daemon's 127.0.0.1 foreign.
   # The job hostname is a container in the latter topology and absent in the
   # former, which lets this adaptation remain a no-op for local preflight.
-  if [ -z "$self_container" ] \
-      || ! docker container inspect "$self_container" >/dev/null 2>&1; then
+  if ! is_remote_dind_kind_job; then
     log "local Docker topology detected; retaining Kind host-port kubeconfig"
     return 0
   fi

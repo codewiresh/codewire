@@ -824,11 +824,21 @@ FAKE_CONTEXT=kind-retained-fixture
 FAKE_MARKER_VERSION="$KIND_E2E_COMPATIBILITY_VERSION"
 FAKE_MARKER_CLUSTER="$KIND_CLUSTER_NAME"
 FAKE_MARKER_MISSING=0
+FAKE_RETAINED_EXPORT_FAIL=0
+FAKE_RETAINED_REACHABLE=1
+HOSTNAME=retained-local-host
+docker() {
+  case "$*" in
+    'container inspect retained-local-host') return 1 ;;
+    *) fail "unexpected retained local Docker invocation: $*" ;;
+  esac
+}
 kind() {
   case "$*" in
     'get clusters') printf '%s\n' "$FAKE_CLUSTERS" ;;
     'get kubeconfig --name retained-fixture')
-      printf 'apiVersion: v1\ncurrent-context: kind-retained-fixture\n'
+      [ "$FAKE_RETAINED_EXPORT_FAIL" = 0 ] || return 42
+      printf 'apiVersion: v1\ncurrent-context: kind-retained-fixture\nserver: https://127.0.0.1:6443\n'
       ;;
     *) fail "unexpected fake kind invocation: $*" ;;
   esac
@@ -836,7 +846,10 @@ kind() {
 kubectl() {
   case "$*" in
     'config current-context') printf '%s\n' "$FAKE_CONTEXT" ;;
-    *'cluster-info'*) return 0 ;;
+    *'cluster-info'*)
+      [ "$FAKE_RETAINED_REACHABLE" = 1 ] &&
+        grep -Fqx 'server: https://127.0.0.1:6443' "$KUBECONFIG"
+      ;;
     *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"compatibility_version"*)
       if [ "$FAKE_MARKER_MISSING" = 1 ]; then
         printf 'NotFound\n' >&2
@@ -878,6 +891,17 @@ expect_failure incompatible-marker validate_retained_cluster
 grep -Fq 'marker is incompatible' "$FIXTURE/incompatible-marker.out" ||
   fail 'incompatible marker rejection was not decisive'
 
+FAKE_RETAINED_EXPORT_FAIL=1
+expect_failure retained-export-failed validate_retained_cluster
+grep -Fq 'failed to pin kubeconfig' "$FIXTURE/retained-export-failed.out" ||
+  fail 'failed retained kubeconfig export was not decisive'
+FAKE_RETAINED_EXPORT_FAIL=0
+FAKE_RETAINED_REACHABLE=0
+expect_failure retained-api-unreachable validate_retained_cluster
+grep -Fq 'is not reachable' "$FIXTURE/retained-api-unreachable.out" ||
+  fail 'unreachable retained API was not rejected'
+FAKE_RETAINED_REACHABLE=1
+
 mkdir -p "$FIXTURE/bin"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/bin/temporal-fencing-smoke"
 chmod +x "$FIXTURE/bin/temporal-fencing-smoke"
@@ -906,6 +930,120 @@ child_kubeconfig="$(<"$FIXTURE/child-kubeconfig-path")"
 [ ! -e "$child_kubeconfig" ] || fail 'retained child did not remove its own kubeconfig'
 [ -f "$parent_kubeconfig" ] || fail 'retained child removed its parent kubeconfig'
 [ "$KUBECONFIG" = "$parent_kubeconfig" ] || fail 'retained child displaced the parent context'
+
+# Compose the real remote bootstrap and nested retained validation. The
+# external endpoint belongs to the sibling DinD daemon, so a child that drops
+# the parent's internal endpoint must fail even though the parent stays live.
+if (
+  HOSTNAME=remote-retained-job
+  KIND_CLUSTER_NAME=remote-retained-fixture
+  KIND_CLUSTER_NAME_EXPLICIT=1
+  RUN_DIR="$FIXTURE/remote-retained-run"
+  mkdir -p "$RUN_DIR"
+  export KUBECONFIG="$RUN_DIR/parent-kubeconfig"
+  CALLS="$RUN_DIR/calls"
+  : >"$CALLS"
+  remote_phase=bootstrap
+  docker() {
+    # shellcheck disable=SC2016 # Match the literal Go-template CLI argument.
+    case "$*" in
+      'container inspect remote-retained-job') return 0 ;;
+      "inspect --format {{range \$name, \$_ := .NetworkSettings.Networks}}{{println \$name}}{{end}} ${KIND_CLUSTER_NAME}-control-plane")
+        [ "$remote_phase" = bootstrap ] || fail 'nested retained suite inspected network topology'
+        printf 'kind\n'
+        ;;
+      'network connect kind remote-retained-job')
+        [ "$remote_phase" = bootstrap ] || fail 'nested retained suite reconnected its parent network'
+        record network-connect
+        ;;
+      *) fail "unexpected composed remote Docker invocation: $*" ;;
+    esac
+  }
+  kind() {
+    local server
+    case "$*" in
+      'get clusters') printf '%s\n' "$KIND_CLUSTER_NAME"; return ;;
+      "get kubeconfig --internal --name $KIND_CLUSTER_NAME")
+        server="https://${KIND_CLUSTER_NAME}-control-plane:6443"
+        ;;
+      "get kubeconfig --name $KIND_CLUSTER_NAME")
+        server='https://127.0.0.1:6443'
+        ;;
+      *) fail "unexpected composed remote Kind invocation: $*" ;;
+    esac
+    printf 'apiVersion: v1\ncurrent-context: kind-%s\nserver: %s\n' \
+      "$KIND_CLUSTER_NAME" "$server"
+  }
+  kubectl() {
+    case "$*" in
+      'config current-context') sed -n 's/^current-context: //p' "$KUBECONFIG" ;;
+      *'cluster-info'*)
+        grep -Fqx "server: https://${KIND_CLUSTER_NAME}-control-plane:6443" "$KUBECONFIG"
+        ;;
+      *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"compatibility_version"*)
+        printf '%s' "$KIND_E2E_COMPATIBILITY_VERSION"
+        ;;
+      *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"cluster-name"*)
+        printf '%s' "$KIND_CLUSTER_NAME"
+        ;;
+      *'get deployment/'*) printf '1' ;;
+      *'get crd/sandboxclaims.extensions.agents.x-k8s.io'*) return 0 ;;
+      *) fail "unexpected composed remote kubectl invocation: $*" ;;
+    esac
+  }
+  start_remote_dind_kind_forwarding() {
+    [ "$remote_phase" = bootstrap ] || fail 'nested retained suite restarted parent forwarders'
+    record forwarder-start
+  }
+  stop_remote_dind_kind_forwarding() { fail 'nested retained suite stopped parent forwarding'; }
+  acquire_kind_host_lock() { fail 'nested provenance suite reacquired the host lock'; }
+  build_images_and_smokes() { fail 'nested provenance suite rebuilt images'; }
+  create_cluster() { fail 'nested provenance suite recreated its cluster'; }
+  deploy_overlay() { fail 'nested provenance suite redeployed its cluster'; }
+  dump_cluster_state() { record failure-dump; }
+  assert_sandbox_supply_chain() {
+    [ "$KUBECONFIG" != "$remote_parent_kubeconfig" ] ||
+      fail 'remote retained child reused its parent kubeconfig'
+    [ "$(stat -c '%a' "$KUBECONFIG")" = 600 ] ||
+      fail 'remote retained child kubeconfig is not private'
+    grep -Fqx "server: https://${KIND_CLUSTER_NAME}-control-plane:6443" "$KUBECONFIG" ||
+      fail 'remote retained child lost its internal API endpoint'
+    printf '%s\n' "$KUBECONFIG" >"$RUN_DIR/child-kubeconfig-path"
+    record provenance
+  }
+  configure_remote_dind_kind_network || exit $?
+  remote_parent_kubeconfig="$KUBECONFIG"
+  remote_parent_content="$(<"$remote_parent_kubeconfig")"
+  [ "$(stat -c '%a' "$remote_parent_kubeconfig")" = 600 ] ||
+    fail 'remote parent kubeconfig is not private'
+  kubectl --context "kind-$KIND_CLUSTER_NAME" cluster-info --request-timeout=10s ||
+    fail 'remote parent did not reach its internal API'
+  remote_phase=retained
+  (
+    # A fresh child dispatcher reinitializes these ownership variables.
+    REMOTE_DIND_JOB_CONTAINER=""
+    REMOTE_DIND_KIND_NETWORK=""
+    REMOTE_DIND_FORWARDER_PID=""
+    RETAINED_KUBECONFIG=""
+    run_retained_sandbox_supply_chain_suite
+  ) || exit $?
+  remote_child_kubeconfig="$(<"$RUN_DIR/child-kubeconfig-path")"
+  [ ! -e "$remote_child_kubeconfig" ] || fail 'remote child leaked its owned kubeconfig'
+  [ -f "$remote_parent_kubeconfig" ] || fail 'remote child removed its parent kubeconfig'
+  [ "$(<"$remote_parent_kubeconfig")" = "$remote_parent_content" ] ||
+    fail 'remote child changed its parent kubeconfig content'
+  [ "$KUBECONFIG" = "$remote_parent_kubeconfig" ] ||
+    fail 'remote child displaced its parent context'
+  kubectl --context "kind-$KIND_CLUSTER_NAME" cluster-info --request-timeout=10s ||
+    fail 'remote child made the parent API unreachable'
+  printf '%s\n' network-connect forwarder-start provenance | cmp -s - "$CALLS" ||
+    fail 'remote retained child changed bootstrap ownership or skipped provenance'
+) >"$FIXTURE/remote-nested-retained.out" 2>&1; then
+  :
+else
+  sed -n '1,120p' "$FIXTURE/remote-nested-retained.out" >&2
+  fail 'remote parent bootstrap did not preserve reachability through nested retained validation'
+fi
 
 # Runtime acceptance propagates the explicit cluster to its nested provenance
 # check. Use a synthetic smoke executable; this fixture never starts a runtime.
