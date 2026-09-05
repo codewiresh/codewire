@@ -141,3 +141,8 @@ ALTER TABLE public.repo_configs
     DROP COLUMN preset_id,
     DROP COLUMN setup_config,
     ADD COLUMN project_spec jsonb NOT NULL;
+
+-- Preserve the applied baseline checksum while retiring shared warm starts
+-- from the current schema along with the other preview-era runtime inputs.
+ALTER TABLE public.sandbox_template_config
+    DROP COLUMN warm_pool_size;

@@ -100,6 +100,9 @@ project-intent columns and their foreign keys, adds one non-null `project_spec`
 JSONB column to each environment-intent table, removes the raw
 `environments.auth_token` credential column, and drops all five retired account
 credential metadata tables.
+It also removes `sandbox_template_config.warm_pool_size`; the applied baseline
+remains byte-for-byte unchanged so SQLx can validate existing migration history
+before applying this clean break. Shared warm starts remain unsupported.
 Auto-created image presets receive a nullable internal image identity with a
 partial organization-scoped unique index. The API writes that identity, the
 canonical preset, and its runtime template projection in one transaction, so

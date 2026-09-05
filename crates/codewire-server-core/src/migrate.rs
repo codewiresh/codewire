@@ -46,12 +46,14 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 mod tests {
     use std::{borrow::Cow, time::Duration};
 
+    use sha2::{Digest, Sha384};
     use sqlx::{PgPool, postgres::PgPoolOptions};
 
     use super::*;
 
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
         "89054bb58aa891438dc98b13dc89a353480982506e91c43ce1ad5d5047377ce8";
+    const APPLIED_BASELINE_CHECKSUM: &str = "3c739196dff29f03ccbe05af6dc45b0be2327bca39dbafaa9d29601ba3873aa99affe0492bfb4f0e3de7579d2e5da8fb";
     const RETIRE_MESH_OIDC_CLIENT_VERSION: i64 = 5;
     const ORGANIZATION_ROUTE_SLUGS_VERSION: i64 = 11;
     const OPENBAO_SECRET_AUTHORITY_VERSION: i64 = 12;
@@ -65,6 +67,11 @@ mod tests {
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
+    }
+
+    #[test]
+    fn embedded_baseline_matches_the_applied_pre_cutover_history() -> anyhow::Result<()> {
+        assert_applied_baseline_checksum()
     }
 
     #[tokio::test]
@@ -522,6 +529,7 @@ mod tests {
                 .max_connections(1)
                 .connect(&test_db.url)
                 .await?;
+            assert_pre_cutover_project_spec_schema(&pool).await?;
             sqlx::query(
                 "INSERT INTO tenant_secret_deks \
                  (dek_id, scope, scope_id, provider, key_name, key_version, wrapped_dek) \
@@ -559,6 +567,7 @@ mod tests {
             );
             assert_tenant_secret_key_constraint(&pool, "^[A-Za-z_][A-Za-z0-9_]*$", "post-cutover")
                 .await?;
+            assert_project_spec_schema(&pool).await?;
             pool.close().await;
             anyhow::Ok(())
         }
@@ -2113,6 +2122,7 @@ mod tests {
                  OR (table_name = 'repo_configs' AND column_name IN (
                         'preset_id', 'setup_config'
                     ))
+                 OR (table_name = 'sandbox_template_config' AND column_name = 'warm_pool_size')
               )
             "#,
         )
@@ -2327,13 +2337,14 @@ mod tests {
                  OR (table_name = 'repo_configs' AND column_name IN (
                         'preset_id', 'setup_config'
                     ))
+                 OR (table_name = 'sandbox_template_config' AND column_name = 'warm_pool_size')
               )
             "#,
         )
         .fetch_one(pool)
         .await?;
         anyhow::ensure!(
-            retired_columns == 10,
+            retired_columns == 11,
             "pre-cutover project intent columns changed: {retired_columns}"
         );
         let retired_credential_tables_present: bool = sqlx::query_scalar(
@@ -2352,7 +2363,23 @@ mod tests {
         Ok(())
     }
 
+    fn assert_applied_baseline_checksum() -> anyhow::Result<()> {
+        let baseline = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 1)
+            .context("embedded baseline migration is missing")?;
+        let checksum = format!("{:x}", Sha384::digest(baseline.sql.as_bytes()));
+        anyhow::ensure!(
+            checksum == APPLIED_BASELINE_CHECKSUM,
+            "migration 1 no longer matches the applied pre-cutover history"
+        );
+        Ok(())
+    }
+
     async fn apply_migrations_before(database_url: &str, version: i64) -> anyhow::Result<()> {
+        // Do not manufacture an apparently valid old ledger from a baseline
+        // rewritten by the same branch whose upgrade is being tested.
+        assert_applied_baseline_checksum()?;
         anyhow::ensure!(
             MIGRATOR.version_exists(version),
             "embedded migration {version} is missing"
@@ -2372,6 +2399,15 @@ mod tests {
         };
         let mut connection = PgConnection::connect(database_url).await?;
         prior.run_direct(&mut connection).await?;
+        let checksum: String = sqlx::query_scalar(
+            "SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = 1 AND success",
+        )
+        .fetch_one(&mut connection)
+        .await?;
+        anyhow::ensure!(
+            checksum == APPLIED_BASELINE_CHECKSUM,
+            "prior-source fixture did not record the canonical migration 1 checksum"
+        );
         connection.close().await?;
         Ok(())
     }

@@ -613,6 +613,7 @@ CREATE TABLE public.sandbox_template_config (
     preset_id text NOT NULL,
     image_ref text NOT NULL,
     sandbox_template_name text NOT NULL,
+    warm_pool_size integer DEFAULT 0 NOT NULL,
     persistent_storage boolean DEFAULT false NOT NULL
 );
 
