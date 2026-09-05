@@ -2129,10 +2129,37 @@ if grep -qF 'diagnostics' "$required_block" \
   exit 1
 fi
 grep -qF 'scripts/ci/select/select-verification.sh' "$ROOT/scripts/dev/preflight.sh"
-grep -qF 'scripts/checks/source/check-native-desktop-ui.py' \
-  "$ROOT/scripts/dev/preflight.sh"
-grep -qF 'scripts/checks/source/check-native-desktop-ui.py' \
-  "$ROOT/scripts/ci/verify/run-product-verification.sh"
+if [ "$(grep -cE '^[[:space:]]*run_selected_family policy policy ' \
+    "$ROOT/scripts/dev/preflight.sh")" -ne 1 ]; then
+  echo 'local preflight must invoke the shared policy family exactly once' >&2
+  exit 1
+fi
+if grep -Eq 'run_policy_local|scripts/checks/repo_checks.py|scripts/checks/source/check-native-desktop-ui.py|test-rust-owned-fixtures.sh|test-dashboard-image-network-probe.sh' \
+    "$ROOT/scripts/dev/preflight.sh"; then
+  echo 'local preflight still owns a private policy checklist' >&2
+  exit 1
+fi
+shared_policy_core="$TMP/shared-policy-core.sh"
+awk '
+  /^run_policy_core\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$shared_policy_core"
+for policy_owner in \
+    'run_verification_shell_syntax' \
+    'scripts/ci/tests/test-rust-owned-fixtures.sh' \
+    'scripts/ci/tests/test-dashboard-image-network-probe.sh' \
+    'scripts/checks/repo_checks.py license-map' \
+    'scripts/checks/repo_checks.py permanent-raw-surface --self-test' \
+    'scripts/checks/repo_checks.py rust-validation-source' \
+    'scripts/checks/repo_checks.py retired-reference-source' \
+    'scripts/checks/source/check-native-desktop-ui.py' \
+    'scripts/checks/repo_checks.py go-source-classification'; do
+  if [ "$(grep -cF "$policy_owner" "$shared_policy_core")" -ne 1 ]; then
+    echo "shared policy core must own exactly one $policy_owner" >&2
+    exit 1
+  fi
+done
 desktop_package_args="$TMP/desktop-package-args.sh"
 awk '
   /^rust_package_args\(\) \{/ { capture = 1 }
@@ -2163,10 +2190,26 @@ if [ "$(grep -c '^run_selected_family edge_kind edge ' \
   echo 'local preflight must invoke edge static verification exactly once' >&2
   exit 1
 fi
-grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
-  "$ROOT/scripts/dev/preflight.sh"
+if grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
+    "$ROOT/scripts/dev/preflight.sh"; then
+  echo 'local preflight duplicates the shared runtime syntax owner' >&2
+  exit 1
+fi
 grep -qF "find scripts/runtime -type f -name '*.sh' -print0" \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
+shared_shell_policy="$TMP/shared-shell-policy.sh"
+awk '
+  /^run_shell_policy\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$shared_shell_policy"
+if grep -Eq 'run_verification_shell_syntax|bash -n|find scripts/runtime|run_policy_core' \
+    "$shared_shell_policy"; then
+  echo 'selected ShellCheck duplicates shared core or syntax verification' >&2
+  exit 1
+fi
+grep -qxF '  scripts/ci/verify/check-shell-scripts.sh --self-test' "$shared_shell_policy"
+grep -qxF '  scripts/ci/verify/check-shell-scripts.sh' "$shared_shell_policy"
 grep -qF 'scripts/runtime/tests/test-run-sdk-python-e2e.sh' \
   "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'Python SDK wheel leaked generated codewire/$forbidden_package' \

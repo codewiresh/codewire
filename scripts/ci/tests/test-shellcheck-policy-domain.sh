@@ -27,12 +27,18 @@ grep -Fq 'policy-shell) run_shell_policy' "$RUNNER" \
   || fail 'hosted ShellCheck has no independent heavy entrypoint'
 
 run_dispatch_fixture() {
-  local selection="$1"
-  SELECTION="$selection" bash -c '
+  local selection="$1" failure="${2:-}"
+  SELECTION="$selection" POLICY_FIXTURE_FAILURE="$failure" bash -c '
     set -euo pipefail
     selected() { [[ "$SELECTION" == *"|$1|"* ]]; }
-    run_shell_policy() { printf "shell\n"; }
-    run_policy_core() { printf "core\n"; }
+    run_shell_policy() {
+      printf "shell\n"
+      if [ "$POLICY_FIXTURE_FAILURE" = shell ]; then return 41; fi
+    }
+    run_policy_core() {
+      printf "core\n"
+      if [ "$POLICY_FIXTURE_FAILURE" = core ]; then return 42; fi
+    }
     source "$1"
     run_policy
   ' bash "$policy_dispatch"
@@ -49,6 +55,76 @@ omitted_output="$(run_dispatch_fixture \
   '|valid:v3|policy|policy_shell_omittable|complete|')"
 [[ "$omitted_output" == core ]] \
   || fail 'authoritative shell-policy omission still executed ShellCheck'
+
+# Exercise the actual shared dispatcher in a fresh shell so a failure cannot
+# be hidden by an outer conditional or followed by another policy phase.
+if shell_failure_output="$(run_dispatch_fixture \
+  '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|' shell)"; then
+  fail 'shared policy accepted a failing shell phase'
+else
+  shell_failure_status=$?
+fi
+[[ "$shell_failure_status" -eq 41 ]] \
+  || fail 'shared policy changed the shell failure status'
+[[ "$shell_failure_output" == shell ]] \
+  || fail 'shared policy ran core after a shell failure'
+if core_failure_output="$(run_dispatch_fixture \
+  '|valid:v3|policy|policy_shell|policy_shell_omittable|complete|' core)"; then
+  fail 'shared policy accepted a failing core phase'
+else
+  core_failure_status=$?
+fi
+[[ "$core_failure_status" -eq 42 ]] \
+  || fail 'shared policy changed the core failure status'
+[[ "$core_failure_output" == $'shell\ncore' ]] \
+  || fail 'shared policy repeated a phase before the core failure'
+if omitted_failure_output="$(run_dispatch_fixture \
+  '|valid:v3|policy|policy_shell_omittable|complete|' core)"; then
+  fail 'shell-omitted policy accepted a failing core phase'
+else
+  omitted_failure_status=$?
+fi
+[[ "$omitted_failure_status" -eq 42 && "$omitted_failure_output" == core ]] \
+  || fail 'shell-omitted policy did not preserve the core failure'
+
+# Validate the shared syntax owner, including a second fixed-list file and a
+# runtime path containing spaces. No product runner or heavy policy is invoked.
+syntax_dispatch="$TMP/run-verification-shell-syntax.sh"
+awk '
+  /^run_verification_shell_syntax\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$RUNNER" > "$syntax_dispatch"
+grep -Fq 'run_verification_shell_syntax() {' "$syntax_dispatch" \
+  || fail 'shared policy has no verification syntax owner'
+syntax_tree="$TMP/syntax-tree"
+mkdir -p "$syntax_tree/.githooks" "$syntax_tree/scripts/dev" \
+  "$syntax_tree/scripts/runtime"
+printf '#!/usr/bin/env bash\n:\n' > "$syntax_tree/.githooks/pre-push"
+printf '#!/usr/bin/env bash\n:\n' > "$syntax_tree/scripts/dev/preflight.sh"
+printf '#!/usr/bin/env bash\n:\n' > "$syntax_tree/scripts/runtime/space name.sh"
+run_syntax_fixture() {
+  bash -c '
+    set -euo pipefail
+    cd "$1"
+    source "$2"
+    run_verification_shell_syntax
+  ' bash "$syntax_tree" "$syntax_dispatch"
+}
+run_syntax_fixture || fail 'shared syntax owner rejected valid fixture files'
+printf '#!/usr/bin/env bash\nif then\n' > "$syntax_tree/scripts/dev/preflight.sh"
+if fixed_syntax_output="$(run_syntax_fixture 2>&1)"; then
+  fail 'shared syntax owner ignored an invalid second fixed-list file'
+fi
+grep -Fq 'scripts/dev/preflight.sh' <<<"$fixed_syntax_output" \
+  || fail 'second-file syntax failure did not identify its source'
+printf '#!/usr/bin/env bash\n:\n' > "$syntax_tree/scripts/dev/preflight.sh"
+printf '#!/usr/bin/env bash\nif then\n' > "$syntax_tree/scripts/runtime/space name.sh"
+if runtime_syntax_output="$(run_syntax_fixture 2>&1)"; then
+  fail 'shared syntax owner ignored an invalid runtime script'
+fi
+grep -Fq 'scripts/runtime/space name.sh' <<<"$runtime_syntax_output" \
+  || fail 'runtime syntax failure did not identify its source'
 
 fake_shellcheck="$TMP/shellcheck"
 fake_log="$TMP/shellcheck.log"
