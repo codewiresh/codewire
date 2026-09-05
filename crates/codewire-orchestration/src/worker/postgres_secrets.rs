@@ -443,8 +443,8 @@ impl PostgresSecretStore {
             encrypt_secret(&dek, &coordinates, value.as_bytes()).map_err(envelope_error)?;
         sqlx::query(
             "INSERT INTO tenant_secrets \
-             (path, key, dek_id, scope, scope_id, ciphertext, nonce, format) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             (path, key, dek_id, scope, scope_id, ciphertext, nonce, format, storage_contract_version) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1) \
              ON CONFLICT (path, key) DO UPDATE SET \
                dek_id = EXCLUDED.dek_id, scope = EXCLUDED.scope, scope_id = EXCLUDED.scope_id, \
                ciphertext = EXCLUDED.ciphertext, nonce = EXCLUDED.nonce, \
@@ -630,8 +630,8 @@ impl PostgresSecretStore {
             encrypt_secret(&dek, &new_coordinates, &plaintext).map_err(envelope_error)?;
         sqlx::query(
             "INSERT INTO tenant_secrets \
-             (path, key, dek_id, scope, scope_id, ciphertext, nonce, format, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             (path, key, dek_id, scope, scope_id, ciphertext, nonce, format, created_at, storage_contract_version) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1)",
         )
         .bind(secret_path)
         .bind(new_key)
@@ -819,25 +819,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_workload_secret_keys_fail_before_database_access() {
+    async fn invalid_workload_secret_keys_fail_before_database_access() {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://unused:unused@127.0.0.1:1/unused")
             .expect("lazy test pool");
         let store = PostgresSecretStore::new(pool, Arc::new(TestKekProvider));
-        let key = format!(
-            "A{}",
-            "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES)
-        );
-
-        let error = store
-            .set_secret_at_path("/users/synthetic", &key, "synthetic")
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("failure_class=invalid-secret-key")
-        );
+        for key in [
+            "1DIGIT_FIRST".to_owned(),
+            format!(
+                "A{}",
+                "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES)
+            ),
+        ] {
+            let error = store
+                .set_secret_at_path("/users/synthetic", &key, "synthetic")
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("failure_class=invalid-secret-key")
+            );
+        }
     }
 
     #[tokio::test]
@@ -871,6 +874,28 @@ mod tests {
         store
             .set_secret_at_path(&project_path, "OLD_KEY", canary)
             .await?;
+        let inserted: (Vec<u8>, i16) = sqlx::query_as(
+            "SELECT ciphertext, storage_contract_version FROM tenant_secrets \
+             WHERE path = $1 AND key = 'OLD_KEY'",
+        )
+        .bind(&project_path)
+        .fetch_one(&pool)
+        .await?;
+        store
+            .set_secret_at_path(&project_path, "OLD_KEY", canary)
+            .await?;
+        let upserted: (Vec<u8>, i16) = sqlx::query_as(
+            "SELECT ciphertext, storage_contract_version FROM tenant_secrets \
+             WHERE path = $1 AND key = 'OLD_KEY'",
+        )
+        .bind(&project_path)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!((inserted.1, upserted.1), (1, 1));
+        assert_ne!(
+            inserted.0, upserted.0,
+            "current upsert must produce a fresh authenticated envelope"
+        );
         store
             .set_secret_at_path(&org_path, "ORG_KEY", "org-private-value")
             .await?;
@@ -889,12 +914,7 @@ mod tests {
             0,
             "metadata listing must not unwrap or cache a DEK"
         );
-        let before: Vec<u8> = sqlx::query_scalar(
-            "SELECT ciphertext FROM tenant_secrets WHERE path = $1 AND key = 'OLD_KEY'",
-        )
-        .bind(&project_path)
-        .fetch_one(&pool)
-        .await?;
+        let before = upserted.0;
         let deks: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM tenant_secret_deks WHERE scope = 'org' AND scope_id = $1",
         )
@@ -909,14 +929,16 @@ mod tests {
         store
             .rename_secret_at_path(&project_path, "OLD_KEY", "NEW_KEY")
             .await?;
-        let after: Vec<u8> = sqlx::query_scalar(
-            "SELECT ciphertext FROM tenant_secrets WHERE path = $1 AND key = 'NEW_KEY'",
+        let after: (Vec<u8>, i16) = sqlx::query_as(
+            "SELECT ciphertext, storage_contract_version FROM tenant_secrets \
+             WHERE path = $1 AND key = 'NEW_KEY'",
         )
         .bind(&project_path)
         .fetch_one(&pool)
         .await?;
+        assert_eq!(after.1, 1, "rename must write the current storage contract");
         assert!(
-            before != after,
+            before != after.0,
             "rename must produce a fresh authenticated envelope"
         );
         let renamed = store.get_secrets_raw_at_path(&project_path).await?;

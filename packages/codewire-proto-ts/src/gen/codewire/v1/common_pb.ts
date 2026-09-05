@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/common.proto.
  */
 export const file_codewire_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("Chhjb2Rld2lyZS92MS9jb21tb24ucHJvdG8SC2NvZGV3aXJlLnYxIicKE1NjYWZmb2xkUGxhY2Vob2xkZXISDAoEbm90ZRgBIAEoCToCGAEiTgoJUmVwb0VudHJ5EgsKA3VybBgBIAEoCRIOCgZicmFuY2gYAiABKAkSEgoKbW91bnRfcGF0aBgDIAEoCRIQCghyZXZpc2lvbhgEIAEoCSI2CgdBcHBQb3J0EgwKBHBvcnQYASABKAUSDQoFbGFiZWwYAiABKAkSDgoGYWNjZXNzGAMgASgJIhoKClNldHVwQWdlbnQSDAoEdHlwZRgBIAEoCSKTBQoLU2V0dXBDb25maWcSEAoIcmVwb191cmwYASABKAkSDgoGYnJhbmNoGAIgASgJEiUKBXJlcG9zGAMgAygLMhYuY29kZXdpcmUudjEuUmVwb0VudHJ5EhcKD2luc3RhbGxfY29tbWFuZBgEIAEoCRIWCg5zdGFydHVwX3NjcmlwdBgFIAEoCRI3CghlbnZfdmFycxgGIAMoCzIlLmNvZGV3aXJlLnYxLlNldHVwQ29uZmlnLkVudlZhcnNFbnRyeRInCgZhZ2VudHMYByADKAsyFy5jb2Rld2lyZS52MS5TZXR1cEFnZW50EhsKDmluc3RhbGxfYWdlbnRzGAggASgISACIAQESDQoFYWdlbnQYCSABKAkSOQoJYWdlbnRfZW52GAogAygLMiYuY29kZXdpcmUudjEuU2V0dXBDb25maWcuQWdlbnRFbnZFbnRyeRInCglhcHBfcG9ydHMYCyADKAsyFC5jb2Rld2lyZS52MS5BcHBQb3J0EiAKE2luY2x1ZGVfb3JnX3NlY3JldHMYDCABKAhIAYgBARIhChRpbmNsdWRlX3VzZXJfc2VjcmV0cxgNIAEoCEgCiAEBEi4KDHByb2plY3Rfc3BlYxgOIAEoCzIYLmNvZGV3aXJlLnYxLlByb2plY3RTcGVjGi4KDEVudlZhcnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGi8KDUFnZW50RW52RW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIRCg9faW5zdGFsbF9hZ2VudHNCFgoUX2luY2x1ZGVfb3JnX3NlY3JldHNCFwoVX2luY2x1ZGVfdXNlcl9zZWNyZXRzIkAKDVByb2plY3RBZ2VudHMSFAoHaW5zdGFsbBgBIAEoCEgAiAEBEg0KBXRvb2xzGAIgAygJQgoKCF9pbnN0YWxsImsKFVByb2plY3RTa2lsbFNlbGVjdGlvbhIvCgZzb3VyY2UYASABKA4yHy5jb2Rld2lyZS52MS5Qcm9qZWN0U2tpbGxTb3VyY2USEQoJcmVmZXJlbmNlGAIgASgJEg4KBmFnZW50cxgDIAMoCSKOAQoQUHJvamVjdFJlc291cmNlcxIbCg5jcHVfbWlsbGljb3JlcxgBIAEoDUgAiAEBEhcKCm1lbW9yeV9taWIYAiABKARIAYgBARIVCghkaXNrX2dpYhgDIAEoBEgCiAEBQhEKD19jcHVfbWlsbGljb3Jlc0INCgtfbWVtb3J5X21pYkILCglfZGlza19naWIiqgEKFVByb2plY3RTZWNyZXRCaW5kaW5ncxIPCgdwcm9qZWN0GAEgASgJEhwKC2luY2x1ZGVfb3JnGAIgASgIQgIYAUgAiAEBEh0KDGluY2x1ZGVfdXNlchgDIAEoCEICGAFIAYgBARIUCgxvcmdhbml6YXRpb24YBCABKAgSDAoEdXNlchgFIAEoCEIOCgxfaW5jbHVkZV9vcmdCDwoNX2luY2x1ZGVfdXNlciJDChpQcm9qZWN0Q3JlZGVudGlhbFJlZmVyZW5jZRIQCghwcm92aWRlchgBIAEoCRIPCgdhY2NvdW50GAIgASgJOgIYASInChRQcm9qZWN0QWNjZXNzQmluZGluZxIPCgdwcm9maWxlGAEgASgJIsEHCgtQcm9qZWN0U3BlYxIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIOCgZwcmVzZXQYAiABKAkSDQoFaW1hZ2UYAyABKAkSLAoMcmVwb3NpdG9yaWVzGAQgAygLMhYuY29kZXdpcmUudjEuUmVwb0VudHJ5EhkKEXdvcmtpbmdfZGlyZWN0b3J5GAUgASgJEhcKD2luc3RhbGxfY29tbWFuZBgGIAEoCRIWCg5zdGFydHVwX3NjcmlwdBgHIAEoCRI+CgtlbnZpcm9ubWVudBgIIAMoCzIpLmNvZGV3aXJlLnYxLlByb2plY3RTcGVjLkVudmlyb25tZW50RW50cnkSKgoGYWdlbnRzGAkgASgLMhouY29kZXdpcmUudjEuUHJvamVjdEFnZW50cxJJChFhZ2VudF9lbnZpcm9ubWVudBgKIAMoCzIuLmNvZGV3aXJlLnYxLlByb2plY3RTcGVjLkFnZW50RW52aXJvbm1lbnRFbnRyeRIyCgZza2lsbHMYCyADKAsyIi5jb2Rld2lyZS52MS5Qcm9qZWN0U2tpbGxTZWxlY3Rpb24SLwoRYXBwbGljYXRpb25fcG9ydHMYDCADKAsyFC5jb2Rld2lyZS52MS5BcHBQb3J0EjAKCXJlc291cmNlcxgNIAEoCzIdLmNvZGV3aXJlLnYxLlByb2plY3RSZXNvdXJjZXMSMwoHc2VjcmV0cxgOIAEoCzIiLmNvZGV3aXJlLnYxLlByb2plY3RTZWNyZXRCaW5kaW5ncxJCCgtjcmVkZW50aWFscxgPIAMoCzIpLmNvZGV3aXJlLnYxLlByb2plY3RTcGVjLkNyZWRlbnRpYWxzRW50cnlCAhgBEj0KDndvcmtzcGFjZV9tb2RlGBAgASgOMiEuY29kZXdpcmUudjEuUHJvamVjdFdvcmtzcGFjZU1vZGVCAhgBEjEKBmFjY2VzcxgRIAEoCzIhLmNvZGV3aXJlLnYxLlByb2plY3RBY2Nlc3NCaW5kaW5nGjIKEEVudmlyb25tZW50RW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ARo3ChVBZ2VudEVudmlyb25tZW50RW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ARpbChBDcmVkZW50aWFsc0VudHJ5EgsKA2tleRgBIAEoCRI2CgV2YWx1ZRgCIAEoCzInLmNvZGV3aXJlLnYxLlByb2plY3RDcmVkZW50aWFsUmVmZXJlbmNlOgI4ASqoAQoUUHJvamVjdFdvcmtzcGFjZU1vZGUSJgoiUFJPSkVDVF9XT1JLU1BBQ0VfTU9ERV9VTlNQRUNJRklFRBAAEh8KG1BST0pFQ1RfV09SS1NQQUNFX01PREVfQVVUTxABEiAKHFBST0pFQ1RfV09SS1NQQUNFX01PREVfQ0xPTkUQAhIhCh1QUk9KRUNUX1dPUktTUEFDRV9NT0RFX0RJUkVDVBADGgIYASp+ChJQcm9qZWN0U2tpbGxTb3VyY2USJAogUFJPSkVDVF9TS0lMTF9TT1VSQ0VfVU5TUEVDSUZJRUQQABIjCh9QUk9KRUNUX1NLSUxMX1NPVVJDRV9SRVBPU0lUT1JZEAESHQoZUFJPSkVDVF9TS0lMTF9TT1VSQ0VfVVNFUhACQq4BCg9jb20uY29kZXdpcmUudjFCC0NvbW1vblByb3RvUAFaQWdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS92MTtjb2Rld2lyZXYxogIDQ1hYqgILQ29kZXdpcmUuVjHKAgtDb2Rld2lyZVxWMeICF0NvZGV3aXJlXFYxXEdQQk1ldGFkYXRh6gIMQ29kZXdpcmU6OlYxYgZwcm90bzM");
+  fileDesc("Chhjb2Rld2lyZS92MS9jb21tb24ucHJvdG8SC2NvZGV3aXJlLnYxIicKE1NjYWZmb2xkUGxhY2Vob2xkZXISDAoEbm90ZRgBIAEoCToCGAEiVwoOUmVwb3NpdG9yeVNwZWMSDgoGc291cmNlGAEgASgJEg4KBmJyYW5jaBgCIAEoCRITCgtkZXN0aW5hdGlvbhgDIAEoCRIQCghyZXZpc2lvbhgEIAEoCSI+Cg9BcHBsaWNhdGlvblBvcnQSDAoEcG9ydBgBIAEoBRINCgVsYWJlbBgCIAEoCRIOCgZhY2Nlc3MYAyABKAkiQAoNUHJvamVjdEFnZW50cxIUCgdpbnN0YWxsGAEgASgISACIAQESDQoFdG9vbHMYAiADKAlCCgoIX2luc3RhbGwiawoVUHJvamVjdFNraWxsU2VsZWN0aW9uEi8KBnNvdXJjZRgBIAEoDjIfLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNvdXJjZRIRCglyZWZlcmVuY2UYAiABKAkSDgoGYWdlbnRzGAMgAygJIo4BChBQcm9qZWN0UmVzb3VyY2VzEhsKDmNwdV9taWxsaWNvcmVzGAEgASgNSACIAQESFwoKbWVtb3J5X21pYhgCIAEoBEgBiAEBEhUKCGRpc2tfZ2liGAMgASgESAKIAQFCEQoPX2NwdV9taWxsaWNvcmVzQg0KC19tZW1vcnlfbWliQgsKCV9kaXNrX2dpYiJzChVQcm9qZWN0U2VjcmV0QmluZGluZ3MSDwoHcHJvamVjdBgBIAEoCRIUCgxvcmdhbml6YXRpb24YBCABKAgSDAoEdXNlchgFIAEoCEoECAIQA0oECAMQBFILaW5jbHVkZV9vcmdSDGluY2x1ZGVfdXNlciInChRQcm9qZWN0QWNjZXNzQmluZGluZxIPCgdwcm9maWxlGAEgASgJIqwFCgtQcm9qZWN0U3BlYxIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIOCgZwcmVzZXQYAiABKAkSDQoFaW1hZ2UYAyABKAkSMQoMcmVwb3NpdG9yaWVzGAQgAygLMhsuY29kZXdpcmUudjEuUmVwb3NpdG9yeVNwZWMSGQoRd29ya2luZ19kaXJlY3RvcnkYBSABKAkSFwoPaW5zdGFsbF9jb21tYW5kGAYgASgJEhYKDnN0YXJ0dXBfc2NyaXB0GAcgASgJEj4KC2Vudmlyb25tZW50GAggAygLMikuY29kZXdpcmUudjEuUHJvamVjdFNwZWMuRW52aXJvbm1lbnRFbnRyeRIqCgZhZ2VudHMYCSABKAsyGi5jb2Rld2lyZS52MS5Qcm9qZWN0QWdlbnRzEjIKBnNraWxscxgLIAMoCzIiLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNlbGVjdGlvbhI3ChFhcHBsaWNhdGlvbl9wb3J0cxgMIAMoCzIcLmNvZGV3aXJlLnYxLkFwcGxpY2F0aW9uUG9ydBIwCglyZXNvdXJjZXMYDSABKAsyHS5jb2Rld2lyZS52MS5Qcm9qZWN0UmVzb3VyY2VzEjMKB3NlY3JldHMYDiABKAsyIi5jb2Rld2lyZS52MS5Qcm9qZWN0U2VjcmV0QmluZGluZ3MSMQoGYWNjZXNzGBEgASgLMiEuY29kZXdpcmUudjEuUHJvamVjdEFjY2Vzc0JpbmRpbmcaMgoQRW52aXJvbm1lbnRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBSgQIChALSgQIDxAQSgQIEBARUhFhZ2VudF9lbnZpcm9ubWVudFILY3JlZGVudGlhbHNSDndvcmtzcGFjZV9tb2RlKn4KElByb2plY3RTa2lsbFNvdXJjZRIkCiBQUk9KRUNUX1NLSUxMX1NPVVJDRV9VTlNQRUNJRklFRBAAEiMKH1BST0pFQ1RfU0tJTExfU09VUkNFX1JFUE9TSVRPUlkQARIdChlQUk9KRUNUX1NLSUxMX1NPVVJDRV9VU0VSEAJCrgEKD2NvbS5jb2Rld2lyZS52MUILQ29tbW9uUHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw");
 
 /**
  * ScaffoldPlaceholder proved the initial codegen path. It remains deprecated
@@ -37,16 +37,16 @@ export const ScaffoldPlaceholderSchema: GenMessage<ScaffoldPlaceholder> = /*@__P
   messageDesc(file_codewire_v1_common, 0);
 
 /**
- * RepoEntry selects one repository and an optional branch or immutable
+ * RepositorySpec selects one repository and an optional branch or immutable
  * revision during setup. Branch and revision are mutually exclusive.
  *
- * @generated from message codewire.v1.RepoEntry
+ * @generated from message codewire.v1.RepositorySpec
  */
-export type RepoEntry = Message<"codewire.v1.RepoEntry"> & {
+export type RepositorySpec = Message<"codewire.v1.RepositorySpec"> & {
   /**
-   * @generated from field: string url = 1;
+   * @generated from field: string source = 1;
    */
-  url: string;
+  source: string;
 
   /**
    * @generated from field: string branch = 2;
@@ -54,12 +54,12 @@ export type RepoEntry = Message<"codewire.v1.RepoEntry"> & {
   branch: string;
 
   /**
-   * Optional normalized checkout directory strictly below /workspace.
-   * When omitted, the checkout directory remains /workspace/{repo_name}.
+   * Canonical normalized checkout directory strictly below /workspace.
+   * User-facing parsers may derive it, but RPC writers always send it.
    *
-   * @generated from field: string mount_path = 3;
+   * @generated from field: string destination = 3;
    */
-  mountPath: string;
+  destination: string;
 
   /**
    * @generated from field: string revision = 4;
@@ -68,19 +68,20 @@ export type RepoEntry = Message<"codewire.v1.RepoEntry"> & {
 };
 
 /**
- * Describes the message codewire.v1.RepoEntry.
- * Use `create(RepoEntrySchema)` to create a new message.
+ * Describes the message codewire.v1.RepositorySpec.
+ * Use `create(RepositorySpecSchema)` to create a new message.
  */
-export const RepoEntrySchema: GenMessage<RepoEntry> = /*@__PURE__*/
+export const RepositorySpecSchema: GenMessage<RepositorySpec> = /*@__PURE__*/
   messageDesc(file_codewire_v1_common, 1);
 
 /**
- * AppPort requests one application port during setup. Access is an extensible
- * setup vocabulary today; PortAccess is used for persisted environment ports.
+ * ApplicationPort requests one application port during setup. Access is an
+ * extensible setup vocabulary today; PortAccess is used for persisted environment
+ * ports.
  *
- * @generated from message codewire.v1.AppPort
+ * @generated from message codewire.v1.ApplicationPort
  */
-export type AppPort = Message<"codewire.v1.AppPort"> & {
+export type ApplicationPort = Message<"codewire.v1.ApplicationPort"> & {
   /**
    * @generated from field: int32 port = 1;
    */
@@ -98,117 +99,11 @@ export type AppPort = Message<"codewire.v1.AppPort"> & {
 };
 
 /**
- * Describes the message codewire.v1.AppPort.
- * Use `create(AppPortSchema)` to create a new message.
+ * Describes the message codewire.v1.ApplicationPort.
+ * Use `create(ApplicationPortSchema)` to create a new message.
  */
-export const AppPortSchema: GenMessage<AppPort> = /*@__PURE__*/
+export const ApplicationPortSchema: GenMessage<ApplicationPort> = /*@__PURE__*/
   messageDesc(file_codewire_v1_common, 2);
-
-/**
- * SetupAgent enables one setup agent. Type is an extensible agent identifier.
- *
- * @generated from message codewire.v1.SetupAgent
- */
-export type SetupAgent = Message<"codewire.v1.SetupAgent"> & {
-  /**
-   * @generated from field: string type = 1;
-   */
-  type: string;
-};
-
-/**
- * Describes the message codewire.v1.SetupAgent.
- * Use `create(SetupAgentSchema)` to create a new message.
- */
-export const SetupAgentSchema: GenMessage<SetupAgent> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 3);
-
-/**
- * SetupConfig is the reusable environment/preset setup configuration.
- *
- * @generated from message codewire.v1.SetupConfig
- */
-export type SetupConfig = Message<"codewire.v1.SetupConfig"> & {
-  /**
-   * @generated from field: string repo_url = 1;
-   */
-  repoUrl: string;
-
-  /**
-   * @generated from field: string branch = 2;
-   */
-  branch: string;
-
-  /**
-   * @generated from field: repeated codewire.v1.RepoEntry repos = 3;
-   */
-  repos: RepoEntry[];
-
-  /**
-   * @generated from field: string install_command = 4;
-   */
-  installCommand: string;
-
-  /**
-   * @generated from field: string startup_script = 5;
-   */
-  startupScript: string;
-
-  /**
-   * @generated from field: map<string, string> env_vars = 6;
-   */
-  envVars: { [key: string]: string };
-
-  /**
-   * @generated from field: repeated codewire.v1.SetupAgent agents = 7;
-   */
-  agents: SetupAgent[];
-
-  /**
-   * @generated from field: optional bool install_agents = 8;
-   */
-  installAgents?: boolean | undefined;
-
-  /**
-   * @generated from field: string agent = 9;
-   */
-  agent: string;
-
-  /**
-   * @generated from field: map<string, string> agent_env = 10;
-   */
-  agentEnv: { [key: string]: string };
-
-  /**
-   * @generated from field: repeated codewire.v1.AppPort app_ports = 11;
-   */
-  appPorts: AppPort[];
-
-  /**
-   * @generated from field: optional bool include_org_secrets = 12;
-   */
-  includeOrgSecrets?: boolean | undefined;
-
-  /**
-   * @generated from field: optional bool include_user_secrets = 13;
-   */
-  includeUserSecrets?: boolean | undefined;
-
-  /**
-   * Canonical versioned project intent. Legacy fields above remain readable;
-   * new writers populate this field after normalization.
-   *
-   * @generated from field: codewire.v1.ProjectSpec project_spec = 14;
-   */
-  projectSpec?: ProjectSpec | undefined;
-};
-
-/**
- * Describes the message codewire.v1.SetupConfig.
- * Use `create(SetupConfigSchema)` to create a new message.
- */
-export const SetupConfigSchema: GenMessage<SetupConfig> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 4);
 
 /**
  * @generated from message codewire.v1.ProjectAgents
@@ -230,7 +125,7 @@ export type ProjectAgents = Message<"codewire.v1.ProjectAgents"> & {
  * Use `create(ProjectAgentsSchema)` to create a new message.
  */
 export const ProjectAgentsSchema: GenMessage<ProjectAgents> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 5);
+  messageDesc(file_codewire_v1_common, 3);
 
 /**
  * @generated from message codewire.v1.ProjectSkillSelection
@@ -257,7 +152,7 @@ export type ProjectSkillSelection = Message<"codewire.v1.ProjectSkillSelection">
  * Use `create(ProjectSkillSelectionSchema)` to create a new message.
  */
 export const ProjectSkillSelectionSchema: GenMessage<ProjectSkillSelection> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 6);
+  messageDesc(file_codewire_v1_common, 4);
 
 /**
  * @generated from message codewire.v1.ProjectResources
@@ -284,7 +179,7 @@ export type ProjectResources = Message<"codewire.v1.ProjectResources"> & {
  * Use `create(ProjectResourcesSchema)` to create a new message.
  */
 export const ProjectResourcesSchema: GenMessage<ProjectResources> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 7);
+  messageDesc(file_codewire_v1_common, 5);
 
 /**
  * @generated from message codewire.v1.ProjectSecretBindings
@@ -294,21 +189,6 @@ export type ProjectSecretBindings = Message<"codewire.v1.ProjectSecretBindings">
    * @generated from field: string project = 1;
    */
   project: string;
-
-  /**
-   * Deprecated preview fields retained only for wire compatibility. Runtime
-   * adapters reject their presence; new clients use organization and user.
-   *
-   * @generated from field: optional bool include_org = 2 [deprecated = true];
-   * @deprecated
-   */
-  includeOrg?: boolean | undefined;
-
-  /**
-   * @generated from field: optional bool include_user = 3 [deprecated = true];
-   * @deprecated
-   */
-  includeUser?: boolean | undefined;
 
   /**
    * @generated from field: bool organization = 4;
@@ -326,34 +206,7 @@ export type ProjectSecretBindings = Message<"codewire.v1.ProjectSecretBindings">
  * Use `create(ProjectSecretBindingsSchema)` to create a new message.
  */
 export const ProjectSecretBindingsSchema: GenMessage<ProjectSecretBindings> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 8);
-
-/**
- * Deprecated wire tombstone for the unpublished preview credential map. New
- * code must use ProjectAccessBinding.
- *
- * @generated from message codewire.v1.ProjectCredentialReference
- * @deprecated
- */
-export type ProjectCredentialReference = Message<"codewire.v1.ProjectCredentialReference"> & {
-  /**
-   * @generated from field: string provider = 1;
-   */
-  provider: string;
-
-  /**
-   * @generated from field: string account = 2;
-   */
-  account: string;
-};
-
-/**
- * Describes the message codewire.v1.ProjectCredentialReference.
- * Use `create(ProjectCredentialReferenceSchema)` to create a new message.
- * @deprecated
- */
-export const ProjectCredentialReferenceSchema: GenMessage<ProjectCredentialReference> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 9);
+  messageDesc(file_codewire_v1_common, 6);
 
 /**
  * ProjectAccessBinding selects one scope-qualified access profile. It carries
@@ -373,7 +226,7 @@ export type ProjectAccessBinding = Message<"codewire.v1.ProjectAccessBinding"> &
  * Use `create(ProjectAccessBindingSchema)` to create a new message.
  */
 export const ProjectAccessBindingSchema: GenMessage<ProjectAccessBinding> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 10);
+  messageDesc(file_codewire_v1_common, 7);
 
 /**
  * ProjectSpec is the deterministic, placement-neutral codewire.yaml model.
@@ -400,9 +253,9 @@ export type ProjectSpec = Message<"codewire.v1.ProjectSpec"> & {
   image: string;
 
   /**
-   * @generated from field: repeated codewire.v1.RepoEntry repositories = 4;
+   * @generated from field: repeated codewire.v1.RepositorySpec repositories = 4;
    */
-  repositories: RepoEntry[];
+  repositories: RepositorySpec[];
 
   /**
    * @generated from field: string working_directory = 5;
@@ -430,19 +283,14 @@ export type ProjectSpec = Message<"codewire.v1.ProjectSpec"> & {
   agents?: ProjectAgents | undefined;
 
   /**
-   * @generated from field: map<string, string> agent_environment = 10;
-   */
-  agentEnvironment: { [key: string]: string };
-
-  /**
    * @generated from field: repeated codewire.v1.ProjectSkillSelection skills = 11;
    */
   skills: ProjectSkillSelection[];
 
   /**
-   * @generated from field: repeated codewire.v1.AppPort application_ports = 12;
+   * @generated from field: repeated codewire.v1.ApplicationPort application_ports = 12;
    */
-  applicationPorts: AppPort[];
+  applicationPorts: ApplicationPort[];
 
   /**
    * @generated from field: codewire.v1.ProjectResources resources = 13;
@@ -455,22 +303,6 @@ export type ProjectSpec = Message<"codewire.v1.ProjectSpec"> & {
   secrets?: ProjectSecretBindings | undefined;
 
   /**
-   * Deprecated preview fields retained only for wire compatibility. Runtime
-   * adapters reject their use; new clients use access and local workspace
-   * directives outside this portable message.
-   *
-   * @generated from field: map<string, codewire.v1.ProjectCredentialReference> credentials = 15 [deprecated = true];
-   * @deprecated
-   */
-  credentials: { [key: string]: ProjectCredentialReference };
-
-  /**
-   * @generated from field: codewire.v1.ProjectWorkspaceMode workspace_mode = 16 [deprecated = true];
-   * @deprecated
-   */
-  workspaceMode: ProjectWorkspaceMode;
-
-  /**
    * @generated from field: codewire.v1.ProjectAccessBinding access = 17;
    */
   access?: ProjectAccessBinding | undefined;
@@ -481,44 +313,7 @@ export type ProjectSpec = Message<"codewire.v1.ProjectSpec"> & {
  * Use `create(ProjectSpecSchema)` to create a new message.
  */
 export const ProjectSpecSchema: GenMessage<ProjectSpec> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_common, 11);
-
-/**
- * Deprecated wire tombstone for the retired top-level workspace mode. New
- * writers leave the field below unspecified; placement-specific filesystem
- * behavior is expressed outside the portable project contract.
- *
- * @generated from enum codewire.v1.ProjectWorkspaceMode
- * @deprecated
- */
-export enum ProjectWorkspaceMode {
-  /**
-   * @generated from enum value: PROJECT_WORKSPACE_MODE_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * @generated from enum value: PROJECT_WORKSPACE_MODE_AUTO = 1;
-   */
-  AUTO = 1,
-
-  /**
-   * @generated from enum value: PROJECT_WORKSPACE_MODE_CLONE = 2;
-   */
-  CLONE = 2,
-
-  /**
-   * @generated from enum value: PROJECT_WORKSPACE_MODE_DIRECT = 3;
-   */
-  DIRECT = 3,
-}
-
-/**
- * Describes the enum codewire.v1.ProjectWorkspaceMode.
- * @deprecated
- */
-export const ProjectWorkspaceModeSchema: GenEnum<ProjectWorkspaceMode> = /*@__PURE__*/
-  enumDesc(file_codewire_v1_common, 0);
+  messageDesc(file_codewire_v1_common, 8);
 
 /**
  * @generated from enum codewire.v1.ProjectSkillSource
@@ -544,5 +339,5 @@ export enum ProjectSkillSource {
  * Describes the enum codewire.v1.ProjectSkillSource.
  */
 export const ProjectSkillSourceSchema: GenEnum<ProjectSkillSource> = /*@__PURE__*/
-  enumDesc(file_codewire_v1_common, 1);
+  enumDesc(file_codewire_v1_common, 0);
 

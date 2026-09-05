@@ -19,6 +19,10 @@ source "$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 source "$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
 # shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
 source "$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/sandbox-supply-chain.sh
+source "$ROOT/scripts/ci/verify/kind/suites/sandbox-supply-chain.sh"
+# shellcheck source=scripts/ci/verify/kind/suites/runtime-acceptance.sh
+source "$ROOT/scripts/ci/verify/kind/suites/runtime-acceptance.sh"
 
 kind_e2e_usage() {
   cat >&2 <<'EOF'
@@ -27,6 +31,8 @@ usage:
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite dashboard-browser
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite final-fencing
   KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite environment-session
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite sandbox-supply-chain
+  KIND_CLUSTER_NAME=<retained-cluster> scripts/ci/verify/kind-e2e.sh suite runtime-acceptance
 EOF
 }
 
@@ -55,6 +61,12 @@ dispatch_kind_e2e() {
       ;;
     final-fencing)
       run_retained_final_fencing_suite
+      ;;
+    sandbox-supply-chain)
+      run_retained_sandbox_supply_chain_suite
+      ;;
+    runtime-acceptance)
+      run_retained_runtime_acceptance_suite
       ;;
     *)
       echo "::error::unknown Kind e2e suite: $2"

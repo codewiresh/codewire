@@ -9,6 +9,8 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::Zeroize as _;
 
+use crate::config::DAEMON_AUTH_TOKEN_ENV;
+
 const MAX_PROCESS_SPEC_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,7 +199,11 @@ fn prepare_runc(
             additional_gids: config.additional_gids.clone(),
         },
         args,
-        env: environment.to_vec(),
+        env: environment
+            .iter()
+            .filter(|entry| !is_daemon_auth_environment_entry(entry))
+            .cloned()
+            .collect(),
         cwd: working_directory.to_owned(),
         capabilities: ProcessCapabilities::default(),
         no_new_privileges: true,
@@ -281,9 +287,18 @@ fn split_environment(environment: &[String]) -> Vec<(String, String)> {
         .iter()
         .filter_map(|entry| {
             let (key, value) = entry.split_once('=')?;
+            if key == DAEMON_AUTH_TOKEN_ENV {
+                return None;
+            }
             Some((key.to_owned(), value.to_owned()))
         })
         .collect()
+}
+
+fn is_daemon_auth_environment_entry(entry: &str) -> bool {
+    entry
+        .split_once('=')
+        .is_some_and(|(key, _)| key == DAEMON_AUTH_TOKEN_ENV)
 }
 
 fn invalid_input(message: &'static str) -> io::Error {
@@ -352,11 +367,12 @@ mod tests {
             additional_gids: vec![27],
         });
         let secret = "CW_TEST_SECRET=not-on-helper-command";
+        let daemon_auth = format!("{DAEMON_AUTH_TOKEN_ENV}=must-not-enter-child");
         let prepared = PreparedProcess::prepare(
             &execution,
             &["/bin/sh".into(), "-lc".into(), "id".into()],
             "/workspace",
-            &[secret.into()],
+            &[secret.into(), daemon_auth],
             true,
             120,
             40,
@@ -396,6 +412,28 @@ mod tests {
         assert_eq!(value["user"]["uid"], 1000);
         drop(prepared);
         assert!(!spec_path.exists());
+    }
+
+    #[test]
+    fn native_process_drops_daemon_auth_token_from_supplied_environment() {
+        let prepared = PreparedProcess::prepare(
+            &ProcessExecution::Native,
+            &["/usr/bin/env".into()],
+            "/",
+            &[
+                "VISIBLE=value".into(),
+                format!("{DAEMON_AUTH_TOKEN_ENV}=must-not-enter-child"),
+            ],
+            false,
+            0,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.environment,
+            vec![("VISIBLE".into(), "value".into())]
+        );
     }
 
     #[test]

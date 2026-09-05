@@ -43,15 +43,6 @@ export async function addOrgMember(
   `;
 }
 
-export async function getOrgInvitationToken(email: string): Promise<string | null> {
-  const [result] = await sql`
-    SELECT token FROM org_invitations
-    WHERE email = ${email} AND status = 'pending'
-    ORDER BY created_at DESC LIMIT 1
-  `;
-  return result?.token ?? null;
-}
-
 export async function cleanupTestOrg(slug: string): Promise<void> {
   await cleanupOrgs(slug);
 }

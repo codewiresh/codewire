@@ -28,6 +28,22 @@ fn client_config(state: &AppState) -> ClientConfig {
         .with_default_timeout(std::time::Duration::from_secs(10))
 }
 
+/// The raw invitation capability returned only by CreateInvitation.
+/// Diagnostics are deliberately value-blind and list/read models use
+/// [`InvitationRow`], which cannot carry this value.
+pub(crate) struct CreatedInvitation {
+    pub(crate) token: String,
+}
+
+impl std::fmt::Debug for CreatedInvitation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreatedInvitation")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
 pub(crate) async fn members(
     state: &AppState,
     cookie: HeaderValue,
@@ -109,8 +125,6 @@ fn invitation_row(invitation: OrgInvitation) -> Option<InvitationRow> {
     if invitation.status.to_i32() != InvitationStatus::Pending as i32 {
         return None;
     }
-    // The protobuf also contains `invitation.token`. Do not move it into any
-    // browser-facing model; it is dropped with the consumed protobuf here.
     Some(InvitationRow {
         id: invitation.id,
         email: invitation.email,
@@ -134,8 +148,8 @@ pub(crate) async fn create_invitation(
     email: String,
     role: OrgRole,
     assignments: Vec<String>,
-) -> Result<(), ConnectError> {
-    OrganizationServiceClient::new(transport(state, cookie), client_config(state))
+) -> Result<CreatedInvitation, ConnectError> {
+    let response = OrganizationServiceClient::new(transport(state, cookie), client_config(state))
         .create_invitation(CreateInvitationRequest {
             org_id,
             email,
@@ -143,8 +157,11 @@ pub(crate) async fn create_invitation(
             assignments,
             ..Default::default()
         })
-        .await?;
-    Ok(())
+        .await?
+        .into_owned();
+    Ok(CreatedInvitation {
+        token: response.token,
+    })
 }
 
 pub(crate) async fn update_member_role(
@@ -383,18 +400,26 @@ mod tests {
     }
 
     #[test]
-    fn invitation_mapping_discards_opaque_tokens() {
+    fn invitation_mapping_contains_only_display_metadata() {
         let row = invitation_row(OrgInvitation {
             id: "invitation-1".into(),
             email: "member@example.test".into(),
             role: OrgRole::Member.into(),
-            token: "opaque-token-must-not-cross-the-view-boundary".into(),
             status: InvitationStatus::Pending.into(),
             ..Default::default()
         })
         .expect("pending invitation");
         let diagnostic = format!("{row:?}");
         assert!(diagnostic.contains("member@example.test"));
-        assert!(!diagnostic.contains("opaque-token"));
+    }
+
+    #[test]
+    fn created_invitation_debug_redacts_one_time_token() {
+        let created = CreatedInvitation {
+            token: "synthetic-invitation-capability-marker".into(),
+        };
+        let diagnostic = format!("{created:?}");
+        assert!(!diagnostic.contains("synthetic-invitation-capability-marker"));
+        assert!(diagnostic.contains("[REDACTED]"));
     }
 }

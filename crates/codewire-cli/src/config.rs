@@ -89,9 +89,9 @@ fn home_dir(env: &impl Env) -> PathBuf {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PlatformConfig {
     pub server_url: String,
-    pub session_token: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub default_org: String,
 }
@@ -99,7 +99,6 @@ pub struct PlatformConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PlatformResolveOptions {
     pub server_url: Option<String>,
-    pub token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -237,7 +236,7 @@ pub fn resolve_platform(
         }
     };
 
-    let mut token = trim_opt(opts.token).or_else(|| trim_opt(env.var(CODEWIRE_API_KEY_ENV)));
+    let token = trim_opt(env.var(CODEWIRE_API_KEY_ENV));
     let mut used_config_token = false;
     let mut oauth_credential_file = None;
     if token.is_none()
@@ -248,9 +247,6 @@ pub fn resolve_platform(
         if credentials_path.is_file() {
             oauth_credential_file = Some(credentials_path);
             used_config_token = true;
-        } else {
-            token = non_empty(config.session_token.trim().to_string());
-            used_config_token = token.is_some();
         }
     }
 
@@ -345,7 +341,8 @@ pub fn delete_platform_config(config_dir: &Path) -> Result<(), ConfigError> {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MeshConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_url: Option<String>,
@@ -365,14 +362,32 @@ pub struct MeshConfig {
     pub local_identity: Option<LocalMeshIdentity>,
 }
 
+impl std::fmt::Debug for MeshConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MeshConfig")
+            .field("mesh_url", &self.mesh_url)
+            .field(
+                "mesh_auth_token",
+                &self.mesh_auth_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("mesh_selected_network", &self.mesh_selected_network)
+            .field("mesh_auto_connect", &self.mesh_auto_connect)
+            .field("mesh_node_network", &self.mesh_node_network)
+            .field("current_target", &self.current_target)
+            .field("node", &self.node)
+            .field("local_identity", &self.local_identity)
+            .finish()
+    }
+}
+
 /// Durable standalone-Mesh identity. The file containing this record is
-/// created mode 0600; Debug intentionally never displays the raw credentials.
+/// created mode 0600; Debug intentionally never displays the raw credential.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LocalMeshIdentity {
     pub organization_id: String,
     pub api_key: String,
-    pub environment_id: String,
-    pub environment_token: String,
 }
 
 impl std::fmt::Debug for LocalMeshIdentity {
@@ -381,8 +396,6 @@ impl std::fmt::Debug for LocalMeshIdentity {
             .debug_struct("LocalMeshIdentity")
             .field("organization_id", &self.organization_id)
             .field("api_key", &"[redacted]")
-            .field("environment_id", &self.environment_id)
-            .field("environment_token", &"[redacted]")
             .finish()
     }
 }
@@ -392,30 +405,23 @@ impl LocalMeshIdentity {
         sha256_hex(&self.api_key)
     }
 
-    pub fn environment_token_hash(&self) -> String {
-        sha256_hex(&self.environment_token)
-    }
-
     fn is_complete(&self) -> bool {
-        [
-            self.organization_id.as_str(),
-            self.api_key.as_str(),
-            self.environment_id.as_str(),
-            self.environment_token.as_str(),
-        ]
-        .iter()
-        .all(|value| !value.trim().is_empty())
+        [self.organization_id.as_str(), self.api_key.as_str()]
+            .iter()
+            .all(|value| !value.trim().is_empty())
             && self.api_key.starts_with("cw_")
     }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct MeshNodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CurrentTargetConfig {
     pub kind: String,
     #[serde(rename = "ref")]
@@ -440,12 +446,27 @@ pub fn display_agent_id(raw: &str) -> String {
         .to_string()
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct MeshResolveOptions {
     pub mesh_url: Option<String>,
     pub auth_token: Option<String>,
     pub network_id: Option<String>,
     pub platform_server_url: Option<String>,
+}
+
+impl std::fmt::Debug for MeshResolveOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MeshResolveOptions")
+            .field("mesh_url", &self.mesh_url)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("network_id", &self.network_id)
+            .field("platform_server_url", &self.platform_server_url)
+            .finish()
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -656,9 +677,9 @@ pub fn load_mesh_config(data_dir: &Path) -> Result<MeshConfig, ConfigError> {
         .map_err(|source| ConfigError::ParseMesh { path, source })
 }
 
-/// Creates the one standalone-local organization and its approved machine and
-/// environment credentials once, then persists them in the hardened local
-/// config. It never derives identity from a network name or a hosted default.
+/// Creates the one standalone-local organization and its approved machine
+/// credential once, then persists them in the hardened local config. It never
+/// derives identity from a network name or a hosted default.
 pub fn ensure_local_mesh_identity(data_dir: &Path) -> Result<LocalMeshIdentity, ConfigError> {
     let mut config = load_mesh_config(data_dir)?;
     if let Some(identity) = config.local_identity.as_ref()
@@ -675,14 +696,10 @@ pub fn ensure_local_mesh_identity(data_dir: &Path) -> Result<LocalMeshIdentity, 
 
 fn new_local_mesh_identity() -> LocalMeshIdentity {
     let mut api_key_bytes = [0u8; 32];
-    let mut environment_token_bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut api_key_bytes);
-    rand::rngs::OsRng.fill_bytes(&mut environment_token_bytes);
     LocalMeshIdentity {
         organization_id: format!("local-org-{}", uuid::Uuid::new_v4().simple()),
         api_key: format!("cw_{}", hex_lower(&api_key_bytes)),
-        environment_id: format!("local-env-{}", uuid::Uuid::new_v4().simple()),
-        environment_token: hex_lower(&environment_token_bytes),
     }
 }
 
@@ -1161,16 +1178,16 @@ pub enum ConfigError {
     IncompletePlatformConfig { path: PathBuf },
     #[error("no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login'){suffix}", suffix = source.as_ref().map(|e| format!(": {e}")).unwrap_or_default())]
     NoPlatformServer { source: Option<Box<ConfigError>> },
-    #[error("not logged in (pass --token, set CODEWIRE_API_KEY, run 'cw setup', or run 'cw login'){suffix}", suffix = source.as_ref().map(|e| format!(": {e}")).unwrap_or_default())]
+    #[error("not logged in (set CODEWIRE_API_KEY, run 'cw setup', or run 'cw login'){suffix}", suffix = source.as_ref().map(|e| format!(": {e}")).unwrap_or_default())]
     NoPlatformToken { source: Option<Box<ConfigError>> },
     #[error(
-        "not logged in for {requested} (saved config is for {saved}; pass --token or set CODEWIRE_API_KEY)"
+        "not logged in for {requested} (saved config is for {saved}; set CODEWIRE_API_KEY or log in to that server)"
     )]
     PlatformServerMismatch { requested: String, saved: String },
     #[error("mesh not configured (set CODEWIRE_MESH_URL or log in to hosted Codewire)")]
     NoMeshUrl,
     #[error(
-        "mesh user authentication not configured (pass --token, set CODEWIRE_MESH_AUTH_TOKEN, or use 'cw login'/CODEWIRE_API_KEY for hosted Codewire)"
+        "mesh user authentication not configured (set CODEWIRE_MESH_AUTH_TOKEN, or use 'cw login'/CODEWIRE_API_KEY for hosted Codewire)"
     )]
     NoMeshAuth,
     #[error("invalid Mesh authentication configuration: {0}")]
@@ -1193,13 +1210,12 @@ mod tests {
         ResolvePaths::from_home_and_env(home.to_path_buf(), env)
     }
 
-    fn write_platform_config(dir: &Path, server_url: &str, token: &str) {
+    fn write_platform_config(dir: &Path, server_url: &str) {
         fs::create_dir_all(dir).unwrap();
         fs::write(
             dir.join("config.json"),
             serde_json::json!({
                 "server_url": server_url,
-                "session_token": token,
                 "default_org": "org-default",
             })
             .to_string(),
@@ -1220,11 +1236,7 @@ mod tests {
             (CODEWIRE_SERVER_URL_ENV, ""),
         ]);
         let paths = paths(home.path(), &env);
-        write_platform_config(
-            &paths.platform_config_dir,
-            "https://example.invalid",
-            "session-token",
-        );
+        write_platform_config(&paths.platform_config_dir, "https://example.invalid");
 
         let resolved = resolve_platform(PlatformResolveOptions::default(), &paths, &env).unwrap();
 
@@ -1246,6 +1258,7 @@ mod tests {
 
         assert_eq!(resolved.server_url, "https://api.codewire.test");
         assert_eq!(resolved.session_token, "cw_env_only");
+        assert!(!format!("{resolved:?}").contains("cw_env_only"));
     }
 
     #[tokio::test]
@@ -1253,7 +1266,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
-        write_platform_config(&paths.platform_config_dir, "https://api.codewire.test", "");
+        write_platform_config(&paths.platform_config_dir, "https://api.codewire.test");
         let credentials = codewire_client::OAuthCredentials::new(
             "https://api.codewire.test",
             codewire_client::CODEWIRE_CLI_OAUTH_CLIENT_ID,
@@ -1296,16 +1309,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
-        write_platform_config(
-            &paths.platform_config_dir,
-            "https://codewire.sh",
-            "prod-token",
-        );
+        write_platform_config(&paths.platform_config_dir, "https://codewire.sh");
 
         let err = resolve_platform(
             PlatformResolveOptions {
                 server_url: Some("https://codewire-dev.sh".to_string()),
-                token: None,
             },
             &paths,
             &env,
@@ -1323,11 +1331,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
-        write_platform_config(
-            &paths.platform_config_dir,
-            "https://codewire.sh",
-            "session-token",
-        );
+        write_platform_config(&paths.platform_config_dir, "https://codewire.sh");
 
         delete_platform_config(&paths.platform_config_dir).unwrap();
         assert!(!paths.platform_config_dir.join("config.json").exists());
@@ -1345,7 +1349,6 @@ mod tests {
             &paths.platform_config_dir,
             &PlatformConfig {
                 server_url: "https://codewire.sh".to_string(),
-                session_token: "session-token".to_string(),
                 default_org: "org_123".to_string(),
             },
         )
@@ -1354,7 +1357,7 @@ mod tests {
         let data = fs::read_to_string(paths.platform_config_dir.join("config.json")).unwrap();
         assert!(data.ends_with('\n'));
         assert!(data.contains("\"server_url\": \"https://codewire.sh\""));
-        assert!(data.contains("\"session_token\": \"session-token\""));
+        assert!(!data.contains("session_token"));
         assert!(data.contains("\"default_org\": \"org_123\""));
 
         let config = load_platform_config(&paths.platform_config_dir).unwrap();
@@ -1375,6 +1378,50 @@ mod tests {
             derive_hosted_mesh_url_for_server("https://example.com"),
             None
         );
+    }
+
+    #[test]
+    fn standalone_local_identity_persists_only_the_api_key_identity() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::default();
+        let paths = paths(home.path(), &env);
+
+        let first = ensure_local_mesh_identity(&paths.mesh_data_dir).unwrap();
+        assert!(first.organization_id.starts_with("local-org-"));
+        assert!(first.api_key.starts_with("cw_"));
+        assert_eq!(
+            ensure_local_mesh_identity(&paths.mesh_data_dir).unwrap(),
+            first
+        );
+
+        let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
+        assert!(data.contains("[local_identity]"));
+        assert!(data.contains("organization_id = \"local-org-"));
+        assert!(data.contains("api_key = \"cw_"));
+        assert!(!data.contains("environment_id"));
+        assert!(!data.contains("environment_token"));
+    }
+
+    #[test]
+    fn retired_local_environment_identity_fields_fail_closed() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::default();
+        let paths = paths(home.path(), &env);
+        write_mesh_config(
+            &paths.mesh_data_dir,
+            r#"
+[local_identity]
+organization_id = "local-org"
+api_key = "cw_local"
+environment_id = "retired-environment"
+environment_token = "retired-bearer"
+"#,
+        );
+
+        assert!(matches!(
+            load_mesh_config(&paths.mesh_data_dir),
+            Err(ConfigError::ParseMesh { .. })
+        ));
     }
 
     #[test]
@@ -1653,18 +1700,27 @@ mesh_selected_network = "project-alpha"
     }
 
     #[test]
-    fn hosted_mesh_rejects_the_old_saved_platform_token_fallback() {
+    fn retired_saved_platform_token_field_fails_closed_without_exposing_its_value() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
-        write_platform_config(
-            &paths.platform_config_dir,
-            "https://codewire.sh",
-            "platform-token",
-        );
+        const MARKER: &str = "synthetic-retired-platform-bearer-canary";
+        fs::create_dir_all(&paths.platform_config_dir).unwrap();
+        fs::write(
+            paths.platform_config_dir.join("config.json"),
+            serde_json::json!({
+                "server_url": "https://codewire.sh",
+                "session_token": MARKER,
+                "default_org": "org-default",
+            })
+            .to_string(),
+        )
+        .unwrap();
 
-        let error = resolve_mesh(MeshResolveOptions::default(), &paths, &env).unwrap_err();
-        assert!(matches!(error, ConfigError::NoMeshAuth));
+        let error = load_platform_config(&paths.platform_config_dir).unwrap_err();
+        assert!(matches!(error, ConfigError::ParsePlatform { .. }));
+        assert!(error.to_string().contains("session_token"));
+        assert!(!error.to_string().contains(MARKER));
     }
 
     #[tokio::test]
@@ -1672,7 +1728,7 @@ mesh_selected_network = "project-alpha"
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
-        write_platform_config(&paths.platform_config_dir, "https://codewire.sh", "");
+        write_platform_config(&paths.platform_config_dir, "https://codewire.sh");
         let credentials = codewire_client::OAuthCredentials::new(
             "https://codewire.sh",
             codewire_client::CODEWIRE_CLI_OAUTH_CLIENT_ID,
@@ -1707,11 +1763,7 @@ mesh_selected_network = "project-alpha"
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::new([(CODEWIRE_API_KEY_ENV, "cw_dev_exact_org")]);
         let paths = paths(home.path(), &env);
-        write_platform_config(
-            &paths.platform_config_dir,
-            "https://codewire.sh",
-            "prod-token",
-        );
+        write_platform_config(&paths.platform_config_dir, "https://codewire.sh");
         write_mesh_config(&paths.mesh_data_dir, r#"mesh_selected_network = "default""#);
 
         let resolved = resolve_mesh(
@@ -1797,7 +1849,6 @@ mesh_selected_network = "project-alpha"
             &paths.mesh_data_dir,
             r#"
 mesh_url = "https://mesh.example.com"
-mesh_node_token = "node-token"
 
 [node]
 name = "builder"
@@ -1808,7 +1859,6 @@ name = "builder"
 
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
-        assert!(!data.contains("mesh_node_token"));
         assert!(data.contains("mesh_selected_network = \"project-alpha\""));
         assert!(data.contains("mesh_auto_connect = false"));
         assert!(data.contains("[node]"));
@@ -1848,7 +1898,6 @@ name = "builder"
             r#"
 mesh_url = "https://mesh.example.com"
 mesh_selected_network = "project-alpha"
-mesh_node_token = "node-token"
 "#,
         );
 
@@ -1856,13 +1905,12 @@ mesh_node_token = "node-token"
 
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
-        assert!(!data.contains("mesh_node_token"));
         assert!(!data.contains("mesh_selected_network"));
         assert!(!data.contains("mesh_auto_connect"));
     }
 
     #[test]
-    fn save_node_registration_preserves_existing_config_and_scrubs_legacy_token() {
+    fn retired_mesh_node_token_fails_closed_for_load_and_mutations() {
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
@@ -1870,31 +1918,36 @@ mesh_node_token = "node-token"
             &paths.mesh_data_dir,
             r#"
 mesh_node_token = "legacy-node-token"
-
-[node]
-name = "old-builder"
 "#,
         );
 
-        save_node_registration(
-            &paths.mesh_data_dir,
-            "https://mesh.example.com/",
-            "project-alpha",
-            "builder",
-        )
-        .unwrap();
-
-        let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
-        assert!(data.contains("mesh_url = \"https://mesh.example.com/\""));
-        assert!(!data.contains("mesh_node_token"));
-        assert!(data.contains("mesh_node_network = \"project-alpha\""));
-        assert!(data.contains("[node]"));
-        assert!(data.contains("name = \"builder\""));
-
-        let config = load_mesh_config(&paths.mesh_data_dir).unwrap();
-        assert_eq!(
-            config.node.and_then(|node| node.name).as_deref(),
-            Some("builder")
+        assert!(matches!(
+            load_mesh_config(&paths.mesh_data_dir),
+            Err(ConfigError::ParseMesh { .. })
+        ));
+        assert!(save_selected_mesh_network(&paths.mesh_data_dir, "project-alpha").is_err());
+        assert!(clear_selected_mesh_network(&paths.mesh_data_dir).is_err());
+        assert!(
+            save_node_registration(
+                &paths.mesh_data_dir,
+                "https://mesh.example.com/",
+                "project-alpha",
+                "builder",
+            )
+            .is_err()
+        );
+        assert!(
+            save_joined_network(
+                &paths.mesh_data_dir,
+                "https://mesh.example.com",
+                "project-alpha",
+            )
+            .is_err()
+        );
+        assert!(
+            fs::read_to_string(paths.mesh_data_dir.join("config.toml"))
+                .unwrap()
+                .contains("legacy-node-token")
         );
     }
 
@@ -1903,13 +1956,6 @@ name = "old-builder"
         let home = tempfile::tempdir().unwrap();
         let env = MapEnv::default();
         let paths = paths(home.path(), &env);
-        write_mesh_config(
-            &paths.mesh_data_dir,
-            r#"
-mesh_node_token = "mesh-node-token"
-"#,
-        );
-
         save_joined_network(
             &paths.mesh_data_dir,
             "https://mesh.example.com",
@@ -1920,6 +1966,25 @@ mesh_node_token = "mesh-node-token"
         let data = fs::read_to_string(paths.mesh_data_dir.join("config.toml")).unwrap();
         assert!(data.contains("mesh_url = \"https://mesh.example.com\""));
         assert!(data.contains("mesh_selected_network = \"project-alpha\""));
-        assert!(!data.contains("mesh_node_token"));
+    }
+
+    #[test]
+    fn mesh_bearer_debug_output_is_redacted() {
+        const MARKER: &str = "synthetic-mesh-bearer-debug-canary";
+        let config = MeshConfig {
+            mesh_auth_token: Some(MARKER.to_owned()),
+            local_identity: Some(LocalMeshIdentity {
+                organization_id: "local-org".to_owned(),
+                api_key: MARKER.to_owned(),
+            }),
+            ..MeshConfig::default()
+        };
+        let options = MeshResolveOptions {
+            auth_token: Some(MARKER.to_owned()),
+            ..MeshResolveOptions::default()
+        };
+
+        assert!(!format!("{config:?}").contains(MARKER));
+        assert!(!format!("{options:?}").contains(MARKER));
     }
 }

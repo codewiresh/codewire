@@ -39,10 +39,19 @@ pub(crate) struct ApiKeyRecord {
     pub(crate) created_by_email: String,
 }
 
-#[derive(Debug)]
 pub(crate) struct CreatedApiKey {
     pub(crate) record: ApiKeyRecord,
     pub(crate) raw_key: String,
+}
+
+impl std::fmt::Debug for CreatedApiKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreatedApiKey")
+            .field("record", &self.record)
+            .field("raw_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -336,5 +345,31 @@ mod tests {
             .to_ascii_lowercase();
         assert!(normalized.contains("where ak.org_id = $1"));
         assert!(!normalized.contains(" limit "));
+    }
+
+    #[test]
+    fn created_api_key_debug_redacts_the_one_use_raw_key() {
+        const MARKER: &str = "cw_synthetic-one-use-api-key-canary";
+        let created = CreatedApiKey {
+            record: ApiKeyRecord {
+                id: "key-alpha".into(),
+                user_id: "user-alpha".into(),
+                org_id: "org-alpha".into(),
+                name: "automation".into(),
+                key_prefix: "synthet".into(),
+                scopes: Vec::new(),
+                last_used_at: None,
+                expires_at: None,
+                disabled_at: None,
+                created_at: Utc::now().naive_utc(),
+                created_by_name: "Synthetic User".into(),
+                created_by_email: "synthetic@example.test".into(),
+            },
+            raw_key: MARKER.into(),
+        };
+
+        let debug = format!("{created:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(MARKER));
     }
 }

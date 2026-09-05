@@ -36,9 +36,6 @@ const (
 	// EnvironmentSetupServiceGetEnvironmentCreateOptionsProcedure is the fully-qualified name of the
 	// EnvironmentSetupService's GetEnvironmentCreateOptions RPC.
 	EnvironmentSetupServiceGetEnvironmentCreateOptionsProcedure = "/codewire.console.v1.EnvironmentSetupService/GetEnvironmentCreateOptions"
-	// EnvironmentSetupServiceDetectRepoProcedure is the fully-qualified name of the
-	// EnvironmentSetupService's DetectRepo RPC.
-	EnvironmentSetupServiceDetectRepoProcedure = "/codewire.console.v1.EnvironmentSetupService/DetectRepo"
 	// EnvironmentSetupServiceIssueTerminalTicketProcedure is the fully-qualified name of the
 	// EnvironmentSetupService's IssueTerminalTicket RPC.
 	EnvironmentSetupServiceIssueTerminalTicketProcedure = "/codewire.console.v1.EnvironmentSetupService/IssueTerminalTicket"
@@ -48,7 +45,6 @@ const (
 // service.
 type EnvironmentSetupServiceClient interface {
 	GetEnvironmentCreateOptions(context.Context, *connect.Request[v1.GetEnvironmentCreateOptionsRequest]) (*connect.Response[v1.GetEnvironmentCreateOptionsResponse], error)
-	DetectRepo(context.Context, *connect.Request[v1.DetectRepoRequest]) (*connect.Response[v1.DetectRepoResponse], error)
 	IssueTerminalTicket(context.Context, *connect.Request[v1.IssueTerminalTicketRequest]) (*connect.Response[v1.IssueTerminalTicketResponse], error)
 }
 
@@ -71,13 +67,6 @@ func NewEnvironmentSetupServiceClient(httpClient connect.HTTPClient, baseURL str
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
-		detectRepo: connect.NewClient[v1.DetectRepoRequest, v1.DetectRepoResponse](
-			httpClient,
-			baseURL+EnvironmentSetupServiceDetectRepoProcedure,
-			connect.WithSchema(environmentSetupServiceMethods.ByName("DetectRepo")),
-			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
-			connect.WithClientOptions(opts...),
-		),
 		issueTerminalTicket: connect.NewClient[v1.IssueTerminalTicketRequest, v1.IssueTerminalTicketResponse](
 			httpClient,
 			baseURL+EnvironmentSetupServiceIssueTerminalTicketProcedure,
@@ -90,7 +79,6 @@ func NewEnvironmentSetupServiceClient(httpClient connect.HTTPClient, baseURL str
 // environmentSetupServiceClient implements EnvironmentSetupServiceClient.
 type environmentSetupServiceClient struct {
 	getEnvironmentCreateOptions *connect.Client[v1.GetEnvironmentCreateOptionsRequest, v1.GetEnvironmentCreateOptionsResponse]
-	detectRepo                  *connect.Client[v1.DetectRepoRequest, v1.DetectRepoResponse]
 	issueTerminalTicket         *connect.Client[v1.IssueTerminalTicketRequest, v1.IssueTerminalTicketResponse]
 }
 
@@ -98,11 +86,6 @@ type environmentSetupServiceClient struct {
 // codewire.console.v1.EnvironmentSetupService.GetEnvironmentCreateOptions.
 func (c *environmentSetupServiceClient) GetEnvironmentCreateOptions(ctx context.Context, req *connect.Request[v1.GetEnvironmentCreateOptionsRequest]) (*connect.Response[v1.GetEnvironmentCreateOptionsResponse], error) {
 	return c.getEnvironmentCreateOptions.CallUnary(ctx, req)
-}
-
-// DetectRepo calls codewire.console.v1.EnvironmentSetupService.DetectRepo.
-func (c *environmentSetupServiceClient) DetectRepo(ctx context.Context, req *connect.Request[v1.DetectRepoRequest]) (*connect.Response[v1.DetectRepoResponse], error) {
-	return c.detectRepo.CallUnary(ctx, req)
 }
 
 // IssueTerminalTicket calls codewire.console.v1.EnvironmentSetupService.IssueTerminalTicket.
@@ -114,7 +97,6 @@ func (c *environmentSetupServiceClient) IssueTerminalTicket(ctx context.Context,
 // codewire.console.v1.EnvironmentSetupService service.
 type EnvironmentSetupServiceHandler interface {
 	GetEnvironmentCreateOptions(context.Context, *connect.Request[v1.GetEnvironmentCreateOptionsRequest]) (*connect.Response[v1.GetEnvironmentCreateOptionsResponse], error)
-	DetectRepo(context.Context, *connect.Request[v1.DetectRepoRequest]) (*connect.Response[v1.DetectRepoResponse], error)
 	IssueTerminalTicket(context.Context, *connect.Request[v1.IssueTerminalTicketRequest]) (*connect.Response[v1.IssueTerminalTicketResponse], error)
 }
 
@@ -132,13 +114,6 @@ func NewEnvironmentSetupServiceHandler(svc EnvironmentSetupServiceHandler, opts 
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
-	environmentSetupServiceDetectRepoHandler := connect.NewUnaryHandler(
-		EnvironmentSetupServiceDetectRepoProcedure,
-		svc.DetectRepo,
-		connect.WithSchema(environmentSetupServiceMethods.ByName("DetectRepo")),
-		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
-		connect.WithHandlerOptions(opts...),
-	)
 	environmentSetupServiceIssueTerminalTicketHandler := connect.NewUnaryHandler(
 		EnvironmentSetupServiceIssueTerminalTicketProcedure,
 		svc.IssueTerminalTicket,
@@ -149,8 +124,6 @@ func NewEnvironmentSetupServiceHandler(svc EnvironmentSetupServiceHandler, opts 
 		switch r.URL.Path {
 		case EnvironmentSetupServiceGetEnvironmentCreateOptionsProcedure:
 			environmentSetupServiceGetEnvironmentCreateOptionsHandler.ServeHTTP(w, r)
-		case EnvironmentSetupServiceDetectRepoProcedure:
-			environmentSetupServiceDetectRepoHandler.ServeHTTP(w, r)
 		case EnvironmentSetupServiceIssueTerminalTicketProcedure:
 			environmentSetupServiceIssueTerminalTicketHandler.ServeHTTP(w, r)
 		default:
@@ -164,10 +137,6 @@ type UnimplementedEnvironmentSetupServiceHandler struct{}
 
 func (UnimplementedEnvironmentSetupServiceHandler) GetEnvironmentCreateOptions(context.Context, *connect.Request[v1.GetEnvironmentCreateOptionsRequest]) (*connect.Response[v1.GetEnvironmentCreateOptionsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.EnvironmentSetupService.GetEnvironmentCreateOptions is not implemented"))
-}
-
-func (UnimplementedEnvironmentSetupServiceHandler) DetectRepo(context.Context, *connect.Request[v1.DetectRepoRequest]) (*connect.Response[v1.DetectRepoResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.EnvironmentSetupService.DetectRepo is not implemented"))
 }
 
 func (UnimplementedEnvironmentSetupServiceHandler) IssueTerminalTicket(context.Context, *connect.Request[v1.IssueTerminalTicketRequest]) (*connect.Response[v1.IssueTerminalTicketResponse], error) {

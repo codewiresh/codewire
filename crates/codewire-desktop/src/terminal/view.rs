@@ -154,7 +154,7 @@ impl TerminalView {
 
     /// Spawn a command in a local PTY and wire up read/write loops.
     ///
-    /// This is the single entry point for both local shells and SSH sessions.
+    /// This is the entry point for commands running in a local PTY.
     fn spawn(&mut self, command: &str, args: &[&str], label: &str, cx: &mut Context<Self>) {
         self.spawn_with_env(command, args, &[], label, cx);
     }
@@ -316,15 +316,6 @@ impl TerminalView {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         self.spawn(&shell, &[], "local shell", cx);
-    }
-
-    /// Open an SSH terminal (spawns `ssh <host>` via PTY).
-    pub fn connect_ssh(&mut self, host: &str, cx: &mut Context<Self>) {
-        self.host = Some(host.to_string());
-        self.session_name = Some(host.to_string());
-        self.session_type = Some("ssh".to_string());
-
-        self.spawn("ssh", &[host], &format!("ssh {}", host), cx);
     }
 
     /// Open a platform environment shell over the typed Connect Run stream.

@@ -268,6 +268,7 @@ require_available_deployment() {
 
 validate_retained_cluster_identity() {
   local expected_context current_context clusters
+  local -a kubeconfig_args=()
 
   if [ "${KIND_CLUSTER_NAME_EXPLICIT:-0}" != "1" ] || [ -z "$KIND_CLUSTER_NAME" ]; then
     echo "::error::retained suites require an explicit non-empty KIND_CLUSTER_NAME"
@@ -293,8 +294,17 @@ validate_retained_cluster_identity() {
     return 1
   fi
 
-  RETAINED_KUBECONFIG="$RUN_DIR/retained-kubeconfig"
-  if ! kind get kubeconfig --name "$KIND_CLUSTER_NAME" >"$RETAINED_KUBECONFIG"; then
+  # A retained suite can invoke a narrower read-only suite. Each invocation
+  # owns its file so child cleanup cannot remove the parent's pinned context.
+  # Keep the API endpoint in the caller's existing topology. Remote DinD's
+  # published loopback endpoint belongs to the daemon, not the job container.
+  # This only chooses the export; it must not reconnect or start forwarding.
+  if is_remote_dind_kind_job; then
+    kubeconfig_args+=(--internal)
+  fi
+  RETAINED_KUBECONFIG="$(mktemp "$RUN_DIR/retained-kubeconfig.XXXXXX")" || return $?
+  if ! kind get kubeconfig "${kubeconfig_args[@]}" --name "$KIND_CLUSTER_NAME" \
+      >"$RETAINED_KUBECONFIG"; then
     echo "::error::failed to pin kubeconfig for retained Kind cluster ${KIND_CLUSTER_NAME}"
     return 1
   fi
@@ -473,13 +483,20 @@ curl_settled() {
   return 0
 }
 
-daemon_auth_token_for_environment() {
-  local environment_id="$1" secret payload encoded_payload signature
+auth_token_for_environment_scope() {
+  local environment_id="$1" scope="$2" secret payload encoded_payload signature
+  case "$scope" in
+    coordinate | daemon) ;;
+    *)
+      echo "::error::unsupported environment auth token scope: $scope" >&2
+      return 1
+      ;;
+  esac
   secret="$(
     kubectl -n "$NS" get secret codewire-secrets \
       -o jsonpath='{.data.SESSION_SECRET}' | base64 --decode
   )"
-  payload="$(printf '{"environment_id":"%s","scope":"coordinate"}' "$environment_id")"
+  payload="$(printf '{"environment_id":"%s","scope":"%s"}' "$environment_id" "$scope")"
   encoded_payload="$(
     printf '%s' "$payload" | openssl base64 -A | tr '+/' '-_' | tr -d '='
   )"
@@ -489,6 +506,14 @@ daemon_auth_token_for_environment() {
       | openssl base64 -A | tr '+/' '-_' | tr -d '='
   )"
   printf '%s.%s' "$encoded_payload" "$signature"
+}
+
+gateway_auth_token_for_environment() {
+  auth_token_for_environment_scope "$1" coordinate
+}
+
+daemon_auth_token_for_environment() {
+  auth_token_for_environment_scope "$1" daemon
 }
 
 kubectl_apply() {
@@ -674,6 +699,11 @@ start_remote_dind_kind_forwarding() {
   return 1
 }
 
+is_remote_dind_kind_job() {
+  [ -n "${HOSTNAME:-}" ] \
+    && docker container inspect "$HOSTNAME" >/dev/null 2>&1
+}
+
 configure_remote_dind_kind_network() {
   local self_container="${HOSTNAME:-}"
   local node="${KIND_CLUSTER_NAME}-control-plane"
@@ -685,8 +715,7 @@ configure_remote_dind_kind_network() {
   # socket for a sibling DinD daemon, making that daemon's 127.0.0.1 foreign.
   # The job hostname is a container in the latter topology and absent in the
   # former, which lets this adaptation remain a no-op for local preflight.
-  if [ -z "$self_container" ] \
-      || ! docker container inspect "$self_container" >/dev/null 2>&1; then
+  if ! is_remote_dind_kind_job; then
     log "local Docker topology detected; retaining Kind host-port kubeconfig"
     return 0
   fi
@@ -951,11 +980,11 @@ for public, (local, expected) in replacements.items():
 path.write_text(text)
 PY
   if validate_sealed_kind_images; then
-    python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" "$KIND_WORKSPACE_LOCAL_IMAGE" <<'PY'
+    python3 - "$rendered" "$KIND_DIND_LOCAL_IMAGE" <<'PY'
 from pathlib import Path
 import sys
 
-rendered, local_dind, local_workspace = sys.argv[1:]
+rendered, local_dind = sys.argv[1:]
 path = Path(rendered)
 text = path.read_text()
 public_dind = "docker.io/library/docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c"
@@ -963,10 +992,6 @@ old = f"  SANDBOX_DIND_IMAGE: {public_dind}\n"
 if text.count(old) != 1:
     raise SystemExit("Kind overlay Dind image occurrence mismatch")
 text = text.replace(old, f"  SANDBOX_DIND_IMAGE: {local_dind}\n")
-public_workspace = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"
-if text.count(public_workspace) != 1:
-    raise SystemExit("Kind overlay warm-pool workspace image occurrence mismatch")
-text = text.replace(public_workspace, local_workspace)
 path.write_text(text)
 PY
   else
@@ -1015,129 +1040,6 @@ wait_for_kind_api_after_image_load() {
   return 1
 }
 
-mesh_legacy_auth_retirement_transition() {
-  log "seeding the exact Mesh SQLx 1-5 legacy-auth retirement fixture"
-  local mesh_database_exists
-  mesh_database_exists="$(kubectl -n "$NS" exec deploy/postgres -- \
-    psql -U codewire -d postgres -At -v ON_ERROR_STOP=1 \
-      -c "SELECT 1 FROM pg_database WHERE datname = 'codewire_mesh'")"
-  if [[ "$mesh_database_exists" != "1" ]]; then
-    kubectl -n "$NS" exec deploy/postgres -- \
-      psql -U codewire -d postgres -v ON_ERROR_STOP=1 \
-        -c 'CREATE DATABASE codewire_mesh'
-  fi
-  kubectl -n "$NS" exec deploy/postgres -- \
-    psql -U codewire -d codewire_mesh -v ON_ERROR_STOP=1 -c '
-      CREATE TABLE _sqlx_migrations (
-        version BIGINT PRIMARY KEY,
-        description TEXT NOT NULL,
-        installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
-        success BOOLEAN NOT NULL,
-        checksum BYTEA NOT NULL,
-        execution_time BIGINT NOT NULL
-      )'
-
-  local migration version description checksum
-  for migration in "$ROOT"/crates/codewire-mesh/migrations/00[1-5]_*.sql; do
-    version="$(basename "$migration")"
-    version="${version%%_*}"
-    version="$((10#$version))"
-    description="$(basename "$migration" .sql)"
-    description="${description#*_}"
-    description="${description//_/ }"
-    checksum="$(sha384sum "$migration" | awk '{ print $1 }')"
-    kubectl -n "$NS" exec -i deploy/postgres -- \
-      psql -U codewire -d codewire_mesh -v ON_ERROR_STOP=1 < "$migration"
-    kubectl -n "$NS" exec -i deploy/postgres -- \
-      psql -U codewire -d codewire_mesh -v ON_ERROR_STOP=1 \
-        -v version="$version" -v description="$description" -v checksum="$checksum" <<'SQL'
-INSERT INTO _sqlx_migrations
-  (version, description, success, checksum, execution_time)
-VALUES
-  (:'version', :'description', true, decode(:'checksum', 'hex'), 0);
-SQL
-  done
-
-  kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire_mesh -v ON_ERROR_STOP=1 <<'SQL'
-INSERT INTO networks (network_id, created_at, organization_id)
-VALUES ('kind-retained', now(), 'kind-org-retained');
-INSERT INTO nodes
-  (network_id, name, token, peer_url, owner_subject, authorized_by,
-   enrollment_id, authorized_at, last_seen_at)
-VALUES
-  ('kind-retained', 'kind-node-retained', 'legacy-kind-node-secret',
-   'udp://127.0.0.1:10000', 'kind-subject-retained', 'kind-issuer-retained',
-   'kind-enrollment-retained', now(), now());
-INSERT INTO invites
-  (id, network_id, organization_id, created_by_user_id, code_hash,
-   expires_at, created_at)
-VALUES
-  ('kind-invite-retained', 'kind-retained', 'kind-org-retained',
-   'kind-primary-user-retained', 'kind-hash-retained',
-   now() + interval '1 hour', now());
-INSERT INTO kv (network_id, namespace, key, value)
-VALUES ('kind-retained', 'product.settings', 'retained', '\x0102');
-INSERT INTO users (github_id, username, created_at, last_login_at)
-VALUES (7, 'legacy-kind-user', now(), now());
-INSERT INTO sessions (token, github_id, created_at, expires_at)
-VALUES ('legacy-kind-session', 7, now(), now() + interval '1 hour');
-INSERT INTO oauth_state (state, created_at, expires_at)
-VALUES ('legacy-kind-oauth', now(), now() + interval '1 hour');
-INSERT INTO oidc_users (sub, username, created_at, last_login_at)
-VALUES ('legacy-kind-subject', 'legacy-kind-oidc-user', now(), now());
-INSERT INTO oidc_sessions (token, sub, created_at, expires_at)
-VALUES ('legacy-kind-oidc-session', 'legacy-kind-subject', now(), now() + interval '1 hour');
-INSERT INTO oidc_device_flows
-  (poll_token, device_code, network_id, node_name, node_token, expires_at)
-VALUES
-  ('legacy-kind-poll', 'legacy-kind-device', 'kind-retained',
-   'kind-node-retained', 'legacy-kind-device-node', now() + interval '1 hour');
-INSERT INTO device_codes
-  (code, public_key, node_name, created_at, expires_at)
-VALUES
-  ('legacy-kind-code', 'legacy-kind-public-key', 'kind-node-retained',
-   now(), now() + interval '1 hour');
-INSERT INTO github_app
-  (id, app_id, client_id, client_secret, pem, webhook_secret, owner, created_at)
-VALUES
-  (1, 7, 'legacy-kind-client', 'legacy-kind-client-secret',
-   'legacy-kind-pem', 'legacy-kind-webhook', 'legacy-kind-owner', now());
-SQL
-
-  log "running the Mesh prelaunch retirement command in-cluster"
-  kubectl -n "$NS" delete pod codewire-mesh-retire-legacy-auth --ignore-not-found --wait=true
-  kubectl -n "$NS" run codewire-mesh-retire-legacy-auth \
-    --image=codewire-mesh:e2e --image-pull-policy=Never --restart=Never \
-    --env=DATABASE_URL=postgres://codewire:codewire@postgres:5432/codewire_mesh?sslmode=disable \
-    --command -- codewire-mesh prelaunch-retire-legacy-auth
-  if ! kubectl -n "$NS" wait pod/codewire-mesh-retire-legacy-auth \
-      --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s; then
-    kubectl -n "$NS" logs pod/codewire-mesh-retire-legacy-auth || true
-    return 1
-  fi
-  kubectl -n "$NS" logs pod/codewire-mesh-retire-legacy-auth
-
-  local prelaunch_state
-  prelaunch_state="$(kubectl -n "$NS" exec deploy/postgres -- \
-    psql -U codewire -d codewire_mesh -At -v ON_ERROR_STOP=1 -c \
-      "SELECT (SELECT count(*) FROM _sqlx_migrations), (SELECT count(*) FROM users) + (SELECT count(*) FROM sessions) + (SELECT count(*) FROM oauth_state) + (SELECT count(*) FROM oidc_users) + (SELECT count(*) FROM oidc_sessions) + (SELECT count(*) FROM oidc_device_flows) + (SELECT count(*) FROM device_codes) + (SELECT count(*) FROM github_app), (SELECT count(*) FROM nodes WHERE token <> '')")"
-  if [[ "$prelaunch_state" != "5|0|0" ]]; then
-    echo "::error::Mesh prelaunch retirement did not leave exact ledger/count state: ${prelaunch_state}"
-    return 1
-  fi
-}
-
-verify_mesh_legacy_auth_retirement_transition() {
-  local final_state
-  final_state="$(kubectl -n "$NS" exec deploy/postgres -- \
-    psql -U codewire -d codewire_mesh -At -v ON_ERROR_STOP=1 -c \
-      "SELECT (SELECT count(*) FROM _sqlx_migrations WHERE success = true), (SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN ('users','sessions','oauth_state','oidc_users','oidc_sessions','oidc_device_flows','device_codes','github_app')), (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'nodes' AND column_name = 'token'), (SELECT count(*) FROM networks WHERE network_id = 'kind-retained'), (SELECT count(*) FROM nodes WHERE network_id = 'kind-retained' AND name = 'kind-node-retained'), (SELECT count(*) FROM invites WHERE id = 'kind-invite-retained'), (SELECT count(*) FROM kv WHERE network_id = 'kind-retained' AND namespace = 'product.settings' AND key = 'retained' AND value = '\x0102')")"
-  if [[ "$final_state" != "6|0|0|1|1|1|1" ]]; then
-    echo "::error::Mesh retirement-to-healthy transition lost schema or product sentinels: ${final_state}"
-    return 1
-  fi
-}
 
 deploy_overlay() {
   local ingress_manifest kind_overlay
@@ -1205,7 +1107,6 @@ deploy_overlay() {
     return 1
   fi
   kubectl -n "$NS" logs job/codewire-db-migrate --all-containers=true
-  mesh_legacy_auth_retirement_transition
   local expected_migration_rows migration_rows
   expected_migration_rows="$(find "$ROOT/crates/codewire-server-core/migrations" \
     -maxdepth 1 -type f -name '*.sql' -print | wc -l | tr -d '[:space:]')"
@@ -1236,7 +1137,6 @@ deploy_overlay() {
   kubectl -n "$NS" rollout status deploy/codewire-idp --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-orchestration --timeout=300s
   kubectl -n "$NS" rollout status deploy/codewire-mesh --timeout=300s
-  verify_mesh_legacy_auth_retirement_transition
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
 }
 
@@ -1358,8 +1258,9 @@ mesh_product_connect_ownership_smoke() {
     exit 1
   fi
 
-  # The OAuth bearer belongs to the same ordinary product user and sees the
-  # same organization-owned state through the identical receiver/domain path.
+  # The OAuth bearer belongs to the same ordinary product user as the API key.
+  # Exact network membership exposes only that user's two networks; the
+  # administrator's invite network remains hidden despite the shared org.
   curl_settled -X POST \
     -H 'authorization: Bearer at_kind_connect_oidc_codewire_api' \
     -H 'content-type: application/json' \
@@ -1369,11 +1270,12 @@ mesh_product_connect_ownership_smoke() {
       --arg api_key_network "$network_id" \
       --arg session_network "$session_network_id" \
       --arg invite_network "$invite_network_id" \
-      'any(.networks[]; .id == $api_key_network and .orgId == "org_contract_1") and
+      '(.networks | length) == 2 and
+       any(.networks[]; .id == $api_key_network and .orgId == "org_contract_1") and
        any(.networks[]; .id == $session_network and .orgId == "org_contract_1") and
-       any(.networks[]; .id == $invite_network and .orgId == "org_contract_1")' \
+       (any(.networks[]; .id == $invite_network) | not)' \
       <<<"$PROBE_BODY" >/dev/null; then
-    echo "::error::Mesh Connect OAuth list did not return the exact organization-owned networks: code=$PROBE_CODE body=$PROBE_BODY"
+    echo "::error::Mesh Connect OAuth list crossed the exact network-membership boundary: code=$PROBE_CODE body=$PROBE_BODY"
     exit 1
   fi
 
@@ -1399,11 +1301,23 @@ mesh_product_connect_ownership_smoke() {
     exit 1
   fi
 
+  # Same-org administration does not bypass exact network ownership.
+  curl_settled -X POST \
+    -H 'cookie: codewire.session_token=contract-admin-session-token' \
+    -H 'content-type: application/json' \
+    -d "{\"orgId\":\"org_contract_1\",\"networkId\":\"${network_id}\",\"nodeName\":\"mesh-kind-node\"}" \
+    "${KIND_INGRESS_URL}/codewire.v1.MeshNodeService/CreateMeshNodeEnrollment"
+  if [ "$PROBE_CODE" != "403" ] || ! jq -e \
+      '.code == "permission_denied"' <<<"$PROBE_BODY" >/dev/null; then
+    echo "::error::same-org Mesh nonmember created an enrollment: code=$PROBE_CODE body=$PROBE_BODY"
+    exit 1
+  fi
+
   # Enrollment redemption is a generated, unauthenticated one-use capability
   # exchange. It returns registration metadata only and never mints or stores a
   # steady-state node bearer.
   curl_settled -X POST \
-    -H 'cookie: codewire.session_token=contract-admin-session-token' \
+    -H "authorization: Bearer ${api_key}" \
     -H 'content-type: application/json' \
     -d "{\"orgId\":\"org_contract_1\",\"networkId\":\"${network_id}\",\"nodeName\":\"mesh-kind-node\"}" \
     "${KIND_INGRESS_URL}/codewire.v1.MeshNodeService/CreateMeshNodeEnrollment"
@@ -1441,8 +1355,8 @@ mesh_product_connect_ownership_smoke() {
        .enrollment.id == $enrollment_id and
        .enrollment.orgId == "org_contract_1" and
        .enrollment.networkId == $network_id and
-       .enrollment.ownerUserId == "usr_contract_admin" and
-       .enrollment.issuedByUserId == "usr_contract_admin" and
+       .enrollment.ownerUserId == "usr_contract_user" and
+       .enrollment.issuedByUserId == "usr_contract_user" and
        (.enrollment.redeemedAt | type == "string" and length > 0) and
        ([.. | objects |
           has("nodeToken") or has("credential") or has("token") or
@@ -1510,7 +1424,7 @@ EOF
   network_auth_rows="$(kubectl -n "$NS" exec deploy/postgres -- \
     psql -U codewire -d codewire_mesh -tAc \
       "SELECT count(*) FROM kv WHERE namespace = 'mesh.networkauth'")"
-  if [ "$node_registration" != "${network_id}|mesh-kind-node|usr_contract_admin|usr_contract_admin|${enrollment_id}|https://mesh-kind-node.test/peer" ] \
+  if [ "$node_registration" != "${network_id}|mesh-kind-node|usr_contract_user|usr_contract_user|${enrollment_id}|https://mesh-kind-node.test/peer" ] \
     || [ "$legacy_relations" != "0" ] \
     || [ "$legacy_columns" != "0" ] \
     || [ "$migration_004" != "retire persistent node bearer|t" ] \
@@ -1961,13 +1875,13 @@ connect_edge_probes() {
 # `codewire.internal.v1` is the sole listener-isolation exception to the
 # public `/codewire.` fallback. Prove both sides of that boundary against the
 # rendered Kind Service: public ingress reaches the ordinary public 8084
-# not-found, while a ClusterIP Service-DNS request reaches the binding mount
-# and a direct port-forward validates the complete internal surface.
+# not-found, an authenticated ClusterIP Service-DNS request proves the binding
+# success path, and a direct port-forward proves anonymous and cross-capability
+# requests fail closed on the internal listener.
 internal_connect_listener_probes() {
   log "running internal Connect listener isolation probes"
   local public_base="${KIND_INGRESS_URL}/codewire.internal.v1.GatewayBindingService"
-  curl_settled -X POST -H 'content-type: application/json' \
-    -d "{\"pod\":\"kind-internal-unbound\",\"namespace\":\"${NS}\"}" \
+  curl_settled -X POST -H 'content-type: application/json' -d '{}' \
     "${public_base}/IssueGatewayBinding"
   if [ "$PROBE_CODE" != "404" ]; then
     echo "::error::public internal Connect path returned ${PROBE_CODE}, want public-listener 404: ${PROBE_BODY}"
@@ -1995,6 +1909,7 @@ internal_connect_listener_probes() {
     # merely returning a syntactically plausible token from its own process.
     local bound_environment_id=00000000-0000-4000-8000-000000000501
     local bound_pod="sandbox-${bound_environment_id}"
+    local bound_gateway="cw-binding-gateway-${bound_environment_id}"
     local bound_pod_ip
     local bound_port_id=port_internal_connect_kind
     local port_forward_log port_forward_pid local_port i sidecar_token in_cluster_probe
@@ -2017,6 +1932,8 @@ SQL
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
       kubectl -n "$NS" delete pod "$bound_pod" \
         --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
+      kubectl -n "$NS" delete pod "$bound_gateway" \
+        --ignore-not-found=true --wait=true >/dev/null 2>&1 || true
       rm -f "$port_forward_log"
     }
     trap cleanup_internal_connect_fixture EXIT
@@ -2025,7 +1942,16 @@ SQL
       --ignore-not-found=true --wait=true >/dev/null
     kubectl -n "$NS" delete pod "$bound_pod" \
       --ignore-not-found=true --wait=true >/dev/null
+    kubectl -n "$NS" delete pod "$bound_gateway" \
+      --ignore-not-found=true --wait=true >/dev/null
     kubectl_apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: codewire-sandbox
+  namespace: ${NS}
+automountServiceAccountToken: false
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -2042,6 +1968,41 @@ spec:
       imagePullPolicy: Never
       command: ["sleep", "600"]
 ---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${bound_gateway}
+  namespace: ${NS}
+  labels:
+    codewire.sh/environment-id: ${bound_environment_id}
+    codewire.sh/type: gateway
+spec:
+  serviceAccountName: codewire-sandbox
+  automountServiceAccountToken: false
+  restartPolicy: Always
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  containers:
+    - name: gateway-binding-caller
+      image: ${KIND_POSTGRES_LOCAL_IMAGE}
+      imagePullPolicy: Never
+      command: ["sleep", "600"]
+      volumeMounts:
+        - name: gateway-binding-identity
+          mountPath: /var/run/secrets/codewire/gateway-binding
+          readOnly: true
+  volumes:
+    - name: gateway-binding-identity
+      projected:
+        defaultMode: 288
+        sources:
+          - serviceAccountToken:
+              audience: codewire.internal.gateway-binding.v1
+              expirationSeconds: 600
+              path: token
+---
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
@@ -2052,6 +2013,8 @@ spec:
     name: kind-internal-ready-fixture
 EOF
     kubectl -n "$NS" wait "pod/${bound_pod}" \
+      --for=condition=Ready --timeout=60s
+    kubectl -n "$NS" wait "pod/${bound_gateway}" \
       --for=condition=Ready --timeout=60s
     kubectl -n "$NS" patch sandboxclaim "$bound_pod" \
       --subresource=status --type=merge \
@@ -2076,16 +2039,19 @@ VALUES ('$bound_environment_id', '$NS', '$bound_pod', '$bound_pod_ip');
 INSERT INTO environment_ports (id, environment_id, port, label, access)
 VALUES ('$bound_port_id', '$bound_environment_id', 3000, 'internal-connect-kind', 'creator');
 SQL
-    # This originates in the already-deployed Postgres pod and addresses the
-    # ClusterIP by its Service DNS name. A host port-forward alone cannot prove
-    # kube-proxy's 8085 Service leg or the in-cluster caller boundary. Use the
-    # bound fixture because BusyBox wget intentionally discards non-2xx bodies,
-    # making an unbound typed-not_found response impossible to inspect here.
-    in_cluster_probe="$(kubectl -n "$NS" exec deploy/postgres -- \
-      wget -q -O - \
+    # This originates in a gateway-labeled Pod and addresses the ClusterIP by
+    # Service DNS. The caller rereads its exact-audience projected token, and
+    # sends no Pod coordinates; orchestration derives name, namespace, and UID
+    # exclusively from TokenReview before resolving the environment label.
+    # shellcheck disable=SC2016 # The shell inside the fixture Pod expands the token.
+    in_cluster_probe="$(kubectl -n "$NS" exec "$bound_gateway" -- sh -ec '
+      token="$(cat /var/run/secrets/codewire/gateway-binding/token)"
+      exec wget -q -O - \
         --header="content-type: application/json" \
-        --post-data="{\"pod\":\"${bound_pod}\",\"namespace\":\"${NS}\"}" \
-        http://codewire-orchestration:8085/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding)"
+        --header="authorization: Bearer ${token}" \
+        --post-data="{}" \
+        http://codewire-orchestration:8085/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding
+    ')"
     if ! jq -e --arg environment_id "$bound_environment_id" --arg pod_ip "$bound_pod_ip" \
       '(.environmentId // .environment_id) == $environment_id
        and (.workspacePodIp // .workspace_pod_ip) == $pod_ip
@@ -2118,11 +2084,10 @@ SQL
       exit 1
     fi
 
-    curl_settled -X POST -H 'content-type: application/json' \
-      -d "{\"pod\":\"kind-internal-unbound\",\"namespace\":\"${NS}\"}" \
+    curl_settled -X POST -H 'content-type: application/json' -d '{}' \
       "http://127.0.0.1:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
-    if [ "$PROBE_CODE" != "404" ] || ! echo "$PROBE_BODY" | grep -q '"code":"not_found"'; then
-      echo "::error::ClusterIP internal binding command did not reach its 8085 mount: code=$PROBE_CODE body=$PROBE_BODY"
+    if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
+      echo "::error::anonymous internal binding command was not rejected: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1
     fi
     if ! grep -qi '^x-codewire-service: codewire-orchestration-internal' "$PROBE_HEADERS"; then
@@ -2131,23 +2096,18 @@ SQL
       exit 1
     fi
 
+    sidecar_token="$(jq -er '.sidecarToken // .sidecar_token // empty' <<<"$in_cluster_probe")"
+
+    # A freshly issued coordinate-scoped Codewire HMAC bearer must not be
+    # accepted as a gateway bootstrap identity. There is no HMAC or anonymous
+    # fallback around the exact-audience Kubernetes TokenReview boundary.
     curl_settled -X POST -H 'content-type: application/json' \
-      -d "{\"pod\":\"${bound_pod}\",\"namespace\":\"${NS}\"}" \
+      -H "authorization: Bearer ${sidecar_token}" -d '{}' \
       "http://127.0.0.1:${local_port}/codewire.internal.v1.GatewayBindingService/IssueGatewayBinding"
-    if [ "$PROBE_CODE" != "200" ]; then
-      echo "::error::ClusterIP internal binding command did not issue a bound response: code=$PROBE_CODE body=$PROBE_BODY"
+    if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
+      echo "::error::coordinate capability crossed into gateway binding: code=$PROBE_CODE body=$PROBE_BODY"
       exit 1
     fi
-    if ! jq -e --arg environment_id "$bound_environment_id" --arg pod_ip "$bound_pod_ip" \
-      '(.environmentId // .environment_id) == $environment_id
-       and (.workspacePodIp // .workspace_pod_ip) == $pod_ip
-       and ((.appPorts // .app_ports // []) | index(3000)) != null
-       and ((.sidecarToken // .sidecar_token // "") | length > 0)' \
-      <<<"$PROBE_BODY" >/dev/null; then
-      echo "::error::ClusterIP internal binding response omitted a required bound field: $PROBE_BODY"
-      exit 1
-    fi
-    sidecar_token="$(jq -er '.sidecarToken // .sidecar_token // empty' <<<"$PROBE_BODY")"
 
     # The one Rust client core opens a real generated Coordinate stream. Its
     # successful setup proves the just-issued HMAC token crossed the service
@@ -2169,17 +2129,6 @@ SQL
       sleep 2
     done
 
-    curl_settled -X POST -H 'content-type: application/json' -d '{}' \
-      "http://127.0.0.1:${local_port}/codewire.internal.v1.EnvironmentCredentialService/IssueGitHubCredentials"
-    if [ "$PROBE_CODE" != "401" ] || ! echo "$PROBE_BODY" | grep -q '"code":"unauthenticated"'; then
-      echo "::error::ClusterIP environment credentials command did not enforce environment Bearer auth: code=$PROBE_CODE body=$PROBE_BODY"
-      exit 1
-    fi
-    if ! grep -qi '^x-codewire-service: codewire-orchestration-internal' "$PROBE_HEADERS"; then
-      echo "::error::ClusterIP environment credentials command did not reach the internal listener"
-      cat "$PROBE_HEADERS"
-      exit 1
-    fi
   )
 
   log "internal Connect listener isolation probes OK"
@@ -2402,12 +2351,13 @@ EOF
 INSERT INTO environments (
   id, org_id, created_by, type, name, state, desired_state, preset_id,
   cpu_millicores, memory_mb, disk_gb,
-  environment_operation_generation, state_changed_at
+  environment_operation_generation, state_changed_at, project_spec
 )
 VALUES (
   '$environment_id', 'org_contract_1', 'usr_contract_user', 'sandbox',
   'terminal-ticket-smoke', 'running', 'started', 'preset_contract_1',
-  2000, 4096, 10, 1, NOW()
+  2000, 4096, 10, 1, NOW(),
+  '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 );
 
 INSERT INTO sandbox_environment_backend (
@@ -2456,7 +2406,8 @@ file_service_smoke() (
   local environment_id=env-crd-smoke
   local claim_name=sandbox-env-crd-smoke
   local daemon_pod=crd-smoke-workspace-daemon
-  local daemon_token original_replicas pod_ip pod_uid ready
+  local gateway_token daemon_token original_replicas pod_ip pod_uid ready
+  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
   daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
 
   original_replicas="$(
@@ -2527,12 +2478,13 @@ EOF
 INSERT INTO environments (
   id, org_id, created_by, type, name, state, desired_state, preset_id,
   cpu_millicores, memory_mb, disk_gb,
-  environment_operation_generation, state_changed_at
+  environment_operation_generation, state_changed_at, project_spec
 )
 VALUES (
   '$environment_id', 'org_contract_1', 'usr_contract_user', 'sandbox',
   'file-service-daemon', 'running', 'started', 'preset_contract_1',
-  2000, 4096, 10, 1, NOW()
+  2000, 4096, 10, 1, NOW(),
+  '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 )
 ON CONFLICT (id) DO UPDATE
 SET state = 'running', desired_state = 'started', error_reason = NULL,
@@ -2591,7 +2543,8 @@ SQL
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
-    CRD_SMOKE_GATEWAY_TOKEN="$daemon_token" \
+    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" \
+    CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=cleanup \
     CRD_SMOKE_LOCAL_GATEWAY=1 \
     "$CARGO_CI_DIR/crd-smoke"
@@ -2801,7 +2754,7 @@ environment_resize_smoke() (
   local environment_id="env-resize-kind-${RANDOM}"
   local request_id="kind-resize-${RANDOM}-${RANDOM}"
   local template_name="resize-template-${environment_id}"
-  local warm_pool_name="resize-pool-${environment_id}"
+  local shadow_pool_name="shadow-pool-resize-template-${environment_id}"
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
   local daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
@@ -2818,7 +2771,7 @@ DELETE FROM environments WHERE id = '$environment_id';
 SQL
     kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
       --ignore-not-found=true --wait=false >/dev/null
-    kubectl -n "$SANDBOX_NS" delete sandboxwarmpool "$warm_pool_name" \
+    kubectl -n "$SANDBOX_NS" delete sandboxwarmpool "$shadow_pool_name" \
       --ignore-not-found=true --wait=false >/dev/null
     kubectl -n "$SANDBOX_NS" delete sandboxtemplate "$template_name" \
       --ignore-not-found=true --wait=false >/dev/null
@@ -2860,7 +2813,7 @@ spec:
         - name: workspace
           image: codewire-gateway:e2e
           imagePullPolicy: Never
-          command: ["/usr/local/bin/cw", "daemon"]
+          command: ["/usr/local/bin/cw", "__hosted-daemon"]
           env:
             - name: CODEWIRE_WORKSPACE_SHIM_ADDR
               value: 0.0.0.0:7777
@@ -2904,10 +2857,13 @@ spec:
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:
-  name: ${warm_pool_name}
+  name: ${shadow_pool_name}
   namespace: ${SANDBOX_NS}
+  labels:
+    codewire.sh/environment-id: ${environment_id}
+    codewire.sh/type: sandbox-claim-shadow
 spec:
-  replicas: 1
+  replicas: 0
   sandboxTemplateRef:
     name: ${template_name}
 ---
@@ -2926,8 +2882,6 @@ spec:
       targetPort: 7777
 EOF
 
-  kubectl -n "$SANDBOX_NS" wait "sandboxwarmpool/${warm_pool_name}" \
-    --for=jsonpath='{.status.readyReplicas}'=1 --timeout=180s
   kubectl_apply -f - <<EOF
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
@@ -2940,7 +2894,7 @@ metadata:
     codewire.sh/type: sandbox
 spec:
   warmPoolRef:
-    name: ${warm_pool_name}
+    name: ${shadow_pool_name}
   additionalPodMetadata:
     labels:
       codewire.sh/environment-id: ${environment_id}
@@ -2982,12 +2936,13 @@ EOF
 INSERT INTO environments (
   id, org_id, created_by, type, name, state, desired_state, preset_id,
   cpu_millicores, memory_mb, disk_gb,
-  state_changed_at
+  state_changed_at, project_spec
 )
 VALUES (
   '$environment_id', 'org_contract_1', 'usr_contract_admin', 'sandbox',
   'kind-resize-smoke', 'running', 'started', 'preset_contract_1',
-  250, 256, 1, NOW()
+  250, 256, 1, NOW(),
+  '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 );
 INSERT INTO sandbox_environment_backend (
   environment_id, namespace, sandbox_claim_name, sandbox_claim_uid, pod_name, pod_ip
@@ -3183,9 +3138,11 @@ temporal_workflow_smoke() {
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
 INSERT INTO environments (id, org_id, created_by, type, state, desired_state,
-                          cpu_millicores, memory_mb, disk_gb, preset_id)
+                          cpu_millicores, memory_mb, disk_gb, preset_id,
+                          project_spec)
 VALUES ('$env_id', 'org_contract_1', 'usr_contract_admin', 'sandbox', 'pending', 'started',
-        2000, 4096, 10, 'preset_contract_1');
+        2000, 4096, 10, 'preset_contract_1',
+        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 SQL
   if ! DATABASE_URL="$KIND_DATABASE_URL" \
     SMOKE_ENV_ID="$env_id" "$CARGO_CI_DIR/temporal-smoke"; then
@@ -3398,16 +3355,18 @@ gateway_host_key_restart_smoke() {
   local daemon_pod=crd-smoke-workspace-daemon
   local gateway_deploy=cw-gateway-env-crd-smoke
   local host_key_secret=cw-gateway-host-key-env-crd-smoke
-  local daemon_token
+  local gateway_token daemon_token
   local before_fingerprint after_fingerprint before_uid after_uid
 
   log "running CRD round-trip and gateway host-key restart smoke"
+  gateway_token="$(gateway_auth_token_for_environment env-crd-smoke)"
   daemon_token="$(daemon_auth_token_for_environment env-crd-smoke)"
   GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")"
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
     CRD_SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
-    CRD_SMOKE_GATEWAY_TOKEN="$daemon_token" \
+    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" \
+    CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=setup \
     CRD_SMOKE_LOCAL_GATEWAY=1 \
     "$CARGO_CI_DIR/crd-smoke"
@@ -3428,7 +3387,7 @@ spec:
     - name: codewire-daemon
       image: codewire-gateway:e2e
       imagePullPolicy: Never
-      command: ["/usr/local/bin/cw", "daemon"]
+      command: ["/usr/local/bin/cw", "__hosted-daemon"]
       env:
         - name: CODEWIRE_WORKSPACE_SHIM_ADDR
           value: 0.0.0.0:7777
@@ -3503,7 +3462,8 @@ billing_contract_through_ingress() {
 
 rust_reconciler_ttl_e2e() {
   log "running Rust reconciler TTL Kubernetes e2e"
-  DATABASE_URL="$KIND_DATABASE_URL" \
+  KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" \
+    DATABASE_URL="$KIND_DATABASE_URL" \
     SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
     SMOKE_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     SMOKE_SESSION_TOKEN=contract-admin-session-token \

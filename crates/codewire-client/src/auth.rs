@@ -255,7 +255,7 @@ impl CredentialStore for KeyringCredentialStore {
 /// RFC 8628 device-authorization response. The CLI deliberately presents the
 /// base verification URI and user code, so the existing browser page remains
 /// the sole password/2FA/passkey owner during dual serving.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 pub struct OAuthDeviceAuthorization {
     pub device_code: String,
     pub user_code: String,
@@ -263,6 +263,20 @@ pub struct OAuthDeviceAuthorization {
     pub verification_uri_complete: String,
     pub expires_in: u64,
     pub interval: u64,
+}
+
+impl fmt::Debug for OAuthDeviceAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthDeviceAuthorization")
+            .field("device_code", &"[REDACTED]")
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .field("verification_uri_complete", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
+    }
 }
 
 /// UserInfo claims used by `cw whoami`.
@@ -1532,6 +1546,29 @@ mod tests {
         assert_eq!(format!("{token:?}"), "BearerToken([REDACTED])");
         assert!(!format!("{token:?}").contains("secret-value"));
         assert_eq!(token.expose_secret(), "secret-value");
+    }
+
+    #[test]
+    fn device_authorization_debug_preserves_user_instructions_but_redacts_capabilities() {
+        const DEVICE_MARKER: &str = "synthetic-device-code-capability";
+        const COMPLETE_URI_MARKER: &str = "synthetic-complete-uri-capability";
+        let authorization = OAuthDeviceAuthorization {
+            device_code: DEVICE_MARKER.to_owned(),
+            user_code: "BCDF-GHJK".to_owned(),
+            verification_uri: "https://identity.example.test/device".to_owned(),
+            verification_uri_complete: format!(
+                "https://identity.example.test/device?capability={COMPLETE_URI_MARKER}"
+            ),
+            expires_in: 600,
+            interval: 5,
+        };
+
+        let debug = format!("{authorization:?}");
+        assert!(debug.contains("BCDF-GHJK"));
+        assert!(debug.contains("https://identity.example.test/device"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(DEVICE_MARKER));
+        assert!(!debug.contains(COMPLETE_URI_MARKER));
     }
 
     #[tokio::test]

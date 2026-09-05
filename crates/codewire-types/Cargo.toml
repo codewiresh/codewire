@@ -5,24 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license = "MIT"
 authors.workspace = true
-description = "Shared types and pure functions for Codewire — zero tokio, WASM-safe"
+description = "Local status, diff, and chat display primitives for the Codewire desktop"
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-
-# UniFFI (optional — only for mobile bindings)
-uniffi = { workspace = true, optional = true }
-
-# WASM (optional — Tsify derives for TypeScript type generation)
-tsify-next = { version = "0.5", features = ["js"], optional = true }
-wasm-bindgen = { version = "0.2", optional = true }
-
-[build-dependencies]
-uniffi = { workspace = true, features = ["build"], optional = true }
-
-[features]
-default = []
-uniffi = ["dep:uniffi"]
-wasm = ["dep:tsify-next", "dep:wasm-bindgen"]

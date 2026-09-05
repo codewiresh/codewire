@@ -17,19 +17,23 @@ service MeshAuthorizationService {
 }
 
 enum MeshAuthorizationPrincipalKind {
+  reserved 2;
+  reserved "MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT";
+
   MESH_AUTHORIZATION_PRINCIPAL_KIND_UNSPECIFIED = 0;
   MESH_AUTHORIZATION_PRINCIPAL_KIND_USER = 1;
-  MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT = 2;
 }
 
 // MeshAuthorizationCredentialKind classifies the existing caller credential;
 // it does not contain or mint secret material.
 enum MeshAuthorizationCredentialKind {
+  reserved 4;
+  reserved "MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN";
+
   MESH_AUTHORIZATION_CREDENTIAL_KIND_UNSPECIFIED = 0;
   MESH_AUTHORIZATION_CREDENTIAL_KIND_SESSION_COOKIE = 1;
   MESH_AUTHORIZATION_CREDENTIAL_KIND_OAUTH_BEARER = 2;
   MESH_AUTHORIZATION_CREDENTIAL_KIND_API_KEY = 3;
-  MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN = 4;
 }
 
 message ResolveMeshAuthorizationRequest {

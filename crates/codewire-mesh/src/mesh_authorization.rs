@@ -21,7 +21,6 @@ use codewire_server_core::auth::{SESSION_COOKIE_NAME, hash_api_key};
 use codewire_server_core::internal_hmac::issue_internal_hmac_token;
 use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
 use connectrpc::{ConnectError, ErrorCode};
-use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
@@ -166,10 +165,8 @@ impl MeshAuthorizationAdapter {
     }
 }
 
-/// Network management is a product surface. A successfully authenticated
-/// environment identity is valid for the runtime paths that will consume it
-/// later, but it must not acquire the ability to create or enumerate an
-/// organization’s networks through this transitional product adapter.
+/// Network management is a product surface and accepts only the three
+/// user-facing credential flavors.
 pub fn is_network_product_principal(context: &MeshAuthorizationContext) -> bool {
     context.principal_kind == MeshAuthorizationPrincipalKind::User
         && (context.credential_kind == MeshAuthorizationCredentialKind::SessionCookie
@@ -293,8 +290,6 @@ fn request_options(
 pub struct LocalMeshAuthorization {
     organization_id: String,
     api_key_hash: String,
-    environment_id: String,
-    environment_token_hash: String,
 }
 
 impl fmt::Debug for LocalMeshAuthorization {
@@ -303,8 +298,6 @@ impl fmt::Debug for LocalMeshAuthorization {
             .debug_struct("LocalMeshAuthorization")
             .field("organization_id", &self.organization_id)
             .field("api_key_hash", &"[redacted]")
-            .field("environment_id", &self.environment_id)
-            .field("environment_token_hash", &"[redacted]")
             .finish()
     }
 }
@@ -322,8 +315,6 @@ impl LocalMeshAuthorization {
         Self {
             organization_id: config.organization_id.clone(),
             api_key_hash: config.api_key_hash.clone(),
-            environment_id: config.environment_id.clone(),
-            environment_token_hash: config.environment_token_hash.clone(),
         }
     }
 
@@ -344,7 +335,7 @@ impl LocalMeshAuthorization {
             .ok_or(LocalMeshAuthorizationError::Unauthorized)?;
         if hashes_equal(&hash_api_key(token), &self.api_key_hash) {
             return Ok(MeshAuthorizationContext {
-                principal_id: format!("local-machine:{}", self.environment_id),
+                principal_id: format!("local-owner:{}", self.organization_id),
                 principal_kind: MeshAuthorizationPrincipalKind::User.into(),
                 org_id: self.organization_id.clone(),
                 role: OrgRole::Owner.into(),
@@ -352,32 +343,8 @@ impl LocalMeshAuthorization {
                 ..Default::default()
             });
         }
-        if hashes_equal(&hash_opaque_value(token), &self.environment_token_hash) {
-            return Ok(MeshAuthorizationContext {
-                principal_id: self.environment_id.clone(),
-                principal_kind: MeshAuthorizationPrincipalKind::Environment.into(),
-                org_id: self.organization_id.clone(),
-                role: OrgRole::Member.into(),
-                credential_kind: MeshAuthorizationCredentialKind::EnvironmentToken.into(),
-                ..Default::default()
-            });
-        }
         Err(LocalMeshAuthorizationError::Unauthorized)
     }
-}
-
-pub fn hash_local_environment_token(value: &str) -> String {
-    hash_opaque_value(value)
-}
-
-fn hash_opaque_value(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 fn hashes_equal(left: &str, right: &str) -> bool {
@@ -435,12 +402,9 @@ mod tests {
     #[test]
     fn local_authorization_is_exact_org_and_redacted() {
         let api_key = "cw_local_key";
-        let environment_token = "local-environment-token";
         let local = LocalMeshAuthorization::from_config(&LocalMeshAuthorizationConfig {
             organization_id: "local-org".to_string(),
             api_key_hash: hash_api_key(api_key),
-            environment_id: "local-environment".to_string(),
-            environment_token_hash: hash_local_environment_token(environment_token),
         });
         let context = local
             .resolve(
@@ -452,6 +416,7 @@ mod tests {
             context.credential_kind,
             MeshAuthorizationCredentialKind::ApiKey
         );
+        assert_eq!(context.principal_id, "local-owner:local-org");
         assert_eq!(
             local
                 .resolve(
@@ -461,17 +426,28 @@ mod tests {
                 .unwrap_err(),
             LocalMeshAuthorizationError::Forbidden
         );
-        assert!(!format!("{local:?}").contains(environment_token));
+        assert_eq!(
+            local
+                .resolve(
+                    "local-org",
+                    ForwardedMeshCredential::Authorization(
+                        "Bearer retired-environment-bearer".to_owned(),
+                    ),
+                )
+                .unwrap_err(),
+            LocalMeshAuthorizationError::Unauthorized
+        );
+        assert!(!format!("{local:?}").contains(api_key));
     }
 
     #[test]
-    fn product_networks_exclude_environment_principals() {
-        let environment = MeshAuthorizationContext {
-            principal_kind: MeshAuthorizationPrincipalKind::Environment.into(),
-            credential_kind: MeshAuthorizationCredentialKind::EnvironmentToken.into(),
+    fn product_networks_require_a_user_product_credential() {
+        let unspecified = MeshAuthorizationContext {
+            principal_kind: MeshAuthorizationPrincipalKind::Unspecified.into(),
+            credential_kind: MeshAuthorizationCredentialKind::Unspecified.into(),
             ..Default::default()
         };
-        assert!(!is_network_product_principal(&environment));
+        assert!(!is_network_product_principal(&unspecified));
 
         let api_key = MeshAuthorizationContext {
             principal_kind: MeshAuthorizationPrincipalKind::User.into(),

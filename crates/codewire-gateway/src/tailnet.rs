@@ -766,6 +766,7 @@ fn derp_target_from_config(config: &GatewayConfig, tailnet: &TailnetConfig) -> R
 mod tests {
     use super::*;
     use crate::config::DockerProxyConfig;
+    use codewire_gateway_proto::DaemonAuthToken;
     use uuid::Uuid;
 
     fn gateway_config(
@@ -784,7 +785,7 @@ mod tests {
             api_url: api_url.map(str::to_string),
             binding_url: None,
             coordinator_url: Some(coordinator_url.into()),
-            daemon_auth_token: None,
+            daemon_auth_token: DaemonAuthToken::new("gateway-tailnet-test-token").unwrap(),
             derp_url: derp_url.map(str::to_string),
             stun: None,
             stun_servers: Vec::new(),

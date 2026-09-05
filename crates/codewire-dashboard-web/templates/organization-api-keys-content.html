@@ -1,4 +1,4 @@
-<section id="organization-content" class="cw-org-content" aria-live="polite">
+<section id="organization-content" class="cw-org-content" aria-live="polite"{% if page.has_one_time_key %} hx-history="false"{% endif %}>
   {% if !page.message.is_empty() %}
   <div class="cw-alert cw-alert--success" role="status">{{ page.message }}</div>
   {% endif %}

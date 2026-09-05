@@ -47,7 +47,7 @@ message CreateMeshInviteRequest {
 message CreateMeshInviteResponse {
   MeshInvite invite = 1;
   // Secret one-use capability returned exactly once. Clients must not log it.
-  string invite_code = 2;
+  string invite_code = 2 [debug_redact = true];
 }
 
 message DeleteMeshInviteRequest {

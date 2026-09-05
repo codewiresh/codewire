@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -7,7 +6,7 @@ use codewire_client::{self as rpc, ClientConfig, CodewireClient, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::CLI_VERSION;
-use crate::config::ResolvedPlatformConfig;
+use crate::config::{ResolvedPlatformConfig, normalize_server_url};
 use crate::environment_client::display_client_error;
 
 const ORGANIZATION_DELETION_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -21,6 +20,7 @@ const ORGANIZATION_DELETION_POLL_WINDOW: Duration = Duration::from_secs(300);
 #[derive(Clone)]
 pub struct OrganizationClient {
     inner: CodewireClient,
+    public_origin: String,
 }
 
 impl OrganizationClient {
@@ -29,6 +29,7 @@ impl OrganizationClient {
             .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?;
         Ok(Self {
             inner: CodewireClient::with_token_provider(client_config, config.token_provider()?)?,
+            public_origin: normalize_server_url(&config.server_url),
         })
     }
 
@@ -180,7 +181,7 @@ impl OrganizationClient {
         &self,
         org_id: &str,
         request: &CreateInvitationRequest,
-    ) -> anyhow::Result<OrgInvitation> {
+    ) -> anyhow::Result<CreatedInvitation> {
         let response = self
             .inner
             .create_invitation(rpc::CreateInvitationRequest {
@@ -191,11 +192,13 @@ impl OrganizationClient {
             })
             .await
             .map_err(display_client_error)?;
-        response
+        let invitation = response
             .invitation
             .into_option()
             .map(legacy_invitation)
-            .ok_or_else(|| anyhow::anyhow!("CreateInvitation returned no invitation"))
+            .ok_or_else(|| anyhow::anyhow!("CreateInvitation returned no invitation"))?;
+        let url = invitation_url(&self.public_origin, &response.token)?;
+        Ok(CreatedInvitation { invitation, url })
     }
 
     pub async fn list_presets(&self, org_id: &str) -> anyhow::Result<Vec<Preset>> {
@@ -207,14 +210,17 @@ impl OrganizationClient {
             })
             .await
             .map_err(display_client_error)?;
-        response.presets.into_iter().map(legacy_preset).collect()
+        response
+            .presets
+            .into_iter()
+            .map(preset_from_proto)
+            .collect()
     }
 
     pub async fn create_preset(
         &self,
         org_id: &str,
         request: &CreatePresetRequest,
-        secret_project_id: Option<String>,
     ) -> anyhow::Result<Preset> {
         let response = self
             .inner
@@ -223,34 +229,11 @@ impl OrganizationClient {
                 name: request.name.clone(),
                 slug: request.slug.clone(),
                 description: (!request.description.is_empty()).then(|| request.description.clone()),
-                default_cpu_millicores: request.default_cpu_millicores,
-                default_memory_mb: request.default_memory_mb,
-                default_disk_gb: request.default_disk_gb,
                 default_ttl_seconds: request.default_ttl_seconds,
-                image: request.image.clone(),
-                install_command: request.install_command.clone(),
-                startup_script: request.startup_script.clone(),
-                env_vars: request.env_vars.clone().into_iter().collect(),
-                agents: request
-                    .agents
-                    .iter()
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .collect::<Result<_, _>>()
-                    .context("decode preset agents")?,
-                install_agents: request.install_agents,
-                agent: request.agent.clone(),
-                agent_env: request.agent_env.clone().into_iter().collect(),
-                app_ports: request
-                    .app_ports
-                    .iter()
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .collect::<Result<_, _>>()
-                    .context("decode preset app ports")?,
-                include_org_secrets: request.include_org_secrets,
-                include_user_secrets: request.include_user_secrets,
-                secret_project_id,
+                project_spec: Some(codewire_project_proto::to_proto(
+                    request.project_spec.clone(),
+                ))
+                .into(),
                 ..Default::default()
             })
             .await
@@ -258,7 +241,7 @@ impl OrganizationClient {
         response
             .preset
             .into_option()
-            .map(legacy_preset)
+            .map(preset_from_proto)
             .transpose()?
             .ok_or_else(|| anyhow::anyhow!("CreatePreset returned no preset"))
     }
@@ -355,14 +338,29 @@ pub struct OrgInvitation {
     pub invited_by: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inviter_name: Option<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub token: String,
     pub status: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub expires_at: String,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_at: Option<String>,
+}
+
+/// Invitation metadata plus the one-time URL returned only by create.
+/// List/read invitation models never carry this capability.
+pub struct CreatedInvitation {
+    pub invitation: OrgInvitation,
+    pub url: String,
+}
+
+impl std::fmt::Debug for CreatedInvitation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreatedInvitation")
+            .field("invitation", &self.invitation)
+            .field("url", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
@@ -388,17 +386,9 @@ pub struct Preset {
     pub build_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_error: Option<String>,
-    pub default_cpu_millicores: i32,
-    pub default_memory_mb: i32,
-    pub default_disk_gb: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_ttl_seconds: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_setup_config: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret_project_id: Option<String>,
+    pub project_spec: codewire_project::ProjectSpec,
     pub created_at: String,
 }
 
@@ -410,37 +400,8 @@ pub struct CreatePresetRequest {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_cpu_millicores: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_memory_mb: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_disk_gb: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_ttl_seconds: Option<i32>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub image: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub install_command: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub startup_script: String,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub env_vars: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub install_agents: Option<bool>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub agent: String,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_env: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub app_ports: Vec<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_org_secrets: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_user_secrets: Option<bool>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub secret_project: String,
+    pub project_spec: codewire_project::ProjectSpec,
 }
 
 fn legacy_org_with_role(value: rpc::OrganizationMembership) -> anyhow::Result<OrgWithRole> {
@@ -491,7 +452,6 @@ fn legacy_invitation(value: rpc::OrgInvitation) -> OrgInvitation {
         role: legacy_org_role(value.role.as_known()),
         invited_by: value.invited_by,
         inviter_name: value.inviter_name,
-        token: value.token,
         status: legacy_invitation_status(value.status.as_known()),
         expires_at: value
             .expires_at
@@ -507,7 +467,24 @@ fn legacy_invitation(value: rpc::OrgInvitation) -> OrgInvitation {
     }
 }
 
-pub(crate) fn legacy_preset(value: rpc::Preset) -> anyhow::Result<Preset> {
+fn invitation_url(public_origin: &str, token: &str) -> anyhow::Result<String> {
+    if token.is_empty() {
+        anyhow::bail!("CreateInvitation returned no one-time token");
+    }
+    let mut url = url::Url::parse(public_origin).context("parse public invitation origin")?;
+    url.set_path("/accept-invite");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.query_pairs_mut().append_pair("token", token);
+    Ok(url.into())
+}
+
+pub(crate) fn preset_from_proto(value: rpc::Preset) -> anyhow::Result<Preset> {
+    let project_spec = value
+        .project_spec
+        .into_option()
+        .ok_or_else(|| anyhow::anyhow!("Preset omitted project_spec"))
+        .and_then(|spec| codewire_project_proto::from_proto(spec).map_err(Into::into))?;
     Ok(Preset {
         id: value.id,
         org_id: value.org_id,
@@ -518,17 +495,8 @@ pub(crate) fn legacy_preset(value: rpc::Preset) -> anyhow::Result<Preset> {
         description: value.description,
         build_status: value.build_status,
         build_error: value.build_error,
-        default_cpu_millicores: value.default_cpu_millicores,
-        default_memory_mb: value.default_memory_mb,
-        default_disk_gb: value.default_disk_gb,
         default_ttl_seconds: value.default_ttl_seconds,
-        image: value.image,
-        default_setup_config: value
-            .default_setup_config
-            .into_option()
-            .map(serde_json::to_value)
-            .transpose()?,
-        secret_project_id: value.secret_project_id,
+        project_spec,
         created_at: value
             .created_at
             .into_option()
@@ -578,7 +546,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn organization_and_preset_adapters_preserve_cli_json_shapes() {
+    fn created_invitation_url_is_canonical_and_debug_redacted() {
+        let token = "synthetic/invitation capability?marker";
+        let url = invitation_url("https://codewire.test/api/", token).unwrap();
+        assert_eq!(
+            url,
+            "https://codewire.test/accept-invite?token=synthetic%2Finvitation+capability%3Fmarker"
+        );
+
+        let created = CreatedInvitation {
+            invitation: OrgInvitation {
+                id: "invitation-1".into(),
+                email: "member@example.test".into(),
+                ..Default::default()
+            },
+            url,
+        };
+        let diagnostic = format!("{created:?}");
+        assert!(diagnostic.contains("member@example.test"));
+        assert!(!diagnostic.contains("synthetic%2F"));
+        assert!(!diagnostic.contains("capability"));
+        assert!(diagnostic.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn organization_and_preset_adapters_preserve_cli_json_and_canonical_project_intent() {
         let organization = legacy_org_with_role(rpc::OrganizationMembership {
             organization: Some(rpc::Organization {
                 id: "org_123".into(),
@@ -617,12 +609,32 @@ mod tests {
             })
         );
 
-        let preset = legacy_preset(rpc::Preset {
+        let project_spec = codewire_project::parse_project_yaml(
+            r#"
+version: 1
+image: ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467
+repositories:
+  - source: https://example.test/org/app.git
+    destination: /workspace/app
+working_directory: /workspace/app
+install_command: cargo fetch
+startup_script: cargo test
+environment: {RUST_LOG: info}
+agents: {install: false, tools: [codex]}
+ports: [{port: 8080, label: api, access: private}]
+cpu: "2"
+memory: "8Gi"
+disk: "40Gi"
+"#,
+        )
+        .unwrap()
+        .spec;
+        let preset = preset_from_proto(rpc::Preset {
             id: "preset_123".into(),
             org_id: Some("org_123".into()),
             name: "Rust".into(),
             slug: Some("rust".into()),
-            image: Some("ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into()),
+            project_spec: Some(codewire_project_proto::to_proto(project_spec.clone())).into(),
             created_at: Some(rpc::Timestamp {
                 seconds: 1_767_225_600,
                 ..Default::default()
@@ -631,15 +643,36 @@ mod tests {
             ..Default::default()
         })
         .expect("preset");
-        let json = serde_json::to_value(preset).expect("preset JSON");
+        let json = serde_json::to_value(&preset).expect("preset JSON");
         assert_eq!(json["id"], "preset_123");
         assert_eq!(json["org_id"], "org_123");
         assert_eq!(json["slug"], "rust");
         assert_eq!(json["created_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(preset.project_spec, project_spec);
     }
 
     #[test]
-    fn organization_enum_adapters_preserve_legacy_values() {
+    fn preset_adapter_requires_canonical_project_spec_presence() {
+        let error = preset_from_proto(rpc::Preset::default()).unwrap_err();
+        assert!(error.to_string().contains("omitted project_spec"));
+
+        let request = CreatePresetRequest {
+            name: "Canonical".to_string(),
+            project_spec: codewire_project::ProjectSpec::default(),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert!(value.get("project_spec").is_some());
+        for removed in ["image", "env_vars", "agents", "agent_env"] {
+            assert!(
+                value.get(removed).is_none(),
+                "unexpected top-level {removed}"
+            );
+        }
+    }
+
+    #[test]
+    fn organization_enum_adapters_preserve_public_values() {
         assert_eq!(legacy_org_role(Some(rpc::OrgRole::Admin)), "admin");
         assert_eq!(
             legacy_invitation_status(Some(rpc::InvitationStatus::Pending)),

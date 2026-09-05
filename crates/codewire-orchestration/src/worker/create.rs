@@ -1,7 +1,6 @@
 //! The `environment.create` job — port of `runEnvironmentCreate`
 //! (handler_environment.go), `environmentlifecycle/create.go`'s
-//! NextCreateAction policy, and the template/claim opts builders in
-//! `worker/environment_sandbox.go` + `sandbox/warm_pools.go`.
+//! NextCreateAction policy, and the template/claim opts builders.
 
 use std::time::Duration;
 
@@ -10,19 +9,18 @@ use sqlx::PgPool;
 use super::activity_authority::{ActivityAuthority, await_external_mutation};
 use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::{SCOPE_COORDINATE, issue_token};
+use super::gatewayauth::issue_environment_tokens;
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
 use crate::sandbox::template::{
     DOCKER_MODE_LOCAL_DIND_DIRECT, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
-    RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, confidential_init_data, default_tolerations,
-    runtime_profile_spec, validate_managed_runtime_profile,
+    RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts, confidential_init_data, runtime_profile_spec,
+    validate_managed_runtime_profile,
 };
 use crate::sandbox::{
-    CANONICAL_WORKSPACE_RUNTIME_IMAGE, ClaimOpts, claim_name, environment_pod_selector,
-    environment_template_name, is_canonical_workspace_runtime_image, shadow_warm_pool_name,
-    warm_pool_name,
+    ClaimOpts, claim_name, environment_pod_selector, environment_template_name,
+    is_canonical_workspace_runtime_image, shadow_warm_pool_name,
 };
 
 /// Mirrors `sandbox.CanonicalWorkspaceRuntimeTemplateName`.
@@ -106,206 +104,18 @@ fn create_retry_recovery_required(state: &str) -> bool {
     state == "pending"
 }
 
-// ── Warm pool profiles (port of sandbox/warm_pools.go) ─────────────────
-
-pub const DEFAULT_FULL_CPU_MILLICORES: i32 = 1000;
-pub const DEFAULT_FULL_MEMORY_MIB: i32 = 2048;
-pub const DEFAULT_FULL_DISK_GIB: i32 = 10;
-const LEGACY_FULL_CPU_MILLICORES: i32 = 2000;
-const LEGACY_FULL_MEMORY_MIB: i32 = 4096;
-const LEGACY_FULL_DISK_GIB: i32 = 10;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WarmPoolProfile {
-    pub template_name: String,
-    pub cpu_millicores: i32,
-    pub memory_mib: i32,
-    pub disk_gib: i32,
-    pub replicas: i32,
-}
-
-/// Mirrors `CanonicalFullWarmPoolTemplateName`.
-pub fn canonical_full_warm_pool_template_name(cpu: i32, mem: i32, disk: i32) -> String {
-    if cpu == DEFAULT_FULL_CPU_MILLICORES
-        && mem == DEFAULT_FULL_MEMORY_MIB
-        && disk == DEFAULT_FULL_DISK_GIB
-    {
-        return CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME.to_string();
-    }
-    format!("{CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME}-{cpu}m-{mem}mib-{disk}gib")
-}
-
-fn default_canonical_full_warm_pool_profiles() -> Vec<WarmPoolProfile> {
-    vec![
-        WarmPoolProfile {
-            template_name: CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME.to_string(),
-            cpu_millicores: DEFAULT_FULL_CPU_MILLICORES,
-            memory_mib: DEFAULT_FULL_MEMORY_MIB,
-            disk_gib: DEFAULT_FULL_DISK_GIB,
-            replicas: 2,
-        },
-        WarmPoolProfile {
-            template_name: canonical_full_warm_pool_template_name(
-                LEGACY_FULL_CPU_MILLICORES,
-                LEGACY_FULL_MEMORY_MIB,
-                LEGACY_FULL_DISK_GIB,
-            ),
-            cpu_millicores: LEGACY_FULL_CPU_MILLICORES,
-            memory_mib: LEGACY_FULL_MEMORY_MIB,
-            disk_gib: LEGACY_FULL_DISK_GIB,
-            replicas: 2,
-        },
-    ]
-}
-
-/// Mirrors `ParseCanonicalFullWarmPoolProfiles`.
-pub fn parse_canonical_full_warm_pool_profiles(raw: &str) -> anyhow::Result<Vec<WarmPoolProfile>> {
-    if raw.trim().is_empty() {
-        return Ok(default_canonical_full_warm_pool_profiles());
-    }
-    let mut profiles = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for entry in raw.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = entry.split(':').collect();
-        if parts.len() != 4 {
-            anyhow::bail!(
-                "invalid warm profile {entry:?}: want cpuMillicores:memoryMiB:diskGiB:replicas"
-            );
-        }
-        let cpu: i32 = parts[0].parse().unwrap_or(0);
-        if cpu <= 0 {
-            anyhow::bail!("invalid cpuMillicores in warm profile {entry:?}");
-        }
-        let mem: i32 = parts[1].parse().unwrap_or(0);
-        if mem <= 0 {
-            anyhow::bail!("invalid memoryMiB in warm profile {entry:?}");
-        }
-        let disk: i32 = parts[2].parse().unwrap_or(0);
-        if disk <= 0 {
-            anyhow::bail!("invalid diskGiB in warm profile {entry:?}");
-        }
-        let replicas: i32 = parts[3].parse().unwrap_or(0);
-        if replicas <= 0 {
-            anyhow::bail!("invalid replicas in warm profile {entry:?}");
-        }
-        let template_name = canonical_full_warm_pool_template_name(cpu, mem, disk);
-        if !seen.insert(template_name.clone()) {
-            anyhow::bail!("duplicate warm profile template {template_name:?}");
-        }
-        profiles.push(WarmPoolProfile {
-            template_name,
-            cpu_millicores: cpu,
-            memory_mib: mem,
-            disk_gib: disk,
-            replicas,
-        });
-    }
-    if profiles.is_empty() {
-        anyhow::bail!("no warm profiles configured");
-    }
-    Ok(profiles)
-}
-
-/// Mirrors `MatchCanonicalFullWarmPoolProfile`.
-pub fn match_canonical_full_warm_pool_profile(
-    profiles: &[WarmPoolProfile],
-    cpu: i32,
-    mem: i32,
-    disk: i32,
-) -> Option<&WarmPoolProfile> {
-    profiles
-        .iter()
-        .find(|p| p.cpu_millicores == cpu && p.memory_mib == mem && p.disk_gib == disk)
-}
-
-/// Mirrors `warmPoolTemplateOpts`: the TemplateOpts the warm-pool path
-/// renders, derived from the worker config and a profile.
-pub fn warm_pool_template_opts(cfg: &SandboxWorkerCfg, profile: &WarmPoolProfile) -> TemplateOpts {
-    let override_selector = parse_node_selector(&cfg.node_selector);
-    let uses_runtime_transport_registry = !cfg.runtime_transport_zones_json.trim().is_empty();
-    let runtime_spec = runtime_profile_spec(
-        &cfg.runtime_profile,
-        &cfg.runtime_class,
-        &cfg.docker_mode,
-        cfg.dind_enabled,
-    );
-    TemplateOpts {
-        name: profile.template_name.clone(),
-        image: if cfg.warm_pool_workspace_image.trim().is_empty() {
-            CANONICAL_WORKSPACE_RUNTIME_IMAGE.to_string()
-        } else {
-            cfg.warm_pool_workspace_image.clone()
-        },
-        image_command: vec!["sleep".to_string(), "infinity".to_string()],
-        support_image: cfg.gateway_image.clone(),
-        dind_image: cfg.dind_image.clone(),
-        runtime_profile: runtime_spec.profile.clone(),
-        runtime_class_name: runtime_spec.runtime_class_name.clone(),
-        docker_mode: runtime_spec.docker_mode.clone(),
-        sidecar_resource_mode: runtime_spec.sidecar_resource_mode.clone(),
-        api_base_url: cfg.api_base_url.clone(),
-        coordinator_url: cfg.coordinator_url.clone(),
-        server_namespace: cfg.pod_namespace.clone(),
-        derp_host: cfg.derp_host.clone(),
-        derp_port: parse_derp_port(&cfg.derp_port),
-        stun_host: cfg.stun_host.clone(),
-        stun_port: parse_stun_port(&cfg.stun_port),
-        stun_servers: cfg.stun_servers.clone(),
-        udp_relay_allocator_url: if uses_runtime_transport_registry {
-            String::new()
-        } else {
-            cfg.udp_relay_allocator_url.clone()
-        },
-        udp_relay_allocator_token: if uses_runtime_transport_registry {
-            String::new()
-        } else {
-            cfg.udp_relay_allocator_token.clone()
-        },
-        udp_relay_bind_addrs: if uses_runtime_transport_registry {
-            String::new()
-        } else {
-            cfg.udp_relay_bind_addrs.clone()
-        },
-        udp_relay_allocator_egress_enabled: uses_runtime_transport_registry,
-        cpu_millicores: i64::from(profile.cpu_millicores),
-        memory_mib: i64::from(profile.memory_mib),
-        disk_gib: i64::from(profile.disk_gib),
-        workspace_storage_class: cfg.workspace_storage_class.clone(),
-        node_selector: resolve_node_selector(&runtime_spec.profile, override_selector),
-        tolerations: default_tolerations(&runtime_spec.profile),
-        network_policy_management: cfg.network_policy_management.clone(),
-        dind_enabled: runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT,
-        kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
-        kata_coco_init_data_enabled: cfg.kata_coco_init_data_enabled,
-        kata_coco_kbs_url: cfg.kata_coco_kbs_url.clone(),
-        kata_coco_kbs_ca_pem: cfg.kata_coco_kbs_ca_pem.clone(),
-        kata_coco_image_registry_auth_uri: cfg.kata_coco_image_registry_auth_uri.clone(),
-        kata_coco_test_resource_uri: cfg.kata_coco_test_resource_uri.clone(),
-        kata_coco_test_resource_path: cfg.kata_coco_test_resource_path.clone(),
-        ..Default::default()
-    }
-}
-
 // ── Worker sandbox config (the cfg slice the create path reads) ────────
 
-/// The subset of Go's config.Config the create handler consumes, with
-/// the same env names and defaults (config.Load).
+/// Runtime configuration consumed by the environment-create handler.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxWorkerCfg {
     pub session_secret: String,
     pub sandbox_namespace: String,
     pub gateway_image: String,
-    pub warm_pool_workspace_image: String,
     pub dind_image: String,
     pub runtime_profile: String,
-    pub runtime_class: String,
     pub docker_mode: String,
     pub allow_diagnostic_runtime: bool,
-    pub node_selector: String,
     pub workspace_storage_class: String,
     pub network_policy_management: String,
     pub dind_enabled: bool,
@@ -316,7 +126,6 @@ pub struct SandboxWorkerCfg {
     pub kata_coco_image_registry_auth_uri: String,
     pub kata_coco_test_resource_uri: String,
     pub kata_coco_test_resource_path: String,
-    pub full_warm_profiles: String,
     pub api_base_url: String,
     pub coordinator_url: String,
     pub derp_host: String,
@@ -374,18 +183,10 @@ impl SandboxWorkerCfg {
                 "SANDBOX_GATEWAY_IMAGE",
                 "ghcr.io/codewiresh/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836",
             ),
-            warm_pool_workspace_image: getenv(
-                "SANDBOX_WARM_POOL_WORKSPACE_IMAGE",
-                CANONICAL_WORKSPACE_RUNTIME_IMAGE,
-            ),
             dind_image: getenv("SANDBOX_DIND_IMAGE", ""),
             runtime_profile: std::env::var("SANDBOX_RUNTIME_PROFILE").unwrap_or_default(),
-            // SANDBOX_RUNTIME_CLASS allows explicit empty (getEnvAllowEmpty).
-            runtime_class: std::env::var("SANDBOX_RUNTIME_CLASS")
-                .unwrap_or_else(|_| "runc".to_string()),
             docker_mode: getenv("SANDBOX_DOCKER_MODE", "profile-default"),
             allow_diagnostic_runtime: getenv("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "false") == "true",
-            node_selector: getenv("SANDBOX_NODE_SELECTOR", ""),
             workspace_storage_class: getenv("SANDBOX_WORKSPACE_STORAGE_CLASS", ""),
             network_policy_management: getenv("SANDBOX_NETWORK_POLICY_MANAGEMENT", "Managed"),
             dind_enabled: getenv("SANDBOX_DIND_ENABLED", "false") == "true",
@@ -401,7 +202,6 @@ impl SandboxWorkerCfg {
             ),
             kata_coco_test_resource_uri: getenv("SANDBOX_KATA_COCO_TEST_RESOURCE_URI", ""),
             kata_coco_test_resource_path: getenv("SANDBOX_KATA_COCO_TEST_RESOURCE_PATH", ""),
-            full_warm_profiles: getenv("SANDBOX_FULL_WARM_PROFILES", ""),
             api_base_url: getenv("CODEWIRE_API_URL", ""),
             coordinator_url: getenv("CODEWIRE_COORDINATOR_URL", ""),
             derp_host: getenv("DERP_HOST", ""),
@@ -460,33 +260,6 @@ fn parse_udp_lb_port_bound(s: &str) -> i64 {
     }
 }
 
-/// Mirrors `config.ParseNodeSelector` ("k=v,k2=v2").
-pub fn parse_node_selector(s: &str) -> Vec<(String, String)> {
-    if s.is_empty() {
-        return Vec::new();
-    }
-    s.split(',')
-        .filter_map(|pair| {
-            let mut it = pair.splitn(2, '=');
-            match (it.next(), it.next()) {
-                (Some(k), Some(v)) => Some((k.trim().to_string(), v.trim().to_string())),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-/// Mirrors `sandbox.ResolveNodeSelector`.
-pub fn resolve_node_selector(
-    runtime_class: &str,
-    override_selector: Vec<(String, String)>,
-) -> Vec<(String, String)> {
-    if !override_selector.is_empty() {
-        return override_selector;
-    }
-    crate::sandbox::template::default_node_selector(runtime_class)
-}
-
 /// Mirrors `isFirstPartyWorkspaceImage`.
 pub fn is_first_party_workspace_image(image_ref: &str) -> bool {
     image_ref.contains("codewiresh/workspace-")
@@ -502,7 +275,12 @@ pub fn environment_template_opts(
     env: &EnvironmentRow,
     env_id: &str,
     gateway_token: &str,
+    daemon_auth_token: &str,
 ) -> TemplateOpts {
+    assert!(
+        gateway_token != daemon_auth_token,
+        "hosted coordinate and daemon capabilities must be distinct"
+    );
     // Codewire base images: no ImageCommand → daemon is the main
     // process. Custom images: sleep infinity keeps the container alive.
     let image_command = if is_first_party_workspace_image(image_ref) {
@@ -511,17 +289,11 @@ pub fn environment_template_opts(
         vec!["sleep".to_string(), "infinity".to_string()]
     };
 
-    let override_selector = parse_node_selector(&cfg.node_selector);
     let runtime_spec = match runtime_profile_for_isolation_tier(&env.isolation_tier)
         .expect("environment isolation tier is validated at creation")
     {
-        Some(profile) => runtime_profile_spec(profile, "", &cfg.docker_mode, cfg.dind_enabled),
-        None => runtime_profile_spec(
-            &cfg.runtime_profile,
-            &cfg.runtime_class,
-            &cfg.docker_mode,
-            cfg.dind_enabled,
-        ),
+        Some(profile) => runtime_profile_spec(profile, &cfg.docker_mode, cfg.dind_enabled),
+        None => runtime_profile_spec(&cfg.runtime_profile, &cfg.docker_mode, cfg.dind_enabled),
     };
     let template_base = if is_canonical_workspace_runtime_image(image_ref) {
         CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
@@ -538,12 +310,11 @@ pub fn environment_template_opts(
         support_image: cfg.gateway_image.clone(),
         dind_image: cfg.dind_image.clone(),
         runtime_profile: runtime_spec.profile.clone(),
-        runtime_class_name: runtime_spec.runtime_class_name.clone(),
         docker_mode: runtime_spec.docker_mode.clone(),
-        sidecar_resource_mode: runtime_spec.sidecar_resource_mode.clone(),
         environment_id: env_id.to_string(),
         confidential_storage_manifest_uri: String::new(),
         gateway_token: gateway_token.to_string(),
+        daemon_auth_token: daemon_auth_token.to_string(),
         api_base_url: cfg.api_base_url.clone(),
         coordinator_url: cfg.coordinator_url.clone(),
         server_namespace: cfg.pod_namespace.clone(),
@@ -585,8 +356,6 @@ pub fn environment_template_opts(
         memory_mib: i64::from(env.memory_mb),
         disk_gib: i64::from(env.disk_gb),
         workspace_storage_class: cfg.workspace_storage_class.clone(),
-        node_selector: resolve_node_selector(&runtime_spec.profile, override_selector),
-        tolerations: default_tolerations(&runtime_spec.profile),
         network_policy_management: cfg.network_policy_management.clone(),
         dind_enabled: runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT,
         kata_agent_policy_enabled: cfg.kata_agent_policy_enabled,
@@ -611,63 +380,18 @@ pub fn runtime_profile_for_isolation_tier(tier: &str) -> anyhow::Result<Option<&
     }
 }
 
-/// Mirrors `environmentClaimOpts`.
+/// Build the claim contract for one environment-specific template.
 pub fn environment_claim_opts(
-    cfg: &SandboxWorkerCfg,
     image_ref: &str,
     template_base: &str,
     env: &EnvironmentRow,
     env_id: &str,
-    _gateway_token: &str,
 ) -> ClaimOpts {
-    if is_canonical_workspace_runtime_image(image_ref) {
-        if env.isolation_tier != "standard" {
-            let template_ref =
-                environment_template_name(CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME, env_id);
-            return ClaimOpts {
-                environment_id: env_id.to_string(),
-                org_id: env.org_id.clone(),
-                warm_pool_ref: shadow_warm_pool_name(&template_ref),
-                template_ref,
-                additional_pod_labels: environment_pod_selector(env_id),
-                ..Default::default()
-            };
-        }
-        match parse_canonical_full_warm_pool_profiles(&cfg.full_warm_profiles) {
-            Err(e) => {
-                tracing::warn!(error = %e, "environment claim: invalid canonical full warm profiles, falling back to per-environment template");
-            }
-            Ok(profiles) => {
-                if let Some(profile) = match_canonical_full_warm_pool_profile(
-                    &profiles,
-                    env.cpu_millicores,
-                    env.memory_mb,
-                    env.disk_gb,
-                ) {
-                    let template_opts = warm_pool_template_opts(cfg, profile);
-                    return ClaimOpts {
-                        environment_id: env_id.to_string(),
-                        org_id: env.org_id.clone(),
-                        template_ref: profile.template_name.clone(),
-                        warm_pool_ref: warm_pool_name(&profile.template_name, &template_opts),
-                        additional_pod_labels: environment_pod_selector(env_id),
-                        ..Default::default()
-                    };
-                }
-            }
-        }
-        let template_ref =
-            environment_template_name(CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME, env_id);
-        return ClaimOpts {
-            environment_id: env_id.to_string(),
-            org_id: env.org_id.clone(),
-            warm_pool_ref: shadow_warm_pool_name(&template_ref),
-            template_ref,
-            additional_pod_labels: environment_pod_selector(env_id),
-            ..Default::default()
-        };
-    }
-
+    let template_base = if is_canonical_workspace_runtime_image(image_ref) {
+        CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
+    } else {
+        template_base
+    };
     let template_ref = environment_template_name(template_base, env_id);
     ClaimOpts {
         environment_id: env_id.to_string(),
@@ -680,41 +404,16 @@ pub fn environment_claim_opts(
 }
 
 pub fn environment_per_env_template_name(
-    cfg: &SandboxWorkerCfg,
     image_ref: &str,
     template_base: &str,
-    env: &EnvironmentRow,
     env_id: &str,
-) -> Option<String> {
-    if is_canonical_workspace_runtime_image(image_ref) {
-        // Canonical warm pools are rendered from the process-wide standard
-        // runtime configuration. A confidential environment must instead use
-        // its tier-derived per-environment template so its Sandbox and Pod are
-        // created with the confidential RuntimeClass.
-        if env.isolation_tier != "standard" {
-            return Some(environment_template_name(
-                CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME,
-                env_id,
-            ));
-        }
-        if let Ok(profiles) = parse_canonical_full_warm_pool_profiles(&cfg.full_warm_profiles)
-            && match_canonical_full_warm_pool_profile(
-                &profiles,
-                env.cpu_millicores,
-                env.memory_mb,
-                env.disk_gb,
-            )
-            .is_some()
-        {
-            return None;
-        }
-        return Some(environment_template_name(
-            CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME,
-            env_id,
-        ));
-    }
-
-    Some(environment_template_name(template_base, env_id))
+) -> String {
+    let template_base = if is_canonical_workspace_runtime_image(image_ref) {
+        CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
+    } else {
+        template_base
+    };
+    environment_template_name(template_base, env_id)
 }
 
 // ── Backend row mutators (port of environment_data.go) ─────────────────
@@ -826,14 +525,17 @@ pub(super) async fn confidential_runtime_template_opts(
         .ok_or_else(|| anyhow::anyhow!("confidential environment has no preset id"))?;
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
     let cfg = &ctx.sandbox_cfg;
-    let expected_template =
-        environment_per_env_template_name(cfg, &image_ref, &template_base, env, env_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!("confidential environment has no private runtime template")
-            })?;
-    let gateway_token = issue_token(&cfg.session_secret, env_id, SCOPE_COORDINATE)?;
-    let mut template_opts =
-        environment_template_opts(cfg, &image_ref, &template_base, env, env_id, &gateway_token);
+    let expected_template = environment_per_env_template_name(&image_ref, &template_base, env_id);
+    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
+    let mut template_opts = environment_template_opts(
+        cfg,
+        &image_ref,
+        &template_base,
+        env,
+        env_id,
+        &auth_tokens.coordinate,
+        &auth_tokens.daemon,
+    );
     template_opts.confidential_storage_manifest_uri = confidential_storage_manifest_uri.to_owned();
     if template_opts.name != expected_template {
         anyhow::bail!("confidential runtime template identity is inconsistent");
@@ -1164,9 +866,8 @@ async fn run_environment_create(
                             return Err(e);
                         }
                     };
-                let gateway_token = match issue_token(&cfg.session_secret, env_id, SCOPE_COORDINATE)
-                {
-                    Ok(t) => t,
+                let auth_tokens = match issue_environment_tokens(&cfg.session_secret, env_id) {
+                    Ok(tokens) => tokens,
                     Err(e) => {
                         emit_create_log(
                             authority,
@@ -1176,8 +877,13 @@ async fn run_environment_create(
                             None,
                         )
                         .await?;
-                        record_error(&svc, authority, env_id, &format!("sidecar token: {e:#}"))
-                            .await?;
+                        record_error(
+                            &svc,
+                            authority,
+                            env_id,
+                            &format!("environment capabilities: {e:#}"),
+                        )
+                        .await?;
                         return Err(e);
                     }
                 };
@@ -1187,7 +893,8 @@ async fn run_environment_create(
                     &template_base,
                     &env,
                     env_id,
-                    &gateway_token,
+                    &auth_tokens.coordinate,
+                    &auth_tokens.daemon,
                 );
                 template_opts.confidential_storage_manifest_uri =
                     confidential_storage_manifest_uri.unwrap_or_default();
@@ -1231,14 +938,7 @@ async fn run_environment_create(
                     .await?;
                     return Err(e);
                 }
-                let claim_opts = environment_claim_opts(
-                    cfg,
-                    &image_ref,
-                    &template_base,
-                    &env,
-                    env_id,
-                    &gateway_token,
-                );
+                let claim_opts = environment_claim_opts(&image_ref, &template_base, &env, env_id);
 
                 let backend = backend
                     .as_ref()
@@ -1259,57 +959,68 @@ async fn run_environment_create(
                     }
                 };
 
-                let mut ensured_template = String::new();
-                let mut ensured_warm_pool = String::new();
-                if claim_opts.template_ref == template_opts.name {
-                    ensured_template = template_opts.name.clone();
-                    ensured_warm_pool = if claim_opts.warm_pool_ref.is_empty() {
-                        shadow_warm_pool_name(&ensured_template)
-                    } else {
-                        claim_opts.warm_pool_ref.clone()
-                    };
-                    if let Err(e) = authority
+                if claim_opts.template_ref != template_opts.name {
+                    let error = anyhow::anyhow!(
+                        "claim template does not match environment-scoped daemon template"
+                    );
+                    emit_create_log(
+                        authority,
+                        "create_claim",
+                        "failed",
+                        &error.to_string(),
+                        duration_meta(started),
+                    )
+                    .await?;
+                    record_error(&svc, authority, env_id, &error.to_string()).await?;
+                    return Err(error);
+                }
+                let ensured_template = template_opts.name.clone();
+                let ensured_shadow_pool = if claim_opts.warm_pool_ref.is_empty() {
+                    shadow_warm_pool_name(&ensured_template)
+                } else {
+                    claim_opts.warm_pool_ref.clone()
+                };
+                if let Err(e) = authority
+                    .run_external_mutation(
+                        CREATE_MUTATION_STATES,
+                        client.ensure_sandbox_template(&template_opts),
+                    )
+                    .await
+                {
+                    emit_create_log(
+                        authority,
+                        "create_claim",
+                        "failed",
+                        &format!("{e:#}"),
+                        duration_meta(started),
+                    )
+                    .await?;
+                    record_error(&svc, authority, env_id, &format!("template: {e:#}")).await?;
+                    return Err(e);
+                }
+                if let Err(e) = authority
+                    .run_external_mutation(
+                        CREATE_MUTATION_STATES,
+                        client.ensure_shadow_pool(&ensured_shadow_pool, &ensured_template, env_id),
+                    )
+                    .await
+                {
+                    let _ = authority
                         .run_external_mutation(
                             CREATE_MUTATION_STATES,
-                            client.ensure_sandbox_template(&template_opts),
+                            client.delete_sandbox_template(&ensured_template),
                         )
-                        .await
-                    {
-                        emit_create_log(
-                            authority,
-                            "create_claim",
-                            "failed",
-                            &format!("{e:#}"),
-                            duration_meta(started),
-                        )
-                        .await?;
-                        record_error(&svc, authority, env_id, &format!("template: {e:#}")).await?;
-                        return Err(e);
-                    }
-                    if let Err(e) = authority
-                        .run_external_mutation(
-                            CREATE_MUTATION_STATES,
-                            client.ensure_warm_pool(&ensured_warm_pool, &ensured_template, 0),
-                        )
-                        .await
-                    {
-                        let _ = authority
-                            .run_external_mutation(
-                                CREATE_MUTATION_STATES,
-                                client.delete_sandbox_template(&ensured_template),
-                            )
-                            .await;
-                        emit_create_log(
-                            authority,
-                            "create_claim",
-                            "failed",
-                            &format!("{e:#}"),
-                            duration_meta(started),
-                        )
-                        .await?;
-                        record_error(&svc, authority, env_id, &format!("warm pool: {e:#}")).await?;
-                        return Err(e);
-                    }
+                        .await;
+                    emit_create_log(
+                        authority,
+                        "create_claim",
+                        "failed",
+                        &format!("{e:#}"),
+                        duration_meta(started),
+                    )
+                    .await?;
+                    record_error(&svc, authority, env_id, &format!("shadow pool: {e:#}")).await?;
+                    return Err(e);
                 }
                 let claim_result = async {
                     let mut guard = authority
@@ -1346,22 +1057,10 @@ async fn run_environment_create(
                 let (_created_claim_name, _claim_uid) = match claim_result {
                     Ok(v) => v,
                     Err(e) => {
-                        if !ensured_warm_pool.is_empty() {
-                            let _ = authority
-                                .run_external_mutation(
-                                    CREATE_MUTATION_STATES,
-                                    client.delete_warm_pool(&ensured_warm_pool),
-                                )
-                                .await;
-                        }
-                        if !ensured_template.is_empty() {
-                            let _ = authority
-                                .run_external_mutation(
-                                    CREATE_MUTATION_STATES,
-                                    client.delete_sandbox_template(&ensured_template),
-                                )
-                                .await;
-                        }
+                        // The Kubernetes create may already have succeeded even when
+                        // bookkeeping fails. Keep its environment-scoped dependencies so
+                        // an idempotent retry can adopt the claim; destroy owns their final
+                        // removal if the environment is abandoned.
                         emit_create_log(
                             authority,
                             "create_claim",
@@ -1603,9 +1302,16 @@ async fn ensure_gateway_stack_for_environment(
 ) -> anyhow::Result<()> {
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let gateway_token = issue_token(&cfg.session_secret, env_id, SCOPE_COORDINATE)?;
-    let template_opts =
-        environment_template_opts(cfg, &image_ref, &template_base, env, env_id, &gateway_token);
+    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
+    let template_opts = environment_template_opts(
+        cfg,
+        &image_ref,
+        &template_base,
+        env,
+        env_id,
+        &auth_tokens.coordinate,
+        &auth_tokens.daemon,
+    );
     let runtime_spec = template_opts.runtime_profile_spec();
     validate_managed_runtime_profile(&runtime_spec, cfg.allow_diagnostic_runtime)
         .map_err(|e| anyhow::anyhow!("runtime profile: {e}"))?;
@@ -1801,37 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn warm_pool_parsing_mirrors_go() {
-        // Empty → defaults (workspace + legacy SKU).
-        let defaults = parse_canonical_full_warm_pool_profiles("").unwrap();
-        assert_eq!(defaults.len(), 2);
-        assert_eq!(defaults[0].template_name, "workspace");
-        assert_eq!(defaults[1].template_name, "workspace-2000m-4096mib-10gib");
-
-        // Custom entries with the default-SKU shortcut name.
-        let custom =
-            parse_canonical_full_warm_pool_profiles("1000:2048:10:2, 4000:8192:20:1").unwrap();
-        assert_eq!(custom[0].template_name, "workspace");
-        assert_eq!(custom[1].template_name, "workspace-4000m-8192mib-20gib");
-        assert_eq!(custom[1].replicas, 1);
-
-        // Bad entries.
-        assert!(parse_canonical_full_warm_pool_profiles("1000:2048:10").is_err());
-        assert!(parse_canonical_full_warm_pool_profiles("0:2048:10:2").is_err());
-        assert!(parse_canonical_full_warm_pool_profiles("1000:2048:10:2,1000:2048:10:3").is_err());
-
-        // Matching.
-        let p = match_canonical_full_warm_pool_profile(&defaults, 2000, 4096, 10).unwrap();
-        assert_eq!(p.template_name, "workspace-2000m-4096mib-10gib");
-        assert!(match_canonical_full_warm_pool_profile(&defaults, 123, 456, 7).is_none());
-    }
-
-    #[test]
-    fn claim_opts_uses_warm_pool_for_canonical_image() {
-        let cfg = SandboxWorkerCfg {
-            full_warm_profiles: String::new(),
-            ..Default::default()
-        };
+    fn claim_opts_always_use_an_environment_scoped_template_and_shadow_pool() {
         let env = EnvironmentRow {
             id: "env-1".into(),
             org_id: "org-1".into(),
@@ -1844,81 +1520,44 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
-            auth_token: None,
             ttl_seconds: None,
-            setup_config: None,
-            secret_project_id: None,
+            project_spec: codewire_project::ProjectSpec::default(),
         };
-        // Canonical image + matching SKU → shared warm-pool template.
+        // Even the canonical image uses an environment-scoped template: the
+        // daemon credential must be present before the workspace process starts.
         let opts = environment_claim_opts(
-            &cfg,
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "tmpl-base",
             &env,
             "env-1",
-            "gateway-token",
         );
-        assert_eq!(opts.template_ref, "workspace");
-        let profile = parse_canonical_full_warm_pool_profiles("").unwrap()[0].clone();
-        assert_eq!(
-            opts.warm_pool_ref,
-            warm_pool_name(
-                &profile.template_name,
-                &warm_pool_template_opts(&cfg, &profile)
-            )
-        );
+        assert_eq!(opts.template_ref, "workspace-env-1");
+        assert_eq!(opts.warm_pool_ref, "shadow-pool-workspace-env-1");
         assert!(opts.env_overrides.is_empty());
 
-        // Confidential environments must never adopt a standard canonical
-        // warm-pool Sandbox. Their per-environment template carries the
-        // tier-derived confidential RuntimeClass.
+        // Isolation tier and requested size never select a shared template.
         let mut confidential = env.clone();
         confidential.isolation_tier = "confidential".into();
+        confidential.cpu_millicores = 8000;
         let opts = environment_claim_opts(
-            &cfg,
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "tmpl-base",
             &confidential,
             "env-1",
-            "gateway-token",
         );
         assert_eq!(opts.template_ref, "workspace-env-1");
         assert_eq!(opts.warm_pool_ref, "shadow-pool-workspace-env-1");
         assert_eq!(
             environment_per_env_template_name(
-                &cfg,
                 "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
                 "tmpl-base",
-                &confidential,
                 "env-1",
             ),
-            Some("workspace-env-1".into())
+            "workspace-env-1"
         );
-
-        // Canonical image, non-matching SKU → per-env canonical template.
-        let mut big = env.clone();
-        big.cpu_millicores = 8000;
-        let opts = environment_claim_opts(
-            &cfg,
-            "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
-            "tmpl-base",
-            &big,
-            "env-1",
-            "gateway-token",
-        );
-        assert_eq!(opts.template_ref, "workspace-env-1");
-        assert_eq!(opts.warm_pool_ref, "shadow-pool-workspace-env-1");
-        assert!(opts.env_overrides.is_empty());
 
         // Custom image → per-env template from the preset base name.
-        let opts = environment_claim_opts(
-            &cfg,
-            "ghcr.io/acme/custom:1",
-            "tmpl-base",
-            &env,
-            "env-1",
-            "gateway-token",
-        );
+        let opts = environment_claim_opts("ghcr.io/acme/custom:1", "tmpl-base", &env, "env-1");
         assert_eq!(opts.template_ref, "tmpl-base-env-1");
         assert_eq!(opts.warm_pool_ref, "shadow-pool-tmpl-base-env-1");
         assert!(opts.env_overrides.is_empty());
@@ -1926,7 +1565,6 @@ mod tests {
 
     #[test]
     fn long_per_environment_pool_cleanup_cannot_target_another_claim() {
-        let cfg = SandboxWorkerCfg::default();
         let env = EnvironmentRow {
             id: "unused".into(),
             org_id: "org-1".into(),
@@ -1939,39 +1577,30 @@ mod tests {
             cpu_millicores: 2000,
             memory_mb: 16384,
             disk_gb: 50,
-            auth_token: None,
             ttl_seconds: None,
-            setup_config: None,
-            secret_project_id: None,
+            project_spec: codewire_project::ProjectSpec::default(),
         };
         let template_base = "codewiresh-workspace-sha256-2058b7f1fd76f6f77b1dba";
         let first_id = "3d6bb495-efac-419f-bf3a-91696e7c7ca4";
         let second_id = "76169e1f-3bbf-46be-96e0-cac68e0ac910";
 
         let first_claim = environment_claim_opts(
-            &cfg,
             "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
             template_base,
             &env,
             first_id,
-            "unused",
         );
         let second_claim = environment_claim_opts(
-            &cfg,
             "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
             template_base,
             &env,
             second_id,
-            "unused",
         );
         let first_cleanup_template = environment_per_env_template_name(
-            &cfg,
             "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
             template_base,
-            &env,
             first_id,
-        )
-        .unwrap();
+        );
 
         assert_eq!(
             first_claim.warm_pool_ref,
@@ -1985,10 +1614,10 @@ mod tests {
     }
 
     #[test]
-    fn template_opts_mirror_go_branches() {
+    fn template_opts_use_only_the_runtime_profile() {
         let cfg = SandboxWorkerCfg {
             gateway_image: "gw:1".into(),
-            runtime_class: "isol8".into(),
+            runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
             api_base_url: "https://api".into(),
             derp_port: "".into(),
             stun_port: "".into(),
@@ -2012,10 +1641,8 @@ mod tests {
             cpu_millicores: 2000,
             memory_mb: 4096,
             disk_gb: 10,
-            auth_token: None,
             ttl_seconds: None,
-            setup_config: None,
-            secret_project_id: None,
+            project_spec: codewire_project::ProjectSpec::default(),
         };
         // First-party image: no image command; canonical name swap.
         let opts = environment_template_opts(
@@ -2025,6 +1652,7 @@ mod tests {
             &env,
             "env-1",
             "tok",
+            "daemon-tok",
         );
         assert!(opts.image_command.is_empty());
         assert_eq!(opts.name, "workspace-env-1");
@@ -2044,11 +1672,6 @@ mod tests {
             opts.kata_coco_test_resource_path,
             "/run/confidential-containers/cdh/kbs/codewire/runtime-test-resource"
         );
-        assert!(
-            !opts.node_selector.is_empty(),
-            "legacy isol8 RuntimeClass resolves to the external-isol8-xen selector"
-        );
-
         // Custom image: sleep infinity + preset-derived name.
         let opts = environment_template_opts(
             &cfg,
@@ -2057,37 +1680,19 @@ mod tests {
             &env,
             "env-1",
             "tok",
+            "daemon-tok",
         );
         assert_eq!(
             opts.image_command,
             vec!["sleep".to_string(), "infinity".to_string()]
         );
         assert_eq!(opts.name, "preset-base-env-1");
-
-        // Non-external-isol8 runtime: no selector/tolerations.
-        let mut plain = cfg.clone();
-        plain.runtime_class = String::new();
-        let opts =
-            environment_template_opts(&plain, "ghcr.io/acme/img:1", "b", &env, "env-1", "tok");
-        assert!(opts.node_selector.is_empty());
-        assert!(opts.tolerations.is_empty());
-
-        // Override selector wins.
-        let mut overridden = cfg.clone();
-        overridden.node_selector = "pool=custom".into();
-        let opts =
-            environment_template_opts(&overridden, "ghcr.io/acme/img:1", "b", &env, "env-1", "tok");
-        assert_eq!(
-            opts.node_selector,
-            vec![("pool".to_string(), "custom".to_string())]
-        );
     }
 
     #[test]
     fn confidential_tier_coexists_with_commodity_process_default() {
         let cfg = SandboxWorkerCfg {
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
-            runtime_class: crate::sandbox::template::RUNTIME_CLASS_COMMODITY.into(),
             docker_mode: crate::sandbox::template::DOCKER_MODE_PROFILE_DEFAULT.into(),
             workspace_storage_class: "longhorn".into(),
             kata_agent_policy_enabled: true,
@@ -2108,10 +1713,8 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
-            auth_token: None,
             ttl_seconds: None,
-            setup_config: None,
-            secret_project_id: None,
+            project_spec: codewire_project::ProjectSpec::default(),
         };
 
         let standard_opts = environment_template_opts(
@@ -2121,13 +1724,14 @@ mod tests {
             &standard,
             "env-coexist",
             "tok",
+            "daemon-tok",
         );
         assert_eq!(
             standard_opts.runtime_profile,
             crate::sandbox::template::RUNTIME_PROFILE_COMMODITY
         );
         assert_eq!(
-            standard_opts.runtime_class_name,
+            standard_opts.runtime_profile_spec().runtime_class_name,
             crate::sandbox::template::RUNTIME_CLASS_COMMODITY
         );
         assert_eq!(
@@ -2157,13 +1761,14 @@ mod tests {
             &confidential,
             "env-coexist",
             "tok",
+            "daemon-tok",
         );
         assert_eq!(
             confidential_opts.runtime_profile,
             crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL
         );
         assert_eq!(
-            confidential_opts.runtime_class_name,
+            confidential_opts.runtime_profile_spec().runtime_class_name,
             crate::sandbox::template::RUNTIME_CLASS_CONFIDENTIAL
         );
         assert_eq!(
@@ -2201,10 +1806,8 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
-            auth_token: None,
             ttl_seconds: None,
-            setup_config: None,
-            secret_project_id: None,
+            project_spec: codewire_project::ProjectSpec::default(),
         };
         let cfg = SandboxWorkerCfg {
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
@@ -2225,6 +1828,7 @@ mod tests {
             &env,
             "env-1",
             "tok",
+            "daemon-tok",
         );
 
         assert!(opts.direct_udp_lb_enabled);
@@ -2249,6 +1853,7 @@ mod tests {
             &env,
             "env-1",
             "tok",
+            "daemon-tok",
         );
         assert!(!opts.direct_udp_lb_enabled);
     }
@@ -2267,10 +1872,8 @@ mod tests {
             cpu_millicores: 1000,
             memory_mb: 2048,
             disk_gb: 10,
-            auth_token: None,
             ttl_seconds: None,
-            setup_config: None,
-            secret_project_id: None,
+            project_spec: codewire_project::ProjectSpec::default(),
         };
         let cfg = SandboxWorkerCfg {
             runtime_transport_zones_json:
@@ -2291,6 +1894,7 @@ mod tests {
             &env,
             "env-1",
             "tok",
+            "daemon-tok",
         );
 
         assert!(opts.udp_relay_allocator_url.is_empty());

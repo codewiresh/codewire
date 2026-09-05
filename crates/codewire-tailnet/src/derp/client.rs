@@ -94,7 +94,7 @@ where
     /// HTTP upgrade, if any, has already completed).
     ///
     /// Reads `ServerKey`, then writes `ClientInfo`. `ServerInfo` is read
-    /// on demand by [`recv`].
+    /// on demand by [`Self::recv`].
     pub async fn handshake<R: RngCore + CryptoRng>(
         mut conn: S,
         private: NodePrivate,

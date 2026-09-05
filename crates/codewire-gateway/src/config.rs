@@ -1,5 +1,6 @@
 use crate::docker_proxy::DockerProxySettings;
-use std::{net::SocketAddr, time::Duration};
+use codewire_gateway_proto::DaemonAuthToken;
+use std::{env, fmt, net::SocketAddr, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -12,13 +13,12 @@ pub const MAX_DAEMON_CONNECT_TIMEOUT_SECONDS: u64 = 3_600;
 pub const DEFAULT_SSH_LISTEN_ADDR: &str = "0.0.0.0:2222";
 pub const DEFAULT_READYZ_LISTEN_ADDR: &str = "0.0.0.0:2223";
 pub const DEFAULT_DOCKER_UPSTREAM_SOCK: &str = "/var/run/docker/docker.sock";
-pub const DEFAULT_HOST_KEY_PATH: &str = "/codewire/workspace/.codewire/ssh/sidecar_host_ed25519";
+pub const DEFAULT_HOST_KEY_PATH: &str = "/codewire/gateway/ssh/host_ed25519";
 pub const DEFAULT_TAILNET_UDP_LISTEN_ADDR: &str = "0.0.0.0:31000";
 
 pub const SSH_LISTEN_ADDR_ENV: &str = "CODEWIRE_SSH_LISTEN_ADDR";
 pub const READYZ_LISTEN_ADDR_ENV: &str = "CODEWIRE_READYZ_LISTEN_ADDR";
 pub const SSH_PORT_ENV: &str = "CODEWIRE_SSH_PORT";
-pub const LEGACY_SSH_PORT_ENV: &str = "SSH_PORT";
 pub const SSH_HOST_KEY_PATH_ENV: &str = "CODEWIRE_SSH_HOST_KEY_PATH";
 pub const GATEWAY_LISTENER_SELF_CHECK_INTERVAL_ENV: &str =
     "CODEWIRE_GATEWAY_LISTENER_SELF_CHECK_INTERVAL";
@@ -43,10 +43,10 @@ pub const DEBUG_TAILNET_ENV: &str = "CODEWIRE_DEBUG_TAILNET";
 pub const DOCKER_PROXY_SOCK_ENV: &str = "CODEWIRE_DOCKER_PROXY_SOCK";
 pub const DOCKER_UPSTREAM_SOCK_ENV: &str = "CODEWIRE_DOCKER_UPSTREAM_SOCK";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GatewayConfig {
     pub shim_addr: String,
-    pub daemon_auth_token: Option<String>,
+    pub daemon_auth_token: DaemonAuthToken,
     pub daemon_connect_timeout: Duration,
     pub ssh_listen_addr: String,
     pub readyz_listen_addr: String,
@@ -68,7 +68,7 @@ pub struct GatewayConfig {
     pub debug_tailnet: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TailnetConfig {
     pub environment_id: Uuid,
     pub gateway_token: String,
@@ -89,6 +89,10 @@ pub struct DockerProxyConfig {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
+    #[error("{DAEMON_AUTH_TOKEN_ENV} is required")]
+    MissingDaemonAuthToken,
+    #[error("{DAEMON_AUTH_TOKEN_ENV} must be nonblank canonical ASCII metadata")]
+    InvalidDaemonAuthToken,
     #[error("{name} must be a UDP port from 1 to 65535")]
     InvalidPort { name: &'static str },
     #[error("{name} contains invalid STUN server {value:?}; expected host[:port]")]
@@ -113,7 +117,18 @@ pub enum ConfigError {
 
 impl GatewayConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_getenv(|key| std::env::var(key).ok())
+        let daemon_auth_token = match env::var(DAEMON_AUTH_TOKEN_ENV) {
+            Ok(value) => value,
+            Err(env::VarError::NotPresent) => return Err(ConfigError::MissingDaemonAuthToken),
+            Err(env::VarError::NotUnicode(_)) => return Err(ConfigError::InvalidDaemonAuthToken),
+        };
+        Self::from_getenv(|key| {
+            if key == DAEMON_AUTH_TOKEN_ENV {
+                Some(daemon_auth_token.clone())
+            } else {
+                env::var(key).ok()
+            }
+        })
     }
 
     pub fn from_getenv<F>(getenv: F) -> Result<Self, ConfigError>
@@ -121,7 +136,11 @@ impl GatewayConfig {
         F: Fn(&str) -> Option<String>,
     {
         let shim_addr = env_or(&getenv, SHIM_ADDR_ENV, DEFAULT_SHIM_ADDR);
-        let daemon_auth_token = trim_env(&getenv, DAEMON_AUTH_TOKEN_ENV);
+        let daemon_auth_token = getenv(DAEMON_AUTH_TOKEN_ENV)
+            .ok_or(ConfigError::MissingDaemonAuthToken)
+            .and_then(|value| {
+                DaemonAuthToken::new(value).map_err(|_| ConfigError::InvalidDaemonAuthToken)
+            })?;
         let daemon_connect_timeout = parse_duration_seconds_env(
             &getenv,
             DAEMON_CONNECT_TIMEOUT_SECONDS_ENV,
@@ -179,6 +198,52 @@ impl GatewayConfig {
     }
 }
 
+impl fmt::Debug for GatewayConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GatewayConfig")
+            .field("shim_addr", &self.shim_addr)
+            .field("daemon_auth_token", &self.daemon_auth_token)
+            .field("daemon_connect_timeout", &self.daemon_connect_timeout)
+            .field("ssh_listen_addr", &self.ssh_listen_addr)
+            .field("readyz_listen_addr", &self.readyz_listen_addr)
+            .field("host_key_path", &self.host_key_path)
+            .field(
+                "listener_self_check_interval",
+                &self.listener_self_check_interval,
+            )
+            .field("api_url", &self.api_url)
+            .field("binding_url", &self.binding_url)
+            .field("coordinator_url", &self.coordinator_url)
+            .field("derp_url", &self.derp_url)
+            .field("stun", &self.stun)
+            .field("stun_servers", &self.stun_servers)
+            .field("tailnet_udp_listen_addr", &self.tailnet_udp_listen_addr)
+            .field(
+                "tailnet_direct_udp_advertise_endpoints",
+                &self.tailnet_direct_udp_advertise_endpoints,
+            )
+            .field("udp_relay_allocator_url", &self.udp_relay_allocator_url)
+            .field("udp_relay_allocator_token", &"[REDACTED]")
+            .field("udp_relay_bind_addrs", &self.udp_relay_bind_addrs)
+            .field("tailnet", &self.tailnet)
+            .field("docker_proxy", &self.docker_proxy)
+            .field("debug_tailnet", &self.debug_tailnet)
+            .finish()
+    }
+}
+
+impl fmt::Debug for TailnetConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TailnetConfig")
+            .field("environment_id", &self.environment_id)
+            .field("gateway_token", &"[REDACTED]")
+            .field("coordinator_url", &self.coordinator_url)
+            .finish()
+    }
+}
+
 pub fn resolve_coordinator_url<F>(getenv: &F) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
@@ -197,9 +262,6 @@ where
         return addr;
     }
     if let Some(port) = trim_env(getenv, SSH_PORT_ENV) {
-        return format!("0.0.0.0:{port}");
-    }
-    if let Some(port) = trim_env(getenv, LEGACY_SSH_PORT_ENV) {
         return format!("0.0.0.0:{port}");
     }
     DEFAULT_SSH_LISTEN_ADDR.into()
@@ -454,15 +516,17 @@ mod tests {
     use std::collections::HashMap;
 
     fn config(vars: &[(&str, &str)]) -> Result<GatewayConfig, ConfigError> {
-        let vars: HashMap<String, String> = vars
+        let mut vars: HashMap<String, String> = vars
             .iter()
             .map(|(key, value)| ((*key).into(), (*value).into()))
             .collect();
+        vars.entry(DAEMON_AUTH_TOKEN_ENV.into())
+            .or_insert_with(|| "gateway-daemon-test-token".into());
         GatewayConfig::from_getenv(|key| vars.get(key).cloned())
     }
 
     #[test]
-    fn defaults_match_go_gateway() {
+    fn defaults_match_gateway_contract() {
         let cfg = config(&[]).unwrap();
         assert_eq!(cfg.shim_addr, DEFAULT_SHIM_ADDR);
         assert_eq!(
@@ -471,7 +535,7 @@ mod tests {
         );
         assert_eq!(cfg.ssh_listen_addr, DEFAULT_SSH_LISTEN_ADDR);
         assert_eq!(cfg.readyz_listen_addr, DEFAULT_READYZ_LISTEN_ADDR);
-        assert_eq!(cfg.host_key_path, DEFAULT_HOST_KEY_PATH);
+        assert_eq!(cfg.host_key_path, "/codewire/gateway/ssh/host_ed25519");
         assert!(cfg.tailnet.is_none());
         assert!(cfg.stun.is_none());
         assert!(cfg.stun_servers.is_empty());
@@ -481,6 +545,44 @@ mod tests {
         assert_eq!(cfg.udp_relay_allocator_token, None);
         assert!(cfg.udp_relay_bind_addrs.is_empty());
         assert!(cfg.docker_proxy.is_none());
+    }
+
+    #[test]
+    fn daemon_auth_token_is_required_and_not_canonicalized() {
+        assert_eq!(
+            GatewayConfig::from_getenv(|_| None),
+            Err(ConfigError::MissingDaemonAuthToken)
+        );
+        for invalid in ["", " ", " token", "token ", "line\nbreak"] {
+            assert_eq!(
+                GatewayConfig::from_getenv(|key| {
+                    (key == DAEMON_AUTH_TOKEN_ENV).then(|| invalid.to_string())
+                }),
+                Err(ConfigError::InvalidDaemonAuthToken)
+            );
+        }
+    }
+
+    #[test]
+    fn credential_debug_fields_are_redacted() {
+        let daemon_marker = "daemon-debug-marker";
+        let relay_marker = "relay-debug-marker";
+        let gateway_marker = "gateway-debug-marker";
+        let env_id = Uuid::new_v4().to_string();
+        let config = config(&[
+            (DAEMON_AUTH_TOKEN_ENV, daemon_marker),
+            (UDP_RELAY_ALLOCATOR_TOKEN_ENV, relay_marker),
+            (API_URL_ENV, "https://codewire.example"),
+            (ENVIRONMENT_ID_ENV, &env_id),
+            (GATEWAY_TOKEN_ENV, gateway_marker),
+        ])
+        .unwrap();
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        for marker in [daemon_marker, relay_marker, gateway_marker] {
+            assert!(!debug.contains(marker), "debug exposed {marker}");
+        }
     }
 
     #[test]
@@ -501,20 +603,20 @@ mod tests {
     }
 
     #[test]
-    fn ssh_listen_addr_precedence_matches_go_gateway() {
+    fn ssh_listen_addr_precedence_matches_gateway_contract() {
         let cfg = config(&[
             (SSH_LISTEN_ADDR_ENV, "127.0.0.1:2200"),
             (SSH_PORT_ENV, "2201"),
-            (LEGACY_SSH_PORT_ENV, "2202"),
+            ("SSH_PORT", "2202"),
         ])
         .unwrap();
         assert_eq!(cfg.ssh_listen_addr, "127.0.0.1:2200");
 
-        let cfg = config(&[(SSH_PORT_ENV, "2201"), (LEGACY_SSH_PORT_ENV, "2202")]).unwrap();
+        let cfg = config(&[(SSH_PORT_ENV, "2201"), ("SSH_PORT", "2202")]).unwrap();
         assert_eq!(cfg.ssh_listen_addr, "0.0.0.0:2201");
 
-        let cfg = config(&[(LEGACY_SSH_PORT_ENV, "2202")]).unwrap();
-        assert_eq!(cfg.ssh_listen_addr, "0.0.0.0:2202");
+        let cfg = config(&[("SSH_PORT", "2202")]).unwrap();
+        assert_eq!(cfg.ssh_listen_addr, DEFAULT_SSH_LISTEN_ADDR);
     }
 
     #[test]

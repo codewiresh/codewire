@@ -227,93 +227,22 @@ pub struct CreateEnvironmentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpu_millicores: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory_mb: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub disk_gb: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i32>,
     #[serde(skip_serializing_if = "String::is_empty")]
-    pub preset_slug: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub repo_url: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub branch: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub repos: Vec<RepoEntry>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub image: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub install_command: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub startup_script: String,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub env_vars: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<SetupAgent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub install_agents: Option<bool>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub agent: String,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_env: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub secret_project: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub app_ports: Vec<AppPort>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_org_secrets: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_user_secrets: Option<bool>,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub isolation_tier: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_spec: Option<codewire_project::ProjectSpec>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct RepoEntry {
-    pub url: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub branch: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub mount_path: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub revision: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SetupAgent {
-    #[serde(rename = "type")]
-    pub agent_type: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct AppPort {
-    pub port: i32,
-    pub label: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub access: String,
+    pub project_spec: codewire_project::ProjectSpec,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct PrepareEnvironmentRequest {
     #[serde(flatten)]
     pub draft: CreateEnvironmentRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub analyze: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct PrepareEnvironmentResponse {
     pub draft: CreateEnvironmentRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detection: Option<DetectionResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_preset: Option<Preset>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -322,43 +251,11 @@ pub struct PrepareEnvironmentResponse {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
-pub struct DetectionResult {
-    pub project_type: String,
-    pub preset_slug: String,
-    pub preset_image: String,
-    pub install_command: String,
-    pub startup_script: String,
-    pub language: String,
-    pub framework: String,
-    pub suggested_name: String,
-    pub needs_docker: bool,
-    pub has_compose: bool,
-    pub app_ports: Vec<AppPort>,
-    pub agents: Vec<SetupAgent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub install_agents: Option<bool>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub secret_project: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_org_secrets: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_user_secrets: Option<bool>,
-    pub cpu: String,
-    pub memory: String,
-    pub setup_notes: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_spec: Option<codewire_project::ProjectSpec>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
 pub struct RepoConfig {
     pub id: String,
     pub org_id: String,
     pub repo_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub preset_id: Option<String>,
-    pub setup_config: serde_json::Value,
+    pub project_spec: codewire_project::ProjectSpec,
     pub created_by: String,
     pub updated_at: String,
 }
@@ -408,38 +305,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn environment_request_presentation_keeps_the_cli_json_shape() {
+    fn environment_request_presentation_serializes_only_canonical_project_intent() {
         let request = CreateEnvironmentRequest {
             preset_id: Some("preset_123".to_string()),
             name: Some("builder".to_string()),
-            cpu_millicores: Some(2000),
-            memory_mb: Some(4096),
-            disk_gb: Some(40),
             ttl_seconds: Some(3600),
-            preset_slug: "go".to_string(),
-            repo_url: "https://github.com/codewiresh/codewire".to_string(),
-            branch: "main".to_string(),
-            repos: vec![RepoEntry {
-                url: "https://github.com/codewiresh/codewire".to_string(),
-                branch: "main".to_string(),
-                revision: String::new(),
-                mount_path: "/workspace/codewire".to_string(),
-            }],
-            env_vars: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
-            agents: vec![SetupAgent {
-                agent_type: "codex".to_string(),
-            }],
+            project_spec: codewire_project::ProjectSpec {
+                preset: "go".to_string(),
+                repositories: vec![codewire_project::RepositorySpec {
+                    source: "https://github.com/codewiresh/codewire".to_string(),
+                    branch: "main".to_string(),
+                    destination: "/workspace/codewire".to_string(),
+                    ..Default::default()
+                }],
+                working_directory: "/workspace/codewire".to_string(),
+                environment: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
+                agents: codewire_project::AgentsSpec {
+                    tools: vec!["codex".to_string()],
+                    ..Default::default()
+                },
+                resources: codewire_project::ResourceSpec {
+                    cpu_millicores: Some(2000),
+                    memory_mib: Some(4096),
+                    disk_gib: Some(40),
+                },
+                ..Default::default()
+            },
             ..Default::default()
         };
 
         let value = serde_json::to_value(request).expect("serialize request");
         assert_eq!(value["preset_id"], "preset_123");
         assert_eq!(value["name"], "builder");
-        assert_eq!(value["cpu_millicores"], 2000);
-        assert_eq!(value["repos"][0]["branch"], "main");
-        assert_eq!(value["repos"][0]["mount_path"], "/workspace/codewire");
-        assert_eq!(value["env_vars"]["FOO"], "bar");
-        assert_eq!(value["agents"][0]["type"], "codex");
+        assert_eq!(value["project_spec"]["resources"]["cpu_millicores"], 2000);
+        assert_eq!(value["project_spec"]["repositories"][0]["branch"], "main");
+        assert_eq!(
+            value["project_spec"]["repositories"][0]["destination"],
+            "/workspace/codewire"
+        );
+        assert_eq!(value["project_spec"]["environment"]["FOO"], "bar");
+        assert_eq!(value["project_spec"]["agents"]["tools"][0], "codex");
+        for removed in ["image", "repos", "env_vars", "agents", "agent_env"] {
+            assert!(
+                value.get(removed).is_none(),
+                "unexpected top-level {removed}"
+            );
+        }
+
+        let empty = serde_json::to_value(CreateEnvironmentRequest::default()).unwrap();
+        assert!(empty.get("project_spec").is_some());
     }
 
     #[test]

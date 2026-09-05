@@ -1212,8 +1212,9 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO environment_presets (id, org_id, name, slug)
-             VALUES ($1, $2, 'Resize test', $3)",
+            r#"INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+               VALUES ($1, $2, 'Resize test', $3,
+                       '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
         )
         .bind(&preset_id)
         .bind(&org_id)
@@ -1223,10 +1224,11 @@ mod tests {
         .unwrap();
         for (id, cpu) in [(&env_id, 1_000), (&other_env_id, 2_000)] {
             sqlx::query(
-                "INSERT INTO environments
+                r#"INSERT INTO environments
                     (id, org_id, created_by, preset_id, type, state, desired_state,
-                     cpu_millicores, memory_mb, disk_gb)
-                 VALUES ($1, $2, $3, $4, 'sandbox', 'running', 'started', $5, 1024, 10)",
+                     cpu_millicores, memory_mb, disk_gb, project_spec)
+                 VALUES ($1, $2, $3, $4, 'sandbox', 'running', 'started', $5, 1024, 10,
+                         '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
             )
             .bind(id)
             .bind(&org_id)

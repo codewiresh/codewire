@@ -87,7 +87,13 @@ async fn serve() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "oidc: failed to seed CLI client");
     }
 
-    let provider = codewire_idp::build_provider(pool.clone(), &idp_cfg, signing_keyring).await?;
+    let provider = codewire_idp::build_provider(
+        pool.clone(),
+        &idp_cfg,
+        signing_keyring,
+        cfg.session_secret.clone(),
+    )
+    .await?;
     let oidc = codewire_idp::service::router(provider.clone());
 
     let auth_state = AuthState { pool: pool.clone() };

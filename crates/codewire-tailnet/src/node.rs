@@ -1,6 +1,6 @@
 //! Peer / node wire types (#48).
 //!
-//! The [`Node`] struct is the WireGuard connectivity record exchanged
+//! The [`crate::node::Node`] struct is the WireGuard connectivity record exchanged
 //! between clients and environment sidecars via the coordinator (JSON over
 //! WebSocket). It is the Rust port of `libs/tailnet/node.go` and its JSON
 //! encoding must preserve the Go wire contract **byte-for-byte**.
@@ -18,7 +18,8 @@
 //! | `Endpoints []netip.AddrPort`     | `endpoints`      | `["1.2.3.4:41641","[2001:db8::1]:41641"]` |
 //! | `Addresses []netip.Prefix`       | `addresses`      | `["fd7a:115c:a1e0:.../128"]`              |
 //!
-//! The ULA addressing helper ([`CW_SERVICE_PREFIX`] / [`prefix_from_uuid`])
+//! The ULA addressing helper ([`crate::node::CW_SERVICE_PREFIX`] /
+//! [`crate::node::prefix_from_uuid`])
 //! reproduces Go's deterministic `ServicePrefix.PrefixFromUUID`: the 6-byte
 //! `fd7a:115c:a1e0` prefix followed by the **first 10 bytes** of the UUID,
 //! giving a stable `/128`.

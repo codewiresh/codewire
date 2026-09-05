@@ -72,22 +72,22 @@ func TestUpdateAPIKeyDisabledPreservesPresence(t *testing.T) {
 }
 
 func TestFromProtoPresetGolden(t *testing.T) {
-	setup := &codewirev1.SetupConfig{
-		RepoUrl: "https://example.test/repo", Branch: "main",
-		Repos:          []*codewirev1.RepoEntry{{Url: "https://example.test/extra", Branch: "dev", MountPath: "/workspace/extra"}},
-		InstallCommand: "bun install", StartupScript: "bun run dev",
-		EnvVars: map[string]string{"A": "1"}, Agents: []*codewirev1.SetupAgent{{Type: "codex"}},
-		InstallAgents: testBoolPointer(true), Agent: "codex", AgentEnv: map[string]string{"B": "2"},
-		AppPorts:          []*codewirev1.AppPort{{Port: 3000, Label: "web", Access: "public"}},
-		IncludeOrgSecrets: testBoolPointer(true), IncludeUserSecrets: testBoolPointer(false),
+	project := &codewirev1.ProjectSpec{
+		SchemaVersion: 1, Image: "node:22", WorkingDirectory: "/workspace/app",
+		Repositories:     []*codewirev1.RepositorySpec{{Source: "https://example.test/extra", Branch: "dev", Destination: "/workspace/extra"}},
+		InstallCommand:   "bun install",
+		StartupScript:    "bun run dev",
+		Environment:      map[string]string{"A": "1"},
+		Agents:           &codewirev1.ProjectAgents{Install: testBoolPointer(true), Tools: []string{"codex"}},
+		ApplicationPorts: []*codewirev1.ApplicationPort{{Port: 3000, Label: "web", Access: "public"}},
+		Secrets:          &codewirev1.ProjectSecretBindings{Project: "development", Organization: true},
 	}
 	got, err := fromProtoPreset(&codewirev1.Preset{
 		Id: "preset_1", OrgId: testStringPointer("org_1"), Name: "Node", Slug: testStringPointer("node"),
 		Language: testStringPointer("typescript"), Official: true, Description: testStringPointer("starter"),
-		BuildStatus: "ready", BuildError: testStringPointer(""), DefaultCpuMillicores: 2000,
-		DefaultMemoryMb: 4096, DefaultDiskGb: 20, DefaultTtlSeconds: testInt32Pointer(3600),
-		Image: testStringPointer("node:22"), DefaultSetupConfig: setup, SecretProjectId: testStringPointer("project_1"),
-		CreatedAt: timestamppb.New(time.Date(2026, 2, 3, 4, 5, 6, 789, time.UTC)),
+		BuildStatus: "ready", BuildError: testStringPointer(""), DefaultTtlSeconds: testInt32Pointer(3600),
+		CreatedAt:   timestamppb.New(time.Date(2026, 2, 3, 4, 5, 6, 789, time.UTC)),
+		ProjectSpec: project,
 	})
 	if err != nil {
 		t.Fatalf("convert preset: %v", err)
@@ -95,18 +95,16 @@ func TestFromProtoPresetGolden(t *testing.T) {
 	want := Preset{
 		Id: "preset_1", OrgId: testStringPointer("org_1"), Name: "Node", Slug: testStringPointer("node"),
 		Language: testStringPointer("typescript"), Official: true, Description: testStringPointer("starter"),
-		BuildStatus: "ready", BuildError: testStringPointer(""), DefaultCpuMillicores: 2000,
-		DefaultMemoryMb: 4096, DefaultDiskGb: 20, DefaultTtlSeconds: testInt64Pointer(3600),
-		Image: testStringPointer("node:22"), SecretProjectId: testStringPointer("project_1"),
-		CreatedAt: "2026-02-03T04:05:06Z",
-		DefaultSetupConfig: &SetupConfig{
-			RepoUrl: testStringPointer("https://example.test/repo"), Branch: testStringPointer("main"),
-			Repos:          testRepoEntriesPointer([]RepoEntry{{Url: "https://example.test/extra", Branch: testStringPointer("dev"), MountPath: testStringPointer("/workspace/extra")}}),
-			InstallCommand: testStringPointer("bun install"), StartupScript: testStringPointer("bun run dev"),
-			EnvVars: testStringMapPointer(map[string]string{"A": "1"}), Agents: testSetupAgentsPointer([]SetupAgent{{Type: "codex"}}),
-			InstallAgents: testBoolPointer(true), Agent: testStringPointer("codex"), AgentEnv: testStringMapPointer(map[string]string{"B": "2"}),
-			AppPorts:          testAppPortsPointer([]AppPort{{Port: 3000, Label: "web", Access: testStringPointer("public")}}),
-			IncludeOrgSecrets: testBoolPointer(true), IncludeUserSecrets: testBoolPointer(false),
+		BuildStatus: "ready", BuildError: testStringPointer(""), DefaultTtlSeconds: testInt64Pointer(3600),
+		CreatedAt: "2026-02-03T04:05:06Z", ProjectSpec: ProjectSpec{
+			SchemaVersion: 1, Image: "node:22", WorkingDirectory: "/workspace/app",
+			Repositories:     []RepositorySpec{{Source: "https://example.test/extra", Branch: testStringPointer("dev"), Destination: testStringPointer("/workspace/extra")}},
+			InstallCommand:   "bun install",
+			StartupScript:    "bun run dev",
+			Environment:      map[string]string{"A": "1"},
+			Agents:           &ProjectAgents{Install: testBoolPointer(true), Tools: []string{"codex"}},
+			ApplicationPorts: []ApplicationPort{{Port: 3000, Label: "web", Access: testStringPointer("public")}},
+			Secrets:          &ProjectSecretBindings{Project: "development", Organization: true},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -114,88 +112,57 @@ func TestFromProtoPresetGolden(t *testing.T) {
 	}
 }
 
-func TestFromProtoPresetUnsetOptionalsAndEmptySetupConfig(t *testing.T) {
+func TestFromProtoPresetRequiresProjectSpec(t *testing.T) {
+	if _, err := fromProtoPreset(nil); err == nil {
+		t.Fatal("nil preset response payload was accepted")
+	}
 	got, err := fromProtoPreset(&codewirev1.Preset{
-		Id: "preset_1", Name: "empty", DefaultSetupConfig: &codewirev1.SetupConfig{},
+		Id: "preset_1", Name: "empty", ProjectSpec: &codewirev1.ProjectSpec{},
 	})
 	if err != nil {
 		t.Fatalf("convert preset: %v", err)
 	}
-	if got.CreatedAt != "" || got.OrgId != nil || got.Slug != nil || got.Language != nil || got.Description != nil || got.BuildError != nil || got.DefaultTtlSeconds != nil || got.Image != nil || got.SecretProjectId != nil {
+	if got.CreatedAt != "" || got.OrgId != nil || got.Slug != nil || got.Language != nil || got.Description != nil || got.BuildError != nil || got.DefaultTtlSeconds != nil {
 		t.Errorf("unset optional preset fields were not preserved: %#v", got)
 	}
-	if got.DefaultSetupConfig == nil {
-		t.Fatal("default setup config = nil, want present empty config")
-	}
-	setup := got.DefaultSetupConfig
-	if setup.RepoUrl != nil || setup.Branch != nil || setup.Repos != nil || setup.InstallCommand != nil || setup.StartupScript != nil || setup.EnvVars != nil || setup.Agents != nil || setup.InstallAgents != nil || setup.Agent != nil || setup.AgentEnv != nil || setup.AppPorts != nil || setup.IncludeOrgSecrets != nil || setup.IncludeUserSecrets != nil {
-		t.Errorf("empty setup config did not preserve nil optional fields: %#v", setup)
-	}
-
-	withoutSetup, err := fromProtoPreset(&codewirev1.Preset{Id: "preset_2", Name: "no-setup"})
-	if err != nil {
-		t.Fatalf("convert preset without setup config: %v", err)
-	}
-	if withoutSetup.DefaultSetupConfig != nil {
-		t.Errorf("absent setup config = %#v, want nil", withoutSetup.DefaultSetupConfig)
+	if _, err := fromProtoPreset(&codewirev1.Preset{Id: "preset_2", Name: "missing"}); err == nil {
+		t.Fatal("preset without project_spec was accepted")
 	}
 }
 
 func TestPresetRequestPresenceAndOverflow(t *testing.T) {
 	empty := ""
 	zero := int64(0)
-	falseValue := false
-	emptyMap := map[string]string{}
-	emptyAgents := []SetupAgent{}
-	emptyPorts := []AppPort{}
 	create, err := createPresetRequest("org_1", CreatePresetBody{
-		Name: "preset", Description: &empty, DefaultCpuMillicores: &zero, DefaultMemoryMb: &zero,
-		DefaultDiskGb: &zero, DefaultTtlSeconds: &zero, Image: &empty, InstallCommand: &empty,
-		StartupScript: &empty, EnvVars: &emptyMap, Agents: &emptyAgents, InstallAgents: &falseValue,
-		Agent: &empty, AgentEnv: &emptyMap, AppPorts: &emptyPorts, IncludeOrgSecrets: &falseValue,
-		IncludeUserSecrets: &falseValue,
-	}, testStringPointer("project_1"))
+		Name: "preset", Description: &empty, DefaultTtlSeconds: &zero,
+		ProjectSpec: ProjectSpec{SchemaVersion: 1, WorkingDirectory: "/workspace"},
+	})
 	if err != nil {
 		t.Fatalf("create request: %v", err)
 	}
-	if create.Description == nil || create.DefaultCpuMillicores == nil || create.DefaultMemoryMb == nil || create.DefaultDiskGb == nil || create.DefaultTtlSeconds == nil || create.InstallAgents == nil || create.IncludeOrgSecrets == nil || create.IncludeUserSecrets == nil || create.SecretProjectId == nil {
+	if create.Description == nil || create.DefaultTtlSeconds == nil || create.ProjectSpec == nil {
 		t.Errorf("create request lost optional presence: %#v", create)
 	}
-	if create.GetDefaultCpuMillicores() != 0 || create.GetImage() != "" || create.GetInstallCommand() != "" || create.GetStartupScript() != "" || create.GetSecretProjectId() != "project_1" {
-		t.Errorf("create request changed optional values: %#v", create)
-	}
-	if create.EnvVars == nil || create.AgentEnv == nil || create.Agents == nil || create.AppPorts == nil {
-		t.Errorf("create request lost empty collection values: %#v", create)
+	if create.GetProjectSpec().GetSchemaVersion() != 1 || create.GetProjectSpec().GetWorkingDirectory() != "/workspace" {
+		t.Errorf("create request changed project spec: %#v", create)
 	}
 
 	update, err := updatePresetRequest("org_1", "preset_1", UpdatePresetBody{
-		Name: &empty, Description: &empty, DefaultCpuMillicores: &zero, DefaultMemoryMb: &zero,
-		DefaultDiskGb: &zero, DefaultTtlSeconds: &zero, Image: &empty, InstallCommand: &empty,
-		StartupScript: &empty, EnvVars: &emptyMap, Agents: &emptyAgents, InstallAgents: &falseValue,
-		Agent: &empty, AgentEnv: &emptyMap, AppPorts: &emptyPorts, IncludeOrgSecrets: &falseValue,
-		IncludeUserSecrets: &falseValue,
-	}, testStringPointer(""))
+		Name: &empty, Description: &empty, DefaultTtlSeconds: &zero,
+		ProjectSpec: &ProjectSpec{},
+	})
 	if err != nil {
 		t.Fatalf("update request: %v", err)
 	}
-	if update.Name == nil || update.Description == nil || update.DefaultCpuMillicores == nil || update.DefaultMemoryMb == nil || update.DefaultDiskGb == nil || update.DefaultTtlSeconds == nil || update.Image == nil || update.InstallCommand == nil || update.StartupScript == nil || update.InstallAgents == nil || update.Agent == nil || update.IncludeOrgSecrets == nil || update.IncludeUserSecrets == nil || update.SecretProjectId == nil {
+	if update.Name == nil || update.Description == nil || update.DefaultTtlSeconds == nil || update.ProjectSpec == nil {
 		t.Errorf("update request lost scalar optional presence: %#v", update)
-	}
-	if update.EnvVars == nil || update.Agents == nil || update.AgentEnv == nil || update.AppPorts == nil {
-		t.Errorf("update request lost empty collection presence: %#v", update)
-	}
-	if len(update.EnvVars.GetValues()) != 0 || len(update.Agents.GetValues()) != 0 || len(update.AgentEnv.GetValues()) != 0 || len(update.AppPorts.GetValues()) != 0 || update.GetSecretProjectId() != "" {
-		t.Errorf("update request changed empty values: %#v", update)
 	}
 
 	overflow := int64(math.MaxInt32) + 1
-	if _, err := createPresetRequest("org_1", CreatePresetBody{Name: "preset", DefaultCpuMillicores: &overflow}, nil); err == nil {
-		t.Error("create request accepted overflow CPU value")
-	}
-	if _, err := updatePresetRequest("org_1", "preset_1", UpdatePresetBody{DefaultTtlSeconds: &overflow}, nil); err == nil {
+	if _, err := updatePresetRequest("org_1", "preset_1", UpdatePresetBody{DefaultTtlSeconds: &overflow}); err == nil {
 		t.Error("update request accepted overflow TTL value")
 	}
-	if _, err := toProtoAppPorts(&[]AppPort{{Port: int64(math.MaxInt32) + 1}}); err == nil {
+	if _, err := toProtoApplicationPorts(&[]ApplicationPort{{Port: int64(math.MaxInt32) + 1}}); err == nil {
 		t.Error("app port conversion accepted overflow value")
 	}
 }
@@ -266,40 +233,31 @@ func TestEnvironmentConvertersGolden(t *testing.T) {
 func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	empty := ""
 	zero := int64(0)
-	falseValue := false
 	confidential := "confidential"
-	emptyMap := map[string]string{}
-	agents := []SetupAgent{{Type: "codex"}}
-	ports := []AppPort{{Port: 3000, Label: "web", Access: &empty}}
-	mountPath := "/workspace/repo"
-	repos := []RepoEntry{{Url: "https://example.test/repo", Branch: &empty, MountPath: &mountPath}}
+	destination := "/workspace/repo"
 	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{
-		Agent: &empty, AgentEnv: &emptyMap, Agents: &agents, AppPorts: &ports, Branch: &empty,
-		CpuMillicores: &zero, DiskGb: &zero, EnvVars: &emptyMap, Image: &empty, IncludeOrgSecrets: &falseValue,
-		IncludeUserSecrets: &falseValue, InstallAgents: &falseValue, InstallCommand: &empty, IsolationTier: &confidential, MemoryMb: &zero,
-		Name: &empty, PresetId: &empty, PresetSlug: &empty, RepoUrl: &empty, Repos: &repos, SecretProject: &empty,
-		StartupScript: &empty, TtlSeconds: &zero,
+		Name: &empty, PresetId: &empty, IsolationTier: &confidential, TtlSeconds: &zero,
+		ProjectSpec: ProjectSpec{
+			SchemaVersion: 1, WorkingDirectory: destination,
+			Repositories:     []RepositorySpec{{Source: "https://example.test/repo", Branch: &empty, Destination: &destination}},
+			Agents:           &ProjectAgents{Tools: []string{"codex"}},
+			ApplicationPorts: []ApplicationPort{{Port: 3000, Label: "web", Access: &empty}},
+		},
 	})
 	if err != nil {
 		t.Fatalf("create environment request: %v", err)
 	}
-	if request.PresetId == nil || request.Name == nil || request.CpuMillicores == nil || request.MemoryMb == nil || request.DiskGb == nil || request.TtlSeconds == nil || request.InstallAgents == nil || request.IncludeOrgSecrets == nil || request.IncludeUserSecrets == nil {
+	if request.PresetId == nil || request.Name == nil || request.TtlSeconds == nil || request.ProjectSpec == nil {
 		t.Errorf("request lost scalar presence: %#v", request)
 	}
-	if request.EnvVars == nil || request.AgentEnv == nil || len(request.Agents) != 1 || len(request.AppPorts) != 1 || len(request.Repos) != 1 {
+	if len(request.GetProjectSpec().GetAgents().GetTools()) != 1 || len(request.GetProjectSpec().GetApplicationPorts()) != 1 || len(request.GetProjectSpec().GetRepositories()) != 1 {
 		t.Errorf("request lost collection values: %#v", request)
 	}
 	if request.GetIsolationTier() != codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL {
 		t.Errorf("request changed isolation tier: %#v", request)
 	}
-	if request.GetAgents()[0].GetType() != "codex" || request.GetAppPorts()[0].GetPort() != 3000 || request.GetAppPorts()[0].GetLabel() != "web" || request.GetAppPorts()[0].GetAccess() != "" || request.GetRepos()[0].GetUrl() != "https://example.test/repo" || request.GetRepos()[0].GetBranch() != "" || request.GetRepos()[0].GetMountPath() != mountPath {
+	if request.GetProjectSpec().GetAgents().GetTools()[0] != "codex" || request.GetProjectSpec().GetApplicationPorts()[0].GetPort() != 3000 || request.GetProjectSpec().GetRepositories()[0].GetSource() != "https://example.test/repo" || request.GetProjectSpec().GetRepositories()[0].GetDestination() != destination {
 		t.Errorf("request changed nested values: %#v", request)
-	}
-	if overflow := int64(math.MaxInt32) + 1; func() bool {
-		_, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{CpuMillicores: &overflow})
-		return err == nil
-	}() {
-		t.Error("create environment request accepted overflow CPU value")
 	}
 	invalidIsolation := "container"
 	if _, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{IsolationTier: &invalidIsolation}); err == nil {
@@ -309,21 +267,21 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 
 func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 	revision := "deadbeef"
-	mountPath := "/workspace/app"
+	destination := "/workspace/app"
 	cpu := uint32(2000)
 	memory := uint64(16384)
 	disk := uint64(40)
 	project := &ProjectSpec{
 		SchemaVersion: 1,
 		Image:         "ghcr.io/example/workspace@sha256:abc",
-		Repositories: []RepoEntry{{
-			Url: "https://example.test/org/app.git", Revision: &revision, MountPath: &mountPath,
+		Repositories: []RepositorySpec{{
+			Source: "https://example.test/org/app.git", Revision: &revision, Destination: &destination,
 		}},
 		WorkingDirectory: "/workspace/app",
 		Environment:      map[string]string{"RUST_LOG": "info"},
 		Agents:           &ProjectAgents{Tools: []string{"codex"}},
 		Skills:           []ProjectSkillSelection{{Source: "repository", Reference: ".agents/skills/rust", Agents: []string{"codex"}}},
-		ApplicationPorts: []AppPort{{Port: 8080, Label: "api"}},
+		ApplicationPorts: []ApplicationPort{{Port: 8080, Label: "api"}},
 		Resources:        &ProjectResources{CpuMillicores: &cpu, MemoryMib: &memory, DiskGib: &disk},
 		Secrets:          &ProjectSecretBindings{Project: "development", User: true},
 		Access:           &ProjectAccessBinding{Profile: "user/work"},
@@ -389,9 +347,6 @@ func TestPresetSecretConverterDescriptorCoverage(t *testing.T) {
 	if err := ensureSecretProjectConverterCoverage(); err != nil {
 		t.Fatalf("secret project converter descriptor coverage: %v", err)
 	}
-	if err := ensureSetupConfigConverterCoverage(); err != nil {
-		t.Fatalf("setup config converter descriptor coverage: %v", err)
-	}
 	if err := ensureEnvironmentConverterCoverage(); err != nil {
 		t.Fatalf("environment converter descriptor coverage: %v", err)
 	}
@@ -407,11 +362,7 @@ func stringSlicePointer(values []string) *[]string {
 	return &values
 }
 
-func testStringPointer(value string) *string                          { return &value }
-func testBoolPointer(value bool) *bool                                { return &value }
-func testInt32Pointer(value int32) *int32                             { return &value }
-func testInt64Pointer(value int64) *int64                             { return &value }
-func testStringMapPointer(value map[string]string) *map[string]string { return &value }
-func testSetupAgentsPointer(value []SetupAgent) *[]SetupAgent         { return &value }
-func testAppPortsPointer(value []AppPort) *[]AppPort                  { return &value }
-func testRepoEntriesPointer(value []RepoEntry) *[]RepoEntry           { return &value }
+func testStringPointer(value string) *string { return &value }
+func testBoolPointer(value bool) *bool       { return &value }
+func testInt32Pointer(value int32) *int32    { return &value }
+func testInt64Pointer(value int64) *int64    { return &value }

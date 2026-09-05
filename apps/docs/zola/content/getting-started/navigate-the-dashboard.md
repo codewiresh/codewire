@@ -19,7 +19,6 @@ After creating your first organization, a setup checklist guides you through:
 
 1. Create an organization
 2. Create an environment
-3. Connect GitHub
 
 Completed steps are checked off automatically.
 
@@ -39,7 +38,7 @@ Each organization you belong to appears as an expandable group. Expand an org to
 Each organization group has quick links:
 
 - **New Environment** — open the [AI-assisted environment creator](@/getting-started/create-your-first-environment.md)
-- **Secrets** — manage [organization secrets](@/organizations/secrets.md) (GitHub tokens, API keys)
+- **Secrets** — manage generic, write-only [stored values](@/organizations/secrets.md)
 
 ### Bottom links
 

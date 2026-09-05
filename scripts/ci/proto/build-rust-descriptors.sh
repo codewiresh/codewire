@@ -20,9 +20,7 @@ cd "$ROOT/proto"
   --path codewire/console/v1/account.proto \
   --path codewire/console/v1/billing.proto \
   --path codewire/console/v1/environment_setup.proto \
-  --path codewire/console/v1/github.proto \
   --path codewire/internal/v1/coordinate.proto \
-  --path codewire/internal/v1/environment_credentials.proto \
   --path codewire/internal/v1/gateway_binding.proto \
   --path codewire/internal/v1/mesh_authorization.proto \
   --path codewire/v1/api_key.proto \

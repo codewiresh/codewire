@@ -199,6 +199,12 @@ verify_kind_build_cache_contract() {
   # shellcheck disable=SC2016
   count="$(grep -cF 'cargo build --locked --profile "$CODEWIRE_RUST_PROFILE"' "$GATEWAY_DOCKERFILE")"
   [[ "$count" -eq 2 ]] || fail 'gateway must preserve its two distinct profile-selected builds'
+  grep -qF -- '-p codewire-cli-bin --bin cw' "$GATEWAY_DOCKERFILE" ||
+    fail 'gateway support image does not build the self-contained cw binary'
+  if grep -Eq -- '--bin codewire-daemon|/usr/local/bin/(daemon|codewire-daemon)' \
+      "$GATEWAY_DOCKERFILE"; then
+    fail 'gateway support image retained a standalone daemon binary or alias'
+  fi
 }
 
 verify_services_dockerfile_contract

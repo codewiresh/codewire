@@ -1,10 +1,9 @@
 use std::future::Future;
-use std::io::{BufRead as _, Read as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
 use anyhow::Context as _;
 use codewire_access::{AccessProfileReference, EnvironmentId};
@@ -33,77 +32,7 @@ const DEFAULT_NATIVE_MEMORY_MIB: u32 = 4 * 1024;
 const DEFAULT_NATIVE_DISK_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const DEFAULT_NATIVE_DOCKER_DISK_BYTES: u64 =
     codewire_local_vmm::linux::state::DEFAULT_DOCKER_DISK_BYTES;
-const MAX_LEGACY_LOCAL_NAME_INDEX_BYTES: u64 = 1024 * 1024;
 const NATIVE_CREDENTIAL_AUTHORITY_UNAVAILABLE: &str = "local credential authority is unavailable";
-
-fn legacy_local_name_collides(data_dir: &Path, name: &str) -> anyhow::Result<bool> {
-    let state_path = data_dir.join("local_instances.toml");
-    let before = match std::fs::symlink_metadata(&state_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read legacy local name index {}", state_path.display()));
-        }
-    };
-    if !before.is_file()
-        || before.file_type().is_symlink()
-        || before.uid() != unsafe { libc::geteuid() }
-        || before.permissions().mode() & 0o022 != 0
-        || before.len() > MAX_LEGACY_LOCAL_NAME_INDEX_BYTES
-    {
-        anyhow::bail!(
-            "legacy local name index is not an owner-controlled bounded regular file: {}",
-            state_path.display()
-        );
-    }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&state_path)
-        .with_context(|| format!("open legacy local name index {}", state_path.display()))?;
-    let opened = file
-        .metadata()
-        .with_context(|| format!("inspect legacy local name index {}", state_path.display()))?;
-    if opened.dev() != before.dev()
-        || opened.ino() != before.ino()
-        || opened.uid() != before.uid()
-        || opened.permissions().mode() & 0o022 != 0
-        || opened.len() > MAX_LEGACY_LOCAL_NAME_INDEX_BYTES
-    {
-        anyhow::bail!(
-            "legacy local name index changed while opening: {}",
-            state_path.display()
-        );
-    }
-
-    let unquoted = format!("[instances.{name}]");
-    let double_quoted = format!("[instances.\"{name}\"]");
-    let single_quoted = format!("[instances.'{name}']");
-    let mut reader = std::io::BufReader::new(file).take(MAX_LEGACY_LOCAL_NAME_INDEX_BYTES + 1);
-    let mut line = String::new();
-    let mut total = 0_u64;
-    loop {
-        line.clear();
-        let read = reader
-            .read_line(&mut line)
-            .with_context(|| format!("read legacy local name index {}", state_path.display()))?;
-        if read == 0 {
-            return Ok(false);
-        }
-        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        if total > MAX_LEGACY_LOCAL_NAME_INDEX_BYTES {
-            anyhow::bail!(
-                "legacy local name index exceeds the supported size: {}",
-                state_path.display()
-            );
-        }
-        let line = line.trim();
-        if line == unquoted || line == double_quoted || line == single_quoted {
-            return Ok(true);
-        }
-    }
-}
 
 pub(crate) async fn run_native_supervisor(args: NativeSupervisorArgs) -> anyhow::Result<()> {
     let executable = canonical_current_executable()?;
@@ -185,8 +114,6 @@ impl codewire_local_vmm::mesh_enrollment::MeshEnrollmentCredentialResolver
                         || identity.organization_id != attachment.organization_id
                         || identity.api_key != token
                         || !identity.api_key.starts_with("cw_")
-                        || identity.environment_id.trim().is_empty()
-                        || identity.environment_token.trim().is_empty()
                     {
                         return Err(());
                     }
@@ -412,11 +339,6 @@ pub(crate) async fn create_native_environment(
         .to_owned();
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
-    if legacy_local_name_collides(&paths.mesh_data_dir, &name)? {
-        anyhow::bail!(
-            "local environment {name:?} already exists in the legacy Docker/Lima state; choose a different name or remove it explicitly"
-        );
-    }
     let requested_path = args.path.as_deref().unwrap_or_else(|| Path::new("."));
     let source_path = std::fs::canonicalize(requested_path)
         .with_context(|| format!("resolve native workspace {}", requested_path.display()))?;
@@ -1355,7 +1277,7 @@ fn native_unsupported_project_fields(
     if !spec.startup_script.is_empty() {
         unsupported.push("startup");
     }
-    if spec.agents.install == Some(true) || !spec.agent_environment.is_empty() {
+    if spec.agents.install == Some(true) {
         unsupported.push("agents");
     }
     if !spec.secrets.is_empty() {
@@ -1527,9 +1449,6 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
     }
     if !args.env.is_empty() {
         unsupported.push("--env");
-    }
-    if args.secret_project.is_some() {
-        unsupported.push("secrets");
     }
     if !args.follow || args.no_wait {
         unsupported.push("asynchronous creation");
@@ -1813,41 +1732,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_local_state_is_used_only_as_a_read_only_name_collision_index() {
-        let root = tempfile::tempdir().unwrap();
-        let state_path = root.path().join("local_instances.toml");
-        let state = concat!(
-            "[instances.workspace]\n",
-            "backend = \"lima\"\n",
-            "runtime_name = \"cw-workspace\"\n",
-            "daemon_auth_token = \"synthetic-do-not-read\"\n",
-        );
-        std::fs::write(&state_path, state).unwrap();
-        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        assert!(legacy_local_name_collides(root.path(), "workspace").unwrap());
-        assert!(!legacy_local_name_collides(root.path(), "cw-workspace").unwrap());
-        assert!(!legacy_local_name_collides(root.path(), "other").unwrap());
-        assert_eq!(std::fs::read_to_string(&state_path).unwrap(), state);
-    }
-
-    #[test]
-    fn legacy_local_name_index_rejects_symlinks_and_unbounded_files() {
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("target");
-        std::fs::write(&target, "[instances.workspace]\n").unwrap();
-        std::os::unix::fs::symlink(&target, root.path().join("local_instances.toml")).unwrap();
-        assert!(legacy_local_name_collides(root.path(), "workspace").is_err());
-
-        std::fs::remove_file(root.path().join("local_instances.toml")).unwrap();
-        let state_path = root.path().join("local_instances.toml");
-        let file = std::fs::File::create(&state_path).unwrap();
-        file.set_len(MAX_LEGACY_LOCAL_NAME_INDEX_BYTES + 1).unwrap();
-        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(legacy_local_name_collides(root.path(), "workspace").is_err());
-    }
-
-    #[test]
     fn native_resource_quantities_match_the_canonical_command() {
         assert_eq!(parse_native_cpu("2").unwrap(), 2);
         assert_eq!(parse_native_memory("16gi").unwrap(), 16 * 1024);
@@ -1895,7 +1779,7 @@ mod tests {
         // Native creation must not deserialize this credential-bearing file.
         std::fs::write(mesh_data_dir.join("config.toml"), "not valid toml = [").unwrap();
         let project = NativeProjectPlan {
-            spec: codewire_project::parse_project_yaml("ports: [3001, 8080]\n")
+            spec: codewire_project::parse_project_yaml("ports: [{port: 3001}, {port: 8080}]\n")
                 .unwrap()
                 .spec,
             ..NativeProjectPlan::default()
@@ -2058,7 +1942,6 @@ mod tests {
             &platform_config_dir,
             &config::PlatformConfig {
                 server_url: "https://api.codewire-dev.sh".to_owned(),
-                session_token: String::new(),
                 default_org: "org-hosted".to_owned(),
             },
         )
@@ -2131,7 +2014,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("codewire.yaml"),
-            "version: 1\ncpu: 2000m\nmemory: 8GB\ndisk: 40GB\n",
+            "version: 1\ncpu: \"2000m\"\nmemory: \"8GB\"\ndisk: \"40GB\"\n",
         )
         .unwrap();
         let resources = native_codewire_yaml(temp.path(), None).unwrap();
@@ -2161,7 +2044,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("codewire.yaml"),
-            "version: 1\nenv: {EXPLICIT: wins}\nsecrets: {user: true, project: development}\n",
+            "version: 1\nenvironment: {EXPLICIT: wins}\nsecrets: {user: true, project: development}\n",
         )
         .unwrap();
 
@@ -2170,6 +2053,24 @@ mod tests {
             error.to_string(),
             "native local preview does not yet support codewire.yaml fields: secrets"
         );
+    }
+
+    #[test]
+    fn native_yaml_rejects_all_reserved_runtime_environment_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        for key in codewire_project::RESERVED_RUNTIME_ENVIRONMENT_KEYS {
+            std::fs::write(
+                temp.path().join("codewire.yaml"),
+                format!("environment: {{{key}: synthetic}}\n"),
+            )
+            .unwrap();
+            let error = native_codewire_yaml(temp.path(), None).unwrap_err();
+            assert!(
+                format!("{error:#}")
+                    .contains(&format!("{key} is reserved for Codewire runtime control")),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]
@@ -2273,7 +2174,7 @@ working_directory: /workspace/github
         std::fs::create_dir_all(temp.path().join(".agents/skills/rust")).unwrap();
         std::fs::write(
             temp.path().join("codewire.yaml"),
-            "agents: [codex]\nskills: [.agents/skills/rust]\n",
+            "agents: {tools: [codex]}\nskills: [{source: repository, path: .agents/skills/rust}]\n",
         )
         .unwrap();
         let project = native_codewire_yaml(temp.path(), None).unwrap();
@@ -2283,7 +2184,7 @@ working_directory: /workspace/github
 
         std::fs::write(
             temp.path().join("codewire.yaml"),
-            "agents: {install: true, tools: [codex]}\nskills: [.agents/skills/rust]\n",
+            "agents: {install: true, tools: [codex]}\nskills: [{source: repository, path: .agents/skills/rust}]\n",
         )
         .unwrap();
         let error = native_codewire_yaml(temp.path(), None).unwrap_err();
@@ -2295,7 +2196,7 @@ working_directory: /workspace/github
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("codewire.yaml"),
-            "ports:\n  - 3000\n  - 18080:8080\n",
+            "ports:\n  - port: 3000\n  - host_port: 18080\n    guest_port: 8080\n",
         )
         .unwrap();
 

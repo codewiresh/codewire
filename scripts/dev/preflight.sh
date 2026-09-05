@@ -240,6 +240,8 @@ run_policy_local() {
   if [ "${#syntax_files[@]}" -gt 0 ]; then
     run_step "verification shell syntax" bash -n "${syntax_files[@]}"
   fi
+  run_step "Rust-owned schema and fixture guard" \
+    scripts/ci/tests/test-rust-owned-fixtures.sh
   run_step "package license map" python3 scripts/checks/repo_checks.py license-map
   run_step "Permanent raw surface policy" python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   run_step "Rust validation source guard" python3 scripts/checks/repo_checks.py rust-validation-source

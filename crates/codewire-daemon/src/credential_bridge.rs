@@ -884,7 +884,7 @@ mod tests {
                 listen_addr: "injected:credential-bridge".to_owned(),
                 workspace_root,
                 home_root,
-                auth_token: Some(TEST_TOKEN.to_owned()),
+                auth_token: crate::DaemonAuthToken::new(TEST_TOKEN).unwrap(),
                 process_execution: ProcessExecution::Native,
                 credential_bridge: Some(CredentialBridgeConfig {
                     environment_id,

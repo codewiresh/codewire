@@ -129,13 +129,6 @@ metadata:
   name: runc
 handler: runc
 ---
-# Legacy compatibility for older isol8-rendering paths in kind.
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: isol8
-handler: runc
----
 # The workspace pod's PVC requests storageClassName=example-volumes (Hetzner
 # Cloud block storage in prod). kind has no such StorageClass, so the PVC
 # stayed unbound and the pod hung in Pending (unschedulable) — the env never

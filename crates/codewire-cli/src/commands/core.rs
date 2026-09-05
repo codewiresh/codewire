@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::*;
 
 pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<()> {
@@ -123,13 +125,13 @@ pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> an
     let mut platform_context = None;
     let request = if init_needs_platform_resolution(&args) {
         let prepare = init_prepare_request_from_args(&args)?;
-        let (org_id, secret_client, organization_client, environment_client) =
+        let (org_id, organization_client, environment_client) =
             resolve_platform_context(globals).await?;
         let response = environment_client
             .prepare_environment_create(&org_id, &prepare)
             .await
             .context("prepare launch")?;
-        platform_context = Some((org_id, secret_client, organization_client));
+        platform_context = Some((org_id, organization_client));
         response.draft
     } else {
         init_request_from_args(&args)?
@@ -138,23 +140,16 @@ pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> an
     write_resolved_codewire_yaml(&args.file, &request).context("write codewire.yaml")?;
     eprintln!("codewire.yaml written: {}", args.file.display());
     if let Some(preset_name) = trimmed_optional(args.save_preset.clone()) {
-        let (org_id, secret_client, organization_client) = match platform_context {
+        let (org_id, organization_client) = match platform_context {
             Some(context) => context,
             None => {
-                let (org_id, secret_client, organization_client, _) =
-                    resolve_platform_context(globals).await?;
-                (org_id, secret_client, organization_client)
+                let (org_id, organization_client, _) = resolve_platform_context(globals).await?;
+                (org_id, organization_client)
             }
         };
         let preset_request = create_preset_request_from_environment(&preset_name, &request)?;
-        let secret_project_id = resolve_preset_secret_project_id(
-            &secret_client,
-            &org_id,
-            &preset_request.secret_project,
-        )
-        .await?;
         let preset = organization_client
-            .create_preset(&org_id, &preset_request, secret_project_id)
+            .create_preset(&org_id, &preset_request)
             .await
             .context("save preset")?;
         eprintln!("Preset saved: {} ({}).", preset.name, preset.id);
@@ -168,17 +163,15 @@ pub(crate) async fn handle_init_command(globals: &Globals, args: InitArgs) -> an
 
 pub(crate) async fn resolve_platform_context(
     globals: &Globals,
-) -> anyhow::Result<(String, SecretClient, OrganizationClient, EnvironmentClient)> {
+) -> anyhow::Result<(String, OrganizationClient, EnvironmentClient)> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
     let platform = resolve_platform(globals, &paths, &env)?;
-    let client = SecretClient::new(&platform)?;
     let organization_client = organization_client(&platform)?;
     let orgs = organization_client.list_orgs().await.context("list orgs")?;
     let org_id = current_org_id(&platform, &orgs)?;
     Ok((
         org_id,
-        client,
         organization_client,
         EnvironmentClient::new(&platform)?,
     ))
@@ -275,27 +268,40 @@ pub(crate) fn init_prepare_request_from_args_with_repo_detector(
     detect_repo: impl FnOnce() -> anyhow::Result<(String, String)>,
 ) -> anyhow::Result<PrepareEnvironmentRequest> {
     let mut draft = env_create_request_from_init_args(args)?;
-    if draft.repo_url.is_empty()
-        && draft.repos.is_empty()
+    if draft.project_spec.repositories.is_empty()
         && draft.preset_id.is_none()
-        && draft.preset_slug.is_empty()
-        && draft.image.is_empty()
+        && draft.project_spec.preset.is_empty()
+        && draft.project_spec.image.is_empty()
     {
         let (repo_url, detected_branch) =
             detect_repo().context("provide a repo URL, --image, or --preset")?;
         if repo_url.trim().is_empty() {
             anyhow::bail!("provide a repo URL, --image, or --preset");
         }
-        eprintln!("Using repo: {repo_url}");
-        draft.repo_url = repo_url;
-        if draft.branch.is_empty() {
-            draft.branch = detected_branch;
-        }
+        let destination =
+            codewire_project::validate_repository_destinations([(repo_url.as_str(), "")])?
+                .into_iter()
+                .next()
+                .expect("one repository produces one destination");
+        draft.project_spec.working_directory = destination.clone();
+        let branch = args
+            .branch
+            .as_deref()
+            .and_then(trimmed_str)
+            .unwrap_or(&detected_branch)
+            .to_string();
+        draft
+            .project_spec
+            .repositories
+            .push(codewire_project::RepositorySpec {
+                source: repo_url,
+                branch,
+                destination,
+                ..Default::default()
+            });
+        draft.project_spec.validate()?;
     }
-    Ok(PrepareEnvironmentRequest {
-        draft,
-        analyze: None,
-    })
+    Ok(PrepareEnvironmentRequest { draft })
 }
 
 pub(crate) fn init_needs_platform_resolution(args: &InitArgs) -> bool {
@@ -316,11 +322,6 @@ pub(crate) fn init_has_direct_yaml_inputs(args: &InitArgs) -> bool {
         || args.startup.as_deref().and_then(trimmed_str).is_some()
         || args.coding_agent.as_deref().and_then(trimmed_str).is_some()
         || !args.env.is_empty()
-        || args
-            .secret_project
-            .as_deref()
-            .and_then(trimmed_str)
-            .is_some()
 }
 
 pub(crate) fn env_create_request_from_init_args(
@@ -359,7 +360,6 @@ pub(crate) fn env_create_request_from_init_args(
         startup: args.startup.clone(),
         coding_agent: args.coding_agent.clone(),
         env: args.env.clone(),
-        secret_project: args.secret_project.clone(),
         access_profile: None,
         network: None,
         no_network: false,
@@ -386,6 +386,10 @@ pub(crate) fn detect_local_repo(dir: &Path) -> anyhow::Result<(String, String)> 
         anyhow::bail!("not a git repository or no origin remote");
     }
     let repo_url = normalize_git_url(String::from_utf8(remote.stdout)?.trim());
+    // Reject ambient URL credentials at the discovery boundary. In
+    // particular, never return the untrusted remote to a caller that might
+    // display or log it before canonical request validation.
+    codewire_project::validate_repository_destinations([(repo_url.as_str(), "")])?;
     let branch = ProcessCommand::new("git")
         .arg("-C")
         .arg(dir)

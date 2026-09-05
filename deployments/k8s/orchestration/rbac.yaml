@@ -27,10 +27,10 @@ metadata:
     app.kubernetes.io/name: codewire
     app.kubernetes.io/component: orchestration
 rules:
-  # OpenBao Kubernetes Auth validates the presented workload JWT through the
-  # cluster TokenReview API as this ServiceAccount. It needs only TokenReview
-  # creation; SubjectAccessReview and broader auth-delegator access are not
-  # required.
+  # Exact-audience gateway binding and OpenBao Kubernetes Auth validate their
+  # presented workload JWTs through the cluster TokenReview API as this
+  # ServiceAccount. They need only TokenReview creation; SubjectAccessReview
+  # and broader auth-delegator access are not required.
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]

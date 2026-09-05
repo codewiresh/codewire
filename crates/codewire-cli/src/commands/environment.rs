@@ -1,4 +1,5 @@
 use std::io::Write as _;
+use std::path::Path;
 
 use super::*;
 
@@ -13,7 +14,6 @@ const PLATFORM_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(180);
 #[derive(Clone, Debug)]
 pub(crate) struct LocalMeshBootstrap {
     pub(crate) mesh: config::ResolvedMeshConfig,
-    pub(crate) organization_id: String,
     pub(crate) network_id: String,
 }
 
@@ -105,11 +105,7 @@ pub(crate) fn resolve_env_create_mesh_bootstrap(
         }
     }
 
-    Ok(Some(LocalMeshBootstrap {
-        mesh,
-        organization_id,
-        network_id,
-    }))
+    Ok(Some(LocalMeshBootstrap { mesh, network_id }))
 }
 
 pub(crate) fn env_create_mesh_prompt(mesh_url: &str, network_id: &str) -> String {
@@ -312,7 +308,6 @@ pub(crate) async fn handle_platform_env_command(
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
     let platform = resolve_platform(globals, &paths, &env)?;
-    let secret_client = SecretClient::new(&platform)?;
     let environment_client = EnvironmentClient::new(&platform)?;
     let organization_client = organization_client(&platform)?;
     let orgs = organization_client.list_orgs().await.context("list orgs")?;
@@ -320,7 +315,7 @@ pub(crate) async fn handle_platform_env_command(
 
     match command {
         EnvCommand::Create(args) => {
-            let mut request = prepare_platform_env_create_request(&args)?;
+            let request = prepare_platform_env_create_request(&args)?;
             if let Some(bootstrap) = resolve_env_create_mesh_bootstrap(
                 &paths,
                 &env,
@@ -330,15 +325,11 @@ pub(crate) async fn handle_platform_env_command(
                 args.network.as_deref(),
                 args.no_network,
             )? {
-                let invite = create_env_mesh_invite(&bootstrap)
-                    .await
-                    .context("create Mesh enrollment for platform environment")?;
-                inject_env_create_mesh_bootstrap(
-                    &mut request,
-                    &bootstrap.mesh.mesh_url,
-                    &bootstrap.network_id,
-                    &invite.invite_code,
-                )?;
+                anyhow::bail!(
+                    "platform Mesh attachment to {:?} at {} is unavailable until credential-free runtime enrollment is implemented",
+                    bootstrap.network_id,
+                    bootstrap.mesh.mesh_url
+                );
             }
             let environment = environment_client
                 .create_environment(&org_id, &request)
@@ -352,14 +343,8 @@ pub(crate) async fn handle_platform_env_command(
             if let Some(preset_name) = trimmed_optional(args.save_preset.clone()) {
                 let preset_request =
                     create_preset_request_from_environment(&preset_name, &request)?;
-                let secret_project_id = resolve_preset_secret_project_id(
-                    &secret_client,
-                    &org_id,
-                    &preset_request.secret_project,
-                )
-                .await?;
                 let preset = organization_client
-                    .create_preset(&org_id, &preset_request, secret_project_id)
+                    .create_preset(&org_id, &preset_request)
                     .await
                     .context("save preset")?;
                 eprintln!("Preset saved: {} ({}).", preset.name, preset.id);
@@ -2037,7 +2022,7 @@ pub(crate) fn env_create_request_from_args(
         .map(parse_go_duration_seconds)
         .transpose()
         .context("invalid --ttl duration")?;
-    let (repo_url, branch, repos) = collect_env_create_repos(
+    let repositories = collect_env_create_repos(
         &args.repo_urls,
         &args.repo_flags,
         args.branch.as_deref().and_then(trimmed_str),
@@ -2062,112 +2047,46 @@ pub(crate) fn env_create_request_from_args(
     let agents = if agent.is_empty() {
         Vec::new()
     } else {
-        vec![SetupAgent {
-            agent_type: agent.clone(),
-        }]
+        vec![agent]
     };
-
-    let mut request = CreateEnvironmentRequest {
-        preset_id,
-        name: trimmed_optional(args.name.clone()),
-        cpu_millicores: positive_i32(parse_platform_create_quantity(args.cpu.as_deref(), "CPU")?),
-        memory_mb: positive_i32(parse_create_memory(args.memory.as_deref())?),
-        disk_gb: positive_i32(parse_create_disk(args.disk.as_deref())?),
-        ttl_seconds,
-        preset_slug,
-        repo_url,
-        branch,
-        repos,
-        image,
-        install_command: trimmed_optional(args.install.clone()).unwrap_or_default(),
-        startup_script: trimmed_optional(args.startup.clone()).unwrap_or_default(),
-        env_vars: parse_env_overrides(&args.env)?,
-        agents,
-        install_agents: None,
-        agent,
-        agent_env: BTreeMap::new(),
-        secret_project: trimmed_optional(args.secret_project.clone()).unwrap_or_default(),
-        app_ports: Vec::new(),
-        include_org_secrets: None,
-        include_user_secrets: None,
-        isolation_tier: args.isolation.clone().unwrap_or_default(),
-        project_spec: None,
-    };
-    request.project_spec = Some(project_spec_from_create_request(&request)?);
-    Ok(request)
-}
-
-fn project_spec_from_create_request(
-    request: &CreateEnvironmentRequest,
-) -> anyhow::Result<codewire_project::ProjectSpec> {
-    let destinations = codewire_project::validate_repository_destinations(
-        request
-            .repos
-            .iter()
-            .map(|repository| (repository.url.as_str(), repository.mount_path.as_str())),
-    )?;
-    let repositories = request
-        .repos
-        .iter()
-        .zip(destinations.iter())
-        .map(
-            |(repository, destination)| codewire_project::RepositorySpec {
-                source: repository.url.clone(),
-                revision: repository.revision.clone(),
-                branch: repository.branch.clone(),
-                destination: destination.clone(),
-            },
-        )
-        .collect::<Vec<_>>();
     let working_directory = match repositories.as_slice() {
         [repository] => repository.destination.clone(),
         _ => "/workspace".to_string(),
     };
-    let application_ports = request
-        .app_ports
-        .iter()
-        .map(|port| {
-            Ok(codewire_project::ApplicationPort {
-                port: u16::try_from(port.port)
-                    .map_err(|_| anyhow::anyhow!("application port is outside 1 through 65535"))?,
-                label: port.label.clone(),
-                access: port.access.clone(),
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let spec = codewire_project::ProjectSpec {
+    let project_spec = codewire_project::ProjectSpec {
         schema_version: codewire_project::PROJECT_SCHEMA_VERSION,
-        preset: request.preset_slug.clone(),
-        image: request.image.clone(),
+        preset: preset_slug,
+        image,
         repositories,
         working_directory,
-        install_command: request.install_command.clone(),
-        startup_script: request.startup_script.clone(),
-        environment: request.env_vars.clone(),
+        install_command: trimmed_optional(args.install.clone()).unwrap_or_default(),
+        startup_script: trimmed_optional(args.startup.clone()).unwrap_or_default(),
+        environment: parse_env_overrides(&args.env)?,
         agents: codewire_project::AgentsSpec {
-            install: request.install_agents,
-            tools: request
-                .agents
-                .iter()
-                .map(|agent| agent.agent_type.clone())
-                .collect(),
+            install: None,
+            tools: agents,
         },
-        agent_environment: request.agent_env.clone(),
-        application_ports,
         resources: codewire_project::ResourceSpec {
-            cpu_millicores: request.cpu_millicores.map(|value| value as u32),
-            memory_mib: request.memory_mb.map(|value| value as u64),
-            disk_gib: request.disk_gb.map(|value| value as u64),
-        },
-        secrets: codewire_project::SecretBindings {
-            project: request.secret_project.clone(),
-            organization: request.include_org_secrets.unwrap_or(false),
-            user: request.include_user_secrets.unwrap_or(false),
+            cpu_millicores: positive_i32(parse_platform_create_quantity(
+                args.cpu.as_deref(),
+                "CPU",
+            )?)
+            .map(|value| value as u32),
+            memory_mib: positive_i32(parse_create_memory(args.memory.as_deref())?)
+                .map(|value| value as u64),
+            disk_gib: positive_i32(parse_create_disk(args.disk.as_deref())?)
+                .map(|value| value as u64),
         },
         ..codewire_project::ProjectSpec::default()
     };
-    spec.validate()?;
-    Ok(spec)
+    project_spec.validate()?;
+    Ok(CreateEnvironmentRequest {
+        preset_id,
+        name: trimmed_optional(args.name.clone()),
+        ttl_seconds,
+        isolation_tier: args.isolation.clone().unwrap_or_default(),
+        project_spec,
+    })
 }
 
 fn parse_platform_create_quantity(value: Option<&str>, label: &str) -> anyhow::Result<Option<i32>> {
@@ -2205,94 +2124,66 @@ pub(crate) fn prepare_platform_env_create_request(
 ) -> anyhow::Result<CreateEnvironmentRequest> {
     let mut request = env_create_request_from_args(args)?;
     if request.preset_id.is_none()
-        && request.preset_slug.is_empty()
-        && request.repo_url.is_empty()
-        && request.repos.is_empty()
-        && request.image.is_empty()
+        && request.project_spec.preset.is_empty()
+        && request.project_spec.repositories.is_empty()
+        && request.project_spec.image.is_empty()
     {
-        request.image = CANONICAL_WORKSPACE_IMAGE.to_string();
-        request.project_spec = Some(project_spec_from_create_request(&request)?);
-    }
-    if !args.no_network {
-        validate_env_create_mesh_bootstrap_env(&request)?;
+        request.project_spec.image = CANONICAL_WORKSPACE_IMAGE.to_string();
     }
     Ok(request)
 }
 
-pub(crate) fn validate_env_create_mesh_bootstrap_env(
-    request: &CreateEnvironmentRequest,
-) -> anyhow::Result<()> {
-    for key in [
-        config::CODEWIRE_MESH_URL_ENV,
-        config::CODEWIRE_MESH_NETWORK_ENV,
-        config::CODEWIRE_MESH_INVITE_CODE_ENV,
-    ] {
-        if request.env_vars.contains_key(key) {
-            anyhow::bail!("{key} is reserved for mesh bootstrap");
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn inject_env_create_mesh_bootstrap(
-    request: &mut CreateEnvironmentRequest,
-    mesh_url: &str,
-    network_id: &str,
-    invite_code: &str,
-) -> anyhow::Result<()> {
-    validate_env_create_mesh_bootstrap_env(request)?;
-    for (key, value) in [
-        (config::CODEWIRE_MESH_URL_ENV, mesh_url),
-        (config::CODEWIRE_MESH_NETWORK_ENV, network_id),
-        (config::CODEWIRE_MESH_INVITE_CODE_ENV, invite_code),
-    ] {
-        request.env_vars.insert(key.to_string(), value.to_string());
-    }
-    Ok(())
-}
-
-pub(crate) async fn create_env_mesh_invite(
-    bootstrap: &LocalMeshBootstrap,
-) -> anyhow::Result<Invite> {
-    MeshClient::new(&bootstrap.mesh)?
-        .create_invite(&bootstrap.organization_id, &bootstrap.network_id, "24h")
-        .await
-        .context("create mesh invite for environment")
-}
-
 #[derive(serde::Serialize)]
 pub(crate) struct ResolvedCodewireYaml {
+    pub(crate) version: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) preset: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) image: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) repositories: Vec<ResolvedCodewireRepositoryYaml>,
+    pub(crate) working_directory: String,
     #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) install: String,
+    pub(crate) install_command: String,
     #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) startup: String,
+    pub(crate) startup_script: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) secrets: Option<ResolvedCodewireSecretsYaml>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) env: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) ports: Vec<ResolvedCodewirePortYaml>,
-    #[serde(skip_serializing_if = "is_zero_i32")]
-    pub(crate) cpu: i32,
-    #[serde(skip_serializing_if = "is_zero_i32")]
-    pub(crate) memory: i32,
-    #[serde(skip_serializing_if = "is_zero_i32")]
-    pub(crate) disk: i32,
+    pub(crate) environment: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agents: Option<ResolvedCodewireAgentsYaml>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) skills: Vec<ResolvedCodewireSkillYaml>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ports: Vec<ResolvedCodewirePortYaml>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cpu: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) memory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) disk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) access: Option<ResolvedCodewireAccessYaml>,
 }
 
-fn is_zero_i32(value: &i32) -> bool {
-    *value == 0
+#[derive(serde::Serialize)]
+pub(crate) struct ResolvedCodewireRepositoryYaml {
+    pub(crate) source: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) revision: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) branch: String,
+    pub(crate) destination: String,
 }
 
 #[derive(serde::Serialize)]
 pub(crate) struct ResolvedCodewirePortYaml {
-    pub(crate) port: i32,
+    pub(crate) port: u16,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) label: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) access: String,
 }
 
 #[derive(serde::Serialize)]
@@ -2309,6 +2200,22 @@ pub(crate) struct ResolvedCodewireSecretsYaml {
     pub(crate) user: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) project: String,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct ResolvedCodewireSkillYaml {
+    pub(crate) source: &'static str,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) path: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) name: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) agents: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct ResolvedCodewireAccessYaml {
+    pub(crate) profile: String,
 }
 
 pub(crate) fn write_resolved_codewire_yaml(
@@ -2329,55 +2236,84 @@ pub(crate) fn write_resolved_codewire_yaml(
 pub(crate) fn codewire_yaml_from_request(
     request: &CreateEnvironmentRequest,
 ) -> ResolvedCodewireYaml {
+    let spec = &request.project_spec;
     ResolvedCodewireYaml {
-        image: request.image.clone(),
-        install: request.install_command.clone(),
-        startup: request.startup_script.clone(),
-        secrets: Some(ResolvedCodewireSecretsYaml {
-            organization: request.include_org_secrets.unwrap_or(false),
-            user: request.include_user_secrets.unwrap_or(false),
-            project: request.secret_project.clone(),
+        version: spec.schema_version,
+        preset: spec.preset.clone(),
+        image: spec.image.clone(),
+        repositories: spec
+            .repositories
+            .iter()
+            .map(|repository| ResolvedCodewireRepositoryYaml {
+                source: repository.source.clone(),
+                revision: repository.revision.clone(),
+                branch: repository.branch.clone(),
+                destination: repository.destination.clone(),
+            })
+            .collect(),
+        working_directory: spec.working_directory.clone(),
+        install_command: spec.install_command.clone(),
+        startup_script: spec.startup_script.clone(),
+        secrets: (!spec.secrets.is_empty()).then(|| ResolvedCodewireSecretsYaml {
+            organization: spec.secrets.organization,
+            user: spec.secrets.user,
+            project: spec.secrets.project.clone(),
         }),
-        env: request.env_vars.clone(),
-        ports: request
-            .app_ports
+        environment: spec.environment.clone(),
+        agents: codewire_yaml_agents_from_request(request),
+        skills: spec
+            .skills
+            .iter()
+            .map(|skill| {
+                let (source, path, name) = match skill.source {
+                    codewire_project::SkillSource::Repository => {
+                        ("repository", skill.reference.clone(), String::new())
+                    }
+                    codewire_project::SkillSource::User => {
+                        ("user", String::new(), skill.reference.clone())
+                    }
+                };
+                ResolvedCodewireSkillYaml {
+                    source,
+                    path,
+                    name,
+                    agents: skill.agents.clone(),
+                }
+            })
+            .collect(),
+        ports: spec
+            .application_ports
             .iter()
             .map(|port| ResolvedCodewirePortYaml {
                 port: port.port,
                 label: port.label.clone(),
+                access: port.access.clone(),
             })
             .collect(),
-        cpu: request.cpu_millicores.unwrap_or_default(),
-        memory: request.memory_mb.unwrap_or_default(),
-        disk: request.disk_gb.unwrap_or_default(),
-        agents: codewire_yaml_agents_from_request(request),
+        cpu: spec
+            .resources
+            .cpu_millicores
+            .map(|value| format!("{value}m")),
+        memory: spec.resources.memory_mib.map(|value| format!("{value}Mi")),
+        disk: spec.resources.disk_gib.map(|value| format!("{value}Gi")),
+        access: spec
+            .access
+            .as_ref()
+            .map(|access| ResolvedCodewireAccessYaml {
+                profile: access.profile.to_string(),
+            }),
     }
 }
 
 pub(crate) fn codewire_yaml_agents_from_request(
     request: &CreateEnvironmentRequest,
 ) -> Option<ResolvedCodewireAgentsYaml> {
-    let mut tools = request
-        .agents
-        .iter()
-        .filter_map(|agent| {
-            let tool = config::display_agent_id(&agent.agent_type);
-            (!tool.is_empty()).then_some(tool)
-        })
-        .collect::<Vec<_>>();
-    if tools.is_empty()
-        && let Some(agent) = trimmed_str(&request.agent)
-    {
-        let tool = config::display_agent_id(agent);
-        if !tool.is_empty() {
-            tools.push(tool);
-        }
-    }
-    if tools.is_empty() && request.install_agents.is_none() {
+    let tools = request.project_spec.agents.tools.clone();
+    if tools.is_empty() && request.project_spec.agents.install.is_none() {
         return None;
     }
     Some(ResolvedCodewireAgentsYaml {
-        install: request.install_agents,
+        install: request.project_spec.agents.install,
         tools,
     })
 }
@@ -2391,34 +2327,15 @@ pub(crate) fn create_preset_request_from_environment(
     if slug.is_empty() {
         anyhow::bail!("preset name is required");
     }
+    let mut project_spec = request.project_spec.clone();
+    project_spec.preset.clear();
+    project_spec.validate()?;
     Ok(CreatePresetRequest {
         name: name.to_string(),
         slug,
-        default_cpu_millicores: request.cpu_millicores,
-        default_memory_mb: request.memory_mb,
-        default_disk_gb: request.disk_gb,
         default_ttl_seconds: request.ttl_seconds,
-        image: request.image.clone(),
-        install_command: request.install_command.clone(),
-        startup_script: request.startup_script.clone(),
-        env_vars: request.env_vars.clone(),
-        agents: request
-            .agents
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()?,
-        install_agents: request.install_agents,
-        agent: request.agent.clone(),
-        agent_env: request.agent_env.clone(),
-        app_ports: request
-            .app_ports
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()?,
-        include_org_secrets: request.include_org_secrets,
-        include_user_secrets: request.include_user_secrets,
-        secret_project: request.secret_project.clone(),
-        ..CreatePresetRequest::default()
+        project_spec,
+        ..Default::default()
     })
 }
 
@@ -2441,28 +2358,37 @@ pub(crate) fn collect_env_create_repos(
     repo_urls: &[String],
     repo_flags: &[String],
     branch: Option<&str>,
-) -> anyhow::Result<(String, String, Vec<RepoEntry>)> {
-    let mut repos = Vec::new();
+) -> anyhow::Result<Vec<codewire_project::RepositorySpec>> {
+    let mut inputs = Vec::new();
     for spec in repo_urls.iter().chain(repo_flags.iter()) {
         let (url, repo_branch, mount_path) = parse_env_create_repo_spec(spec)?;
-        repos.push(RepoEntry {
-            url,
-            branch: repo_branch,
-            mount_path,
-            revision: String::new(),
-        });
+        inputs.push((url, repo_branch, mount_path));
     }
-
-    let mut repo_url = String::new();
-    let mut branch = branch.unwrap_or("").to_string();
-    if let Some(first) = repos.first() {
-        repo_url = first.url.clone();
-        if repos.len() == 1 && branch.is_empty() {
-            branch = first.branch.clone();
-        }
+    if branch.is_some() && inputs.len() > 1 {
+        anyhow::bail!("--branch can be used only with one repository");
     }
-
-    Ok((repo_url, branch, repos))
+    if let (Some(branch), Some((_, repo_branch, _))) = (branch, inputs.first_mut())
+        && repo_branch.is_empty()
+    {
+        *repo_branch = branch.to_string();
+    }
+    let destinations = codewire_project::validate_repository_destinations(
+        inputs
+            .iter()
+            .map(|(source, _, destination)| (source.as_str(), destination.as_str())),
+    )?;
+    Ok(inputs
+        .into_iter()
+        .zip(destinations)
+        .map(
+            |((source, branch, _), destination)| codewire_project::RepositorySpec {
+                source,
+                branch,
+                destination,
+                revision: String::new(),
+            },
+        )
+        .collect())
 }
 
 pub(crate) fn parse_env_create_repo_spec(spec: &str) -> anyhow::Result<(String, String, String)> {

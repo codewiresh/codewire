@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19\x63odewire/v1/api_key.proto\x12\x0b\x63odewire.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd6\x03\n\x06\x41piKey\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n\x07user_id\x18\x02 \x01(\tR\x06userId\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x12\n\x04name\x18\x04 \x01(\tR\x04name\x12\x1d\n\nkey_prefix\x18\x05 \x01(\tR\tkeyPrefix\x12\x16\n\x06scopes\x18\x06 \x03(\tR\x06scopes\x12<\n\x0clast_used_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\nlastUsedAt\x12\x39\n\nexpires_at\x18\x08 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12;\n\x0b\x64isabled_at\x18\t \x01(\x0b\x32\x1a.google.protobuf.TimestampR\ndisabledAt\x12\x39\n\ncreated_at\x18\n \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\x12&\n\x0f\x63reated_by_name\x18\x0b \x01(\tR\rcreatedByName\x12(\n\x10\x63reated_by_email\x18\x0c \x01(\tR\x0e\x63reatedByEmail\"g\n\x12ListApiKeysRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n\tpage_size\x18\x02 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x03 \x01(\tR\tpageToken\"m\n\x13ListApiKeysResponse\x12.\n\x08\x61pi_keys\x18\x01 \x03(\x0b\x32\x13.codewire.v1.ApiKeyR\x07\x61piKeys\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x99\x01\n\x13\x43reateApiKeyRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n\x06scopes\x18\x03 \x03(\tR\x06scopes\x12+\n\x0f\x65xpires_in_days\x18\x04 \x01(\x05H\x00R\rexpiresInDays\x88\x01\x01\x42\x12\n\x10_expires_in_days\"V\n\x14\x43reateApiKeyResponse\x12,\n\x07\x61pi_key\x18\x01 \x01(\x0b\x32\x13.codewire.v1.ApiKeyR\x06\x61piKey\x12\x10\n\x03key\x18\x02 \x01(\tR\x03key\"q\n\x13UpdateApiKeyRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x15\n\x06key_id\x18\x02 \x01(\tR\x05keyId\x12\x1f\n\x08\x64isabled\x18\x03 \x01(\x08H\x00R\x08\x64isabled\x88\x01\x01\x42\x0b\n\t_disabled\"D\n\x14UpdateApiKeyResponse\x12,\n\x07\x61pi_key\x18\x01 \x01(\x0b\x32\x13.codewire.v1.ApiKeyR\x06\x61piKey\"C\n\x13\x44\x65leteApiKeyRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x15\n\x06key_id\x18\x02 \x01(\tR\x05keyId\"\x16\n\x14\x44\x65leteApiKeyResponse2\xe5\x02\n\rApiKeyService\x12U\n\x0bListApiKeys\x12\x1f.codewire.v1.ListApiKeysRequest\x1a .codewire.v1.ListApiKeysResponse\"\x03\x90\x02\x01\x12S\n\x0c\x43reateApiKey\x12 .codewire.v1.CreateApiKeyRequest\x1a!.codewire.v1.CreateApiKeyResponse\x12S\n\x0cUpdateApiKey\x12 .codewire.v1.UpdateApiKeyRequest\x1a!.codewire.v1.UpdateApiKeyResponse\x12S\n\x0c\x44\x65leteApiKey\x12 .codewire.v1.DeleteApiKeyRequest\x1a!.codewire.v1.DeleteApiKeyResponseB\xae\x01\n\x0f\x63om.codewire.v1B\x0b\x41piKeyProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19\x63odewire/v1/api_key.proto\x12\x0b\x63odewire.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd6\x03\n\x06\x41piKey\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n\x07user_id\x18\x02 \x01(\tR\x06userId\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x12\n\x04name\x18\x04 \x01(\tR\x04name\x12\x1d\n\nkey_prefix\x18\x05 \x01(\tR\tkeyPrefix\x12\x16\n\x06scopes\x18\x06 \x03(\tR\x06scopes\x12<\n\x0clast_used_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\nlastUsedAt\x12\x39\n\nexpires_at\x18\x08 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12;\n\x0b\x64isabled_at\x18\t \x01(\x0b\x32\x1a.google.protobuf.TimestampR\ndisabledAt\x12\x39\n\ncreated_at\x18\n \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\x12&\n\x0f\x63reated_by_name\x18\x0b \x01(\tR\rcreatedByName\x12(\n\x10\x63reated_by_email\x18\x0c \x01(\tR\x0e\x63reatedByEmail\"g\n\x12ListApiKeysRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n\tpage_size\x18\x02 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x03 \x01(\tR\tpageToken\"m\n\x13ListApiKeysResponse\x12.\n\x08\x61pi_keys\x18\x01 \x03(\x0b\x32\x13.codewire.v1.ApiKeyR\x07\x61piKeys\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x99\x01\n\x13\x43reateApiKeyRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n\x06scopes\x18\x03 \x03(\tR\x06scopes\x12+\n\x0f\x65xpires_in_days\x18\x04 \x01(\x05H\x00R\rexpiresInDays\x88\x01\x01\x42\x12\n\x10_expires_in_days\"[\n\x14\x43reateApiKeyResponse\x12,\n\x07\x61pi_key\x18\x01 \x01(\x0b\x32\x13.codewire.v1.ApiKeyR\x06\x61piKey\x12\x15\n\x03key\x18\x02 \x01(\tB\x03\x80\x01\x01R\x03key\"q\n\x13UpdateApiKeyRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x15\n\x06key_id\x18\x02 \x01(\tR\x05keyId\x12\x1f\n\x08\x64isabled\x18\x03 \x01(\x08H\x00R\x08\x64isabled\x88\x01\x01\x42\x0b\n\t_disabled\"D\n\x14UpdateApiKeyResponse\x12,\n\x07\x61pi_key\x18\x01 \x01(\x0b\x32\x13.codewire.v1.ApiKeyR\x06\x61piKey\"C\n\x13\x44\x65leteApiKeyRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x15\n\x06key_id\x18\x02 \x01(\tR\x05keyId\"\x16\n\x14\x44\x65leteApiKeyResponse2\xe5\x02\n\rApiKeyService\x12U\n\x0bListApiKeys\x12\x1f.codewire.v1.ListApiKeysRequest\x1a .codewire.v1.ListApiKeysResponse\"\x03\x90\x02\x01\x12S\n\x0c\x43reateApiKey\x12 .codewire.v1.CreateApiKeyRequest\x1a!.codewire.v1.CreateApiKeyResponse\x12S\n\x0cUpdateApiKey\x12 .codewire.v1.UpdateApiKeyRequest\x1a!.codewire.v1.UpdateApiKeyResponse\x12S\n\x0c\x44\x65leteApiKey\x12 .codewire.v1.DeleteApiKeyRequest\x1a!.codewire.v1.DeleteApiKeyResponseB\xae\x01\n\x0f\x63om.codewire.v1B\x0b\x41piKeyProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,6 +33,8 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'codewire.v1.api_key_pb2', _
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\017com.codewire.v1B\013ApiKeyProtoP\001ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\242\002\003CXX\252\002\013Codewire.V1\312\002\013Codewire\\V1\342\002\027Codewire\\V1\\GPBMetadata\352\002\014Codewire::V1'
+  _globals['_CREATEAPIKEYRESPONSE'].fields_by_name['key']._loaded_options = None
+  _globals['_CREATEAPIKEYRESPONSE'].fields_by_name['key']._serialized_options = b'\200\001\001'
   _globals['_APIKEYSERVICE'].methods_by_name['ListApiKeys']._loaded_options = None
   _globals['_APIKEYSERVICE'].methods_by_name['ListApiKeys']._serialized_options = b'\220\002\001'
   _globals['_APIKEY']._serialized_start=76
@@ -44,15 +46,15 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CREATEAPIKEYREQUEST']._serialized_start=765
   _globals['_CREATEAPIKEYREQUEST']._serialized_end=918
   _globals['_CREATEAPIKEYRESPONSE']._serialized_start=920
-  _globals['_CREATEAPIKEYRESPONSE']._serialized_end=1006
-  _globals['_UPDATEAPIKEYREQUEST']._serialized_start=1008
-  _globals['_UPDATEAPIKEYREQUEST']._serialized_end=1121
-  _globals['_UPDATEAPIKEYRESPONSE']._serialized_start=1123
-  _globals['_UPDATEAPIKEYRESPONSE']._serialized_end=1191
-  _globals['_DELETEAPIKEYREQUEST']._serialized_start=1193
-  _globals['_DELETEAPIKEYREQUEST']._serialized_end=1260
-  _globals['_DELETEAPIKEYRESPONSE']._serialized_start=1262
-  _globals['_DELETEAPIKEYRESPONSE']._serialized_end=1284
-  _globals['_APIKEYSERVICE']._serialized_start=1287
-  _globals['_APIKEYSERVICE']._serialized_end=1644
+  _globals['_CREATEAPIKEYRESPONSE']._serialized_end=1011
+  _globals['_UPDATEAPIKEYREQUEST']._serialized_start=1013
+  _globals['_UPDATEAPIKEYREQUEST']._serialized_end=1126
+  _globals['_UPDATEAPIKEYRESPONSE']._serialized_start=1128
+  _globals['_UPDATEAPIKEYRESPONSE']._serialized_end=1196
+  _globals['_DELETEAPIKEYREQUEST']._serialized_start=1198
+  _globals['_DELETEAPIKEYREQUEST']._serialized_end=1265
+  _globals['_DELETEAPIKEYRESPONSE']._serialized_start=1267
+  _globals['_DELETEAPIKEYRESPONSE']._serialized_end=1289
+  _globals['_APIKEYSERVICE']._serialized_start=1292
+  _globals['_APIKEYSERVICE']._serialized_end=1649
 # @@protoc_insertion_point(module_scope)

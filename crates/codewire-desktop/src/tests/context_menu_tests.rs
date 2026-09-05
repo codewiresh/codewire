@@ -6,7 +6,7 @@
 use gpui::{AppContext as _, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
 use crate::chat::ChatPanel;
-use crate::pane_tree::RemoteConnection;
+use crate::pane_tree::TerminalConnection;
 use crate::split_container::SplitContainer;
 
 /// Helper: create a SplitContainer with a window for testing.
@@ -46,9 +46,7 @@ async fn test_left_click_after_right_click(cx: &mut TestAppContext) {
         sc.open_terminal(
             "ws-test".to_string(),
             "s1".to_string(),
-            RemoteConnection::Ssh {
-                host: "host".to_string(),
-            },
+            TerminalConnection::Local,
             "zellij".to_string(),
             cx,
         );

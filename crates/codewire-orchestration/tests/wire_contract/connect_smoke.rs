@@ -11,7 +11,6 @@ use super::{Auth, Harness, PRIMARY_ORG, assert_connect_error};
 const ADMIN_SERVICE: &str = "codewire.admin.v1.AdminService";
 const API_KEY_SERVICE: &str = "codewire.v1.ApiKeyService";
 const ACCOUNT_SERVICE: &str = "codewire.console.v1.AccountService";
-const GITHUB_SERVICE: &str = "codewire.console.v1.GitHubService";
 const ENVIRONMENT_SETUP_SERVICE: &str = "codewire.console.v1.EnvironmentSetupService";
 const ORGANIZATION_SERVICE: &str = "codewire.v1.OrganizationService";
 const SECRET_SERVICE: &str = "codewire.v1.SecretService";
@@ -24,24 +23,33 @@ pub(super) async fn run(harness: &Harness) {
     assert_proto_connect_route(harness).await;
     assert_auth_boundary(harness).await;
     assert_resize_contract(harness).await;
+    assert_retired_github_and_detection_surfaces_absent(harness).await;
     assert_retired_routes_absent(harness).await;
 }
 
-pub(super) async fn assert_detection_unconfigured(harness: &Harness) {
-    let response = harness
-        .connect_json(
-            ENVIRONMENT_SETUP_SERVICE,
-            "DetectRepo",
-            json!({"repoUrl": "codewire/codewire", "branch": "main"}),
-            Auth::User,
-        )
-        .await;
-    assert_connect_error(
-        &response,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "unavailable",
-        "AI detection is not configured",
-    );
+pub(super) async fn assert_retired_github_and_detection_surfaces_absent(harness: &Harness) {
+    for (service, method) in [
+        ("codewire.console.v1.GitHubService", "GetGitHubConfig"),
+        (ENVIRONMENT_SETUP_SERVICE, "DetectRepo"),
+        (ACCOUNT_SERVICE, "ListLoginKeys"),
+        (ACCOUNT_SERVICE, "CreateLoginKey"),
+        (ACCOUNT_SERVICE, "DeleteLoginKey"),
+    ] {
+        harness
+            .connect_json(service, method, json!({}), Auth::User)
+            .await
+            .assert_status(StatusCode::NOT_FOUND, &format!("{service}/{method}"));
+    }
+
+    for path in [
+        "/api/v1/github/oauth/authorize",
+        "/api/v1/github/oauth/callback",
+    ] {
+        harness
+            .rest(Method::GET, path, None, Auth::User)
+            .await
+            .assert_status(StatusCode::NOT_FOUND, path);
+    }
 }
 
 async fn assert_json_connect_routes(harness: &Harness) {
@@ -62,17 +70,10 @@ async fn assert_json_connect_routes(harness: &Harness) {
         ),
         (
             ACCOUNT_SERVICE,
-            "ListLoginKeys",
+            "GetGitIdentity",
             json!({}),
             Auth::Admin,
-            None,
-        ),
-        (
-            GITHUB_SERVICE,
-            "GetGitHubConfig",
-            json!({}),
-            Auth::Admin,
-            None,
+            Some("gitIdentity"),
         ),
         (
             ENVIRONMENT_SETUP_SERVICE,

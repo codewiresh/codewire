@@ -1,8 +1,0 @@
-set -eu
-mkdir -p "$HOME/.config/gh"
-cat > "$HOME/.config/gh/hosts.yml" << 'CWEOF'
-github.com:
-    oauth_token: "gho_goldentoken"
-    user: "octocat"
-    git_protocol: ssh
-CWEOF

@@ -35,7 +35,7 @@ fn decode_32(label: &str, s: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Parse a stored public JWK JSON into a [`PublicJwk`] (for JWKS publication).
+/// Parse a stored public JWK JSON into a [`codewire_oidc::PublicJwk`] (for JWKS publication).
 pub fn parse_public_key(kid: &str, public_json: &str) -> Result<codewire_oidc::PublicJwk> {
     let jwk: JosePublicJwk = serde_json::from_str(public_json).context("parse public JWK json")?;
     if jwk.kty != "OKP" || jwk.crv != "Ed25519" {

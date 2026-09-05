@@ -89,7 +89,7 @@ impl NodePrivate {
         Ok(out)
     }
 
-    /// Open a box produced by [`seal_to`] from `peer`, matching Go's
+    /// Open a box produced by [`Self::seal_to`] from `peer`, matching Go's
     /// `NodePrivate.OpenFrom`. Input is `nonce[24] || box(...)`.
     pub fn open_from(&self, peer: &NodePublic, sealed: &[u8]) -> Result<Vec<u8>, Error> {
         if sealed.len() < NONCE_LEN {

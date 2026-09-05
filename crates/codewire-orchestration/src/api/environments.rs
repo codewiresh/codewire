@@ -110,21 +110,6 @@ fn format_time_opt(t: Option<chrono::NaiveDateTime>) -> Option<String> {
     t.map(format_time)
 }
 
-/// Mirrors `meshNetworkFromSetupJSON`.
-fn mesh_network_from_setup_json(setup_json: Option<&serde_json::Value>) -> Option<String> {
-    let env_vars = setup_json?.get("env_vars")?;
-    let network = env_vars
-        .get("CODEWIRE_MESH_NETWORK")?
-        .as_str()?
-        .trim()
-        .to_string();
-    if network.is_empty() {
-        None
-    } else {
-        Some(network)
-    }
-}
-
 /// Mirrors `computePreviewURL`.
 pub(crate) fn compute_preview_url(
     label: &str,
@@ -154,15 +139,13 @@ pub(crate) const ENV_SELECT_COLS: &str = r#"e.id, e.org_id, e.created_by, e.pres
     e.total_running_seconds,
     e.created_at, e.started_at, e.stopped_at, e.destroyed_at,
     e.protected, e.deletion_requested_at, e.deletion_grace_until,
-    t.name AS preset_name,
-    e.setup_config"#;
+    t.name AS preset_name"#;
 
 pub(crate) const ENV_SELECT_JOINS: &str = r#"LEFT JOIN environment_presets t ON e.preset_id = t.id
     LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id"#;
 
 pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> {
     let setup_error: String = row.try_get("setup_error")?;
-    let setup_json: Option<serde_json::Value> = row.try_get("setup_config")?;
     Ok(Environment {
         id: row.try_get("id")?,
         org_id: row.try_get("org_id")?,
@@ -198,7 +181,9 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         deletion_requested_at: format_time_opt(row.try_get("deletion_requested_at")?),
         deletion_grace_until: format_time_opt(row.try_get("deletion_grace_until")?),
         preset_name: row.try_get("preset_name")?,
-        network: mesh_network_from_setup_json(setup_json.as_ref()),
+        // Runtime network enrollment needs a dedicated credential-free
+        // contract; workload environment values are never control input.
+        network: None,
         ports: Vec::new(),
     })
 }
@@ -1333,22 +1318,6 @@ mod tests {
         );
         assert_eq!(compute_preview_url("web", "abc", "", "preview.dev"), "");
         assert_eq!(compute_preview_url("web", "abc", "acme", ""), "");
-    }
-
-    #[test]
-    fn mesh_network_extraction_mirrors_go() {
-        let v: serde_json::Value =
-            serde_json::from_str(r#"{"env_vars":{"CODEWIRE_MESH_NETWORK":" mesh-1 "}}"#).unwrap();
-        assert_eq!(
-            mesh_network_from_setup_json(Some(&v)),
-            Some("mesh-1".to_string())
-        );
-        let v: serde_json::Value = serde_json::from_str(r#"{"env_vars":{}}"#).unwrap();
-        assert_eq!(mesh_network_from_setup_json(Some(&v)), None);
-        assert_eq!(mesh_network_from_setup_json(None), None);
-        let v: serde_json::Value =
-            serde_json::from_str(r#"{"env_vars":{"CODEWIRE_MESH_NETWORK":"  "}}"#).unwrap();
-        assert_eq!(mesh_network_from_setup_json(Some(&v)), None);
     }
 
     #[test]

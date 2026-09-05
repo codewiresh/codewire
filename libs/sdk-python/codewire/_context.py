@@ -9,8 +9,6 @@ from connectrpc.errors import ConnectError
 
 from codewire._transport import ConnectTransport
 from codewire.errors import codewire_error_from_connect
-from codewire.v1.secret_connect import SecretServiceClientSync
-from codewire.v1.secret_pb2 import ListSecretProjectsRequest
 
 
 ResponseT = TypeVar("ResponseT")
@@ -22,7 +20,6 @@ class ConnectContext:
     def __init__(self, transport: ConnectTransport, org_id: str) -> None:
         self.transport = transport
         self.org_id = org_id
-        self._secrets = transport.client(SecretServiceClientSync)
 
     def resolve_org_id(self) -> str:
         if not self.org_id:
@@ -31,16 +28,6 @@ class ConnectContext:
                 "or set CODEWIRE_ORG_ID"
             )
         return self.org_id
-
-    def resolve_secret_project_id(self, name: str) -> str:
-        response = self.unary(
-            self._secrets.list_secret_projects,
-            ListSecretProjectsRequest(org_id=self.resolve_org_id()),
-        )
-        for project in response.secret_projects:
-            if project.name == name or project.id == name:
-                return project.id
-        raise ValueError(f"secret project not found: {name}")
 
     def unary(
         self,

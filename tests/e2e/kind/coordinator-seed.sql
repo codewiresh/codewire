@@ -5,7 +5,7 @@
 -- id, while the older billing fixture deliberately uses env_contract_1.
 INSERT INTO environments (
     id, org_id, created_by, type, state, name, preset_id,
-    cpu_millicores, memory_mb, total_running_seconds, auth_token
+    cpu_millicores, memory_mb, total_running_seconds, project_spec
 )
 VALUES (
     '00000000-0000-4000-8000-000000000501',
@@ -18,5 +18,5 @@ VALUES (
     500,
     1024,
     0,
-    'mesh-kind-environment-token'
+    '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 );

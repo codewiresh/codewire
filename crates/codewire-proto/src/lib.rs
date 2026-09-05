@@ -22,35 +22,37 @@ connectrpc::include_generated!();
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
+
     use super::codewire::console::v1::{
-        ACCOUNT_SERVICE_SERVICE_NAME, BILLING_SERVICE_SERVICE_NAME, CreateGitCredentialRequest,
-        DetectRepoRequest, ENVIRONMENT_SETUP_SERVICE_SERVICE_NAME, GIT_HUB_SERVICE_SERVICE_NAME,
-        GetEnvironmentCreateOptionsResponse, GetEnvironmentUsageResponse, GetGitHubStatusResponse,
-        GitHubConnection, ListGitHubReposResponse, ResourcePlan, SaveGitHubTokenRequest, SshKey,
-        UpdateGitIdentityRequest,
+        ACCOUNT_SERVICE_SERVICE_NAME, BILLING_SERVICE_SERVICE_NAME,
+        ENVIRONMENT_SETUP_SERVICE_SERVICE_NAME, GetEnvironmentCreateOptionsResponse,
+        GetEnvironmentUsageResponse, ResourcePlan, UpdateGitIdentityRequest,
     };
     use super::codewire::internal::v1::{
-        COORDINATOR_SERVICE_SERVICE_NAME, CoordinateNode, MESH_AUTHORIZATION_SERVICE_SERVICE_NAME,
-        MESH_COORDINATOR_SERVICE_SERVICE_NAME, MeshAuthorizationContext,
-        MeshAuthorizationCredentialKind, MeshAuthorizationPrincipalKind, MeshCoordinateHello,
-        MeshCoordinateRole, MeshCoordinatorServiceCoordinateRequest,
+        COORDINATOR_SERVICE_SERVICE_NAME, CoordinateNode, IssueGatewayBindingResponse,
+        MESH_AUTHORIZATION_SERVICE_SERVICE_NAME, MESH_COORDINATOR_SERVICE_SERVICE_NAME,
+        MeshAuthorizationContext, MeshAuthorizationCredentialKind, MeshAuthorizationPrincipalKind,
+        MeshCoordinateHello, MeshCoordinateRole, MeshCoordinatorServiceCoordinateRequest,
         ResolveMeshAuthorizationResponse,
     };
     use super::codewire::v1::{
-        AgentEnvMap, AgentList, ApiKey, AppPort, AppPortList, CreateApiKeyResponse,
-        CreateMeshInviteResponse, CreateMeshNodeEnrollmentResponse, CreatePortRequest, EnvVarMap,
-        GetOrganizationResponse, InvitationStatus, ListSecretProjectsResponse, ListSecretsResponse,
+        AcceptInvitationRequest, ApiKey, ApplicationPort, CreateApiKeyResponse,
+        CreateInvitationResponse, CreateMeshInviteResponse, CreateMeshNodeEnrollmentResponse,
+        CreatePortRequest, GetInvitationByTokenRequest, GetOrganizationResponse, InvitationStatus,
+        JoinMeshNetworkRequest, ListSecretProjectsResponse, ListSecretsResponse,
         MESH_GROUP_SERVICE_SERVICE_NAME, MESH_INVITE_SERVICE_SERVICE_NAME,
         MESH_KEY_VALUE_SERVICE_SERVICE_NAME, MESH_NETWORK_SERVICE_SERVICE_NAME,
-        MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshNetwork, MeshNode, MeshNodeEnrollment,
-        ORGANIZATION_SERVICE_SERVICE_NAME, OrgMember, OrgRole, Organization,
+        MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshKeyValue, MeshNetwork, MeshNode,
+        MeshNodeEnrollment, ORGANIZATION_SERVICE_SERVICE_NAME, OrgMember, OrgRole, Organization,
         OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME, PRESET_SERVICE_SERVICE_NAME, Port,
         PortAccess, Preset, PreviewWorkloadSecretResolutionResponse, ProjectAccessBinding,
         ProjectAgents, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
-        ProjectSkillSource, ProjectSpec, RedeemMeshNodeEnrollmentResponse, RepoEntry,
-        ResolvedWorkloadSecretMetadata, SECRET_SERVICE_PREVIEW_WORKLOAD_SECRET_RESOLUTION_SPEC,
-        SECRET_SERVICE_SERVICE_NAME, SecretMetadata, SetProjectSecretRequest, SetSecretRequest,
-        SetUserSecretRequest, SetupAgent, SetupConfig, UpdatePresetRequest, WorkloadSecretSource,
+        ProjectSkillSource, ProjectSpec, RedeemMeshNodeEnrollmentRequest,
+        RedeemMeshNodeEnrollmentResponse, RepositorySpec, ResolvedWorkloadSecretMetadata,
+        SECRET_SERVICE_PREVIEW_WORKLOAD_SECRET_RESOLUTION_SPEC, SECRET_SERVICE_SERVICE_NAME,
+        SecretMetadata, SetMeshKeyValueRequest, SetProjectSecretRequest, SetSecretRequest,
+        SetUserSecretRequest, UpdatePresetRequest, WorkloadSecretSource,
     };
 
     #[test]
@@ -172,6 +174,68 @@ mod tests {
     }
 
     #[test]
+    fn mesh_capability_and_value_debug_output_is_redacted() {
+        const MARKER: &str = "do-not-print-this-mesh-capability-or-value";
+        let marker_bytes = MARKER.as_bytes().to_vec();
+        let unredacted_bytes = format!("{marker_bytes:?}");
+
+        for rendered in [
+            format!(
+                "{:?}",
+                CreateMeshNodeEnrollmentResponse {
+                    enrollment_code: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                RedeemMeshNodeEnrollmentRequest {
+                    enrollment_code: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                CreateMeshInviteResponse {
+                    invite_code: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                JoinMeshNetworkRequest {
+                    invite_code: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                MeshKeyValue {
+                    value: marker_bytes.clone(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                SetMeshKeyValueRequest {
+                    value: marker_bytes.clone(),
+                    ..Default::default()
+                }
+            ),
+        ] {
+            assert!(
+                !rendered.contains(MARKER),
+                "Mesh material leaked through Debug"
+            );
+            assert!(
+                !rendered.contains(&unredacted_bytes),
+                "Mesh value bytes leaked through Debug"
+            );
+            assert!(rendered.contains("[REDACTED]"));
+        }
+    }
+
+    #[test]
     fn mesh_internal_json_is_typed_without_raw_authorization_material() {
         let resolved = ResolveMeshAuthorizationResponse {
             context: Some(MeshAuthorizationContext {
@@ -235,49 +299,46 @@ mod tests {
     }
 
     #[test]
-    fn generated_types_are_importable_and_json_serializable() {
-        let setup = SetupConfig {
-            repo_url: "https://git.example/repo.git".into(),
-            repos: vec![RepoEntry {
-                url: "https://git.example/second.git".into(),
-                branch: "main".into(),
+    fn generated_project_type_is_importable_and_json_serializable() {
+        let project = ProjectSpec {
+            schema_version: 1,
+            working_directory: "/workspace".into(),
+            environment: [("RUST_LOG".into(), "info".into())].into_iter().collect(),
+            agents: Some(ProjectAgents {
+                install: Some(false),
+                tools: vec!["claude-code".into()],
                 ..Default::default()
-            }],
-            env_vars: [("RUST_LOG".into(), "info".into())].into_iter().collect(),
-            agents: vec![SetupAgent {
-                r#type: "claude".into(),
-                ..Default::default()
-            }],
-            install_agents: Some(false),
-            app_ports: vec![AppPort {
+            })
+            .into(),
+            application_ports: vec![ApplicationPort {
                 port: 8080,
                 label: "web".into(),
                 access: "public".into(),
                 ..Default::default()
             }],
-            include_org_secrets: Some(true),
             ..Default::default()
         };
-        let json = serde_json::to_value(&setup).expect("proto3 JSON serialization");
+        let json = serde_json::to_value(&project).expect("proto3 JSON serialization");
 
-        assert_eq!(json["repoUrl"], "https://git.example/repo.git");
-        assert_eq!(json["repos"][0]["branch"], "main");
-        assert_eq!(json["envVars"]["RUST_LOG"], "info");
-        assert_eq!(json["agents"][0]["type"], "claude");
-        assert_eq!(json["installAgents"], false);
-        assert_eq!(json["appPorts"][0]["port"], 8080);
-        assert_eq!(json["includeOrgSecrets"], true);
-        assert!(json.get("repo_url").is_none(), "unexpected JSON: {json}");
+        assert_eq!(json["workingDirectory"], "/workspace");
+        assert_eq!(json["environment"]["RUST_LOG"], "info");
+        assert_eq!(json["agents"]["tools"][0], "claude-code");
+        assert_eq!(json["agents"]["install"], false);
+        assert_eq!(json["applicationPorts"][0]["port"], 8080);
+        assert!(
+            json.get("working_directory").is_none(),
+            "unexpected JSON: {json}"
+        );
     }
 
     #[test]
     fn portable_project_json_contains_only_opaque_placement_bindings() {
         let project = ProjectSpec {
             schema_version: 1,
-            repositories: vec![RepoEntry {
-                url: "https://git.example/org/app.git".into(),
+            repositories: vec![RepositorySpec {
+                source: "https://git.example/org/app.git".into(),
                 revision: "deadbeef".into(),
-                mount_path: "/workspace/app".into(),
+                destination: "/workspace/app".into(),
                 ..Default::default()
             }],
             working_directory: "/workspace/app".into(),
@@ -313,7 +374,14 @@ mod tests {
         };
         let json = serde_json::to_value(project).expect("portable project proto JSON");
         assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(
+            json["repositories"][0]["source"],
+            "https://git.example/org/app.git"
+        );
+        assert_eq!(json["repositories"][0]["destination"], "/workspace/app");
         assert_eq!(json["repositories"][0]["revision"], "deadbeef");
+        assert!(json["repositories"][0].get("url").is_none());
+        assert!(json["repositories"][0].get("mountPath").is_none());
         assert_eq!(json["access"]["profile"], "user/work");
         let encoded = json.to_string();
         for forbidden in [
@@ -336,18 +404,6 @@ mod tests {
             "codewire.console.v1.AccountService"
         );
 
-        let create = CreateGitCredentialRequest {
-            name: "forge".into(),
-            host: "git.example.com".into(),
-            auth_type: "basic".into(),
-            username: "octocat".into(),
-            password: "secret".into(),
-            ..Default::default()
-        };
-        let json = serde_json::to_value(create).expect("account proto3 JSON serialization");
-        assert_eq!(json["authType"], "basic");
-        assert!(json.get("auth_type").is_none(), "unexpected JSON: {json}");
-
         let clear = UpdateGitIdentityRequest::default();
         let clear_json = serde_json::to_value(clear).expect("optional fields serialize");
         assert!(clear_json.get("gitName").is_none());
@@ -361,17 +417,37 @@ mod tests {
         let set_json = serde_json::to_value(set).expect("present optional fields serialize");
         assert_eq!(set_json["gitName"], "");
         assert_eq!(set_json["gitEmail"], "git@example.com");
+    }
 
-        let ssh = SshKey {
-            public_key: "ssh-ed25519 AAAA\n".into(),
-            fingerprint: "SHA256:test".into(),
-            created_at: Some(buffa_types::Timestamp::from_unix_secs(1_735_689_600)).into(),
-            regenerated_at: None.into(),
-            ..Default::default()
-        };
-        let ssh_json = serde_json::to_value(ssh).expect("SSH key proto3 JSON serialization");
-        assert_eq!(ssh_json["createdAt"], "2025-01-01T00:00:00Z");
-        assert!(ssh_json.get("regeneratedAt").is_none());
+    #[test]
+    fn account_contract_excludes_retired_credential_products() {
+        let source = include_str!("../../../proto/codewire/console/v1/account.proto");
+        for removed in [
+            "LoginKey",
+            "ListLoginKeys",
+            "CreateLoginKey",
+            "DeleteLoginKey",
+            "SshKey",
+            "EnsureSshKey",
+            "GetSshKey",
+            "RegenerateSshKey",
+            "GitCredential",
+            "ListGitCredentials",
+            "CreateGitCredential",
+            "UpdateGitCredential",
+            "DeleteGitCredential",
+        ] {
+            assert!(
+                !source.contains(removed),
+                "retired symbol remains: {removed}"
+            );
+        }
+        for preserved in ["GetGitIdentity", "UpdateGitIdentity"] {
+            assert!(
+                source.contains(preserved),
+                "required symbol missing: {preserved}"
+            );
+        }
     }
 
     #[test]
@@ -401,56 +477,100 @@ mod tests {
     }
 
     #[test]
-    fn github_proto_json_surface_presence_and_empty_repeated_are_pinned() {
-        assert_eq!(
-            GIT_HUB_SERVICE_SERVICE_NAME,
-            "codewire.console.v1.GitHubService"
-        );
-
-        let disconnected = GetGitHubStatusResponse::default();
-        let json = serde_json::to_value(disconnected).expect("GitHub status JSON serialization");
-        assert!(json.get("installationId").is_none());
-        assert!(json.get("connectedAt").is_none());
-
-        let save = SaveGitHubTokenRequest {
-            access_token: "gho_test".into(),
-            installation_id: Some(42),
-            ..Default::default()
-        };
-        let json = serde_json::to_value(save).expect("GitHub token JSON serialization");
-        assert_eq!(json["accessToken"], "gho_test");
-        assert_eq!(json["installationId"], "42");
-        assert!(json.get("access_token").is_none());
-
-        let repos = ListGitHubReposResponse::default();
-        let json = serde_json::to_value(repos).expect("GitHub repos JSON serialization");
-        assert_ne!(json.get("repos"), Some(&serde_json::Value::Null));
-    }
-
-    #[test]
-    fn environment_setup_proto_reuses_product_messages_and_has_no_raw_token() {
+    fn environment_setup_create_options_are_presets_only_and_reserve_removed_fields() {
         assert_eq!(
             ENVIRONMENT_SETUP_SERVICE_SERVICE_NAME,
             "codewire.console.v1.EnvironmentSetupService"
         );
 
-        let detect = DetectRepoRequest {
-            repo_url: "https://git.example/codewire/codewire".into(),
-            branch: "main".into(),
-            ..Default::default()
-        };
-        let json = serde_json::to_value(detect).expect("environment setup proto3 JSON");
-        assert_eq!(json["repoUrl"], "https://git.example/codewire/codewire");
-        assert_eq!(json["branch"], "main");
-        assert!(json.get("githubToken").is_none(), "unexpected JSON: {json}");
-
-        let options = GetEnvironmentCreateOptionsResponse {
-            github_status: Some(GitHubConnection::default()).into(),
-            ..Default::default()
-        };
+        let options = GetEnvironmentCreateOptionsResponse::default();
         let json = serde_json::to_value(options).expect("environment setup options JSON");
         assert_ne!(json.get("presets"), Some(&serde_json::Value::Null));
-        assert_ne!(json.get("secretProjects"), Some(&serde_json::Value::Null));
+        assert!(json.get("secretProjects").is_none());
+        assert!(json.get("githubStatus").is_none());
+
+        let descriptor = prost_types::FileDescriptorSet::decode(
+            include_bytes!("../codewire_descriptor.bin").as_slice(),
+        )
+        .expect("decode public descriptor");
+        let response = descriptor
+            .file
+            .iter()
+            .find(|file| {
+                file.name.as_deref() == Some("codewire/console/v1/environment_setup.proto")
+            })
+            .and_then(|file| {
+                file.message_type.iter().find(|message| {
+                    message.name.as_deref() == Some("GetEnvironmentCreateOptionsResponse")
+                })
+            })
+            .expect("environment create options response descriptor");
+        assert_eq!(
+            response
+                .field
+                .iter()
+                .map(|field| (field.number, field.name.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(Some(2), Some("presets"))]
+        );
+        for (number, name) in [(1, "github_status"), (3, "secret_projects")] {
+            assert!(
+                response
+                    .reserved_range
+                    .iter()
+                    .any(|range| range.start == Some(number) && range.end == Some(number + 1))
+            );
+            assert!(
+                response
+                    .reserved_name
+                    .iter()
+                    .any(|reserved| reserved == name)
+            );
+        }
+    }
+
+    #[test]
+    fn repository_analysis_contract_is_absent_and_reserved() {
+        let descriptor = prost_types::FileDescriptorSet::decode(
+            include_bytes!("../codewire_descriptor.bin").as_slice(),
+        )
+        .expect("decode public descriptor");
+        let file = descriptor
+            .file
+            .iter()
+            .find(|file| file.name.as_deref() == Some("codewire/v1/environment.proto"))
+            .expect("environment descriptor");
+
+        for removed in ["RepoFetched", "DetectionResult"] {
+            assert!(
+                file.message_type
+                    .iter()
+                    .all(|message| message.name.as_deref() != Some(removed)),
+                "retired analysis message remains: {removed}"
+            );
+        }
+
+        for (message_name, field_number, field_name) in [
+            ("WatchEnvironmentCreateRequest", 3, "analyze"),
+            ("WatchEnvironmentCreateResponse", 2, "repo_fetched"),
+            ("PrepareComplete", 2, "detection"),
+        ] {
+            let message = file
+                .message_type
+                .iter()
+                .find(|message| message.name.as_deref() == Some(message_name))
+                .unwrap_or_else(|| panic!("missing descriptor message {message_name}"));
+            assert!(
+                message.reserved_range.iter().any(|range| {
+                    range.start == Some(field_number) && range.end == Some(field_number + 1)
+                }),
+                "{message_name} does not reserve field {field_number}"
+            );
+            assert!(
+                message.reserved_name.iter().any(|name| name == field_name),
+                "{message_name} does not reserve name {field_name}"
+            );
+        }
     }
 
     #[test]
@@ -466,17 +586,22 @@ mod tests {
             slug: Some("rust".into()),
             official: true,
             build_status: "ready".into(),
-            default_cpu_millicores: 2_000,
-            default_memory_mb: 4_096,
-            default_disk_gb: 10,
             default_ttl_seconds: Some(3_600),
-            image: Some("ghcr.io/example/workspace:1".into()),
-            default_setup_config: Some(SetupConfig {
+            project_spec: Some(ProjectSpec {
+                schema_version: 1,
+                image: "ghcr.io/example/workspace:1".into(),
+                resources: Some(ProjectResources {
+                    cpu_millicores: Some(2_000),
+                    memory_mib: Some(4_096),
+                    disk_gib: Some(10),
+                    ..Default::default()
+                })
+                .into(),
                 startup_script: "cargo run".into(),
+                working_directory: "/workspace".into(),
                 ..Default::default()
             })
             .into(),
-            secret_project_id: Some("project_123".into()),
             created_at: Some(created_at.clone()).into(),
             ..Default::default()
         };
@@ -484,13 +609,12 @@ mod tests {
 
         assert_eq!(preset_json["orgId"], "org_123");
         assert_eq!(preset_json["buildStatus"], "ready");
-        assert_eq!(preset_json["defaultCpuMillicores"], 2_000);
-        assert_eq!(preset_json["defaultTtlSeconds"], 3_600);
         assert_eq!(
-            preset_json["defaultSetupConfig"]["startupScript"],
-            "cargo run"
+            preset_json["projectSpec"]["resources"]["cpuMillicores"],
+            2_000
         );
-        assert_eq!(preset_json["secretProjectId"], "project_123");
+        assert_eq!(preset_json["defaultTtlSeconds"], 3_600);
+        assert_eq!(preset_json["projectSpec"]["startupScript"], "cargo run");
         assert_eq!(preset_json["createdAt"], "2025-01-01T00:00:00Z");
         assert!(
             preset_json.get("build_status").is_none(),
@@ -532,32 +656,23 @@ mod tests {
 
         let absent = serde_json::to_value(UpdatePresetRequest::default())
             .expect("absent preset patch serialization");
-        for field in [
-            "slug",
-            "secretProjectId",
-            "envVars",
-            "agents",
-            "agentEnv",
-            "appPorts",
-        ] {
+        for field in ["slug", "projectSpec"] {
             assert!(absent.get(field).is_none(), "unexpected {field}: {absent}");
         }
 
         let empty = serde_json::to_value(UpdatePresetRequest {
             slug: Some(String::new()),
-            secret_project_id: Some(String::new()),
-            env_vars: Some(EnvVarMap::default()).into(),
-            agents: Some(AgentList::default()).into(),
-            agent_env: Some(AgentEnvMap::default()).into(),
-            app_ports: Some(AppPortList::default()).into(),
+            project_spec: Some(ProjectSpec {
+                schema_version: 1,
+                working_directory: "/workspace".into(),
+                ..Default::default()
+            })
+            .into(),
             ..Default::default()
         })
         .expect("present-empty preset patch serialization");
         assert_eq!(empty["slug"], "");
-        assert_eq!(empty["secretProjectId"], "");
-        for field in ["envVars", "agents", "agentEnv", "appPorts"] {
-            assert!(empty.get(field).is_some(), "missing {field}: {empty}");
-        }
+        assert_eq!(empty["projectSpec"]["workingDirectory"], "/workspace");
     }
 
     #[test]
@@ -795,5 +910,50 @@ mod tests {
         let object = json.as_object().expect("response object");
         assert!(object.contains_key("apiKey"));
         assert!(!object.contains_key("api_key"));
+    }
+
+    #[test]
+    fn one_time_capability_debug_is_redacted() {
+        const MARKER: &str = "synthetic-one-use-service-capability-canary";
+        for debug in [
+            format!(
+                "{:?}",
+                CreateApiKeyResponse {
+                    key: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                IssueGatewayBindingResponse {
+                    sidecar_token: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                CreateInvitationResponse {
+                    token: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                AcceptInvitationRequest {
+                    token: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                GetInvitationByTokenRequest {
+                    token: MARKER.into(),
+                    ..Default::default()
+                }
+            ),
+        ] {
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains(MARKER));
+        }
     }
 }

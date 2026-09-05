@@ -1,11 +1,13 @@
-"""Conversion from generated protobuf messages to the SDK's REST-era values."""
+"""Conversion from generated protobuf messages to SDK-owned public values."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
 from google.protobuf.descriptor import FieldDescriptor
+from google.protobuf.json_format import ParseDict
 from google.protobuf.message import Message
 from google.protobuf.timestamp_pb2 import Timestamp
 
@@ -24,13 +26,42 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
-    1: "org_id", 2: "preset_id", 3: "name", 4: "cpu_millicores",
-    5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug",
-    9: "repo_url", 10: "branch", 11: "repos", 12: "image",
-    13: "install_command", 14: "startup_script", 15: "env_vars",
-    16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env",
-    20: "secret_project", 21: "app_ports", 22: "include_org_secrets",
-    23: "include_user_secrets", 24: "isolation_tier", 25: "project_spec",
+    1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds",
+    24: "isolation_tier", 25: "project_spec",
+}
+
+_PRESET_DESCRIPTOR_FIELDS = {
+    1: "id", 2: "org_id", 3: "name", 4: "slug", 5: "language",
+    6: "official", 7: "description", 8: "build_status", 9: "build_error",
+    13: "default_ttl_seconds", 17: "created_at", 18: "project_spec",
+}
+
+_CREATE_PRESET_DESCRIPTOR_FIELDS = {
+    1: "org_id", 2: "name", 3: "slug", 4: "description",
+    8: "default_ttl_seconds", 21: "project_spec",
+}
+
+_UPDATE_PRESET_DESCRIPTOR_FIELDS = {
+    1: "org_id", 2: "preset_id", 3: "name", 4: "description", 5: "slug",
+    9: "default_ttl_seconds", 22: "project_spec",
+}
+
+_PROJECT_DESCRIPTOR_FIELDS = {
+    "RepositorySpec": {
+        1: "source", 2: "branch", 3: "destination", 4: "revision"
+    },
+    "ApplicationPort": {1: "port", 2: "label", 3: "access"},
+    "ProjectAgents": {1: "install", 2: "tools"},
+    "ProjectSkillSelection": {1: "source", 2: "reference", 3: "agents"},
+    "ProjectResources": {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
+    "ProjectSecretBindings": {1: "project", 4: "organization", 5: "user"},
+    "ProjectAccessBinding": {1: "profile"},
+    "ProjectSpec": {
+        1: "schema_version", 2: "preset", 3: "image", 4: "repositories",
+        5: "working_directory", 6: "install_command", 7: "startup_script",
+        8: "environment", 9: "agents", 11: "skills",
+        12: "application_ports", 13: "resources", 14: "secrets", 17: "access",
+    },
 }
 
 
@@ -84,6 +115,8 @@ def assert_environment_converter_coverage() -> None:
     """Fail when either owned environment adapter drifts from protobuf."""
     from codewire.v1.environment_pb2 import CreateEnvironmentRequest, Environment
 
+    assert_project_spec_converter_coverage()
+
     _assert_descriptor_coverage(
         "environment", Environment.DESCRIPTOR, _ENVIRONMENT_DESCRIPTOR_FIELDS
     )
@@ -91,6 +124,40 @@ def assert_environment_converter_coverage() -> None:
         "create environment request",
         CreateEnvironmentRequest.DESCRIPTOR,
         _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS,
+    )
+
+
+def assert_project_spec_converter_coverage() -> None:
+    """Fail when canonical project intent gains an unmapped field."""
+    from codewire.v1 import common_pb2
+
+    for message_name, expected in _PROJECT_DESCRIPTOR_FIELDS.items():
+        _assert_descriptor_coverage(
+            f"project {message_name}",
+            getattr(common_pb2, message_name).DESCRIPTOR,
+            expected,
+        )
+
+
+def assert_preset_converter_coverage() -> None:
+    """Fail when a preset resource or mutation gains an unmapped field."""
+    from codewire.v1.preset_pb2 import (
+        CreatePresetRequest,
+        Preset,
+        UpdatePresetRequest,
+    )
+
+    assert_project_spec_converter_coverage()
+    _assert_descriptor_coverage("preset", Preset.DESCRIPTOR, _PRESET_DESCRIPTOR_FIELDS)
+    _assert_descriptor_coverage(
+        "create preset request",
+        CreatePresetRequest.DESCRIPTOR,
+        _CREATE_PRESET_DESCRIPTOR_FIELDS,
+    )
+    _assert_descriptor_coverage(
+        "update preset request",
+        UpdatePresetRequest.DESCRIPTOR,
+        _UPDATE_PRESET_DESCRIPTOR_FIELDS,
     )
 
 
@@ -152,14 +219,37 @@ def file_entry_to_dict(message: Message) -> dict[str, Any]:
     return value
 
 
-def preset_to_dict(message: Message) -> dict[str, Any]:
-    """Render PresetService's nested setup config in the SDK's flat shape."""
+def project_spec_from_dict(value: dict[str, Any]) -> Message:
+    """Encode the SDK's short enum spellings into canonical project intent."""
+    from codewire.v1.common_pb2 import ProjectSpec
+
+    assert_project_spec_converter_coverage()
+    payload = deepcopy(value)
+    for skill in payload.get("skills", []):
+        source = skill.get("source")
+        if source not in ("repository", "user"):
+            raise ValueError("codewire: project skill source must be repository or user")
+        skill["source"] = f"PROJECT_SKILL_SOURCE_{source.upper()}"
+    return ParseDict(payload, ProjectSpec())
+
+
+def project_spec_to_dict(message: Message) -> dict[str, Any]:
+    """Render canonical project intent with the SDK's short enum spellings."""
+    assert_project_spec_converter_coverage()
     value = proto_to_dict(message)
-    value["type"] = "sandbox"
-    if message.HasField("default_setup_config"):
-        setup = proto_to_dict(message.default_setup_config)
-        value.update(setup)
-        value.pop("default_setup_config", None)
+    for skill in value["skills"]:
+        source = skill["source"]
+        skill["source"] = source.removeprefix("project_skill_source_")
+    return value
+
+
+def preset_to_dict(message: Message) -> dict[str, Any]:
+    """Render a preset with ProjectSpec as its sole workload configuration."""
+    assert_preset_converter_coverage()
+    if not message.HasField("project_spec"):
+        raise RuntimeError("preset response omitted project_spec")
+    value = proto_to_dict(message)
+    value["project_spec"] = project_spec_to_dict(message.project_spec)
     return value
 
 
@@ -187,7 +277,7 @@ def _field_value(field: FieldDescriptor, value: Any) -> Any:
             return timestamp_string(value)
         converted = proto_to_dict(value)
         if field.message_type is not None and field.message_type.full_name == (
-            "codewire.v1.RepoEntry"
+            "codewire.v1.RepositorySpec"
         ):
             if not converted.get("revision"):
                 converted.pop("revision", None)

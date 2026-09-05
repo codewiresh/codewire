@@ -1,65 +1,27 @@
 ---
-title: GitHub integration
-description: Connect GitHub for repository access
+title: Repository access
+description: Create environments from public repository URLs
 ---
 
+Codewire accepts clean HTTP(S) repository URLs. Public GitHub repositories do
+not require a platform integration or repository credential.
 
-Connect GitHub so environments can access private repositories.
+## Create from a public repository
 
-## Setup methods
+Enter the complete repository URL when you create the environment:
 
-There are two ways to configure GitHub integration:
+```text
+https://github.com/owner/repository
+```
 
-### Easy mode — GitHub App Manifest (recommended)
+Repository URLs containing embedded usernames, passwords, or tokens are
+rejected.
 
-This creates a GitHub App automatically with the correct permissions.
+## Private repositories
 
-1. Go to organization **Secrets**
-2. Choose the GitHub connection option
-3. Choose your GitHub provider:
-   - **github.com** for standard GitHub
-   - **GitHub Enterprise** — enter your enterprise URL
-4. You'll be redirected to GitHub to authorize the app creation
-5. Approve the app and you're redirected back
+Hosted private-repository credentials are not connected to environment
+creation in the current release. Saving a repository credential as a secret
+does not enable cloning, and there is no hosted GitHub credential setup.
 
-The integration is configured automatically.
-
-### Advanced mode — manual token
-
-If you prefer to manage credentials yourself:
-
-1. Create a GitHub token with repository access
-2. Store it in organization secrets
-3. Create or restart environments that need private repository access
-
-## After connecting
-
-Once connected, the settings page shows:
-
-- The GitHub provider URL
-- A masked credential identifier
-- A **Disconnect** button to remove the integration
-
-{% aside(kind="caution") %}
-  After changing repository credentials, restart affected environments so new sessions pick up the updated secret.
-{% end %}
-
-{% aside(kind="note") %}
-  GitHub tokens are organization secrets. Scope them narrowly and rotate them when membership changes.
-{% end %}
-
-## GitHub Enterprise
-
-GitHub Enterprise is supported in both setup modes:
-
-- **Easy mode** — select "GitHub Enterprise" and enter your enterprise URL
-- **Advanced mode** — create an OAuth App on your enterprise server and configure manually
-
-## Disconnecting
-
-To remove the GitHub integration:
-
-1. Go to organization **Secrets**
-2. Click **Disconnect**
-
-New environments will no longer receive the removed GitHub credential.
+The former GitHub-specific CLI command group is retired. Use a repository that
+is accessible without authentication for now.

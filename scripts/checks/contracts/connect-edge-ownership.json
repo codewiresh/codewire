@@ -8,7 +8,6 @@
     "codewire.console.v1.AccountService": "orchestration",
     "codewire.console.v1.BillingService": "billing",
     "codewire.console.v1.EnvironmentSetupService": "orchestration",
-    "codewire.console.v1.GitHubService": "orchestration",
     "codewire.testing.v1.PingService": "testing",
     "codewire.v1.ApiKeyService": "orchestration",
     "codewire.v1.EnvironmentService": "orchestration",
@@ -44,11 +43,6 @@
   },
   "pending": {},
   "unrouted": {
-    "codewire.internal.v1.EnvironmentCredentialService": {
-      "binary": "orchestration",
-      "listener": "internal-connect",
-      "port": 8085
-    },
     "codewire.internal.v1.GatewayBindingService": {
       "binary": "orchestration",
       "listener": "internal-connect",

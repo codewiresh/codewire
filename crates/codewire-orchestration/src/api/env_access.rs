@@ -1,7 +1,7 @@
 //! Environment-access management CRUD (#169, part of the #38 HTTP surface).
 //!
 //! Orchestration already ENFORCES the `environment_access` ACL via
-//! [`require_environment_access`]; this adds the management endpoints so
+//! `require_environment_access`; this adds the management endpoints so
 //! retiring Go (#162) doesn't drop grant/revoke.
 //!
 //! Wire parity notes:
@@ -11,7 +11,7 @@
 //! - `created_at::text` on the Go side returns the raw Postgres
 //!   timestamp text (NOT `formatTime`), so we reproduce it with a
 //!   `::text` cast rather than `format_time`.
-//! - Error envelopes are huma `CodedError` shapes via [`coded`]:
+//! - Error envelopes are huma `CodedError` shapes via `coded`:
 //!   org_not_found (404), access_denied (403), invalid_access (400),
 //!   forbidden (400), env_not_found (404), internal_error (500) — each
 //!   with the CLI hint Go's `hintForCode` attaches.

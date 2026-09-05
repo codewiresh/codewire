@@ -8,7 +8,7 @@ if (!baseUrl) {
 async function testFirstPartyEnv() {
   const cw = new Codewire({ baseUrl, timeout: 300_000 });
   const env = await cw.environments.create(
-    { preset_slug: "python" },
+    { project_spec: { schema_version: 1, preset: "python", working_directory: "/workspace" } },
     { wait: true, waitTimeout: 300_000 },
   );
   try {
@@ -32,7 +32,7 @@ async function testFirstPartyEnv() {
 async function testArbitraryImage() {
   const cw = new Codewire({ baseUrl, timeout: 300_000 });
   const env = await cw.environments.create(
-    { image: "python:3.12-slim" } as any,
+    { project_spec: { schema_version: 1, image: "python:3.12-slim", working_directory: "/workspace" } },
     { wait: true, waitTimeout: 300_000 },
   );
   try {

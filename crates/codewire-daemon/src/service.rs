@@ -66,9 +66,7 @@ impl DaemonServiceImpl {
     }
 
     fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
-        let Some(expected) = self.config.auth_token.as_deref() else {
-            return Ok(());
-        };
+        let expected = self.config.auth_token.expose_secret();
         let Some(actual) = request
             .metadata()
             .get(DAEMON_AUTH_TOKEN_HEADER)
@@ -710,20 +708,57 @@ fn validate_timestamp(timestamp: Option<&prost_types::Timestamp>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
     use codewire_gateway_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
+    use codewire_gateway_proto::{DAEMON_AUTH_TOKEN_HEADER, DaemonAuthToken};
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
     use tokio::sync::{mpsc, oneshot};
     use tokio::time::{Duration, sleep};
-    use tokio_stream::{iter, wrappers::ReceiverStream};
+    use tokio_stream::{
+        iter,
+        wrappers::{ReceiverStream, TcpListenerStream},
+    };
+    use tonic::metadata::{Ascii, MetadataValue};
+    use tonic::service::Interceptor;
+    use tonic::service::interceptor::InterceptedService;
+    use tonic::transport::Channel;
+
+    const TEST_AUTH_TOKEN: &str = "daemon-service-test-token";
+
+    #[derive(Clone)]
+    struct TestAuthInterceptor {
+        token: MetadataValue<Ascii>,
+    }
+
+    impl Interceptor for TestAuthInterceptor {
+        fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+            request
+                .metadata_mut()
+                .insert(DAEMON_AUTH_TOKEN_HEADER, self.token.clone());
+            Ok(request)
+        }
+    }
+
+    type TestClient = DaemonServiceClient<InterceptedService<Channel, TestAuthInterceptor>>;
+
+    async fn authenticated_client(addr: SocketAddr) -> TestClient {
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .expect("connect daemon");
+        DaemonServiceClient::with_interceptor(
+            channel,
+            TestAuthInterceptor {
+                token: TEST_AUTH_TOKEN.parse().unwrap(),
+            },
+        )
+    }
 
     #[tokio::test]
     async fn exec_session_streams_stdout_stderr_and_exit() {
         let (_temp, addr, shutdown) = spawn_daemon().await;
-        let mut client = DaemonServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect daemon");
+        let mut client = authenticated_client(addr).await;
 
         let request = iter([
             v1::ExecMessage {
@@ -775,9 +810,7 @@ mod tests {
     #[tokio::test]
     async fn exec_session_forwards_stdin_and_close() {
         let (_temp, addr, shutdown) = spawn_daemon().await;
-        let mut client = DaemonServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect daemon");
+        let mut client = authenticated_client(addr).await;
 
         let request = iter([
             v1::ExecMessage {
@@ -818,9 +851,7 @@ mod tests {
     #[tokio::test]
     async fn pty_session_uses_requested_term() {
         let (_temp, addr, shutdown) = spawn_daemon().await;
-        let mut client = DaemonServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect daemon");
+        let mut client = authenticated_client(addr).await;
 
         let request = iter([
             v1::PtyMessage {
@@ -867,9 +898,7 @@ mod tests {
     #[tokio::test]
     async fn exec_transport_loss_terminates_remote_process() {
         let (temp, addr, shutdown) = spawn_daemon().await;
-        let mut client = DaemonServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect daemon");
+        let mut client = authenticated_client(addr).await;
         let workspace = temp.path().join("workspace");
         let pid_file = workspace.join("exec.pid");
         let (input, rx) = mpsc::channel(4);
@@ -903,9 +932,7 @@ mod tests {
     #[tokio::test]
     async fn pty_transport_loss_terminates_remote_process() {
         let (temp, addr, shutdown) = spawn_daemon().await;
-        let mut client = DaemonServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect daemon");
+        let mut client = authenticated_client(addr).await;
         let workspace = temp.path().join("workspace");
         let pid_file = workspace.join("pty.pid");
         let (input, rx) = mpsc::channel(4);
@@ -942,9 +969,7 @@ mod tests {
     #[tokio::test]
     async fn file_rpcs_cover_lifecycle_and_path_rejection() {
         let (_temp, addr, shutdown) = spawn_daemon().await;
-        let mut client = DaemonServiceClient::connect(format!("http://{addr}"))
-            .await
-            .expect("connect daemon");
+        let mut client = authenticated_client(addr).await;
 
         client
             .open_file(v1::OpenFileRequest {
@@ -1029,23 +1054,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_endpoint_returns_ok() {
+    async fn typed_health_returns_ready() {
         let (_temp, addr, shutdown) = spawn_daemon().await;
-        let response = reqwest::get(format!("http://{addr}/health"))
+        let response = authenticated_client(addr)
             .await
-            .expect("health request");
-        assert!(response.status().is_success());
-        let body = response
-            .json::<serde_json::Value>()
+            .get_health(v1::GetHealthRequest {})
             .await
-            .expect("health json");
-        assert_eq!(body["status"], "ok");
+            .expect("typed health request")
+            .into_inner();
+        assert_eq!(response.state, v1::DaemonState::Ready as i32);
         shutdown.send(()).ok();
     }
 
     #[tokio::test]
     async fn typed_service_enforces_auth_token() {
-        let (_temp, addr, shutdown) = spawn_daemon_with_auth(Some("daemon-secret".into())).await;
+        let (_temp, addr, shutdown) = spawn_daemon_with_auth("daemon-secret").await;
         let mut client = DaemonServiceClient::connect(format!("http://{addr}"))
             .await
             .expect("connect daemon");
@@ -1118,11 +1141,11 @@ mod tests {
     }
 
     async fn spawn_daemon() -> (tempfile::TempDir, SocketAddr, oneshot::Sender<()>) {
-        spawn_daemon_with_auth(None).await
+        spawn_daemon_with_auth(TEST_AUTH_TOKEN).await
     }
 
     async fn spawn_daemon_with_auth(
-        auth_token: Option<String>,
+        auth_token: &str,
     ) -> (tempfile::TempDir, SocketAddr, oneshot::Sender<()>) {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
@@ -1135,17 +1158,20 @@ mod tests {
             listen_addr: addr.to_string(),
             workspace_root,
             home_root,
-            auth_token,
+            auth_token: DaemonAuthToken::new(auth_token).expect("valid daemon test token"),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, crate::server::router(config))
-                .with_graceful_shutdown(async {
+            let _ = crate::server::serve_grpc_with_incoming(
+                config,
+                TcpListenerStream::new(listener),
+                async {
                     let _ = shutdown_rx.await;
-                })
-                .await;
+                },
+            )
+            .await;
         });
         (temp, addr, shutdown_tx)
     }

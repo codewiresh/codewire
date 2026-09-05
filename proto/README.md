@@ -33,11 +33,12 @@ are compiled for Rust at build time by `crates/codewire-proto`.
 
 | Package | Service | Consumers |
 |---|---|---|
-| `codewire.internal.v1` | `CoordinatorService`, `MeshCoordinatorService`, environment credentials, gateway binding, and Mesh authorization. | First-party runtime clients only |
+| `codewire.internal.v1` | `CoordinatorService`, `MeshCoordinatorService`, gateway binding, and Mesh authorization. | First-party runtime clients only |
 
-`libs/gateway-proto/proto/` holds the Rust-consumed daemon/gateway protocol.
-It has no independent Go module or generated Go copy. New client-facing
-contracts go here.
+`libs/gateway-proto/proto/` holds only the Rust-consumed private `daemon.v1`
+protocol between the gateway and environment daemon. It has no independent Go
+module or generated Go copy. New client-facing contracts belong under
+`proto/codewire/`.
 
 ## Vendored third-party protos
 
@@ -85,5 +86,10 @@ make proto-drift-check  # CI gate: fails if generated code is stale
 The TypeScript generator (`protoc-gen-es`) comes from `bun install`
 (pinned in the root `package.json` devDependencies).
 
-Breaking changes are checked with `buf breaking` against `main`
-(`cd proto && buf breaking --against '../.git#branch=main,subdir=proto'`).
+Breaking changes are checked against `main` by
+`scripts/checks/proto_breaking.py`. During the prelaunch clean cutover, every
+intentional exception is pinned to the exact pre-change file digest in the
+append-only preimage ledger and must update all generated consumers in the
+same change. Only entries added relative to the checked base are active;
+historical replacements return to strict Buf checking, and deleted contracts
+stay absent.

@@ -1592,23 +1592,23 @@ assert_tailnet_direct_udp_discovery_shape() {
 
 assert_sandbox_template_derp_egress() {
   local claim_json="$TMPDIR_SMOKE/claim-template.json"
-  local warm_pool_json="$TMPDIR_SMOKE/claim-warmpool.json"
+  local claim_shadow_json="$TMPDIR_SMOKE/claim-shadow.json"
   local template_json="$TMPDIR_SMOKE/sandboxtemplate.json"
   local gateway_policy_json="$TMPDIR_SMOKE/gateway-networkpolicy.json"
   local daemon_policy_json="$TMPDIR_SMOKE/workspace-daemon-networkpolicy.json"
   local daemon_service_json="$TMPDIR_SMOKE/workspace-daemon-service.json"
-  local template_name warm_pool_name
+  local template_name claim_shadow_name
 
   kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxclaim "$CLAIM_NAME" -o json >"$claim_json"
   template_name="$(jq -r '.spec.sandboxTemplateRef.name // empty' "$claim_json")"
   if [[ -z "$template_name" ]]; then
-    warm_pool_name="$(jq -r '.spec.warmPoolRef.name // empty' "$claim_json")"
-    [[ -n "$warm_pool_name" ]] || \
+    claim_shadow_name="$(jq -r '.spec.warmPoolRef.name // empty' "$claim_json")"
+    [[ -n "$claim_shadow_name" ]] || \
       die "SandboxClaim $CLAIM_NAME has neither sandboxTemplateRef.name nor warmPoolRef.name"
-    kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxwarmpool "$warm_pool_name" -o json >"$warm_pool_json"
-    template_name="$(jq -r '.spec.sandboxTemplateRef.name // empty' "$warm_pool_json")"
+    kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxwarmpool "$claim_shadow_name" -o json >"$claim_shadow_json"
+    template_name="$(jq -r '.spec.sandboxTemplateRef.name // empty' "$claim_shadow_json")"
     [[ -n "$template_name" ]] || \
-      die "SandboxWarmPool $warm_pool_name has no sandboxTemplateRef.name"
+      die "claim shadow SandboxWarmPool $claim_shadow_name has no sandboxTemplateRef.name"
   fi
   kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxtemplate "$template_name" -o json >"$template_json"
   kubectl_dev -n "$SANDBOX_NAMESPACE" get networkpolicy \
@@ -3179,7 +3179,7 @@ select_kube_context_best_effort() {
 stage_kubernetes_failure_diagnostics() {
   local source_dir="$1"
   local label="$2"
-  local bundle_dir manifest_file pool_source="" candidate manifest_entries
+  local bundle_dir manifest_file shadow_source="" candidate manifest_entries
   local file file_name byte_count
 
   [[ -n "$SMOKE_ARTIFACT_DIR" ]] || return 0
@@ -3210,7 +3210,7 @@ stage_kubernetes_failure_diagnostics() {
                 | if type == "number" and . >= 0 then . else null end
               ),
               deleting: (.metadata.deletionTimestamp != null),
-              warm_pool: (.spec.warmPoolRef.name | safe_token),
+              claim_shadow: (.spec.warmPoolRef.name | safe_token),
               template: (.spec.sandboxTemplateRef.name | safe_token),
               sandbox_assigned: (
                 (.status.sandbox.name | safe_token) != null
@@ -3248,11 +3248,11 @@ stage_kubernetes_failure_diagnostics() {
 
   for candidate in "$source_dir"/sandboxwarmpool-*.json; do
     [[ -f "$candidate" ]] || continue
-    pool_source="$candidate"
+    shadow_source="$candidate"
     break
   done
-  if [[ -n "$pool_source" && -s "$pool_source" ]] \
-      && jq -e 'type == "object"' "$pool_source" >/dev/null 2>&1; then
+  if [[ -n "$shadow_source" && -s "$shadow_source" ]] \
+      && jq -e 'type == "object"' "$shadow_source" >/dev/null 2>&1; then
     jq '
       def safe_token:
         if type == "string"
@@ -3263,7 +3263,7 @@ stage_kubernetes_failure_diagnostics() {
       def count_value:
         if type == "number" and . >= 0 and floor == . then . else null end;
       {
-        schema: "codewire-kubernetes-warm-pool-diagnostic-v1",
+        schema: "codewire-kubernetes-claim-shadow-diagnostic-v1",
         read_state: "available",
         name: (.metadata.name | safe_token),
         generation: (.metadata.generation | count_value),
@@ -3273,12 +3273,12 @@ stage_kubernetes_failure_diagnostics() {
         ready_replicas: (.status.readyReplicas | count_value)
       }
       | with_entries(select(.value != null))
-    ' "$pool_source" >"$bundle_dir/warm-pool.json"
+    ' "$shadow_source" >"$bundle_dir/claim-shadow.json"
   else
     jq -n '{
-      schema: "codewire-kubernetes-warm-pool-diagnostic-v1",
+      schema: "codewire-kubernetes-claim-shadow-diagnostic-v1",
       read_state: "unavailable"
-    }' >"$bundle_dir/warm-pool.json"
+    }' >"$bundle_dir/claim-shadow.json"
   fi
 
   if [[ -s "$source_dir/pods.json" ]] \
@@ -3466,7 +3466,7 @@ stage_kubernetes_failure_diagnostics() {
 
 collect_failure_diagnostics() {
   local label="$1"
-  local dir pods_json pod container containers claim_json warm_pool_name template_name
+  local dir pods_json pod container containers claim_json claim_shadow_name template_name
 
   [[ "$SMOKE_COLLECT_FAILURE_DIAGNOSTICS" == "1" ]] || return 0
   [[ "$SMOKE_SKIP_KUBE" != "1" ]] || return 0
@@ -3492,12 +3492,12 @@ collect_failure_diagnostics() {
     claim_json="$dir/sandboxclaim-$CLAIM_NAME.json"
     kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxclaim "$CLAIM_NAME" -o json \
       >"$claim_json" 2>"$dir/sandboxclaim-$CLAIM_NAME.err" || true
-    warm_pool_name="$(jq -r '.spec.warmPoolRef.name // empty' "$claim_json" 2>/dev/null || true)"
+    claim_shadow_name="$(jq -r '.spec.warmPoolRef.name // empty' "$claim_json" 2>/dev/null || true)"
     template_name="$(jq -r '.spec.sandboxTemplateRef.name // empty' "$claim_json" 2>/dev/null || true)"
-    if [[ -n "$warm_pool_name" ]]; then
-      kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxwarmpool "$warm_pool_name" -o json \
-        >"$dir/sandboxwarmpool-$warm_pool_name.json" 2>"$dir/sandboxwarmpool-$warm_pool_name.err" || true
-      template_name="$(jq -r '.spec.sandboxTemplateRef.name // empty' "$dir/sandboxwarmpool-$warm_pool_name.json" 2>/dev/null || true)"
+    if [[ -n "$claim_shadow_name" ]]; then
+      kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxwarmpool "$claim_shadow_name" -o json \
+        >"$dir/sandboxwarmpool-$claim_shadow_name.json" 2>"$dir/sandboxwarmpool-$claim_shadow_name.err" || true
+      template_name="$(jq -r '.spec.sandboxTemplateRef.name // empty' "$dir/sandboxwarmpool-$claim_shadow_name.json" 2>/dev/null || true)"
     fi
     if [[ -n "$template_name" ]]; then
       kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxtemplate "$template_name" -o json \

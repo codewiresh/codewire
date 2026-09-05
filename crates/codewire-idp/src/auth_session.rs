@@ -5,17 +5,17 @@
 //! codes, error `detail` strings, JSON field names/nullability, the
 //! Argon2id PHC hash format, and the `Set-Cookie` header bytes.
 //!
-//! - [`sign_up`] (`POST /api/auth/sign-up`, public) creates a
+//! - `sign_up` (`POST /api/auth/sign-up`, public) creates a
 //!   `users` + `accounts` (`provider_id='credential'`) pair inside a
 //!   transaction, mints a session, and returns the session cookie + an
 //!   `AuthResponse`.
-//! - [`sign_in`] (`POST /api/auth/sign-in`, public) verifies the
+//! - `sign_in` (`POST /api/auth/sign-in`, public) verifies the
 //!   credential, applies the failed-attempt lockout (≥5 ⇒ 15 min), and
 //!   either issues a 2FA challenge token or mints a session.
-//! - [`sign_out`] (`POST /api/auth/sign-out`, public) deletes the
+//! - `sign_out` (`POST /api/auth/sign-out`, public) deletes the
 //!   session(s) named by the cookie and/or bearer token and always
 //!   returns `{success:true}` with a clear-cookie.
-//! - [`get_session`] (`GET /api/auth/get-session`, *optional* auth)
+//! - `get_session` (`GET /api/auth/get-session`, *optional* auth)
 //!   returns the current `AuthResponse`, or JSON `null` (200, not 401)
 //!   when unauthenticated.
 //!
@@ -222,12 +222,29 @@ pub(crate) struct UserResponse {
     pub(crate) created_at: String,
 }
 
-/// Mirrors `auth.SessionResponse`.
+/// Browser-visible session metadata. The bearer capability is delivered only
+/// through the HttpOnly session cookie and is never serialized into JSON.
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct SessionResponse {
     pub(crate) id: String,
-    pub(crate) token: String,
     pub(crate) expires_at: String,
+}
+
+/// A newly minted session and its one-time raw cookie capability.
+pub(crate) struct CreatedSession {
+    pub(crate) response: SessionResponse,
+    pub(crate) token: String,
+}
+
+impl fmt::Debug for CreatedSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreatedSession")
+            .field("session_id", &self.response.id)
+            .field("expires_at", &self.response.expires_at)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Mirrors `auth.AuthResponse`. `skip_2fa_setup` is `omitempty` on the
@@ -568,13 +585,13 @@ pub(crate) async fn log_audit(
 
 /// Insert a web session row (mirrors `auth.CreateSession`): a 64-hex
 /// token, a 32-hex id, `expires_at = NOW() + 8h`. Returns the
-/// `SessionResponse` (id/token/expires_at) for the body.
+/// browser-safe session metadata plus the raw token for `Set-Cookie`.
 pub(crate) async fn create_session(
     pool: &PgPool,
     user_id: &str,
     ip: &str,
     ua: &str,
-) -> Result<SessionResponse, AppError> {
+) -> Result<CreatedSession, AppError> {
     let id = hex_id();
     let token = hex_token();
     let token_hash = hash_session_token(&token);
@@ -599,10 +616,12 @@ pub(crate) async fn create_session(
         AppError::InternalMsg("Failed to create session".into())
     })?;
 
-    Ok(SessionResponse {
-        id,
+    Ok(CreatedSession {
         token,
-        expires_at: format_time(expires_at),
+        response: SessionResponse {
+            id,
+            expires_at: format_time(expires_at),
+        },
     })
 }
 
@@ -711,7 +730,7 @@ async fn sign_up(
     })?;
 
     let (ip, ua) = request_info(&headers);
-    let session = create_session(&state.pool, &user_id, &ip, &ua)
+    let created_session = create_session(&state.pool, &user_id, &ip, &ua)
         .await
         .map_err(|_| AppError::InternalMsg("Account created but session failed".into()))?;
 
@@ -739,11 +758,11 @@ async fn sign_up(
 
     let body = AuthResponse {
         user,
-        session,
+        session: created_session.response,
         skip_2fa_setup: false,
     };
     Ok(with_cookie(
-        session_cookie_string(&body.session.token, state.secure),
+        session_cookie_string(&created_session.token, state.secure),
         Json(body),
     ))
 }
@@ -830,16 +849,17 @@ async fn sign_in(
     // 2FA challenge branch: no session, no cookie.
     if user.two_factor_enabled.unwrap_or(false) {
         let tf_token = hex_token();
+        let tf_token_hash = hash_session_token(&tf_token);
         let tf_id = hex_id();
         sqlx::query(
             r#"
-            INSERT INTO two_factor_tokens (id, user_id, token, expires_at)
+            INSERT INTO two_factor_tokens (id, user_id, token_hash, expires_at)
             VALUES ($1, $2, $3, NOW() + ($4::bigint * interval '1 second'))
             "#,
         )
         .bind(&tf_id)
         .bind(&user.id)
-        .bind(&tf_token)
+        .bind(&tf_token_hash)
         .bind(TWO_FACTOR_TOKEN_TTL_SECS)
         .execute(&state.pool)
         .await
@@ -867,7 +887,7 @@ async fn sign_in(
     .await;
 
     // No 2FA: mint a session + cookie.
-    let session = create_session(&state.pool, &user.id, &ip, &ua).await?;
+    let created_session = create_session(&state.pool, &user.id, &ip, &ua).await?;
     log_audit(
         &state.pool,
         "user.signin",
@@ -879,10 +899,10 @@ async fn sign_in(
     )
     .await;
 
-    let cookie = session_cookie_string(&session.token, state.secure);
+    let cookie = session_cookie_string(&created_session.token, state.secure);
     let body = SignInResponseBody {
         user: Some(user_response(user)),
-        session: Some(session),
+        session: Some(created_session.response),
         ..Default::default()
     };
     Ok(with_cookie(cookie, Json(body)))
@@ -1013,7 +1033,6 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             user: user_response(user),
             session: SessionResponse {
                 id: String::new(),
-                token: String::new(),
                 expires_at: String::new(),
             },
             skip_2fa_setup: false,
@@ -1065,7 +1084,6 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
         user: user_response(user),
         session: SessionResponse {
             id: session_id,
-            token,
             expires_at: format_time(expires_at),
         },
         skip_2fa_setup: false,
@@ -1248,7 +1266,6 @@ mod tests {
         let ok = SignInResponseBody {
             session: Some(SessionResponse {
                 id: "s".into(),
-                token: "t".into(),
                 expires_at: "2021-01-01T00:00:00Z".into(),
             }),
             ..Default::default()
@@ -1256,7 +1273,7 @@ mod tests {
         let v = serde_json::to_value(&ok).unwrap();
         assert!(v.get("twoFactorRequired").is_none());
         assert!(v.get("twoFactorToken").is_none());
-        assert_eq!(v["session"]["token"], "t");
+        assert!(v["session"].get("token").is_none());
     }
 
     #[test]
@@ -1276,7 +1293,6 @@ mod tests {
             },
             session: SessionResponse {
                 id: "s".into(),
-                token: "t".into(),
                 expires_at: "2021-01-01T00:00:00Z".into(),
             },
             skip_2fa_setup: false,
@@ -1286,6 +1302,22 @@ mod tests {
         // `name` is a present-but-null field (Go `*string` without
         // omitempty), matching UserResponse.
         assert!(v["user"]["name"].is_null());
+    }
+
+    #[test]
+    fn created_session_debug_redacts_cookie_capability() {
+        let session = CreatedSession {
+            response: SessionResponse {
+                id: "session-id".into(),
+                expires_at: "2021-01-01T00:00:00Z".into(),
+            },
+            token: "session-token-marker".into(),
+        };
+
+        let diagnostic = format!("{session:?}");
+        assert!(!diagnostic.contains("session-token-marker"));
+        assert!(diagnostic.contains("session-id"));
+        assert!(diagnostic.contains("[REDACTED]"));
     }
 
     #[test]

@@ -873,7 +873,7 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(admitted.info().protocol_version, 7);
+    assert_eq!(admitted.info().protocol_version, 8);
     drop(admitted);
 
     let client = LocalCredentialClient::connect_or_start_with(&config, |_| {
@@ -881,8 +881,8 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     })
     .await
     .unwrap();
-    assert_eq!(AUTHORITY_PROTOCOL_VERSION, 7);
-    assert_eq!(client.info().protocol_version, 7);
+    assert_eq!(AUTHORITY_PROTOCOL_VERSION, 8);
+    assert_eq!(client.info().protocol_version, 8);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     drop(shutdown);

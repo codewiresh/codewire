@@ -26,7 +26,7 @@ from google.protobuf import duration_pb2 as google_dot_protobuf_dot_duration__pb
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1d\x63odewire/v1/mesh_invite.proto\x12\x0b\x63odewire.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf5\x01\n\nMeshInvite\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x03 \x01(\tR\tnetworkId\x12+\n\x12\x63reated_by_user_id\x18\x04 \x01(\tR\x0f\x63reatedByUserId\x12\x39\n\nexpires_at\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12\x39\n\ncreated_at\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\"\x8a\x01\n\x16ListMeshInvitesRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\x12\x1b\n\tpage_size\x18\x03 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x04 \x01(\tR\tpageToken\"t\n\x17ListMeshInvitesResponse\x12\x31\n\x07invites\x18\x01 \x03(\x0b\x32\x17.codewire.v1.MeshInviteR\x07invites\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"|\n\x17\x43reateMeshInviteRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\x12+\n\x03ttl\x18\x03 \x01(\x0b\x32\x19.google.protobuf.DurationR\x03ttl\"l\n\x18\x43reateMeshInviteResponse\x12/\n\x06invite\x18\x01 \x01(\x0b\x32\x17.codewire.v1.MeshInviteR\x06invite\x12\x1f\n\x0binvite_code\x18\x02 \x01(\tR\ninviteCode\"l\n\x17\x44\x65leteMeshInviteRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\x12\x1b\n\tinvite_id\x18\x03 \x01(\tR\x08inviteId\"\x1a\n\x18\x44\x65leteMeshInviteResponse2\xb8\x02\n\x11MeshInviteService\x12\x61\n\x0fListMeshInvites\x12#.codewire.v1.ListMeshInvitesRequest\x1a$.codewire.v1.ListMeshInvitesResponse\"\x03\x90\x02\x01\x12_\n\x10\x43reateMeshInvite\x12$.codewire.v1.CreateMeshInviteRequest\x1a%.codewire.v1.CreateMeshInviteResponse\x12_\n\x10\x44\x65leteMeshInvite\x12$.codewire.v1.DeleteMeshInviteRequest\x1a%.codewire.v1.DeleteMeshInviteResponseB\xb2\x01\n\x0f\x63om.codewire.v1B\x0fMeshInviteProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1d\x63odewire/v1/mesh_invite.proto\x12\x0b\x63odewire.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf5\x01\n\nMeshInvite\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x03 \x01(\tR\tnetworkId\x12+\n\x12\x63reated_by_user_id\x18\x04 \x01(\tR\x0f\x63reatedByUserId\x12\x39\n\nexpires_at\x18\x05 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12\x39\n\ncreated_at\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\"\x8a\x01\n\x16ListMeshInvitesRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\x12\x1b\n\tpage_size\x18\x03 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x04 \x01(\tR\tpageToken\"t\n\x17ListMeshInvitesResponse\x12\x31\n\x07invites\x18\x01 \x03(\x0b\x32\x17.codewire.v1.MeshInviteR\x07invites\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"|\n\x17\x43reateMeshInviteRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\x12+\n\x03ttl\x18\x03 \x01(\x0b\x32\x19.google.protobuf.DurationR\x03ttl\"q\n\x18\x43reateMeshInviteResponse\x12/\n\x06invite\x18\x01 \x01(\x0b\x32\x17.codewire.v1.MeshInviteR\x06invite\x12$\n\x0binvite_code\x18\x02 \x01(\tB\x03\x80\x01\x01R\ninviteCode\"l\n\x17\x44\x65leteMeshInviteRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n\nnetwork_id\x18\x02 \x01(\tR\tnetworkId\x12\x1b\n\tinvite_id\x18\x03 \x01(\tR\x08inviteId\"\x1a\n\x18\x44\x65leteMeshInviteResponse2\xb8\x02\n\x11MeshInviteService\x12\x61\n\x0fListMeshInvites\x12#.codewire.v1.ListMeshInvitesRequest\x1a$.codewire.v1.ListMeshInvitesResponse\"\x03\x90\x02\x01\x12_\n\x10\x43reateMeshInvite\x12$.codewire.v1.CreateMeshInviteRequest\x1a%.codewire.v1.CreateMeshInviteResponse\x12_\n\x10\x44\x65leteMeshInvite\x12$.codewire.v1.DeleteMeshInviteRequest\x1a%.codewire.v1.DeleteMeshInviteResponseB\xb2\x01\n\x0f\x63om.codewire.v1B\x0fMeshInviteProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,6 +34,8 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'codewire.v1.mesh_invite_pb2
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\017com.codewire.v1B\017MeshInviteProtoP\001ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\242\002\003CXX\252\002\013Codewire.V1\312\002\013Codewire\\V1\342\002\027Codewire\\V1\\GPBMetadata\352\002\014Codewire::V1'
+  _globals['_CREATEMESHINVITERESPONSE'].fields_by_name['invite_code']._loaded_options = None
+  _globals['_CREATEMESHINVITERESPONSE'].fields_by_name['invite_code']._serialized_options = b'\200\001\001'
   _globals['_MESHINVITESERVICE'].methods_by_name['ListMeshInvites']._loaded_options = None
   _globals['_MESHINVITESERVICE'].methods_by_name['ListMeshInvites']._serialized_options = b'\220\002\001'
   _globals['_MESHINVITE']._serialized_start=112
@@ -45,11 +47,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CREATEMESHINVITEREQUEST']._serialized_start=618
   _globals['_CREATEMESHINVITEREQUEST']._serialized_end=742
   _globals['_CREATEMESHINVITERESPONSE']._serialized_start=744
-  _globals['_CREATEMESHINVITERESPONSE']._serialized_end=852
-  _globals['_DELETEMESHINVITEREQUEST']._serialized_start=854
-  _globals['_DELETEMESHINVITEREQUEST']._serialized_end=962
-  _globals['_DELETEMESHINVITERESPONSE']._serialized_start=964
-  _globals['_DELETEMESHINVITERESPONSE']._serialized_end=990
-  _globals['_MESHINVITESERVICE']._serialized_start=993
-  _globals['_MESHINVITESERVICE']._serialized_end=1305
+  _globals['_CREATEMESHINVITERESPONSE']._serialized_end=857
+  _globals['_DELETEMESHINVITEREQUEST']._serialized_start=859
+  _globals['_DELETEMESHINVITEREQUEST']._serialized_end=967
+  _globals['_DELETEMESHINVITERESPONSE']._serialized_start=969
+  _globals['_DELETEMESHINVITERESPONSE']._serialized_end=995
+  _globals['_MESHINVITESERVICE']._serialized_start=998
+  _globals['_MESHINVITESERVICE']._serialized_end=1310
 # @@protoc_insertion_point(module_scope)

@@ -79,9 +79,6 @@ WHERE id IN (
     'ses_orchestration_global_admin'
 );
 
-DELETE FROM user_github_tokens
-WHERE user_id IN ('usr_apikey_contract_admin', 'usr_apikey_contract_user');
-
 -- Tenant-secret envelopes have no user foreign key, so reset them explicitly.
 DELETE FROM tenant_secrets
 WHERE path IN (
@@ -201,8 +198,8 @@ VALUES (
     '2026-07-10 10:03:02'
 );
 
--- PresetService fixtures: one stable project ID for Connect's contract,
--- one global official preset for cross-organization reads, and one active
+-- SecretProject remains an independent management-plane fixture. PresetService
+-- uses one global official preset for cross-organization reads and one active
 -- environment proving the preset-in-use lifecycle error.
 INSERT INTO secret_projects (id, org_id, name, created_at)
 VALUES (
@@ -214,36 +211,36 @@ VALUES (
 
 INSERT INTO environment_presets (
     id, org_id, name, slug, description, official, language,
-    build_status, default_cpu_millicores, default_memory_mb,
-    default_disk_gb, default_ttl_seconds, default_setup_config,
-    default_secret_project_id, created_at
+    build_status, default_ttl_seconds, project_spec, created_at
 )
 VALUES
     (
         'preset_contract_official', NULL, 'Official Contract Preset',
         'official-contract', 'Global preset fixture', true, 'rust',
-        'ready', 2000, 4096, 10, 3600,
-        '{"env_vars":{"OFFICIAL":"true"}}'::jsonb,
-        NULL, '2026-07-10 10:05:00.123456'
+        'ready', 3600,
+        '{"schema_version":1,"working_directory":"/workspace","environment":{"OFFICIAL":"true"},"resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
+        '2026-07-10 10:05:00.123456'
     ),
     (
         'preset_contract_in_use', 'org_apikey_contract_1',
         'In-use Contract Preset', 'preset-contract-in-use',
         'Active environment fixture', false, NULL,
-        'ready', 2000, 4096, 10, NULL, NULL,
-        'sp_preset_contract_1', '2026-07-10 10:06:00.654321'
+        'ready', NULL,
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
+        '2026-07-10 10:06:00.654321'
     ),
     (
         'preset_admin_contract', 'org_admin_contract',
         'Admin Contract Preset', 'admin-contract-preset',
         'Admin startup timing fixture', false, NULL,
-        'ready', 2000, 4096, 10, NULL, NULL,
-        NULL, '2026-07-10 10:06:01'
+        'ready', NULL,
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
+        '2026-07-10 10:06:01'
     );
 
 INSERT INTO environments (
     id, org_id, created_by, type, name, state, desired_state, preset_id,
-    created_at
+    project_spec, created_at
 )
 VALUES (
     'env_preset_contract_in_use',
@@ -254,6 +251,7 @@ VALUES (
     'running',
     'started',
     'preset_contract_in_use',
+    '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
     '2026-07-10 10:07:00'
 );
 
@@ -263,25 +261,28 @@ VALUES (
 -- explicit-grant shortcuts that must all fail before authorization succeeds.
 INSERT INTO environments (
     id, org_id, created_by, type, name, state, desired_state, preset_id,
-    created_at
+    project_spec, created_at
 )
 VALUES
     (
         'env_prereq_foreign_creator', 'org_apikey_contract_2',
         'usr_apikey_contract_user', 'sandbox', 'prereq-foreign-creator',
         'running', 'started', 'preset_contract_official',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:07:01'
     ),
     (
         'env_prereq_foreign_role', 'org_apikey_contract_2',
         'usr_apikey_contract_admin', 'sandbox', 'prereq-foreign-role',
         'running', 'started', 'preset_contract_official',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:07:02'
     ),
     (
         'env_prereq_foreign_grant', 'org_apikey_contract_2',
         'usr_apikey_contract_admin', 'sandbox', 'prereq-foreign-grant',
         'running', 'started', 'preset_contract_official',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:07:03'
     );
 
@@ -302,25 +303,28 @@ VALUES (
 -- the explicit environment_access grant rather than the creator shortcut.
 INSERT INTO environments (
     id, org_id, created_by, type, name, state, desired_state, preset_id,
-    created_at
+    project_spec, created_at
 )
 VALUES
     (
         'env_port_contract_viewer', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'port-contract-viewer',
         'running', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:08:00'
     ),
     (
         'env_port_contract_operator', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'port-contract-operator',
         'running', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:09:00'
     ),
     (
         'env_port_contract_owner', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'port-contract-owner',
         'running', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:10:00'
     );
 
@@ -350,100 +354,115 @@ VALUES
 INSERT INTO environments (
     id, org_id, created_by, type, name, state, desired_state, preset_id,
     ttl_seconds, shutdown_at, protected, deletion_requested_at,
-    deletion_grace_until, created_at
+    deletion_grace_until, created_at, project_spec
 )
 VALUES
     (
         'env_environment_contract_read', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-read',
         'running', 'started', 'preset_contract_in_use', 3600,
-        '2026-07-10 11:00:00', false, NULL, NULL, '2026-07-10 10:20:00'
+        '2026-07-10 11:00:00', false, NULL, NULL, '2026-07-10 10:20:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_stop_binary', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-stop-binary',
         'running', 'started', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:21:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:21:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_stop_json', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-stop-json',
         'running', 'started', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:22:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:22:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_start_binary', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-start-binary',
         'stopped', 'stopped', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:23:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:23:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_start_json', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-start-json',
         'stopped', 'stopped', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:24:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:24:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_retry_binary', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-retry-binary',
         'pending', 'started', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:25:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:25:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_retry_json', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-retry-json',
         'pending', 'started', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:26:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:26:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_protect_binary', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-protect-binary',
         'stopped', 'stopped', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:27:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:27:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_protect_json', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-protect-json',
         'stopped', 'stopped', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:28:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:28:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_cancel_binary', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-cancel-binary',
         'stopped', 'stopped', 'preset_contract_in_use', 3600,
         '2026-07-10 11:30:00', false, '2026-07-10 10:29:00',
-        '2026-07-10 10:59:00', '2026-07-10 10:29:00'
+        '2026-07-10 10:59:00', '2026-07-10 10:29:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_cancel_json', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-cancel-json',
         'stopped', 'stopped', 'preset_contract_in_use', 3600,
         '2026-07-10 11:31:00', false, '2026-07-10 10:30:00',
-        '2026-07-10 11:00:00', '2026-07-10 10:30:00'
+        '2026-07-10 11:00:00', '2026-07-10 10:30:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_ttl_binary', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-ttl-binary',
         'running', 'started', 'preset_contract_in_use', 3600,
-        '2026-07-10 12:00:00', false, NULL, NULL, '2026-07-10 10:31:00'
+        '2026-07-10 12:00:00', false, NULL, NULL, '2026-07-10 10:31:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_ttl_json', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-ttl-json',
         'running', 'started', 'preset_contract_in_use', 3600,
-        '2026-07-10 12:01:00', false, NULL, NULL, '2026-07-10 10:32:00'
+        '2026-07-10 12:01:00', false, NULL, NULL, '2026-07-10 10:32:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_access_binary', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-access-binary',
         'running', 'started', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:33:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:33:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     ),
     (
         'env_environment_contract_access_json', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-access-json',
         'running', 'started', 'preset_contract_in_use', NULL,
-        NULL, false, NULL, NULL, '2026-07-10 10:34:00'
+        NULL, false, NULL, NULL, '2026-07-10 10:34:00',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     );
 
 INSERT INTO environment_resize_operations (
@@ -470,127 +489,147 @@ VALUES (
 -- the happy-path mutations above.
 INSERT INTO environments (
     id, org_id, created_by, type, name, state, desired_state, preset_id,
-    created_at
+    project_spec, created_at
 )
 VALUES
     (
         'env_environment_contract_invalid_state', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-invalid-state',
         'stopped', 'stopped', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:00'
     ),
     (
         'env_environment_contract_state_pending', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-pending',
         'pending', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:01'
     ),
     (
         'env_environment_contract_state_pending_build', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-pending-build',
         'pending_build', 'stopped', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:02'
     ),
     (
         'env_environment_contract_state_building', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-building',
         'building', 'destroyed', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:03'
     ),
     (
         'env_environment_contract_state_build_failed', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-build-failed',
         'build_failed', 'archived', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:04'
     ),
     (
         'env_environment_contract_state_pulling_snapshot', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-pulling-snapshot',
         'pulling_snapshot', 'resized', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:05'
     ),
     (
         'env_environment_contract_state_creating', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-creating',
         'creating', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:06'
     ),
     (
         'env_environment_contract_state_starting', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-starting',
         'starting', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:07'
     ),
     (
         'env_environment_contract_state_running', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-running',
         'running', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:08'
     ),
     (
         'env_environment_contract_state_running_complete', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-running-complete',
         'running', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:09'
     ),
     (
         'env_environment_contract_state_stopping', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-stopping',
         'stopping', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:10'
     ),
     (
         'env_environment_contract_state_stopped', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-stopped',
         'stopped', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:11'
     ),
     (
         'env_environment_contract_state_archiving', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-archiving',
         'archiving', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:12'
     ),
     (
         'env_environment_contract_state_archived', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-archived',
         'archived', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:13'
     ),
     (
         'env_environment_contract_state_restoring', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-restoring',
         'restoring', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:14'
     ),
     (
         'env_environment_contract_state_resizing', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-resizing',
         'resizing', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:15'
     ),
     (
         'env_environment_contract_state_destroying', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-destroying',
         'destroying', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:16'
     ),
     (
         'env_environment_contract_state_destroyed', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-destroyed',
         'destroyed', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:17'
     ),
     (
         'env_environment_contract_state_error', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-error',
         'error', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:18'
     ),
     (
         'env_environment_contract_state_unknown', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'environment-contract-state-unknown',
         'unknown', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:19'
     );
 
@@ -606,12 +645,13 @@ VALUES (
 -- so their four terminal phase rows cannot alter EnvironmentService streams.
 INSERT INTO environments (
     id, org_id, created_by, type, name, state, desired_state, preset_id,
-    created_at
+    project_spec, created_at
 )
 VALUES (
     'env_admin_contract_read', 'org_admin_contract',
     'usr_orchestration_global_admin', 'sandbox', 'admin-contract-read',
     'running', 'started', 'preset_admin_contract',
+    '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
     NOW() - INTERVAL '5 minutes'
 );
 
@@ -677,19 +717,21 @@ VALUES (
 -- deterministic unavailable target after every database gate succeeds.
 INSERT INTO environments (
     id, org_id, created_by, type, name, state, desired_state, preset_id,
-    created_at
+    project_spec, created_at
 )
 VALUES
     (
         'env_exec_contract_backend', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'exec-contract-backend',
         'running', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:00'
     ),
     (
         'env_exec_contract_unavailable', 'org_apikey_contract_1',
         'usr_apikey_contract_admin', 'sandbox', 'exec-contract-unavailable',
         'running', 'started', 'preset_contract_in_use',
+        '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
         '2026-07-10 10:35:01'
     );
 

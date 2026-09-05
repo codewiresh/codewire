@@ -49,7 +49,7 @@ message CreateMeshNetworkResponse {
 message JoinMeshNetworkRequest {
   // One-use capability returned by CreateMeshInvite. It selects the
   // organization and network; it is not a steady-state credential.
-  string invite_code = 1;
+  string invite_code = 1 [debug_redact = true];
 }
 
 message JoinMeshNetworkResponse {

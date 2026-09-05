@@ -1,5 +1,9 @@
 //! Gateway services, deployment, environment, and host-key rendering.
 
+use codewire_gateway_proto::{
+    GATEWAY_BINDING_TOKEN_AUDIENCE, GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS,
+    GATEWAY_BINDING_TOKEN_MOUNT_PATH,
+};
 use serde_json::{Map, Value, json};
 
 use super::encoding::kata_policy_init_data_annotation;
@@ -22,6 +26,7 @@ use super::{
 };
 
 const GATEWAY_STARTUP_PROBE_PERIOD_SECONDS: i64 = 2;
+pub(super) const GATEWAY_BINDING_TOKEN_VOLUME: &str = "gateway-binding-identity";
 pub(super) const COMMODITY_GATEWAY_STARTUP_FAILURE_THRESHOLD: i64 = 45;
 // Guest storage setup is bounded by the kubelet's 25-minute StartContainer
 // horizon. Give the gateway the same daemon-connect budget, then leave one
@@ -78,13 +83,20 @@ fn apply_sidecar_probes(gateway: &mut Value, confidential: bool) {
 }
 
 pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
-    let mut env = vec![json!({
-        "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
-        "value": workspace_daemon_service_addr(&opts.environment_id),
-    })];
-    if !opts.gateway_token.is_empty() {
-        env.push(json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.gateway_token }));
-    }
+    codewire_gateway_proto::DaemonAuthToken::new(opts.daemon_auth_token.clone())
+        .expect("hosted gateway requires a canonical daemon auth token");
+    assert!(
+        opts.gateway_token != opts.daemon_auth_token,
+        "hosted coordinate and daemon capabilities must be distinct"
+    );
+    let mut env = vec![
+        json!({
+            "name": "CODEWIRE_WORKSPACE_SHIM_ADDR",
+            "value": workspace_daemon_service_addr(&opts.environment_id),
+        }),
+        json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.daemon_auth_token }),
+        json!({ "name": "CODEWIRE_GATEWAY_TOKEN", "value": opts.gateway_token }),
+    ];
     if opts.runtime_profile_spec().profile == RUNTIME_PROFILE_CONFIDENTIAL {
         env.push(json!({
             "name": GATEWAY_DAEMON_CONNECT_TIMEOUT_SECONDS_ENV,
@@ -93,9 +105,6 @@ pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
     }
     if !opts.environment_id.is_empty() {
         env.push(json!({ "name": "CODEWIRE_ENVIRONMENT_ID", "value": opts.environment_id }));
-    }
-    if !opts.gateway_token.is_empty() {
-        env.push(json!({ "name": "CODEWIRE_GATEWAY_TOKEN", "value": opts.gateway_token }));
     }
     if !opts.api_base_url.is_empty() {
         env.push(json!({ "name": "CODEWIRE_API_URL", "value": opts.api_base_url }));
@@ -161,10 +170,6 @@ pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
     env.push(json!({
         "name": "CODEWIRE_SSH_HOST_KEY_PATH",
         "value": GATEWAY_HOST_KEY_PATH,
-    }));
-    env.push(json!({
-        "name": "POD_NAMESPACE",
-        "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } },
     }));
     env
 }
@@ -325,6 +330,11 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
         ],
         "volumeMounts": [
             { "name": "gateway-state", "mountPath": "/codewire/gateway" },
+            {
+                "name": GATEWAY_BINDING_TOKEN_VOLUME,
+                "mountPath": GATEWAY_BINDING_TOKEN_MOUNT_PATH,
+                "readOnly": true,
+            },
         ],
         "resources": {
             "requests": { "cpu": "100m", "memory": "128Mi" },
@@ -366,6 +376,21 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
                     ],
                 },
             },
+            {
+                "name": GATEWAY_BINDING_TOKEN_VOLUME,
+                "projected": {
+                    "defaultMode": 0o440,
+                    "sources": [
+                        {
+                            "serviceAccountToken": {
+                                "audience": GATEWAY_BINDING_TOKEN_AUDIENCE,
+                                "expirationSeconds": GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS,
+                                "path": "token",
+                            },
+                        },
+                    ],
+                },
+            },
         ]),
     );
     if !runtime_spec.runtime_class_name.is_empty() {
@@ -374,32 +399,6 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
             runtime_spec.runtime_class_name.clone().into(),
         );
     }
-    if !opts.node_selector.is_empty() {
-        let sel: Map<String, Value> = opts
-            .node_selector
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-            .collect();
-        pod_spec.insert("nodeSelector".into(), Value::Object(sel));
-    }
-    if !opts.tolerations.is_empty() {
-        let tolerations: Vec<Value> = opts
-            .tolerations
-            .iter()
-            .map(|t| {
-                let mut tol = Map::new();
-                tol.insert("key".into(), t.key.clone().into());
-                tol.insert("operator".into(), t.operator.clone().into());
-                tol.insert("effect".into(), t.effect.clone().into());
-                if !t.value.is_empty() {
-                    tol.insert("value".into(), t.value.clone().into());
-                }
-                Value::Object(tol)
-            })
-            .collect();
-        pod_spec.insert("tolerations".into(), Value::Array(tolerations));
-    }
-
     let mut pod_annotations = Map::new();
     if uses_kata_policy_init_data(opts, &runtime_spec) {
         pod_annotations.insert(

@@ -43,7 +43,6 @@ pub enum WorkspaceSource {
         org_id: String,
         org_slug: String,
         env_id: String,
-        #[serde(default)]
         env_name: String,
         /// Live Connect data is never persisted in the window layout.
         #[serde(skip)]

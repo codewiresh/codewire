@@ -431,13 +431,12 @@ impl AppLayout {
             workspace_layouts.insert(ws_id.clone(), sc.layout_state());
         }
 
-        let state = AppLayoutState {
-            version: 0, // save methods stamp the real version
-            outer_tree: self.outer_tree.clone(),
-            active_outer_pane: self.active_outer_pane,
+        let state = AppLayoutState::new(
+            self.outer_tree.clone(),
+            self.active_outer_pane,
             workspace_identities,
             workspace_layouts,
-        };
+        );
 
         if let Err(e) = storage.save_window_layout(&self.window_id, &state) {
             tracing::warn!("Failed to save window layout: {}", e);

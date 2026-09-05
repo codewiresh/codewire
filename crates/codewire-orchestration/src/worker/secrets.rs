@@ -5,21 +5,14 @@
 //! fallback. Organization teardown deletes only names and paths, never values,
 //! and re-enumerates before it can call a namespace absent.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::Deserialize;
 use sqlx::PgPool;
 
-use codewire_workload_secrets::validate_workload_secret_metadata_key;
+use codewire_workload_secrets::validate_workload_secret_key;
 
-/// Legacy SSH material is consumed by setup's dedicated SSH path and must
-/// never be resolved into the workload environment from user secrets.
-pub const SSH_PRIVATE_KEY_SECRET_KEY: &str = "SSH_PRIVATE_KEY";
-
-/// Mirrors `worker.StoredSecret`. `created_at`/`updated_at` are surfaced by
-/// the secrets-list endpoint (RFC3339 strings; empty when the backend omits
-/// them); the env-setup flow only reads `key`/`value`.
+/// Stored secret material used only within the protected storage boundary.
 #[derive(Clone, Default, Deserialize)]
 pub struct StoredSecret {
     #[serde(rename = "secretKey")]
@@ -131,15 +124,6 @@ impl SecretStore {
             .await
     }
 
-    /// Mirrors `GetAllSecretsAtPath`.
-    pub async fn get_all_secrets_at_path(
-        &self,
-        secret_path: &str,
-    ) -> anyhow::Result<BTreeMap<String, String>> {
-        let secrets = self.get_secrets_raw_at_path(secret_path).await?;
-        Ok(secrets.into_iter().map(|s| (s.key, s.value)).collect())
-    }
-
     /// Mirrors `CreateFolderAtPath` (idempotent — "already exists" is OK).
     pub async fn create_folder_at_path(
         &self,
@@ -229,105 +213,12 @@ fn split_folder_path(secret_path: &str) -> anyhow::Result<(String, String)> {
 /// than a general URL segment keeps the storage path sink unambiguous and
 /// matches the dashboard's environment-variable-style key input.
 pub fn is_valid_secret_key(key: &str) -> bool {
-    validate_workload_secret_metadata_key(key).is_ok()
-}
-
-/// Mirrors `mergeSecrets`: existing keys win, optional skip set,
-/// returns the number injected.
-pub fn merge_secrets(
-    dst: &mut BTreeMap<String, String>,
-    secrets: Vec<StoredSecret>,
-    skip_keys: &[&str],
-) -> usize {
-    let mut injected = 0;
-    for s in secrets {
-        if skip_keys.contains(&s.key.as_str()) {
-            continue;
-        }
-        if dst.contains_key(&s.key) {
-            continue;
-        }
-        dst.insert(s.key, s.value);
-        injected += 1;
-    }
-    injected
+    validate_workload_secret_key(key).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn merge_secrets_mirrors_go() {
-        let mut dst = BTreeMap::new();
-        dst.insert("EXPLICIT".to_string(), "keep".to_string());
-        let n = merge_secrets(
-            &mut dst,
-            vec![
-                StoredSecret {
-                    key: "EXPLICIT".into(),
-                    value: "lose".into(),
-                    ..Default::default()
-                },
-                StoredSecret {
-                    key: "NEW".into(),
-                    value: "v".into(),
-                    ..Default::default()
-                },
-                StoredSecret {
-                    key: "SSH_PRIVATE_KEY".into(),
-                    value: "x".into(),
-                    ..Default::default()
-                },
-            ],
-            &["SSH_PRIVATE_KEY"],
-        );
-        assert_eq!(n, 1);
-        assert_eq!(dst.get("EXPLICIT").map(String::as_str), Some("keep"));
-        assert_eq!(dst.get("NEW").map(String::as_str), Some("v"));
-        assert!(!dst.contains_key("SSH_PRIVATE_KEY"));
-    }
-
-    #[test]
-    fn first_writer_order_encodes_canonical_secret_precedence() {
-        fn secret(key: &str, value: &str) -> StoredSecret {
-            StoredSecret {
-                key: key.into(),
-                value: value.into(),
-                ..Default::default()
-            }
-        }
-
-        let mut resolved = BTreeMap::from([("EXPLICIT".into(), "explicit".into())]);
-        merge_secrets(
-            &mut resolved,
-            vec![secret("SHARED", "user"), secret("USER_ONLY", "user")],
-            &[],
-        );
-        merge_secrets(
-            &mut resolved,
-            vec![
-                secret("SHARED", "project"),
-                secret("PROJECT_ONLY", "project"),
-            ],
-            &[],
-        );
-        merge_secrets(
-            &mut resolved,
-            vec![
-                secret("SHARED", "organization"),
-                secret("EXPLICIT", "organization"),
-                secret("ORG_ONLY", "organization"),
-            ],
-            &[],
-        );
-
-        assert_eq!(resolved["EXPLICIT"], "explicit");
-        assert_eq!(resolved["SHARED"], "user");
-        assert_eq!(resolved["USER_ONLY"], "user");
-        assert_eq!(resolved["PROJECT_ONLY"], "project");
-        assert_eq!(resolved["ORG_ONLY"], "organization");
-    }
 
     #[test]
     fn stored_secret_parses_api_field_names() {

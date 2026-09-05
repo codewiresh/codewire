@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::*;
 
 pub(crate) async fn handle_network_command(
@@ -268,15 +270,28 @@ pub(crate) struct LocalDerpRuntime {
     pub(crate) log_path: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct LocalMeshStartSpec {
     pub(crate) binary: PathBuf,
     pub(crate) base_url: String,
     pub(crate) listen_addr: String,
-    pub(crate) auth_token: String,
     pub(crate) local_identity: config::LocalMeshIdentity,
     pub(crate) log_path: PathBuf,
     pub(crate) derp: Option<LocalDerpStartSpec>,
+}
+
+impl std::fmt::Debug for LocalMeshStartSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalMeshStartSpec")
+            .field("binary", &self.binary)
+            .field("base_url", &self.base_url)
+            .field("listen_addr", &self.listen_addr)
+            .field("local_identity", &self.local_identity)
+            .field("log_path", &self.log_path)
+            .field("derp", &self.derp)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -313,7 +328,7 @@ pub(crate) fn mesh_status_report(
 ) -> MeshStatusReport {
     let opts = config::MeshResolveOptions {
         mesh_url: None,
-        auth_token: globals.token.clone(),
+        auth_token: None,
         network_id: None,
         platform_server_url: globals.server.clone(),
     };
@@ -521,8 +536,12 @@ pub(crate) async fn handle_mesh_up(
         derp,
     };
     let persist = (|| -> anyhow::Result<()> {
-        config::save_mesh_connection(&paths.mesh_data_dir, &spec.base_url, &spec.auth_token)
-            .context("save local mesh config")?;
+        config::save_mesh_connection(
+            &paths.mesh_data_dir,
+            &spec.base_url,
+            &spec.local_identity.api_key,
+        )
+        .context("save local mesh config")?;
         save_local_mesh_runtime(&paths.mesh_data_dir, &runtime)?;
         save_local_mesh_owner_context(
             &paths.mesh_data_dir,
@@ -567,7 +586,7 @@ async fn wait_for_standalone_mesh_catalog(
     let resolved = config::resolve_mesh(
         config::MeshResolveOptions {
             mesh_url: Some(spec.base_url.clone()),
-            auth_token: Some(spec.auth_token.clone()),
+            auth_token: Some(spec.local_identity.api_key.clone()),
             ..config::MeshResolveOptions::default()
         },
         paths,
@@ -717,7 +736,6 @@ pub(crate) fn local_mesh_start_spec(
         binary,
         base_url,
         listen_addr,
-        auth_token: local_identity.api_key.clone(),
         local_identity,
         log_path: paths.mesh_data_dir.join(LOCAL_MESH_LOG_FILE),
         derp,
@@ -755,6 +773,7 @@ pub(crate) fn locate_codewire_derp_binary(override_path: Option<&PathBuf>) -> Pa
 }
 
 pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Result<u32> {
+    let executable = resolve_local_service_executable(&spec.binary, "codewire-mesh")?;
     if let Some(parent) = spec.log_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -766,7 +785,7 @@ pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Res
     let stderr = log
         .try_clone()
         .with_context(|| format!("clone {}", spec.log_path.display()))?;
-    let mut command = ProcessCommand::new(&spec.binary);
+    let mut command = ProcessCommand::new(&executable);
     command
         .arg("--base-url")
         .arg(&spec.base_url)
@@ -774,9 +793,10 @@ pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Res
         .arg(&spec.listen_addr)
         // The local API key remains a standard cw_ credential. Keep it out
         // of argv; only hash-only verification material reaches the Mesh
-        // process besides its normal local environment. The client retains
-        // the credential; Mesh itself no longer accepts a separate server
-        // auth-token mode.
+        // process. The client retains the credential; Mesh itself no longer
+        // accepts a separate server auth-token mode.
+        .env_clear()
+        .envs(local_service_logging_environment())
         .env(
             "CODEWIRE_MESH_LOCAL_ORGANIZATION_ID",
             &spec.local_identity.organization_id,
@@ -784,14 +804,6 @@ pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Res
         .env(
             "CODEWIRE_MESH_LOCAL_API_KEY_HASH",
             spec.local_identity.api_key_hash(),
-        )
-        .env(
-            "CODEWIRE_MESH_LOCAL_ENVIRONMENT_ID",
-            &spec.local_identity.environment_id,
-        )
-        .env(
-            "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH",
-            spec.local_identity.environment_token_hash(),
         )
         .stdin(Stdio::null());
     if let Some(derp) = spec.derp.as_ref() {
@@ -824,6 +836,7 @@ pub(crate) fn start_local_mesh_process(spec: &LocalMeshStartSpec) -> anyhow::Res
 pub(crate) fn start_local_derp_process(
     spec: &LocalDerpStartSpec,
 ) -> anyhow::Result<LocalDerpRuntime> {
+    let executable = resolve_local_service_executable(&spec.binary, "codewire-derp")?;
     if let Some(parent) = spec.log_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -835,13 +848,14 @@ pub(crate) fn start_local_derp_process(
     let stderr = log
         .try_clone()
         .with_context(|| format!("clone {}", spec.log_path.display()))?;
-    let mut child = ProcessCommand::new(&spec.binary);
+    let mut child = ProcessCommand::new(&executable);
     child
         // Standalone Mesh advertises its loopback DERP URL with the
         // InsecureForTests marker so the transport can admit this one
         // self-signed endpoint. The relay itself still runs encrypted TLS;
         // never turn the managed local process into a plaintext DERP server.
-        .env_remove("LISTEN_ADDR")
+        .env_clear()
+        .envs(local_service_logging_environment())
         .env("PORT", "-1")
         .env("TLS_LISTEN_ADDR", &spec.listen_addr)
         .env("STUN_LISTEN_ADDR", "-1")
@@ -874,6 +888,66 @@ pub(crate) fn start_local_derp_process(
         binary: spec.binary.display().to_string(),
         log_path: spec.log_path.display().to_string(),
     })
+}
+
+fn local_service_logging_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    ["RUST_LOG", "RUST_BACKTRACE"]
+        .into_iter()
+        .filter_map(|name| env::var_os(name).map(|value| (std::ffi::OsString::from(name), value)))
+        .collect()
+}
+
+fn resolve_local_service_executable(binary: &Path, label: &str) -> anyhow::Result<PathBuf> {
+    let direct = binary.is_absolute() || binary.components().count() > 1;
+    let candidates = if direct {
+        vec![binary.to_path_buf()]
+    } else {
+        let path = env::var_os("PATH").ok_or_else(|| {
+            anyhow::anyhow!("PATH is unavailable; install {label} or pass its path")
+        })?;
+        env::split_paths(&path)
+            .flat_map(|directory| local_executable_candidates(&directory, binary))
+            .collect()
+    };
+    for candidate in candidates {
+        if !local_executable_file(&candidate) {
+            continue;
+        }
+        return fs::canonicalize(&candidate)
+            .with_context(|| format!("resolve {label} executable {}", candidate.display()));
+    }
+    anyhow::bail!(
+        "{label} executable {} was not found or executable",
+        binary.display()
+    )
+}
+
+fn local_executable_candidates(directory: &Path, binary: &Path) -> Vec<PathBuf> {
+    let candidate = directory.join(binary);
+    #[cfg(windows)]
+    {
+        if candidate.extension().is_none() {
+            return vec![candidate.clone(), candidate.with_extension("exe")];
+        }
+    }
+    vec![candidate]
+}
+
+fn local_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) async fn stop_local_process(pid: u32, label: &str) -> anyhow::Result<()> {

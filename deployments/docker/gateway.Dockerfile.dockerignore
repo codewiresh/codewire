@@ -1,6 +1,6 @@
 # BuildKit per-Dockerfile ignore for the sandbox gateway image.
 # Keep the context narrow while allowing the curated gateway workspace, the
-# root `cw daemon` builder, and generated protobuf inputs.
+# root `cw __hosted-daemon` builder, and generated protobuf inputs.
 *
 !Cargo.toml
 !Cargo.lock

@@ -163,7 +163,7 @@ fn invalid_invitation() -> Response {
     )
 }
 
-fn invite_continuation(token: &str) -> String {
+pub(super) fn invite_continuation(token: &str) -> String {
     format!(
         "/accept-invite?{}",
         url::form_urlencoded::Serializer::new(String::new())

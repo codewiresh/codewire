@@ -315,16 +315,6 @@ chmod 0600 "$TRANSCRIPT"
 printf 'this is deliberately invalid platform JSON\n' >"$PLATFORM_CONFIG/config.json"
 chmod 0600 "$PLATFORM_CONFIG/config.json"
 mkdir -m 0700 "$SMOKE_HOME/.codewire"
-cat >"$SMOKE_HOME/.codewire/local_instances.toml" <<'EOF'
-[instances.legacy]
-name = "legacy"
-backend = "lima"
-runtime_name = "cw-legacy"
-repo_path = "/nonexistent/legacy"
-workdir = "/workspace"
-EOF
-chmod 0600 "$SMOKE_HOME/.codewire/local_instances.toml"
-LEGACY_SHA256="$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')"
 
 for fallback in docker limactl qemu-system-x86_64; do
   printf '#!/bin/sh\nprintf "%%s\\n" "%s" >>"%s"\nexit 97\n' \
@@ -509,17 +499,21 @@ mounts:
     mode: direct
     read_only: false
 working_directory: /workspace/github
-agents: [codex, claude-code]
+agents:
+  tools: [codex, claude-code]
 skills:
-  - path: fixtures/.agents/skills/repo-smoke
+  - source: repository
+    path: fixtures/.agents/skills/repo-smoke
     agents: [codex, claude-code]
-  - path: direct-ro/.agents/skills/direct-smoke
+  - source: repository
+    path: direct-ro/.agents/skills/direct-smoke
     agents: [codex]
   - source: user
     name: user-smoke
     agents: [codex]
 ports:
-  - $HOST_PORT:3000
+  - host_port: $HOST_PORT
+    guest_port: 3000
 EOF
 
 cw_isolated() {
@@ -1489,7 +1483,7 @@ cleanup() {
   trap - EXIT HUP INT TERM
   ALLOW_REGISTRY_EGRESS=0
   CW_COMMAND_TIMEOUT_SECONDS=180
-  if [[ "$ENV_CREATED" -eq 1 && ( -f "$STATE_ROOT/supervisor.db" || -f "$STATE_ROOT/state.json" ) ]]; then
+  if [[ "$ENV_CREATED" -eq 1 && -f "$STATE_ROOT/supervisor.db" ]]; then
     if [[ "$status" -eq 0 ]]; then
       log 'cleaning native environment after incomplete smoke'
       if ! cw_isolated env rm --local "$NAME" --yes >/dev/null 2>&1; then
@@ -1670,9 +1664,9 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     die 'synthetic protected GitHub credential ID is invalid'
   run_cw credentials --local profile create "$CREDENTIAL_PROFILE_NAME"
   run_cw credentials --local profile set \
-    "$CREDENTIAL_PROFILE_NAME" codex "$CREDENTIAL_ID"
+    "$CREDENTIAL_PROFILE_NAME" codex "id:$CREDENTIAL_ID"
   run_cw credentials --local profile set \
-    "$CREDENTIAL_PROFILE_NAME" github "$GITHUB_CREDENTIAL_ID"
+    "$CREDENTIAL_PROFILE_NAME" github "id:$GITHUB_CREDENTIAL_ID"
   run_cw credentials --local profile get "$CREDENTIAL_PROFILE_NAME" --output json
   jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" '
     length == 1 and
@@ -1685,13 +1679,6 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     .[0].entries.github == $github
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic access profile metadata drifted'
   CREATE_ACCESS_ARGS=(--access-profile "user/$CREDENTIAL_PROFILE_NAME")
-else
-  log 'checking native and legacy local names cannot collide'
-  run_cw_expect_failure env create --local --name legacy --cpu 2 --memory 16Gi --path "$WORKSPACE"
-  rg -qF 'already exists in the legacy Docker/Lima state' "$LAST_STDERR" ||
-    die 'native creation did not report the legacy-name collision'
-  [[ ! -e "$STATE_ROOT/state.json" && ! -e "$STATE_ROOT/supervisor.db" ]] ||
-    die 'rejected native creation wrote native state'
 fi
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
@@ -1829,7 +1816,7 @@ run_cw run --no-tty -- /bin/sh -lc \
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
   run_managed_credential_broker_smoke
-  run_cw credentials --local get "$CREDENTIAL_ID" --output json
+  run_cw credentials --local get "id:$CREDENTIAL_ID" --output json
   jq -e '
     length == 1 and
     .[0].status == "revoked" and
@@ -1876,8 +1863,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
      "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
     die 'environment deletion changed acknowledged direct-share host content'
   run_cw credentials --local profile delete "$CREDENTIAL_PROFILE_NAME" --yes
-  run_cw credentials --local delete "$CREDENTIAL_ID" --yes
-  run_cw credentials --local delete "$GITHUB_CREDENTIAL_ID" --yes
+  run_cw credentials --local delete "id:$CREDENTIAL_ID" --yes
+  run_cw credentials --local delete "id:$GITHUB_CREDENTIAL_ID" --yes
   run_cw secrets --local user delete CW_NATIVE_SMOKE_SECRET
   run_cw secrets --local list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
@@ -1914,8 +1901,6 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
 
   [[ ! -e "$TRIPWIRE" ]] ||
     die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
-  [[ "$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')" == "$LEGACY_SHA256" ]] ||
-    die 'pre-existing legacy local state changed'
   terminate_exact_credential_authority || die 'bounded credential-authority teardown failed'
   terminate_exact_supervisor || die 'bounded supervisor teardown failed'
   [[ -z "$(owned_processes)" ]] ||
@@ -2586,8 +2571,6 @@ stop_smoke_mesh
 [[ ! -e "$MESH_OWNER_CONTEXT" ]] || die 'Mesh owner projection remained after Mesh shutdown'
 
 [[ ! -e "$TRIPWIRE" ]] || die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
-[[ "$(sha256sum "$SMOKE_HOME/.codewire/local_instances.toml" | awk '{print $1}')" == "$LEGACY_SHA256" ]] ||
-  die 'pre-existing legacy local state changed'
 if rg -qF 'synthetic-platform-key-must-not-be-used' "$TRANSCRIPT"; then
   die 'synthetic platform credential appeared in CLI output'
 fi

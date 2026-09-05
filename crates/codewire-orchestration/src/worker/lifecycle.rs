@@ -19,10 +19,10 @@ use super::create::{
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
-use super::gatewayauth::{SCOPE_COORDINATE, issue_token};
+use super::gatewayauth::issue_environment_tokens;
 use super::port_dns;
 use super::setup::{
-    handle_post_start_auth_injection, is_setup_activity_cancelled, is_setup_recovery_failed,
+    handle_post_start_configuration, is_setup_activity_cancelled, is_setup_recovery_failed,
     jittered_duration, wait_for_sidecar,
 };
 use super::{JobPayload, WorkerContext};
@@ -197,14 +197,15 @@ async fn ensure_gateway_stack_for_env(
     let env = load_environment(&ctx.pool, env_id).await?;
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
-    let gateway_token = issue_token(&cfg.session_secret, env_id, SCOPE_COORDINATE)?;
+    let auth_tokens = issue_environment_tokens(&cfg.session_secret, env_id)?;
     let opts = environment_template_opts(
         cfg,
         &image_ref,
         &template_base,
         &env,
         env_id,
-        &gateway_token,
+        &auth_tokens.coordinate,
+        &auth_tokens.daemon,
     );
     let client = sandbox_client(ctx, namespace)?;
     authority
@@ -629,7 +630,7 @@ pub async fn handle_environment_start(
         tracing::warn!(environment_id = env_id, error = %e, "environment.start: schedule shutdown failed");
     }
 
-    // Gateway readiness + credential re-injection are best-effort,
+    // Gateway readiness + post-start configuration are best-effort,
     // post-running steps (the create path runs the equivalent work in the
     // Setup activity, which records errors on the backend row but never
     // flips the env to `error`). The env is already `running`; a transient
@@ -663,7 +664,7 @@ pub async fn handle_environment_start(
                 "environment sidecar ready"
             );
 
-            handle_post_start_auth_injection(
+            handle_post_start_configuration(
                 ctx,
                 payload,
                 authority,
@@ -692,7 +693,7 @@ pub async fn handle_environment_start(
             tracing::warn!(
                 environment_id = env_id,
                 error = %e,
-                "environment.start: gateway not ready yet; env is running, skipping credential re-injection"
+                "environment.start: gateway not ready yet; env is running, skipping post-start configuration"
             );
         }
     }
@@ -784,13 +785,8 @@ pub async fn handle_environment_destroy(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("sandbox environment has no preset id"))?;
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
-    let per_environment_template = environment_per_env_template_name(
-        &ctx.sandbox_cfg,
-        &image_ref,
-        &template_base,
-        &env,
-        env_id,
-    );
+    let per_environment_template =
+        environment_per_env_template_name(&image_ref, &template_base, env_id);
 
     for namespace in namespaces {
         if namespace.trim().is_empty() {
@@ -803,7 +799,7 @@ pub async fn handle_environment_destroy(
                 client.delete_environment_resources(
                     env_id,
                     known_sandbox_name,
-                    per_environment_template.as_deref(),
+                    Some(&per_environment_template),
                     env.isolation_tier == "confidential",
                     DELETED_TIMEOUT,
                 ),

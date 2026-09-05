@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import * as OTPAuth from "otpauth";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,6 @@ import {
   addOrgMember,
   cleanupTestOrg,
   ensureTestOrg,
-  getOrgInvitationToken,
 } from "./helpers/org";
 import { TEST_PASSWORD, USERS } from "./helpers/seed";
 
@@ -21,6 +20,18 @@ const invitationEmail = `invited-${Date.now()}@example.com`;
 // This file reaches the one-time API-key reveal. Capturing a screenshot or
 // trace here would turn a test artifact into a secret store.
 test.use({ screenshot: "off", trace: "off" });
+
+async function oneTimeInvitationUrl(page: Page): Promise<string> {
+  await expect(page.getByRole("heading", { name: "Invitation created", exact: true }))
+    .toBeVisible();
+  await expect(page.getByText("Share this link now. It will not be shown again.", { exact: true }))
+    .toBeVisible();
+  const invitationUrl = (await page
+    .locator('[data-secret-kind="invitation-url"]')
+    .textContent())?.trim();
+  expect(invitationUrl).toBeTruthy();
+  return invitationUrl!;
+}
 
 test.describe.serial("server-rendered organization governance", () => {
   test.beforeAll(async () => {
@@ -70,7 +81,7 @@ test.describe.serial("server-rendered organization governance", () => {
     await page.getByText("Invite Member", { exact: true }).first().click();
     await page.getByLabel("Email").fill(invitationEmail);
     await page.getByRole("button", { name: "Send Invite" }).click();
-    await expect(page.getByRole("status")).toContainText("Invitation sent");
+    await oneTimeInvitationUrl(page);
     const invitation = page.locator(".cw-list-row", { hasText: invitationEmail });
     await expect(invitation).toBeVisible();
     await invitation.getByRole("button", { name: `Revoke invitation for ${invitationEmail}` }).click();
@@ -137,9 +148,9 @@ test.describe.serial("server-rendered organization governance", () => {
       await page.getByText("Invite Member", { exact: true }).first().click();
       await page.getByLabel("Email").fill(USERS.outsider.email);
       await page.getByRole("button", { name: "Send Invite" }).click();
-      await expect(page.getByRole("status")).toContainText("Invitation sent");
 
-      const token = await getOrgInvitationToken(USERS.outsider.email);
+      const invitationUrl = await oneTimeInvitationUrl(page);
+      const token = new URL(invitationUrl).searchParams.get("token");
       expect(token).toBeTruthy();
       await page.context().clearCookies();
       await page.goto(`/accept-invite?token=${token}`);

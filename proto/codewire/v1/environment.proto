@@ -148,32 +148,15 @@ message ListEnvironmentsResponse {
 }
 
 message CreateEnvironmentRequest {
+  reserved 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23;
+  reserved "cpu_millicores", "memory_mb", "disk_gb", "preset_slug", "repo_url", "branch", "repos", "image", "install_command", "startup_script", "env_vars", "agents", "install_agents", "agent", "agent_env", "secret_project", "app_ports", "include_org_secrets", "include_user_secrets";
+
   string org_id = 1;
   optional string preset_id = 2;
   optional string name = 3;
-  optional int32 cpu_millicores = 4;
-  optional int32 memory_mb = 5;
-  optional int32 disk_gb = 6;
   optional int32 ttl_seconds = 7;
-  string preset_slug = 8;
-  string repo_url = 9;
-  string branch = 10;
-  repeated RepoEntry repos = 11;
-  string image = 12;
-  string install_command = 13;
-  string startup_script = 14;
-  map<string, string> env_vars = 15;
-  repeated SetupAgent agents = 16;
-  optional bool install_agents = 17;
-  string agent = 18;
-  map<string, string> agent_env = 19;
-  string secret_project = 20;
-  repeated AppPort app_ports = 21;
-  optional bool include_org_secrets = 22;
-  optional bool include_user_secrets = 23;
   IsolationTier isolation_tier = 24;
-  // Canonical project intent. When set, it is validated and normalized before
-  // the legacy setup fields above are persisted or executed.
+  // Canonical project intent. Workload configuration is accepted only here.
   ProjectSpec project_spec = 25;
 }
 
@@ -501,15 +484,19 @@ message TrustReportSummary {
 // WatchEnvironmentCreate replaces both the environment-create prepare SSE and
 // its synchronous JSON mode. Callers read through the terminal complete frame.
 message WatchEnvironmentCreateRequest {
+  reserved 3;
+  reserved "analyze";
+
   string org_id = 1;
   CreateEnvironmentRequest draft = 2;
-  optional bool analyze = 3;
 }
 
 message WatchEnvironmentCreateResponse {
+  reserved 2;
+  reserved "repo_fetched";
+
   oneof event {
     PrepareProgress progress = 1;
-    RepoFetched repo_fetched = 2;
     PrepareComplete complete = 3;
   }
 }
@@ -521,50 +508,25 @@ message PrepareProgress {
   string repo = 4;
 }
 
-message RepoFetched {
-  int32 index = 1;
-  string repo = 2;
-  bool ok = 3;
-}
-
 message PrepareComplete {
+  reserved 2;
+  reserved "detection";
+
   CreateEnvironmentRequest draft = 1;
-  DetectionResult detection = 2;
   Preset resolved_preset = 3;
   RepoConfig repo_config = 4;
 }
 
-message DetectionResult {
-  string project_type = 1;
-  string preset_slug = 2;
-  string preset_image = 3;
-  string install_command = 4;
-  string startup_script = 5;
-  string language = 6;
-  string framework = 7;
-  string suggested_name = 8;
-  bool needs_docker = 9;
-  bool has_compose = 10;
-  repeated AppPort app_ports = 11;
-  repeated SetupAgent agents = 12;
-  optional bool install_agents = 13;
-  string secret_project = 14;
-  optional bool include_org_secrets = 15;
-  optional bool include_user_secrets = 16;
-  string cpu = 17;
-  string memory = 18;
-  string setup_notes = 19;
-  ProjectSpec project_spec = 20;
-}
-
 message RepoConfig {
+  reserved 4, 5;
+  reserved "preset_id", "setup_config";
+
   string id = 1;
   string org_id = 2;
   string repo_url = 3;
-  optional string preset_id = 4;
-  google.protobuf.Struct setup_config = 5;
   string created_by = 6;
   string updated_at = 7;
+  ProjectSpec project_spec = 8;
 }
 
 // StreamLogs replaces both the bounded environment-log JSON list and the SSE

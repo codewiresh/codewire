@@ -4,286 +4,13 @@
 
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
-import type { Timestamp } from "@bufbuild/protobuf/wkt";
-import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file codewire/console/v1/account.proto.
  */
 export const file_codewire_console_v1_account: GenFile = /*@__PURE__*/
-  fileDesc("CiFjb2Rld2lyZS9jb25zb2xlL3YxL2FjY291bnQucHJvdG8SE2NvZGV3aXJlLmNvbnNvbGUudjEifQoITG9naW5LZXkSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRISCgpwdWJsaWNfa2V5GAMgASgJEhMKC2ZpbmdlcnByaW50GAQgASgJEi4KCmNyZWF0ZWRfYXQYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIhYKFExpc3RMb2dpbktleXNSZXF1ZXN0IkoKFUxpc3RMb2dpbktleXNSZXNwb25zZRIxCgpsb2dpbl9rZXlzGAEgAygLMh0uY29kZXdpcmUuY29uc29sZS52MS5Mb2dpbktleSI5ChVDcmVhdGVMb2dpbktleVJlcXVlc3QSDAoEbmFtZRgBIAEoCRISCgpwdWJsaWNfa2V5GAIgASgJIkoKFkNyZWF0ZUxvZ2luS2V5UmVzcG9uc2USMAoJbG9naW5fa2V5GAEgASgLMh0uY29kZXdpcmUuY29uc29sZS52MS5Mb2dpbktleSIjChVEZWxldGVMb2dpbktleVJlcXVlc3QSCgoCaWQYASABKAkiGAoWRGVsZXRlTG9naW5LZXlSZXNwb25zZSKtAQoGU3NoS2V5EhIKCnB1YmxpY19rZXkYASABKAkSEwoLZmluZ2VycHJpbnQYAiABKAkSLgoKY3JlYXRlZF9hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASNwoOcmVnZW5lcmF0ZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wSACIAQFCEQoPX3JlZ2VuZXJhdGVkX2F0IhUKE0Vuc3VyZVNzaEtleVJlcXVlc3QiRAoURW5zdXJlU3NoS2V5UmVzcG9uc2USLAoHc3NoX2tleRgBIAEoCzIbLmNvZGV3aXJlLmNvbnNvbGUudjEuU3NoS2V5IhIKEEdldFNzaEtleVJlcXVlc3QiQQoRR2V0U3NoS2V5UmVzcG9uc2USLAoHc3NoX2tleRgBIAEoCzIbLmNvZGV3aXJlLmNvbnNvbGUudjEuU3NoS2V5IhkKF1JlZ2VuZXJhdGVTc2hLZXlSZXF1ZXN0IkgKGFJlZ2VuZXJhdGVTc2hLZXlSZXNwb25zZRIsCgdzc2hfa2V5GAEgASgLMhsuY29kZXdpcmUuY29uc29sZS52MS5Tc2hLZXkiMgoLR2l0SWRlbnRpdHkSEAoIZ2l0X25hbWUYASABKAkSEQoJZ2l0X2VtYWlsGAIgASgJIhcKFUdldEdpdElkZW50aXR5UmVxdWVzdCJQChZHZXRHaXRJZGVudGl0eVJlc3BvbnNlEjYKDGdpdF9pZGVudGl0eRgBIAEoCzIgLmNvZGV3aXJlLmNvbnNvbGUudjEuR2l0SWRlbnRpdHkiZAoYVXBkYXRlR2l0SWRlbnRpdHlSZXF1ZXN0EhUKCGdpdF9uYW1lGAEgASgJSACIAQESFgoJZ2l0X2VtYWlsGAIgASgJSAGIAQFCCwoJX2dpdF9uYW1lQgwKCl9naXRfZW1haWwiUwoZVXBkYXRlR2l0SWRlbnRpdHlSZXNwb25zZRI2CgxnaXRfaWRlbnRpdHkYASABKAsyIC5jb2Rld2lyZS5jb25zb2xlLnYxLkdpdElkZW50aXR5It8BCg1HaXRDcmVkZW50aWFsEgoKAmlkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIMCgRob3N0GAQgASgJEhEKCWF1dGhfdHlwZRgFIAEoCRIVCgh1c2VybmFtZRgGIAEoCUgAiAEBEi4KCmNyZWF0ZWRfYXQYByABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wQgsKCV91c2VybmFtZSIbChlMaXN0R2l0Q3JlZGVudGlhbHNSZXF1ZXN0IlkKGkxpc3RHaXRDcmVkZW50aWFsc1Jlc3BvbnNlEjsKD2dpdF9jcmVkZW50aWFscxgBIAMoCzIiLmNvZGV3aXJlLmNvbnNvbGUudjEuR2l0Q3JlZGVudGlhbCJvChpDcmVhdGVHaXRDcmVkZW50aWFsUmVxdWVzdBIMCgRuYW1lGAEgASgJEgwKBGhvc3QYAiABKAkSEQoJYXV0aF90eXBlGAMgASgJEhAKCHVzZXJuYW1lGAQgASgJEhAKCHBhc3N3b3JkGAUgASgJIlkKG0NyZWF0ZUdpdENyZWRlbnRpYWxSZXNwb25zZRI6Cg5naXRfY3JlZGVudGlhbBgBIAEoCzIiLmNvZGV3aXJlLmNvbnNvbGUudjEuR2l0Q3JlZGVudGlhbCKXAQoaVXBkYXRlR2l0Q3JlZGVudGlhbFJlcXVlc3QSFQoNY3JlZGVudGlhbF9pZBgBIAEoCRIRCgRuYW1lGAIgASgJSACIAQESFQoIdXNlcm5hbWUYAyABKAlIAYgBARIVCghwYXNzd29yZBgEIAEoCUgCiAEBQgcKBV9uYW1lQgsKCV91c2VybmFtZUILCglfcGFzc3dvcmQiWQobVXBkYXRlR2l0Q3JlZGVudGlhbFJlc3BvbnNlEjoKDmdpdF9jcmVkZW50aWFsGAEgASgLMiIuY29kZXdpcmUuY29uc29sZS52MS5HaXRDcmVkZW50aWFsIjMKGkRlbGV0ZUdpdENyZWRlbnRpYWxSZXF1ZXN0EhUKDWNyZWRlbnRpYWxfaWQYASABKAkiHQobRGVsZXRlR2l0Q3JlZGVudGlhbFJlc3BvbnNlMtgKCg5BY2NvdW50U2VydmljZRJrCg1MaXN0TG9naW5LZXlzEikuY29kZXdpcmUuY29uc29sZS52MS5MaXN0TG9naW5LZXlzUmVxdWVzdBoqLmNvZGV3aXJlLmNvbnNvbGUudjEuTGlzdExvZ2luS2V5c1Jlc3BvbnNlIgOQAgESaQoOQ3JlYXRlTG9naW5LZXkSKi5jb2Rld2lyZS5jb25zb2xlLnYxLkNyZWF0ZUxvZ2luS2V5UmVxdWVzdBorLmNvZGV3aXJlLmNvbnNvbGUudjEuQ3JlYXRlTG9naW5LZXlSZXNwb25zZRJpCg5EZWxldGVMb2dpbktleRIqLmNvZGV3aXJlLmNvbnNvbGUudjEuRGVsZXRlTG9naW5LZXlSZXF1ZXN0GisuY29kZXdpcmUuY29uc29sZS52MS5EZWxldGVMb2dpbktleVJlc3BvbnNlEmMKDEVuc3VyZVNzaEtleRIoLmNvZGV3aXJlLmNvbnNvbGUudjEuRW5zdXJlU3NoS2V5UmVxdWVzdBopLmNvZGV3aXJlLmNvbnNvbGUudjEuRW5zdXJlU3NoS2V5UmVzcG9uc2USXwoJR2V0U3NoS2V5EiUuY29kZXdpcmUuY29uc29sZS52MS5HZXRTc2hLZXlSZXF1ZXN0GiYuY29kZXdpcmUuY29uc29sZS52MS5HZXRTc2hLZXlSZXNwb25zZSIDkAIBEm8KEFJlZ2VuZXJhdGVTc2hLZXkSLC5jb2Rld2lyZS5jb25zb2xlLnYxLlJlZ2VuZXJhdGVTc2hLZXlSZXF1ZXN0Gi0uY29kZXdpcmUuY29uc29sZS52MS5SZWdlbmVyYXRlU3NoS2V5UmVzcG9uc2USbgoOR2V0R2l0SWRlbnRpdHkSKi5jb2Rld2lyZS5jb25zb2xlLnYxLkdldEdpdElkZW50aXR5UmVxdWVzdBorLmNvZGV3aXJlLmNvbnNvbGUudjEuR2V0R2l0SWRlbnRpdHlSZXNwb25zZSIDkAIBEnIKEVVwZGF0ZUdpdElkZW50aXR5Ei0uY29kZXdpcmUuY29uc29sZS52MS5VcGRhdGVHaXRJZGVudGl0eVJlcXVlc3QaLi5jb2Rld2lyZS5jb25zb2xlLnYxLlVwZGF0ZUdpdElkZW50aXR5UmVzcG9uc2USegoSTGlzdEdpdENyZWRlbnRpYWxzEi4uY29kZXdpcmUuY29uc29sZS52MS5MaXN0R2l0Q3JlZGVudGlhbHNSZXF1ZXN0Gi8uY29kZXdpcmUuY29uc29sZS52MS5MaXN0R2l0Q3JlZGVudGlhbHNSZXNwb25zZSIDkAIBEngKE0NyZWF0ZUdpdENyZWRlbnRpYWwSLy5jb2Rld2lyZS5jb25zb2xlLnYxLkNyZWF0ZUdpdENyZWRlbnRpYWxSZXF1ZXN0GjAuY29kZXdpcmUuY29uc29sZS52MS5DcmVhdGVHaXRDcmVkZW50aWFsUmVzcG9uc2USeAoTVXBkYXRlR2l0Q3JlZGVudGlhbBIvLmNvZGV3aXJlLmNvbnNvbGUudjEuVXBkYXRlR2l0Q3JlZGVudGlhbFJlcXVlc3QaMC5jb2Rld2lyZS5jb25zb2xlLnYxLlVwZGF0ZUdpdENyZWRlbnRpYWxSZXNwb25zZRJ4ChNEZWxldGVHaXRDcmVkZW50aWFsEi8uY29kZXdpcmUuY29uc29sZS52MS5EZWxldGVHaXRDcmVkZW50aWFsUmVxdWVzdBowLmNvZGV3aXJlLmNvbnNvbGUudjEuRGVsZXRlR2l0Q3JlZGVudGlhbFJlc3BvbnNlQt8BChdjb20uY29kZXdpcmUuY29uc29sZS52MUIMQWNjb3VudFByb3RvUAFaSGdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9jb25zb2xlL3YxO2NvbnNvbGV2MaICA0NDWKoCE0NvZGV3aXJlLkNvbnNvbGUuVjHKAhNDb2Rld2lyZVxDb25zb2xlXFYx4gIfQ29kZXdpcmVcQ29uc29sZVxWMVxHUEJNZXRhZGF0YeoCFUNvZGV3aXJlOjpDb25zb2xlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
-
-/**
- * LoginKey is a caller-managed public key accepted for SSH login.
- *
- * @generated from message codewire.console.v1.LoginKey
- */
-export type LoginKey = Message<"codewire.console.v1.LoginKey"> & {
-  /**
-   * @generated from field: string id = 1;
-   */
-  id: string;
-
-  /**
-   * @generated from field: string name = 2;
-   */
-  name: string;
-
-  /**
-   * @generated from field: string public_key = 3;
-   */
-  publicKey: string;
-
-  /**
-   * SHA-256 fingerprint in OpenSSH's SHA256:<base64-without-padding> form.
-   *
-   * @generated from field: string fingerprint = 4;
-   */
-  fingerprint: string;
-
-  /**
-   * @generated from field: google.protobuf.Timestamp created_at = 5;
-   */
-  createdAt?: Timestamp | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.LoginKey.
- * Use `create(LoginKeySchema)` to create a new message.
- */
-export const LoginKeySchema: GenMessage<LoginKey> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 0);
-
-/**
- * @generated from message codewire.console.v1.ListLoginKeysRequest
- */
-export type ListLoginKeysRequest = Message<"codewire.console.v1.ListLoginKeysRequest"> & {
-};
-
-/**
- * Describes the message codewire.console.v1.ListLoginKeysRequest.
- * Use `create(ListLoginKeysRequestSchema)` to create a new message.
- */
-export const ListLoginKeysRequestSchema: GenMessage<ListLoginKeysRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 1);
-
-/**
- * @generated from message codewire.console.v1.ListLoginKeysResponse
- */
-export type ListLoginKeysResponse = Message<"codewire.console.v1.ListLoginKeysResponse"> & {
-  /**
-   * @generated from field: repeated codewire.console.v1.LoginKey login_keys = 1;
-   */
-  loginKeys: LoginKey[];
-};
-
-/**
- * Describes the message codewire.console.v1.ListLoginKeysResponse.
- * Use `create(ListLoginKeysResponseSchema)` to create a new message.
- */
-export const ListLoginKeysResponseSchema: GenMessage<ListLoginKeysResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 2);
-
-/**
- * @generated from message codewire.console.v1.CreateLoginKeyRequest
- */
-export type CreateLoginKeyRequest = Message<"codewire.console.v1.CreateLoginKeyRequest"> & {
-  /**
-   * @generated from field: string name = 1;
-   */
-  name: string;
-
-  /**
-   * @generated from field: string public_key = 2;
-   */
-  publicKey: string;
-};
-
-/**
- * Describes the message codewire.console.v1.CreateLoginKeyRequest.
- * Use `create(CreateLoginKeyRequestSchema)` to create a new message.
- */
-export const CreateLoginKeyRequestSchema: GenMessage<CreateLoginKeyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 3);
-
-/**
- * @generated from message codewire.console.v1.CreateLoginKeyResponse
- */
-export type CreateLoginKeyResponse = Message<"codewire.console.v1.CreateLoginKeyResponse"> & {
-  /**
-   * @generated from field: codewire.console.v1.LoginKey login_key = 1;
-   */
-  loginKey?: LoginKey | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.CreateLoginKeyResponse.
- * Use `create(CreateLoginKeyResponseSchema)` to create a new message.
- */
-export const CreateLoginKeyResponseSchema: GenMessage<CreateLoginKeyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 4);
-
-/**
- * @generated from message codewire.console.v1.DeleteLoginKeyRequest
- */
-export type DeleteLoginKeyRequest = Message<"codewire.console.v1.DeleteLoginKeyRequest"> & {
-  /**
-   * Matches the existing REST path parameter name.
-   *
-   * @generated from field: string id = 1;
-   */
-  id: string;
-};
-
-/**
- * Describes the message codewire.console.v1.DeleteLoginKeyRequest.
- * Use `create(DeleteLoginKeyRequestSchema)` to create a new message.
- */
-export const DeleteLoginKeyRequestSchema: GenMessage<DeleteLoginKeyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 5);
-
-/**
- * @generated from message codewire.console.v1.DeleteLoginKeyResponse
- */
-export type DeleteLoginKeyResponse = Message<"codewire.console.v1.DeleteLoginKeyResponse"> & {
-};
-
-/**
- * Describes the message codewire.console.v1.DeleteLoginKeyResponse.
- * Use `create(DeleteLoginKeyResponseSchema)` to create a new message.
- */
-export const DeleteLoginKeyResponseSchema: GenMessage<DeleteLoginKeyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 6);
-
-/**
- * SshKey is the public half of Codewire's generated workspace keypair. The
- * private key remains in the account's secret-store path and is never exposed.
- *
- * @generated from message codewire.console.v1.SshKey
- */
-export type SshKey = Message<"codewire.console.v1.SshKey"> & {
-  /**
-   * OpenSSH authorized_keys form, including its trailing newline.
-   *
-   * @generated from field: string public_key = 1;
-   */
-  publicKey: string;
-
-  /**
-   * @generated from field: string fingerprint = 2;
-   */
-  fingerprint: string;
-
-  /**
-   * @generated from field: google.protobuf.Timestamp created_at = 3;
-   */
-  createdAt?: Timestamp | undefined;
-
-  /**
-   * Present after an explicit rotation.
-   *
-   * @generated from field: optional google.protobuf.Timestamp regenerated_at = 4;
-   */
-  regeneratedAt?: Timestamp | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.SshKey.
- * Use `create(SshKeySchema)` to create a new message.
- */
-export const SshKeySchema: GenMessage<SshKey> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 7);
-
-/**
- * @generated from message codewire.console.v1.EnsureSshKeyRequest
- */
-export type EnsureSshKeyRequest = Message<"codewire.console.v1.EnsureSshKeyRequest"> & {
-};
-
-/**
- * Describes the message codewire.console.v1.EnsureSshKeyRequest.
- * Use `create(EnsureSshKeyRequestSchema)` to create a new message.
- */
-export const EnsureSshKeyRequestSchema: GenMessage<EnsureSshKeyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 8);
-
-/**
- * @generated from message codewire.console.v1.EnsureSshKeyResponse
- */
-export type EnsureSshKeyResponse = Message<"codewire.console.v1.EnsureSshKeyResponse"> & {
-  /**
-   * @generated from field: codewire.console.v1.SshKey ssh_key = 1;
-   */
-  sshKey?: SshKey | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.EnsureSshKeyResponse.
- * Use `create(EnsureSshKeyResponseSchema)` to create a new message.
- */
-export const EnsureSshKeyResponseSchema: GenMessage<EnsureSshKeyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 9);
-
-/**
- * @generated from message codewire.console.v1.GetSshKeyRequest
- */
-export type GetSshKeyRequest = Message<"codewire.console.v1.GetSshKeyRequest"> & {
-};
-
-/**
- * Describes the message codewire.console.v1.GetSshKeyRequest.
- * Use `create(GetSshKeyRequestSchema)` to create a new message.
- */
-export const GetSshKeyRequestSchema: GenMessage<GetSshKeyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 10);
-
-/**
- * @generated from message codewire.console.v1.GetSshKeyResponse
- */
-export type GetSshKeyResponse = Message<"codewire.console.v1.GetSshKeyResponse"> & {
-  /**
-   * @generated from field: codewire.console.v1.SshKey ssh_key = 1;
-   */
-  sshKey?: SshKey | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.GetSshKeyResponse.
- * Use `create(GetSshKeyResponseSchema)` to create a new message.
- */
-export const GetSshKeyResponseSchema: GenMessage<GetSshKeyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 11);
-
-/**
- * @generated from message codewire.console.v1.RegenerateSshKeyRequest
- */
-export type RegenerateSshKeyRequest = Message<"codewire.console.v1.RegenerateSshKeyRequest"> & {
-};
-
-/**
- * Describes the message codewire.console.v1.RegenerateSshKeyRequest.
- * Use `create(RegenerateSshKeyRequestSchema)` to create a new message.
- */
-export const RegenerateSshKeyRequestSchema: GenMessage<RegenerateSshKeyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 12);
-
-/**
- * @generated from message codewire.console.v1.RegenerateSshKeyResponse
- */
-export type RegenerateSshKeyResponse = Message<"codewire.console.v1.RegenerateSshKeyResponse"> & {
-  /**
-   * @generated from field: codewire.console.v1.SshKey ssh_key = 1;
-   */
-  sshKey?: SshKey | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.RegenerateSshKeyResponse.
- * Use `create(RegenerateSshKeyResponseSchema)` to create a new message.
- */
-export const RegenerateSshKeyResponseSchema: GenMessage<RegenerateSshKeyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 13);
+  fileDesc("CiFjb2Rld2lyZS9jb25zb2xlL3YxL2FjY291bnQucHJvdG8SE2NvZGV3aXJlLmNvbnNvbGUudjEiMgoLR2l0SWRlbnRpdHkSEAoIZ2l0X25hbWUYASABKAkSEQoJZ2l0X2VtYWlsGAIgASgJIhcKFUdldEdpdElkZW50aXR5UmVxdWVzdCJQChZHZXRHaXRJZGVudGl0eVJlc3BvbnNlEjYKDGdpdF9pZGVudGl0eRgBIAEoCzIgLmNvZGV3aXJlLmNvbnNvbGUudjEuR2l0SWRlbnRpdHkiZAoYVXBkYXRlR2l0SWRlbnRpdHlSZXF1ZXN0EhUKCGdpdF9uYW1lGAEgASgJSACIAQESFgoJZ2l0X2VtYWlsGAIgASgJSAGIAQFCCwoJX2dpdF9uYW1lQgwKCl9naXRfZW1haWwiUwoZVXBkYXRlR2l0SWRlbnRpdHlSZXNwb25zZRI2CgxnaXRfaWRlbnRpdHkYASABKAsyIC5jb2Rld2lyZS5jb25zb2xlLnYxLkdpdElkZW50aXR5MvQBCg5BY2NvdW50U2VydmljZRJuCg5HZXRHaXRJZGVudGl0eRIqLmNvZGV3aXJlLmNvbnNvbGUudjEuR2V0R2l0SWRlbnRpdHlSZXF1ZXN0GisuY29kZXdpcmUuY29uc29sZS52MS5HZXRHaXRJZGVudGl0eVJlc3BvbnNlIgOQAgEScgoRVXBkYXRlR2l0SWRlbnRpdHkSLS5jb2Rld2lyZS5jb25zb2xlLnYxLlVwZGF0ZUdpdElkZW50aXR5UmVxdWVzdBouLmNvZGV3aXJlLmNvbnNvbGUudjEuVXBkYXRlR2l0SWRlbnRpdHlSZXNwb25zZULfAQoXY29tLmNvZGV3aXJlLmNvbnNvbGUudjFCDEFjY291bnRQcm90b1ABWkhnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvY29uc29sZS92MTtjb25zb2xldjGiAgNDQ1iqAhNDb2Rld2lyZS5Db25zb2xlLlYxygITQ29kZXdpcmVcQ29uc29sZVxWMeICH0NvZGV3aXJlXENvbnNvbGVcVjFcR1BCTWV0YWRhdGHqAhVDb2Rld2lyZTo6Q29uc29sZTo6VjFiBnByb3RvMw");
 
 /**
  * GitIdentity is the resolved author identity after applying account
@@ -308,7 +35,7 @@ export type GitIdentity = Message<"codewire.console.v1.GitIdentity"> & {
  * Use `create(GitIdentitySchema)` to create a new message.
  */
 export const GitIdentitySchema: GenMessage<GitIdentity> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 14);
+  messageDesc(file_codewire_console_v1_account, 0);
 
 /**
  * @generated from message codewire.console.v1.GetGitIdentityRequest
@@ -321,7 +48,7 @@ export type GetGitIdentityRequest = Message<"codewire.console.v1.GetGitIdentityR
  * Use `create(GetGitIdentityRequestSchema)` to create a new message.
  */
 export const GetGitIdentityRequestSchema: GenMessage<GetGitIdentityRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 15);
+  messageDesc(file_codewire_console_v1_account, 1);
 
 /**
  * @generated from message codewire.console.v1.GetGitIdentityResponse
@@ -338,7 +65,7 @@ export type GetGitIdentityResponse = Message<"codewire.console.v1.GetGitIdentity
  * Use `create(GetGitIdentityResponseSchema)` to create a new message.
  */
 export const GetGitIdentityResponseSchema: GenMessage<GetGitIdentityResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 16);
+  messageDesc(file_codewire_console_v1_account, 2);
 
 /**
  * @generated from message codewire.console.v1.UpdateGitIdentityRequest
@@ -364,7 +91,7 @@ export type UpdateGitIdentityRequest = Message<"codewire.console.v1.UpdateGitIde
  * Use `create(UpdateGitIdentityRequestSchema)` to create a new message.
  */
 export const UpdateGitIdentityRequestSchema: GenMessage<UpdateGitIdentityRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 17);
+  messageDesc(file_codewire_console_v1_account, 3);
 
 /**
  * @generated from message codewire.console.v1.UpdateGitIdentityResponse
@@ -381,238 +108,10 @@ export type UpdateGitIdentityResponse = Message<"codewire.console.v1.UpdateGitId
  * Use `create(UpdateGitIdentityResponseSchema)` to create a new message.
  */
 export const UpdateGitIdentityResponseSchema: GenMessage<UpdateGitIdentityResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 18);
+  messageDesc(file_codewire_console_v1_account, 4);
 
 /**
- * GitCredential is non-secret metadata for one non-GitHub forge credential.
- *
- * @generated from message codewire.console.v1.GitCredential
- */
-export type GitCredential = Message<"codewire.console.v1.GitCredential"> & {
-  /**
-   * @generated from field: string id = 1;
-   */
-  id: string;
-
-  /**
-   * @generated from field: string user_id = 2;
-   */
-  userId: string;
-
-  /**
-   * @generated from field: string name = 3;
-   */
-  name: string;
-
-  /**
-   * Lowercase host name used to derive the stable secret-store key.
-   *
-   * @generated from field: string host = 4;
-   */
-  host: string;
-
-  /**
-   * "basic" is the only supported value today.
-   *
-   * @generated from field: string auth_type = 5;
-   */
-  authType: string;
-
-  /**
-   * @generated from field: optional string username = 6;
-   */
-  username?: string | undefined;
-
-  /**
-   * @generated from field: google.protobuf.Timestamp created_at = 7;
-   */
-  createdAt?: Timestamp | undefined;
-
-  /**
-   * @generated from field: google.protobuf.Timestamp updated_at = 8;
-   */
-  updatedAt?: Timestamp | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.GitCredential.
- * Use `create(GitCredentialSchema)` to create a new message.
- */
-export const GitCredentialSchema: GenMessage<GitCredential> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 19);
-
-/**
- * @generated from message codewire.console.v1.ListGitCredentialsRequest
- */
-export type ListGitCredentialsRequest = Message<"codewire.console.v1.ListGitCredentialsRequest"> & {
-};
-
-/**
- * Describes the message codewire.console.v1.ListGitCredentialsRequest.
- * Use `create(ListGitCredentialsRequestSchema)` to create a new message.
- */
-export const ListGitCredentialsRequestSchema: GenMessage<ListGitCredentialsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 20);
-
-/**
- * @generated from message codewire.console.v1.ListGitCredentialsResponse
- */
-export type ListGitCredentialsResponse = Message<"codewire.console.v1.ListGitCredentialsResponse"> & {
-  /**
-   * @generated from field: repeated codewire.console.v1.GitCredential git_credentials = 1;
-   */
-  gitCredentials: GitCredential[];
-};
-
-/**
- * Describes the message codewire.console.v1.ListGitCredentialsResponse.
- * Use `create(ListGitCredentialsResponseSchema)` to create a new message.
- */
-export const ListGitCredentialsResponseSchema: GenMessage<ListGitCredentialsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 21);
-
-/**
- * @generated from message codewire.console.v1.CreateGitCredentialRequest
- */
-export type CreateGitCredentialRequest = Message<"codewire.console.v1.CreateGitCredentialRequest"> & {
-  /**
-   * @generated from field: string name = 1;
-   */
-  name: string;
-
-  /**
-   * @generated from field: string host = 2;
-   */
-  host: string;
-
-  /**
-   * @generated from field: string auth_type = 3;
-   */
-  authType: string;
-
-  /**
-   * Empty stores no username.
-   *
-   * @generated from field: string username = 4;
-   */
-  username: string;
-
-  /**
-   * Written to the secret store and never echoed.
-   *
-   * @generated from field: string password = 5;
-   */
-  password: string;
-};
-
-/**
- * Describes the message codewire.console.v1.CreateGitCredentialRequest.
- * Use `create(CreateGitCredentialRequestSchema)` to create a new message.
- */
-export const CreateGitCredentialRequestSchema: GenMessage<CreateGitCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 22);
-
-/**
- * @generated from message codewire.console.v1.CreateGitCredentialResponse
- */
-export type CreateGitCredentialResponse = Message<"codewire.console.v1.CreateGitCredentialResponse"> & {
-  /**
-   * @generated from field: codewire.console.v1.GitCredential git_credential = 1;
-   */
-  gitCredential?: GitCredential | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.CreateGitCredentialResponse.
- * Use `create(CreateGitCredentialResponseSchema)` to create a new message.
- */
-export const CreateGitCredentialResponseSchema: GenMessage<CreateGitCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 23);
-
-/**
- * @generated from message codewire.console.v1.UpdateGitCredentialRequest
- */
-export type UpdateGitCredentialRequest = Message<"codewire.console.v1.UpdateGitCredentialRequest"> & {
-  /**
-   * @generated from field: string credential_id = 1;
-   */
-  credentialId: string;
-
-  /**
-   * @generated from field: optional string name = 2;
-   */
-  name?: string | undefined;
-
-  /**
-   * @generated from field: optional string username = 3;
-   */
-  username?: string | undefined;
-
-  /**
-   * Absent or empty leaves the stored secret unchanged.
-   *
-   * @generated from field: optional string password = 4;
-   */
-  password?: string | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.UpdateGitCredentialRequest.
- * Use `create(UpdateGitCredentialRequestSchema)` to create a new message.
- */
-export const UpdateGitCredentialRequestSchema: GenMessage<UpdateGitCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 24);
-
-/**
- * @generated from message codewire.console.v1.UpdateGitCredentialResponse
- */
-export type UpdateGitCredentialResponse = Message<"codewire.console.v1.UpdateGitCredentialResponse"> & {
-  /**
-   * @generated from field: codewire.console.v1.GitCredential git_credential = 1;
-   */
-  gitCredential?: GitCredential | undefined;
-};
-
-/**
- * Describes the message codewire.console.v1.UpdateGitCredentialResponse.
- * Use `create(UpdateGitCredentialResponseSchema)` to create a new message.
- */
-export const UpdateGitCredentialResponseSchema: GenMessage<UpdateGitCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 25);
-
-/**
- * @generated from message codewire.console.v1.DeleteGitCredentialRequest
- */
-export type DeleteGitCredentialRequest = Message<"codewire.console.v1.DeleteGitCredentialRequest"> & {
-  /**
-   * @generated from field: string credential_id = 1;
-   */
-  credentialId: string;
-};
-
-/**
- * Describes the message codewire.console.v1.DeleteGitCredentialRequest.
- * Use `create(DeleteGitCredentialRequestSchema)` to create a new message.
- */
-export const DeleteGitCredentialRequestSchema: GenMessage<DeleteGitCredentialRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 26);
-
-/**
- * @generated from message codewire.console.v1.DeleteGitCredentialResponse
- */
-export type DeleteGitCredentialResponse = Message<"codewire.console.v1.DeleteGitCredentialResponse"> & {
-};
-
-/**
- * Describes the message codewire.console.v1.DeleteGitCredentialResponse.
- * Use `create(DeleteGitCredentialResponseSchema)` to create a new message.
- */
-export const DeleteGitCredentialResponseSchema: GenMessage<DeleteGitCredentialResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_console_v1_account, 27);
-
-/**
- * AccountService manages account-global login keys, the user's generated SSH
- * keypair, Git author identity, and non-GitHub forge credentials.
+ * AccountService manages account-global Git author identity.
  *
  * Organization-scoped API keys cannot call this service. Callers must use a
  * browser session or an OAuth-issued native-app bearer credential.
@@ -620,68 +119,6 @@ export const DeleteGitCredentialResponseSchema: GenMessage<DeleteGitCredentialRe
  * @generated from service codewire.console.v1.AccountService
  */
 export const AccountService: GenService<{
-  /**
-   * ListLoginKeys returns every public key accepted for account login.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.ListLoginKeys
-   */
-  listLoginKeys: {
-    methodKind: "unary";
-    input: typeof ListLoginKeysRequestSchema;
-    output: typeof ListLoginKeysResponseSchema;
-  },
-  /**
-   * CreateLoginKey adds one caller-supplied public login key.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.CreateLoginKey
-   */
-  createLoginKey: {
-    methodKind: "unary";
-    input: typeof CreateLoginKeyRequestSchema;
-    output: typeof CreateLoginKeyResponseSchema;
-  },
-  /**
-   * DeleteLoginKey removes one public login key owned by the caller.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.DeleteLoginKey
-   */
-  deleteLoginKey: {
-    methodKind: "unary";
-    input: typeof DeleteLoginKeyRequestSchema;
-    output: typeof DeleteLoginKeyResponseSchema;
-  },
-  /**
-   * EnsureSshKey returns the generated workspace SSH key, creating and
-   * storing a keypair when the account does not have one yet.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.EnsureSshKey
-   */
-  ensureSshKey: {
-    methodKind: "unary";
-    input: typeof EnsureSshKeyRequestSchema;
-    output: typeof EnsureSshKeyResponseSchema;
-  },
-  /**
-   * GetSshKey performs a pure read. It returns not_found until EnsureSshKey
-   * or RegenerateSshKey has created the account's keypair.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.GetSshKey
-   */
-  getSshKey: {
-    methodKind: "unary";
-    input: typeof GetSshKeyRequestSchema;
-    output: typeof GetSshKeyResponseSchema;
-  },
-  /**
-   * RegenerateSshKey rotates the generated workspace SSH keypair.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.RegenerateSshKey
-   */
-  regenerateSshKey: {
-    methodKind: "unary";
-    input: typeof RegenerateSshKeyRequestSchema;
-    output: typeof RegenerateSshKeyResponseSchema;
-  },
   /**
    * GetGitIdentity returns the resolved Git author name and email.
    *
@@ -702,49 +139,6 @@ export const AccountService: GenService<{
     methodKind: "unary";
     input: typeof UpdateGitIdentityRequestSchema;
     output: typeof UpdateGitIdentityResponseSchema;
-  },
-  /**
-   * ListGitCredentials returns metadata for non-GitHub forge credentials.
-   * Secret values are never returned.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.ListGitCredentials
-   */
-  listGitCredentials: {
-    methodKind: "unary";
-    input: typeof ListGitCredentialsRequestSchema;
-    output: typeof ListGitCredentialsResponseSchema;
-  },
-  /**
-   * CreateGitCredential stores metadata and one secret for a non-GitHub
-   * forge. github.com credentials must use GitHubService instead.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.CreateGitCredential
-   */
-  createGitCredential: {
-    methodKind: "unary";
-    input: typeof CreateGitCredentialRequestSchema;
-    output: typeof CreateGitCredentialResponseSchema;
-  },
-  /**
-   * UpdateGitCredential changes selected metadata and optionally replaces the
-   * stored secret. Absent fields remain unchanged.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.UpdateGitCredential
-   */
-  updateGitCredential: {
-    methodKind: "unary";
-    input: typeof UpdateGitCredentialRequestSchema;
-    output: typeof UpdateGitCredentialResponseSchema;
-  },
-  /**
-   * DeleteGitCredential removes the metadata and its stored secret.
-   *
-   * @generated from rpc codewire.console.v1.AccountService.DeleteGitCredential
-   */
-  deleteGitCredential: {
-    methodKind: "unary";
-    input: typeof DeleteGitCredentialRequestSchema;
-    output: typeof DeleteGitCredentialResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_console_v1_account, 0);

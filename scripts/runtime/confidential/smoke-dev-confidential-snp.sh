@@ -358,8 +358,6 @@ resolve_active_release() {
 
   assert_jq "active default runtime profile is not commodity" \
     '.data.SANDBOX_RUNTIME_PROFILE == "commodity"' "$EVIDENCE_DIR/active-runtime-config.json"
-  assert_jq "active default runtime class is not commodity" \
-    '.data.SANDBOX_RUNTIME_CLASS == "commodity"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "active Docker mode is not profile-default" \
     '.data.SANDBOX_DOCKER_MODE == "profile-default"' "$EVIDENCE_DIR/active-runtime-config.json"
   assert_jq "active default workspace storage class is not ordinary Longhorn" \

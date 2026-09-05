@@ -29,10 +29,8 @@ mod enabled {
         organization_deletion_workflow_id,
     };
     use codewire_orchestration::worker;
-    use codewire_orchestration::worker::create::{
-        SandboxWorkerCfg, environment_per_env_template_name,
-    };
-    use codewire_orchestration::worker::env_data::{load_backend_row, load_environment};
+    use codewire_orchestration::worker::create::environment_per_env_template_name;
+    use codewire_orchestration::worker::env_data::load_backend_row;
     use codewire_orchestration::worker::fencing_evidence::{
         CLONE_FAIL_FIXTURE_URL, CLONE_SIBLING_FIXTURE_URL,
     };
@@ -345,7 +343,6 @@ mod enabled {
                 .env("SANDBOX_NAMESPACE", SANDBOX_NAMESPACE)
                 .env("SANDBOX_GATEWAY_IMAGE", "codewire-gateway:e2e")
                 .env("SANDBOX_RUNTIME_PROFILE", "runc")
-                .env("SANDBOX_RUNTIME_CLASS", "runc")
                 .env("SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME", "true")
                 .env("SANDBOX_WORKSPACE_STORAGE_CLASS", "example-volumes")
                 .env("SANDBOX_NETWORK_POLICY_MANAGEMENT", "Managed")
@@ -368,9 +365,9 @@ mod enabled {
         async fn seed_environment(
             &self,
             env_id: &str,
-            setup_config: Option<Value>,
+            project_spec: Option<Value>,
         ) -> anyhow::Result<()> {
-            self.seed_environment_for(env_id, "org_contract_1", "usr_contract_admin", setup_config)
+            self.seed_environment_for(env_id, "org_contract_1", "usr_contract_admin", project_spec)
                 .await
         }
 
@@ -379,22 +376,32 @@ mod enabled {
             env_id: &str,
             organization_id: &str,
             created_by: &str,
-            setup_config: Option<Value>,
+            project_spec: Option<Value>,
         ) -> anyhow::Result<()> {
             let preset_id = format!("preset-{env_id}");
+            let project_spec = project_spec
+                .unwrap_or_else(|| json!({"schema_version": 1, "working_directory": "/workspace"}));
+            let mut parsed: codewire_project::ProjectSpec =
+                serde_json::from_value(project_spec.clone())
+                    .context("decode fixture project_spec")?;
+            parsed.image = self.workspace_image.clone();
+            parsed.validate().context("validate fixture project_spec")?;
+            let project_spec =
+                serde_json::to_value(parsed).context("encode fixture project_spec")?;
             sqlx::query(
-                "INSERT INTO environment_presets (id, org_id, name, slug)
-                 VALUES ($1, $2, $3, $1)",
+                "INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+                 VALUES ($1, $2, $3, $1, $4)",
             )
             .bind(&preset_id)
             .bind(organization_id)
             .bind(format!("WI-F {env_id}"))
+            .bind(&project_spec)
             .execute(&self.pool)
             .await?;
             sqlx::query(
                 "INSERT INTO sandbox_template_config
-                        (preset_id, image_ref, sandbox_template_name, warm_pool_size, persistent_storage)
-                 VALUES ($1, $2, 'wi-f-kind', 0, true)",
+                        (preset_id, image_ref, sandbox_template_name, persistent_storage)
+                 VALUES ($1, $2, 'wi-f-kind', true)",
             )
             .bind(&preset_id)
             .bind(&self.workspace_image)
@@ -403,7 +410,7 @@ mod enabled {
             sqlx::query(
                 "INSERT INTO environments
                         (id, org_id, created_by, type, name, state, desired_state,
-                         cpu_millicores, memory_mb, disk_gb, preset_id, setup_config)
+                         cpu_millicores, memory_mb, disk_gb, preset_id, project_spec)
                  VALUES ($1, $2, $3, 'sandbox', $1,
                          'pending', 'started', 100, 256, 1, $4, $5)",
             )
@@ -411,7 +418,7 @@ mod enabled {
             .bind(organization_id)
             .bind(created_by)
             .bind(&preset_id)
-            .bind(setup_config)
+            .bind(&project_spec)
             .execute(&self.pool)
             .await?;
             Ok(())
@@ -806,12 +813,12 @@ mod enabled {
             self.seed_environment(
                 &env_id,
                 Some(json!({
+                    "schema_version": 1,
+                    "working_directory": "/workspace",
                     "install_command": format!(
                         "if [ -f {WORKER_DEATH_MARKER} ]; then exit 0; fi; \
                          touch {WORKER_DEATH_MARKER}; sleep 600"
-                    ),
-                    "include_org_secrets": false,
-                    "include_user_secrets": false
+                    )
                 })),
             )
             .await?;
@@ -948,9 +955,9 @@ mod enabled {
             self.seed_environment(
                 &env_id,
                 Some(json!({
-                    "env_vars": {"WI_F_RETRY": "1"},
-                    "include_org_secrets": false,
-                    "include_user_secrets": false
+                    "schema_version": 1,
+                    "working_directory": "/workspace",
+                    "environment": {"WI_F_RETRY": "1"}
                 })),
             )
             .await?;
@@ -986,7 +993,7 @@ mod enabled {
 
         async fn parallel_clone_cleanup(&self) -> anyhow::Result<()> {
             let scenario = "parallel-clone";
-            codewire_project::validate_repository_destinations([
+            let destinations = codewire_project::validate_repository_destinations([
                 (CLONE_FAIL_FIXTURE_URL, ""),
                 (CLONE_SIBLING_FIXTURE_URL, ""),
             ])
@@ -1003,12 +1010,12 @@ mod enabled {
             self.seed_environment(
                 &env_id,
                 Some(json!({
-                    "repos": [
-                        {"url": CLONE_FAIL_FIXTURE_URL},
-                        {"url": CLONE_SIBLING_FIXTURE_URL}
-                    ],
-                    "include_org_secrets": false,
-                    "include_user_secrets": false
+                    "schema_version": 1,
+                    "working_directory": "/workspace",
+                    "repositories": [
+                        {"source": CLONE_FAIL_FIXTURE_URL, "destination": destinations[0]},
+                        {"source": CLONE_SIBLING_FIXTURE_URL, "destination": destinations[1]}
+                    ]
                 })),
             )
             .await?;
@@ -1052,9 +1059,9 @@ mod enabled {
             self.seed_environment(
                 &env_id,
                 Some(json!({
-                    "env_vars": {"WI_2_EXTERNAL_CLEANUP": "1"},
-                    "include_org_secrets": false,
-                    "include_user_secrets": false
+                    "schema_version": 1,
+                    "working_directory": "/workspace",
+                    "environment": {"WI_2_EXTERNAL_CLEANUP": "1"}
                 })),
             )
             .await?;
@@ -1063,18 +1070,9 @@ mod enabled {
             self.wait_setup_complete(&env_id, &handle, &evidence)
                 .await?;
 
-            let environment = load_environment(&self.pool, &env_id).await?;
             let backend = load_backend_row(&self.pool, &env_id).await?;
-            let template_name = environment_per_env_template_name(
-                &SandboxWorkerCfg::default(),
-                &self.workspace_image,
-                "wi-f-kind",
-                &environment,
-                &env_id,
-            )
-            .ok_or_else(|| {
-                anyhow::anyhow!("WI-2 fixture unexpectedly selected a shared template")
-            })?;
+            let template_name =
+                environment_per_env_template_name(&self.workspace_image, "wi-f-kind", &env_id);
             let workspace = self
                 .sandbox
                 .get_workspace_pod_identity(&env_id)
@@ -1346,9 +1344,9 @@ mod enabled {
                 &org_id,
                 &user_id,
                 Some(json!({
-                    "env_vars": {"WI_5_ORGANIZATION_DELETION": "1"},
-                    "include_org_secrets": false,
-                    "include_user_secrets": false
+                    "schema_version": 1,
+                    "working_directory": "/workspace",
+                    "environment": {"WI_5_ORGANIZATION_DELETION": "1"}
                 })),
             )
             .await?;
@@ -1362,15 +1360,8 @@ mod enabled {
             self.wait_setup_complete(&env_id, &environment, &evidence)
                 .await?;
             let backend = load_backend_row(&self.pool, &env_id).await?;
-            let environment_row = load_environment(&self.pool, &env_id).await?;
-            let template_name = environment_per_env_template_name(
-                &SandboxWorkerCfg::default(),
-                &self.workspace_image,
-                "wi-f-kind",
-                &environment_row,
-                &env_id,
-            )
-            .ok_or_else(|| anyhow::anyhow!("WI-5 fixture selected a shared template"))?;
+            let template_name =
+                environment_per_env_template_name(&self.workspace_image, "wi-f-kind", &env_id);
 
             // Fail the first generation in the tenant-secret phase after the
             // real runtime and billing phases have completed. No secret value
@@ -1638,7 +1629,6 @@ mod enabled {
             preview_base_domain: String::new(),
             kube: Some(kube::Client::try_default().await?),
             secrets: Arc::new(worker::secrets::SecretStore::from_env(pool)?),
-            github_cfg: worker::github::GitHubAppConfig::from_env(),
             sandbox_cfg: worker::create::SandboxWorkerCfg::from_env(),
             confidential_storage: None,
             temporal_trigger: trigger,

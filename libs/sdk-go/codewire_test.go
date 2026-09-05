@@ -420,7 +420,7 @@ func TestNewUsesCodewireAPIURLEnv(t *testing.T) {
 		},
 	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
 
-	t.Setenv("CODEWIRE_API_URL", srv.URL+"/api/v1")
+	t.Setenv("CODEWIRE_API_URL", srv.URL+"/")
 	t.Setenv("CODEWIRE_ORG_ID", "org_test")
 
 	client := codewire.New("test-key")
@@ -429,18 +429,45 @@ func TestNewUsesCodewireAPIURLEnv(t *testing.T) {
 	}
 }
 
+func TestWithBaseURLPreservesAPIPathPrefix(t *testing.T) {
+	const prefix = "/api/v1"
+	servicePath, serviceHandler := codewirev1connect.NewEnvironmentServiceHandler(
+		environmentServiceHandler{
+			list: func(_ context.Context, req *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error) {
+				if req.Msg.GetOrgId() != "org_test" {
+					t.Errorf("unexpected list request: %#v", req.Msg)
+				}
+				return connect.NewResponse(&codewirev1.ListEnvironmentsResponse{}), nil
+			},
+		},
+	)
+	mux := http.NewServeMux()
+	mux.Handle(prefix+servicePath, http.StripPrefix(prefix, serviceHandler))
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := codewire.New(
+		"test-key",
+		codewire.WithBaseURL(server.URL+prefix),
+		codewire.WithOrgID("org_test"),
+	)
+
+	if _, err := client.Environments.List(context.Background(), nil); err != nil {
+		t.Fatalf("list environments through explicit prefix: %v", err)
+	}
+}
+
 func TestEnvironmentsCRUD(t *testing.T) {
 	envJSON := codewire.EnvironmentData{
 		Id: "env_123", OrgId: "org_test", State: "running",
 		DesiredState: "running", Type: "sandbox", CreatedBy: "user_1",
-		PresetId: strPtr("tmpl_1"), Recoverable: true, StateChangedAt: "2026-01-01T00:00:00Z",
+		PresetId: strPtr("preset_1"), Recoverable: true, StateChangedAt: "2026-01-01T00:00:00Z",
 		CpuMillicores: 2000, MemoryMb: 4096, DiskGb: 20,
 		TotalRunningSeconds: 0, CreatedAt: "2026-01-01T00:00:00Z",
 	}
 
 	client, _ := testRuntimeServer(t, environmentServiceHandler{
 		create: func(_ context.Context, req *connect.Request[codewirev1.CreateEnvironmentRequest]) (*connect.Response[codewirev1.CreateEnvironmentResponse], error) {
-			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetOrgId() != "org_test" || req.Msg.GetPresetSlug() != "python" {
+			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetOrgId() != "org_test" || req.Msg.GetProjectSpec().GetPreset() != "python" {
 				t.Errorf("unexpected create request: %#v", req.Msg)
 			}
 			return connect.NewResponse(&codewirev1.CreateEnvironmentResponse{Environment: environmentProto(envJSON)}), nil
@@ -480,9 +507,8 @@ func TestEnvironmentsCRUD(t *testing.T) {
 	ctx := context.Background()
 
 	// Create
-	slug := "python"
 	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{
-		PresetSlug: &slug,
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Preset: "python", WorkingDirectory: "/workspace"},
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -664,7 +690,7 @@ func TestEnvironmentWrapper(t *testing.T) {
 	envJSON := codewire.EnvironmentData{
 		Id: "env_w", OrgId: "org_test", State: "running",
 		DesiredState: "running", Type: "sandbox", CreatedBy: "user_1",
-		PresetId: strPtr("tmpl_1"), Recoverable: true, StateChangedAt: "2026-01-01T00:00:00Z",
+		PresetId: strPtr("preset_1"), Recoverable: true, StateChangedAt: "2026-01-01T00:00:00Z",
 		CpuMillicores: 1000, MemoryMb: 2048, DiskGb: 10,
 		TotalRunningSeconds: 0, CreatedAt: "2026-01-01T00:00:00Z",
 	}
@@ -686,8 +712,9 @@ func TestEnvironmentWrapper(t *testing.T) {
 	}, fileServiceHandler{}, portServiceHandler{})
 
 	ctx := context.Background()
-	slug := "go"
-	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{PresetSlug: &slug})
+	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Preset: "go", WorkingDirectory: "/workspace"},
+	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -710,41 +737,41 @@ func TestEnvironmentWrapper(t *testing.T) {
 	}
 }
 
-func TestTemplatesCRUD(t *testing.T) {
-	tmplProto := &codewirev1.Preset{
-		Id: "tmpl_1", Name: "Go",
-		BuildStatus: "ready", DefaultCpuMillicores: 2000,
-		DefaultMemoryMb: 4096, DefaultDiskGb: 20, Official: false,
-		CreatedAt: timestamppb.New(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
+func TestPresetsCRUD(t *testing.T) {
+	presetProto := &codewirev1.Preset{
+		Id: "preset_1", Name: "Go",
+		BuildStatus: "ready", Official: false,
+		CreatedAt:   timestamppb.New(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
+		ProjectSpec: &codewirev1.ProjectSpec{SchemaVersion: 1, WorkingDirectory: "/workspace"},
 	}
 
 	client, _ := testPresetServer(t, presetServiceHandler{
 		create: func(_ context.Context, req *connect.Request[codewirev1.CreatePresetRequest]) (*connect.Response[codewirev1.CreatePresetResponse], error) {
-			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetOrgId() != "org_test" || req.Msg.GetName() != "Go" {
+			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetOrgId() != "org_test" || req.Msg.GetName() != "Go" || req.Msg.GetProjectSpec().GetWorkingDirectory() != "/workspace" {
 				t.Errorf("unexpected create request: %#v", req.Msg)
 			}
-			return connect.NewResponse(&codewirev1.CreatePresetResponse{Preset: tmplProto}), nil
+			return connect.NewResponse(&codewirev1.CreatePresetResponse{Preset: presetProto}), nil
 		},
 		get: func(_ context.Context, req *connect.Request[codewirev1.GetPresetRequest]) (*connect.Response[codewirev1.GetPresetResponse], error) {
-			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetPresetId() != "tmpl_1" {
+			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetPresetId() != "preset_1" {
 				t.Errorf("unexpected get request: %#v", req.Msg)
 			}
-			return connect.NewResponse(&codewirev1.GetPresetResponse{Preset: tmplProto}), nil
+			return connect.NewResponse(&codewirev1.GetPresetResponse{Preset: presetProto}), nil
 		},
 		update: func(_ context.Context, req *connect.Request[codewirev1.UpdatePresetRequest]) (*connect.Response[codewirev1.UpdatePresetResponse], error) {
-			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetPresetId() != "tmpl_1" || req.Msg.GetName() != "Golang" {
+			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetPresetId() != "preset_1" || req.Msg.GetName() != "Golang" || req.Msg.GetProjectSpec().GetResources().GetCpuMillicores() != 4000 {
 				t.Errorf("unexpected update request: %#v", req.Msg)
 			}
-			return connect.NewResponse(&codewirev1.UpdatePresetResponse{Preset: tmplProto}), nil
+			return connect.NewResponse(&codewirev1.UpdatePresetResponse{Preset: presetProto}), nil
 		},
 		list: func(_ context.Context, req *connect.Request[codewirev1.ListPresetsRequest]) (*connect.Response[codewirev1.ListPresetsResponse], error) {
 			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetOrgId() != "org_test" {
 				t.Errorf("unexpected list request: %#v", req.Msg)
 			}
-			return connect.NewResponse(&codewirev1.ListPresetsResponse{Presets: []*codewirev1.Preset{tmplProto}}), nil
+			return connect.NewResponse(&codewirev1.ListPresetsResponse{Presets: []*codewirev1.Preset{presetProto}}), nil
 		},
 		delete: func(_ context.Context, req *connect.Request[codewirev1.DeletePresetRequest]) (*connect.Response[codewirev1.DeletePresetResponse], error) {
-			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetPresetId() != "tmpl_1" {
+			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetPresetId() != "preset_1" {
 				t.Errorf("unexpected delete request: %#v", req.Msg)
 			}
 			return connect.NewResponse(&codewirev1.DeletePresetResponse{}), nil
@@ -753,37 +780,107 @@ func TestTemplatesCRUD(t *testing.T) {
 
 	ctx := context.Background()
 
-	tmpl, err := client.Templates.Create(ctx, codewire.CreatePresetBody{
-		Name: "Go",
+	preset, err := client.Presets.Create(ctx, codewire.CreatePresetBody{
+		Name: "Go", ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, WorkingDirectory: "/workspace"},
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if tmpl.Name != "Go" {
-		t.Errorf("expected Go, got %s", tmpl.Name)
+	if preset.Name != "Go" {
+		t.Errorf("expected Go, got %s", preset.Name)
 	}
 
-	_, err = client.Templates.Get(ctx, "tmpl_1")
+	_, err = client.Presets.Get(ctx, "preset_1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 
 	newName := "Golang"
-	_, err = client.Templates.Update(ctx, "tmpl_1", codewire.UpdatePresetBody{Name: &newName})
+	cpu := uint32(4000)
+	_, err = client.Presets.Update(ctx, "preset_1", codewire.UpdatePresetBody{
+		Name: &newName,
+		ProjectSpec: &codewire.ProjectSpec{
+			SchemaVersion: 1, WorkingDirectory: "/workspace", Resources: &codewire.ProjectResources{CpuMillicores: &cpu},
+		},
+	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
 
-	list, err := client.Templates.List(ctx)
+	list, err := client.Presets.List(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(list) != 1 {
-		t.Errorf("expected 1 template, got %d", len(list))
+		t.Errorf("expected 1 preset, got %d", len(list))
 	}
 
-	if err := client.Templates.Delete(ctx, "tmpl_1"); err != nil {
+	if err := client.Presets.Delete(ctx, "preset_1"); err != nil {
 		t.Fatalf("delete: %v", err)
+	}
+}
+
+func TestPresetsRejectNilResponsePayloads(t *testing.T) {
+	client, _ := testPresetServer(t, presetServiceHandler{
+		create: func(context.Context, *connect.Request[codewirev1.CreatePresetRequest]) (*connect.Response[codewirev1.CreatePresetResponse], error) {
+			return connect.NewResponse(&codewirev1.CreatePresetResponse{}), nil
+		},
+		get: func(context.Context, *connect.Request[codewirev1.GetPresetRequest]) (*connect.Response[codewirev1.GetPresetResponse], error) {
+			return connect.NewResponse(&codewirev1.GetPresetResponse{}), nil
+		},
+		update: func(context.Context, *connect.Request[codewirev1.UpdatePresetRequest]) (*connect.Response[codewirev1.UpdatePresetResponse], error) {
+			return connect.NewResponse(&codewirev1.UpdatePresetResponse{}), nil
+		},
+		list: func(context.Context, *connect.Request[codewirev1.ListPresetsRequest]) (*connect.Response[codewirev1.ListPresetsResponse], error) {
+			return connect.NewResponse(&codewirev1.ListPresetsResponse{Presets: []*codewirev1.Preset{nil}}), nil
+		},
+	})
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "create",
+			call: func() error {
+				_, err := client.Presets.Create(context.Background(), codewire.CreatePresetBody{
+					Name: "Synthetic",
+					ProjectSpec: codewire.ProjectSpec{
+						SchemaVersion: 1, WorkingDirectory: "/workspace",
+					},
+				})
+				return err
+			},
+		},
+		{
+			name: "get",
+			call: func() error {
+				_, err := client.Presets.Get(context.Background(), "preset_synthetic")
+				return err
+			},
+		},
+		{
+			name: "update",
+			call: func() error {
+				_, err := client.Presets.Update(context.Background(), "preset_synthetic", codewire.UpdatePresetBody{})
+				return err
+			},
+		},
+		{
+			name: "list",
+			call: func() error {
+				_, err := client.Presets.List(context.Background())
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.call()
+			if err == nil || !strings.Contains(err.Error(), "preset response omitted") {
+				t.Fatalf("expected omitted preset error, got %v", err)
+			}
+		})
 	}
 }
 
@@ -1259,7 +1356,7 @@ func TestWaitReady(t *testing.T) {
 	envProvisioning := codewire.EnvironmentData{
 		Id: "env1", OrgId: "org_test", State: "provisioning",
 		DesiredState: "running", Type: "sandbox", CreatedBy: "user-1",
-		PresetId: strPtr("tmpl-1"), Recoverable: false, StateChangedAt: "2024-01-01T00:00:00Z",
+		PresetId: strPtr("preset-1"), Recoverable: false, StateChangedAt: "2024-01-01T00:00:00Z",
 		CpuMillicores: 1000, MemoryMb: 512, DiskGb: 10,
 		TotalRunningSeconds: 0, CreatedAt: "2024-01-01T00:00:00Z",
 	}
@@ -1282,8 +1379,9 @@ func TestWaitReady(t *testing.T) {
 	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
 
 	ctx := context.Background()
-	slug := "test"
-	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{PresetSlug: &slug})
+	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Preset: "test", WorkingDirectory: "/workspace"},
+	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1301,7 +1399,7 @@ func TestWaitReadyError(t *testing.T) {
 	envProvisioning := codewire.EnvironmentData{
 		Id: "env1", OrgId: "org_test", State: "provisioning",
 		DesiredState: "running", Type: "sandbox", CreatedBy: "user-1",
-		PresetId: strPtr("tmpl-1"), Recoverable: false, StateChangedAt: "2024-01-01T00:00:00Z",
+		PresetId: strPtr("preset-1"), Recoverable: false, StateChangedAt: "2024-01-01T00:00:00Z",
 		CpuMillicores: 1000, MemoryMb: 512, DiskGb: 10,
 		TotalRunningSeconds: 0, CreatedAt: "2024-01-01T00:00:00Z",
 	}
@@ -1319,8 +1417,9 @@ func TestWaitReadyError(t *testing.T) {
 	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
 
 	ctx := context.Background()
-	slug := "test"
-	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{PresetSlug: &slug})
+	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Preset: "test", WorkingDirectory: "/workspace"},
+	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1344,7 +1443,7 @@ func TestCreateWithWait(t *testing.T) {
 	envProvisioning := codewire.EnvironmentData{
 		Id: "env_cw", OrgId: "org_test", State: "provisioning",
 		DesiredState: "running", Type: "sandbox", CreatedBy: "user-1",
-		PresetId: strPtr("tmpl-1"), Recoverable: false, StateChangedAt: "2024-01-01T00:00:00Z",
+		PresetId: strPtr("preset-1"), Recoverable: false, StateChangedAt: "2024-01-01T00:00:00Z",
 		CpuMillicores: 1000, MemoryMb: 512, DiskGb: 10,
 		TotalRunningSeconds: 0, CreatedAt: "2024-01-01T00:00:00Z",
 	}
@@ -1367,8 +1466,9 @@ func TestCreateWithWait(t *testing.T) {
 	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
 
 	ctx := context.Background()
-	slug := "test"
-	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{PresetSlug: &slug}, codewire.CreateOptions{Wait: true})
+	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Preset: "test", WorkingDirectory: "/workspace"},
+	}, codewire.CreateOptions{Wait: true})
 	if err != nil {
 		t.Fatalf("create with wait: %v", err)
 	}

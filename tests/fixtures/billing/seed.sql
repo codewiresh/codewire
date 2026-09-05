@@ -30,18 +30,6 @@ VALUES
     -- expiry UPDATE must not resurrect it.
     ('ses_contract_stale', 'usr_contract_user',  encode(digest('contract-stale-session-token', 'sha256'), 'hex'), NOW() - INTERVAL '1 minute', '127.0.0.1', 'contract-suite');
 
--- A seeded SSH key makes the authenticated account-key contract deterministic: the
--- lazy-generate-on-first-access path would mint a random keypair. With a row
--- present, the handler returns this fixed key verbatim (it reads the stored
--- values, it does not recompute the fingerprint).
-INSERT INTO user_ssh_keys (user_id, public_key, key_fingerprint, created_at)
-VALUES (
-    'usr_contract_user',
-    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl contract@codewire.test',
-    'SHA256:RYM6JbHEZNFW6f5jK2qkfZ8m2vqU1uFn0qY3oQ9p0sT',
-    '2026-01-01 00:00:00'
-);
-
 INSERT INTO billing_catalog_plans (
     resource_type, plan_key, display_name, price_cents,
     included_devs, max_concurrent_ws, max_team_members,
@@ -133,13 +121,14 @@ VALUES
     ('omasn_contract_1', 'orgm_contract_2', 'developer', 'usr_contract_admin'),
     ('omasn_contract_2', 'orgm_contract_2', 'viewer',    'usr_contract_admin');
 
--- A seeded PENDING invitation in org_contract_1 (fixed id/token/timestamps,
+-- A seeded PENDING invitation in org_contract_1 (fixed id/capability/timestamps,
 -- expires in the future) drives the invitations list, the 409 "pending
 -- invitation already exists" create branch, and the revoke success/404 rows.
 -- invited_by = the org owner.
-INSERT INTO org_invitations (id, org_id, email, role, invited_by, token, status, expires_at, created_at, assignments)
+INSERT INTO org_invitations (id, org_id, email, role, invited_by, token_hash, status, expires_at, created_at, assignments)
 VALUES ('inv_contract_1', 'org_contract_1', 'invitee@codewire.test', 'member', 'usr_contract_admin',
-        'invtoken_contract_1', 'pending', '2027-01-01 00:00:00', '2026-01-20 00:00:00', ARRAY['viewer']);
+        encode(digest('invtoken_contract_1', 'sha256'), 'hex'), 'pending',
+        '2027-01-01 00:00:00', '2026-01-20 00:00:00', ARRAY['viewer']);
 
 -- A seeded empty secret project (org_id FK → organizations). Encrypted values
 -- are created through the API so fixtures never duplicate envelope logic.
@@ -177,23 +166,22 @@ VALUES ('envsub_contract_1', 'org_contract_1', 'starter', 'active', 'sub_contrac
 INSERT INTO org_subscriptions (id, org_id, plan, status, stripe_subscription_id, created_at, updated_at)
 VALUES ('orgsub_checkout_guard_1', 'org_checkout_guard', 'starter', 'active', 'sub_checkout_guard_fixture', NOW(), NOW());
 
--- Org-scoped so createEnvironment's preset_id path accepts it (a
--- NULL-org non-official preset 400s with "preset does not belong to
--- this organization" — that branch keeps its own check via the
--- foreign preset below).
-INSERT INTO environment_presets (id, org_id, name)
-VALUES ('preset_contract_1', 'org_contract_1', 'contract-preset');
+-- Org-scoped so createEnvironment's preset_id path accepts it. The foreign
+-- preset belongs to a different organization; global presets are always
+-- explicitly official after the clean cutover.
+INSERT INTO environment_presets (id, org_id, name, project_spec)
+VALUES ('preset_contract_1', 'org_contract_1', 'contract-preset', '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 
-INSERT INTO environment_presets (id, org_id, name)
-VALUES ('preset_contract_foreign', NULL, 'contract-preset-foreign');
+INSERT INTO environment_presets (id, org_id, name, project_spec)
+VALUES ('preset_contract_foreign', 'org_checkout_guard', 'contract-preset-foreign', '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 
 -- Slugged + a pre-registered port: pin the slug-conflict (409) and
 -- port-conflict (409) branches with idempotent checks.
-INSERT INTO environment_presets (id, org_id, name, slug)
-VALUES ('preset_contract_slugged', 'org_contract_1', 'contract-preset-slugged', 'contract');
+INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+VALUES ('preset_contract_slugged', 'org_contract_1', 'contract-preset-slugged', 'contract', '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 
-INSERT INTO environments (id, org_id, created_by, type, state, name, preset_id, cpu_millicores, memory_mb, total_running_seconds)
-VALUES ('env_contract_1', 'org_contract_1', 'usr_contract_user', 'sandbox', 'running', 'contract-env', 'preset_contract_1', 2000, 4096, 7200);
+INSERT INTO environments (id, org_id, created_by, type, state, name, preset_id, cpu_millicores, memory_mb, total_running_seconds, project_spec)
+VALUES ('env_contract_1', 'org_contract_1', 'usr_contract_user', 'sandbox', 'running', 'contract-env', 'preset_contract_1', 2000, 4096, 7200, '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 
 INSERT INTO sandbox_running_sessions (
     id, environment_id, organization_id, runtime_type, runtime_uid,
@@ -214,8 +202,8 @@ VALUES (
 -- access-denied path (the contract user is neither creator nor org
 -- admin and holds no grant) and the include_destroyed list filter,
 -- WITHOUT touching billing usage aggregates (destroyed is excluded).
-INSERT INTO environments (id, org_id, created_by, type, state, name, preset_id, cpu_millicores, memory_mb, total_running_seconds, destroyed_at)
-VALUES ('env_contract_2', 'org_contract_1', 'usr_contract_admin', 'sandbox', 'destroyed', 'contract-env-destroyed', 'preset_contract_1', 1000, 2048, 60, NOW());
+INSERT INTO environments (id, org_id, created_by, type, state, name, preset_id, cpu_millicores, memory_mb, total_running_seconds, destroyed_at, project_spec)
+VALUES ('env_contract_2', 'org_contract_1', 'usr_contract_admin', 'sandbox', 'destroyed', 'contract-env-destroyed', 'preset_contract_1', 1000, 2048, 60, NOW(), '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 
 INSERT INTO environment_ports (id, environment_id, port, label, access)
 VALUES ('port_contract_1', 'env_contract_1', 3000, 'web', 'creator');
@@ -243,10 +231,10 @@ VALUES ('orgm_contract_4', 'org_contract_2', 'usr_contract_member2', 'member', '
 -- the revoke success + 404 "already processed" cycle. org_contract_2
 -- invitations are not listed by the org_contract_1 contract rows, so these
 -- don't perturb the org_contract_1 list.
-INSERT INTO org_invitations (id, org_id, email, role, invited_by, token, status, expires_at, created_at, assignments)
+INSERT INTO org_invitations (id, org_id, email, role, invited_by, token_hash, status, expires_at, created_at, assignments)
 VALUES
-    ('inv_rev_go', 'org_contract_2', 'revgo@codewire.test', 'member', 'usr_contract_user', 'tok_rev_go', 'pending', '2027-01-01 00:00:00', '2026-01-22 00:00:00', ARRAY['viewer']),
-    ('inv_rev_rs', 'org_contract_2', 'revrs@codewire.test', 'member', 'usr_contract_user', 'tok_rev_rs', 'pending', '2027-01-01 00:00:00', '2026-01-22 00:00:00', ARRAY['viewer']);
+    ('inv_rev_go', 'org_contract_2', 'revgo@codewire.test', 'member', 'usr_contract_user', encode(digest('tok_rev_go', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-22 00:00:00', ARRAY['viewer']),
+    ('inv_rev_rs', 'org_contract_2', 'revrs@codewire.test', 'member', 'usr_contract_user', encode(digest('tok_rev_rs', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-22 00:00:00', ARRAY['viewer']);
 
 -- Invitation-accept fixtures. A revoked invitation (400 "invitation is
 -- revoked", status-checked before email) and an email-mismatch pending one
@@ -259,12 +247,12 @@ VALUES
     ('org_contract_3', 'Contract Org Three', 'contract-org-three', 'usr_contract_admin', NOW(), NOW()),
     ('org_contract_4', 'Contract Org Four',  'contract-org-four',  'usr_contract_admin', NOW(), NOW());
 
-INSERT INTO org_invitations (id, org_id, email, role, invited_by, token, status, expires_at, created_at, assignments)
+INSERT INTO org_invitations (id, org_id, email, role, invited_by, token_hash, status, expires_at, created_at, assignments)
 VALUES
-    ('inv_accept_revoked',  'org_contract_1', 'whoever@codewire.test',      'member', 'usr_contract_admin', 'tok_accept_revoked',  'revoked', '2027-01-01 00:00:00', '2026-01-23 00:00:00', ARRAY['viewer']),
-    ('inv_accept_mismatch', 'org_contract_1', 'someone-else@codewire.test', 'member', 'usr_contract_admin', 'tok_accept_mismatch', 'pending', '2027-01-01 00:00:00', '2026-01-23 00:00:00', ARRAY['viewer']),
-    ('inv_accept_go', 'org_contract_3', 'contract-user@codewire.test', 'member', 'usr_contract_admin', 'tok_accept_go', 'pending', '2027-01-01 00:00:00', '2026-01-24 00:00:00', ARRAY['viewer']),
-    ('inv_accept_rs', 'org_contract_4', 'contract-user@codewire.test', 'member', 'usr_contract_admin', 'tok_accept_rs', 'pending', '2027-01-01 00:00:00', '2026-01-24 00:00:00', ARRAY['viewer']);
+    ('inv_accept_revoked',  'org_contract_1', 'whoever@codewire.test',      'member', 'usr_contract_admin', encode(digest('tok_accept_revoked', 'sha256'), 'hex'),  'revoked', '2027-01-01 00:00:00', '2026-01-23 00:00:00', ARRAY['viewer']),
+    ('inv_accept_mismatch', 'org_contract_1', 'someone-else@codewire.test', 'member', 'usr_contract_admin', encode(digest('tok_accept_mismatch', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-23 00:00:00', ARRAY['viewer']),
+    ('inv_accept_go', 'org_contract_3', 'contract-user@codewire.test', 'member', 'usr_contract_admin', encode(digest('tok_accept_go', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-24 00:00:00', ARRAY['viewer']),
+    ('inv_accept_rs', 'org_contract_4', 'contract-user@codewire.test', 'member', 'usr_contract_admin', encode(digest('tok_accept_rs', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-24 00:00:00', ARRAY['viewer']);
 
 -- Terminal log fixture: the SSE stream closes after the initial batch
 -- (phase=complete), making the stream diffable end-to-end. Fixed
@@ -286,8 +274,8 @@ VALUES ('audit_contract_1', '2026-01-15 12:00:00', 'contract.audit.fixture', 'us
 -- surface) + one deterministic journal entry. The admin journal
 -- query is by environment_id, so this env is never touched by the
 -- env-lifecycle contract rows (those use env_contract_1/2).
-INSERT INTO environments (id, org_id, created_by, type, state, name, preset_id, cpu_millicores, memory_mb, total_running_seconds)
-VALUES ('env_contract_journal', 'org_contract_2', 'usr_contract_user', 'sandbox', 'running', 'contract-env-journal', 'preset_contract_foreign', 1000, 2048, 0);
+INSERT INTO environments (id, org_id, created_by, type, state, name, preset_id, cpu_millicores, memory_mb, total_running_seconds, project_spec)
+VALUES ('env_contract_journal', 'org_contract_2', 'usr_contract_user', 'sandbox', 'running', 'contract-env-journal', 'preset_contract_foreign', 1000, 2048, 0, '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
 
 INSERT INTO environment_lifecycle_journal
     (id, environment_id, kind, actor, phase, status, from_state, to_state, checkpoint, reason, metadata, created_at)

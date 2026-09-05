@@ -460,7 +460,8 @@ pub async fn run_daemon() -> Result<()> {
         listen_addr: format!("vsock:any:{}", seed.daemon_vsock_port()),
         workspace_root: PathBuf::from(WORKSPACE_PATH),
         home_root: PathBuf::from(&plan.identity.home),
-        auth_token: Some(seed.auth_token().to_owned()),
+        auth_token: codewire_daemon::DaemonAuthToken::new(seed.auth_token())
+            .context("validate guest daemon auth token")?,
         process_execution: codewire_daemon::execution::ProcessExecution::Runc(
             codewire_daemon::execution::RuncExecution {
                 helper_path: PathBuf::from(INIT_PATH),

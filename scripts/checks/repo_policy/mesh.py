@@ -470,11 +470,13 @@ def mesh_final_surface_failures(
         ("forbidden_edge_fragments", False),
     ):
         for source, fragments in policy[policy_key].items():
-            path = ROOT / source
-            if not path.is_file():
-                failures.append(f"final Mesh policy source is missing: {source}")
-                continue
-            text = path.read_text(encoding="utf-8")
+            text = mesh_sources.get(source)
+            if text is None:
+                path = ROOT / source
+                if not path.is_file():
+                    failures.append(f"final Mesh policy source is missing: {source}")
+                    continue
+                text = path.read_text(encoding="utf-8")
             for fragment in fragments:
                 present = fragment in text
                 if expectation and not present:
@@ -546,6 +548,22 @@ def mesh_final_surface_self_test(
         raise RuntimeError("final Mesh guard did not discover a new first-party client")
     if not mesh_final_surface_failures(mesh_sources, policy, restored_clients):
         raise RuntimeError("final Mesh guard accepted a new first-party raw Mesh client")
+
+    store_rel = "crates/codewire-mesh/src/store.rs"
+    atomic_create = "async fn network_create_with_owner("
+    legacy_create = "async fn network_create_owned("
+    store_source = mesh_sources.get(store_rel)
+    if store_source is None or atomic_create not in store_source:
+        raise RuntimeError("final Mesh guard self-test cannot find atomic owner creation")
+    restored_split_create = dict(mesh_sources)
+    restored_split_create[store_rel] = store_source.replace(atomic_create, legacy_create)
+    split_failures = mesh_final_surface_failures(
+        restored_split_create, policy, client_sources
+    )
+    if not any(atomic_create in failure for failure in split_failures):
+        raise RuntimeError("final Mesh guard accepted removal of atomic owner creation")
+    if not any(legacy_create in failure for failure in split_failures):
+        raise RuntimeError("final Mesh guard accepted restored split network creation")
 
 
 def mesh_final_client_sources(

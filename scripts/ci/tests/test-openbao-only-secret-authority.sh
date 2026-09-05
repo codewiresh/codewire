@@ -94,6 +94,9 @@ fi
 # non-promotable image is compiled with it, and every repository-owned Kind
 # topology opts into it explicitly. Production images and manifests must not.
 grep -Fq 'CODEWIRE_ORCHESTRATION_FEATURES = "kind-e2e"' docker-bake.hcl
+grep -Fq -- \
+  "--set 'services-ci.tags=codewire-services:local' services-ci" \
+  Makefile
 grep -Fq 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"' \
   deployments/k8s/overlays/local-kind/configmap-patch.yaml
 grep -Fq 'CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"' \
@@ -113,6 +116,8 @@ fi
 render_root="$(mktemp -d)"
 trap 'rm -rf -- "$render_root"' EXIT
 kubectl kustomize deployments/k8s/overlays/dev >"$render_root/dev.yaml"
+kubectl kustomize deployments/k8s/overlays/local-kind >"$render_root/local-kind.yaml"
+kubectl kustomize deployments/k8s/overlays/local-kind-static >"$render_root/local-kind-static.yaml"
 kubectl kustomize deployments/k8s/overlays/production >"$render_root/production.yaml"
 yq ea -o=json -I=0 \
   'select(.kind == "ConfigMap") | .data' \
@@ -120,6 +125,11 @@ yq ea -o=json -I=0 \
 yq ea -o=json -I=0 \
   'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
   "$render_root/dev.yaml" >"$render_root/dev-orchestration.json"
+for topology in local-kind local-kind-static; do
+  yq ea -o=json -I=0 \
+    'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
+    "$render_root/$topology.yaml" >"$render_root/$topology-orchestration.json"
+done
 yq ea -o=json -I=0 \
   'select(.kind == "Role" and .metadata.name == "codewire-orchestration-tokenrequest")' \
   "$render_root/dev.yaml" >"$render_root/dev-tokenrequest-role.json"
@@ -166,6 +176,18 @@ jq -e '
   named($pod.volumes; "tenant-secret-openbao-token") == [] and
   named($pod.volumes; "confidential-storage-openbao-token") == []
 ' "$render_root/dev-orchestration.json" >/dev/null
+
+for topology in local-kind local-kind-static; do
+  jq -e '
+    def named($items; $name): [$items[] | select(.name == $name)];
+    .spec.template.spec.containers[0].env as $env |
+    named($env; "ORCHESTRATION_INTERNAL_CONNECT_PORT")[0].value == "8085" and
+    named($env; "POD_NAMESPACE")[0].valueFrom.fieldRef.fieldPath == "metadata.namespace" and
+    named($env; "POD_NAME")[0].valueFrom.fieldRef.fieldPath == "metadata.name" and
+    named($env; "POD_UID")[0].valueFrom.fieldRef.fieldPath == "metadata.uid" and
+    named($env; "POD_SERVICE_ACCOUNT_NAME")[0].valueFrom.fieldRef.fieldPath == "spec.serviceAccountName"
+  ' "$render_root/$topology-orchestration.json" >/dev/null
+done
 
 jq -e '
   .metadata.namespace == "dev" and

@@ -2,9 +2,9 @@ import { expect, test, type Page } from "@playwright/test";
 import { createPublicKey, verify } from "node:crypto";
 import * as OTPAuth from "otpauth";
 import {
+  bindSyntheticPasswordResetToken,
   cleanupUser,
   clearRateLimits,
-  getPasswordResetToken,
   verifyUserEmail,
 } from "./helpers/db";
 import { fillField } from "./helpers/auth-flow";
@@ -343,7 +343,7 @@ test.describe.serial("server-rendered identity flows", () => {
     expect(request.status(), await request.text()).toBe(200);
     await expect(page.getByRole("heading", { name: "Check your email" })).toBeVisible();
 
-    const token = await getPasswordResetToken(resetEmail);
+    const token = await bindSyntheticPasswordResetToken(resetEmail);
     expect(token).toBeTruthy();
     await page.goto(`/reset-password?token=${token}`);
     await expect(page).toHaveURL(/\/reset-password$/);

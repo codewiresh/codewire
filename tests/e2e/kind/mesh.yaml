@@ -7,9 +7,8 @@ kind: Deployment
 metadata:
   name: codewire-mesh
 spec:
-  # The harness seeds the exact SQLx 1-5 retirement fixture and runs the
-  # prelaunch command before it scales Mesh up. Keeping the initial replica at
-  # zero prevents startup migration 6 from racing that proof.
+  # The harness starts service processes only after PostgreSQL and Temporal are
+  # ready, so this deployment remains parked until the staged rollout begins.
   replicas: 0
   selector:
     matchLabels:
@@ -37,13 +36,10 @@ spec:
         - name: mesh
           image: codewire-mesh:e2e
           imagePullPolicy: Never
-          command: ["sh", "-ceu"]
+          command: ["codewire-mesh"]
           args:
-            - |
-              exec codewire-mesh \
-                --base-url=http://codewire-mesh:8080 \
-                --listen=0.0.0.0:8080 \
-                --database-url="$DATABASE_URL"
+            - --base-url=http://codewire-mesh:8080
+            - --listen=0.0.0.0:8080
           env:
             - name: DATABASE_URL
               value: postgres://codewire:codewire@postgres:5432/codewire_mesh?sslmode=disable

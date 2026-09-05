@@ -5,13 +5,21 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
+use codewire_daemon_bridge::client::DaemonClient;
+use codewire_gateway_proto::daemon::v1::DaemonState;
 use codewire_server_core::org_deletion::{
     acquire_environment_runtime_mutation_lease, mark_organization_mutation_resolution_required,
     release_organization_mutation_lease,
 };
 use futures_util::{SinkExt, StreamExt};
+use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Mutex;
+use tonic::transport::{Channel, Endpoint};
+use tower::service_fn;
 use uuid::Uuid;
 
 use super::ApiState;
@@ -19,9 +27,11 @@ use super::prepare::{json_response, plain_error};
 use super::proxy::{resolve_running_sandbox_target, resolve_running_sandbox_target_for_role};
 use super::terminal::{authenticate_socket_request, require_sandbox_claim_ready};
 use crate::sandbox::client::SandboxClient;
-use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
+use crate::sandbox::sidecar::{DEFAULT_GATEWAY_SSH_PORT, PortForwardedStream};
+use crate::worker::gatewayauth::{SCOPE_DAEMON, issue_token};
 
 const DEFAULT_SHIM_PORT: u16 = 7777;
+const DAEMON_HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Deserialize)]
 pub struct SshProxyQuery {
@@ -167,7 +177,8 @@ pub async fn ssh_proxy_check(
         return check_response(false, false, "");
     }
 
-    let (shim_healthy, shim_error) = probe_shim_health(&sb, &target.environment_id).await;
+    let (shim_healthy, shim_error) =
+        probe_shim_health(&sb, &target.environment_id, &state.session_secret).await;
     if !shim_error.is_empty() {
         tracing::warn!(env = %target.environment_id, error = %shim_error, "ssh-proxy-check: shim probe failed");
     }
@@ -284,28 +295,62 @@ where
     writer.flush().await
 }
 
-async fn probe_shim_health(sb: &SandboxClient, env_id: &str) -> (bool, String) {
-    let mut stream = match sb.port_forward_stream(env_id, DEFAULT_SHIM_PORT).await {
+async fn probe_shim_health(
+    sb: &SandboxClient,
+    env_id: &str,
+    session_secret: &str,
+) -> (bool, String) {
+    let stream = match sb.port_forward_stream(env_id, DEFAULT_SHIM_PORT).await {
         Ok(stream) => stream,
         Err(err) => return (false, format!("port-forward: {err}")),
     };
-
-    let req = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    if let Err(err) = stream.stream_mut().write_all(req).await {
-        return (false, format!("request: {err}"));
-    }
-
-    let mut buf = vec![0u8; 1024];
-    let n = match stream.stream_mut().read(&mut buf).await {
-        Ok(0) => return (false, "dial: empty response".to_string()),
-        Ok(n) => n,
-        Err(err) => return (false, format!("dial: {err}")),
+    let token = match issue_token(session_secret, env_id, SCOPE_DAEMON) {
+        Ok(token) => token,
+        Err(_) => return (false, "authorize daemon health probe".into()),
     };
-    let head = String::from_utf8_lossy(&buf[..n]);
-    (
-        head.starts_with("HTTP/1.1 200 ") || head.starts_with("HTTP/1.0 200 "),
-        String::new(),
-    )
+    let channel = match daemon_channel_from_port_forward(stream).await {
+        Ok(channel) => channel,
+        Err(error) => return (false, format!("daemon transport: {error}")),
+    };
+    let client = match DaemonClient::from_channel(channel, token) {
+        Ok(client) => client,
+        Err(_) => return (false, "authorize daemon health client".into()),
+    };
+    let health = match client.get_health().await {
+        Ok(health) => health,
+        Err(error) => return (false, format!("daemon GetHealth: {error}")),
+    };
+    daemon_health_result(health.state, &health.message)
+}
+
+async fn daemon_channel_from_port_forward(stream: PortForwardedStream) -> anyhow::Result<Channel> {
+    let stream = Arc::new(Mutex::new(Some(stream)));
+    let connector = service_fn(move |_| {
+        let stream = Arc::clone(&stream);
+        async move {
+            stream.lock().await.take().map(TokioIo::new).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "daemon port-forward stream already consumed",
+                )
+            })
+        }
+    });
+    Endpoint::from_static("http://hosted-daemon.internal")
+        .connect_timeout(DAEMON_HEALTH_PROBE_TIMEOUT)
+        .timeout(DAEMON_HEALTH_PROBE_TIMEOUT)
+        .connect_with_connector(connector)
+        .await
+        .map_err(Into::into)
+}
+
+fn daemon_health_result(state: i32, message: &str) -> (bool, String) {
+    let state = DaemonState::try_from(state).unwrap_or(DaemonState::Unspecified);
+    if state == DaemonState::Ready {
+        (true, String::new())
+    } else {
+        (false, format!("daemon state {state:?}: {message}"))
+    }
 }
 
 fn check_response(available: bool, shim_healthy: bool, shim_error: &str) -> Response {
@@ -330,17 +375,21 @@ mod tests {
 
     use tokio::io::AsyncWrite;
 
-    use super::write_ssh_proxy_bytes;
+    use super::{DaemonState, daemon_health_result, write_ssh_proxy_bytes};
 
     #[test]
-    fn http_status_parser_accepts_ok_responses() {
-        let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
-        let head = String::from_utf8_lossy(ok);
-        assert!(head.starts_with("HTTP/1.1 200 "));
-
-        let not_found = b"HTTP/1.1 404 Not Found\r\n\r\n";
-        let head = String::from_utf8_lossy(not_found);
-        assert!(!head.starts_with("HTTP/1.1 200 "));
+    fn typed_daemon_health_accepts_only_ready_state() {
+        assert_eq!(
+            daemon_health_result(DaemonState::Ready as i32, "ready"),
+            (true, String::new())
+        );
+        assert_eq!(
+            daemon_health_result(DaemonState::Unhealthy as i32, "filesystem unavailable"),
+            (
+                false,
+                "daemon state Unhealthy: filesystem unavailable".into()
+            )
+        );
     }
 
     #[tokio::test]

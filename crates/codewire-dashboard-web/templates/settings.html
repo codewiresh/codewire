@@ -25,47 +25,9 @@
             <nav aria-label="Account settings"><p class="cw-context-nav-label">Personal</p><a href="/settings/{{ view.global_context_query }}" aria-current="page">Account</a><a href="/settings/security/{{ view.global_context_query }}">Security</a><a href="/settings/sessions/{{ view.global_context_query }}">Sessions</a>{% if view.has_selected_organization %}<p class="cw-context-nav-label">Organization</p><a href="{{ view.selected_organization_url }}">Sandboxes</a><a href="/{{ view.selected_organization_slug }}/snapshots/">Snapshots <small>Soon</small></a><a href="/{{ view.selected_organization_slug }}/presets/">Presets</a><a href="/{{ view.selected_organization_slug }}/secrets/">Secrets</a><a href="/{{ view.selected_organization_slug }}/api-keys/">API Keys</a><a href="/{{ view.selected_organization_slug }}/members/">Members</a><a href="/{{ view.selected_organization_slug }}/billing/">Billing</a>{% endif %}{% if view.is_admin %}<p class="cw-context-nav-label">Admin</p><a href="/admin/{{ view.global_context_query }}">Overview</a><a href="/admin/billing/{{ view.global_context_query }}">Billing catalog</a><a href="/admin/audit/{{ view.global_context_query }}">Audit log</a>{% endif %}</nav>
           </aside>
           <div class="cw-settings-content">
-        <header class="cw-page-header"><div><p class="cw-eyebrow">Personal</p><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Manage your account integrations and Sandbox identity.</p></div></header>
+        <header class="cw-page-header"><div><p class="cw-eyebrow">Personal</p><h1 class="cw-page-title">Account</h1><p class="cw-page-description">Manage your Sandbox Git identity and account session.</p></div></header>
         {% if !settings.message.is_empty() %}<div class="cw-alert cw-alert--success" role="status">{{ settings.message }}</div>{% endif %}
         {% if !settings.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ settings.error }}</div>{% endif %}
-
-        <section class="cw-card cw-settings-card" aria-labelledby="github-title">
-          <div class="cw-card-header"><h2 id="github-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg> GitHub</h2><p class="cw-card-description">Connect GitHub to create Sandboxes from private repositories.</p></div>
-          <div class="cw-card-content">
-            {% if !settings.data.github_available %}
-            <div class="cw-alert cw-alert--warning" role="status">GitHub status is temporarily unavailable. Other settings remain usable.</div>
-            {% else if settings.data.github_connected %}
-            <p class="cw-status" data-tone="success">Connected{% if !settings.data.github_username.is_empty() %} as @{{ settings.data.github_username }}{% endif %}</p>
-            <form method="post" action="/settings/_actions/github/disconnect{{ view.global_context_query }}"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Disconnect</button></form>
-            {% else %}
-            <p class="cw-settings-muted">Not connected</p><a class="cw-button" href="{{ settings.github_connect_url }}">Connect GitHub</a>
-            {% endif %}
-          </div>
-        </section>
-
-        <section class="cw-card cw-settings-card" aria-labelledby="credentials-title">
-          <div class="cw-card-header"><h2 id="credentials-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg> Git authentication</h2><p class="cw-card-description">Add a token or password for Gitea, GitLab, Bitbucket, or another Git host. Credentials match by host when cloning.</p></div>
-          <div class="cw-card-content cw-stack">
-            {% if !settings.data.credentials_available %}<div class="cw-alert cw-alert--warning" role="status">Saved credentials are temporarily unavailable. You can still add a credential.</div>{% endif %}
-            {% if !settings.data.credentials.is_empty() %}
-            <div class="cw-credential-list">
-              {% for credential in settings.data.credentials %}
-              <div class="cw-credential-row"><div><strong>{{ credential.name }}</strong><span>{{ credential.host }}{% if !credential.username.is_empty() %} · {{ credential.username }}{% endif %}</span></div><form method="post" action="/settings/_actions/credentials/delete{{ view.global_context_query }}"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><input type="hidden" name="credential_id" value="{{ credential.id }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Delete</button></form></div>
-              {% endfor %}
-            </div>
-            {% endif %}
-            <details class="cw-settings-details-panel"><summary class="cw-button cw-button--outline cw-button--small">Add credential</summary>
-              <form class="cw-form cw-settings-form" method="post" action="/settings/_actions/credentials/create{{ view.global_context_query }}">
-                <input type="hidden" name="_csrf" value="{{ settings.csrf_token }}">
-                <div class="cw-field"><label class="cw-label" for="credential-name">Name</label><input class="cw-input" id="credential-name" name="name" placeholder="My Gitea" required></div>
-                <div class="cw-field"><label class="cw-label" for="credential-host">Host</label><input class="cw-input" id="credential-host" name="host" placeholder="git.example.com" required></div>
-                <div class="cw-field"><label class="cw-label" for="credential-username">Username (optional)</label><input class="cw-input" id="credential-username" name="username" autocomplete="username"></div>
-                <div class="cw-field"><label class="cw-label" for="credential-password">Token or password</label><input class="cw-input" id="credential-password" name="password" type="password" autocomplete="off" required></div>
-                <button class="cw-button" type="submit">Save credential</button>
-              </form>
-            </details>
-          </div>
-        </section>
 
         <section class="cw-card cw-settings-card" aria-labelledby="identity-title">
           <div class="cw-card-header"><h2 id="identity-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-user"/></svg> Git identity</h2><p class="cw-card-description">Used for commits in Sandboxes. Empty fields fall back to your account identity.</p></div>
@@ -75,20 +37,6 @@
             <div class="cw-field"><label class="cw-label" for="git-email">Email</label><input class="cw-input" id="git-email" name="git_email" value="{{ settings.data.git_email }}" type="email" autocomplete="email"></div>
             <button class="cw-button" type="submit">Save identity</button>
           </form>{% else %}<div class="cw-alert cw-alert--warning" role="status">Git identity is temporarily unavailable. Reload before changing it.</div>{% endif %}</div>
-        </section>
-
-        <section class="cw-card cw-settings-card" aria-labelledby="ssh-title">
-          <div class="cw-card-header"><h2 id="ssh-title" class="cw-card-title"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-terminal"/></svg> SSH key</h2><p class="cw-card-description">Added to every Sandbox. Add the public key to GitHub, GitLab, or another server.</p></div>
-          <div class="cw-card-content cw-stack">
-            {% if !settings.data.ssh_key_status_available %}
-            <div class="cw-alert cw-alert--warning" role="status">SSH key status is temporarily unavailable. Reload before changing it.</div>
-            {% else if settings.data.ssh_key_available %}
-            <code class="cw-public-key">{{ settings.data.ssh_public_key }}</code><p class="cw-settings-muted cw-mono">{{ settings.data.ssh_fingerprint }}</p>
-            <form method="post" action="/settings/_actions/ssh/regenerate{{ view.global_context_query }}"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button cw-button--outline cw-button--small" type="submit">Regenerate key</button><p class="cw-help">The old key will stop working immediately.</p></form>
-            {% else %}
-            <p class="cw-settings-muted">No SSH key is available yet.</p><form method="post" action="/settings/_actions/ssh/ensure{{ view.global_context_query }}"><input type="hidden" name="_csrf" value="{{ settings.csrf_token }}"><button class="cw-button" type="submit">Create SSH key</button></form>
-            {% endif %}
-          </div>
         </section>
 
         <section id="sign-out" class="cw-card cw-settings-card" aria-labelledby="account-title">

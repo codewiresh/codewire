@@ -9,6 +9,7 @@
 pub mod api;
 pub mod confidential_storage;
 pub mod connect;
+pub(crate) mod gateway_binding_identity;
 pub mod lifecycle;
 pub(crate) mod openbao_workload_identity;
 pub(crate) mod repository_mount;

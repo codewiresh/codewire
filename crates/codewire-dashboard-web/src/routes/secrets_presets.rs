@@ -4,10 +4,9 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
+use codewire_project::ResourceSpec;
 use codewire_proto::codewire::v1::UpdatePresetRequest;
-use codewire_workload_secrets::{
-    MAX_WORKLOAD_SECRET_KEY_BYTES, validate_workload_secret_metadata_key,
-};
+use codewire_workload_secrets::{MAX_WORKLOAD_SECRET_KEY_BYTES, validate_workload_secret_key};
 use connectrpc::{ConnectError, ErrorCode};
 use serde::Deserialize;
 
@@ -439,19 +438,51 @@ pub(super) async fn update_preset(
         )
         .await;
     }
+    let mut project_spec = match secrets_presets_connect::preset_project_spec(
+        &state,
+        cookie.clone(),
+        organization.id.clone(),
+        submission.preset_id.clone(),
+    )
+    .await
+    {
+        Ok(project_spec) => project_spec,
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            return login_redirect(&continuation, &headers);
+        }
+        Err(error) => {
+            apply_preset_error(&mut form, &error);
+            return render_preset_form_error(
+                &state,
+                &headers,
+                (dashboard, organization, cookie),
+                &submission.preset_id,
+                form,
+                &submission.csrf,
+            )
+            .await;
+        }
+    };
+    if apply_preset_project_updates(&mut project_spec, &form, cpu, memory, disk).is_err() {
+        form.form_error = "The preset project configuration is invalid.".to_owned();
+        return render_preset_form_error(
+            &state,
+            &headers,
+            (dashboard, organization, cookie),
+            &submission.preset_id,
+            form,
+            &submission.csrf,
+        )
+        .await;
+    }
     let request = UpdatePresetRequest {
         org_id: organization.id.clone(),
         preset_id: submission.preset_id.clone(),
         name: Some(form.name.trim().to_owned()),
         description: Some(form.description.clone()),
         slug: Some(form.slug.trim().to_owned()),
-        default_cpu_millicores: cpu,
-        default_memory_mb: memory,
-        default_disk_gb: disk,
         default_ttl_seconds: ttl,
-        image: Some(form.image.trim().to_owned()),
-        install_command: Some(form.install_command.clone()),
-        startup_script: Some(form.startup_script.clone()),
+        project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
         ..Default::default()
     };
     match secrets_presets_connect::update_preset(&state, cookie.clone(), request).await {
@@ -715,7 +746,7 @@ async fn render_preset_form_error(
 fn validate_secret_form(form: &mut SecretFormView, value: &str) {
     if !valid_secret_key(&form.key) {
         form.key_error = format!(
-            "Use 1–{MAX_WORKLOAD_SECRET_KEY_BYTES} ASCII letters, numbers, or underscores for the key"
+            "Use 1–{MAX_WORKLOAD_SECRET_KEY_BYTES} ASCII letters, numbers, or underscores; start with a letter or underscore"
         );
     }
     if value.is_empty() {
@@ -724,7 +755,7 @@ fn validate_secret_form(form: &mut SecretFormView, value: &str) {
 }
 
 fn valid_secret_key(value: &str) -> bool {
-    validate_workload_secret_metadata_key(value).is_ok()
+    validate_workload_secret_key(value).is_ok()
 }
 
 fn bucket_scope(bucket: &str) -> SecretBucket<'_> {
@@ -792,6 +823,24 @@ fn preset_form(submission: &PresetUpdateSubmission) -> PresetFormView {
     }
 }
 
+fn apply_preset_project_updates(
+    project_spec: &mut codewire_project::ProjectSpec,
+    form: &PresetFormView,
+    cpu: Option<i32>,
+    memory: Option<i32>,
+    disk: Option<i32>,
+) -> Result<(), codewire_project::ProjectError> {
+    project_spec.image = form.image.trim().to_owned();
+    project_spec.install_command = form.install_command.clone();
+    project_spec.startup_script = form.startup_script.clone();
+    project_spec.resources = ResourceSpec {
+        cpu_millicores: cpu.and_then(|value| u32::try_from(value).ok()),
+        memory_mib: memory.and_then(|value| u64::try_from(value).ok()),
+        disk_gib: disk.and_then(|value| u64::try_from(value).ok()),
+    };
+    project_spec.validate()
+}
+
 fn parse_positive_i32(value: &str, label: &str, error: &mut String) -> Option<i32> {
     match value.trim().parse::<i32>() {
         Ok(value) if value > 0 => Some(value),
@@ -815,9 +864,9 @@ fn apply_preset_error(form: &mut PresetFormView, error: &ConnectError) {
     for (field, description) in bad_request_fields(error) {
         match field.trim_start_matches('/') {
             "name" => form.name_error = description,
-            "default_cpu_millicores" => form.cpu_error = description,
-            "default_memory_mb" => form.memory_error = description,
-            "default_disk_gb" => form.disk_error = description,
+            "project_spec.resources.cpu_millicores" => form.cpu_error = description,
+            "project_spec.resources.memory_mib" => form.memory_error = description,
+            "project_spec.resources.disk_gib" => form.disk_error = description,
             "default_ttl_seconds" => form.ttl_error = description,
             _ => {}
         }
@@ -913,23 +962,25 @@ mod tests {
     use codewire_proto::google::rpc::BadRequest;
 
     #[test]
-    fn secret_keys_use_the_shared_storage_boundary() {
-        let maximum = format!("1{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 1));
+    fn secret_keys_use_the_canonical_workload_grammar() {
+        let maximum = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 1));
         let too_long = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES));
 
         assert_eq!(maximum.len(), 255);
         assert_eq!(too_long.len(), 256);
         assert!(valid_secret_key(&maximum));
         assert!(!valid_secret_key(&too_long));
+        assert!(valid_secret_key("_UNDERSCORE_FIRST"));
+        assert!(!valid_secret_key("1DIGIT_FIRST"));
 
         let mut form = SecretFormView {
-            key: too_long,
+            key: "1DIGIT_FIRST".into(),
             ..Default::default()
         };
         validate_secret_form(&mut form, "synthetic");
         assert_eq!(
             form.key_error,
-            "Use 1–255 ASCII letters, numbers, or underscores for the key"
+            "Use 1–255 ASCII letters, numbers, or underscores; start with a letter or underscore"
         );
     }
 
@@ -950,7 +1001,7 @@ mod tests {
     fn preset_bad_request_details_attach_to_exact_fields() {
         let detail = BadRequest {
             field_violations: vec![codewire_proto::google::rpc::bad_request::FieldViolation {
-                field: "/default_memory_mb".into(),
+                field: "/project_spec.resources.memory_mib".into(),
                 description: "Choose more memory".into(),
                 ..Default::default()
             }],
@@ -963,6 +1014,57 @@ mod tests {
         apply_preset_error(&mut form, &error);
         assert_eq!(form.memory_error, "Choose more memory");
         assert!(form.form_error.is_empty());
+    }
+
+    #[test]
+    fn preset_edits_preserve_unexposed_canonical_project_fields() {
+        let mut project_spec = codewire_project::ProjectSpec {
+            repositories: vec![codewire_project::RepositorySpec {
+                source: "https://example.test/org/app.git".to_owned(),
+                destination: "/workspace/app".to_owned(),
+                ..Default::default()
+            }],
+            working_directory: "/workspace/app".to_owned(),
+            environment: [("RUST_LOG".to_owned(), "info".to_owned())]
+                .into_iter()
+                .collect(),
+            agents: codewire_project::AgentsSpec {
+                install: Some(true),
+                tools: vec!["codex".to_owned()],
+            },
+            application_ports: vec![codewire_project::ApplicationPort {
+                port: 3_000,
+                label: "web".to_owned(),
+                access: "creator".to_owned(),
+            }],
+            secrets: codewire_project::SecretBindings {
+                project: "development".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let repositories = project_spec.repositories.clone();
+        let environment = project_spec.environment.clone();
+        let agents = project_spec.agents.clone();
+        let application_ports = project_spec.application_ports.clone();
+        let secrets = project_spec.secrets.clone();
+        let form = PresetFormView {
+            image: "example.test/workspace@sha256:def".to_owned(),
+            install_command: "cargo build".to_owned(),
+            startup_script: "cargo run".to_owned(),
+            ..Default::default()
+        };
+
+        apply_preset_project_updates(&mut project_spec, &form, Some(2_000), Some(4_096), Some(40))
+            .expect("valid preset edit");
+
+        assert_eq!(project_spec.repositories, repositories);
+        assert_eq!(project_spec.environment, environment);
+        assert_eq!(project_spec.agents, agents);
+        assert_eq!(project_spec.application_ports, application_ports);
+        assert_eq!(project_spec.secrets, secrets);
+        assert_eq!(project_spec.resources.cpu_millicores, Some(2_000));
+        assert_eq!(project_spec.image, "example.test/workspace@sha256:def");
     }
 
     #[test]

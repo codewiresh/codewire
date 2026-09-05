@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use codewire_access::{
-    AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
-    CredentialStatus, Owner, ProviderId, builtin_provider_catalog,
+    AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
+    CredentialId, CredentialStatus, Owner, ProviderId, builtin_provider_catalog,
 };
 use codewire_local_credentials::{
     AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord, LocalCredentialClient,
@@ -941,51 +941,157 @@ async fn resolve_credential(
     client: &mut LocalCredentialClient,
     selector: &str,
 ) -> anyhow::Result<CredentialRecord> {
-    let selector = trimmed_required(selector, "credential")?;
-    let records = client
-        .list_credentials()
-        .await
-        .context("list local credentials")?;
-    if let Some(record) = records
-        .iter()
-        .find(|record| record.metadata.id.as_str() == selector)
-    {
-        return Ok(record.clone());
+    match parse_credential_selector(selector)? {
+        ParsedCredentialSelector::Id(id) => client
+            .get_credential(&id)
+            .await
+            .with_context(|| format!("get local credential by ID {id}")),
+        ParsedCredentialSelector::Name(name) => {
+            let records = client
+                .list_credentials()
+                .await
+                .context("list local credentials")?;
+            select_credential_by_name(&records, name)
+        }
     }
-    records
-        .into_iter()
-        .find(|record| record.metadata.display_name.eq_ignore_ascii_case(selector))
-        .ok_or_else(|| anyhow::anyhow!("local credential {selector:?} was not found"))
 }
 
 async fn resolve_profile(
     client: &mut LocalCredentialClient,
     selector: &str,
 ) -> anyhow::Result<AccessProfileRecord> {
-    let selector = trimmed_required(selector, "access profile")?;
-    if selector.contains('/') {
-        let reference = selector
-            .parse::<AccessProfileReference>()
-            .context("invalid access profile reference")?;
-        return client
+    match parse_profile_selector(selector)? {
+        ParsedProfileSelector::Id(id) => client
+            .get_profile(&id)
+            .await
+            .with_context(|| format!("get local access profile by ID {id}")),
+        ParsedProfileSelector::Reference(reference) => client
             .resolve_profile(&reference)
             .await
-            .context("resolve local access profile");
+            .with_context(|| format!("resolve local access profile {reference}")),
+        ParsedProfileSelector::Name(name) => {
+            let records = client
+                .list_profiles()
+                .await
+                .context("list local access profiles")?;
+            select_profile_by_name(&records, name.as_str())
+        }
     }
-    let records = client
-        .list_profiles()
-        .await
-        .context("list local access profiles")?;
-    if let Some(record) = records
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ParsedCredentialSelector<'a> {
+    Name(&'a str),
+    Id(CredentialId),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ParsedProfileSelector {
+    Name(AccessProfileName),
+    Reference(AccessProfileReference),
+    Id(AccessProfileId),
+}
+
+fn parse_credential_selector(selector: &str) -> anyhow::Result<ParsedCredentialSelector<'_>> {
+    let selector = trimmed_required(selector, "credential selector")?;
+    if let Some(name) = selector.strip_prefix("name:") {
+        return Ok(ParsedCredentialSelector::Name(explicit_selector_name(
+            name,
+            "credential",
+        )?));
+    }
+    if let Some(id) = selector.strip_prefix("id:") {
+        let id = canonical_selector_id(id, "credential")?;
+        return Ok(ParsedCredentialSelector::Id(
+            CredentialId::parse(id).context("invalid credential ID")?,
+        ));
+    }
+    reject_unknown_selector_prefix(selector, "credential")?;
+    Ok(ParsedCredentialSelector::Name(selector))
+}
+
+fn parse_profile_selector(selector: &str) -> anyhow::Result<ParsedProfileSelector> {
+    let selector = trimmed_required(selector, "access profile selector")?;
+    if let Some(name) = selector.strip_prefix("name:") {
+        let name = explicit_selector_name(name, "access profile")?;
+        return Ok(ParsedProfileSelector::Name(
+            AccessProfileName::parse(name).context("invalid access profile name")?,
+        ));
+    }
+    if let Some(id) = selector.strip_prefix("id:") {
+        let id = canonical_selector_id(id, "access profile")?;
+        return Ok(ParsedProfileSelector::Id(
+            AccessProfileId::parse(id).context("invalid access profile ID")?,
+        ));
+    }
+    reject_unknown_selector_prefix(selector, "access profile")?;
+    if selector.contains('/') {
+        return Ok(ParsedProfileSelector::Reference(
+            selector
+                .parse::<AccessProfileReference>()
+                .context("invalid access profile reference")?,
+        ));
+    }
+    Ok(ParsedProfileSelector::Name(
+        AccessProfileName::parse(selector).context("invalid access profile name")?,
+    ))
+}
+
+fn explicit_selector_name<'a>(name: &'a str, kind: &str) -> anyhow::Result<&'a str> {
+    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
+        anyhow::bail!("{kind} selector name must be non-empty and have no surrounding whitespace");
+    }
+    Ok(name)
+}
+
+fn canonical_selector_id<'a>(id: &'a str, kind: &str) -> anyhow::Result<&'a str> {
+    let parsed =
+        uuid::Uuid::parse_str(id).with_context(|| format!("invalid {kind} selector ID {id:?}"))?;
+    if parsed.is_nil() || parsed.to_string() != id {
+        anyhow::bail!("invalid {kind} selector ID {id:?}; expected a canonical non-nil UUID");
+    }
+    Ok(id)
+}
+
+fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<()> {
+    if let Some((prefix, _)) = selector.split_once(':') {
+        anyhow::bail!(
+            "invalid {kind} selector prefix {prefix:?}; use a bare name, name:<name>, or id:<canonical-uuid>"
+        );
+    }
+    Ok(())
+}
+
+fn select_credential_by_name(
+    records: &[CredentialRecord],
+    name: &str,
+) -> anyhow::Result<CredentialRecord> {
+    let mut matches = records
         .iter()
-        .find(|record| record.profile.id.as_str() == selector)
-    {
-        return Ok(record.clone());
+        .filter(|record| record.metadata.display_name.eq_ignore_ascii_case(name));
+    let record = matches
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("local credential name {name:?} was not found"))?;
+    if matches.next().is_some() {
+        anyhow::bail!("local credential name {name:?} is ambiguous");
     }
-    records
-        .into_iter()
-        .find(|record| record.profile.name.as_str().eq_ignore_ascii_case(selector))
-        .ok_or_else(|| anyhow::anyhow!("local access profile {selector:?} was not found"))
+    Ok(record.clone())
+}
+
+fn select_profile_by_name(
+    records: &[AccessProfileRecord],
+    name: &str,
+) -> anyhow::Result<AccessProfileRecord> {
+    let mut matches = records
+        .iter()
+        .filter(|record| record.profile.name.as_str().eq_ignore_ascii_case(name));
+    let record = matches
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("local access profile name {name:?} was not found"))?;
+    if matches.next().is_some() {
+        anyhow::bail!("local access profile name {name:?} is ambiguous");
+    }
+    Ok(record.clone())
 }
 
 fn prompt_credential_material() -> anyhow::Result<ProtectedValue> {
@@ -1038,17 +1144,13 @@ fn authentication_kind(value: CredentialAuthenticationKindArg) -> CredentialAuth
         CredentialAuthenticationKindArg::ApiKey => CredentialAuthKind::ApiKey,
         CredentialAuthenticationKindArg::AccessToken => CredentialAuthKind::AccessToken,
         CredentialAuthenticationKindArg::GithubApp => CredentialAuthKind::GitHubApp,
-        CredentialAuthenticationKindArg::SshPrivateKey => CredentialAuthKind::SshPrivateKey,
-        CredentialAuthenticationKindArg::SshAgent => CredentialAuthKind::SshAgent,
     }
 }
 
 fn manually_supplied_credential_kind(value: CredentialAuthKind) -> bool {
     matches!(
         value,
-        CredentialAuthKind::ApiKey
-            | CredentialAuthKind::AccessToken
-            | CredentialAuthKind::SshPrivateKey
+        CredentialAuthKind::ApiKey | CredentialAuthKind::AccessToken
     )
 }
 
@@ -1058,8 +1160,6 @@ fn authentication_kind_label(value: CredentialAuthKind) -> &'static str {
         CredentialAuthKind::ApiKey => "api_key",
         CredentialAuthKind::AccessToken => "access_token",
         CredentialAuthKind::GitHubApp => "github_app",
-        CredentialAuthKind::SshPrivateKey => "ssh_private_key",
-        CredentialAuthKind::SshAgent => "ssh_agent",
     }
 }
 
@@ -1260,20 +1360,26 @@ mod tests {
 
     use base64::Engine as _;
     use clap::Parser as _;
-    use codewire_access::{CredentialId, CredentialMetadata, OwnerId, Placement};
+    use codewire_access::{
+        AccessProfile, AccessProfileScope, CredentialMetadata, OwnerId, Placement,
+    };
 
     use super::*;
     use crate::{Cli, Command};
 
     fn credential() -> CredentialRecord {
+        credential_with("11111111-1111-4111-8111-111111111111", "work-openai")
+    }
+
+    fn credential_with(id: &str, display_name: &str) -> CredentialRecord {
         CredentialRecord {
             metadata: CredentialMetadata {
-                id: CredentialId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
+                id: CredentialId::parse(id).unwrap(),
                 placement: Placement::Local,
                 owner: Owner::User(OwnerId::parse("local-user").unwrap()),
                 provider: ProviderId::parse("openai").unwrap(),
                 authentication_kind: CredentialAuthKind::ApiKey,
-                display_name: "work-openai".into(),
+                display_name: display_name.into(),
                 account_hint: Some("work@example.test".into()),
                 status: CredentialStatus::Active,
                 expires_at_unix: None,
@@ -1281,6 +1387,21 @@ mod tests {
             },
             persistence: ProtectedStorePersistence::OperatingSystem,
             protected_store_cleanup_pending: false,
+            created_at_unix_ms: 10,
+            updated_at_unix_ms: 20,
+        }
+    }
+
+    fn profile_with(id: &str, name: &str) -> AccessProfileRecord {
+        AccessProfileRecord {
+            profile: AccessProfile {
+                id: AccessProfileId::parse(id).unwrap(),
+                placement: Placement::Local,
+                owner: Owner::User(OwnerId::parse("local-user").unwrap()),
+                name: AccessProfileName::parse(name).unwrap(),
+                revision: 1,
+                entries: BTreeMap::new(),
+            },
             created_at_unix_ms: 10,
             updated_at_unix_ms: 20,
         }
@@ -1305,6 +1426,164 @@ mod tests {
         );
         assert!(credential_placement(false, false).is_err());
         assert!(credential_placement(true, true).is_err());
+    }
+
+    #[test]
+    fn credential_selectors_never_confuse_names_with_ids() {
+        const FIRST_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const SECOND_ID: &str = "22222222-2222-4222-8222-222222222222";
+        const THIRD_ID: &str = "33333333-3333-4333-8333-333333333333";
+        let id_prefixed_name = format!("id:{FIRST_ID}");
+        let records = vec![
+            credential_with(FIRST_ID, "work-openai"),
+            credential_with(SECOND_ID, FIRST_ID),
+            credential_with(THIRD_ID, &id_prefixed_name),
+        ];
+
+        let ParsedCredentialSelector::Name(name) = parse_credential_selector(FIRST_ID).unwrap()
+        else {
+            panic!("a bare credential selector must be a name");
+        };
+        assert_eq!(
+            select_credential_by_name(&records, name)
+                .unwrap()
+                .metadata
+                .id
+                .as_str(),
+            SECOND_ID
+        );
+
+        let ParsedCredentialSelector::Id(id) =
+            parse_credential_selector(&format!("id:{FIRST_ID}")).unwrap()
+        else {
+            panic!("an id: credential selector must be an ID");
+        };
+        assert_eq!(id.as_str(), FIRST_ID);
+
+        let explicit_uuid_name = format!("name:{FIRST_ID}");
+        let ParsedCredentialSelector::Name(name) =
+            parse_credential_selector(&explicit_uuid_name).unwrap()
+        else {
+            panic!("a name: credential selector must be a name");
+        };
+        assert_eq!(
+            select_credential_by_name(&records, name)
+                .unwrap()
+                .metadata
+                .id
+                .as_str(),
+            SECOND_ID
+        );
+
+        let explicit_id_prefixed_name = format!("name:{id_prefixed_name}");
+        let ParsedCredentialSelector::Name(name) =
+            parse_credential_selector(&explicit_id_prefixed_name).unwrap()
+        else {
+            panic!("name: must escape a name beginning with id:");
+        };
+        assert_eq!(
+            select_credential_by_name(&records, name)
+                .unwrap()
+                .metadata
+                .id
+                .as_str(),
+            THIRD_ID
+        );
+    }
+
+    #[test]
+    fn credential_selectors_reject_malformed_prefixes_and_name_collisions() {
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        for selector in [
+            "id:",
+            "id:not-a-uuid",
+            "id:11111111-1111-4111-8111-11111111111A",
+            "id:00000000-0000-0000-0000-000000000000",
+            "name:",
+            "name: work",
+            "provider:work",
+        ] {
+            assert!(
+                parse_credential_selector(selector).is_err(),
+                "selector {selector:?} must fail"
+            );
+        }
+
+        let records = vec![
+            credential_with(ID, "work"),
+            credential_with("22222222-2222-4222-8222-222222222222", "WORK"),
+        ];
+        let error = select_credential_by_name(&records, "work").unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn profile_selectors_keep_names_ids_and_scope_references_distinct() {
+        const FIRST_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const SECOND_ID: &str = "22222222-2222-4222-8222-222222222222";
+        let records = vec![
+            profile_with(FIRST_ID, "work"),
+            profile_with(SECOND_ID, FIRST_ID),
+        ];
+
+        let ParsedProfileSelector::Name(name) = parse_profile_selector(FIRST_ID).unwrap() else {
+            panic!("a bare profile selector must be a name");
+        };
+        assert_eq!(
+            select_profile_by_name(&records, name.as_str())
+                .unwrap()
+                .profile
+                .id
+                .as_str(),
+            SECOND_ID
+        );
+
+        let ParsedProfileSelector::Id(id) =
+            parse_profile_selector(&format!("id:{FIRST_ID}")).unwrap()
+        else {
+            panic!("an id: profile selector must be an ID");
+        };
+        assert_eq!(id.as_str(), FIRST_ID);
+
+        let ParsedProfileSelector::Reference(reference) =
+            parse_profile_selector("user/work").unwrap()
+        else {
+            panic!("a scope-qualified profile selector must remain a reference");
+        };
+        assert_eq!(reference.scope(), AccessProfileScope::User);
+        assert_eq!(reference.name().as_str(), "work");
+
+        let ParsedProfileSelector::Name(name) = parse_profile_selector("name:work").unwrap() else {
+            panic!("a name: profile selector must be a name");
+        };
+        assert_eq!(name.as_str(), "work");
+    }
+
+    #[test]
+    fn profile_selectors_reject_malformed_prefixes_and_name_collisions() {
+        for selector in [
+            "id:",
+            "id:not-a-uuid",
+            "id:11111111-1111-4111-8111-11111111111A",
+            "id:00000000-0000-0000-0000-000000000000",
+            "name:",
+            "name:user/work",
+            "profile:work",
+            "user/",
+            "team/work",
+        ] {
+            assert!(
+                parse_profile_selector(selector).is_err(),
+                "selector {selector:?} must fail"
+            );
+        }
+
+        let records = vec![
+            profile_with("11111111-1111-4111-8111-111111111111", "work"),
+            profile_with("22222222-2222-4222-8222-222222222222", "work"),
+        ];
+        let error = select_profile_by_name(&records, "work").unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
     }
 
     #[test]
@@ -1373,6 +1652,23 @@ mod tests {
                 command: CredentialsCommand::Add(_),
             })
         ));
+        for retired_kind in ["ssh-private-key", "ssh-agent"] {
+            assert!(
+                Cli::try_parse_from([
+                    "cw",
+                    "credentials",
+                    "--local",
+                    "add",
+                    "example",
+                    "--kind",
+                    retired_kind,
+                    "--name",
+                    "retired",
+                ])
+                .is_err(),
+                "retired credential kind {retired_kind} must not remain advertised",
+            );
+        }
 
         let profile = Cli::try_parse_from([
             "cw",
@@ -1429,19 +1725,11 @@ mod tests {
     }
 
     #[test]
-    fn oauth_and_runtime_references_cannot_use_the_opaque_material_prompt() {
-        for kind in [
-            CredentialAuthKind::OAuth,
-            CredentialAuthKind::GitHubApp,
-            CredentialAuthKind::SshAgent,
-        ] {
+    fn oauth_and_app_references_cannot_use_the_opaque_material_prompt() {
+        for kind in [CredentialAuthKind::OAuth, CredentialAuthKind::GitHubApp] {
             assert!(!manually_supplied_credential_kind(kind));
         }
-        for kind in [
-            CredentialAuthKind::ApiKey,
-            CredentialAuthKind::AccessToken,
-            CredentialAuthKind::SshPrivateKey,
-        ] {
+        for kind in [CredentialAuthKind::ApiKey, CredentialAuthKind::AccessToken] {
             assert!(manually_supplied_credential_kind(kind));
         }
     }

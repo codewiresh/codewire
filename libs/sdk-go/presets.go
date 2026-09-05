@@ -2,28 +2,23 @@ package codewire
 
 import (
 	"context"
-	"fmt"
 
 	"connectrpc.com/connect"
 	codewirev1 "github.com/codewiresh/codewire/libs/gen-go/codewire/v1"
 )
 
-// TemplateService manages presets (environment templates).
-type TemplateService struct {
+// PresetService manages reusable environment presets.
+type PresetService struct {
 	client *Client
 }
 
 // Create creates a new preset.
-func (s *TemplateService) Create(ctx context.Context, body CreatePresetBody) (*Preset, error) {
+func (s *PresetService) Create(ctx context.Context, body CreatePresetBody) (*Preset, error) {
 	orgID, err := s.client.resolveOrgID()
 	if err != nil {
 		return nil, err
 	}
-	secretProjectID, err := s.resolveSecretProjectID(ctx, orgID, body.SecretProject, false)
-	if err != nil {
-		return nil, err
-	}
-	req, err := createPresetRequest(orgID, body, secretProjectID)
+	req, err := createPresetRequest(orgID, body)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +34,7 @@ func (s *TemplateService) Create(ctx context.Context, body CreatePresetBody) (*P
 }
 
 // List returns all presets for the organization.
-func (s *TemplateService) List(ctx context.Context) ([]Preset, error) {
+func (s *PresetService) List(ctx context.Context) ([]Preset, error) {
 	orgID, err := s.client.resolveOrgID()
 	if err != nil {
 		return nil, err
@@ -67,7 +62,7 @@ func (s *TemplateService) List(ctx context.Context) ([]Preset, error) {
 }
 
 // Get retrieves a preset by ID.
-func (s *TemplateService) Get(ctx context.Context, presetID string) (*Preset, error) {
+func (s *PresetService) Get(ctx context.Context, presetID string) (*Preset, error) {
 	orgID, err := s.client.resolveOrgID()
 	if err != nil {
 		return nil, err
@@ -86,16 +81,12 @@ func (s *TemplateService) Get(ctx context.Context, presetID string) (*Preset, er
 }
 
 // Update modifies an existing preset.
-func (s *TemplateService) Update(ctx context.Context, presetID string, body UpdatePresetBody) (*Preset, error) {
+func (s *PresetService) Update(ctx context.Context, presetID string, body UpdatePresetBody) (*Preset, error) {
 	orgID, err := s.client.resolveOrgID()
 	if err != nil {
 		return nil, err
 	}
-	secretProjectID, err := s.resolveSecretProjectID(ctx, orgID, body.SecretProject, true)
-	if err != nil {
-		return nil, err
-	}
-	req, err := updatePresetRequest(orgID, presetID, body, secretProjectID)
+	req, err := updatePresetRequest(orgID, presetID, body)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +102,7 @@ func (s *TemplateService) Update(ctx context.Context, presetID string, body Upda
 }
 
 // Delete removes a preset by ID.
-func (s *TemplateService) Delete(ctx context.Context, presetID string) error {
+func (s *PresetService) Delete(ctx context.Context, presetID string) error {
 	orgID, err := s.client.resolveOrgID()
 	if err != nil {
 		return err
@@ -120,35 +111,4 @@ func (s *TemplateService) Delete(ctx context.Context, presetID string) error {
 		OrgId: orgID, PresetId: presetID,
 	}))
 	return connectSDKError(err)
-}
-
-func (s *TemplateService) resolveSecretProjectID(ctx context.Context, orgID string, selection *string, update bool) (*string, error) {
-	if selection == nil {
-		return nil, nil
-	}
-	if *selection == "" {
-		if update {
-			return selection, nil
-		}
-		return nil, nil
-	}
-
-	for pageToken := ""; ; {
-		response, err := s.client.secrets.ListSecretProjects(ctx, connect.NewRequest(&codewirev1.ListSecretProjectsRequest{
-			OrgId: orgID, PageToken: pageToken,
-		}))
-		if err != nil {
-			return nil, connectSDKError(err)
-		}
-		for _, project := range response.Msg.GetSecretProjects() {
-			if project.GetId() == *selection || project.GetName() == *selection {
-				id := project.GetId()
-				return &id, nil
-			}
-		}
-		pageToken = response.Msg.GetNextPageToken()
-		if pageToken == "" {
-			return nil, fmt.Errorf("codewire: secret project not found: %s", *selection)
-		}
-	}
 }

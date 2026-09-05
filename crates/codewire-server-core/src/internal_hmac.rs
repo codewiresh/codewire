@@ -1,8 +1,8 @@
 //! Short-lived, exact-scope HMAC credentials for platform-internal RPC hops.
 //!
-//! This is the existing fifth authentication flavor in its narrowly-scoped
-//! service form. It never represents a user, never carries a caller
-//! credential, and is valid only for one calling service, one exact RPC
+//! This is the platform-internal fourth authentication flavor in its
+//! narrowly-scoped service form. It never represents a user, never carries a
+//! caller credential, and is valid only for one calling service, one exact RPC
 //! method, and a short time window.
 
 use base64::Engine as _;

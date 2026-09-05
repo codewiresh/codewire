@@ -2,24 +2,19 @@
 // types and a fluent Environment handle over generated Connect clients.
 package codewire
 
-// SetupAgent configures one setup-time AI agent.
-type SetupAgent struct {
-	Type string `json:"type"`
-}
-
-// AppPort configures an application port exposed during setup.
-type AppPort struct {
+// ApplicationPort configures an application port exposed during setup.
+type ApplicationPort struct {
 	Access *string `json:"access,omitempty"`
 	Label  string  `json:"label"`
 	Port   int64   `json:"port"`
 }
 
-// RepoEntry configures an additional repository checked out during setup.
-type RepoEntry struct {
-	Branch    *string `json:"branch,omitempty"`
-	MountPath *string `json:"mount_path,omitempty"`
-	Revision  *string `json:"revision,omitempty"`
-	Url       string  `json:"url"`
+// RepositorySpec configures an additional repository checked out during setup.
+type RepositorySpec struct {
+	Branch      *string `json:"branch,omitempty"`
+	Destination *string `json:"destination,omitempty"`
+	Revision    *string `json:"revision,omitempty"`
+	Source      string  `json:"source"`
 }
 
 // ProjectAgents configures canonical setup-time agent intent.
@@ -59,36 +54,17 @@ type ProjectSpec struct {
 	SchemaVersion    uint32                  `json:"schema_version"`
 	Preset           string                  `json:"preset,omitempty"`
 	Image            string                  `json:"image,omitempty"`
-	Repositories     []RepoEntry             `json:"repositories,omitempty"`
+	Repositories     []RepositorySpec        `json:"repositories,omitempty"`
 	WorkingDirectory string                  `json:"working_directory"`
 	InstallCommand   string                  `json:"install_command,omitempty"`
 	StartupScript    string                  `json:"startup_script,omitempty"`
 	Environment      map[string]string       `json:"environment,omitempty"`
 	Agents           *ProjectAgents          `json:"agents,omitempty"`
-	AgentEnvironment map[string]string       `json:"agent_environment,omitempty"`
 	Skills           []ProjectSkillSelection `json:"skills,omitempty"`
-	ApplicationPorts []AppPort               `json:"application_ports,omitempty"`
+	ApplicationPorts []ApplicationPort       `json:"application_ports,omitempty"`
 	Resources        *ProjectResources       `json:"resources,omitempty"`
 	Secrets          *ProjectSecretBindings  `json:"secrets,omitempty"`
 	Access           *ProjectAccessBinding   `json:"access,omitempty"`
-}
-
-// SetupConfig describes the setup configuration embedded in a preset.
-type SetupConfig struct {
-	Agent              *string            `json:"agent,omitempty"`
-	AgentEnv           *map[string]string `json:"agent_env,omitempty"`
-	Agents             *[]SetupAgent      `json:"agents,omitempty"`
-	AppPorts           *[]AppPort         `json:"app_ports,omitempty"`
-	Branch             *string            `json:"branch,omitempty"`
-	EnvVars            *map[string]string `json:"env_vars,omitempty"`
-	IncludeOrgSecrets  *bool              `json:"include_org_secrets,omitempty"`
-	IncludeUserSecrets *bool              `json:"include_user_secrets,omitempty"`
-	InstallAgents      *bool              `json:"install_agents,omitempty"`
-	InstallCommand     *string            `json:"install_command,omitempty"`
-	RepoUrl            *string            `json:"repo_url,omitempty"`
-	Repos              *[]RepoEntry       `json:"repos,omitempty"`
-	StartupScript      *string            `json:"startup_script,omitempty"`
-	ProjectSpec        *ProjectSpec       `json:"project_spec,omitempty"`
 }
 
 // EnvironmentData is the SDK-owned public representation of an environment.
@@ -181,31 +157,11 @@ type EnvironmentResizeOperation struct {
 
 // CreateEnvironmentBody configures environment creation.
 type CreateEnvironmentBody struct {
-	Schema             *string            `json:"$schema,omitempty"`
-	Agent              *string            `json:"agent,omitempty"`
-	AgentEnv           *map[string]string `json:"agent_env,omitempty"`
-	Agents             *[]SetupAgent      `json:"agents,omitempty"`
-	AppPorts           *[]AppPort         `json:"app_ports,omitempty"`
-	Branch             *string            `json:"branch,omitempty"`
-	CpuMillicores      *int64             `json:"cpu_millicores,omitempty"`
-	DiskGb             *int64             `json:"disk_gb,omitempty"`
-	EnvVars            *map[string]string `json:"env_vars,omitempty"`
-	Image              *string            `json:"image,omitempty"`
-	IncludeOrgSecrets  *bool              `json:"include_org_secrets,omitempty"`
-	IncludeUserSecrets *bool              `json:"include_user_secrets,omitempty"`
-	InstallAgents      *bool              `json:"install_agents,omitempty"`
-	InstallCommand     *string            `json:"install_command,omitempty"`
-	IsolationTier      *string            `json:"isolation_tier,omitempty"`
-	MemoryMb           *int64             `json:"memory_mb,omitempty"`
-	Name               *string            `json:"name,omitempty"`
-	PresetId           *string            `json:"preset_id,omitempty"`
-	PresetSlug         *string            `json:"preset_slug,omitempty"`
-	RepoUrl            *string            `json:"repo_url,omitempty"`
-	Repos              *[]RepoEntry       `json:"repos,omitempty"`
-	SecretProject      *string            `json:"secret_project,omitempty"`
-	StartupScript      *string            `json:"startup_script,omitempty"`
-	TtlSeconds         *int64             `json:"ttl_seconds,omitempty"`
-	ProjectSpec        *ProjectSpec       `json:"project_spec,omitempty"`
+	PresetId      *string     `json:"preset_id,omitempty"`
+	Name          *string     `json:"name,omitempty"`
+	TtlSeconds    *int64      `json:"ttl_seconds,omitempty"`
+	IsolationTier *string     `json:"isolation_tier,omitempty"`
+	ProjectSpec   ProjectSpec `json:"project_spec"`
 }
 
 // ExecBody configures command execution in an environment.
@@ -254,72 +210,36 @@ type ListEnvironmentsParams struct {
 
 // Preset is the SDK-owned public representation of a preset.
 type Preset struct {
-	Schema               *string      `json:"$schema,omitempty"`
-	BuildError           *string      `json:"build_error,omitempty"`
-	BuildStatus          string       `json:"build_status"`
-	CreatedAt            string       `json:"created_at"`
-	DefaultCpuMillicores int64        `json:"default_cpu_millicores"`
-	DefaultDiskGb        int64        `json:"default_disk_gb"`
-	DefaultMemoryMb      int64        `json:"default_memory_mb"`
-	DefaultSetupConfig   *SetupConfig `json:"default_setup_config,omitempty"`
-	DefaultTtlSeconds    *int64       `json:"default_ttl_seconds,omitempty"`
-	Description          *string      `json:"description,omitempty"`
-	Id                   string       `json:"id"`
-	Image                *string      `json:"image,omitempty"`
-	Language             *string      `json:"language,omitempty"`
-	Name                 string       `json:"name"`
-	Official             bool         `json:"official"`
-	OrgId                *string      `json:"org_id,omitempty"`
-	SecretProjectId      *string      `json:"secret_project_id,omitempty"`
-	Slug                 *string      `json:"slug,omitempty"`
+	BuildError        *string     `json:"build_error,omitempty"`
+	BuildStatus       string      `json:"build_status"`
+	CreatedAt         string      `json:"created_at"`
+	DefaultTtlSeconds *int64      `json:"default_ttl_seconds,omitempty"`
+	Description       *string     `json:"description,omitempty"`
+	Id                string      `json:"id"`
+	Language          *string     `json:"language,omitempty"`
+	Name              string      `json:"name"`
+	Official          bool        `json:"official"`
+	OrgId             *string     `json:"org_id,omitempty"`
+	Slug              *string     `json:"slug,omitempty"`
+	ProjectSpec       ProjectSpec `json:"project_spec"`
 }
 
 // CreatePresetBody configures preset creation.
 type CreatePresetBody struct {
-	Schema               *string            `json:"$schema,omitempty"`
-	Agent                *string            `json:"agent,omitempty"`
-	AgentEnv             *map[string]string `json:"agent_env,omitempty"`
-	Agents               *[]SetupAgent      `json:"agents,omitempty"`
-	AppPorts             *[]AppPort         `json:"app_ports,omitempty"`
-	DefaultCpuMillicores *int64             `json:"default_cpu_millicores,omitempty"`
-	DefaultDiskGb        *int64             `json:"default_disk_gb,omitempty"`
-	DefaultMemoryMb      *int64             `json:"default_memory_mb,omitempty"`
-	DefaultTtlSeconds    *int64             `json:"default_ttl_seconds,omitempty"`
-	Description          *string            `json:"description,omitempty"`
-	EnvVars              *map[string]string `json:"env_vars,omitempty"`
-	Image                *string            `json:"image,omitempty"`
-	IncludeOrgSecrets    *bool              `json:"include_org_secrets,omitempty"`
-	IncludeUserSecrets   *bool              `json:"include_user_secrets,omitempty"`
-	InstallAgents        *bool              `json:"install_agents,omitempty"`
-	InstallCommand       *string            `json:"install_command,omitempty"`
-	Name                 string             `json:"name"`
-	SecretProject        *string            `json:"secret_project,omitempty"`
-	Slug                 *string            `json:"slug,omitempty"`
-	StartupScript        *string            `json:"startup_script,omitempty"`
+	Name              string      `json:"name"`
+	Slug              *string     `json:"slug,omitempty"`
+	Description       *string     `json:"description,omitempty"`
+	DefaultTtlSeconds *int64      `json:"default_ttl_seconds,omitempty"`
+	ProjectSpec       ProjectSpec `json:"project_spec"`
 }
 
 // UpdatePresetBody configures preset updates.
 type UpdatePresetBody struct {
-	Schema               *string            `json:"$schema,omitempty"`
-	Agent                *string            `json:"agent,omitempty"`
-	AgentEnv             *map[string]string `json:"agent_env,omitempty"`
-	Agents               *[]SetupAgent      `json:"agents,omitempty"`
-	AppPorts             *[]AppPort         `json:"app_ports,omitempty"`
-	DefaultCpuMillicores *int64             `json:"default_cpu_millicores,omitempty"`
-	DefaultDiskGb        *int64             `json:"default_disk_gb,omitempty"`
-	DefaultMemoryMb      *int64             `json:"default_memory_mb,omitempty"`
-	DefaultTtlSeconds    *int64             `json:"default_ttl_seconds,omitempty"`
-	Description          *string            `json:"description,omitempty"`
-	EnvVars              *map[string]string `json:"env_vars,omitempty"`
-	Image                *string            `json:"image,omitempty"`
-	IncludeOrgSecrets    *bool              `json:"include_org_secrets,omitempty"`
-	IncludeUserSecrets   *bool              `json:"include_user_secrets,omitempty"`
-	InstallAgents        *bool              `json:"install_agents,omitempty"`
-	InstallCommand       *string            `json:"install_command,omitempty"`
-	Name                 *string            `json:"name,omitempty"`
-	SecretProject        *string            `json:"secret_project,omitempty"`
-	Slug                 *string            `json:"slug,omitempty"`
-	StartupScript        *string            `json:"startup_script,omitempty"`
+	Name              *string      `json:"name,omitempty"`
+	Description       *string      `json:"description,omitempty"`
+	Slug              *string      `json:"slug,omitempty"`
+	DefaultTtlSeconds *int64       `json:"default_ttl_seconds,omitempty"`
+	ProjectSpec       *ProjectSpec `json:"project_spec,omitempty"`
 }
 
 // FileEntry describes an environment file.

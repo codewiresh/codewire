@@ -1,31 +1,27 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    convert::Infallible,
     pin::Pin,
-    task::{Context, Poll},
 };
 
-use askama::Template as _;
 use axum::{
     Form,
-    body::{Body, Bytes},
     extract::{Path, Query, RawForm, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse as _, Response},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use codewire_project::{
+    AgentsSpec, ApplicationPort, PROJECT_SCHEMA_VERSION, ProjectSpec, RepositorySpec, ResourceSpec,
+};
 use codewire_proto::codewire::v1::{
-    AppPort, CreateEnvironmentRequest, CreatePortRequest, DeletePortRequest,
-    EnvironmentResizeDisruptionPolicy, IsolationTier, PortAccess, RepoEntry,
-    ResizeEnvironmentRequest, SetupAgent,
+    CreateEnvironmentRequest, CreatePortRequest, DeletePortRequest,
+    EnvironmentResizeDisruptionPolicy, IsolationTier, PortAccess, ResizeEnvironmentRequest,
 };
-use connectrpc::{ConnectError, ErrorCode, http_body};
+use connectrpc::{ConnectError, ErrorCode};
 use serde::Deserialize;
-use tokio::sync::mpsc;
 use url::Url;
 
 use crate::{
-    environment_connect::{self, EnvironmentCreateOptions, EnvironmentPrepareEvent},
+    environment_connect::{self, EnvironmentCreateOptions},
     error::WebError,
     response::{
         HTMX_REQUEST, error_page, login_redirect, render_page_with_connect_origin, render_template,
@@ -37,14 +33,14 @@ use crate::{
     security::{csrf_cookie, csrf_cookie_value, new_csrf_token, with_csrf_cookie},
     state::AppState,
     templates::{
-        EnvironmentCreateFormTemplate, EnvironmentListTemplate, EnvironmentResizeOperationTemplate,
+        EnvironmentListTemplate, EnvironmentResizeOperationTemplate,
         OrganizationEnvironmentsContentTemplate, OrganizationEnvironmentsTemplate,
         SandboxRailTemplate,
     },
     view::{
-        EnvironmentAppPortFormRow, EnvironmentCreateFormView, EnvironmentDetectionView,
-        EnvironmentPortPanelView, EnvironmentRepositoryFormRow, EnvironmentsPageView,
-        OrganizationContext, bad_request_fields, connect_error_reason,
+        EnvironmentAppPortFormRow, EnvironmentCreateFormView, EnvironmentPortPanelView,
+        EnvironmentRepositoryFormRow, EnvironmentsPageView, OrganizationContext,
+        bad_request_fields, connect_error_reason,
     },
 };
 
@@ -54,6 +50,9 @@ const MAX_FIELD: usize = 16_384;
 const DEFAULT_TTL: &str = "infinity";
 const PROTECTED_SECRET_ACCESS_UNAVAILABLE: &str =
     "Saved secrets cannot be attached to a Sandbox until protected access is available.";
+const PROJECT_SPEC_INVALID: &str = "The Sandbox service returned an invalid project configuration.";
+const PROJECT_FEATURE_UNAVAILABLE: &str =
+    "This project uses features that the current platform Sandbox editor cannot execute safely.";
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct EnvironmentsQuery {
@@ -131,8 +130,6 @@ pub(super) struct ResizeApplySubmission {
 // derived diagnostics, retained form models, or errors.
 struct EnvironmentSubmission {
     csrf: String,
-    mode: String,
-    prepared: bool,
     name: String,
     preset_id: String,
     image: String,
@@ -217,8 +214,6 @@ impl EnvironmentSubmission {
 
         Ok(Self {
             csrf: take(&mut values, "_csrf"),
-            mode: take(&mut values, "mode"),
-            prepared: values.contains_key("prepared"),
             name: take(&mut values, "name"),
             preset_id: take(&mut values, "preset_id"),
             image: take(&mut values, "image"),
@@ -243,13 +238,6 @@ impl EnvironmentSubmission {
         EnvironmentCreateFormView {
             csrf_token: token,
             expanded: true,
-            prepared: false,
-            mode: if self.mode == "image" {
-                "image"
-            } else {
-                "repo"
-            }
-            .to_owned(),
             name: self.name.trim().to_owned(),
             preset_id: self.preset_id.trim().to_owned(),
             image: self.image.trim().to_owned(),
@@ -266,13 +254,8 @@ impl EnvironmentSubmission {
             confidential_price: String::new(),
             selected_agents: self.agents.clone(),
             app_ports: app_port_rows(&self.app_ports),
-            github_connected: false,
-            github_username: String::new(),
-            github_repositories_available: false,
-            github_repositories: Vec::new(),
             presets: Vec::new(),
             agents: Vec::new(),
-            detection: EnvironmentDetectionView::default(),
             repo_error: String::new(),
             image_error: String::new(),
             name_error: String::new(),
@@ -292,41 +275,39 @@ impl EnvironmentSubmission {
         else {
             return;
         };
-        if self.prepared
-            && !self.image.trim().is_empty()
-            && self.image.trim() != preset.image.trim()
-        {
-            self.preset_id.clear();
-            return;
-        }
         if self.image.trim().is_empty() {
             self.image = preset.image.clone();
         }
-        if !self.prepared && self.cpu.trim().is_empty() {
-            self.cpu = preset.default_cpu_millicores.to_string();
+        if self.cpu.trim().is_empty()
+            && let Some(cpu) = preset.default_cpu_millicores
+        {
+            self.cpu = cpu.to_string();
         }
-        if !self.prepared && self.memory.trim().is_empty() {
-            self.memory = preset.default_memory_mb.to_string();
+        if self.memory.trim().is_empty()
+            && let Some(memory) = preset.default_memory_mib
+        {
+            self.memory = memory.to_string();
         }
-        if !self.prepared && self.disk.trim().is_empty() {
-            self.disk = preset.default_disk_gb.to_string();
+        if self.disk.trim().is_empty()
+            && let Some(disk) = preset.default_disk_gib
+        {
+            self.disk = disk.to_string();
         }
-        if !self.prepared
-            && ttl_uses_default(&self.ttl)
+        if ttl_uses_default(&self.ttl)
             && let Some(ttl) = preset.default_ttl_seconds
         {
             self.ttl = format!("{ttl}s");
         }
-        if !self.prepared && self.install_command.is_empty() {
+        if self.install_command.is_empty() {
             self.install_command = preset.default_install_command.clone();
         }
-        if !self.prepared && self.startup_script.is_empty() {
+        if self.startup_script.is_empty() {
             self.startup_script = preset.default_startup_script.clone();
         }
-        if !self.prepared && self.agents.is_empty() {
+        if self.agents.is_empty() {
             self.agents = preset.default_agents.clone();
         }
-        if !self.prepared && self.app_ports.is_empty() {
+        if self.app_ports.is_empty() {
             self.app_ports = preset
                 .default_app_ports
                 .iter()
@@ -335,38 +316,28 @@ impl EnvironmentSubmission {
         }
     }
 
-    fn normalize_source(&mut self) {
-        // Image and repository configuration are complementary: the image
-        // defines the workspace runtime while repositories define what is
-        // mounted into it. Keep accepting the legacy mode field, but never
-        // discard either half of a submitted configuration.
-        if !matches!(self.mode.as_str(), "image" | "repo") {
-            self.mode = "image".to_owned();
-        }
-    }
-
     fn validate_and_draft(
         &self,
         org_id: &str,
         form: &mut EnvironmentCreateFormView,
     ) -> Option<CreateEnvironmentRequest> {
-        let repositories: Vec<RepoEntry> = self
+        let mut repositories: Vec<RepositorySpec> = self
             .repositories
             .iter()
             .filter_map(|(url, branch, mount_path)| {
                 let url = url.trim();
-                (!url.is_empty()).then(|| RepoEntry {
-                    url: url.to_owned(),
+                (!url.is_empty()).then(|| RepositorySpec {
+                    source: url.to_owned(),
+                    revision: String::new(),
                     branch: branch.trim().to_owned(),
-                    mount_path: workspace_mount_path(mount_path),
-                    ..Default::default()
+                    destination: workspace_mount_path(mount_path),
                 })
             })
             .collect();
 
         if repositories
             .iter()
-            .any(|repository| !valid_repository_url(&repository.url))
+            .any(|repository| !valid_repository_url(&repository.source))
         {
             form.repo_error =
                 "Repository URLs must be clean HTTP(S) URLs without embedded credentials."
@@ -377,6 +348,21 @@ impl EnvironmentSubmission {
             && self.preset_id.trim().is_empty()
         {
             form.image_error = "Enter a workspace image or choose a repository.".to_owned();
+        }
+        match codewire_project::validate_repository_destinations(
+            repositories
+                .iter()
+                .map(|repository| (repository.source.as_str(), repository.destination.as_str())),
+        ) {
+            Ok(destinations) => {
+                for (repository, destination) in repositories.iter_mut().zip(destinations) {
+                    repository.destination = destination;
+                }
+            }
+            Err(_) => {
+                form.repo_error =
+                    "Repository destinations must be distinct paths inside /workspace.".to_owned();
+            }
         }
 
         if self.name.len() > 128 || self.name.bytes().any(|byte| byte.is_ascii_control()) {
@@ -424,11 +410,10 @@ impl EnvironmentSubmission {
                     "Application ports need a valid port and lowercase label.".to_owned();
                 continue;
             }
-            ports.push(AppPort {
-                port: port_number,
+            ports.push(ApplicationPort {
+                port: port_number as u16,
                 label: label.trim().to_owned(),
                 access: allowlisted_access(access).to_owned(),
-                ..Default::default()
             });
         }
 
@@ -443,55 +428,57 @@ impl EnvironmentSubmission {
         if form.has_errors() {
             return None;
         }
-        let primary = repositories.first().cloned().unwrap_or_default();
+        let working_directory = match repositories.as_slice() {
+            [repository] => repository.destination.clone(),
+            _ => "/workspace".to_owned(),
+        };
+        let project_spec = ProjectSpec {
+            schema_version: PROJECT_SCHEMA_VERSION,
+            image: self.image.trim().to_owned(),
+            repositories,
+            working_directory,
+            install_command: self.install_command.clone(),
+            startup_script: self.startup_script.clone(),
+            agents: AgentsSpec {
+                install: None,
+                tools: agents,
+            },
+            application_ports: ports,
+            resources: ResourceSpec {
+                cpu_millicores: cpu.map(|value| value as u32),
+                memory_mib: memory.map(|value| value as u64),
+                disk_gib: disk.map(|value| value as u64),
+            },
+            ..ProjectSpec::default()
+        };
+        if project_spec.validate().is_err() {
+            form.form_error = "The Sandbox project configuration is invalid.".to_owned();
+            return None;
+        }
         Some(CreateEnvironmentRequest {
             org_id: org_id.to_owned(),
             preset_id: nonempty(self.preset_id.trim()),
             name: nonempty(self.name.trim()),
-            cpu_millicores: cpu,
-            memory_mb: memory,
-            disk_gb: disk,
             ttl_seconds: ttl,
-            repo_url: primary.url.clone(),
-            branch: primary.branch.clone(),
-            repos: if repositories.len() > 1
-                || repositories
-                    .iter()
-                    .any(|repository| !repository.mount_path.is_empty())
-            {
-                repositories
-            } else {
-                Vec::new()
-            },
-            image: self.image.trim().to_owned(),
-            install_command: self.install_command.clone(),
-            startup_script: self.startup_script.clone(),
-            agents,
-            secret_project: String::new(),
-            app_ports: ports,
-            include_org_secrets: Some(false),
-            include_user_secrets: Some(false),
             isolation_tier: isolation_tier.into(),
+            project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
             ..Default::default()
         })
     }
 }
 
-fn validate_secret_free_draft(
+fn validated_secret_free_project_spec(
     draft: &CreateEnvironmentRequest,
     presets: &[crate::view::EnvironmentPresetOption],
-) -> Result<(), &'static str> {
-    let project_spec_uses_secrets = draft
+) -> Result<ProjectSpec, &'static str> {
+    let project_spec = draft
         .project_spec
         .as_option()
-        .and_then(|project| project.secrets.as_option())
-        .is_some_and(|secrets| {
-            !secrets.project.trim().is_empty()
-                || secrets.organization
-                || secrets.user
-                || secrets.include_org.unwrap_or(false)
-                || secrets.include_user.unwrap_or(false)
-        });
+        .cloned()
+        .ok_or(PROJECT_SPEC_INVALID)
+        .and_then(|project_spec| {
+            codewire_project_proto::from_proto(project_spec).map_err(|_| PROJECT_SPEC_INVALID)
+        })?;
     let preset_is_safe = match draft
         .preset_id
         .as_deref()
@@ -501,16 +488,45 @@ fn validate_secret_free_draft(
         Some(preset_id) => presets
             .iter()
             .find(|preset| preset.id == preset_id)
-            .is_some_and(|preset| !preset.uses_legacy_secret_sources),
+            .is_some_and(|preset| !preset.uses_protected_secret_bindings),
         None => true,
     };
-    if !draft.secret_project.trim().is_empty()
-        || draft.include_org_secrets != Some(false)
-        || draft.include_user_secrets != Some(false)
-        || project_spec_uses_secrets
-        || !preset_is_safe
-    {
+    if !project_spec.secrets.is_empty() || !preset_is_safe {
         return Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE);
+    }
+    ensure_dashboard_project_support(&project_spec)?;
+    Ok(project_spec)
+}
+
+fn ensure_dashboard_project_support(project_spec: &ProjectSpec) -> Result<(), &'static str> {
+    let expected_working_directory = match project_spec.repositories.as_slice() {
+        [repository] => repository.destination.as_str(),
+        _ => "/workspace",
+    };
+    let repositories_supported = project_spec.repositories.iter().all(|repository| {
+        repository.revision.is_empty()
+            && valid_repository_url(&repository.source)
+            && repository.destination.starts_with("/workspace/")
+    });
+    let ports_supported = project_spec.application_ports.len() <= MAX_APP_PORTS
+        && project_spec.application_ports.iter().all(|port| {
+            valid_port_label(&port.label)
+                && matches!(port.access.as_str(), "creator" | "org_members" | "public")
+        });
+    let agents_supported = project_spec.agents.install.is_none()
+        && allowlisted_agents(&project_spec.agents.tools).len() == project_spec.agents.tools.len();
+    if !project_spec.preset.is_empty()
+        || project_spec.working_directory != expected_working_directory
+        || !project_spec.environment.is_empty()
+        || !project_spec.skills.is_empty()
+        || project_spec.access.is_some()
+        || !repositories_supported
+        || !ports_supported
+        || !agents_supported
+        || project_spec.install_command.len() > MAX_FIELD
+        || project_spec.startup_script.len() > MAX_FIELD
+    {
+        return Err(PROJECT_FEATURE_UNAVAILABLE);
     }
     Ok(())
 }
@@ -520,7 +536,7 @@ fn with_secret_free_draft<T>(
     presets: &[crate::view::EnvironmentPresetOption],
     dispatch: impl FnOnce(CreateEnvironmentRequest) -> T,
 ) -> Result<T, &'static str> {
-    validate_secret_free_draft(&draft, presets)?;
+    validated_secret_free_project_spec(&draft, presets)?;
     Ok(dispatch(draft))
 }
 
@@ -645,294 +661,6 @@ pub(super) async fn rail_fragment(
     render_template(StatusCode::OK, SandboxRailTemplate { view: &dashboard })
 }
 
-pub(super) async fn prepare(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-    headers: HeaderMap,
-    RawForm(bytes): RawForm,
-) -> Response {
-    let mut submission = match EnvironmentSubmission::parse(&bytes) {
-        Ok(submission) => submission,
-        Err(()) => return error_page(WebError::CsrfRejected),
-    };
-    let (dashboard, organization, cookie) = match action_context(
-        &state,
-        &headers,
-        &slug,
-        &submission.csrf,
-        environments_path(&slug),
-    )
-    .await
-    {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
-    let options =
-        match environment_connect::create_options(&state, cookie.clone(), &organization.id).await {
-            Ok(options) => options,
-            Err(error) => return connect_page_error(error, &environments_path(&slug), &headers),
-        };
-    submission.normalize_source();
-    let preset_was_selected = !submission.preset_id.trim().is_empty();
-    submission.apply_selected_preset_defaults(&options);
-    let mut form = submission.form_view(submission.csrf.clone());
-    hydrate_options(&mut form, options);
-    let Some(draft) = submission.validate_and_draft(&organization.id, &mut form) else {
-        return render_action_page(
-            &state,
-            &headers,
-            dashboard,
-            organization,
-            cookie,
-            form,
-            StatusCode::UNPROCESSABLE_ENTITY,
-        )
-        .await;
-    };
-    let analyze_repositories = submission
-        .repositories
-        .iter()
-        .any(|(url, _, _)| !url.trim().is_empty());
-    let prepare = match with_secret_free_draft(draft, &form.presets, |draft| {
-        environment_connect::prepare_events(
-            &state,
-            cookie.clone(),
-            organization.id.clone(),
-            draft,
-            analyze_repositories,
-        )
-    }) {
-        Ok(prepare) => prepare,
-        Err(message) => {
-            form.form_error = message.to_owned();
-            return render_action_page(
-                &state,
-                &headers,
-                dashboard,
-                organization,
-                cookie,
-                form,
-                StatusCode::UNPROCESSABLE_ENTITY,
-            )
-            .await;
-        }
-    };
-    let mut events = match prepare.await {
-        Ok(events) => events,
-        Err(error) => {
-            apply_prepare_error(&mut form, &error);
-            return render_action_page(
-                &state,
-                &headers,
-                dashboard,
-                organization,
-                cookie,
-                form,
-                StatusCode::UNPROCESSABLE_ENTITY,
-            )
-            .await;
-        }
-    };
-    while let Some(event) = events.recv().await {
-        match event {
-            Ok(EnvironmentPrepareEvent::Complete { draft, detection }) => {
-                if let Err(message) =
-                    apply_checked_prepared_draft(&mut form, *draft, *detection, preset_was_selected)
-                {
-                    form.form_error = message.to_owned();
-                    return render_action_page(
-                        &state,
-                        &headers,
-                        dashboard,
-                        organization,
-                        cookie,
-                        form,
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                    )
-                    .await;
-                }
-                return render_action_page(
-                    &state,
-                    &headers,
-                    dashboard,
-                    organization,
-                    cookie,
-                    form,
-                    StatusCode::OK,
-                )
-                .await;
-            }
-            Ok(_) => {}
-            Err(error) => {
-                apply_prepare_error(&mut form, &error);
-                return render_action_page(
-                    &state,
-                    &headers,
-                    dashboard,
-                    organization,
-                    cookie,
-                    form,
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                )
-                .await;
-            }
-        }
-    }
-    form.form_error = "Repository preparation ended before it produced a configuration.".to_owned();
-    render_action_page(
-        &state,
-        &headers,
-        dashboard,
-        organization,
-        cookie,
-        form,
-        StatusCode::BAD_GATEWAY,
-    )
-    .await
-}
-
-pub(super) async fn prepare_events(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-    headers: HeaderMap,
-    RawForm(bytes): RawForm,
-) -> Response {
-    let mut submission = match EnvironmentSubmission::parse(&bytes) {
-        Ok(submission) => submission,
-        Err(()) => return error_page(WebError::CsrfRejected),
-    };
-    let (_, organization, cookie) = match action_context(
-        &state,
-        &headers,
-        &slug,
-        &submission.csrf,
-        environments_path(&slug),
-    )
-    .await
-    {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
-    let options =
-        match environment_connect::create_options(&state, cookie.clone(), &organization.id).await {
-            Ok(options) => options,
-            Err(error) => return connect_page_error(error, &environments_path(&slug), &headers),
-        };
-    submission.normalize_source();
-    let preset_was_selected = !submission.preset_id.trim().is_empty();
-    submission.apply_selected_preset_defaults(&options);
-    let mut form = submission.form_view(submission.csrf.clone());
-    hydrate_options(&mut form, options);
-    let Some(draft) = submission.validate_and_draft(&organization.id, &mut form) else {
-        return render_template(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            EnvironmentCreateFormTemplate {
-                organization: &organization,
-                form: &form,
-            },
-        );
-    };
-    let analyze_repositories = submission
-        .repositories
-        .iter()
-        .any(|(url, _, _)| !url.trim().is_empty());
-    let prepare = match with_secret_free_draft(draft, &form.presets, |draft| {
-        environment_connect::prepare_events(
-            &state,
-            cookie,
-            organization.id.clone(),
-            draft,
-            analyze_repositories,
-        )
-    }) {
-        Ok(prepare) => prepare,
-        Err(message) => {
-            form.form_error = message.to_owned();
-            return render_template(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                EnvironmentCreateFormTemplate {
-                    organization: &organization,
-                    form: &form,
-                },
-            );
-        }
-    };
-    let mut upstream = match prepare.await {
-        Ok(events) => events,
-        Err(error) => {
-            apply_prepare_error(&mut form, &error);
-            return render_template(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                EnvironmentCreateFormTemplate {
-                    organization: &organization,
-                    form: &form,
-                },
-            );
-        }
-    };
-    let (sender, receiver) = mpsc::channel(16);
-    tokio::spawn(async move {
-        loop {
-            let event = tokio::select! {
-                // The browser aborted its fetch. Dropping `upstream` here
-                // closes the adapter receiver, which cancels the generated
-                // Connect stream without a retry or detached background job.
-                _ = sender.closed() => break,
-                event = upstream.recv() => match event {
-                    Some(event) => event,
-                    None => break,
-                },
-            };
-            let frame = match event {
-                Ok(EnvironmentPrepareEvent::Progress {
-                    phase,
-                    message,
-                    total,
-                }) => sse_event(
-                    "progress",
-                    &format!(
-                        "{}|{}|{total}",
-                        safe_event_text(&phase),
-                        safe_event_text(&message)
-                    ),
-                ),
-                Ok(EnvironmentPrepareEvent::RepoFetched { index, repo, ok }) => {
-                    sse_event("repo", &format!("{index}|{}|{ok}", safe_event_text(&repo)))
-                }
-                Ok(EnvironmentPrepareEvent::Complete { draft, detection }) => {
-                    match apply_checked_prepared_draft(
-                        &mut form,
-                        *draft,
-                        *detection,
-                        preset_was_selected,
-                    ) {
-                        Ok(()) => {
-                            let html = EnvironmentCreateFormTemplate {
-                                organization: &organization,
-                                form: &form,
-                            }
-                            .render()
-                            .unwrap_or_else(|_| {
-                                "<div role=\"alert\">The prepared form could not be rendered.</div>"
-                                    .to_owned()
-                            });
-                            sse_event("complete", &STANDARD.encode(html))
-                        }
-                        Err(message) => sse_event("error", message),
-                    }
-                }
-                Err(error) => sse_event("error", prepare_error_message(&error)),
-            };
-            let terminal =
-                frame.starts_with(b"event: complete") || frame.starts_with(b"event: error");
-            if sender.send(frame).await.is_err() || terminal {
-                break;
-            }
-        }
-    });
-    sse_response(receiver)
-}
-
 pub(super) async fn create(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -960,11 +688,9 @@ pub(super) async fn create(
             Ok(options) => options,
             Err(error) => return connect_page_error(error, &environments_path(&slug), &headers),
         };
-    submission.normalize_source();
     submission.apply_selected_preset_defaults(&options);
     let mut form = submission.form_view(submission.csrf.clone());
     hydrate_options(&mut form, options);
-    form.prepared = true;
     let Some(draft) = submission.validate_and_draft(&organization.id, &mut form) else {
         return render_action_page(
             &state,
@@ -1677,8 +1403,6 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
     EnvironmentCreateFormView {
         csrf_token: token,
         expanded,
-        prepared: false,
-        mode: "image".to_owned(),
         name: String::new(),
         preset_id: String::new(),
         image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".to_owned(),
@@ -1700,13 +1424,8 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         confidential_price: String::new(),
         selected_agents: Vec::new(),
         app_ports: Vec::new(),
-        github_connected: false,
-        github_username: String::new(),
-        github_repositories_available: false,
-        github_repositories: Vec::new(),
         presets: Vec::new(),
         agents: Vec::new(),
-        detection: EnvironmentDetectionView::default(),
         repo_error: String::new(),
         image_error: String::new(),
         name_error: String::new(),
@@ -1719,156 +1438,36 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
 }
 
 fn hydrate_options(form: &mut EnvironmentCreateFormView, options: EnvironmentCreateOptions) {
-    form.github_connected = options.github_connected;
-    form.github_username = options.github_username;
-    form.github_repositories_available = options.github_repositories_available;
-    form.github_repositories = options.github_repositories;
     form.presets = options.presets;
     form.agents = options.agents;
     form.confidential_available = options.confidential_available;
     form.confidential_price = options.confidential_price;
 }
 
-fn apply_checked_prepared_draft(
-    form: &mut EnvironmentCreateFormView,
-    draft: CreateEnvironmentRequest,
-    detection: Option<codewire_proto::codewire::v1::DetectionResult>,
-    preset_was_selected: bool,
-) -> Result<(), &'static str> {
-    validate_secret_free_draft(&draft, &form.presets)?;
-    apply_prepared_draft(form, draft, detection);
-    if !preset_was_selected {
-        apply_automatically_resolved_preset_defaults(form);
-    }
-    Ok(())
-}
-
-fn apply_prepared_draft(
-    form: &mut EnvironmentCreateFormView,
-    draft: CreateEnvironmentRequest,
-    detection: Option<codewire_proto::codewire::v1::DetectionResult>,
-) {
-    form.prepared = true;
-    form.expanded = true;
-    form.name = draft.name.unwrap_or_default();
-    form.preset_id = draft.preset_id.unwrap_or_default();
-    form.image = draft.image;
-    form.install_command = draft.install_command;
-    form.startup_script = draft.startup_script;
-    form.cpu = draft
-        .cpu_millicores
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "1000".to_owned());
-    form.memory = draft
-        .memory_mb
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "2048".to_owned());
-    form.disk = draft
-        .disk_gb
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "10".to_owned());
-    form.ttl = draft
-        .ttl_seconds
-        .map(|value| format!("{value}s"))
-        .unwrap_or_else(|| DEFAULT_TTL.to_owned());
-    form.isolation_tier = match draft.isolation_tier.as_known() {
-        Some(IsolationTier::Confidential) => "confidential".to_owned(),
-        _ => "standard".to_owned(),
-    };
-    form.selected_agents = draft.agents.into_iter().map(|agent| agent.r#type).collect();
-    form.app_ports = draft
-        .app_ports
-        .into_iter()
-        .enumerate()
-        .map(|(index, port)| EnvironmentAppPortFormRow {
-            index,
-            port: port.port.to_string(),
-            label: port.label,
-            access: port.access,
-        })
-        .collect();
-    let repositories = if draft.repos.is_empty() {
-        vec![(draft.repo_url, draft.branch, String::new())]
-    } else {
-        draft
-            .repos
-            .into_iter()
-            .map(|repo| (repo.url, repo.branch, repo.mount_path))
-            .collect()
-    };
-    form.repositories = repository_rows(&repositories);
-    form.detection = environment_connect::detection_view(detection);
-    form.form_error.clear();
-}
-
-fn apply_automatically_resolved_preset_defaults(form: &mut EnvironmentCreateFormView) {
-    let Some(preset) = form
-        .presets
-        .iter()
-        .find(|preset| preset.id == form.preset_id)
-        .cloned()
-    else {
-        return;
-    };
-
-    if form.image.trim().is_empty() {
-        form.image = preset.image;
-    }
-    if form.install_command.is_empty() {
-        form.install_command = preset.default_install_command;
-    }
-    if form.startup_script.is_empty() {
-        form.startup_script = preset.default_startup_script;
-    }
-    if ttl_uses_default(&form.ttl)
-        && let Some(ttl) = preset.default_ttl_seconds
-    {
-        form.ttl = format!("{ttl}s");
-    }
-    if form.selected_agents.is_empty() {
-        form.selected_agents = preset.default_agents;
-    }
-    if form.app_ports.is_empty() {
-        form.app_ports = preset.default_app_ports;
-    }
-}
-
 fn apply_create_error(form: &mut EnvironmentCreateFormView, error: &ConnectError) {
     for (field, description) in bad_request_fields(error) {
         match field.trim_start_matches('/') {
-            "repo_url" | "repos" => form.repo_error = description,
-            "image" | "preset_id" | "preset_slug" => form.image_error = description,
+            "project_spec.repositories" | "project_spec.repositories.source" => {
+                form.repo_error = description;
+            }
+            "project_spec.image" | "preset_id" => form.image_error = description,
             "name" => form.name_error = description,
-            "cpu_millicores" => form.cpu_error = description,
-            "memory_mb" => form.memory_error = description,
-            "disk_gb" => form.disk_error = description,
+            "project_spec.resources.cpu_millicores" => form.cpu_error = description,
+            "project_spec.resources.memory_mib" => form.memory_error = description,
+            "project_spec.resources.disk_gib" => form.disk_error = description,
             "ttl_seconds" => form.ttl_error = description,
             _ => {}
         }
     }
     if !form.has_errors() {
-        form.form_error = prepare_error_message(error).to_owned();
+        form.form_error = create_error_message(error).to_owned();
     }
 }
 
-fn apply_prepare_error(form: &mut EnvironmentCreateFormView, error: &ConnectError) {
-    if matches!(
-        connect_error_reason(error).as_deref(),
-        Some("INVALID_REPO_URL" | "REPO_NOT_FOUND" | "REPO_NOT_ACCESSIBLE")
-    ) {
-        form.repo_error = prepare_error_message(error).to_owned();
-    } else {
-        form.form_error = prepare_error_message(error).to_owned();
-    }
-}
-
-fn prepare_error_message(error: &ConnectError) -> &'static str {
+fn create_error_message(error: &ConnectError) -> &'static str {
     match connect_error_reason(error).as_deref() {
-        Some("AI_DETECTION_UNAVAILABLE") => {
-            return "Automatic repository analysis is not configured. Use the universal image or choose a preset instead.";
-        }
-        Some("AI_DETECTION_FAILED") => {
-            return "Automatic repository analysis failed. Retry, or use the universal image instead.";
+        Some("PROJECT_FEATURE_PENDING") => {
+            return "This repository has no saved Sandbox configuration. Enter a workspace image or use a configured repository.";
         }
         Some("INVALID_REPO_URL") => return "Enter a valid repository URL.",
         Some("REPO_NOT_FOUND") => {
@@ -1881,62 +1480,11 @@ fn prepare_error_message(error: &ConnectError) -> &'static str {
     }
     match error.code {
         ErrorCode::InvalidArgument => "The repository or Sandbox options are invalid.",
-        ErrorCode::FailedPrecondition => {
-            "Repository analysis is not available for this configuration."
-        }
-        ErrorCode::PermissionDenied => "You do not have permission to prepare this Sandbox.",
-        ErrorCode::DeadlineExceeded => "Repository preparation took too long and was cancelled.",
-        _ => "Repository preparation is temporarily unavailable.",
+        ErrorCode::FailedPrecondition => "This Sandbox configuration cannot be created yet.",
+        ErrorCode::PermissionDenied => "You do not have permission to create this Sandbox.",
+        ErrorCode::DeadlineExceeded => "Sandbox creation took too long and was cancelled.",
+        _ => "Sandbox creation is temporarily unavailable.",
     }
-}
-
-struct SseBody {
-    receiver: mpsc::Receiver<Bytes>,
-}
-
-impl http_body::Body for SseBody {
-    type Data = Bytes;
-    type Error = Infallible;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        match self.receiver.poll_recv(cx) {
-            Poll::Ready(Some(bytes)) => Poll::Ready(Some(Ok(http_body::Frame::data(bytes)))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-fn sse_response(receiver: mpsc::Receiver<Bytes>) -> Response {
-    (
-        StatusCode::OK,
-        [
-            (
-                header::CONTENT_TYPE.as_str(),
-                "text/event-stream; charset=utf-8",
-            ),
-            (header::CACHE_CONTROL.as_str(), "private, no-store"),
-            (header::X_CONTENT_TYPE_OPTIONS.as_str(), "nosniff"),
-            ("x-accel-buffering", "no"),
-        ],
-        Body::new(SseBody { receiver }),
-    )
-        .into_response()
-}
-
-fn sse_event(event: &str, data: &str) -> Bytes {
-    Bytes::from(format!("event: {event}\ndata: {data}\n\n"))
-}
-
-fn safe_event_text(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_control() && *character != '|')
-        .take(240)
-        .collect()
 }
 
 fn indexed_key(key: &str, prefix: &str) -> Option<usize> {
@@ -2055,7 +1603,7 @@ fn ttl_uses_default(value: &str) -> bool {
     value.is_empty() || value == "0" || value.eq_ignore_ascii_case(DEFAULT_TTL) || value == "∞"
 }
 
-fn allowlisted_agents(values: &[String]) -> Vec<SetupAgent> {
+fn allowlisted_agents(values: &[String]) -> Vec<String> {
     values
         .iter()
         .filter(|value| {
@@ -2064,10 +1612,7 @@ fn allowlisted_agents(values: &[String]) -> Vec<SetupAgent> {
                 "claude-code" | "codex" | "gemini-cli" | "kimi-code" | "pi" | "aider"
             )
         })
-        .map(|value| SetupAgent {
-            r#type: value.clone(),
-            ..Default::default()
-        })
+        .cloned()
         .collect()
 }
 
@@ -2244,7 +1789,10 @@ fn environments_path(slug: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use askama::Template as _;
+
     use super::*;
+    use crate::templates::EnvironmentCreateFormTemplate;
 
     fn test_organization() -> OrganizationContext {
         OrganizationContext {
@@ -2265,22 +1813,22 @@ mod tests {
 
     fn test_preset(
         id: &str,
-        uses_legacy_secret_sources: bool,
+        uses_protected_secret_bindings: bool,
     ) -> crate::view::EnvironmentPresetOption {
         crate::view::EnvironmentPresetOption {
             id: id.to_owned(),
             name: "Preset".to_owned(),
             description: String::new(),
             image: "example.test/workspace@sha256:abc".to_owned(),
-            default_cpu_millicores: 1_000,
-            default_memory_mb: 2_048,
-            default_disk_gb: 10,
+            default_cpu_millicores: Some(1_000),
+            default_memory_mib: Some(2_048),
+            default_disk_gib: Some(10),
             default_ttl_seconds: None,
             default_install_command: String::new(),
             default_startup_script: String::new(),
             default_agents: Vec::new(),
             default_app_ports: Vec::new(),
-            uses_legacy_secret_sources,
+            uses_protected_secret_bindings,
             official: false,
         }
     }
@@ -2289,7 +1837,6 @@ mod tests {
     fn confidential_controls_are_hidden_by_the_dashboard_gate() {
         let organization = test_organization();
         let mut form = default_create_form("csrf".into(), true);
-        form.prepared = true;
         form.confidential_available = true;
         form.show_confidential_controls = false;
         let hidden = EnvironmentCreateFormTemplate {
@@ -2308,6 +1855,26 @@ mod tests {
         .render()
         .unwrap();
         assert!(visible.contains("environment-isolation-tier"));
+    }
+
+    #[test]
+    fn resource_values_outside_the_catalog_round_trip_in_the_form() {
+        let organization = test_organization();
+        let mut form = default_create_form("csrf".into(), true);
+        form.cpu = "750".to_owned();
+        form.memory = "1024".to_owned();
+        form.disk = "5".to_owned();
+
+        let html = EnvironmentCreateFormTemplate {
+            organization: &organization,
+            form: &form,
+        }
+        .render()
+        .expect("environment create form");
+
+        assert!(html.contains("<option value=\"750\" selected>750 millicores</option>"));
+        assert!(html.contains("<option value=\"1024\" selected>1024 MiB</option>"));
+        assert!(html.contains("<option value=\"5\" selected>5 GiB</option>"));
     }
 
     #[test]
@@ -2378,9 +1945,9 @@ mod tests {
     }
 
     #[test]
-    fn prepare_errors_map_only_allowlisted_typed_reasons() {
+    fn unknown_repository_configuration_maps_to_a_bounded_create_error() {
         let detail = codewire_proto::google::rpc::ErrorInfo {
-            reason: "AI_DETECTION_UNAVAILABLE".to_owned(),
+            reason: "PROJECT_FEATURE_PENDING".to_owned(),
             domain: "codewire.dev".to_owned(),
             ..Default::default()
         };
@@ -2389,11 +1956,11 @@ mod tests {
         );
         let mut form = default_create_form("token".to_owned(), true);
 
-        apply_prepare_error(&mut form, &error);
+        apply_create_error(&mut form, &error);
 
         assert_eq!(
             form.form_error,
-            "Automatic repository analysis is not configured. Use the universal image or choose a preset instead."
+            "This repository has no saved Sandbox configuration. Enter a workspace image or use a configured repository."
         );
         assert!(form.repo_error.is_empty());
         assert!(!form.form_error.contains("untrusted upstream detail"));
@@ -2424,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_submissions_emit_explicitly_disabled_secret_sources() {
+    fn safe_submissions_emit_one_canonical_secret_free_project_spec() {
         let submission =
             EnvironmentSubmission::parse(b"image=example.test%2Fworkspace").expect("submission");
         let mut form = submission.form_view("token".to_owned());
@@ -2433,10 +2000,9 @@ mod tests {
             .validate_and_draft("org-test", &mut form)
             .expect("safe draft");
 
-        assert!(draft.secret_project.is_empty());
-        assert_eq!(draft.include_org_secrets, Some(false));
-        assert_eq!(draft.include_user_secrets, Some(false));
-        assert!(validate_secret_free_draft(&draft, &[]).is_ok());
+        let project_spec = validated_secret_free_project_spec(&draft, &[]).expect("project spec");
+        assert_eq!(project_spec.image, "example.test/workspace");
+        assert!(project_spec.secrets.is_empty());
     }
 
     #[test]
@@ -2451,67 +2017,46 @@ mod tests {
             assert!(!dispatched.get());
         }
 
-        let safe = CreateEnvironmentRequest {
+        let safe_project_spec = ProjectSpec {
             image: "example.test/workspace@sha256:abc".to_owned(),
-            include_org_secrets: Some(false),
-            include_user_secrets: Some(false),
             ..Default::default()
         };
-        assert_not_dispatched(
-            CreateEnvironmentRequest {
-                include_org_secrets: None,
-                ..safe.clone()
-            },
-            &[],
-        );
-        assert_not_dispatched(
-            CreateEnvironmentRequest {
-                include_user_secrets: Some(true),
-                ..safe.clone()
-            },
-            &[],
-        );
-        assert_not_dispatched(
-            CreateEnvironmentRequest {
-                secret_project: "development".to_owned(),
-                ..safe.clone()
-            },
-            &[],
-        );
+        let dispatched = std::cell::Cell::new(false);
+        let missing = with_secret_free_draft(CreateEnvironmentRequest::default(), &[], |_| {
+            dispatched.set(true)
+        });
+        assert_eq!(missing, Err(PROJECT_SPEC_INVALID));
+        assert!(!dispatched.get());
         for secrets in [
-            codewire_proto::codewire::v1::ProjectSecretBindings {
+            codewire_project::SecretBindings {
                 project: "development".to_owned(),
                 ..Default::default()
             },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
+            codewire_project::SecretBindings {
                 organization: true,
                 ..Default::default()
             },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
+            codewire_project::SecretBindings {
                 user: true,
                 ..Default::default()
             },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
-                include_org: Some(true),
-                ..Default::default()
-            },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
-                include_user: Some(true),
-                ..Default::default()
-            },
         ] {
+            let project_spec = ProjectSpec {
+                secrets,
+                ..safe_project_spec.clone()
+            };
             assert_not_dispatched(
                 CreateEnvironmentRequest {
-                    project_spec: Some(codewire_proto::codewire::v1::ProjectSpec {
-                        secrets: Some(secrets).into(),
-                        ..Default::default()
-                    })
-                    .into(),
-                    ..safe.clone()
+                    project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
+                    ..Default::default()
                 },
                 &[],
             );
         }
+        let safe = CreateEnvironmentRequest {
+            project_spec: Some(codewire_project_proto::to_proto(safe_project_spec)).into(),
+            ..Default::default()
+        };
         assert_not_dispatched(
             CreateEnvironmentRequest {
                 preset_id: Some("missing-preset".to_owned()),
@@ -2544,46 +2089,20 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_prepared_drafts_are_rejected_before_form_mutation() {
-        let mut form = default_create_form("token".to_owned(), true);
-        let original_image = form.image.clone();
-        let result = apply_checked_prepared_draft(
-            &mut form,
-            CreateEnvironmentRequest {
-                image: "example.test/prepared@sha256:def".to_owned(),
-                secret_project: "development".to_owned(),
-                include_org_secrets: Some(false),
-                include_user_secrets: Some(false),
-                ..Default::default()
-            },
-            None,
-            false,
-        );
-
-        assert_eq!(result, Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE));
-        assert!(!form.prepared);
-        assert_eq!(form.image, original_image);
-    }
-
-    #[test]
     fn preset_defaults_fill_missing_resources_without_overwriting_edits() {
         let mut submission =
             EnvironmentSubmission::parse(b"preset_id=preset-id&cpu=750").expect("submission");
         let options = EnvironmentCreateOptions {
             confidential_available: false,
             confidential_price: String::new(),
-            github_connected: false,
-            github_username: String::new(),
-            github_repositories_available: false,
-            github_repositories: Vec::new(),
             presets: vec![crate::view::EnvironmentPresetOption {
                 id: "preset-id".to_owned(),
                 name: "Preset".to_owned(),
                 description: String::new(),
                 image: "example.test/workspace@sha256:abc".to_owned(),
-                default_cpu_millicores: 500,
-                default_memory_mb: 1_024,
-                default_disk_gb: 5,
+                default_cpu_millicores: Some(500),
+                default_memory_mib: Some(1_024),
+                default_disk_gib: Some(5),
                 default_ttl_seconds: Some(3_600),
                 default_install_command: "install-dependencies".to_owned(),
                 default_startup_script: "start-services".to_owned(),
@@ -2594,7 +2113,7 @@ mod tests {
                     label: "web".to_owned(),
                     access: "creator".to_owned(),
                 }],
-                uses_legacy_secret_sources: true,
+                uses_protected_secret_bindings: true,
                 official: false,
             }],
             agents: Vec::new(),
@@ -2621,70 +2140,23 @@ mod tests {
             .validate_and_draft("org-test", &mut form)
             .expect("source-free submitted fields");
         assert_eq!(
-            validate_secret_free_draft(&draft, &form.presets),
+            validated_secret_free_project_spec(&draft, &form.presets),
             Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE)
         );
     }
 
     #[test]
-    fn automatically_resolved_presets_fill_the_prepared_form_without_replacing_its_image() {
-        let mut form = default_create_form("token".to_owned(), true);
-        form.prepared = true;
-        form.preset_id = "preset-id".to_owned();
-        form.presets = vec![crate::view::EnvironmentPresetOption {
-            id: "preset-id".to_owned(),
-            name: "Preset".to_owned(),
-            description: String::new(),
-            image: "example.test/preset@sha256:abc".to_owned(),
-            default_cpu_millicores: 1_000,
-            default_memory_mb: 2_048,
-            default_disk_gb: 10,
-            default_ttl_seconds: Some(3_600),
-            default_install_command: "install-dependencies".to_owned(),
-            default_startup_script: "start-services".to_owned(),
-            default_agents: vec!["codex".to_owned()],
-            default_app_ports: vec![EnvironmentAppPortFormRow {
-                index: 0,
-                port: "3000".to_owned(),
-                label: "web".to_owned(),
-                access: "creator".to_owned(),
-            }],
-            uses_legacy_secret_sources: false,
-            official: false,
-        }];
-
-        let submitted_image = form.image.clone();
-        apply_automatically_resolved_preset_defaults(&mut form);
-
-        assert_eq!(form.image, submitted_image);
-        assert_eq!(form.install_command, "install-dependencies");
-        assert_eq!(form.startup_script, "start-services");
-        assert_eq!(form.ttl, "3600s");
-        assert_eq!(form.selected_agents, vec!["codex"]);
-        assert_eq!(form.app_ports[0].port, "3000");
-    }
-
-    #[test]
-    fn workspace_image_and_repositories_survive_legacy_source_modes() {
-        let mut image = EnvironmentSubmission::parse(
-            b"mode=image&image=ghcr.io%2Fcodewiresh%2Fworkspace%40sha256%3A03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467&repo_url_0=https%3A%2F%2Fstale.invalid%2Frepo",
+    fn workspace_image_and_repositories_are_complementary_inputs() {
+        let submission = EnvironmentSubmission::parse(
+            b"image=ghcr.io%2Fcodewiresh%2Fworkspace%40sha256%3A03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467&repo_url_0=https%3A%2F%2Fexample.test%2Frepo&preset_id=preset-id",
         )
-        .expect("image submission");
-        image.normalize_source();
-        assert_eq!(image.repositories.len(), 1);
+        .expect("combined submission");
+        assert_eq!(submission.repositories.len(), 1);
         assert_eq!(
-            image.image,
+            submission.image,
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467"
         );
-
-        let mut repository = EnvironmentSubmission::parse(
-            b"mode=repo&repo_url_0=https%3A%2F%2Fexample.test%2Frepo&preset_id=stale&image=stale.invalid%2Fimage",
-        )
-        .expect("repository submission");
-        repository.normalize_source();
-        assert_eq!(repository.repositories.len(), 1);
-        assert_eq!(repository.preset_id, "stale");
-        assert_eq!(repository.image, "stale.invalid/image");
+        assert_eq!(submission.preset_id, "preset-id");
     }
 
     #[test]
@@ -2713,38 +2185,30 @@ mod tests {
     }
 
     #[test]
-    fn environment_form_escapes_all_upstream_metadata() {
+    fn environment_form_escapes_metadata_and_omits_retired_repository_surfaces() {
         let mut form = default_create_form("csrf-token".to_owned(), true);
-        form.github_repositories = vec![crate::view::GitHubRepositoryOption {
-            full_name: "<b>unsafe repository</b>".to_owned(),
-            url: "https://example.test/repository".to_owned(),
-            description: "<b>unsafe description</b>".to_owned(),
-            language: "<b>unsafe language</b>".to_owned(),
-            private: true,
+        form.repositories = vec![EnvironmentRepositoryFormRow {
+            index: 0,
+            url: "https://example.test/<b>unsafe repository</b>".to_owned(),
+            branch: "<b>unsafe branch</b>".to_owned(),
+            mount_path: "/workspace/repository".to_owned(),
         }];
-        form.github_connected = true;
-        form.github_repositories_available = true;
         form.presets = vec![crate::view::EnvironmentPresetOption {
             id: "preset-id".to_owned(),
             name: "<b>unsafe preset</b>".to_owned(),
             description: "<b>unsafe preset description</b>".to_owned(),
             image: "example.test/<b>unsafe image</b>".to_owned(),
-            default_cpu_millicores: 1_000,
-            default_memory_mb: 2_048,
-            default_disk_gb: 10,
+            default_cpu_millicores: Some(1_000),
+            default_memory_mib: Some(2_048),
+            default_disk_gib: Some(10),
             default_ttl_seconds: Some(3_600),
             default_install_command: String::new(),
             default_startup_script: String::new(),
             default_agents: Vec::new(),
             default_app_ports: Vec::new(),
-            uses_legacy_secret_sources: false,
+            uses_protected_secret_bindings: false,
             official: false,
         }];
-        form.detection = EnvironmentDetectionView {
-            project_type: "<b>unsafe type</b>".to_owned(),
-            image: "example.test/<b>unsafe detected image</b>".to_owned(),
-            ..EnvironmentDetectionView::default()
-        };
         let organization = OrganizationContext {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
@@ -2770,11 +2234,27 @@ mod tests {
         assert!(html.contains("unsafe repository"));
         assert!(html.contains("unsafe preset"));
         assert!(!html.contains("<b>unsafe"));
-        assert!(html.contains("icons-v2.svg#icon-github"));
-        assert!(html.contains("data-repository-virtual-list"));
-        assert!(html.contains("data-repository-virtual-row"));
-        assert!(html.contains("data-selected-mounts hidden"));
-        assert!(html.contains("data-repository-mount-option=\"0\" hidden"));
+        assert!(html.contains("data-manual-repositories"));
+        assert!(html.contains("value=\"repository\" placeholder=\"repo\""));
+        assert!(!html.contains("value=\"/workspace/repository\""));
+        for retired in [
+            "Connect GitHub",
+            "GitHub connected",
+            "/api/v1/github/",
+            "data-github-repository-picker",
+            "data-repository-virtual-list",
+            "data-show-github-repositories",
+            "Analyze and generate from repo",
+            "/_actions/sandboxes/prepare",
+            "/_events/sandboxes/prepare",
+            "data-environment-prepare",
+            "cw-detection-summary",
+        ] {
+            assert!(
+                !html.contains(retired),
+                "retired surface remains: {retired}"
+            );
+        }
         assert!(html.contains(PROTECTED_SECRET_ACCESS_UNAVAILABLE));
         for forbidden in [
             "name=\"secret_project\"",
@@ -2784,35 +2264,6 @@ mod tests {
         ] {
             assert!(!html.contains(forbidden), "unexpected field {forbidden}");
         }
-
-        form.repositories = vec![EnvironmentRepositoryFormRow {
-            index: 0,
-            url: "https://example.test/repository".to_owned(),
-            branch: "main".to_owned(),
-            mount_path: "/workspace/repository".to_owned(),
-        }];
-        let selected_html = EnvironmentCreateFormTemplate {
-            organization: &organization,
-            form: &form,
-        }
-        .render()
-        .expect("environment form with selected GitHub repository");
-        assert!(selected_html.contains("data-selected-mounts>"));
-        assert!(selected_html.contains("data-repository-mount-option=\"0\"><span"));
-        assert!(!selected_html.contains("data-repository-mount-option=\"0\" hidden"));
-        assert!(selected_html.contains(">/workspace/</span><input"));
-        assert!(selected_html.contains("value=\"repository\" placeholder=\"repo\""));
-        assert!(!selected_html.contains("value=\"/workspace/repository\""));
-
-        form.prepared = true;
-        let prepared_html = EnvironmentCreateFormTemplate {
-            organization: &organization,
-            form: &form,
-        }
-        .render()
-        .expect("prepared environment form");
-        assert!(prepared_html.contains("unsafe type"));
-        assert!(!prepared_html.contains("<b>unsafe"));
     }
 
     #[test]
@@ -2945,11 +2396,8 @@ mod tests {
     }
 
     #[test]
-    fn connected_github_outage_keeps_manual_repository_entry_available() {
-        let mut form = default_create_form("csrf-token".to_owned(), true);
-        form.github_connected = true;
-        form.github_username = "octocat".to_owned();
-        form.github_repositories_available = false;
+    fn manual_repository_entry_is_always_available() {
+        let form = default_create_form("csrf-token".to_owned(), true);
         let organization = OrganizationContext {
             id: "organization-id".to_owned(),
             name: "Organization".to_owned(),
@@ -2972,31 +2420,22 @@ mod tests {
         .render()
         .expect("environment form");
 
-        assert!(html.contains("GitHub repositories are temporarily unavailable"));
         assert!(html.contains("Repository URL"));
+        assert!(html.contains("Branch"));
+        assert!(html.contains("Mount path"));
         assert!(html.contains("data-manual-repositories"));
-        assert!(!html.contains("data-manual-repositories hidden"));
         assert!(!html.contains("data-github-repository-picker"));
         assert!(!html.contains("data-show-github-repositories"));
+        assert!(!html.contains("Connect GitHub"));
     }
 
     #[test]
-    fn feedback_and_stream_text_are_bounded() {
+    fn feedback_query_values_are_bounded() {
         assert_eq!(
             page_message("environment-created"),
             "Sandbox creation started."
         );
         assert_eq!(page_message("<script>"), "");
-        assert_eq!(safe_event_text("line\nother|field"), "lineotherfield");
-    }
-
-    #[test]
-    fn dropping_the_browser_stream_closes_the_route_sender() {
-        let (sender, receiver) = mpsc::channel(1);
-        let body = SseBody { receiver };
-        assert!(!sender.is_closed());
-        drop(body);
-        assert!(sender.is_closed());
     }
 
     #[test]

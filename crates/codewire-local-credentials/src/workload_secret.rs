@@ -943,7 +943,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_secret_keys_use_the_shared_storage_boundary() {
+    fn local_secret_keys_use_the_canonical_workload_grammar() {
         let maximum = format!(
             "A{}",
             "_".repeat(codewire_workload_secrets::MAX_WORKLOAD_SECRET_KEY_BYTES - 1)
@@ -956,6 +956,11 @@ mod tests {
         assert!(validate_secret_key(&maximum).is_ok());
         assert_eq!(
             validate_secret_key(&too_long),
+            Err(LocalCredentialError::InvalidWorkloadSecret)
+        );
+        assert!(validate_secret_key("_UNDERSCORE_FIRST").is_ok());
+        assert_eq!(
+            validate_secret_key("1DIGIT_FIRST"),
             Err(LocalCredentialError::InvalidWorkloadSecret)
         );
     }
@@ -1082,6 +1087,13 @@ mod tests {
                 ..WorkloadSecretSelection::default()
             }),
             Err(LocalCredentialError::OrganizationSecretsUnsupported)
+        );
+        assert_eq!(
+            authority.resolve_workload_secret_metadata(&WorkloadSecretSelection {
+                explicit_environment_keys: BTreeSet::from(["1DIGIT_FIRST".into()]),
+                ..WorkloadSecretSelection::default()
+            }),
+            Err(LocalCredentialError::InvalidWorkloadSecret)
         );
     }
 

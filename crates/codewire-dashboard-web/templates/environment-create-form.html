@@ -4,18 +4,11 @@
       <h2 id="environment-create-title">Create Sandbox</h2>
       <a class="cw-drawer-close" href="{{ organization.environments_url }}" data-drawer-close aria-label="Close Create Sandbox"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-close"/></svg></a>
     </div>
-    {% if form.github_connected %}
-    <p class="cw-github-banner" data-tone="success"><svg class="cw-icon cw-github-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg><span>GitHub connected{% if !form.github_username.is_empty() %} as <strong>@{{ form.github_username }}</strong>{% endif %}</span></p>
-    {% else %}
-    <p class="cw-github-banner"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-github"/></svg><span>Connect GitHub for private repositories</span><a href="/api/v1/github/oauth/authorize?return_url=/{{ organization.slug }}/new/">Connect</a></p>
-    {% endif %}
   </header>
 
-  <form class="cw-environment-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/create" data-environment-prepare data-event-action="/{{ organization.slug }}/_events/sandboxes/prepare">
+  <form class="cw-environment-form" method="post" action="/{{ organization.slug }}/_actions/sandboxes/create" data-environment-form>
     <input type="hidden" name="_csrf" value="{{ form.csrf_token }}">
-    <input type="hidden" name="mode" value="{{ form.mode }}">
-    <input type="hidden" name="preset_id" value="{{ form.preset_id }}" data-prepared-preset-id>
-    {% if form.prepared %}<input type="hidden" name="prepared" value="true">{% endif %}
+    <input type="hidden" name="preset_id" value="{{ form.preset_id }}">
 
     <div class="cw-drawer-body">
       {% if !form.form_error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ form.form_error }}</div>{% endif %}
@@ -27,9 +20,9 @@
       </div>
 
       <div class="cw-create-resources">
-        <div class="cw-field"><label class="cw-label" for="environment-cpu">CPU</label><select class="cw-select" id="environment-cpu" name="cpu"><option value="1000"{% if form.cpu == "1000" %} selected{% endif %}>1 Core</option><option value="2000"{% if form.cpu == "2000" %} selected{% endif %}>2 Cores</option><option value="4000"{% if form.cpu == "4000" %} selected{% endif %}>4 Cores</option><option value="8000"{% if form.cpu == "8000" %} selected{% endif %}>8 Cores</option></select>{% if !form.cpu_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.cpu_error }}</p>{% endif %}</div>
-        <div class="cw-field"><label class="cw-label" for="environment-memory">Memory</label><select class="cw-select" id="environment-memory" name="memory"><option value="2048"{% if form.memory == "2048" %} selected{% endif %}>2 GB</option><option value="4096"{% if form.memory == "4096" %} selected{% endif %}>4 GB</option><option value="8192"{% if form.memory == "8192" %} selected{% endif %}>8 GB</option><option value="16384"{% if form.memory == "16384" %} selected{% endif %}>16 GB</option></select>{% if !form.memory_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.memory_error }}</p>{% endif %}</div>
-        <div class="cw-field"><label class="cw-label" for="environment-disk">Disk</label><select class="cw-select" id="environment-disk" name="disk"><option value="10"{% if form.disk == "10" %} selected{% endif %}>10 GB</option><option value="20"{% if form.disk == "20" %} selected{% endif %}>20 GB</option><option value="40"{% if form.disk == "40" %} selected{% endif %}>40 GB</option><option value="80"{% if form.disk == "80" %} selected{% endif %}>80 GB</option></select>{% if !form.disk_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.disk_error }}</p>{% endif %}</div>
+        <div class="cw-field"><label class="cw-label" for="environment-cpu">CPU</label><select class="cw-select" id="environment-cpu" name="cpu">{% if !form.cpu_uses_catalog_option() %}<option value="{{ form.cpu }}" selected>{% if form.cpu.is_empty() %}Platform default{% else %}{{ form.cpu }} millicores{% endif %}</option>{% endif %}<option value="1000"{% if form.cpu == "1000" %} selected{% endif %}>1 Core</option><option value="2000"{% if form.cpu == "2000" %} selected{% endif %}>2 Cores</option><option value="4000"{% if form.cpu == "4000" %} selected{% endif %}>4 Cores</option><option value="8000"{% if form.cpu == "8000" %} selected{% endif %}>8 Cores</option></select>{% if !form.cpu_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.cpu_error }}</p>{% endif %}</div>
+        <div class="cw-field"><label class="cw-label" for="environment-memory">Memory</label><select class="cw-select" id="environment-memory" name="memory">{% if !form.memory_uses_catalog_option() %}<option value="{{ form.memory }}" selected>{% if form.memory.is_empty() %}Platform default{% else %}{{ form.memory }} MiB{% endif %}</option>{% endif %}<option value="2048"{% if form.memory == "2048" %} selected{% endif %}>2 GB</option><option value="4096"{% if form.memory == "4096" %} selected{% endif %}>4 GB</option><option value="8192"{% if form.memory == "8192" %} selected{% endif %}>8 GB</option><option value="16384"{% if form.memory == "16384" %} selected{% endif %}>16 GB</option></select>{% if !form.memory_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.memory_error }}</p>{% endif %}</div>
+        <div class="cw-field"><label class="cw-label" for="environment-disk">Disk</label><select class="cw-select" id="environment-disk" name="disk">{% if !form.disk_uses_catalog_option() %}<option value="{{ form.disk }}" selected>{% if form.disk.is_empty() %}Platform default{% else %}{{ form.disk }} GiB{% endif %}</option>{% endif %}<option value="10"{% if form.disk == "10" %} selected{% endif %}>10 GB</option><option value="20"{% if form.disk == "20" %} selected{% endif %}>20 GB</option><option value="40"{% if form.disk == "40" %} selected{% endif %}>40 GB</option><option value="80"{% if form.disk == "80" %} selected{% endif %}>80 GB</option></select>{% if !form.disk_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.disk_error }}</p>{% endif %}</div>
         <div class="cw-field"><label class="cw-label" for="environment-ttl">TTL</label><input class="cw-input cw-mono" id="environment-ttl" name="ttl" value="{{ form.ttl }}" placeholder="infinity" inputmode="text" autocapitalize="none" spellcheck="false" title="Use 0 for infinity, or enter a duration such as 30m, 1h, or 7d." data-ttl-input>{% if !form.ttl_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.ttl_error }}</p>{% endif %}</div>
       </div>
 
@@ -44,44 +37,19 @@
         <label class="cw-label" for="environment-image">Workspace image</label>
         <div class="cw-image-field"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-box"/></svg><input id="environment-image" name="image" value="{{ form.image }}" placeholder="ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467" list="workspace-image-options" data-advanced-image><button type="button" data-reset-workspace-image>Reset</button></div>
         <datalist id="workspace-image-options">{% for preset in form.presets %}<option value="{{ preset.image }}" label="{{ preset.name }}" data-description="{{ preset.description }}" data-official="{{ preset.official }}"></option>{% endfor %}</datalist>
-        {% if !form.image_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.image_error }}</p>{% else %}<p class="cw-field-help">Use the Codewire workspace image or enter another OCI image.</p>{% endif %}
+        {% if !form.image_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.image_error }}</p>{% else %}<p class="cw-field-help">Use the Codewire workspace image or another OCI image. Leave it blank only to use a saved configuration for the first repository.</p>{% endif %}
       </div>
 
       <section class="cw-create-repositories" aria-labelledby="create-repositories-title">
-        <div class="cw-create-section-label"><h3 id="create-repositories-title">Repositories</h3><div><button type="button" data-show-manual-repositories><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Add URL</button>{% if !form.github_connected %}<a href="/api/v1/github/oauth/authorize?return_url=/{{ organization.slug }}/new/">Connect GitHub</a>{% endif %}</div></div>
-        {% if form.github_connected && !form.github_repositories_available %}<div class="cw-alert cw-alert--warning" role="status">GitHub repositories are temporarily unavailable. Paste a repository URL to continue.</div>{% endif %}
-        {% if form.github_connected && form.github_repositories_available %}
-        <div class="cw-repository-picker" data-github-repository-picker>
-          <input class="cw-repository-search" id="repository-search" type="search" placeholder="Search repositories" aria-label="Search repositories" data-repository-search>
-          <div class="cw-repository-options" role="group" aria-label="GitHub repositories" data-repository-virtual-list>
-            {% if form.github_repositories.is_empty() %}<p class="cw-empty-inline">No repositories found.</p>{% endif %}
-            {% for repository in form.github_repositories %}
-            <label class="cw-repository-option" data-repository-option data-repository-virtual-row data-repository-index="{{ loop.index0 }}" data-repository-name="{{ repository.full_name }}" data-search-text="{{ repository.full_name }} {{ repository.description }} {{ repository.language }}">
-              <input type="checkbox" name="repo_url_{{ loop.index0 }}" value="{{ repository.url }}"{% if form.repository_selected(repository.url) %} checked{% endif %}>
-              <span class="cw-checkmark" aria-hidden="true"><svg class="cw-icon"><use href="/assets/codewire/icons-v2.svg#icon-check"/></svg></span>
-              <strong>{{ repository.full_name }}</strong>
-              <span class="cw-repository-branch">main</span>
-              {% if repository.private %}<span class="cw-repository-private">Private</span>{% endif %}
-            </label>
-            {% endfor %}
-            <p class="cw-repository-no-match" data-repository-no-match hidden>No repositories match that search.</p>
-          </div>
-        </div>
-        <div class="cw-mount-points" data-selected-mounts{% if !form.has_selected_github_repository() %} hidden{% endif %}>
-          <p>Mount points</p>
-          {% for repository in form.github_repositories %}
-          <div class="cw-mount-row" data-repository-mount-option="{{ loop.index0 }}"{% if !form.repository_selected(repository.url) %} hidden{% endif %}><span title="{{ repository.full_name }}">{{ repository.full_name }}</span><b aria-hidden="true">→</b><label class="cw-workspace-mount"><span aria-hidden="true">/workspace/</span><input class="cw-input cw-mono" name="repo_mount_{{ loop.index0 }}" value="{{ form.repository_mount_suffix(repository.url) }}" placeholder="repo" aria-label="Mount path"{% if !form.repository_selected(repository.url) %} disabled{% endif %}></label><button type="button" data-unselect-repository="{{ loop.index0 }}" aria-label="Remove {{ repository.full_name }}"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-close"/></svg></button></div>
-          {% endfor %}
-        </div>
-        {% endif %}
+        <div class="cw-create-section-label"><h3 id="create-repositories-title">Repositories</h3><button type="button" data-add-repository><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Add URL</button></div>
 
-        <div class="cw-manual-repositories" data-manual-repositories{% if form.github_connected && form.github_repositories_available %} hidden{% endif %}>
+        <div class="cw-manual-repositories" data-manual-repositories>
           <div class="cw-stack" data-repository-rows>
             {% for repository in form.repositories %}
             <div class="cw-repository-row" data-repository-row><div class="cw-field"><label class="cw-label" for="repo-url-{{ repository.index }}">Repository URL</label><input class="cw-input" id="repo-url-{{ repository.index }}" name="repo_url_{{ repository.index }}" value="{{ repository.url }}" type="url" placeholder="https://github.com/owner/repo"></div><div class="cw-field"><label class="cw-label" for="repo-branch-{{ repository.index }}">Branch</label><input class="cw-input cw-mono" id="repo-branch-{{ repository.index }}" name="repo_branch_{{ repository.index }}" value="{{ repository.branch }}" placeholder="main"></div><div class="cw-field"><label class="cw-label" for="repo-mount-{{ repository.index }}">Mount path</label><label class="cw-workspace-mount"><span aria-hidden="true">/workspace/</span><input class="cw-input cw-mono" id="repo-mount-{{ repository.index }}" name="repo_mount_{{ repository.index }}" value="{{ repository.mount_suffix() }}" placeholder="repo"></label></div><button type="button" data-remove-repository aria-label="Remove repository"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-close"/></svg></button></div>
             {% endfor %}
           </div>
-          <div class="cw-manual-actions">{% if form.github_connected && form.github_repositories_available %}<button type="button" data-show-github-repositories>Pick from GitHub</button>{% endif %}<button type="button" data-add-repository><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Add another URL</button></div>
+          <div class="cw-manual-actions"><button type="button" data-add-repository><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-plus"/></svg>Add another URL</button></div>
         </div>
         {% if !form.repo_error.is_empty() %}<p class="cw-field-error" role="alert">{{ form.repo_error }}</p>{% endif %}
       </section>
@@ -105,11 +73,8 @@
       {% if form.show_confidential_controls %}<section class="cw-create-panel" aria-labelledby="isolation-tier-title"><div class="cw-create-panel-heading"><h3 id="isolation-tier-title">Isolation</h3></div><div class="cw-field"><select class="cw-select" id="environment-isolation-tier" name="isolation_tier" aria-label="Isolation tier"><option value="standard"{% if form.isolation_selected("standard") %} selected{% endif %}>Standard</option><option value="confidential"{% if form.isolation_selected("confidential") %} selected{% endif %}{% if !form.confidential_available %} disabled{% endif %}>Confidential{% if !form.confidential_price.is_empty() %} — {{ form.confidential_price }}{% endif %}</option></select></div></section>{% else %}<input type="hidden" name="isolation_tier" value="standard">{% endif %}
 
       <section class="cw-create-panel cw-runtime-options" aria-labelledby="runtime-title">
-        <h3 id="runtime-title" class="cw-sr-only">Runtime</h3>
-        <button class="cw-analyze-button" type="submit" formaction="/{{ organization.slug }}/_actions/sandboxes/prepare" data-environment-prepare-submit{% if !form.has_repository() %} disabled{% endif %}><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-spark"/></svg>Analyze and generate from repo</button>
-        <p class="cw-field-help" data-environment-prepare-help>{% if form.has_repository() %}Reads the selected repositories and fills in install and startup steps.{% else %}Select a repository above to generate these steps.{% endif %}</p>
-        <div class="cw-stream-status" data-environment-stream-status hidden><span class="cw-skeleton"></span><div><p data-environment-stream-message>Analyzing repositories…</p><div data-environment-repo-progress></div></div><button type="button" data-environment-cancel>Cancel</button></div>
-        {% if form.prepared %}<div class="cw-detection-summary" data-image="{{ form.detection.image }}">{% if !form.detection.project_type.is_empty() %}<strong>{{ form.detection.project_type }}</strong>{% else %}<strong>Configuration ready</strong>{% endif %}{% if !form.detection.language.is_empty() %}<span>{{ form.detection.language }}</span>{% endif %}{% if !form.detection.framework.is_empty() %}<span>{{ form.detection.framework }}</span>{% endif %}{% if form.detection.needs_docker %}<span>Docker</span>{% endif %}{% if form.detection.has_compose %}<span>Compose</span>{% endif %}{% if form.detection.setup_notes.is_empty() %}<p>Repository settings have been applied. Review the generated runtime configuration below.</p>{% else %}<p>{{ form.detection.setup_notes }}</p>{% endif %}</div>{% endif %}
+        <div class="cw-create-panel-heading"><h3 id="runtime-title">Runtime</h3></div>
+        <p class="cw-panel-help">Optional commands run after the Sandbox workspace is created.</p>
         <div class="cw-runtime-fields"><div class="cw-field"><label class="cw-label" for="install-command">Install Command</label><input class="cw-input cw-mono" id="install-command" name="install_command" value="{{ form.install_command }}" placeholder="e.g. bun install"></div><div class="cw-field"><label class="cw-label" for="startup-script">Startup Script</label><textarea class="cw-textarea cw-mono" id="startup-script" name="startup_script" rows="4" placeholder="Post-install commands…">{{ form.startup_script }}</textarea></div></div>
       </section>
     </div>

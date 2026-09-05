@@ -13,8 +13,6 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use self::template::TemplateOpts;
-
 /// CRD coordinates, mirroring `sandbox.SandboxGVR` et al.
 pub const SANDBOX_GROUP: &str = "agents.x-k8s.io";
 pub const EXTENSIONS_GROUP: &str = "extensions.agents.x-k8s.io";
@@ -61,8 +59,8 @@ pub fn truncate_kubernetes_name(name: &str) -> String {
 
 /// Derive the zero-replica pool used by one per-environment template.
 ///
-/// Short historical names remain unchanged. Long template references need a
-/// digest suffix: truncating only from the right can discard the environment
+/// Short names remain readable. Long template references need a digest suffix:
+/// truncating only from the right can discard the environment
 /// UUID and make cleanup for one environment delete another environment's
 /// pool.
 pub fn shadow_warm_pool_name(template_ref: &str) -> String {
@@ -81,26 +79,6 @@ pub fn shadow_warm_pool_name(template_ref: &str) -> String {
     format!("{PREFIX}{stem}-{suffix}")
 }
 
-pub fn warm_pool_name(template_name: &str, opts: &TemplateOpts) -> String {
-    truncate_kubernetes_name(&format!(
-        "sandbox-warmpool-{template_name}-{}",
-        warm_pool_revision_hash(opts)
-    ))
-}
-
-/// Derive the warm-pool revision from the exact blueprint copied into a
-/// Sandbox. Hashing the rendered contract instead of a hand-maintained input
-/// list ensures renderer-only changes rotate existing warm-pool members.
-pub fn warm_pool_revision_hash(opts: &TemplateOpts) -> String {
-    sandbox_blueprint_revision_hash(&template::render_sandbox_blueprint(opts))
-}
-
-fn sandbox_blueprint_revision_hash(blueprint: &Value) -> String {
-    let encoded = serde_json::to_vec(blueprint)
-        .expect("the in-memory Sandbox blueprint must be JSON serializable");
-    sha256_hex_prefix(&encoded, 4)
-}
-
 fn sha256_hex_prefix(input: &[u8], bytes: usize) -> String {
     let digest = Sha256::digest(input);
     let mut hex = String::with_capacity(bytes * 2);
@@ -110,7 +88,7 @@ fn sha256_hex_prefix(input: &[u8], bytes: usize) -> String {
     hex
 }
 
-/// Mirrors `sandbox.ClaimOpts`.
+/// Inputs for one environment-scoped SandboxClaim.
 #[derive(Debug, Clone, Default)]
 pub struct ClaimOpts {
     pub environment_id: String,
@@ -335,38 +313,6 @@ mod tests {
         assert_eq!(
             got["spec"]["additionalPodMetadata"]["labels"][LABEL_ENV_ID].as_str(),
             Some("env-1")
-        );
-    }
-
-    #[test]
-    fn warm_pool_revision_tracks_rendered_socket_topology() {
-        let opts = TemplateOpts {
-            name: "workspace".into(),
-            image: "workspace:exact".into(),
-            support_image: "gateway:exact".into(),
-            dind_enabled: true,
-            docker_mode: template::DOCKER_MODE_LOCAL_DIND_DIRECT.into(),
-            ..Default::default()
-        };
-        let current_blueprint = template::render_sandbox_blueprint(&opts);
-        assert_eq!(
-            warm_pool_revision_hash(&opts),
-            sandbox_blueprint_revision_hash(&current_blueprint)
-        );
-
-        let mut legacy_blueprint = current_blueprint;
-        let docker_socket = legacy_blueprint["podTemplate"]["spec"]["volumes"]
-            .as_array_mut()
-            .expect("volumes")
-            .iter_mut()
-            .find(|volume| volume["name"] == "docker-sock")
-            .expect("docker-sock volume");
-        docker_socket["emptyDir"] = json!({});
-
-        assert_ne!(
-            warm_pool_revision_hash(&opts),
-            sandbox_blueprint_revision_hash(&legacy_blueprint),
-            "disk-backed and guest-memory socket blueprints must not share a warm pool"
         );
     }
 }

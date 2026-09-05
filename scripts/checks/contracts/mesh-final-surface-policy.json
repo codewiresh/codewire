@@ -1,5 +1,5 @@
 {
-  "$comment": "Permanent WS18 WI-9B Mesh guard. Mesh exposes generated codewire.v1 Connect services, the typed internal coordinator, and health/readiness only; all former Mesh REST and Mesh-owned browser auth/session/device paths are retired.",
+  "$comment": "Permanent WS18 WI-9B Mesh guard. Mesh exposes generated codewire.v1 Connect services, the typed internal coordinator, and health/readiness only; network ownership and invitation redemption are atomic, peer streams consume one-use enrollment capabilities, and persistent environment bearers remain retired.",
   "schema_version": 1,
   "required_server_fragments": [
     "AppBuilder::new(\"mesh\")",
@@ -22,8 +22,7 @@
     "crates/codewire-mesh/src/config.rs": [
       "MESH_AUTHORIZATION_URL_ENV",
       "MESH_AUTHORIZATION_HMAC_SECRET_ENV",
-      "LOCAL_API_KEY_HASH_ENV",
-      "LOCAL_ENVIRONMENT_TOKEN_HASH_ENV"
+      "LOCAL_API_KEY_HASH_ENV"
     ],
     "crates/codewire-mesh/src/mesh_authorization.rs": [
       "MeshAuthorizationAdapter",
@@ -33,11 +32,17 @@
     "crates/codewire-mesh/src/store.rs": [
       "async fn node_enrollment_create",
       "async fn invite_create",
-      "async fn network_create_owned"
+      "async fn network_create_with_owner(",
+      "async fn invite_consume_and_join("
     ],
     "crates/codewire-cli/src/commands/mesh_commands.rs": [
-      "CODEWIRE_MESH_LOCAL_API_KEY_HASH",
-      "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH"
+      "CODEWIRE_MESH_LOCAL_API_KEY_HASH"
+    ],
+    "proto/codewire/internal/v1/mesh_authorization.proto": [
+      "reserved 2;",
+      "reserved \"MESH_AUTHORIZATION_PRINCIPAL_KIND_ENVIRONMENT\";",
+      "reserved 4;",
+      "reserved \"MESH_AUTHORIZATION_CREDENTIAL_KIND_ENVIRONMENT_TOKEN\";"
     ]
   },
   "forbidden_source_fragments": {
@@ -46,7 +51,14 @@
       "AUTH_TOKEN_ENV",
       "OIDC_ISSUER_ENV",
       "OIDC_CLIENT_ID_ENV",
-      "OIDC_CLIENT_SECRET_ENV"
+      "OIDC_CLIENT_SECRET_ENV",
+      "LOCAL_ENVIRONMENT_ID_ENV",
+      "LOCAL_ENVIRONMENT_TOKEN_HASH_ENV"
+    ],
+    "crates/codewire-mesh/src/mesh_authorization.rs": [
+      "hash_local_environment_token",
+      "MeshAuthorizationPrincipalKind::Environment",
+      "MeshAuthorizationCredentialKind::EnvironmentToken"
     ],
     "crates/codewire-mesh/src/lib.rs": [
       "AuthMode",
@@ -58,11 +70,23 @@
       "async fn user_get_by_username",
       "async fn oauth_state_create",
       "async fn oidc_user_upsert",
-      "async fn oidc_session_create"
+      "async fn oidc_session_create",
+      "async fn network_create_owned(",
+      "async fn invite_consume("
     ],
     "crates/codewire-cli/src/commands/mesh_commands.rs": [
       ".env(\"CODEWIRE_MESH_AUTH_MODE\"",
-      ".env(\"CODEWIRE_MESH_AUTH_TOKEN\""
+      ".env(\"CODEWIRE_MESH_AUTH_TOKEN\"",
+      "CODEWIRE_MESH_LOCAL_ENVIRONMENT_ID",
+      "CODEWIRE_MESH_LOCAL_ENVIRONMENT_TOKEN_HASH"
+    ],
+    "crates/codewire-cli/src/commands/native.rs": [
+      "identity.environment_id",
+      "identity.environment_token"
+    ],
+    "crates/codewire-cli/src/config.rs": [
+      "pub environment_id: String",
+      "pub environment_token: String"
     ],
     "tests/e2e/kind/mesh.yaml": [
       "--auth-mode="

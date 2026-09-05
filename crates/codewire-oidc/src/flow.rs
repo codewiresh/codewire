@@ -1,13 +1,15 @@
 //! The authorization-code grant — the provider's core flow.
 //!
 //! [`Provider::authorize`] validates an `/authorize` request, resolves the
-//! end-user through the host's [`UserAuthenticator`], and (on success)
+//! end-user through the host's [`crate::store::UserAuthenticator`], and (on success)
 //! issues a single-use authorization code bound to the client, redirect
 //! URI, subject, scopes, nonce, and PKCE challenge.
 //! [`Provider::exchange_authorization_code`] authenticates the client at the
 //! token endpoint, atomically consumes the code, verifies PKCE, and mints an
 //! opaque access token, an EdDSA-signed `id_token`, and (when the client
 //! allows it) a refresh token.
+
+use std::fmt;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -48,7 +50,7 @@ pub struct RawAuthorizeParams {
 }
 
 /// The outcome of [`Provider::authorize`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AuthorizeOutcome {
     /// Redirect the user agent here (success: `?code=…&state=…`, or an OAuth
     /// error redirect: `?error=…&error_description=…&state=…`). The redirect
@@ -61,8 +63,24 @@ pub enum AuthorizeOutcome {
     Fail(OAuthError),
 }
 
+impl fmt::Debug for AuthorizeOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Redirect(_) => formatter
+                .debug_tuple("Redirect")
+                .field(&"[REDACTED: contains authorization response]")
+                .finish(),
+            Self::RedirectToLogin(_) => formatter
+                .debug_tuple("RedirectToLogin")
+                .field(&"[REDACTED: contains auth request]")
+                .finish(),
+            Self::Fail(error) => formatter.debug_tuple("Fail").field(error).finish(),
+        }
+    }
+}
+
 /// A successful token-endpoint response (RFC 6749 §5.1 + OIDC `id_token`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     /// The opaque access token.
     pub access_token: String,
@@ -78,6 +96,23 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     /// Granted scopes (space-delimited).
     pub scope: String,
+}
+
+impl fmt::Debug for TokenResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("id_token", &self.id_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 impl Provider {
@@ -527,4 +562,48 @@ pub(crate) fn enc(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::*;
+
+    #[test]
+    fn authorize_outcome_debug_redacts_redirect_material() {
+        let authorization_code = "authorization-code-marker";
+        let request_id = "auth-request-marker";
+        let success = AuthorizeOutcome::Redirect(format!(
+            "https://client.example/callback?code={authorization_code}&state=opaque-state"
+        ));
+        let login =
+            AuthorizeOutcome::RedirectToLogin(format!("https://idp.example/login?id={request_id}"));
+
+        let success_diagnostic = format!("{success:?}");
+        let login_diagnostic = format!("{login:?}");
+        assert!(!success_diagnostic.contains(authorization_code));
+        assert!(!success_diagnostic.contains("opaque-state"));
+        assert!(!login_diagnostic.contains(request_id));
+        assert!(success_diagnostic.contains("[REDACTED"));
+        assert!(login_diagnostic.contains("[REDACTED"));
+    }
+
+    #[test]
+    fn token_response_debug_redacts_all_tokens() {
+        let response = TokenResponse {
+            access_token: "access-token-marker".into(),
+            token_type: "Bearer".into(),
+            expires_in: 3600,
+            id_token: Some("id-token-marker".into()),
+            refresh_token: Some("refresh-token-marker".into()),
+            scope: "openid profile".into(),
+        };
+
+        let diagnostic = format!("{response:?}");
+        assert!(!diagnostic.contains("access-token-marker"));
+        assert!(!diagnostic.contains("id-token-marker"));
+        assert!(!diagnostic.contains("refresh-token-marker"));
+        assert!(diagnostic.contains("Bearer"));
+        assert!(diagnostic.contains("openid profile"));
+        assert!(diagnostic.contains("[REDACTED]"));
+    }
 }

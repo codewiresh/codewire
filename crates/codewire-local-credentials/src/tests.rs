@@ -1619,47 +1619,17 @@ fn unsupported_database_schema_fails_closed() {
 }
 
 #[test]
-fn adjacent_schema_migration_preserves_existing_metadata_and_adds_workload_secrets() {
+fn schema_v1_is_rejected_without_mutation() {
     let temp = TempDir::new().expect("temporary directory");
     let root = authority_root(&temp);
     let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
     let authority =
         LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("open authority");
-    let credential = authority
+    authority
         .add_credential(new_credential("existing"), material(b"synthetic-existing"))
         .expect("add credential");
     drop(authority);
 
-    let connection = Connection::open(root.join(DATABASE_FILE)).expect("open metadata database");
-    connection
-        .execute_batch(
-            "DROP TABLE workload_secret_journal;
-             DROP INDEX workload_secrets_scope;
-             DROP TABLE workload_secrets;
-             DROP TABLE secret_projects;
-             PRAGMA user_version = 1;",
-        )
-        .expect("construct adjacent schema fixture");
-    drop(connection);
-
-    let migrated =
-        LocalCredentialAuthority::open(&root, store, catalog()).expect("migrate adjacent schema");
-    assert_eq!(
-        migrated.list_credentials().unwrap()[0].metadata.id,
-        credential.metadata.id
-    );
-    assert!(migrated.list_secret_projects().unwrap().is_empty());
-    migrated
-        .set_user_workload_secret("MIGRATED", material(b"synthetic-workload"))
-        .expect("write through migrated schema");
-}
-
-#[test]
-fn failed_adjacent_schema_migration_rolls_back_atomically() {
-    let temp = TempDir::new().expect("temporary directory");
-    let root = authority_root(&temp);
-    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
-    drop(LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("open authority"));
     let database = root.join(DATABASE_FILE);
     let connection = Connection::open(&database).expect("open metadata database");
     connection
@@ -1668,31 +1638,52 @@ fn failed_adjacent_schema_migration_rolls_back_atomically() {
              DROP INDEX workload_secrets_scope;
              DROP TABLE workload_secrets;
              DROP TABLE secret_projects;
-             PRAGMA user_version = 1;
-             CREATE TABLE workload_secrets(collision TEXT) STRICT;",
+             PRAGMA user_version = 1;",
         )
-        .expect("construct migration collision");
+        .expect("construct schema v1 fixture");
+    let journal: String = connection
+        .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+        .expect("set schema v1 journal mode");
+    assert!(journal.eq_ignore_ascii_case("wal"));
     drop(connection);
 
-    assert!(LocalCredentialAuthority::open(&root, store.clone(), catalog()).is_err());
+    assert!(matches!(
+        LocalCredentialAuthority::open(&root, store.clone(), catalog()),
+        Err(LocalCredentialError::UnsupportedSchema)
+    ));
     let connection = Connection::open(&database).expect("reopen metadata database");
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("read rolled-back schema version");
+        .expect("read rejected schema version");
     assert_eq!(version, 1);
-    let secret_projects: i64 = connection
+    let journal: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .expect("read rejected schema journal mode");
+    assert!(journal.eq_ignore_ascii_case("wal"));
+    for object in [
+        "secret_projects",
+        "workload_secrets",
+        "workload_secrets_scope",
+        "workload_secret_journal",
+    ] {
+        let present: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                [object],
+                |row| row.get(0),
+            )
+            .expect("inspect rejected schema");
+        assert_eq!(present, 0, "{object}");
+    }
+    let credential_count: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'secret_projects'",
+            "SELECT COUNT(*) FROM credentials WHERE display_name = 'existing'",
             [],
             |row| row.get(0),
         )
-        .expect("inspect rolled-back schema");
-    assert_eq!(secret_projects, 0);
-    connection
-        .execute("DROP TABLE workload_secrets", [])
-        .expect("remove collision");
-    drop(connection);
-    assert!(LocalCredentialAuthority::open(&root, store, catalog()).is_ok());
+        .expect("inspect preserved credential metadata");
+    assert_eq!(credential_count, 1);
+    assert_eq!(store.entry_count(), 1);
 }
 
 #[test]

@@ -246,7 +246,7 @@ impl HybridVsockTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_daemon::{Config, serve_grpc_with_incoming};
+    use codewire_daemon::{Config, DaemonAuthToken, serve_grpc_with_incoming};
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
@@ -298,13 +298,13 @@ mod tests {
             serve_grpc_with_incoming(
                 Config {
                     // The injected transport entrypoint must never parse or
-                    // bind this legacy host-TCP address. Its successful Unix
+                    // bind this deliberately invalid host-TCP address. Its successful Unix
                     // readiness below proves that the caller-owned hybrid
                     // transport is the daemon's only listener in this test.
                     listen_addr: deliberately_invalid_tcp_address.into(),
                     workspace_root: workspace,
                     home_root: home,
-                    auth_token: Some("daemon-auth-token-for-hybrid-test".into()),
+                    auth_token: DaemonAuthToken::new("daemon-auth-token-for-hybrid-test").unwrap(),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
                 },
@@ -389,7 +389,7 @@ mod tests {
                     listen_addr: "vsock:7777".into(),
                     workspace_root: workspace,
                     home_root: home,
-                    auth_token: Some("correct-daemon-token".into()),
+                    auth_token: DaemonAuthToken::new("correct-daemon-token").unwrap(),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
                 },

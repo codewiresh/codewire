@@ -28,8 +28,8 @@ use super::template::{
     TemplateOpts, gateway_direct_udp_service_name, gateway_host_key_secret_name,
     gateway_network_policy_name, gateway_workload_name, render_gateway_deployment,
     render_gateway_direct_udp_service, render_gateway_host_key_secret,
-    render_gateway_network_policy, render_gateway_service, render_sandbox_template,
-    render_sandbox_warm_pool, render_workspace_daemon_network_policy,
+    render_gateway_network_policy, render_gateway_service, render_sandbox_shadow_pool,
+    render_sandbox_template, render_workspace_daemon_network_policy,
     render_workspace_daemon_service, workspace_daemon_network_policy_name,
     workspace_daemon_service_name,
 };
@@ -126,8 +126,7 @@ impl SandboxClient {
         }
     }
 
-    /// Ensures the shared sandbox namespace exists with the current
-    /// Codewire labels and without legacy isol8-only admission labels.
+    /// Ensures the shared sandbox namespace exists with the current Codewire labels.
     pub async fn ensure_namespace(&self) -> anyhow::Result<()> {
         let namespaces: Api<Namespace> = Api::all(self.client.clone());
         let name = &self.namespace;
@@ -170,7 +169,6 @@ impl SandboxClient {
                             "app.kubernetes.io/managed-by": "codewire",
                             "codewire.sh/resource-type": "sandbox",
                             "codewire.sh/runtime-scope": "shared",
-                            "isol8.codewire.sh/enforce-runtime-class": null,
                         },
                     },
                 });
@@ -478,9 +476,8 @@ impl SandboxClient {
     }
 
     /// Wait until the owning Sandbox controller has produced a ready
-    /// incarnation of the same stable Pod name with a different UID. The
-    /// environment label is intentionally insufficient: a private warm-pool
-    /// Pod can carry the same label before it is claimed.
+    /// incarnation of the same stable Pod name with a different UID. Match
+    /// the stable Pod name instead of relying only on an environment label.
     pub async fn wait_for_replacement_workspace_pod(
         &self,
         pod_name: &str,
@@ -526,9 +523,9 @@ impl SandboxClient {
     }
 
     /// Reconcile the current confidential runtime fields into the private
-    /// template and the already-adopted Sandbox before replacing a terminal
-    /// Pod. Updating the SandboxTemplate alone is insufficient because the
-    /// default warm-pool strategy does not rewrite an adopted Sandbox.
+    /// template and the allocated Sandbox before replacing a terminal Pod.
+    /// Updating the SandboxTemplate alone is insufficient because the
+    /// controller does not rewrite an already-created Sandbox.
     pub async fn reconcile_per_environment_runtime(
         &self,
         env_id: &str,
@@ -551,16 +548,16 @@ impl SandboxClient {
             .pointer("/status/sandbox/name")
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("SandboxClaim has no adopted Sandbox"))?;
+            .ok_or_else(|| anyhow::anyhow!("SandboxClaim has no allocated Sandbox"))?;
         if sandbox_name != expected_pod_name {
-            anyhow::bail!("workspace Pod does not match the adopted Sandbox");
+            anyhow::bail!("workspace Pod does not match the allocated Sandbox");
         }
         let warm_pool_name = claim
             .data
             .pointer("/spec/warmPoolRef/name")
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("SandboxClaim has no warm-pool reference"))?;
+            .ok_or_else(|| anyhow::anyhow!("SandboxClaim has no shadow-pool reference"))?;
         let warm_pool = self
             .warm_pools()
             .get(warm_pool_name)
@@ -1372,7 +1369,7 @@ impl SandboxClient {
 
         if let Some(template_name) = per_environment_template {
             let warm_pool_name = super::shadow_warm_pool_name(template_name);
-            self.delete_warm_pool(&warm_pool_name).await?;
+            self.delete_shadow_pool(&warm_pool_name).await?;
             self.delete_sandbox_template(template_name).await?;
         }
 
@@ -1997,19 +1994,24 @@ impl SandboxClient {
         anyhow::bail!("update SandboxTemplate {name}: too many conflicts")
     }
 
-    /// Mirrors `EnsureWarmPool`'s dynamic-client path: truncate the name
-    /// to 63 chars, then create when absent or update (setting the
-    /// resource version) when it already exists.
-    pub async fn ensure_warm_pool(
+    /// Ensure the zero-replica shadow pool required by SandboxClaim.
+    pub async fn ensure_shadow_pool(
         &self,
         name: &str,
         template_ref: &str,
-        replicas: i32,
+        environment_id: &str,
     ) -> anyhow::Result<()> {
-        let name = if name.len() > 63 { &name[..63] } else { name };
+        anyhow::ensure!(
+            name == super::shadow_warm_pool_name(template_ref),
+            "claim shadow name does not match its environment template"
+        );
+        anyhow::ensure!(
+            !environment_id.is_empty() && environment_id.trim() == environment_id,
+            "claim shadow requires a canonical environment id"
+        );
         let pools = self.warm_pools();
         let rendered =
-            render_sandbox_warm_pool(&self.namespace, name, template_ref, i64::from(replicas));
+            render_sandbox_shadow_pool(&self.namespace, name, template_ref, environment_id);
         let mut pool: DynamicObject = serde_json::from_value(rendered)?;
 
         let existing = match pools.get(name).await {
@@ -2018,7 +2020,7 @@ impl SandboxClient {
                     .create(&PostParams::default(), &pool)
                     .await
                     .map_err(|e| anyhow::anyhow!("create SandboxWarmPool {name}: {e}"))?;
-                tracing::info!(name, replicas, "created SandboxWarmPool");
+                tracing::info!(name, "created zero-replica SandboxWarmPool");
                 return Ok(());
             }
             Err(e) => return Err(anyhow::anyhow!("get SandboxWarmPool {name}: {e}")),
@@ -2030,12 +2032,12 @@ impl SandboxClient {
             .replace(name, &PostParams::default(), &pool)
             .await
             .map_err(|e| anyhow::anyhow!("update SandboxWarmPool {name}: {e}"))?;
-        tracing::info!(name, replicas, "updated SandboxWarmPool");
+        tracing::info!(name, "updated zero-replica SandboxWarmPool");
         Ok(())
     }
 
-    /// Mirrors `DeleteWarmPool`: NotFound is success.
-    pub async fn delete_warm_pool(&self, name: &str) -> anyhow::Result<()> {
+    /// Delete an environment-scoped shadow pool. NotFound is success.
+    pub async fn delete_shadow_pool(&self, name: &str) -> anyhow::Result<()> {
         match self
             .warm_pools()
             .delete(name, &DeleteParams::default())
@@ -2045,30 +2047,13 @@ impl SandboxClient {
                 tracing::info!(
                     name,
                     namespace = self.namespace,
-                    "deleted deprecated SandboxWarmPool"
+                    "deleted environment shadow SandboxWarmPool"
                 );
                 Ok(())
             }
             Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
             Err(e) => Err(anyhow::anyhow!("delete SandboxWarmPool {name}: {e}")),
         }
-    }
-
-    /// Mirrors `ListWarmPools`: names of all SandboxWarmPools whose name
-    /// starts with `prefix`, for GC of stale revisioned pools.
-    pub async fn list_warm_pools(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
-        let list = self
-            .warm_pools()
-            .list(&ListParams::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("list SandboxWarmPools: {e}"))?;
-        let names = list
-            .items
-            .into_iter()
-            .filter_map(|item| item.metadata.name)
-            .filter(|n| n.starts_with(prefix))
-            .collect();
-        Ok(names)
     }
 
     /// Mirrors `GetSandboxClaimReadyStatus`: (exists, ready, reason).
@@ -3252,6 +3237,8 @@ mod tests {
         TemplateOpts {
             name: "workspace-env-test".into(),
             environment_id: "env-test".into(),
+            gateway_token: "confidential-recovery-coordinate-token".into(),
+            daemon_auth_token: "confidential-recovery-daemon-token".into(),
             runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_CONFIDENTIAL.into(),
             kata_coco_init_data_enabled: true,
             kata_coco_kbs_url: "https://kbs.example.test".into(),
@@ -3636,6 +3623,172 @@ mod tests {
         });
         let client = Client::new(service, "default");
         (SandboxClient::new(client, "dev-sandboxes"), requests)
+    }
+
+    #[tokio::test]
+    async fn post_bookkeeping_retry_reuses_the_existing_claim_without_teardown() {
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (
+                StatusCode::CONFLICT,
+                kubernetes_status("AlreadyExists", 409),
+            ),
+            (
+                StatusCode::OK,
+                json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxClaim",
+                    "metadata": {
+                        "name": "sandbox-env-test",
+                        "namespace": "dev-sandboxes",
+                        "uid": "claim-uid"
+                    },
+                    "spec": {
+                        "warmPoolRef": {"name": "shadow-pool-workspace-env-test"}
+                    }
+                }),
+            ),
+        ]);
+        let opts = ClaimOpts {
+            environment_id: "env-test".into(),
+            org_id: "org-test".into(),
+            template_ref: "workspace-env-test".into(),
+            warm_pool_ref: "shadow-pool-workspace-env-test".into(),
+            ..Default::default()
+        };
+
+        let claim = client
+            .create_sandbox_claim("dev-sandboxes", &opts)
+            .await
+            .unwrap();
+
+        assert_eq!(claim, ("sandbox-env-test".into(), "claim-uid".into()));
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &[
+                (
+                    Method::POST,
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims"
+                        .into(),
+                ),
+                (
+                    Method::GET,
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims/sandbox-env-test"
+                        .into(),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_claim_shadow_converges_across_retry_and_destroy() {
+        let pool_name = "shadow-pool-workspace-env-test";
+        let pool = json!({
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxWarmPool",
+            "metadata": {
+                "name": pool_name,
+                "namespace": "dev-sandboxes",
+                "resourceVersion": "1"
+            },
+            "spec": {
+                "replicas": 0,
+                "sandboxTemplateRef": {"name": "workspace-env-test"}
+            }
+        });
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+            (StatusCode::CREATED, pool.clone()),
+            (StatusCode::OK, pool.clone()),
+            (StatusCode::OK, pool),
+            (StatusCode::OK, kubernetes_status("Success", 200)),
+            (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+        ]);
+
+        client
+            .ensure_shadow_pool(pool_name, "workspace-env-test", "env-test")
+            .await
+            .unwrap();
+        client
+            .ensure_shadow_pool(pool_name, "workspace-env-test", "env-test")
+            .await
+            .unwrap();
+        client.delete_shadow_pool(pool_name).await.unwrap();
+        client.delete_shadow_pool(pool_name).await.unwrap();
+
+        let methods = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(method, _)| method.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            vec![
+                Method::GET,
+                Method::POST,
+                Method::GET,
+                Method::PUT,
+                Method::DELETE,
+                Method::DELETE,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_environment_template_converges_across_retry_and_destroy() {
+        let template_name = "workspace-env-test";
+        let template = json!({
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxTemplate",
+            "metadata": {
+                "name": template_name,
+                "namespace": "dev-sandboxes",
+                "resourceVersion": "1"
+            },
+            "spec": {}
+        });
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+            (StatusCode::CREATED, template.clone()),
+            (StatusCode::OK, template.clone()),
+            (StatusCode::OK, template),
+            (StatusCode::OK, kubernetes_status("Success", 200)),
+            (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+        ]);
+        let opts = TemplateOpts {
+            name: template_name.into(),
+            image: "workspace:test".into(),
+            environment_id: "env-test".into(),
+            gateway_token: "synthetic-coordinate-token".into(),
+            daemon_auth_token: "synthetic-daemon-token".into(),
+            cpu_millicores: 1_000,
+            memory_mib: 1_024,
+            disk_gib: 10,
+            ..Default::default()
+        };
+
+        client.ensure_sandbox_template(&opts).await.unwrap();
+        client.ensure_sandbox_template(&opts).await.unwrap();
+        client.delete_sandbox_template(template_name).await.unwrap();
+        client.delete_sandbox_template(template_name).await.unwrap();
+
+        let methods = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(method, _)| method.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            vec![
+                Method::GET,
+                Method::POST,
+                Method::GET,
+                Method::PUT,
+                Method::DELETE,
+                Method::DELETE,
+            ]
+        );
     }
 
     #[test]

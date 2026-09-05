@@ -13,17 +13,14 @@ path = "src/main.rs"
 
 [dependencies]
 codewire-client = { path = "../codewire-client", features = ["desktop-keyring", "desktop-pkce-loopback"] }
-codewire-platform-native = { path = "../codewire-platform-native", default-features = false, features = ["ssh"] }
 codewire-types = { path = "../codewire-types" }
 codewire-ui = { path = "../codewire-ui" }
 gpui = { package = "gpui-ce", git = "https://github.com/noeljackson/gpui-ce.git" }
 alacritty_terminal = "0.25"
-chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 futures = "0.3"
 open = "5"
 portable-pty = "0.9"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 schemars = "1"
 rfd = "0.15"
 rust-embed = "8"

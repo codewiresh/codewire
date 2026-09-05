@@ -4,7 +4,7 @@
 
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
-import type { AppPort, SetupAgent, SetupConfig } from "./common_pb";
+import type { ProjectSpec } from "./common_pb";
 import { file_codewire_v1_common } from "./common_pb";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/preset.proto.
  */
 export const file_codewire_v1_preset: GenFile = /*@__PURE__*/
-  fileDesc("Chhjb2Rld2lyZS92MS9wcmVzZXQucHJvdG8SC2NvZGV3aXJlLnYxIuYECgZQcmVzZXQSCgoCaWQYASABKAkSEwoGb3JnX2lkGAIgASgJSACIAQESDAoEbmFtZRgDIAEoCRIRCgRzbHVnGAQgASgJSAGIAQESFQoIbGFuZ3VhZ2UYBSABKAlIAogBARIQCghvZmZpY2lhbBgGIAEoCBIYCgtkZXNjcmlwdGlvbhgHIAEoCUgDiAEBEhQKDGJ1aWxkX3N0YXR1cxgIIAEoCRIYCgtidWlsZF9lcnJvchgJIAEoCUgEiAEBEh4KFmRlZmF1bHRfY3B1X21pbGxpY29yZXMYCiABKAUSGQoRZGVmYXVsdF9tZW1vcnlfbWIYCyABKAUSFwoPZGVmYXVsdF9kaXNrX2diGAwgASgFEiAKE2RlZmF1bHRfdHRsX3NlY29uZHMYDSABKAVIBYgBARISCgVpbWFnZRgOIAEoCUgGiAEBEjsKFGRlZmF1bHRfc2V0dXBfY29uZmlnGA8gASgLMhguY29kZXdpcmUudjEuU2V0dXBDb25maWdIB4gBARIeChFzZWNyZXRfcHJvamVjdF9pZBgQIAEoCUgIiAEBEi4KCmNyZWF0ZWRfYXQYESABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wQgkKB19vcmdfaWRCBwoFX3NsdWdCCwoJX2xhbmd1YWdlQg4KDF9kZXNjcmlwdGlvbkIOCgxfYnVpbGRfZXJyb3JCFgoUX2RlZmF1bHRfdHRsX3NlY29uZHNCCAoGX2ltYWdlQhcKFV9kZWZhdWx0X3NldHVwX2NvbmZpZ0IUChJfc2VjcmV0X3Byb2plY3RfaWQiSwoSTGlzdFByZXNldHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIRCglwYWdlX3NpemUYAiABKAUSEgoKcGFnZV90b2tlbhgDIAEoCSJUChNMaXN0UHJlc2V0c1Jlc3BvbnNlEiQKB3ByZXNldHMYASADKAsyEy5jb2Rld2lyZS52MS5QcmVzZXQSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJIq8HChNDcmVhdGVQcmVzZXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIMCgRuYW1lGAIgASgJEgwKBHNsdWcYAyABKAkSGAoLZGVzY3JpcHRpb24YBCABKAlIAIgBARIjChZkZWZhdWx0X2NwdV9taWxsaWNvcmVzGAUgASgFSAGIAQESHgoRZGVmYXVsdF9tZW1vcnlfbWIYBiABKAVIAogBARIcCg9kZWZhdWx0X2Rpc2tfZ2IYByABKAVIA4gBARIgChNkZWZhdWx0X3R0bF9zZWNvbmRzGAggASgFSASIAQESDQoFaW1hZ2UYCSABKAkSFwoPaW5zdGFsbF9jb21tYW5kGAogASgJEhYKDnN0YXJ0dXBfc2NyaXB0GAsgASgJEj8KCGVudl92YXJzGAwgAygLMi0uY29kZXdpcmUudjEuQ3JlYXRlUHJlc2V0UmVxdWVzdC5FbnZWYXJzRW50cnkSJwoGYWdlbnRzGA0gAygLMhcuY29kZXdpcmUudjEuU2V0dXBBZ2VudBIbCg5pbnN0YWxsX2FnZW50cxgOIAEoCEgFiAEBEg0KBWFnZW50GA8gASgJEkEKCWFnZW50X2VudhgQIAMoCzIuLmNvZGV3aXJlLnYxLkNyZWF0ZVByZXNldFJlcXVlc3QuQWdlbnRFbnZFbnRyeRInCglhcHBfcG9ydHMYESADKAsyFC5jb2Rld2lyZS52MS5BcHBQb3J0EiAKE2luY2x1ZGVfb3JnX3NlY3JldHMYEiABKAhIBogBARIhChRpbmNsdWRlX3VzZXJfc2VjcmV0cxgTIAEoCEgHiAEBEh4KEXNlY3JldF9wcm9qZWN0X2lkGBQgASgJSAiIAQEaLgoMRW52VmFyc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEaLwoNQWdlbnRFbnZFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBQg4KDF9kZXNjcmlwdGlvbkIZChdfZGVmYXVsdF9jcHVfbWlsbGljb3Jlc0IUChJfZGVmYXVsdF9tZW1vcnlfbWJCEgoQX2RlZmF1bHRfZGlza19nYkIWChRfZGVmYXVsdF90dGxfc2Vjb25kc0IRCg9faW5zdGFsbF9hZ2VudHNCFgoUX2luY2x1ZGVfb3JnX3NlY3JldHNCFwoVX2luY2x1ZGVfdXNlcl9zZWNyZXRzQhQKEl9zZWNyZXRfcHJvamVjdF9pZCI7ChRDcmVhdGVQcmVzZXRSZXNwb25zZRIjCgZwcmVzZXQYASABKAsyEy5jb2Rld2lyZS52MS5QcmVzZXQiNQoQR2V0UHJlc2V0UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSEQoJcHJlc2V0X2lkGAIgASgJIjgKEUdldFByZXNldFJlc3BvbnNlEiMKBnByZXNldBgBIAEoCzITLmNvZGV3aXJlLnYxLlByZXNldCJuCglFbnZWYXJNYXASMgoGdmFsdWVzGAEgAygLMiIuY29kZXdpcmUudjEuRW52VmFyTWFwLlZhbHVlc0VudHJ5Gi0KC1ZhbHVlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiNAoJQWdlbnRMaXN0EicKBnZhbHVlcxgBIAMoCzIXLmNvZGV3aXJlLnYxLlNldHVwQWdlbnQicgoLQWdlbnRFbnZNYXASNAoGdmFsdWVzGAEgAygLMiQuY29kZXdpcmUudjEuQWdlbnRFbnZNYXAuVmFsdWVzRW50cnkaLQoLVmFsdWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASIzCgtBcHBQb3J0TGlzdBIkCgZ2YWx1ZXMYASADKAsyFC5jb2Rld2lyZS52MS5BcHBQb3J0IuoHChNVcGRhdGVQcmVzZXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIRCglwcmVzZXRfaWQYAiABKAkSEQoEbmFtZRgDIAEoCUgAiAEBEhgKC2Rlc2NyaXB0aW9uGAQgASgJSAGIAQESEQoEc2x1ZxgFIAEoCUgCiAEBEiMKFmRlZmF1bHRfY3B1X21pbGxpY29yZXMYBiABKAVIA4gBARIeChFkZWZhdWx0X21lbW9yeV9tYhgHIAEoBUgEiAEBEhwKD2RlZmF1bHRfZGlza19nYhgIIAEoBUgFiAEBEiAKE2RlZmF1bHRfdHRsX3NlY29uZHMYCSABKAVIBogBARISCgVpbWFnZRgKIAEoCUgHiAEBEhwKD2luc3RhbGxfY29tbWFuZBgLIAEoCUgIiAEBEhsKDnN0YXJ0dXBfc2NyaXB0GAwgASgJSAmIAQESLQoIZW52X3ZhcnMYDSABKAsyFi5jb2Rld2lyZS52MS5FbnZWYXJNYXBICogBARIrCgZhZ2VudHMYDiABKAsyFi5jb2Rld2lyZS52MS5BZ2VudExpc3RIC4gBARIbCg5pbnN0YWxsX2FnZW50cxgPIAEoCEgMiAEBEhIKBWFnZW50GBAgASgJSA2IAQESMAoJYWdlbnRfZW52GBEgASgLMhguY29kZXdpcmUudjEuQWdlbnRFbnZNYXBIDogBARIwCglhcHBfcG9ydHMYEiABKAsyGC5jb2Rld2lyZS52MS5BcHBQb3J0TGlzdEgPiAEBEiAKE2luY2x1ZGVfb3JnX3NlY3JldHMYEyABKAhIEIgBARIhChRpbmNsdWRlX3VzZXJfc2VjcmV0cxgUIAEoCEgRiAEBEh4KEXNlY3JldF9wcm9qZWN0X2lkGBUgASgJSBKIAQFCBwoFX25hbWVCDgoMX2Rlc2NyaXB0aW9uQgcKBV9zbHVnQhkKF19kZWZhdWx0X2NwdV9taWxsaWNvcmVzQhQKEl9kZWZhdWx0X21lbW9yeV9tYkISChBfZGVmYXVsdF9kaXNrX2diQhYKFF9kZWZhdWx0X3R0bF9zZWNvbmRzQggKBl9pbWFnZUISChBfaW5zdGFsbF9jb21tYW5kQhEKD19zdGFydHVwX3NjcmlwdEILCglfZW52X3ZhcnNCCQoHX2FnZW50c0IRCg9faW5zdGFsbF9hZ2VudHNCCAoGX2FnZW50QgwKCl9hZ2VudF9lbnZCDAoKX2FwcF9wb3J0c0IWChRfaW5jbHVkZV9vcmdfc2VjcmV0c0IXChVfaW5jbHVkZV91c2VyX3NlY3JldHNCFAoSX3NlY3JldF9wcm9qZWN0X2lkIjsKFFVwZGF0ZVByZXNldFJlc3BvbnNlEiMKBnByZXNldBgBIAEoCzITLmNvZGV3aXJlLnYxLlByZXNldCI4ChNEZWxldGVQcmVzZXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIRCglwcmVzZXRfaWQYAiABKAkiFgoURGVsZXRlUHJlc2V0UmVzcG9uc2UytgMKDVByZXNldFNlcnZpY2USVQoLTGlzdFByZXNldHMSHy5jb2Rld2lyZS52MS5MaXN0UHJlc2V0c1JlcXVlc3QaIC5jb2Rld2lyZS52MS5MaXN0UHJlc2V0c1Jlc3BvbnNlIgOQAgESUwoMQ3JlYXRlUHJlc2V0EiAuY29kZXdpcmUudjEuQ3JlYXRlUHJlc2V0UmVxdWVzdBohLmNvZGV3aXJlLnYxLkNyZWF0ZVByZXNldFJlc3BvbnNlEk8KCUdldFByZXNldBIdLmNvZGV3aXJlLnYxLkdldFByZXNldFJlcXVlc3QaHi5jb2Rld2lyZS52MS5HZXRQcmVzZXRSZXNwb25zZSIDkAIBElMKDFVwZGF0ZVByZXNldBIgLmNvZGV3aXJlLnYxLlVwZGF0ZVByZXNldFJlcXVlc3QaIS5jb2Rld2lyZS52MS5VcGRhdGVQcmVzZXRSZXNwb25zZRJTCgxEZWxldGVQcmVzZXQSIC5jb2Rld2lyZS52MS5EZWxldGVQcmVzZXRSZXF1ZXN0GiEuY29kZXdpcmUudjEuRGVsZXRlUHJlc2V0UmVzcG9uc2VCrgEKD2NvbS5jb2Rld2lyZS52MUILUHJlc2V0UHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw", [file_codewire_v1_common, file_google_protobuf_timestamp]);
+  fileDesc("Chhjb2Rld2lyZS92MS9wcmVzZXQucHJvdG8SC2NvZGV3aXJlLnYxIqgECgZQcmVzZXQSCgoCaWQYASABKAkSEwoGb3JnX2lkGAIgASgJSACIAQESDAoEbmFtZRgDIAEoCRIRCgRzbHVnGAQgASgJSAGIAQESFQoIbGFuZ3VhZ2UYBSABKAlIAogBARIQCghvZmZpY2lhbBgGIAEoCBIYCgtkZXNjcmlwdGlvbhgHIAEoCUgDiAEBEhQKDGJ1aWxkX3N0YXR1cxgIIAEoCRIYCgtidWlsZF9lcnJvchgJIAEoCUgEiAEBEiAKE2RlZmF1bHRfdHRsX3NlY29uZHMYDSABKAVIBYgBARIuCgpjcmVhdGVkX2F0GBEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgxwcm9qZWN0X3NwZWMYEiABKAsyGC5jb2Rld2lyZS52MS5Qcm9qZWN0U3BlY0IJCgdfb3JnX2lkQgcKBV9zbHVnQgsKCV9sYW5ndWFnZUIOCgxfZGVzY3JpcHRpb25CDgoMX2J1aWxkX2Vycm9yQhYKFF9kZWZhdWx0X3R0bF9zZWNvbmRzSgQIChALSgQICxAMSgQIDBANSgQIDhAPSgQIDxAQSgQIEBARUhZkZWZhdWx0X2NwdV9taWxsaWNvcmVzUhFkZWZhdWx0X21lbW9yeV9tYlIPZGVmYXVsdF9kaXNrX2diUgVpbWFnZVIUZGVmYXVsdF9zZXR1cF9jb25maWdSEXNlY3JldF9wcm9qZWN0X2lkIksKEkxpc3RQcmVzZXRzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSEQoJcGFnZV9zaXplGAIgASgFEhIKCnBhZ2VfdG9rZW4YAyABKAkiVAoTTGlzdFByZXNldHNSZXNwb25zZRIkCgdwcmVzZXRzGAEgAygLMhMuY29kZXdpcmUudjEuUHJlc2V0EhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSKQBAoTQ3JlYXRlUHJlc2V0UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRzbHVnGAMgASgJEhgKC2Rlc2NyaXB0aW9uGAQgASgJSACIAQESIAoTZGVmYXVsdF90dGxfc2Vjb25kcxgIIAEoBUgBiAEBEi4KDHByb2plY3Rfc3BlYxgVIAEoCzIYLmNvZGV3aXJlLnYxLlByb2plY3RTcGVjQg4KDF9kZXNjcmlwdGlvbkIWChRfZGVmYXVsdF90dGxfc2Vjb25kc0oECAUQBkoECAYQB0oECAcQCEoECAkQCkoECAoQC0oECAsQDEoECAwQDUoECA0QDkoECA4QD0oECA8QEEoECBAQEUoECBEQEkoECBIQE0oECBMQFEoECBQQFVIWZGVmYXVsdF9jcHVfbWlsbGljb3Jlc1IRZGVmYXVsdF9tZW1vcnlfbWJSD2RlZmF1bHRfZGlza19nYlIFaW1hZ2VSD2luc3RhbGxfY29tbWFuZFIOc3RhcnR1cF9zY3JpcHRSCGVudl92YXJzUgZhZ2VudHNSDmluc3RhbGxfYWdlbnRzUgVhZ2VudFIJYWdlbnRfZW52UglhcHBfcG9ydHNSE2luY2x1ZGVfb3JnX3NlY3JldHNSFGluY2x1ZGVfdXNlcl9zZWNyZXRzUhFzZWNyZXRfcHJvamVjdF9pZCI7ChRDcmVhdGVQcmVzZXRSZXNwb25zZRIjCgZwcmVzZXQYASABKAsyEy5jb2Rld2lyZS52MS5QcmVzZXQiNQoQR2V0UHJlc2V0UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSEQoJcHJlc2V0X2lkGAIgASgJIjgKEUdldFByZXNldFJlc3BvbnNlEiMKBnByZXNldBgBIAEoCzITLmNvZGV3aXJlLnYxLlByZXNldCK/BAoTVXBkYXRlUHJlc2V0UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSEQoJcHJlc2V0X2lkGAIgASgJEhEKBG5hbWUYAyABKAlIAIgBARIYCgtkZXNjcmlwdGlvbhgEIAEoCUgBiAEBEhEKBHNsdWcYBSABKAlIAogBARIgChNkZWZhdWx0X3R0bF9zZWNvbmRzGAkgASgFSAOIAQESLgoMcHJvamVjdF9zcGVjGBYgASgLMhguY29kZXdpcmUudjEuUHJvamVjdFNwZWNCBwoFX25hbWVCDgoMX2Rlc2NyaXB0aW9uQgcKBV9zbHVnQhYKFF9kZWZhdWx0X3R0bF9zZWNvbmRzSgQIBhAHSgQIBxAISgQICBAJSgQIChALSgQICxAMSgQIDBANSgQIDRAOSgQIDhAPSgQIDxAQSgQIEBARSgQIERASSgQIEhATSgQIExAUSgQIFBAVSgQIFRAWUhZkZWZhdWx0X2NwdV9taWxsaWNvcmVzUhFkZWZhdWx0X21lbW9yeV9tYlIPZGVmYXVsdF9kaXNrX2diUgVpbWFnZVIPaW5zdGFsbF9jb21tYW5kUg5zdGFydHVwX3NjcmlwdFIIZW52X3ZhcnNSBmFnZW50c1IOaW5zdGFsbF9hZ2VudHNSBWFnZW50UglhZ2VudF9lbnZSCWFwcF9wb3J0c1ITaW5jbHVkZV9vcmdfc2VjcmV0c1IUaW5jbHVkZV91c2VyX3NlY3JldHNSEXNlY3JldF9wcm9qZWN0X2lkIjsKFFVwZGF0ZVByZXNldFJlc3BvbnNlEiMKBnByZXNldBgBIAEoCzITLmNvZGV3aXJlLnYxLlByZXNldCI4ChNEZWxldGVQcmVzZXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIRCglwcmVzZXRfaWQYAiABKAkiFgoURGVsZXRlUHJlc2V0UmVzcG9uc2UytgMKDVByZXNldFNlcnZpY2USVQoLTGlzdFByZXNldHMSHy5jb2Rld2lyZS52MS5MaXN0UHJlc2V0c1JlcXVlc3QaIC5jb2Rld2lyZS52MS5MaXN0UHJlc2V0c1Jlc3BvbnNlIgOQAgESUwoMQ3JlYXRlUHJlc2V0EiAuY29kZXdpcmUudjEuQ3JlYXRlUHJlc2V0UmVxdWVzdBohLmNvZGV3aXJlLnYxLkNyZWF0ZVByZXNldFJlc3BvbnNlEk8KCUdldFByZXNldBIdLmNvZGV3aXJlLnYxLkdldFByZXNldFJlcXVlc3QaHi5jb2Rld2lyZS52MS5HZXRQcmVzZXRSZXNwb25zZSIDkAIBElMKDFVwZGF0ZVByZXNldBIgLmNvZGV3aXJlLnYxLlVwZGF0ZVByZXNldFJlcXVlc3QaIS5jb2Rld2lyZS52MS5VcGRhdGVQcmVzZXRSZXNwb25zZRJTCgxEZWxldGVQcmVzZXQSIC5jb2Rld2lyZS52MS5EZWxldGVQcmVzZXRSZXF1ZXN0GiEuY29kZXdpcmUudjEuRGVsZXRlUHJlc2V0UmVzcG9uc2VCrgEKD2NvbS5jb2Rld2lyZS52MUILUHJlc2V0UHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw", [file_codewire_v1_common, file_google_protobuf_timestamp]);
 
 /**
  * Preset is a reusable environment configuration. Organization-less presets
@@ -74,44 +74,19 @@ export type Preset = Message<"codewire.v1.Preset"> & {
   buildError?: string | undefined;
 
   /**
-   * @generated from field: int32 default_cpu_millicores = 10;
-   */
-  defaultCpuMillicores: number;
-
-  /**
-   * @generated from field: int32 default_memory_mb = 11;
-   */
-  defaultMemoryMb: number;
-
-  /**
-   * @generated from field: int32 default_disk_gb = 12;
-   */
-  defaultDiskGb: number;
-
-  /**
    * @generated from field: optional int32 default_ttl_seconds = 13;
    */
   defaultTtlSeconds?: number | undefined;
 
   /**
-   * @generated from field: optional string image = 14;
-   */
-  image?: string | undefined;
-
-  /**
-   * @generated from field: optional codewire.v1.SetupConfig default_setup_config = 15;
-   */
-  defaultSetupConfig?: SetupConfig | undefined;
-
-  /**
-   * @generated from field: optional string secret_project_id = 16;
-   */
-  secretProjectId?: string | undefined;
-
-  /**
    * @generated from field: google.protobuf.Timestamp created_at = 17;
    */
   createdAt?: Timestamp | undefined;
+
+  /**
+   * @generated from field: codewire.v1.ProjectSpec project_spec = 18;
+   */
+  projectSpec?: ProjectSpec | undefined;
 };
 
 /**
@@ -201,87 +176,14 @@ export type CreatePresetRequest = Message<"codewire.v1.CreatePresetRequest"> & {
   description?: string | undefined;
 
   /**
-   * @generated from field: optional int32 default_cpu_millicores = 5;
-   */
-  defaultCpuMillicores?: number | undefined;
-
-  /**
-   * @generated from field: optional int32 default_memory_mb = 6;
-   */
-  defaultMemoryMb?: number | undefined;
-
-  /**
-   * @generated from field: optional int32 default_disk_gb = 7;
-   */
-  defaultDiskGb?: number | undefined;
-
-  /**
    * @generated from field: optional int32 default_ttl_seconds = 8;
    */
   defaultTtlSeconds?: number | undefined;
 
   /**
-   * @generated from field: string image = 9;
+   * @generated from field: codewire.v1.ProjectSpec project_spec = 21;
    */
-  image: string;
-
-  /**
-   * @generated from field: string install_command = 10;
-   */
-  installCommand: string;
-
-  /**
-   * @generated from field: string startup_script = 11;
-   */
-  startupScript: string;
-
-  /**
-   * @generated from field: map<string, string> env_vars = 12;
-   */
-  envVars: { [key: string]: string };
-
-  /**
-   * @generated from field: repeated codewire.v1.SetupAgent agents = 13;
-   */
-  agents: SetupAgent[];
-
-  /**
-   * @generated from field: optional bool install_agents = 14;
-   */
-  installAgents?: boolean | undefined;
-
-  /**
-   * @generated from field: string agent = 15;
-   */
-  agent: string;
-
-  /**
-   * @generated from field: map<string, string> agent_env = 16;
-   */
-  agentEnv: { [key: string]: string };
-
-  /**
-   * @generated from field: repeated codewire.v1.AppPort app_ports = 17;
-   */
-  appPorts: AppPort[];
-
-  /**
-   * @generated from field: optional bool include_org_secrets = 18;
-   */
-  includeOrgSecrets?: boolean | undefined;
-
-  /**
-   * @generated from field: optional bool include_user_secrets = 19;
-   */
-  includeUserSecrets?: boolean | undefined;
-
-  /**
-   * Organization-scoped secret project ID. Ergonomic clients may resolve a
-   * display name before issuing this request.
-   *
-   * @generated from field: optional string secret_project_id = 20;
-   */
-  secretProjectId?: string | undefined;
+  projectSpec?: ProjectSpec | undefined;
 };
 
 /**
@@ -348,78 +250,6 @@ export const GetPresetResponseSchema: GenMessage<GetPresetResponse> = /*@__PURE_
   messageDesc(file_codewire_v1_preset, 6);
 
 /**
- * Presence-bearing collection wrappers preserve REST PATCH semantics: an
- * absent wrapper leaves the field unchanged, while a present empty wrapper
- * replaces the field with an empty collection.
- *
- * @generated from message codewire.v1.EnvVarMap
- */
-export type EnvVarMap = Message<"codewire.v1.EnvVarMap"> & {
-  /**
-   * @generated from field: map<string, string> values = 1;
-   */
-  values: { [key: string]: string };
-};
-
-/**
- * Describes the message codewire.v1.EnvVarMap.
- * Use `create(EnvVarMapSchema)` to create a new message.
- */
-export const EnvVarMapSchema: GenMessage<EnvVarMap> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_preset, 7);
-
-/**
- * @generated from message codewire.v1.AgentList
- */
-export type AgentList = Message<"codewire.v1.AgentList"> & {
-  /**
-   * @generated from field: repeated codewire.v1.SetupAgent values = 1;
-   */
-  values: SetupAgent[];
-};
-
-/**
- * Describes the message codewire.v1.AgentList.
- * Use `create(AgentListSchema)` to create a new message.
- */
-export const AgentListSchema: GenMessage<AgentList> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_preset, 8);
-
-/**
- * @generated from message codewire.v1.AgentEnvMap
- */
-export type AgentEnvMap = Message<"codewire.v1.AgentEnvMap"> & {
-  /**
-   * @generated from field: map<string, string> values = 1;
-   */
-  values: { [key: string]: string };
-};
-
-/**
- * Describes the message codewire.v1.AgentEnvMap.
- * Use `create(AgentEnvMapSchema)` to create a new message.
- */
-export const AgentEnvMapSchema: GenMessage<AgentEnvMap> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_preset, 9);
-
-/**
- * @generated from message codewire.v1.AppPortList
- */
-export type AppPortList = Message<"codewire.v1.AppPortList"> & {
-  /**
-   * @generated from field: repeated codewire.v1.AppPort values = 1;
-   */
-  values: AppPort[];
-};
-
-/**
- * Describes the message codewire.v1.AppPortList.
- * Use `create(AppPortListSchema)` to create a new message.
- */
-export const AppPortListSchema: GenMessage<AppPortList> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_preset, 10);
-
-/**
  * @generated from message codewire.v1.UpdatePresetRequest
  */
 export type UpdatePresetRequest = Message<"codewire.v1.UpdatePresetRequest"> & {
@@ -449,87 +279,16 @@ export type UpdatePresetRequest = Message<"codewire.v1.UpdatePresetRequest"> & {
   slug?: string | undefined;
 
   /**
-   * @generated from field: optional int32 default_cpu_millicores = 6;
-   */
-  defaultCpuMillicores?: number | undefined;
-
-  /**
-   * @generated from field: optional int32 default_memory_mb = 7;
-   */
-  defaultMemoryMb?: number | undefined;
-
-  /**
-   * @generated from field: optional int32 default_disk_gb = 8;
-   */
-  defaultDiskGb?: number | undefined;
-
-  /**
    * @generated from field: optional int32 default_ttl_seconds = 9;
    */
   defaultTtlSeconds?: number | undefined;
 
   /**
-   * @generated from field: optional string image = 10;
-   */
-  image?: string | undefined;
-
-  /**
-   * @generated from field: optional string install_command = 11;
-   */
-  installCommand?: string | undefined;
-
-  /**
-   * @generated from field: optional string startup_script = 12;
-   */
-  startupScript?: string | undefined;
-
-  /**
-   * @generated from field: optional codewire.v1.EnvVarMap env_vars = 13;
-   */
-  envVars?: EnvVarMap | undefined;
-
-  /**
-   * @generated from field: optional codewire.v1.AgentList agents = 14;
-   */
-  agents?: AgentList | undefined;
-
-  /**
-   * @generated from field: optional bool install_agents = 15;
-   */
-  installAgents?: boolean | undefined;
-
-  /**
-   * @generated from field: optional string agent = 16;
-   */
-  agent?: string | undefined;
-
-  /**
-   * @generated from field: optional codewire.v1.AgentEnvMap agent_env = 17;
-   */
-  agentEnv?: AgentEnvMap | undefined;
-
-  /**
-   * @generated from field: optional codewire.v1.AppPortList app_ports = 18;
-   */
-  appPorts?: AppPortList | undefined;
-
-  /**
-   * @generated from field: optional bool include_org_secrets = 19;
-   */
-  includeOrgSecrets?: boolean | undefined;
-
-  /**
-   * @generated from field: optional bool include_user_secrets = 20;
-   */
-  includeUserSecrets?: boolean | undefined;
-
-  /**
-   * Present-empty clears the binding; present-non-empty selects an
-   * organization-owned secret project by ID.
+   * Presence replaces the whole canonical project configuration.
    *
-   * @generated from field: optional string secret_project_id = 21;
+   * @generated from field: codewire.v1.ProjectSpec project_spec = 22;
    */
-  secretProjectId?: string | undefined;
+  projectSpec?: ProjectSpec | undefined;
 };
 
 /**
@@ -537,7 +296,7 @@ export type UpdatePresetRequest = Message<"codewire.v1.UpdatePresetRequest"> & {
  * Use `create(UpdatePresetRequestSchema)` to create a new message.
  */
 export const UpdatePresetRequestSchema: GenMessage<UpdatePresetRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_preset, 11);
+  messageDesc(file_codewire_v1_preset, 7);
 
 /**
  * @generated from message codewire.v1.UpdatePresetResponse
@@ -554,7 +313,7 @@ export type UpdatePresetResponse = Message<"codewire.v1.UpdatePresetResponse"> &
  * Use `create(UpdatePresetResponseSchema)` to create a new message.
  */
 export const UpdatePresetResponseSchema: GenMessage<UpdatePresetResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_preset, 12);
+  messageDesc(file_codewire_v1_preset, 8);
 
 /**
  * @generated from message codewire.v1.DeletePresetRequest
@@ -576,7 +335,7 @@ export type DeletePresetRequest = Message<"codewire.v1.DeletePresetRequest"> & {
  * Use `create(DeletePresetRequestSchema)` to create a new message.
  */
 export const DeletePresetRequestSchema: GenMessage<DeletePresetRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_preset, 13);
+  messageDesc(file_codewire_v1_preset, 9);
 
 /**
  * @generated from message codewire.v1.DeletePresetResponse
@@ -589,7 +348,7 @@ export type DeletePresetResponse = Message<"codewire.v1.DeletePresetResponse"> &
  * Use `create(DeletePresetResponseSchema)` to create a new message.
  */
 export const DeletePresetResponseSchema: GenMessage<DeletePresetResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_preset, 14);
+  messageDesc(file_codewire_v1_preset, 10);
 
 /**
  * PresetService manages organization and official environment presets.

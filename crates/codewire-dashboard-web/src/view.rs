@@ -6,8 +6,9 @@ use buffa::Message as _;
 use codewire_proto::google::rpc::{BadRequest, ErrorInfo};
 use connectrpc::{ConnectError, ErrorCode};
 use serde::Deserialize;
+use std::fmt;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 pub(crate) struct AuthQuery {
     #[serde(default, rename = "authRequestID")]
     pub(crate) auth_request_id: String,
@@ -19,7 +20,19 @@ pub(crate) struct AuthQuery {
     pub(crate) user_code: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for AuthQuery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthQuery")
+            .field("auth_request_id", &redacted(&self.auth_request_id))
+            .field("return_to", &redacted(&self.return_to))
+            .field("token", &redacted(&self.token))
+            .field("user_code", &redacted(&self.user_code))
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub(crate) struct AuthFormSubmission {
     #[serde(rename = "_csrf")]
     pub(crate) csrf: String,
@@ -41,7 +54,23 @@ pub(crate) struct AuthFormSubmission {
     pub(crate) return_to: String,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for AuthFormSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthFormSubmission")
+            .field("csrf", &redacted(&self.csrf))
+            .field("email", &redacted(&self.email))
+            .field("password", &redacted(&self.password))
+            .field("confirm_password", &redacted(&self.confirm_password))
+            .field("name", &redacted(&self.name))
+            .field("invite_code", &redacted(&self.invite_code))
+            .field("code", &redacted(&self.code))
+            .field("auth_request_id", &redacted(&self.auth_request_id))
+            .field("return_to", &redacted(&self.return_to))
+            .finish()
+    }
+}
+
 pub(crate) struct AuthFormView {
     pub(crate) title: &'static str,
     pub(crate) description: &'static str,
@@ -63,7 +92,20 @@ pub(crate) struct AuthFormView {
     pub(crate) secondary_url: String,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for AuthFormView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthFormView")
+            .field("title", &self.title)
+            .field("action", &self.action)
+            .field("error", &self.error)
+            .field("csrf_token", &redacted(&self.csrf_token))
+            .field("auth_request_id", &redacted(&self.auth_request_id))
+            .field("return_to", &redacted(&self.return_to))
+            .finish_non_exhaustive()
+    }
+}
+
 pub(crate) struct SetupTwoFactorView {
     pub(crate) csrf_token: String,
     pub(crate) return_to: String,
@@ -72,18 +114,51 @@ pub(crate) struct SetupTwoFactorView {
     pub(crate) error: String,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for SetupTwoFactorView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SetupTwoFactorView")
+            .field("csrf_token", &redacted(&self.csrf_token))
+            .field("return_to", &redacted(&self.return_to))
+            .field("qr_svg", &redacted(&self.qr_svg))
+            .field("secret", &redacted(&self.secret))
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 pub(crate) struct TwoFactorRecoveryView {
     pub(crate) return_to: String,
     pub(crate) backup_codes: Vec<String>,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for TwoFactorRecoveryView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TwoFactorRecoveryView")
+            .field("return_to", &redacted(&self.return_to))
+            .field("backup_code_count", &self.backup_codes.len())
+            .finish()
+    }
+}
+
 pub(crate) struct DevicePageView {
     pub(crate) user_code: String,
     pub(crate) csrf_token: String,
     pub(crate) error: String,
     pub(crate) approved: bool,
+}
+
+impl fmt::Debug for DevicePageView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DevicePageView")
+            .field("user_code", &redacted(&self.user_code))
+            .field("csrf_token", &redacted(&self.csrf_token))
+            .field("error", &self.error)
+            .field("approved", &self.approved)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -94,7 +169,6 @@ pub(crate) struct InvitationView {
     pub(crate) role: &'static str,
 }
 
-#[derive(Debug)]
 pub(crate) struct InvitationPageView {
     pub(crate) invitation: InvitationView,
     pub(crate) token: String,
@@ -106,42 +180,73 @@ pub(crate) struct InvitationPageView {
     pub(crate) error: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for InvitationPageView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InvitationPageView")
+            .field("invitation", &self.invitation)
+            .field("token", &redacted(&self.token))
+            .field("csrf_token", &redacted(&self.csrf_token))
+            .field("authenticated", &self.authenticated)
+            .field("email_matches", &self.email_matches)
+            .field("login_url", &redacted(&self.login_url))
+            .field("signup_url", &redacted(&self.signup_url))
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub(crate) struct CsrfSubmission {
     #[serde(rename = "_csrf")]
     pub(crate) csrf: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for CsrfSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CsrfSubmission")
+            .field("csrf", &redacted(&self.csrf))
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub(crate) struct DeviceSubmission {
     #[serde(rename = "_csrf")]
     pub(crate) csrf: String,
     pub(crate) user_code: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for DeviceSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceSubmission")
+            .field("csrf", &redacted(&self.csrf))
+            .field("user_code", &redacted(&self.user_code))
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub(crate) struct InvitationSubmission {
     #[serde(rename = "_csrf")]
     pub(crate) csrf: String,
     pub(crate) token: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct GitCredentialSubmission {
-    #[serde(rename = "_csrf")]
-    pub(crate) csrf: String,
-    pub(crate) name: String,
-    pub(crate) host: String,
-    #[serde(default)]
-    pub(crate) username: String,
-    pub(crate) password: String,
+impl fmt::Debug for InvitationSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InvitationSubmission")
+            .field("csrf", &redacted(&self.csrf))
+            .field("token", &redacted(&self.token))
+            .finish()
+    }
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct CredentialIdSubmission {
-    #[serde(rename = "_csrf")]
-    pub(crate) csrf: String,
-    pub(crate) credential_id: String,
+fn redacted(value: &str) -> Option<&'static str> {
+    (!value.is_empty()).then_some("[REDACTED]")
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,35 +257,17 @@ pub(crate) struct GitIdentitySubmission {
     pub(crate) git_email: String,
 }
 
-#[derive(Debug)]
-pub(crate) struct GitCredentialRow {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) host: String,
-    pub(crate) username: String,
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct SettingsData {
-    pub(crate) github_available: bool,
-    pub(crate) github_connected: bool,
-    pub(crate) github_username: String,
-    pub(crate) credentials_available: bool,
-    pub(crate) credentials: Vec<GitCredentialRow>,
     pub(crate) git_identity_available: bool,
     pub(crate) git_name: String,
     pub(crate) git_email: String,
-    pub(crate) ssh_key_status_available: bool,
-    pub(crate) ssh_key_available: bool,
-    pub(crate) ssh_public_key: String,
-    pub(crate) ssh_fingerprint: String,
 }
 
 #[derive(Debug)]
 pub(crate) struct SettingsPageView {
     pub(crate) data: SettingsData,
     pub(crate) csrf_token: String,
-    pub(crate) github_connect_url: String,
     pub(crate) message: String,
     pub(crate) error: String,
 }
@@ -199,13 +286,10 @@ pub(crate) struct DashboardView {
     pub(crate) is_admin: bool,
     pub(crate) organizations: Vec<OrganizationRow>,
     pub(crate) has_organizations: bool,
-    pub(crate) github_connected: bool,
-    pub(crate) github_available: bool,
     pub(crate) show_checklist: bool,
     pub(crate) new_organization_url: String,
     pub(crate) settings_url: String,
     pub(crate) global_context_query: String,
-    pub(crate) github_connect_url: String,
     pub(crate) has_selected_organization: bool,
     pub(crate) selected_organization_name: String,
     pub(crate) selected_organization_slug: String,
@@ -387,29 +471,20 @@ pub(crate) struct TerminalPageView {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct GitHubRepositoryOption {
-    pub(crate) full_name: String,
-    pub(crate) url: String,
-    pub(crate) description: String,
-    pub(crate) language: String,
-    pub(crate) private: bool,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct EnvironmentPresetOption {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) image: String,
-    pub(crate) default_cpu_millicores: i32,
-    pub(crate) default_memory_mb: i32,
-    pub(crate) default_disk_gb: i32,
+    pub(crate) default_cpu_millicores: Option<u32>,
+    pub(crate) default_memory_mib: Option<u64>,
+    pub(crate) default_disk_gib: Option<u64>,
     pub(crate) default_ttl_seconds: Option<i32>,
     pub(crate) default_install_command: String,
     pub(crate) default_startup_script: String,
     pub(crate) default_agents: Vec<String>,
     pub(crate) default_app_ports: Vec<EnvironmentAppPortFormRow>,
-    pub(crate) uses_legacy_secret_sources: bool,
+    pub(crate) uses_protected_secret_bindings: bool,
     pub(crate) official: bool,
 }
 
@@ -447,23 +522,10 @@ pub(crate) struct EnvironmentAgentView {
     pub(crate) label: &'static str,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct EnvironmentDetectionView {
-    pub(crate) project_type: String,
-    pub(crate) language: String,
-    pub(crate) framework: String,
-    pub(crate) image: String,
-    pub(crate) setup_notes: String,
-    pub(crate) needs_docker: bool,
-    pub(crate) has_compose: bool,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentCreateFormView {
     pub(crate) csrf_token: String,
     pub(crate) expanded: bool,
-    pub(crate) prepared: bool,
-    pub(crate) mode: String,
     pub(crate) name: String,
     pub(crate) preset_id: String,
     pub(crate) image: String,
@@ -480,13 +542,8 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) confidential_price: String,
     pub(crate) selected_agents: Vec<String>,
     pub(crate) app_ports: Vec<EnvironmentAppPortFormRow>,
-    pub(crate) github_connected: bool,
-    pub(crate) github_username: String,
-    pub(crate) github_repositories_available: bool,
-    pub(crate) github_repositories: Vec<GitHubRepositoryOption>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
     pub(crate) agents: Vec<EnvironmentAgentView>,
-    pub(crate) detection: EnvironmentDetectionView,
     pub(crate) repo_error: String,
     pub(crate) image_error: String,
     pub(crate) name_error: String,
@@ -498,33 +555,20 @@ pub(crate) struct EnvironmentCreateFormView {
 }
 
 impl EnvironmentCreateFormView {
+    pub(crate) fn cpu_uses_catalog_option(&self) -> bool {
+        matches!(self.cpu.as_str(), "1000" | "2000" | "4000" | "8000")
+    }
+
+    pub(crate) fn memory_uses_catalog_option(&self) -> bool {
+        matches!(self.memory.as_str(), "2048" | "4096" | "8192" | "16384")
+    }
+
+    pub(crate) fn disk_uses_catalog_option(&self) -> bool {
+        matches!(self.disk.as_str(), "10" | "20" | "40" | "80")
+    }
+
     pub(crate) fn isolation_selected(&self, value: &str) -> bool {
         self.isolation_tier == value
-    }
-
-    pub(crate) fn repository_selected(&self, value: &str) -> bool {
-        self.repositories
-            .iter()
-            .any(|repository| repository.url == value)
-    }
-
-    pub(crate) fn has_repository(&self) -> bool {
-        self.repositories
-            .iter()
-            .any(|repository| !repository.url.trim().is_empty())
-    }
-
-    pub(crate) fn has_selected_github_repository(&self) -> bool {
-        self.github_repositories
-            .iter()
-            .any(|repository| self.repository_selected(&repository.url))
-    }
-
-    pub(crate) fn repository_mount_suffix(&self, value: &str) -> &str {
-        self.repositories
-            .iter()
-            .find(|repository| repository.url == value)
-            .map_or("", |repository| repository.mount_suffix())
     }
 
     pub(crate) fn agent_selected(&self, value: &str) -> bool {
@@ -794,12 +838,16 @@ pub(crate) struct InvitationIdSubmission {
     pub(crate) invitation_id: String,
 }
 
+// Deliberately not Debug: a post-create rendering may contain the one-time
+// invitation URL. List/read paths always leave that field empty.
 pub(crate) struct MembersPageView {
     pub(crate) members: Vec<MemberRow>,
     pub(crate) invitations: Vec<InvitationRow>,
     pub(crate) assignment_options: &'static [AssignmentView],
     pub(crate) invite_form: InviteFormView,
     pub(crate) csrf_token: String,
+    pub(crate) one_time_invitation_url: String,
+    pub(crate) has_one_time_invitation: bool,
     pub(crate) message: String,
     pub(crate) error: String,
 }
@@ -1133,4 +1181,106 @@ pub(crate) fn connect_error_reason(error: &ConnectError) -> Option<String> {
         .and_then(|bytes| ErrorInfo::decode_from_slice(&bytes).ok())
         .map(|detail| detail.reason)
         .filter(|reason| !reason.is_empty())
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::*;
+
+    const MARKER: &str = "synthetic-secret-capability-marker";
+
+    fn assert_value_blind(diagnostic: &str) {
+        assert!(!diagnostic.contains(MARKER));
+        assert!(diagnostic.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn auth_input_debug_redacts_credentials_and_continuations() {
+        let query = AuthQuery {
+            auth_request_id: MARKER.into(),
+            return_to: format!("/accept-invite?token={MARKER}"),
+            token: MARKER.into(),
+            user_code: MARKER.into(),
+        };
+        let submission = AuthFormSubmission {
+            csrf: MARKER.into(),
+            email: MARKER.into(),
+            password: MARKER.into(),
+            confirm_password: MARKER.into(),
+            name: MARKER.into(),
+            invite_code: MARKER.into(),
+            code: MARKER.into(),
+            auth_request_id: MARKER.into(),
+            return_to: MARKER.into(),
+        };
+
+        assert_value_blind(&format!("{query:?}"));
+        assert_value_blind(&format!("{submission:?}"));
+        assert_value_blind(&format!(
+            "{:?}",
+            CsrfSubmission {
+                csrf: MARKER.into()
+            }
+        ));
+    }
+
+    #[test]
+    fn two_factor_and_device_debug_redact_capabilities() {
+        let setup = SetupTwoFactorView {
+            csrf_token: MARKER.into(),
+            return_to: MARKER.into(),
+            qr_svg: MARKER.into(),
+            secret: MARKER.into(),
+            error: String::new(),
+        };
+        let recovery = TwoFactorRecoveryView {
+            return_to: MARKER.into(),
+            backup_codes: vec![MARKER.into()],
+        };
+        let device = DevicePageView {
+            user_code: MARKER.into(),
+            csrf_token: MARKER.into(),
+            error: String::new(),
+            approved: false,
+        };
+        let submission = DeviceSubmission {
+            csrf: MARKER.into(),
+            user_code: MARKER.into(),
+        };
+
+        for diagnostic in [
+            format!("{setup:?}"),
+            format!("{recovery:?}"),
+            format!("{device:?}"),
+            format!("{submission:?}"),
+        ] {
+            assert_value_blind(&diagnostic);
+        }
+    }
+
+    #[test]
+    fn invitation_debug_redacts_token_and_token_bearing_urls() {
+        let page = InvitationPageView {
+            invitation: InvitationView {
+                organization_name: "Synthetic Organization".into(),
+                email: "invitee@example.test".into(),
+                inviter_name: "Synthetic Owner".into(),
+                role: "Member",
+            },
+            token: MARKER.into(),
+            csrf_token: MARKER.into(),
+            authenticated: true,
+            email_matches: true,
+            login_url: format!("/login?return_to=/accept-invite%3Ftoken%3D{MARKER}"),
+            signup_url: format!("/signup?return_to=/accept-invite%3Ftoken%3D{MARKER}"),
+            error: String::new(),
+        };
+        let submission = InvitationSubmission {
+            csrf: MARKER.into(),
+            token: MARKER.into(),
+        };
+
+        assert_value_blind(&format!("{page:?}"));
+        assert_value_blind(&format!("{submission:?}"));
+    }
 }

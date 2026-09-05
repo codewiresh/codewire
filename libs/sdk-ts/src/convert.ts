@@ -5,22 +5,18 @@ import {
   type CreateApiKeyResponse as ProtoCreateApiKeyResponse,
 } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
 import {
-  AppPortSchema,
+  ApplicationPortSchema,
   ProjectAccessBindingSchema,
   ProjectAgentsSchema,
-  ProjectCredentialReferenceSchema,
   ProjectResourcesSchema,
   ProjectSecretBindingsSchema,
   ProjectSkillSelectionSchema,
   ProjectSkillSource,
   ProjectSpecSchema,
-  RepoEntrySchema,
-  SetupConfigSchema,
-  type AppPort as ProtoAppPort,
+  RepositorySpecSchema,
+  type ApplicationPort as ProtoApplicationPort,
   type ProjectSpec as ProtoProjectSpec,
-  type RepoEntry as ProtoRepoEntry,
-  type SetupAgent as ProtoSetupAgent,
-  type SetupConfig as ProtoSetupConfig,
+  type RepositorySpec as ProtoRepositorySpec,
 } from "@codewire/proto-ts/gen/codewire/v1/common_pb";
 import {
   CreateEnvironmentRequestSchema,
@@ -46,7 +42,9 @@ import {
   type Port as ProtoPort,
 } from "@codewire/proto-ts/gen/codewire/v1/port_pb";
 import {
+  CreatePresetRequestSchema,
   PresetSchema,
+  UpdatePresetRequestSchema,
   type Preset as ProtoPreset,
 } from "@codewire/proto-ts/gen/codewire/v1/preset_pb";
 import {
@@ -62,7 +60,7 @@ import type {
   CreateAPIKeyResponse,
   CreateEnvironmentRequest,
   CreatePortRequest,
-  CreateTemplateRequest,
+  CreatePresetRequest,
   EnvironmentData,
   EnvironmentResizeOperation,
   EnvironmentPort,
@@ -76,8 +74,8 @@ import type {
   ResolvedWorkloadSecretMetadata,
   SecretMetadata,
   SecretProject,
-  TemplateData,
-  UpdateTemplateRequest,
+  PresetData,
+  UpdatePresetRequest,
   WorkloadSecretSource,
 } from "./types.js";
 
@@ -304,14 +302,8 @@ function toProtoPortAccess(access: string | undefined): PortAccess {
   }
 }
 
-function fromProtoSetupAgents(
-  value: ProtoSetupAgent[],
-): Array<{ type: string }> | undefined {
-  return value.length === 0 ? undefined : value.map((agent) => ({ type: agent.type }));
-}
-
-function fromProtoAppPorts(
-  value: ProtoAppPort[],
+function fromProtoApplicationPorts(
+  value: ProtoApplicationPort[],
 ): Array<{ access?: string; label: string; port: number }> | undefined {
   return value.length === 0
     ? undefined
@@ -322,63 +314,37 @@ function fromProtoAppPorts(
       }));
 }
 
-function fromProtoRepos(
-  value: ProtoRepoEntry[],
-): Array<{ branch?: string; mount_path?: string; revision?: string; url: string }> | undefined {
+function fromProtoRepositorySpecs(
+  value: ProtoRepositorySpec[],
+): Array<{ branch?: string; destination?: string; revision?: string; source: string }> | undefined {
   return value.length === 0
     ? undefined
     : value.map((repo) => ({
         branch: optionalString(repo.branch),
-        mount_path: optionalString(repo.mountPath),
+        destination: optionalString(repo.destination),
         revision: optionalString(repo.revision),
-        url: repo.url,
+        source: repo.source,
       }));
 }
 
-function fromProtoSetupConfig(
-  value: ProtoSetupConfig | undefined,
-): TemplateData["default_setup_config"] {
-  if (!value) return undefined;
-  return {
-    agent: optionalString(value.agent),
-    agent_env: copyStringMap(value.agentEnv),
-    agents: fromProtoSetupAgents(value.agents),
-    app_ports: fromProtoAppPorts(value.appPorts),
-    branch: optionalString(value.branch),
-    env_vars: copyStringMap(value.envVars),
-    include_org_secrets: value.includeOrgSecrets,
-    include_user_secrets: value.includeUserSecrets,
-    install_agents: value.installAgents,
-    install_command: optionalString(value.installCommand),
-    repo_url: optionalString(value.repoUrl),
-    repos: fromProtoRepos(value.repos),
-    startup_script: optionalString(value.startupScript),
-    project_spec: fromProtoProjectSpec(value.projectSpec),
-  };
-}
-
-function toProtoAgents(value: Array<{ type?: string }> | null | undefined) {
-  return (value ?? []).map((agent) => ({ type: agent.type ?? "" }));
-}
-
-function toProtoAppPorts(
-  value: Array<{ access?: string; label?: string; port?: number }> | null | undefined,
+function toProtoApplicationPorts(
+  value: ProjectSpec["application_ports"],
 ) {
   return (value ?? []).map((port) => ({
     access: port.access ?? "",
-    label: port.label ?? "",
-    port: int32("app port", port.port) ?? 0,
+    label: port.label,
+    port: int32("app port", port.port)!,
   }));
 }
 
-function toProtoRepos(
-  value: Array<{ branch?: string; mount_path?: string; revision?: string; url?: string }> | undefined,
+function toProtoRepositorySpecs(
+  value: ProjectSpec["repositories"],
 ) {
   return (value ?? []).map((repo) => ({
     branch: repo.branch ?? "",
-    mountPath: repo.mount_path ?? "",
+    destination: repo.destination ?? "",
     revision: repo.revision ?? "",
-    url: repo.url ?? "",
+    source: repo.source,
   }));
 }
 
@@ -388,7 +354,7 @@ function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec 
     schema_version: value.schemaVersion,
     preset: optionalString(value.preset),
     image: optionalString(value.image),
-    repositories: fromProtoRepos(value.repositories),
+    repositories: fromProtoRepositorySpecs(value.repositories),
     working_directory: value.workingDirectory,
     install_command: optionalString(value.installCommand),
     startup_script: optionalString(value.startupScript),
@@ -396,7 +362,6 @@ function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec 
     agents: value.agents
       ? { install: value.agents.install, tools: value.agents.tools.length ? [...value.agents.tools] : undefined }
       : undefined,
-    agent_environment: copyStringMap(value.agentEnvironment),
     skills: value.skills.length
       ? value.skills.map((skill) => ({
           source: skill.source === ProjectSkillSource.REPOSITORY
@@ -408,7 +373,7 @@ function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec 
           agents: skill.agents.length ? [...skill.agents] : undefined,
         }))
       : undefined,
-    application_ports: fromProtoAppPorts(value.applicationPorts),
+    application_ports: fromProtoApplicationPorts(value.applicationPorts),
     resources: value.resources
       ? {
           cpu_millicores: value.resources.cpuMillicores,
@@ -441,19 +406,18 @@ function toProtoProjectSpec(value: ProjectSpec | undefined) {
     schemaVersion: uint32("project schema_version", value.schema_version) ?? 0,
     preset: value.preset ?? "",
     image: value.image ?? "",
-    repositories: toProtoRepos(value.repositories),
+    repositories: toProtoRepositorySpecs(value.repositories),
     workingDirectory: value.working_directory,
     installCommand: value.install_command ?? "",
     startupScript: value.startup_script ?? "",
     environment: value.environment ? { ...value.environment } : {},
     agents: value.agents ? { install: value.agents.install, tools: [...(value.agents.tools ?? [])] } : undefined,
-    agentEnvironment: value.agent_environment ? { ...value.agent_environment } : {},
     skills: (value.skills ?? []).map((skill) => ({
       source: toProtoProjectSkillSource(skill.source),
       reference: skill.reference,
       agents: [...(skill.agents ?? [])],
     })),
-    applicationPorts: toProtoAppPorts(value.application_ports),
+    applicationPorts: toProtoApplicationPorts(value.application_ports),
     resources: value.resources
       ? {
           cpuMillicores: uint32("project cpu_millicores", value.resources.cpu_millicores),
@@ -650,25 +614,21 @@ export function fromProtoFileEntry(value: ProtoFileEntry): FileEntry {
   };
 }
 
-export function fromProtoPreset(value: ProtoPreset): TemplateData {
+export function fromProtoPreset(value: ProtoPreset): PresetData {
+  if (!value.projectSpec) throw new Error("preset response omitted project_spec");
   return {
     build_error: optionalString(value.buildError),
     build_status: value.buildStatus,
     created_at: timestampString(value.createdAt) ?? "",
-    default_cpu_millicores: value.defaultCpuMillicores,
-    default_disk_gb: value.defaultDiskGb,
-    default_memory_mb: value.defaultMemoryMb,
-    default_setup_config: fromProtoSetupConfig(value.defaultSetupConfig),
     default_ttl_seconds: value.defaultTtlSeconds,
     description: optionalString(value.description),
     id: value.id,
-    image: optionalString(value.image),
     language: optionalString(value.language),
     name: value.name,
     official: value.official,
     org_id: optionalString(value.orgId),
-    secret_project_id: optionalString(value.secretProjectId),
     slug: optionalString(value.slug),
+    project_spec: fromProtoProjectSpec(value.projectSpec)!,
   };
 }
 
@@ -719,32 +679,15 @@ export function toProtoCreateEnvironmentRequest(
   orgId: string,
   body: CreateEnvironmentRequest,
 ) {
+  const projectSpec = toProtoProjectSpec(body.project_spec);
+  if (!projectSpec) throw new Error("codewire: project_spec is required");
   return {
     orgId,
     presetId: body.preset_id ?? undefined,
     name: body.name ?? undefined,
-    cpuMillicores: int32("cpu_millicores", body.cpu_millicores),
-    memoryMb: int32("memory_mb", body.memory_mb),
-    diskGb: int32("disk_gb", body.disk_gb),
     ttlSeconds: int32("ttl_seconds", body.ttl_seconds),
-    presetSlug: body.preset_slug ?? "",
-    repoUrl: body.repo_url ?? "",
-    branch: body.branch ?? "",
-    repos: toProtoRepos(body.repos),
-    image: body.image ?? "",
-    installCommand: body.install_command ?? "",
-    startupScript: body.startup_script ?? "",
-    envVars: body.env_vars ? { ...body.env_vars } : {},
-    agents: toProtoAgents(body.agents),
-    installAgents: body.install_agents ?? undefined,
-    agent: body.agent ?? "",
-    agentEnv: body.agent_env ? { ...body.agent_env } : {},
-    secretProject: body.secret_project ?? "",
-    appPorts: toProtoAppPorts(body.app_ports),
-    includeOrgSecrets: body.include_org_secrets ?? undefined,
-    includeUserSecrets: body.include_user_secrets ?? undefined,
     isolationTier: toProtoIsolationTier(body.isolation_tier),
-    projectSpec: toProtoProjectSpec(body.project_spec),
+    projectSpec,
   };
 }
 
@@ -789,38 +732,24 @@ export function toProtoListEnvironmentsRequest(
 
 export function toProtoCreatePresetRequest(
   orgId: string,
-  body: CreateTemplateRequest,
-  secretProjectId: string | undefined,
+  body: CreatePresetRequest,
 ) {
+  const projectSpec = toProtoProjectSpec(body.project_spec);
+  if (!projectSpec) throw new Error("codewire: project_spec is required");
   return {
     orgId,
     name: body.name,
     slug: body.slug ?? "",
     description: body.description ?? undefined,
-    defaultCpuMillicores: int32("default_cpu_millicores", body.default_cpu_millicores),
-    defaultMemoryMb: int32("default_memory_mb", body.default_memory_mb),
-    defaultDiskGb: int32("default_disk_gb", body.default_disk_gb),
     defaultTtlSeconds: int32("default_ttl_seconds", body.default_ttl_seconds),
-    image: body.image ?? "",
-    installCommand: body.install_command ?? "",
-    startupScript: body.startup_script ?? "",
-    envVars: body.env_vars ? { ...body.env_vars } : {},
-    agents: toProtoAgents(body.agents),
-    installAgents: body.install_agents ?? undefined,
-    agent: body.agent ?? "",
-    agentEnv: body.agent_env ? { ...body.agent_env } : {},
-    appPorts: toProtoAppPorts(body.app_ports),
-    includeOrgSecrets: body.include_org_secrets ?? undefined,
-    includeUserSecrets: body.include_user_secrets ?? undefined,
-    secretProjectId,
+    projectSpec,
   };
 }
 
 export function toProtoUpdatePresetRequest(
   orgId: string,
   presetId: string,
-  body: UpdateTemplateRequest,
-  secretProjectId: string | undefined,
+  body: UpdatePresetRequest,
 ) {
   return {
     orgId,
@@ -828,22 +757,8 @@ export function toProtoUpdatePresetRequest(
     name: optionalUpdateString(body.name),
     description: optionalUpdateString(body.description),
     slug: optionalUpdateString(body.slug),
-    defaultCpuMillicores: int32("default_cpu_millicores", body.default_cpu_millicores),
-    defaultMemoryMb: int32("default_memory_mb", body.default_memory_mb),
-    defaultDiskGb: int32("default_disk_gb", body.default_disk_gb),
     defaultTtlSeconds: int32("default_ttl_seconds", body.default_ttl_seconds),
-    image: optionalUpdateString(body.image),
-    installCommand: optionalUpdateString(body.install_command),
-    startupScript: optionalUpdateString(body.startup_script),
-    envVars: body.env_vars === undefined ? undefined : { values: body.env_vars ?? {} },
-    agents: body.agents === undefined ? undefined : { values: toProtoAgents(body.agents) },
-    installAgents: body.install_agents ?? undefined,
-    agent: optionalUpdateString(body.agent),
-    agentEnv: body.agent_env === undefined ? undefined : { values: body.agent_env ?? {} },
-    appPorts: body.app_ports === undefined ? undefined : { values: toProtoAppPorts(body.app_ports) },
-    includeOrgSecrets: body.include_org_secrets ?? undefined,
-    includeUserSecrets: body.include_user_secrets ?? undefined,
-    secretProjectId,
+    projectSpec: toProtoProjectSpec(body.project_spec),
   };
 }
 
@@ -875,13 +790,10 @@ export function assertAPIKeyConverterCoverage(): void {
 
 /** Throws when a future runtime proto field has no owned SDK conversion. */
 export function assertRuntimeConverterCoverage(): void {
-  assertDescriptorCoverage("setup config", SetupConfigSchema.fields, new Map([
-    [1, "repo_url"], [2, "branch"], [3, "repos"], [4, "install_command"], [5, "startup_script"], [6, "env_vars"], [7, "agents"], [8, "install_agents"], [9, "agent"], [10, "agent_env"], [11, "app_ports"], [12, "include_org_secrets"], [13, "include_user_secrets"], [14, "project_spec"],
+  assertDescriptorCoverage("repository spec", RepositorySpecSchema.fields, new Map([
+    [1, "source"], [2, "branch"], [3, "destination"], [4, "revision"],
   ]));
-  assertDescriptorCoverage("repo entry", RepoEntrySchema.fields, new Map([
-    [1, "url"], [2, "branch"], [3, "mount_path"], [4, "revision"],
-  ]));
-  assertDescriptorCoverage("app port", AppPortSchema.fields, new Map([
+  assertDescriptorCoverage("application port", ApplicationPortSchema.fields, new Map([
     [1, "port"], [2, "label"], [3, "access"],
   ]));
   assertDescriptorCoverage("project agents", ProjectAgentsSchema.fields, new Map([
@@ -894,24 +806,19 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "cpu_millicores"], [2, "memory_mib"], [3, "disk_gib"],
   ]));
   assertDescriptorCoverage("project secrets", ProjectSecretBindingsSchema.fields, new Map([
-    [1, "project"], [2, "include_org"], [3, "include_user"], [4, "organization"], [5, "user"],
-  ]));
-  // Deprecated preview descriptors remain as wire tombstones but are not part
-  // of the ergonomic SDK model or its outbound conversion.
-  assertDescriptorCoverage("project credential tombstone", ProjectCredentialReferenceSchema.fields, new Map([
-    [1, "provider"], [2, "account"],
+    [1, "project"], [4, "organization"], [5, "user"],
   ]));
   assertDescriptorCoverage("project access", ProjectAccessBindingSchema.fields, new Map([
     [1, "profile"],
   ]));
   assertDescriptorCoverage("project spec", ProjectSpecSchema.fields, new Map([
-    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [10, "agent_environment"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [15, "credentials"], [16, "workspace_mode"], [17, "access"],
+    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [17, "access"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"],
   ]));
   assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
-    [1, "org_id"], [2, "preset_id"], [3, "name"], [4, "cpu_millicores"], [5, "memory_mb"], [6, "disk_gb"], [7, "ttl_seconds"], [8, "preset_slug"], [9, "repo_url"], [10, "branch"], [11, "repos"], [12, "image"], [13, "install_command"], [14, "startup_script"], [15, "env_vars"], [16, "agents"], [17, "install_agents"], [18, "agent"], [19, "agent_env"], [20, "secret_project"], [21, "app_ports"], [22, "include_org_secrets"], [23, "include_user_secrets"], [24, "isolation_tier"], [25, "project_spec"],
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"],
   ]));
   assertDescriptorCoverage("environment port", PortSchema.fields, new Map([
     [1, "id"], [2, "environment_id"], [3, "port"], [4, "label"], [5, "access"], [6, "preview_url"], [7, "created_at"],
@@ -920,7 +827,13 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "name"], [2, "size"], [3, "is_dir"], [4, "mode"], [5, "mod_time"],
   ]));
   assertDescriptorCoverage("preset", PresetSchema.fields, new Map([
-    [1, "id"], [2, "org_id"], [3, "name"], [4, "slug"], [5, "language"], [6, "official"], [7, "description"], [8, "build_status"], [9, "build_error"], [10, "default_cpu_millicores"], [11, "default_memory_mb"], [12, "default_disk_gb"], [13, "default_ttl_seconds"], [14, "image"], [15, "default_setup_config"], [16, "secret_project_id"], [17, "created_at"],
+    [1, "id"], [2, "org_id"], [3, "name"], [4, "slug"], [5, "language"], [6, "official"], [7, "description"], [8, "build_status"], [9, "build_error"], [13, "default_ttl_seconds"], [17, "created_at"], [18, "project_spec"],
+  ]));
+  assertDescriptorCoverage("create preset request", CreatePresetRequestSchema.fields, new Map([
+    [1, "org_id"], [2, "name"], [3, "slug"], [4, "description"], [8, "default_ttl_seconds"], [21, "project_spec"],
+  ]));
+  assertDescriptorCoverage("update preset request", UpdatePresetRequestSchema.fields, new Map([
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [4, "description"], [5, "slug"], [9, "default_ttl_seconds"], [22, "project_spec"],
   ]));
   assertDescriptorCoverage("secret metadata", SecretMetadataSchema.fields, new Map([
     [1, "key"], [2, "created_at"], [3, "updated_at"],

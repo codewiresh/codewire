@@ -65,7 +65,6 @@ readonly -a CURATED_MANIFESTS=(
 )
 readonly -a DETACHED_MANIFESTS=(
   'crates/codewire-desktop/Cargo.toml'
-  'crates/codewire-platform-native/Cargo.toml'
   'crates/codewire-ui/Cargo.toml'
 )
 

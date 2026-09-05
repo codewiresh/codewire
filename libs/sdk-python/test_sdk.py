@@ -109,7 +109,7 @@ ENV_JSON = {
     "desired_state": "running",
     "type": "sandbox",
     "created_by": "user_1",
-    "template_id": "tmpl_1",
+    "preset_id": "preset_1",
     "recoverable": True,
     "state_changed_at": "2026-01-01T00:00:00Z",
     "cpu_millicores": 2000,
@@ -121,18 +121,22 @@ ENV_JSON = {
     "isolation_tier": "confidential",
 }
 
-TMPL_JSON = {
-    "id": "tmpl_1",
+PRESET_JSON = {
+    "id": "preset_1",
     "org_id": "org_test",
     "name": "Go",
-    "type": "sandbox",
     "build_status": "ready",
-    "default_cpu_millicores": 2000,
-    "default_memory_mb": 4096,
-    "default_disk_gb": 20,
     "official": False,
     "created_at": "2026-01-01T00:00:00Z",
 }
+
+
+def _project_input(preset: str = "python") -> dict:
+    return {
+        "schema_version": 1,
+        "preset": preset,
+        "working_directory": "/workspace",
+    }
 
 
 def _timestamp(value: str) -> Timestamp:
@@ -239,7 +243,7 @@ def _environment(data: dict | None = None) -> ProtoEnvironment:
     return ProtoEnvironment(
         id=value["id"],
         org_id=value["org_id"],
-        preset_id=value.get("preset_id", value.get("template_id", "")),
+        preset_id=value.get("preset_id", ""),
         type=value["type"],
         created_by=value["created_by"],
         state=states[value["state"]],
@@ -261,15 +265,16 @@ def _environment(data: dict | None = None) -> ProtoEnvironment:
 
 def _preset() -> Preset:
     return Preset(
-        id=TMPL_JSON["id"],
-        org_id=TMPL_JSON["org_id"],
-        name=TMPL_JSON["name"],
-        build_status=TMPL_JSON["build_status"],
-        default_cpu_millicores=TMPL_JSON["default_cpu_millicores"],
-        default_memory_mb=TMPL_JSON["default_memory_mb"],
-        default_disk_gb=TMPL_JSON["default_disk_gb"],
-        official=TMPL_JSON["official"],
-        created_at=_timestamp(TMPL_JSON["created_at"]),
+        id=PRESET_JSON["id"],
+        org_id=PRESET_JSON["org_id"],
+        name=PRESET_JSON["name"],
+        build_status=PRESET_JSON["build_status"],
+        official=PRESET_JSON["official"],
+        created_at=_timestamp(PRESET_JSON["created_at"]),
+        project_spec=ProjectSpec(
+            schema_version=1,
+            working_directory="/workspace",
+        ),
     )
 
 
@@ -279,9 +284,10 @@ class ControlPlaneFixture:
     uploaded_files: dict[str, bytes] = {}
     env_get_count = 0
     env_get_sequence: list[dict] | None = None
-    last_create_secret_project = ""
     last_create_isolation_tier = IsolationTier.ISOLATION_TIER_UNSPECIFIED
     last_create_project_spec: ProjectSpec | None = None
+    last_create_preset_project_spec: ProjectSpec | None = None
+    last_update_preset_project_spec: ProjectSpec | None = None
     last_preview_request: PreviewWorkloadSecretResolutionRequest | None = None
 
     def __getattr__(self, name):
@@ -313,7 +319,6 @@ class ControlPlaneFixture:
 
     def create_environment(self, request, ctx):
         self._require_auth(ctx)
-        type(self).last_create_secret_project = request.secret_project
         type(self).last_create_isolation_tier = request.isolation_tier
         type(self).last_create_project_spec = ProjectSpec()
         if request.HasField("project_spec"):
@@ -460,6 +465,8 @@ class ControlPlaneFixture:
 
     def create_preset(self, request, ctx):
         self._require_auth(ctx)
+        type(self).last_create_preset_project_spec = ProjectSpec()
+        type(self).last_create_preset_project_spec.CopyFrom(request.project_spec)
         return CreatePresetResponse(preset=_preset())
 
     def get_preset(self, request, ctx):
@@ -468,6 +475,9 @@ class ControlPlaneFixture:
 
     def update_preset(self, request, ctx):
         self._require_auth(ctx)
+        type(self).last_update_preset_project_spec = ProjectSpec()
+        if request.HasField("project_spec"):
+            type(self).last_update_preset_project_spec.CopyFrom(request.project_spec)
         return UpdatePresetResponse(preset=_preset())
 
     def delete_preset(self, request, ctx):
@@ -661,7 +671,7 @@ class SDKTestCase(unittest.TestCase):
 
     def test_environment_create(self):
         env = self.cw.environments.create(
-            template_slug="python", isolation_tier="confidential"
+            project_spec=_project_input(), isolation_tier="confidential"
         )
         self.assertIsInstance(env, Environment)
         self.assertEqual(env.id, "env_123")
@@ -674,18 +684,20 @@ class SDKTestCase(unittest.TestCase):
 
     def test_environment_create_rejects_unknown_isolation_tier(self):
         with self.assertRaisesRegex(ValueError, "isolation_tier"):
-            self.cw.environments.create(isolation_tier="container")
+            self.cw.environments.create(
+                project_spec=_project_input(), isolation_tier="container"
+            )
 
     def test_environment_create_carries_portable_project_spec(self):
         self.cw.environments.create(
-            template_slug="python",
             project_spec={
                 "schema_version": 1,
+                "preset": "python",
                 "working_directory": "/workspace/app",
                 "repositories": [{
-                    "url": "https://example.test/org/app.git",
+                    "source": "https://example.test/org/app.git",
                     "revision": "deadbeef",
-                    "mount_path": "/workspace/app",
+                    "destination": "/workspace/app",
                 }],
                 "skills": [{
                     "source": "user",
@@ -693,6 +705,7 @@ class SDKTestCase(unittest.TestCase):
                     "agents": ["codex"],
                 }],
                 "resources": {"cpu_millicores": 2000, "memory_mib": 16384},
+                "secrets": {"project": "development", "user": True},
                 "access": {"profile": "user/work"},
             },
         )
@@ -703,6 +716,7 @@ class SDKTestCase(unittest.TestCase):
             ProjectSkillSource.PROJECT_SKILL_SOURCE_USER,
         )
         self.assertEqual(project.repositories[0].revision, "deadbeef")
+        self.assertEqual(project.secrets.project, "development")
         self.assertEqual(project.access.profile, "user/work")
 
     def test_environment_get(self):
@@ -715,13 +729,13 @@ class SDKTestCase(unittest.TestCase):
         self.assertIsInstance(envs[0], Environment)
 
     def test_environment_exec(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(project_spec=_project_input())
         result = env.exec(command=["echo", "hello"])
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["stdout"], "hello\n")
 
     def test_environment_stop(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(project_spec=_project_input())
         env.stop()  # should not raise
 
     def test_environment_resize(self):
@@ -746,7 +760,7 @@ class SDKTestCase(unittest.TestCase):
         self.assertEqual(fetched["request_id"], "req_resize")
 
     def test_environment_wrapper_resize(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(project_spec=_project_input())
         self.assertEqual(
             env.plan_resize(cpu_millicores=3000, memory_mb=6144, disk_gb=30)[
                 "execution_mode"
@@ -763,38 +777,56 @@ class SDKTestCase(unittest.TestCase):
         self.assertEqual(env.get_resize_operation("resize_1")["state"], "completed")
 
     def test_environment_remove(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(project_spec=_project_input())
         env.remove()  # should not raise
 
     def test_environment_list_files(self):
-        env = self.cw.environments.create(template_slug="python")
-        files = env.list_files("/workspace")
+        env = self.cw.environments.create(project_spec=_project_input())
+        files = env.files.list("/workspace")
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]["name"], "test.txt")
 
     def test_environment_list_ports(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(project_spec=_project_input())
         ports = env.list_ports()
         self.assertEqual(len(ports), 1)
         self.assertEqual(ports[0]["port"], 8080)
 
-    def test_templates_crud(self):
-        tmpl = self.cw.templates.create(name="Go", type="sandbox")
-        self.assertEqual(tmpl["name"], "Go")
+    def test_presets_crud(self):
+        preset = self.cw.presets.create(
+            name="Go",
+            project_spec={
+                "schema_version": 1,
+                "image": "golang:1.25",
+                "working_directory": "/workspace",
+            },
+        )
+        self.assertEqual(preset["name"], "Go")
+        self.assertEqual(
+            ControlPlaneFixture.last_create_preset_project_spec.image, "golang:1.25"
+        )
 
-        tmpl2 = self.cw.templates.get("tmpl_1")
-        self.assertEqual(tmpl2["id"], "tmpl_1")
+        fetched = self.cw.presets.get("preset_1")
+        self.assertEqual(fetched["id"], "preset_1")
 
-        tmpls = self.cw.templates.list()
-        self.assertEqual(len(tmpls), 1)
-        # The REST handler accepted but did not implement this optional filter.
-        # The Connect-backed wrapper keeps the frozen public behavior.
-        self.assertEqual(len(self.cw.templates.list(type="non-sandbox")), 1)
-
-        updated = self.cw.templates.update("tmpl_1", name="Golang")
+        presets = self.cw.presets.list()
+        self.assertEqual(len(presets), 1)
+        updated = self.cw.presets.update(
+            "preset_1",
+            name="Golang",
+            project_spec={
+                "schema_version": 1,
+                "working_directory": "/workspace/app",
+                "resources": {"cpu_millicores": 4000},
+            },
+        )
         self.assertEqual(updated["name"], "Go")  # mock returns same
+        self.assertEqual(
+            ControlPlaneFixture.last_update_preset_project_spec.resources.cpu_millicores,
+            4000,
+        )
 
-        self.cw.templates.delete("tmpl_1")
+        self.cw.presets.delete("preset_1")
 
     def test_api_keys(self):
         key = self.cw.api_keys.create(name="test")
@@ -885,20 +917,20 @@ class SDKTestCase(unittest.TestCase):
         no_org.close()
 
     def test_environment_repr(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(project_spec=_project_input())
         r = repr(env)
         self.assertIn("env_123", r)
         self.assertIn("running", r)
 
     def test_file_upload_download(self):
         ControlPlaneFixture.uploaded_files.clear()
-        env = self.cw.environments.create(template_slug="python")
-        env.upload(b"hello world", "/workspace/test.txt")
-        data = env.download("/workspace/test.txt")
+        env = self.cw.environments.create(project_spec=_project_input())
+        env.files.upload(b"hello world", "/workspace/test.txt")
+        data = env.files.download("/workspace/test.txt")
         self.assertEqual(data, b"hello world")
 
     def test_port_create_delete(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(project_spec=_project_input())
         port = env.create_port(port=8080, label="web")
         self.assertEqual(port["id"], "port_1")
         self.assertEqual(port["port"], 8080)
@@ -948,7 +980,7 @@ class SDKTestCase(unittest.TestCase):
         ControlPlaneFixture.env_get_count = 0
         try:
             env = self.cw.environments.create(
-                template_slug="python", wait=True, wait_timeout=10
+                project_spec=_project_input(), wait=True, wait_timeout=10
             )
             self.assertEqual(env.state, "running")
         finally:
@@ -1029,18 +1061,8 @@ class SDKTestCase(unittest.TestCase):
                 self.assertEqual(client.environments.get("env_123").id, "env_123")
 
     def test_typed_params(self):
-        env = self.cw.environments.create(template_slug="python")
+        env = self.cw.environments.create(project_spec=_project_input())
         self.assertIsInstance(env, Environment)
-
-    def test_environment_create_keeps_secret_project_name_selector(self):
-        try:
-            self.cw.environments.create(
-                template_slug="python", secret_project="myapp"
-            )
-            self.assertEqual(ControlPlaneFixture.last_create_secret_project, "myapp")
-        finally:
-            ControlPlaneFixture.last_create_secret_project = ""
-
 
 if __name__ == "__main__":
     unittest.main()

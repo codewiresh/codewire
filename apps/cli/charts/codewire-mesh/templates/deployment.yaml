@@ -38,14 +38,10 @@ spec:
         - name: mesh
           image: "{{ include "codewire-mesh.imageRef" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["sh", "-c"]
+          command: ["codewire-mesh"]
           args:
-            - |
-              exec codewire-mesh \
-                --base-url={{ .Values.mesh.baseURL | quote }} \
-                --listen={{ .Values.mesh.listenAddr | quote }}{{- if .Values.database.enabled }} \
-                --database-url="$DATABASE_URL"
-                {{- end }}
+            - {{ printf "--base-url=%s" .Values.mesh.baseURL | quote }}
+            - {{ printf "--listen=%s" .Values.mesh.listenAddr | quote }}
           env:
             {{- if .Values.database.enabled }}
             - name: DATABASE_URL

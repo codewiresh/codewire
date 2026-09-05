@@ -14,14 +14,8 @@ use sqlx::{Connection, PgConnection, Row};
 use tokio::sync::Notify;
 
 use super::WorkerContext;
-use super::create::{
-    CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME, parse_canonical_full_warm_pool_profiles,
-    warm_pool_template_opts,
-};
 use crate::lifecycle::{PgLifecycleStore, Service};
 use crate::sandbox::client::{ProbeResult, SandboxClient};
-use crate::sandbox::template::validate_managed_runtime_profile;
-use crate::sandbox::{warm_pool_name, warm_pool_revision_hash};
 use crate::worker::activity_authority::{ActivityAuthority, is_authority_lost};
 
 /// The orchestration worker's leadership domain (see module docs).
@@ -29,8 +23,6 @@ const ADVISORY_LOCK_ID: i64 = 0x636F646577697265; // "codewire"
 
 const RECONCILER_INTERVAL: Duration = Duration::from_secs(30);
 const SANDBOX_LIVENESS_INTERVAL: Duration = Duration::from_secs(5);
-/// Mirrors the retired Go composition-root warm-pool reconciler interval.
-const WARM_POOL_RECONCILER_INTERVAL: Duration = Duration::from_secs(60);
 const SANDBOX_TRANSITIONAL_LIVENESS_GRACE: Duration = Duration::from_secs(60);
 const RECOVERY_ACTIVITY_WINDOW_SECS: i32 = 300; // environmentRecoveryActivityWindow
 const PENDING_CREATE_RECOVERY_SECS: i32 = 60;
@@ -73,14 +65,6 @@ pub fn start_loops(ctx: Arc<WorkerContext>, database_url: String, loops: &[Strin
                 let is_leader = is_leader.clone();
                 tokio::spawn(async move {
                     sandbox_liveness_loop(ctx, is_leader).await;
-                });
-            }
-            "warm-pool-reconciler" => {
-                let ctx = ctx.clone();
-                let is_leader = is_leader.clone();
-                let leader_notify = leader_notify.clone();
-                tokio::spawn(async move {
-                    warm_pool_reconciler_loop(ctx, is_leader, leader_notify).await;
                 });
             }
             // Sandbox billing-session lifecycle controller (port of
@@ -664,134 +648,6 @@ async fn enqueue_environment_reconcile(
     Ok(())
 }
 
-// ── Warm pool reconciler (port of api/seed_templates.go) ───────────────
-
-/// Mirrors the retired Go composition-root warm-pool behavior: desired pools
-/// are ensured once at startup and then re-applied every minute. Under the
-/// Rust leader, "startup" is each leadership acquisition.
-async fn warm_pool_reconciler_loop(
-    ctx: Arc<WorkerContext>,
-    is_leader: Arc<AtomicBool>,
-    leader_notify: Arc<Notify>,
-) {
-    // Mirrors the `sb == nil` early return in EnsureWarmPools.
-    if ctx.kube.is_none() {
-        tracing::info!("warm pools: sandbox client unavailable, skipping");
-        return;
-    }
-    let mut ticker = tokio::time::interval(WARM_POOL_RECONCILER_INTERVAL);
-    ticker.tick().await; // align with Go's NewTicker (first fire after interval)
-    loop {
-        tokio::select! {
-            _ = leader_notify.notified() => {
-                if is_leader.load(Ordering::SeqCst) {
-                    ensure_warm_pools(&ctx).await;
-                }
-            }
-            _ = ticker.tick() => {
-                if is_leader.load(Ordering::SeqCst) {
-                    ensure_warm_pools(&ctx).await;
-                }
-            }
-        }
-    }
-}
-
-/// Mirrors `EnsureWarmPools`: ensure SandboxTemplate + SandboxWarmPool
-/// for every configured profile, then GC stale revisioned pools.
-async fn ensure_warm_pools(ctx: &WorkerContext) {
-    let Some(kube) = &ctx.kube else {
-        tracing::info!("warm pools: sandbox client unavailable, skipping");
-        return;
-    };
-    let cfg = &ctx.sandbox_cfg;
-
-    let profiles = match parse_canonical_full_warm_pool_profiles(&cfg.full_warm_profiles) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, "warm pools: invalid canonical full warm profiles");
-            return;
-        }
-    };
-
-    let client = SandboxClient::new(kube.clone(), &cfg.sandbox_namespace);
-    if let Err(e) = client.ensure_namespace().await {
-        tracing::error!(namespace = cfg.sandbox_namespace, error = %e, "warm pools: failed to ensure namespace");
-        return;
-    }
-
-    let mut expected_pools: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for profile in &profiles {
-        let opts = warm_pool_template_opts(cfg, profile);
-        if let Err(e) = validate_managed_runtime_profile(
-            &opts.runtime_profile_spec(),
-            cfg.allow_diagnostic_runtime,
-        ) {
-            tracing::error!(
-                template = profile.template_name,
-                runtime_profile = opts.runtime_profile,
-                runtime_class = opts.runtime_class_name,
-                error = %e,
-                "warm pools: refusing diagnostic runtime profile"
-            );
-            return;
-        }
-        let hash = warm_pool_revision_hash(&opts);
-        let pool_name = warm_pool_name(&profile.template_name, &opts);
-        expected_pools.insert(pool_name.clone());
-
-        // Always update the template (don't skip if exists) so the warm
-        // pool controller picks up spec changes immediately.
-        if let Err(e) = client.ensure_sandbox_template(&opts).await {
-            tracing::error!(template = profile.template_name, error = %e, "warm pools: failed to ensure SandboxTemplate");
-            return;
-        }
-
-        if let Err(e) = client
-            .ensure_warm_pool(&pool_name, &profile.template_name, profile.replicas)
-            .await
-        {
-            tracing::error!(pool = pool_name, template = profile.template_name, error = %e, "warm pools: failed to ensure SandboxWarmPool");
-            return;
-        }
-
-        tracing::info!(
-            template = profile.template_name,
-            pool = pool_name,
-            hash,
-            cpu_millicores = profile.cpu_millicores,
-            memory_mib = profile.memory_mib,
-            disk_gib = profile.disk_gib,
-            replicas = profile.replicas,
-            "warm pools: ensured"
-        );
-    }
-
-    // GC: delete any canonical full warm pools no longer expected. The
-    // prefix must match how pool names are built above
-    // (`sandbox-warmpool-{template_name}-{hash}`); every canonical full
-    // template name starts with CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME,
-    // so this scopes the GC to exactly the canonical full pools. (#158: the
-    // old `sandbox-warmpool-full` prefix matched nothing → stale pools leaked.)
-    let gc_prefix = format!("sandbox-warmpool-{CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME}");
-    let stale = match client.list_warm_pools(&gc_prefix).await {
-        Ok(names) => names,
-        Err(e) => {
-            tracing::warn!(error = %e, "warm pools: failed to list pools for GC");
-            Vec::new()
-        }
-    };
-    for name in stale {
-        if expected_pools.contains(&name) {
-            continue;
-        }
-        match client.delete_warm_pool(&name).await {
-            Ok(()) => tracing::info!(name, "warm pools: GC'd stale pool"),
-            Err(e) => tracing::warn!(name, error = %e, "warm pools: failed to delete stale pool"),
-        }
-    }
-}
-
 // ── Sandbox liveness (port of sandbox_liveness.go) ─────────────────────
 
 struct LivenessRow {
@@ -1143,7 +999,6 @@ async fn mark_sandbox_env_error(ctx: &WorkerContext, row: &LivenessRow, reason: 
 
 #[cfg(test)]
 mod tests {
-    use super::super::create::{SandboxWorkerCfg, WarmPoolProfile};
     use super::*;
 
     #[test]
@@ -1152,22 +1007,6 @@ mod tests {
             INCOMPLETE_EXTERNAL_CLEANUP_STATES,
             ["destroying", "destroyed", "error"]
         );
-    }
-
-    #[test]
-    fn warm_pool_gc_prefix_matches_pool_names() {
-        // Regression for #158: the GC prefix must be a prefix of every pool
-        // name (`sandbox-warmpool-{template_name}-{hash}`), or stale
-        // SandboxWarmPool CRs are never collected. The previous
-        // `sandbox-warmpool-full` prefix matched nothing.
-        let gc_prefix = format!("sandbox-warmpool-{CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME}");
-        for profile in parse_canonical_full_warm_pool_profiles("").unwrap() {
-            let pool_name = format!("sandbox-warmpool-{}-deadbeef", profile.template_name);
-            assert!(
-                pool_name.starts_with(&gc_prefix),
-                "pool {pool_name:?} missing GC prefix {gc_prefix:?}",
-            );
-        }
     }
 
     fn row(state: &str, age_secs: i64) -> LivenessRow {
@@ -1197,65 +1036,6 @@ mod tests {
         let mut stale = active;
         stale.setup_owner_generation = Some(stale.operation_generation - 1);
         assert!(!setup_activity_active(&stale));
-    }
-
-    fn warm_cfg(runtime_class: &str) -> SandboxWorkerCfg {
-        SandboxWorkerCfg {
-            gateway_image: "gateway:v1".into(),
-            runtime_class: runtime_class.into(),
-            api_base_url: "https://api.codewire.test".into(),
-            pod_namespace: "prod-ns".into(),
-            derp_host: "derp.h".into(),
-            derp_port: "443".into(),
-            stun_host: "stun.h".into(),
-            stun_port: "3478".into(),
-            network_policy_management: "Managed".into(),
-            ..Default::default()
-        }
-    }
-
-    fn default_profile() -> WarmPoolProfile {
-        // The default-SKU "workspace" profile (1000m/2048Mi/10Gi).
-        parse_canonical_full_warm_pool_profiles("").unwrap()[0].clone()
-    }
-
-    // Stable Rust warm-pool revision goldens pin the exact rendered Sandbox
-    // blueprint so renderer changes cannot silently reuse old warm pods.
-    #[test]
-    fn warm_pool_revision_hash_matches_checked_in_goldens() {
-        let isol8 = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&isol8), "2944e433");
-
-        let plain = warm_pool_template_opts(&warm_cfg(""), &default_profile());
-        assert_eq!(warm_pool_revision_hash(&plain), "bc913c68");
-    }
-
-    #[test]
-    fn warm_pool_revision_hash_tracks_material_blueprint_inputs() {
-        let opts = warm_pool_template_opts(&warm_cfg("isol8"), &default_profile());
-        let h1 = warm_pool_revision_hash(&opts);
-        assert_eq!(h1.len(), 8);
-        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
-
-        let mut material = opts.clone();
-        material.support_image = "gateway:v2".into();
-        assert_ne!(warm_pool_revision_hash(&material), h1);
-
-        let mut material = opts.clone();
-        material.image = "localhost/codewire-ci/workspace:verified".into();
-        assert_ne!(warm_pool_revision_hash(&material), h1);
-
-        let mut material = opts.clone();
-        material.cpu_millicores += 1000;
-        assert_ne!(warm_pool_revision_hash(&material), h1);
-
-        let mut unused = opts;
-        unused.dind_image = "docker.io/library/docker:unused".into();
-        assert_eq!(
-            warm_pool_revision_hash(&unused),
-            h1,
-            "an input omitted from this runtime's rendered blueprint must not rotate its pool"
-        );
     }
 
     fn probe(

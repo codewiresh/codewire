@@ -31,7 +31,6 @@ use codewire_local_vmm::mesh_process::{
     encode_mesh_transport_enrollment,
 };
 use codewire_local_vmm::mesh_transport::receive_mesh_ingress_submissions;
-use codewire_mesh::mesh_authorization::hash_local_environment_token;
 use codewire_mesh::{Config as MeshConfig, LocalMeshAuthorizationConfig, StunServerConfig};
 use codewire_proto::codewire::internal::v1::{
     CoordinateDerpMap, MeshCoordinatorService, MeshCoordinatorServiceCoordinateRequest,
@@ -66,8 +65,6 @@ const ORGANIZATION_ID: &str = "org-native-mesh-process";
 const NETWORK_ID: &str = "network-native-mesh-process";
 const NODE_NAME: &str = "sandbox-native-mesh-process";
 const API_KEY: &str = "cw_native-mesh-process-api";
-const OWNER_ENVIRONMENT_ID: &str = "native-mesh-process-owner";
-const OWNER_ENVIRONMENT_TOKEN: &str = "native-mesh-process-environment-token";
 const GUEST_PORT: u16 = 3_000;
 const DENIED_GUEST_PORT: u16 = 3_001;
 const TEST_KEY: [u8; MESH_INGRESS_CONTROL_KEY_LEN] = [0x6d; MESH_INGRESS_CONTROL_KEY_LEN];
@@ -174,8 +171,6 @@ async fn start_fixture(with_stun: bool) -> Fixture {
         local_authorization: Some(LocalMeshAuthorizationConfig {
             organization_id: ORGANIZATION_ID.to_owned(),
             api_key_hash: hash_api_key(API_KEY),
-            environment_id: OWNER_ENVIRONMENT_ID.to_owned(),
-            environment_token_hash: hash_local_environment_token(OWNER_ENVIRONMENT_TOKEN),
         }),
     };
     let app = codewire_mesh::router(config);
@@ -371,7 +366,7 @@ fn private_auth_roots(mesh_url: &str) -> (TempDir, PathBuf, PathBuf) {
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&mesh, fs::Permissions::from_mode(0o700)).unwrap();
     let config = format!(
-        "mesh_url = {mesh_url:?}\nmesh_auth_token = {API_KEY:?}\n\n[local_identity]\norganization_id = {ORGANIZATION_ID:?}\napi_key = {API_KEY:?}\nenvironment_id = {OWNER_ENVIRONMENT_ID:?}\nenvironment_token = {OWNER_ENVIRONMENT_TOKEN:?}\n"
+        "mesh_url = {mesh_url:?}\nmesh_auth_token = {API_KEY:?}\n\n[local_identity]\norganization_id = {ORGANIZATION_ID:?}\napi_key = {API_KEY:?}\n"
     );
     let config_path = mesh.join("config.toml");
     fs::write(&config_path, config).unwrap();

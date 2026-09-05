@@ -868,12 +868,12 @@ mod tests {
     use super::*;
     use crate::Config;
     use crate::config::LocalMeshAuthorizationConfig;
-    use crate::store::{MemoryStore, MeshStore, NodeEnrollment};
+    use crate::store::{Invite, MemoryStore, MeshStore, NETWORK_ROLE_MEMBER, NodeEnrollment};
 
     const ORG: &str = "org-mesh-contract";
     const NETWORK: &str = "network-contract";
     const API_KEY: &str = "cw_mesh-contract";
-    const ENVIRONMENT_TOKEN: &str = "mesh-contract-environment-token";
+    const UNKNOWN_BEARER: &str = "retired-environment-bearer";
 
     fn config() -> Config {
         Config {
@@ -886,10 +886,6 @@ mod tests {
             local_authorization: Some(LocalMeshAuthorizationConfig {
                 organization_id: ORG.to_string(),
                 api_key_hash: hash_api_key(API_KEY),
-                environment_id: "mesh-contract-environment".to_string(),
-                environment_token_hash: crate::mesh_authorization::hash_local_environment_token(
-                    ENVIRONMENT_TOKEN,
-                ),
             }),
         }
     }
@@ -1019,7 +1015,7 @@ mod tests {
         assert!(enrollment.enrollment_code.starts_with("cw_enr_"));
         assert_eq!(
             enrollment.enrollment.as_option().unwrap().owner_user_id,
-            "local-machine:mesh-contract-environment"
+            "local-owner:org-mesh-contract"
         );
 
         let created_invite = invite_client
@@ -1214,6 +1210,15 @@ mod tests {
             .into_owned();
         assert_eq!(joined.network.as_option().unwrap().id, NETWORK);
         assert!(store.invite_list(NETWORK).await.unwrap().is_empty());
+        assert_eq!(
+            store
+                .network_member_get(NETWORK, "local-owner:org-mesh-contract")
+                .await
+                .unwrap()
+                .unwrap()
+                .role,
+            crate::store::NETWORK_ROLE_OWNER
+        );
 
         let public_node_client =
             MeshNodeServiceClient::new(HttpClient::plaintext(), client_config(addr, None));
@@ -1253,7 +1258,10 @@ mod tests {
     #[tokio::test]
     async fn enrollment_redemption_enforces_lifecycle_and_name_contract() {
         let store = MemoryStore::new();
-        store.network_create_owned(NETWORK, ORG).await.unwrap();
+        store
+            .network_create_with_owner(NETWORK, ORG, "local-owner:org-mesh-contract", Utc::now())
+            .await
+            .unwrap();
         seed_enrollment(
             &store,
             "cw_enr_expired",
@@ -1369,9 +1377,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_org_nonmember_is_hidden_and_forbidden_until_atomic_invite_join() {
+        let store = MemoryStore::new();
+        store
+            .network_create_with_owner(NETWORK, ORG, "different-network-owner", Utc::now())
+            .await
+            .unwrap();
+        store
+            .network_create_with_owner(
+                "network-cross-org",
+                "org-cross-tenant",
+                "local-owner:org-mesh-contract",
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        let invite_code = "cw_inv_synthetic_membership_boundary";
+        store
+            .invite_create(Invite {
+                id: "invite-membership-boundary".to_owned(),
+                network_id: NETWORK.to_owned(),
+                organization_id: ORG.to_owned(),
+                created_by_user_id: "different-network-owner".to_owned(),
+                code_hash: format!("{:x}", Sha256::digest(invite_code.as_bytes())),
+                expires_at: Utc::now() + Duration::hours(1),
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let (addr, task) = start(store.clone()).await;
+        let config = client_config(addr, Some(API_KEY));
+        let network_client = MeshNetworkServiceClient::new(HttpClient::plaintext(), config.clone());
+        let node_client = MeshNodeServiceClient::new(HttpClient::plaintext(), config.clone());
+        let invite_client = MeshInviteServiceClient::new(HttpClient::plaintext(), config.clone());
+        let kv_client = MeshKeyValueServiceClient::new(HttpClient::plaintext(), config);
+
+        let hidden = network_client
+            .list_mesh_networks(network_request())
+            .await
+            .unwrap()
+            .into_owned();
+        assert!(hidden.networks.is_empty());
+        assert_code(
+            node_client
+                .list_mesh_nodes(scoped_request_org(ORG))
+                .await
+                .unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        assert_code(
+            node_client
+                .list_mesh_nodes(ListMeshNodesRequest {
+                    org_id: ORG.to_owned(),
+                    network_id: "network-cross-org".to_owned(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        assert_code(
+            node_client
+                .create_mesh_node_enrollment(CreateMeshNodeEnrollmentRequest {
+                    org_id: ORG.to_owned(),
+                    network_id: NETWORK.to_owned(),
+                    node_name: "blocked-node".to_owned(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        assert_code(
+            kv_client
+                .get_mesh_key_value(GetMeshKeyValueRequest {
+                    org_id: ORG.to_owned(),
+                    network_id: NETWORK.to_owned(),
+                    namespace: "runtime".to_owned(),
+                    key: "blocked".to_owned(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        assert_code(
+            network_client
+                .create_mesh_network(CreateMeshNetworkRequest {
+                    org_id: ORG.to_owned(),
+                    network_id: NETWORK.to_owned(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::AlreadyExists,
+        );
+
+        network_client
+            .join_mesh_network(JoinMeshNetworkRequest {
+                invite_code: invite_code.to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let member = store
+            .network_member_get(NETWORK, "local-owner:org-mesh-contract")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(member.role, NETWORK_ROLE_MEMBER);
+        assert!(store.invite_list(NETWORK).await.unwrap().is_empty());
+        assert_eq!(
+            network_client
+                .list_mesh_networks(network_request())
+                .await
+                .unwrap()
+                .into_owned()
+                .networks
+                .len(),
+            1
+        );
+        assert!(
+            node_client
+                .list_mesh_nodes(scoped_request_org(ORG))
+                .await
+                .unwrap()
+                .into_owned()
+                .nodes
+                .is_empty()
+        );
+        node_client
+            .create_mesh_node_enrollment(CreateMeshNodeEnrollmentRequest {
+                org_id: ORG.to_owned(),
+                network_id: NETWORK.to_owned(),
+                node_name: "joined-node".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        kv_client
+            .set_mesh_key_value(SetMeshKeyValueRequest {
+                org_id: ORG.to_owned(),
+                network_id: NETWORK.to_owned(),
+                namespace: "runtime".to_owned(),
+                key: "joined".to_owned(),
+                value: b"synthetic-value".to_vec(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_code(
+            invite_client
+                .create_mesh_invite(CreateMeshInviteRequest {
+                    org_id: ORG.to_owned(),
+                    network_id: NETWORK.to_owned(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err(),
+            ErrorCode::PermissionDenied,
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn retained_services_enforce_canonical_primary_auth_rows() {
         let store = MemoryStore::new();
-        store.network_create_owned(NETWORK, ORG).await.unwrap();
+        store
+            .network_create_with_owner(NETWORK, ORG, "local-owner:org-mesh-contract", Utc::now())
+            .await
+            .unwrap();
         let (addr, task) = start(store).await;
 
         let unauthenticated = client_config(addr, None);
@@ -1424,23 +1599,23 @@ mod tests {
             ErrorCode::Unauthenticated,
         );
 
-        let environment = client_config(addr, Some(ENVIRONMENT_TOKEN));
+        let unknown_bearer = client_config(addr, Some(UNKNOWN_BEARER));
         assert_code(
-            MeshNetworkServiceClient::new(HttpClient::plaintext(), environment.clone())
+            MeshNetworkServiceClient::new(HttpClient::plaintext(), unknown_bearer.clone())
                 .list_mesh_networks(network_request())
                 .await
                 .unwrap_err(),
-            ErrorCode::PermissionDenied,
+            ErrorCode::Unauthenticated,
         );
         assert_code(
-            MeshNodeServiceClient::new(HttpClient::plaintext(), environment.clone())
+            MeshNodeServiceClient::new(HttpClient::plaintext(), unknown_bearer.clone())
                 .list_mesh_nodes(scoped_request_org(ORG))
                 .await
                 .unwrap_err(),
-            ErrorCode::PermissionDenied,
+            ErrorCode::Unauthenticated,
         );
         assert_code(
-            MeshInviteServiceClient::new(HttpClient::plaintext(), environment.clone())
+            MeshInviteServiceClient::new(HttpClient::plaintext(), unknown_bearer.clone())
                 .list_mesh_invites(ListMeshInvitesRequest {
                     org_id: ORG.to_string(),
                     network_id: NETWORK.to_string(),
@@ -1448,10 +1623,10 @@ mod tests {
                 })
                 .await
                 .unwrap_err(),
-            ErrorCode::PermissionDenied,
+            ErrorCode::Unauthenticated,
         );
         assert_code(
-            MeshGroupServiceClient::new(HttpClient::plaintext(), environment.clone())
+            MeshGroupServiceClient::new(HttpClient::plaintext(), unknown_bearer.clone())
                 .list_mesh_groups(ListMeshGroupsRequest {
                     org_id: ORG.to_string(),
                     network_id: NETWORK.to_string(),
@@ -1459,10 +1634,10 @@ mod tests {
                 })
                 .await
                 .unwrap_err(),
-            ErrorCode::PermissionDenied,
+            ErrorCode::Unauthenticated,
         );
         assert_code(
-            MeshKeyValueServiceClient::new(HttpClient::plaintext(), environment)
+            MeshKeyValueServiceClient::new(HttpClient::plaintext(), unknown_bearer)
                 .list_mesh_key_values(ListMeshKeyValuesRequest {
                     org_id: ORG.to_string(),
                     network_id: NETWORK.to_string(),
@@ -1471,7 +1646,7 @@ mod tests {
                 })
                 .await
                 .unwrap_err(),
-            ErrorCode::PermissionDenied,
+            ErrorCode::Unauthenticated,
         );
 
         let api_key = client_config(addr, Some(API_KEY));

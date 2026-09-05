@@ -2,7 +2,7 @@
 //!
 //! This mirrors the security shape of Tailscale's experimental `udprelay`
 //! package without binding sockets yet. A future daemon can wrap
-//! [`Server::handle_packet`] with UDP reads/writes.
+//! [`crate::udp_relay::Server::handle_packet`] with UDP reads/writes.
 
 use std::collections::HashMap;
 use std::future::Future;

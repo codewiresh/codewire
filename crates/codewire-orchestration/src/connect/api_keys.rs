@@ -1,6 +1,6 @@
 //! Connect-RPC adapter for the organization-scoped API-key service.
 //!
-//! This module maps [`crate::api::api_keys::service`] to Connect requests,
+//! This module maps `crate::api::api_keys::service` to Connect requests,
 //! pagination, errors, and protobuf.
 
 use std::borrow::Cow;

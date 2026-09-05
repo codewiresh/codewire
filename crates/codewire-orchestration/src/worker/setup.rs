@@ -1,7 +1,5 @@
-//! The `environment.setup` job — port of `HandleEnvironmentSetup`, the
-//! `environmentsetup` runner package, and the worker-side setup ops
-//! (environment_setup_helpers.go, ssh_injection.go,
-//! environment_workspace.go).
+//! The `environment.setup` job, resumable setup runner, and worker-side
+//! environment configuration operations.
 //!
 //! Final Rust semantics:
 //! - ordinary setup failures record the error and leave the environment
@@ -18,22 +16,15 @@ use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::agents::agent_definition;
-use super::env_data::{
-    BackendRow, EnvironmentRow, SetupConfig, load_backend_row, load_environment,
-};
+use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environment};
 #[cfg(feature = "kind-e2e")]
 use super::fencing_evidence::{FencingEvidence as SetupFencingEvidence, emit};
-use super::github::{get_github_token_for_user, get_github_username_for_user};
-use super::scripts::{
-    build_claude_bootstrap_script, build_codex_bootstrap_script, build_gh_cli_auth_script,
-    build_ssh_setup_script, build_workspace_env_script,
-};
-use super::secrets::merge_secrets;
+use super::scripts::build_workspace_env_script;
 use super::setup_lease::{
     PhaseAcquire, PhasePreparation, SetupActivityIdentity, SetupLeaseRecord, SetupPhaseAuthority,
 };
 use super::{JobPayload, WorkerContext};
-use crate::repository_mount::{effective_repository_mount, validate_repository_mounts};
+use crate::repository_mount::{canonical_repository_mount, validate_repository_mounts};
 use crate::sandbox::client::{ProbeResult, SandboxClient};
 use crate::sandbox::exec::WorkspaceExecResult;
 use crate::sandbox::sidecar::DEFAULT_GATEWAY_SSH_PORT;
@@ -126,6 +117,7 @@ fn setup_command_cancelled(state: &str, desired_state: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct Repo {
     pub url: String,
+    pub revision: String,
     pub branch: String,
     pub mount_path: String,
 }
@@ -141,14 +133,12 @@ pub struct Inputs {
     pub setup_complete: bool,
     pub ttl_seconds: Option<i32>,
     pub has_setup: bool,
-    pub include_org_secrets: bool,
-    pub include_user_secrets: bool,
     pub repos: Vec<Repo>,
+    pub working_directory: String,
     pub install_command: String,
     pub startup_script: String,
     pub agents: Vec<String>,
     pub app_ports: Vec<(i32, String, String)>, // (port, label, access)
-    pub has_mesh: bool,
 }
 
 /// Mirrors `environmentsetup.Store`.
@@ -202,7 +192,7 @@ pub trait SetupOps {
         &mut self,
         input: &Inputs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
-    fn prepare_environment(
+    fn configure_environment(
         &mut self,
         input: &Inputs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
@@ -228,25 +218,6 @@ pub trait SetupOps {
         &mut self,
         input: &Inputs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
-    fn start_mesh_node(
-        &mut self,
-        input: &Inputs,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
-}
-
-/// Mirrors `environmentsetup.workDirForRepos`.
-pub fn work_dir_for_repos(repos: &[Repo]) -> anyhow::Result<String> {
-    validate_repository_mounts(
-        repos
-            .iter()
-            .map(|repo| (repo.url.as_str(), repo.mount_path.as_str())),
-    )?;
-    match repos.len() {
-        0 => Ok(String::new()),
-        1 => effective_repository_mount(&repos[0].url, &repos[0].mount_path)
-            .map_err(anyhow::Error::from),
-        _ => Ok("/workspace".to_string()),
-    }
 }
 
 fn duration_ms_meta(started: std::time::Instant) -> Option<serde_json::Value> {
@@ -309,18 +280,26 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
                 return Ok(());
             }
             self.ops
-                .emit_log(&env_id, phase, "inject_secrets", "started", "", None)
+                .emit_log(&env_id, phase, "configure_environment", "started", "", None)
                 .await?;
-            self.ops.prepare_environment(input).await?;
-            self.finish_phase(input, phase, 2, "inject_secrets", "completed", "", None)
-                .await?;
+            self.ops.configure_environment(input).await?;
+            self.finish_phase(
+                input,
+                phase,
+                2,
+                "configure_environment",
+                "completed",
+                "",
+                None,
+            )
+            .await?;
         }
 
-        if !input.has_setup && !input.has_mesh {
+        if !input.has_setup {
             return self.complete(input).await;
         }
 
-        let work_dir = work_dir_for_repos(&input.repos)?;
+        let work_dir = input.working_directory.clone();
 
         if input.setup_phase <= 2 && !input.repos.is_empty() {
             let phase = input.setup_phase;
@@ -448,35 +427,6 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
                 .await?;
         }
 
-        if input.setup_phase <= 7 && input.has_mesh {
-            let phase = input.setup_phase;
-            if !self.begin_phase(input, phase).await? {
-                return Ok(());
-            }
-            match self.ops.start_mesh_node(input).await {
-                Err(e) => {
-                    if is_setup_control_flow(&e) {
-                        return Err(e);
-                    }
-                    // Non-fatal: env works without the mesh node.
-                    self.finish_phase(
-                        input,
-                        phase,
-                        8,
-                        "mesh_node",
-                        "warning",
-                        &format!("{e:#}"),
-                        None,
-                    )
-                    .await?;
-                }
-                Ok(()) => {
-                    self.finish_phase(input, phase, 8, "mesh_node", "completed", "", None)
-                        .await?;
-                }
-            }
-        }
-
         self.complete(input).await
     }
 
@@ -588,6 +538,7 @@ impl SetupStore for PgSetupStore {
 
 /// Mirrors `toSetupInputs`.
 pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
+    let spec = &env.project_spec;
     let mut input = Inputs {
         environment_id: env.id.clone(),
         namespace: backend.namespace.clone(),
@@ -596,86 +547,38 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
         setup_phase: backend.setup_phase,
         setup_complete: backend.setup_complete,
         ttl_seconds: env.ttl_seconds,
+        has_setup: !spec.repositories.is_empty()
+            || !spec.install_command.is_empty()
+            || !spec.startup_script.is_empty()
+            || !spec.environment.is_empty()
+            || !spec.agents.is_empty()
+            || !spec.application_ports.is_empty(),
+        working_directory: spec.working_directory.clone(),
+        install_command: spec.install_command.clone(),
+        startup_script: spec.startup_script.clone(),
+        agents: spec.agents.tools.clone(),
+        app_ports: spec
+            .application_ports
+            .iter()
+            .map(|port| {
+                (
+                    i32::from(port.port),
+                    port.label.clone(),
+                    port.access.clone(),
+                )
+            })
+            .collect(),
         ..Default::default()
     };
-    let Some(sc) = &env.setup_config else {
-        return input;
-    };
-
-    input.has_setup = true;
-    input.include_org_secrets = sc.include_org_secrets.unwrap_or(false);
-    input.include_user_secrets = sc.include_user_secrets.unwrap_or(false);
-    input.install_command = sc.install_command.clone();
-    input.startup_script = sc.startup_script.clone();
-    for repo in sc.normalized_repos() {
+    for repository in &spec.repositories {
         input.repos.push(Repo {
-            url: repo.url,
-            branch: repo.branch,
-            mount_path: repo.mount_path,
+            url: repository.source.clone(),
+            revision: repository.revision.clone(),
+            branch: repository.branch.clone(),
+            mount_path: repository.destination.clone(),
         });
     }
-    for agent in sc.configured_agents() {
-        input.agents.push(agent.agent_type);
-    }
-    for port in &sc.app_ports {
-        input
-            .app_ports
-            .push((port.port, port.label.clone(), port.access.clone()));
-    }
-    if sc.env_vars.contains_key("CODEWIRE_MESH_URL") {
-        input.has_mesh = true;
-    }
     input
-}
-
-/// Mirrors `inheritClaudeAgentEnv`.
-pub fn inherit_claude_agent_env(sc: &mut SetupConfig) {
-    if !sc.has_configured_agent("claude-code") || sc.agent_env.is_empty() {
-        return;
-    }
-    if let Some(token) = sc.agent_env.get("CLAUDE_CODE_OAUTH_TOKEN").cloned()
-        && !token.is_empty()
-    {
-        sc.env_vars
-            .entry("CLAUDE_CODE_OAUTH_TOKEN".to_string())
-            .or_insert_with(|| token.clone());
-        sc.env_vars
-            .entry("ANTHROPIC_AUTH_TOKEN".to_string())
-            .or_insert(token);
-    }
-    if let Some(api_key) = sc.agent_env.get("ANTHROPIC_API_KEY").cloned()
-        && !api_key.is_empty()
-    {
-        sc.env_vars
-            .entry("ANTHROPIC_API_KEY".to_string())
-            .or_insert(api_key);
-    }
-}
-
-/// Mirrors `shouldBootstrapClaude`.
-fn should_bootstrap_claude(sc: &SetupConfig) -> bool {
-    [
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-    ]
-    .iter()
-    .any(|k| sc.env_vars.get(*k).is_some_and(|v| !v.is_empty()))
-}
-
-/// Mirrors `resolveCodexAuth`.
-fn resolve_codex_auth(sc: &SetupConfig) -> (&'static str, String) {
-    if let Some(k) = sc.env_vars.get("OPENAI_API_KEY")
-        && !k.is_empty()
-    {
-        return ("apikey", k.clone());
-    }
-    if let Some(k) = sc.env_vars.get("CODEX_OAUTH_TOKEN")
-        && !k.is_empty()
-    {
-        return ("oauth", k.clone());
-    }
-    ("", String::new())
 }
 
 fn require_workspace_exec_success(result: &WorkspaceExecResult) -> anyhow::Result<()> {
@@ -701,11 +604,6 @@ fn replacement_runtime_is_current(
         && !probe.pod_ip.is_empty()
 }
 
-pub(crate) struct SshInjectionResult {
-    pub(crate) created_by: String,
-    pub(crate) public_key: String,
-}
-
 pub struct WorkerSetupOps<'a> {
     pub ctx: &'a WorkerContext,
     pub env: EnvironmentRow,
@@ -720,11 +618,7 @@ pub struct WorkerSetupOps<'a> {
 
 impl WorkerSetupOps<'_> {
     fn setup_env_vars(&self) -> BTreeMap<String, String> {
-        self.env
-            .setup_config
-            .as_ref()
-            .map(|sc| sc.env_vars.clone())
-            .unwrap_or_default()
+        self.env.project_spec.environment.clone()
     }
 
     fn sandbox_client(&self, namespace: &str) -> anyhow::Result<SandboxClient> {
@@ -1323,137 +1217,12 @@ impl WorkerSetupOps<'_> {
         Ok(())
     }
 
-    /// Resolves the selected secret project. An admitted source must not be
-    /// silently omitted when its protected storage is unavailable.
-    async fn inject_secret_project_vars(&mut self) -> anyhow::Result<()> {
-        let Some(project_id) = self.env.secret_project_id.clone() else {
-            return Ok(());
-        };
-        let path = format!("/projects/{}/{}", self.env.org_id, project_id);
-        let secrets = self
-            .ctx
-            .secrets
-            .get_secrets_raw_at_path(&path)
-            .await
-            .map_err(|error| {
-                tracing::error!(
-                    environment_id = self.env.id,
-                    secret_project_id = project_id,
-                    error = %error,
-                    "post-boot: selected secret project resolution failed"
-                );
-                anyhow::anyhow!("selected project workload secrets are unavailable")
-            })?;
-        let sc = self
-            .env
-            .setup_config
-            .get_or_insert_with(SetupConfig::default);
-        let count = merge_secrets(&mut sc.env_vars, secrets, &[]);
-        tracing::info!(
-            environment_id = self.env.id,
-            count,
-            "post-boot: injected secret project vars"
-        );
-        Ok(())
-    }
-
-    /// Resolves selected organization secrets without weakening setup when
-    /// the protected store cannot prove the requested result.
-    async fn inject_org_secrets(&mut self) -> anyhow::Result<()> {
-        let path = format!("/org-secrets/{}", self.env.org_id);
-        let secrets = self
-            .ctx
-            .secrets
-            .get_secrets_raw_at_path(&path)
-            .await
-            .map_err(|error| {
-                tracing::error!(
-                    environment_id = self.env.id,
-                    error = %error,
-                    "post-boot: selected organization-secret resolution failed"
-                );
-                anyhow::anyhow!("selected organization workload secrets are unavailable")
-            })?;
-        let sc = self
-            .env
-            .setup_config
-            .get_or_insert_with(SetupConfig::default);
-        let injected = merge_secrets(&mut sc.env_vars, secrets, &[]);
-        if injected > 0 {
-            tracing::info!(
-                environment_id = self.env.id,
-                count = injected,
-                "post-boot: injected org secrets as fallback"
-            );
-        }
-        Ok(())
-    }
-
-    /// Resolves selected user secrets; `SSH_PRIVATE_KEY` remains outside the
-    /// workload environment and is handled by the legacy SSH path below.
-    async fn inject_user_secrets(&mut self) -> anyhow::Result<()> {
-        let created_by: Option<(String,)> =
-            sqlx::query_as("SELECT created_by FROM environments WHERE id = $1")
-                .bind(&self.env.id)
-                .fetch_optional(&self.ctx.pool)
-                .await
-                .map_err(|error| {
-                    tracing::error!(
-                        environment_id = self.env.id,
-                        error = %error,
-                        "post-boot: environment creator lookup failed"
-                    );
-                    anyhow::anyhow!("selected user workload secrets are unavailable")
-                })?;
-        let Some((created_by,)) = created_by else {
-            tracing::error!(
-                environment_id = self.env.id,
-                "post-boot: environment creator is unavailable"
-            );
-            anyhow::bail!("selected user workload secrets are unavailable");
-        };
-        let secrets = self
-            .ctx
-            .secrets
-            .get_secrets_raw_at_path(&format!("/users/{created_by}"))
-            .await
-            .map_err(|error| {
-                tracing::error!(
-                    environment_id = self.env.id,
-                    error = %error,
-                    "post-boot: selected user-secret resolution failed"
-                );
-                anyhow::anyhow!("selected user workload secrets are unavailable")
-            })?;
-        let sc = self
-            .env
-            .setup_config
-            .get_or_insert_with(SetupConfig::default);
-        let injected = merge_secrets(
-            &mut sc.env_vars,
-            secrets,
-            &[super::secrets::SSH_PRIVATE_KEY_SECRET_KEY],
-        );
-        if injected > 0 {
-            tracing::info!(
-                environment_id = self.env.id,
-                user_id = created_by,
-                count = injected,
-                "post-boot: injected user secrets as fallback"
-            );
-        }
-        Ok(())
-    }
-
     /// Mirrors `syncWorkspaceEnv` (warn-only).
     async fn sync_workspace_env(&self, namespace: &str) -> anyhow::Result<()> {
-        let Some(sc) = &self.env.setup_config else {
-            return Ok(());
-        };
-        if sc.env_vars.is_empty() {
+        if self.env.project_spec.environment.is_empty() {
             return Ok(());
         }
-        let script = build_workspace_env_script(&sc.env_vars);
+        let script = build_workspace_env_script(&self.env.project_spec.environment);
         let cmd = vec!["sh".to_string(), "-c".to_string(), script];
         if let Err(e) = self
             .workspace_exec(namespace, &self.env.id, &cmd, "", &BTreeMap::new())
@@ -1467,58 +1236,9 @@ impl WorkerSetupOps<'_> {
         Ok(())
     }
 
-    /// Mirrors `bootstrapAgentAuth` = claude + codex, both warn-only.
-    async fn bootstrap_agent_auth(&self, namespace: &str) -> anyhow::Result<()> {
-        if let Some(sc) = &self.env.setup_config {
-            if should_bootstrap_claude(sc) {
-                let repos = sc.normalized_repos();
-                let work_dir = match repos.as_slice() {
-                    [repo] => effective_repository_mount(&repo.url, &repo.mount_path)?,
-                    _ => "/workspace".to_string(),
-                };
-                let script = build_claude_bootstrap_script(&work_dir);
-                let cmd = vec!["sh".to_string(), "-c".to_string(), script];
-                if let Err(e) = self
-                    .workspace_exec(namespace, &self.env.id, &cmd, "", &BTreeMap::new())
-                    .await
-                {
-                    if is_setup_control_flow(&e) {
-                        return Err(e);
-                    }
-                    tracing::warn!(environment_id = self.env.id, error = %e, "post-boot: failed to bootstrap claude auth");
-                }
-            }
-            let (mode, value) = resolve_codex_auth(sc);
-            if !mode.is_empty() {
-                let script = build_codex_bootstrap_script(mode, &value);
-                if !script.is_empty() {
-                    let cmd = vec!["sh".to_string(), "-c".to_string(), script];
-                    if let Err(e) = self
-                        .workspace_exec(namespace, &self.env.id, &cmd, "", &BTreeMap::new())
-                        .await
-                    {
-                        if is_setup_control_flow(&e) {
-                            return Err(e);
-                        }
-                        tracing::warn!(environment_id = self.env.id, error = %e, "post-boot: failed to bootstrap codex auth");
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// SSH/git injection through the attempt-and-Pod fenced setup executor.
-    async fn inject_ssh_key_and_git_identity(
-        &self,
-        namespace: &str,
-    ) -> anyhow::Result<SshInjectionResult> {
+    /// Applies non-secret Git author metadata through the fenced setup executor.
+    async fn configure_git_identity(&self, namespace: &str) -> anyhow::Result<()> {
         let env_id = &self.env.id;
-        let mut result = SshInjectionResult {
-            created_by: String::new(),
-            public_key: String::new(),
-        };
-
         let created_by: Option<(String,)> =
             sqlx::query_as("SELECT created_by FROM environments WHERE id = $1")
                 .bind(env_id)
@@ -1528,59 +1248,10 @@ impl WorkerSetupOps<'_> {
         let Some((created_by,)) = created_by else {
             tracing::warn!(
                 environment_id = env_id,
-                "ssh-inject: could not resolve creator"
+                "git-identity: could not resolve creator"
             );
-            return Ok(result);
+            return Ok(());
         };
-        result.created_by = created_by.clone();
-
-        let public_key: Option<(String,)> =
-            sqlx::query_as("SELECT public_key FROM user_ssh_keys WHERE user_id = $1")
-                .bind(&created_by)
-                .fetch_optional(&self.ctx.pool)
-                .await
-                .unwrap_or(None);
-        if let Some((public_key,)) = public_key {
-            result.public_key = public_key;
-        }
-
-        let mut private_key = String::new();
-        if !result.public_key.is_empty() {
-            if let Ok(secrets) = self
-                .ctx
-                .secrets
-                .get_all_secrets_at_path(&format!("/users/{created_by}"))
-                .await
-            {
-                private_key = secrets.get("SSH_PRIVATE_KEY").cloned().unwrap_or_default();
-            }
-            if private_key.is_empty() {
-                tracing::warn!(
-                    user_id = created_by,
-                    environment_id = env_id,
-                    "ssh-inject: public key exists but no private key in secret store"
-                );
-            }
-        }
-
-        if !private_key.is_empty() && !result.public_key.is_empty() {
-            let script = build_ssh_setup_script(&private_key, &result.public_key);
-            let cmd = vec!["sh".to_string(), "-c".to_string(), script];
-            match self
-                .workspace_exec(namespace, env_id, &cmd, "", &BTreeMap::new())
-                .await
-            {
-                Err(error) if is_setup_control_flow(&error) => {
-                    return Err(error);
-                }
-                Err(error) => tracing::warn!(
-                    environment_id = env_id,
-                    error = %error,
-                    "ssh-inject: failed to write ssh files"
-                ),
-                Ok(()) => tracing::info!(environment_id = env_id, "ssh-inject: ssh key injected"),
-            }
-        }
 
         let user_row: Option<GitIdentityRow> =
             sqlx::query_as("SELECT git_name, git_email, name, email FROM users WHERE id = $1")
@@ -1589,11 +1260,8 @@ impl WorkerSetupOps<'_> {
                 .await
                 .unwrap_or(None);
         let Some((git_name, git_email, name, email)) = user_row else {
-            tracing::warn!(
-                user_id = created_by,
-                "ssh-inject: could not load user for git identity"
-            );
-            return Ok(result);
+            tracing::warn!(user_id = created_by, "git-identity: could not load user");
+            return Ok(());
         };
 
         let resolved_name = resolve_git_field(git_name.as_deref(), name.as_deref(), &email);
@@ -1639,41 +1307,17 @@ impl WorkerSetupOps<'_> {
             Err(error) => tracing::warn!(
                 environment_id = env_id,
                 error = %error,
-                "ssh-inject: failed to set git identity"
+                "git-identity: failed to set Git identity"
             ),
             Ok(()) => tracing::info!(
                 environment_id = env_id,
                 name = resolved_name,
                 email = resolved_email,
-                "ssh-inject: git identity configured"
+                "git-identity: configured"
             ),
         }
 
-        Ok(result)
-    }
-
-    async fn inject_gh_cli_auth(&self, namespace: &str, user_id: &str) -> anyhow::Result<()> {
-        let token = get_github_token_for_user(&self.ctx.pool, &self.ctx.github_cfg, user_id).await;
-        if token.is_empty() {
-            return Ok(());
-        }
-        let username = get_github_username_for_user(&self.ctx.pool, user_id).await;
-        let script = build_gh_cli_auth_script(&token, &username);
-        let cmd = vec!["sh".to_string(), "-c".to_string(), script];
-        match self
-            .workspace_exec(namespace, &self.env.id, &cmd, "", &BTreeMap::new())
-            .await
-        {
-            Err(error) if is_setup_control_flow(&error) => Err(error),
-            Err(error) => {
-                tracing::warn!(environment_id = self.env.id, error = %error, "gh-auth: failed to write gh config");
-                Ok(())
-            }
-            Ok(()) => {
-                tracing::info!(environment_id = self.env.id, "gh-auth: gh cli configured");
-                Ok(())
-            }
-        }
+        Ok(())
     }
 }
 
@@ -1727,48 +1371,12 @@ impl SetupOps for WorkerSetupOps<'_> {
         .await
     }
 
-    async fn prepare_environment(&mut self, input: &Inputs) -> anyhow::Result<()> {
-        self.phase_authority
-            .ensure_active(self.active_phase)
-            .await?;
-        if let Some(sc) = self.env.setup_config.as_mut() {
-            inherit_claude_agent_env(sc);
-        }
-        let activity_ctx = self.activity_ctx.clone();
-        await_setup_or_cancel(&activity_ctx, async {
-            if input.include_user_secrets {
-                self.inject_user_secrets().await?;
-            }
-            self.inject_secret_project_vars().await?;
-            if input.include_org_secrets {
-                self.inject_org_secrets().await?;
-            }
-            Ok(())
-        })
-        .await?;
+    async fn configure_environment(&mut self, input: &Inputs) -> anyhow::Result<()> {
         self.phase_authority
             .ensure_active(self.active_phase)
             .await?;
         self.sync_workspace_env(&input.namespace).await?;
-        self.bootstrap_agent_auth(&input.namespace).await?;
-        let ssh_result = self
-            .inject_ssh_key_and_git_identity(&input.namespace)
-            .await?;
-        if !ssh_result.created_by.is_empty() {
-            if !ssh_result.public_key.is_empty() {
-                self.phase_authority
-                    .emit_log(
-                        self.active_phase,
-                        "ssh_public_key",
-                        "info",
-                        ssh_result.public_key.trim(),
-                        None,
-                    )
-                    .await?;
-            }
-            self.inject_gh_cli_auth(&input.namespace, &ssh_result.created_by)
-                .await?;
-        }
+        self.configure_git_identity(&input.namespace).await?;
         Ok(())
     }
 
@@ -1795,8 +1403,10 @@ impl SetupOps for WorkerSetupOps<'_> {
             let namespace = input.namespace.clone();
             let env_id = input.environment_id.clone();
             async move {
-                this.phase_authority.ensure_active(this.active_phase).await?;
-                let dir = effective_repository_mount(&repo.url, &repo.mount_path)?;
+                this.phase_authority
+                    .ensure_active(this.active_phase)
+                    .await?;
+                let dir = canonical_repository_mount(&repo.url, &repo.mount_path)?;
                 let rm: Vec<String> = vec!["rm".into(), "-rf".into(), dir.clone()];
                 if let Err(error) = this
                     .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
@@ -1805,7 +1415,9 @@ impl SetupOps for WorkerSetupOps<'_> {
                 {
                     return Err(error);
                 }
-                this.phase_authority.ensure_active(this.active_phase).await?;
+                this.phase_authority
+                    .ensure_active(this.active_phase)
+                    .await?;
                 #[cfg(feature = "kind-e2e")]
                 let clone = super::fencing_evidence::clone_fixture_command(&repo.url)
                     .unwrap_or_else(|| {
@@ -1824,9 +1436,17 @@ impl SetupOps for WorkerSetupOps<'_> {
                     let error = e.context(format!("git clone {}", repo.url));
                     return Err(this.fence_failed_launch_group(input, error).await);
                 }
-                if !repo.branch.is_empty() && repo.branch != "main" && repo.branch != "master" {
-                    let checkout: Vec<String> =
-                        vec!["git".into(), "checkout".into(), repo.branch.clone()];
+                let selector = if repo.revision.is_empty() {
+                    &repo.branch
+                } else {
+                    &repo.revision
+                };
+                if !selector.is_empty() {
+                    let mut checkout: Vec<String> = vec!["git".into(), "checkout".into()];
+                    if !repo.revision.is_empty() {
+                        checkout.push("--detach".into());
+                    }
+                    checkout.push(selector.clone());
                     if let Err(e) = this
                         .workspace_exec(&namespace, &env_id, &checkout, &dir, &BTreeMap::new())
                         .await
@@ -1834,7 +1454,9 @@ impl SetupOps for WorkerSetupOps<'_> {
                         if is_setup_control_flow(&e) {
                             return Err(e);
                         }
-                        tracing::warn!(env = env_id, repo = repo.url, error = %e, "setup: branch checkout failed");
+                        let error =
+                            e.context(format!("git checkout {} for {}", selector, repo.url));
+                        return Err(this.fence_failed_launch_group(input, error).await);
                     }
                 }
                 Ok(())
@@ -1959,20 +1581,6 @@ impl SetupOps for WorkerSetupOps<'_> {
                 "post-boot: auto-registered ports"
             );
         }
-        Ok(())
-    }
-
-    async fn start_mesh_node(&mut self, input: &Inputs) -> anyhow::Result<()> {
-        self.phase_authority
-            .ensure_active(self.active_phase)
-            .await?;
-        // The supervised environment daemon and the platform gateway own
-        // optional Mesh participation. Setup must never start a second
-        // best-effort host-owned node process inside the workspace.
-        tracing::info!(
-            environment_id = input.environment_id,
-            "post-boot: optional Mesh is owned by the supervised runtime"
-        );
         Ok(())
     }
 }
@@ -2147,9 +1755,9 @@ pub async fn handle_environment_setup(
     Ok(())
 }
 
-/// Re-inject ephemeral SSH/git/GitHub credentials after a stop→start Pod
-/// replacement under the same durable process lease used by setup.
-pub async fn handle_post_start_auth_injection(
+/// Reapply non-secret Git author metadata after a stop→start Pod replacement
+/// under the same durable process lease used by setup.
+pub async fn handle_post_start_configuration(
     ctx: &WorkerContext,
     payload: &JobPayload,
     authority: &ActivityAuthority,
@@ -2183,13 +1791,7 @@ pub async fn handle_post_start_auth_injection(
             .map_err(classify_setup_recovery_error)?,
     }
 
-    let ssh_result = ops
-        .inject_ssh_key_and_git_identity(&input.namespace)
-        .await?;
-    if !ssh_result.created_by.is_empty() {
-        ops.inject_gh_cli_auth(&input.namespace, &ssh_result.created_by)
-            .await?;
-    }
+    ops.configure_git_identity(&input.namespace).await?;
     ops.ensure_can_commit().await?;
     phase_authority.complete_post_start_mutation(phase).await?;
     Ok(())
@@ -2327,8 +1929,8 @@ mod tests {
         async fn health_check(&mut self, _input: &Inputs) -> anyhow::Result<()> {
             self.call("health_check")
         }
-        async fn prepare_environment(&mut self, _input: &Inputs) -> anyhow::Result<()> {
-            self.call("prepare_environment")
+        async fn configure_environment(&mut self, _input: &Inputs) -> anyhow::Result<()> {
+            self.call("configure_environment")
         }
         async fn clone_repos(&mut self, _input: &Inputs) -> anyhow::Result<()> {
             self.call("clone_repos")
@@ -2345,9 +1947,6 @@ mod tests {
         async fn register_ports(&mut self, _input: &Inputs) -> anyhow::Result<()> {
             self.call("register_ports")
         }
-        async fn start_mesh_node(&mut self, _input: &Inputs) -> anyhow::Result<()> {
-            self.call("start_mesh_node")
-        }
     }
 
     fn full_inputs() -> Inputs {
@@ -2356,18 +1955,17 @@ mod tests {
             namespace: "ns".into(),
             desired_state: "started".into(),
             has_setup: true,
-            include_org_secrets: true,
-            include_user_secrets: true,
             repos: vec![Repo {
                 url: "https://x/y/app.git".into(),
+                revision: String::new(),
                 branch: "".into(),
-                mount_path: String::new(),
+                mount_path: "/workspace/app".into(),
             }],
+            working_directory: "/workspace/app".into(),
             install_command: "npm ci".into(),
             startup_script: "npm start".into(),
             agents: vec!["claude-code".into()],
             app_ports: vec![(3000, "web".into(), "public".into())],
-            has_mesh: true,
             ttl_seconds: Some(7200),
             ..Default::default()
         }
@@ -2393,23 +1991,22 @@ mod tests {
             ops,
             [
                 "health_check",
-                "prepare_environment",
+                "configure_environment",
                 "clone_repos",
                 "run_install",
                 "run_startup_script",
                 "validate_agents",
-                "register_ports",
-                "start_mesh_node"
+                "register_ports"
             ]
         );
-        assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7]);
         assert!(s.complete);
         assert_eq!(s.shutdown_ttl, Some(7200));
         assert!(input.setup_complete);
     }
 
     #[tokio::test]
-    async fn run_without_setup_completes_after_secrets() {
+    async fn run_without_setup_completes_after_configuration() {
         let mock = Mock::new();
         let mut runner = Runner {
             store: mock.clone(),
@@ -2436,7 +2033,7 @@ mod tests {
             ops: mock.clone(),
         };
         let mut input = full_inputs();
-        input.setup_phase = 3; // health/secrets/clone already done
+        input.setup_phase = 3; // health/configuration/clone already done
         runner.run(&mut input).await.unwrap();
         let s = mock.state();
         let ops: Vec<&str> = s
@@ -2451,11 +2048,10 @@ mod tests {
                 "run_install",
                 "run_startup_script",
                 "validate_agents",
-                "register_ports",
-                "start_mesh_node"
+                "register_ports"
             ]
         );
-        assert_eq!(s.phases, vec![4, 5, 6, 7, 8]);
+        assert_eq!(s.phases, vec![4, 5, 6, 7]);
     }
 
     #[tokio::test]
@@ -2500,7 +2096,7 @@ mod tests {
         let s = mock.state();
         assert!(s.complete);
         assert!(s.calls.contains(&"log:startup_script:warning".to_string()));
-        assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[tokio::test]
@@ -2528,30 +2124,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mesh_node_failure_is_warning_only() {
-        let mock = Mock::failing("start_mesh_node");
-        let mut runner = Runner {
-            store: mock.clone(),
-            ops: mock.clone(),
-        };
-        let mut input = full_inputs();
-        runner.run(&mut input).await.unwrap();
-        let s = mock.state();
-        assert!(s.complete);
-        assert!(s.calls.contains(&"log:mesh_node:warning".to_string()));
-    }
-
-    #[tokio::test]
     async fn authority_loss_escapes_every_runner_path_without_advancing() {
         for step in [
             "health_check",
-            "prepare_environment",
+            "configure_environment",
             "clone_repos",
             "run_install",
             "run_startup_script",
             "validate_agents",
             "register_ports",
-            "start_mesh_node",
         ] {
             let mock = Mock::losing_authority(step);
             let mut runner = Runner {
@@ -2571,7 +2152,6 @@ mod tests {
             );
             let log_step = match step {
                 "run_startup_script" => "startup_script",
-                "start_mesh_node" => "mesh_node",
                 other => other,
             };
             assert!(
@@ -2588,13 +2168,12 @@ mod tests {
     async fn recovery_failure_escapes_every_runner_path_without_advancing() {
         for step in [
             "health_check",
-            "prepare_environment",
+            "configure_environment",
             "clone_repos",
             "run_install",
             "run_startup_script",
             "validate_agents",
             "register_ports",
-            "start_mesh_node",
         ] {
             let mock = Mock::failing_recovery(step);
             let mut runner = Runner {
@@ -2614,7 +2193,6 @@ mod tests {
             );
             let log_step = match step {
                 "run_startup_script" => "startup_script",
-                "start_mesh_node" => "mesh_node",
                 other => other,
             };
             assert!(
@@ -2676,46 +2254,7 @@ mod tests {
     }
 
     #[test]
-    fn work_dir_for_repos_mirrors_go() {
-        assert_eq!(work_dir_for_repos(&[]).unwrap(), "");
-        assert_eq!(
-            work_dir_for_repos(&[Repo {
-                url: "https://g/x/app.git".into(),
-                branch: String::new(),
-                mount_path: "/workspace/services/app".into(),
-            }])
-            .unwrap(),
-            "/workspace/services/app"
-        );
-        assert_eq!(
-            work_dir_for_repos(&[Repo {
-                url: "https://g/x/app.git".into(),
-                branch: String::new(),
-                mount_path: String::new(),
-            }])
-            .unwrap(),
-            "/workspace/app"
-        );
-        assert_eq!(
-            work_dir_for_repos(&[
-                Repo {
-                    url: "https://g/x/a.git".into(),
-                    branch: String::new(),
-                    mount_path: String::new(),
-                },
-                Repo {
-                    url: "https://g/x/b.git".into(),
-                    branch: String::new(),
-                    mount_path: String::new(),
-                },
-            ])
-            .unwrap(),
-            "/workspace"
-        );
-    }
-
-    #[test]
-    fn to_setup_inputs_defaults_secret_sources_off() {
+    fn to_setup_inputs_consumes_the_canonical_project_spec() {
         let env = EnvironmentRow {
             id: "env-1".into(),
             org_id: "org-1".into(),
@@ -2728,10 +2267,8 @@ mod tests {
             cpu_millicores: 2000,
             memory_mb: 4096,
             disk_gb: 10,
-            auth_token: None,
             ttl_seconds: Some(3600),
-            setup_config: None,
-            secret_project_id: None,
+            project_spec: codewire_project::ProjectSpec::default(),
         };
         let backend = BackendRow {
             namespace: "ns".into(),
@@ -2744,28 +2281,32 @@ mod tests {
         assert_eq!(input.ttl_seconds, Some(3600));
 
         let mut env = env;
-        env.setup_config = Some(
-            serde_json::from_str(
-                r#"{"repo_url":"https://g/o/r.git","branch":"dev",
-                    "env_vars":{"CODEWIRE_MESH_URL":"https://mesh.example.com"},
-                    "agents":[{"type":"codex"}],"install_agents":true,
-                    "app_ports":[{"port":8080,"label":"api"}]}"#,
-            )
-            .unwrap(),
-        );
+        env.project_spec = codewire_project::ProjectSpec {
+            repositories: vec![codewire_project::RepositorySpec {
+                source: "https://g/o/r.git".into(),
+                branch: "dev".into(),
+                destination: "/workspace/r".into(),
+                ..Default::default()
+            }],
+            working_directory: "/workspace/r".into(),
+            environment: BTreeMap::from([("APP_MODE".into(), "test".into())]),
+            agents: codewire_project::AgentsSpec {
+                install: Some(true),
+                tools: vec!["codex".into()],
+            },
+            application_ports: vec![codewire_project::ApplicationPort {
+                port: 8080,
+                label: "api".into(),
+                access: String::new(),
+            }],
+            ..Default::default()
+        };
         let input = to_setup_inputs(&env, &backend);
         assert!(input.has_setup);
-        assert!(
-            !input.include_org_secrets,
-            "absent include_org_secrets must default off"
-        );
-        assert!(
-            !input.include_user_secrets,
-            "absent include_user_secrets must default off"
-        );
-        assert!(input.has_mesh);
         assert_eq!(input.repos.len(), 1);
         assert_eq!(input.repos[0].branch, "dev");
+        assert_eq!(input.repos[0].mount_path, "/workspace/r");
+        assert_eq!(input.working_directory, "/workspace/r");
         assert_eq!(input.agents, vec!["codex".to_string()]);
         assert_eq!(
             input.app_ports,
@@ -2784,37 +2325,13 @@ mod tests {
     }
 
     #[test]
-    fn inherit_claude_agent_env_mirrors_go() {
-        let mut sc: SetupConfig = serde_json::from_str(
-            r#"{"agents":[{"type":"claude-code"}],
-                "agent_env":{"CLAUDE_CODE_OAUTH_TOKEN":"tok","ANTHROPIC_API_KEY":"key"},
-                "env_vars":{"ANTHROPIC_API_KEY":"existing"}}"#,
-        )
-        .unwrap();
-        inherit_claude_agent_env(&mut sc);
-        assert_eq!(
-            sc.env_vars
-                .get("CLAUDE_CODE_OAUTH_TOKEN")
-                .map(String::as_str),
-            Some("tok")
+    fn removed_agent_env_is_rejected() {
+        assert!(
+            serde_json::from_str::<codewire_project::ProjectSpec>(
+                r#"{"agent_env":{"CLAUDE_CODE_OAUTH_TOKEN":"synthetic"}}"#,
+            )
+            .is_err()
         );
-        assert_eq!(
-            sc.env_vars.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
-            Some("tok")
-        );
-        // Existing explicit value wins.
-        assert_eq!(
-            sc.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
-            Some("existing")
-        );
-
-        // No claude agent configured → untouched.
-        let mut sc: SetupConfig = serde_json::from_str(
-            r#"{"agents":[{"type":"codex"}],"agent_env":{"CLAUDE_CODE_OAUTH_TOKEN":"tok"}}"#,
-        )
-        .unwrap();
-        inherit_claude_agent_env(&mut sc);
-        assert!(sc.env_vars.is_empty());
     }
 
     #[test]
@@ -2826,19 +2343,6 @@ mod tests {
         assert_eq!(resolve_git_field(Some(""), Some("Acct"), "a@b.c"), "Acct");
         assert_eq!(resolve_git_field(None, None, "user@b.c"), "user");
         assert_eq!(resolve_git_field(None, None, "@b.c"), "@b.c");
-    }
-
-    #[test]
-    fn resolve_codex_auth_prefers_api_key() {
-        let sc: SetupConfig =
-            serde_json::from_str(r#"{"env_vars":{"OPENAI_API_KEY":"k","CODEX_OAUTH_TOKEN":"t"}}"#)
-                .unwrap();
-        assert_eq!(resolve_codex_auth(&sc), ("apikey", "k".to_string()));
-        let sc: SetupConfig =
-            serde_json::from_str(r#"{"env_vars":{"CODEX_OAUTH_TOKEN":"t"}}"#).unwrap();
-        assert_eq!(resolve_codex_auth(&sc), ("oauth", "t".to_string()));
-        let sc: SetupConfig = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(resolve_codex_auth(&sc).0, "");
     }
 
     #[test]

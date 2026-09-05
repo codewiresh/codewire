@@ -196,8 +196,9 @@ run_contracts_proto() {
   (
     cd proto
     buf lint
-    buf breaking --against "../.git#commit=${base_sha},subdir=proto"
   )
+  python3 scripts/checks/proto_breaking.py --self-test
+  BUF="$(command -v buf)" python3 scripts/checks/proto_breaking.py --base-sha "$base_sha"
   (
     cd proto
     rm -rf \
@@ -278,6 +279,7 @@ run_web() {
     --config apps/dashboard/playwright.config.ts --list
   scripts/ci/tests/test-dashboard-browser-gate.sh
   scripts/checks/security/audit-js-supply-chain.sh
+  scripts/checks/security/audit-runtime-images.sh --self-test
   scripts/checks/security/audit-runtime-images.sh
   if selected kind; then
     echo 'dashboard image verification deferred to the exact-image Kind transaction'
@@ -643,47 +645,33 @@ run_deploy() {
 
   install_helm
   scripts/ci/tests/test-deploy-prod-render.sh
-  helm template test apps/cli/charts/codewire-mesh \
-    --set mesh.baseURL=https://mesh.test \
-    | grep -q 'exec codewire-mesh'
-  local default_mesh_render retirement_mesh_render retirement_job
+  local default_mesh_render
   default_mesh_render="$(helm template test apps/cli/charts/codewire-mesh \
     --set mesh.baseURL=https://mesh.test)"
+  grep -Fq 'command: ["codewire-mesh"]' <<<"$default_mesh_render"
+  grep -Fq -- '- "--base-url=https://mesh.test"' <<<"$default_mesh_render"
+  if grep -Fq -- '--database-url' <<<"$default_mesh_render" ||
+      grep -Fq 'exec codewire-mesh' <<<"$default_mesh_render" ||
+      grep -Fq 'command: ["sh"' <<<"$default_mesh_render"; then
+    echo "::error::Mesh deployment rendered a shell or database credential argv path"
+    return 1
+  fi
   if grep -Fq 'prelaunch-retire-legacy-auth' <<<"$default_mesh_render"; then
-    echo "::error::legacy-auth retirement hook rendered without explicit opt-in"
+    echo "::error::retired Mesh legacy-auth command rendered"
     return 1
   fi
-  retirement_mesh_render="$(helm template codewire-mesh-retirement \
-    apps/cli/charts/codewire-mesh \
-    --set mesh.baseURL=https://mesh.test \
-    --set database.enabled=true \
-    --set database.secretName=mesh-database-only \
-    --set prelaunchLegacyAuthRetirement.enabled=true \
-    --set image.repository=registry.test/codewire/mesh \
-    --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-    --set meshAuthorization.url=http://authorization.test \
-    --set meshAuthorization.hmacSecretRef.name=must-not-enter-hook)"
-  retirement_job="$(awk 'BEGIN { RS="---" } /kind: Job/ && /prelaunch-retire-legacy-auth/ { print }' \
-    <<<"$retirement_mesh_render")"
-  grep -Fq '"helm.sh/hook": pre-upgrade' <<<"$retirement_job"
-  grep -Fq '"helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded' \
-    <<<"$retirement_job"
-  grep -Fq 'automountServiceAccountToken: false' <<<"$retirement_job"
-  grep -Fq 'registry.test/codewire/mesh@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
-    <<<"$retirement_job"
-  grep -Fq 'name: DATABASE_URL' <<<"$retirement_job"
-  grep -Fq 'name: mesh-database-only' <<<"$retirement_job"
-  grep -Fq 'args: ["prelaunch-retire-legacy-auth"]' <<<"$retirement_job"
-  if grep -Fq 'must-not-enter-hook' <<<"$retirement_job"; then
-    echo "::error::Mesh authorization credential entered the database-only retirement hook"
-    return 1
-  fi
-  local dev_mesh_render
+  local dev_mesh_render database_reference_canary_render
   dev_mesh_render="$(helm template codewire-mesh-dev apps/cli/charts/codewire-mesh \
     -f deployments/k8s/mesh-dev/values.yaml \
     --set image.repository=registry.test/codewire/mesh --set image.tag=test)"
   grep -q 'mesh.codewire-dev.sh' <<<"$dev_mesh_render"
-  grep -Fq -- '--database-url="$DATABASE_URL"' <<<"$dev_mesh_render"
+  grep -Fq 'command: ["codewire-mesh"]' <<<"$dev_mesh_render"
+  if grep -Fq -- '--database-url' <<<"$dev_mesh_render" ||
+      grep -Fq 'exec codewire-mesh' <<<"$dev_mesh_render" ||
+      grep -Fq 'command: ["sh"' <<<"$dev_mesh_render"; then
+    echo "::error::hosted Mesh deployment rendered a shell or database credential argv path"
+    return 1
+  fi
   grep -Fq 'name: DATABASE_URL' <<<"$dev_mesh_render"
   grep -Fq 'name: codewire-mesh-db-app' <<<"$dev_mesh_render"
   grep -Fq 'name: CODEWIRE_MESH_AUTHORIZATION_URL' <<<"$dev_mesh_render"
@@ -692,6 +680,24 @@ run_deploy() {
   grep -Fq 'name: codewire-mesh-coordinator' <<<"$dev_mesh_render"
   grep -Fq 'nginx.ingress.kubernetes.io/backend-protocol: "GRPC"' <<<"$dev_mesh_render"
   grep -Fq 'path: /codewire\.internal\.v1\.MeshCoordinatorService/' <<<"$dev_mesh_render"
+  database_reference_canary_render="$(helm template codewire-mesh-canary \
+    apps/cli/charts/codewire-mesh \
+    --set mesh.baseURL=https://mesh.test \
+    --set database.enabled=true \
+    --set database.secretName=synthetic-database-credential-canary \
+    --set database.uriKey=synthetic-database-uri-key-canary \
+    --set meshAuthorization.url=http://authorization.test \
+    --set meshAuthorization.hmacSecretRef.name=synthetic-hmac-secret)"
+  grep -Fq 'name: synthetic-database-credential-canary' \
+    <<<"$database_reference_canary_render"
+  grep -Fq 'key: synthetic-database-uri-key-canary' \
+    <<<"$database_reference_canary_render"
+  if grep -Fq -- '--database-url' <<<"$database_reference_canary_render" ||
+      grep -Fq 'exec codewire-mesh' <<<"$database_reference_canary_render" ||
+      grep -Fq 'command: ["sh"' <<<"$database_reference_canary_render"; then
+    echo "::error::synthetic database reference entered the Mesh argv path"
+    return 1
+  fi
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test
 }
 

@@ -52,16 +52,14 @@ pub struct LayoutState {
     pub active_pane: PaneId,
 }
 
-/// Bump this when the layout format changes in a way that's incompatible with
-/// previously saved layouts.  `load_app_layout` silently discards any file whose
-/// version doesn't match, so the app starts fresh instead of restoring stale data.
-const APP_LAYOUT_VERSION: u32 = 2;
+/// Bump this when the layout format changes incompatibly. A mismatched layout is
+/// discarded so removed connection types can never be restored.
+const APP_LAYOUT_VERSION: u32 = 3;
 
 /// Full application layout state: outer workspace tree + per-workspace inner layouts
 #[derive(Serialize, Deserialize)]
 pub struct AppLayoutState {
     /// Schema version — must equal `APP_LAYOUT_VERSION` to be loaded.
-    #[serde(default)]
     pub version: u32,
     pub outer_tree: PaneNode,
     pub active_outer_pane: PaneId,
@@ -69,6 +67,23 @@ pub struct AppLayoutState {
     pub workspace_identities: HashMap<String, WorkspaceIdentity>,
     /// Maps workspace_id -> inner pane tree
     pub workspace_layouts: HashMap<String, LayoutState>,
+}
+
+impl AppLayoutState {
+    pub fn new(
+        outer_tree: PaneNode,
+        active_outer_pane: PaneId,
+        workspace_identities: HashMap<String, WorkspaceIdentity>,
+        workspace_layouts: HashMap<String, LayoutState>,
+    ) -> Self {
+        Self {
+            version: APP_LAYOUT_VERSION,
+            outer_tree,
+            active_outer_pane,
+            workspace_identities,
+            workspace_layouts,
+        }
+    }
 }
 
 /// Handles reading/writing layout JSON to disk.
@@ -90,67 +105,6 @@ impl LayoutStorage {
         Ok(Self { config_dir })
     }
 
-    /// Load layout from disk. Returns `None` on missing or corrupt file (self-healing).
-    pub fn load(&self) -> Option<LayoutState> {
-        let path = self.config_dir.join("layout.json");
-        let data = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&data).ok()
-    }
-
-    /// Save layout to disk as pretty-printed JSON.
-    pub fn save(&self, state: &LayoutState) -> Result<(), io::Error> {
-        let path = self.config_dir.join("layout.json");
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&path, json)
-    }
-
-    // --- Legacy single-file methods (used for migration and single-window compat) ---
-
-    /// Load full application layout from legacy `app_layout.json`.
-    /// Returns `None` if the file is missing or corrupt.
-    pub fn load_app_layout(&self) -> Option<AppLayoutState> {
-        let path = self.config_dir.join("app_layout.json");
-        let data = std::fs::read_to_string(&path).ok()?;
-        let mut state: AppLayoutState = serde_json::from_str(&data).ok()?;
-
-        if state.version == APP_LAYOUT_VERSION {
-            return Some(state);
-        }
-
-        // Migration: v0 (no version field) -> v2
-        if state.version == 0 {
-            tracing::info!("Migrating saved layout from v0 -> v{}", APP_LAYOUT_VERSION);
-            state.version = APP_LAYOUT_VERSION;
-            return Some(state);
-        }
-
-        tracing::info!(
-            "Discarding saved layout (version {} != current {})",
-            state.version,
-            APP_LAYOUT_VERSION
-        );
-        let _ = std::fs::remove_file(&path);
-        None
-    }
-
-    /// Save full application layout to legacy `app_layout.json`.
-    pub fn save_app_layout(&self, state: &AppLayoutState) -> Result<(), io::Error> {
-        let versioned = AppLayoutState {
-            version: APP_LAYOUT_VERSION,
-            outer_tree: state.outer_tree.clone(),
-            active_outer_pane: state.active_outer_pane,
-            workspace_identities: state.workspace_identities.clone(),
-            workspace_layouts: state.workspace_layouts.clone(),
-        };
-        let path = self.config_dir.join("app_layout.json");
-        let json = serde_json::to_string_pretty(&versioned)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&path, json)
-    }
-
-    // --- Multi-window methods ---
-
     /// Load the window manifest. Returns None if missing/corrupt.
     pub fn load_window_manifest(&self) -> Option<WindowManifest> {
         let path = self.config_dir.join("window_manifest.json");
@@ -171,14 +125,9 @@ impl LayoutStorage {
         let dir = self.config_dir.join("windows");
         let path = dir.join(format!("{}.json", window_id.0));
         let data = std::fs::read_to_string(&path).ok()?;
-        let mut state: AppLayoutState = serde_json::from_str(&data).ok()?;
+        let state: AppLayoutState = serde_json::from_str(&data).ok()?;
 
         if state.version == APP_LAYOUT_VERSION {
-            return Some(state);
-        }
-
-        if state.version == 0 {
-            state.version = APP_LAYOUT_VERSION;
             return Some(state);
         }
 
@@ -194,13 +143,12 @@ impl LayoutStorage {
     ) -> Result<(), io::Error> {
         let dir = self.config_dir.join("windows");
         std::fs::create_dir_all(&dir)?;
-        let versioned = AppLayoutState {
-            version: APP_LAYOUT_VERSION,
-            outer_tree: state.outer_tree.clone(),
-            active_outer_pane: state.active_outer_pane,
-            workspace_identities: state.workspace_identities.clone(),
-            workspace_layouts: state.workspace_layouts.clone(),
-        };
+        let versioned = AppLayoutState::new(
+            state.outer_tree.clone(),
+            state.active_outer_pane,
+            state.workspace_identities.clone(),
+            state.workspace_layouts.clone(),
+        );
         let path = dir.join(format!("{}.json", window_id.0));
         let json = serde_json::to_string_pretty(&versioned)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -216,39 +164,107 @@ impl LayoutStorage {
         }
         Ok(())
     }
+}
 
-    /// Migrate from legacy single-file `app_layout.json` to multi-window storage.
-    /// Returns the WindowId assigned to the migrated layout if migration occurred.
-    pub fn migrate_to_multi_window(&self) -> Option<(WindowId, AppLayoutState)> {
-        let legacy = self.load_app_layout()?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("codewire-desktop-layout-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("create test layout directory");
+            Self(path)
+        }
+
+        fn storage(&self) -> LayoutStorage {
+            LayoutStorage {
+                config_dir: self.0.clone(),
+            }
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn empty_layout() -> AppLayoutState {
+        let outer_tree = PaneNode::new_leaf();
+        let active_outer_pane = match &outer_tree {
+            PaneNode::Leaf(leaf) => leaf.id,
+            PaneNode::Split { .. } => unreachable!("new pane tree is a leaf"),
+        };
+        AppLayoutState::new(
+            outer_tree,
+            active_outer_pane,
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn current_window_layout_round_trips() {
+        let directory = TestDirectory::new();
+        let storage = directory.storage();
         let window_id = WindowId::new();
 
-        // Save as per-window layout
-        if let Err(e) = self.save_window_layout(&window_id, &legacy) {
-            tracing::warn!("Failed to save migrated window layout: {}", e);
-            return None;
-        }
+        storage
+            .save_window_layout(&window_id, &empty_layout())
+            .expect("save current layout");
 
-        // Save manifest with single window
-        let manifest = WindowManifest {
-            windows: vec![WindowManifestEntry {
-                window_id: window_id.clone(),
-                bounds: None,
-            }],
-            active_window_id: Some(window_id.clone()),
-        };
-        if let Err(e) = self.save_window_manifest(&manifest) {
-            tracing::warn!("Failed to save window manifest: {}", e);
-        }
+        assert!(storage.load_window_layout(&window_id).is_some());
+    }
 
-        // Remove legacy file
-        let legacy_path = self.config_dir.join("app_layout.json");
-        let _ = std::fs::remove_file(&legacy_path);
+    #[test]
+    fn previous_window_layout_version_is_rejected() {
+        let directory = TestDirectory::new();
+        let storage = directory.storage();
+        let window_id = WindowId::new();
+        let path = directory
+            .0
+            .join("windows")
+            .join(format!("{}.json", window_id.0));
+        std::fs::create_dir_all(path.parent().expect("window directory"))
+            .expect("create window directory");
+        let mut layout = empty_layout();
+        layout.version = APP_LAYOUT_VERSION - 1;
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&layout).expect("serialize previous layout"),
+        )
+        .expect("write previous layout");
 
-        tracing::info!(
-            "Migrated legacy app_layout.json -> windows/{}.json",
-            window_id.0
-        );
-        Some((window_id, legacy))
+        assert!(storage.load_window_layout(&window_id).is_none());
+        assert!(!path.exists(), "rejected layout must be discarded");
+    }
+
+    #[test]
+    fn unversioned_window_layout_is_rejected() {
+        let directory = TestDirectory::new();
+        let storage = directory.storage();
+        let window_id = WindowId::new();
+        let path = directory
+            .0
+            .join("windows")
+            .join(format!("{}.json", window_id.0));
+        std::fs::create_dir_all(path.parent().expect("window directory"))
+            .expect("create window directory");
+        let mut layout = serde_json::to_value(empty_layout()).expect("serialize current layout");
+        layout
+            .as_object_mut()
+            .expect("layout object")
+            .remove("version");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&layout).expect("serialize unversioned layout"),
+        )
+        .expect("write unversioned layout");
+
+        assert!(storage.load_window_layout(&window_id).is_none());
     }
 }

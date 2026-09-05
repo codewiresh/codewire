@@ -1,7 +1,7 @@
-//! The top-level [`Conn`] — the capstone that ties the four proven
+//! The top-level [`crate::conn::Conn`] — the capstone that ties the four proven
 //! sub-components into a working WireGuard-over-DERP tunnel (#59).
 //!
-//! This is the Rust equivalent of [`libs/tailnet/conn.go`]. The Go side wraps
+//! This is the Rust equivalent of `libs/tailnet/conn.go`. The Go side wraps
 //! Tailscale's `wgengine` + `magicsock` + gvisor `netstack`; here we assemble
 //! the same data path from our own pieces:
 //!
@@ -35,27 +35,27 @@
 //! # Transport seam
 //!
 //! The Conn does not embed the DERP client directly; it talks to the transport
-//! over a pair of channels carrying [`WgDatagram`]s (an encrypted WG packet +
+//! over a pair of channels carrying [`crate::conn::WgDatagram`]s (an encrypted WG packet +
 //! the peer's DERP routing key). That is the same channel-seam philosophy the
 //! netstack uses for IP packets — it keeps the data path identical whether the
 //! channels are pumped by the real [`crate::derp::Client`] (a thin adapter task
 //! reads the send channel and calls `client.send`, and feeds `client.recv`
 //! into the recv channel) or by an in-process shim that simply forwards one
 //! Conn's send channel to the other's recv channel. The end-to-end test uses
-//! the shim; [`DerpTransport`] wires the real client.
+//! the shim; [`crate::derp_transport::DerpTransport`] wires the real client.
 //!
 //! # Public API (maps to the Go `Conn`)
 //!
 //! | Go (`conn.go`)               | Rust (`Conn`)                  |
 //! |------------------------------|--------------------------------|
-//! | `NewConn(opts)`              | [`Conn::new`]                  |
-//! | `Listen("tcp", addr)`        | [`Conn::listen`]               |
-//! | `DialContextTCP(ctx, dst)`   | [`Conn::dial_context_tcp`]     |
-//! | `UpdatePeers([]*Node)`       | [`Conn::update_peers`]         |
-//! | `SetNodeCallback(cb)`        | [`Conn::set_node_callback`]    |
-//! | `SetDERPMap(dm)`             | [`Conn::set_preferred_derp`] † |
-//! | `Node()`                     | [`Conn::node`]                 |
-//! | `Close()`                    | [`Conn::close`] / `Drop`       |
+//! | `NewConn(opts)`              | [`crate::conn::Conn::new`]                  |
+//! | `Listen("tcp", addr)`        | [`crate::conn::Conn::listen`]               |
+//! | `DialContextTCP(ctx, dst)`   | [`crate::conn::Conn::dial_context_tcp`]     |
+//! | `UpdatePeers([]*Node)`       | [`crate::conn::Conn::update_peers`]         |
+//! | `SetNodeCallback(cb)`        | [`crate::conn::Conn::set_node_callback`]    |
+//! | `SetDERPMap(dm)`             | [`crate::conn::Conn::set_preferred_derp`] † |
+//! | `Node()`                     | [`crate::conn::Conn::node`]                 |
+//! | `Close()`                    | [`crate::conn::Conn::close`] / `Drop`       |
 //!
 //! † region-tracking stand-in; DERPMap parsing/application remains in the
 //! coordinator/gateway layer until the STUN slice lands.

@@ -5,64 +5,37 @@ use super::{
     TemplateOpts,
 };
 
-pub const RUNTIME_CLASS_NAME: &str = RUNTIME_CLASS_EXTERNAL_ISOL8_XEN;
 pub const RUNTIME_CLASS_RUNC: &str = "runc";
 pub const RUNTIME_CLASS_COMMODITY: &str = "commodity";
 pub const RUNTIME_CLASS_CONFIDENTIAL: &str = "confidential";
-pub const RUNTIME_CLASS_EXTERNAL_ISOL8_XEN: &str = "isol8";
 pub const RUNTIME_PROFILE_NONE: &str = "none";
 pub const RUNTIME_PROFILE_RUNC: &str = "runc";
 pub const RUNTIME_PROFILE_COMMODITY: &str = "commodity";
 pub const RUNTIME_PROFILE_CONFIDENTIAL: &str = "confidential";
-pub const RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN: &str = "external-isol8-xen";
 pub const DOCKER_MODE_PROFILE_DEFAULT: &str = "profile-default";
 pub const DOCKER_MODE_NONE: &str = "none";
 pub const DOCKER_MODE_LOCAL_DIND_DIRECT: &str = "local-dind-direct";
 pub const DOCKER_MODE_GUEST_DIND: &str = "guest-dind";
-pub const DOCKER_MODE_EXTERNAL_ISOL8_PROXY: &str = "external-isol8-proxy";
-pub const SIDECAR_RESOURCE_MODE_EXPLICIT: &str = "explicit";
-pub const SIDECAR_RESOURCE_MODE_RUNTIME_ENVELOPE: &str = "runtime-envelope";
 pub const KATA_COCO_IMAGE_RESOURCE_TIMEOUT_SECS: u32 = 300;
 const KATA_AGENT_LOG_VPORT: u16 = 1025;
-
-#[derive(Debug, Clone, Default)]
-pub struct Toleration {
-    pub key: String,
-    pub operator: String,
-    pub value: String,
-    pub effect: String,
-}
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct RuntimeProfileSpec {
     pub profile: String,
     pub runtime_class_name: String,
     pub docker_mode: String,
-    pub sidecar_resource_mode: String,
 }
 
 pub fn runtime_profile_spec(
     profile: &str,
-    legacy_runtime_class: &str,
     docker_mode: &str,
     dind_enabled: bool,
 ) -> RuntimeProfileSpec {
-    let mut profile = normalize_runtime_profile(profile);
-    let legacy_runtime_class = legacy_runtime_class.trim();
-    if profile.is_empty() {
-        profile = profile_from_legacy_runtime_class(legacy_runtime_class);
-    }
-
-    let sidecar_resource_mode = if profile == RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN {
-        SIDECAR_RESOURCE_MODE_RUNTIME_ENVELOPE
-    } else {
-        SIDECAR_RESOURCE_MODE_EXPLICIT
-    };
+    let profile = profile.trim().to_string();
 
     RuntimeProfileSpec {
-        runtime_class_name: runtime_class_for_profile(&profile, legacy_runtime_class),
+        runtime_class_name: runtime_class_for_profile(&profile),
         docker_mode: resolve_docker_mode(&profile, docker_mode, dind_enabled),
-        sidecar_resource_mode: sidecar_resource_mode.to_string(),
         profile,
     }
 }
@@ -73,7 +46,7 @@ pub fn validate_managed_runtime_profile(
 ) -> Result<(), String> {
     match spec.profile.as_str() {
         RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL => Ok(()),
-        RUNTIME_PROFILE_RUNC | RUNTIME_PROFILE_NONE | "" => {
+        RUNTIME_PROFILE_RUNC | RUNTIME_PROFILE_NONE => {
             if allow_diagnostic {
                 Ok(())
             } else {
@@ -83,44 +56,23 @@ pub fn validate_managed_runtime_profile(
                 ))
             }
         }
+        "" => Err("managed sandboxes require SANDBOX_RUNTIME_PROFILE".to_string()),
         other => Err(format!(
             "unsupported managed sandbox runtime profile {other:?}"
         )),
+    }?;
+    match spec.docker_mode.as_str() {
+        DOCKER_MODE_NONE | DOCKER_MODE_LOCAL_DIND_DIRECT | DOCKER_MODE_GUEST_DIND => Ok(()),
+        other => Err(format!("unsupported managed sandbox Docker mode {other:?}")),
     }
 }
 
-fn normalize_runtime_profile(profile: &str) -> String {
-    match profile.trim() {
-        ""
-        | RUNTIME_PROFILE_NONE
-        | RUNTIME_PROFILE_RUNC
-        | RUNTIME_PROFILE_COMMODITY
-        | RUNTIME_PROFILE_CONFIDENTIAL
-        | RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN => profile.trim().to_string(),
-        RUNTIME_CLASS_EXTERNAL_ISOL8_XEN => RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN.to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn profile_from_legacy_runtime_class(runtime_class_name: &str) -> String {
-    match runtime_class_name.trim() {
-        "" => RUNTIME_PROFILE_NONE.to_string(),
-        RUNTIME_CLASS_RUNC => RUNTIME_PROFILE_RUNC.to_string(),
-        RUNTIME_CLASS_COMMODITY => RUNTIME_PROFILE_COMMODITY.to_string(),
-        RUNTIME_CLASS_CONFIDENTIAL => RUNTIME_PROFILE_CONFIDENTIAL.to_string(),
-        RUNTIME_CLASS_EXTERNAL_ISOL8_XEN => RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN.to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn runtime_class_for_profile(profile: &str, legacy_runtime_class: &str) -> String {
+fn runtime_class_for_profile(profile: &str) -> String {
     match profile {
         RUNTIME_PROFILE_NONE => String::new(),
         RUNTIME_PROFILE_RUNC => RUNTIME_CLASS_RUNC.to_string(),
         RUNTIME_PROFILE_COMMODITY => RUNTIME_CLASS_COMMODITY.to_string(),
         RUNTIME_PROFILE_CONFIDENTIAL => RUNTIME_CLASS_CONFIDENTIAL.to_string(),
-        RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN => RUNTIME_CLASS_EXTERNAL_ISOL8_XEN.to_string(),
-        _ if !legacy_runtime_class.is_empty() => legacy_runtime_class.to_string(),
         _ => profile.to_string(),
     }
 }
@@ -134,54 +86,11 @@ fn resolve_docker_mode(profile: &str, docker_mode: &str, dind_enabled: bool) -> 
         return DOCKER_MODE_LOCAL_DIND_DIRECT.to_string();
     }
     match profile {
-        RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN => DOCKER_MODE_EXTERNAL_ISOL8_PROXY.to_string(),
         RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL => {
             DOCKER_MODE_GUEST_DIND.to_string()
         }
         _ => DOCKER_MODE_NONE.to_string(),
     }
-}
-
-/// Mirrors `sandbox.Isol8Tolerations`.
-pub fn isol8_tolerations() -> Vec<Toleration> {
-    vec![
-        Toleration {
-            key: "isol8.codewire.sh/xen".into(),
-            operator: "Equal".into(),
-            value: "true".into(),
-            effect: "NoSchedule".into(),
-        },
-        Toleration {
-            key: "node.kubernetes.io/memory-pressure".into(),
-            operator: "Exists".into(),
-            value: String::new(),
-            effect: "NoSchedule".into(),
-        },
-    ]
-}
-
-/// Mirrors `sandbox.DefaultTolerations`: external isol8 taints only when
-/// targeting external-isol8-xen.
-pub fn default_tolerations(runtime_profile_or_class: &str) -> Vec<Toleration> {
-    if profile_from_legacy_runtime_class(&normalize_runtime_profile(runtime_profile_or_class))
-        != RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN
-    {
-        return Vec::new();
-    }
-    isol8_tolerations()
-}
-
-/// Mirrors `sandbox.DefaultNodeSelector`.
-pub fn default_node_selector(runtime_profile_or_class: &str) -> Vec<(String, String)> {
-    if profile_from_legacy_runtime_class(&normalize_runtime_profile(runtime_profile_or_class))
-        != RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN
-    {
-        return Vec::new();
-    }
-    vec![
-        ("codewire.sh/node-pool".into(), "sandbox".into()),
-        ("isol8.codewire.sh/enabled".into(), "true".into()),
-    ]
 }
 
 pub(super) fn uses_kata_policy_init_data(

@@ -86,10 +86,25 @@ def proto_field_names(message_body: str) -> set[str]:
     expression = re.compile(
         r"^\s*(?:optional\s+|repeated\s+)?"
         r"(?:map\s*<[^>]+>|[.A-Za-z][.A-Za-z0-9_]*)\s+"
-        r"([a-z][a-z0-9_]*)\s*=\s*[0-9]+\s*;",
+        r"([a-z][a-z0-9_]*)\s*=\s*[0-9]+\s*(?:\[[^\]]*\]\s*)?;",
         re.MULTILINE,
     )
     return {match.group(1) for match in expression.finditer(message_body)}
+
+
+def proto_debug_redacted_field_names(message_body: str) -> set[str]:
+    expression = re.compile(
+        r"^\s*(?:optional\s+|repeated\s+)?"
+        r"(?:map\s*<[^>]+>|[.A-Za-z][.A-Za-z0-9_]*)\s+"
+        r"([a-z][a-z0-9_]*)\s*=\s*[0-9]+\s*"
+        r"\[([^\]]*)\]\s*;",
+        re.MULTILINE,
+    )
+    return {
+        match.group(1)
+        for match in expression.finditer(message_body)
+        if re.search(r"(?:^|,)\s*debug_redact\s*=\s*true\s*(?:,|$)", match.group(2))
+    }
 
 
 def proto_package_boundary_failures(
@@ -102,6 +117,7 @@ def proto_package_boundary_failures(
     failures: list[str] = []
     services: dict[str, dict[str, bool]] = {}
     messages: dict[str, set[str]] = {}
+    debug_redacted_fields: set[tuple[str, str]] = set()
 
     for rel, source in proto_sources.items():
         package_match = re.search(r"^\s*package\s+([.a-z0-9]+)\s*;", source, re.MULTILINE)
@@ -120,6 +136,9 @@ def proto_package_boundary_failures(
             if name in messages:
                 failures.append(f"duplicate Mesh message declaration {name}")
             messages[name] = proto_field_names(body)
+            debug_redacted_fields.update(
+                (name, field) for field in proto_debug_redacted_field_names(body)
+            )
 
     expected_services = {
         **MESH_PUBLIC_SERVICE_METHODS,
@@ -177,6 +196,12 @@ def proto_package_boundary_failures(
             "one-use capability fields differ: "
             f"actual={sorted(actual_capability_fields)}, "
             f"expected={sorted(expected_capability_fields)}"
+        )
+    unredacted_capability_fields = expected_capability_fields - debug_redacted_fields
+    if unredacted_capability_fields:
+        failures.append(
+            "one-use capability fields must set debug_redact = true: "
+            f"missing={sorted(unredacted_capability_fields)}"
         )
     for message in ["MeshInvite", "MeshNodeEnrollment"]:
         legacy_count_fields = messages.get(message, set()) & {"uses", "uses_remaining"}
@@ -343,6 +368,22 @@ def proto_package_boundary_self_test(
             raw_token, ts_manifest, ts_index, python_manifest, sdk_sources
         ),
         "MeshNode.node_token",
+    )
+
+    unredacted_capability = dict(proto_sources)
+    unredacted_capability["proto/codewire/v1/mesh_invite.proto"] = (
+        unredacted_capability["proto/codewire/v1/mesh_invite.proto"].replace(
+            "  string invite_code = 2 [debug_redact = true];\n",
+            "  string invite_code = 2;\n",
+            1,
+        )
+    )
+    require_failure(
+        "a one-use capability without debug redaction",
+        proto_package_boundary_failures(
+            unredacted_capability, ts_manifest, ts_index, python_manifest, sdk_sources
+        ),
+        "one-use capability fields must set debug_redact = true",
     )
 
     internal_export = copy.deepcopy(ts_manifest)

@@ -134,9 +134,6 @@ INTERNAL_CONNECT_SERVICES = {
     "codewire.internal.v1.GatewayBindingService": (
         "codewire_orchestration::connect::internal::gateway_binding_router"
     ),
-    "codewire.internal.v1.EnvironmentCredentialService": (
-        "codewire_orchestration::connect::internal::environment_credentials_router"
-    ),
     "codewire.internal.v1.MeshAuthorizationService": (
         "codewire_orchestration::connect::mesh_authorization::router"
     ),
@@ -294,8 +291,8 @@ def assert_internal_connect_listener_exemption(
                 fail(f"{file}: unrouted {service} has a prohibited public edge matcher")
     if set(unrouted) != set(INTERNAL_CONNECT_SERVICES):
         fail(
-            "unrouted listener map must contain exactly GatewayBindingService, "
-            "EnvironmentCredentialService, and MeshAuthorizationService"
+            "unrouted listener map must contain exactly GatewayBindingService "
+            "and MeshAuthorizationService"
         )
     assert_internal_connect_listener_boundary(INTERNAL_CONNECT_SERVICES, fail, reader)
 

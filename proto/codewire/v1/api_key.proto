@@ -89,7 +89,7 @@ message CreateApiKeyResponse {
   // The raw `cw_`-prefixed secret. Returned exactly once, here; only
   // its SHA-256 hash is stored. Clients must not log or persist it
   // beyond handing it to the user.
-  string key = 2;
+  string key = 2 [debug_redact = true];
 }
 
 message UpdateApiKeyRequest {

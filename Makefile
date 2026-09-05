@@ -407,7 +407,7 @@ build-derp-local:
 	docker buildx bake --file docker-bake.hcl --pull --load --set 'derp.tags=codewire-derp:local' derp
 
 build-services-local:
-	docker buildx bake --file docker-bake.hcl --pull --load --set 'services.tags=codewire-services:local' services
+	docker buildx bake --file docker-bake.hcl --pull --load --set 'services-ci.tags=codewire-services:local' services-ci
 
 rollout-local-runtime:
 	$(KUBECTL) -n default rollout restart deployment codewire-coordinator codewire-idp codewire-billing codewire-orchestration codewire-derp

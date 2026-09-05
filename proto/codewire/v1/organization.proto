@@ -109,7 +109,8 @@ message OrgInvitation {
   OrgRole role = 5;
   string invited_by = 6;
   optional string inviter_name = 7;
-  string token = 8;
+  reserved 8;
+  reserved "token";
   InvitationStatus status = 9;
   google.protobuf.Timestamp expires_at = 10;
   google.protobuf.Timestamp created_at = 11;
@@ -219,6 +220,8 @@ message CreateInvitationRequest {
 
 message CreateInvitationResponse {
   OrgInvitation invitation = 1;
+  // One-time invitation capability. Only its SHA-256 digest is persisted.
+  string token = 2 [debug_redact = true];
 }
 
 message RevokeInvitationRequest {
@@ -229,7 +232,8 @@ message RevokeInvitationRequest {
 message RevokeInvitationResponse {}
 
 message AcceptInvitationRequest {
-  string token = 1;
+  // One-time bearer capability presented by the invitee.
+  string token = 1 [debug_redact = true];
 }
 
 message AcceptInvitationResponse {
@@ -237,7 +241,8 @@ message AcceptInvitationResponse {
 }
 
 message GetInvitationByTokenRequest {
-  string token = 1;
+  // One-time bearer capability used to resolve public invitation metadata.
+  string token = 1 [debug_redact = true];
 }
 
 message GetInvitationByTokenResponse {

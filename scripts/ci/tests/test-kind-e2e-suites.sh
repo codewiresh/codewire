@@ -8,6 +8,8 @@ INTEGRATED="$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
 DASHBOARD_BROWSER="$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 FINAL_FENCING="$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
 ENVIRONMENT_SESSION="$ROOT/scripts/ci/verify/kind/suites/environment-session.sh"
+SANDBOX_SUPPLY_CHAIN="$ROOT/scripts/ci/verify/kind/suites/sandbox-supply-chain.sh"
+RUNTIME_ACCEPTANCE="$ROOT/scripts/ci/verify/kind/suites/runtime-acceptance.sh"
 mkdir -p "$ROOT/.tmp"
 FIXTURE="$(mktemp -d "$ROOT/.tmp/kind-e2e-suites.XXXXXX")"
 CALLS="$FIXTURE/calls"
@@ -40,18 +42,31 @@ record() {
 }
 
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
-  "$ENVIRONMENT_SESSION" "$0"
-grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN="$daemon_token"' "$COMMON" ||
-  fail 'local gateway and workspace daemon do not share the derived credential'
+  "$ENVIRONMENT_SESSION" "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"
+grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN="$gateway_token"' "$COMMON" ||
+  fail 'local gateway does not receive its coordinate-scoped capability'
+grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' "$COMMON" ||
+  fail 'local gateway and workspace daemon do not receive the daemon-scoped capability'
 grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'local CRD smoke permits an unrelated literal gateway credential'
+grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1' \
+  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
+  fail 'local CRD smoke permits an unrelated literal daemon credential'
 grep -Fq 'std::env::var("CRD_SMOKE_WORKSPACE_IMAGE")' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'CRD smoke cannot consume the sealed workspace alias'
 grep -Fq 'std::env::var("SMOKE_WORKSPACE_IMAGE")' \
   "$ROOT/crates/codewire-orchestration/src/bin/temporal-fencing-smoke.rs" ||
   fail 'Temporal fencing smoke cannot consume the sealed workspace alias'
+awk '
+  /list TTL smoke workspace Pods/ { ready = NR }
+  /\.args\(\["suite", "sandbox-supply-chain"\]\)/ { observe = NR }
+  /provenance\.success\(\)/ { checked = NR }
+  /UPDATE environments/ { expire = NR }
+  END { exit !(ready > 0 && ready < observe && observe < checked && checked < expire) }
+' "$ROOT/crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs" ||
+  fail 'TTL smoke must pass the live provenance gate after Ready and before expiry'
 [[ "$(grep -Fc 'SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)"' "$COMMON")" -eq 4 ]] ||
   fail 'Kind smoke callers do not consistently select the sealed workspace alias'
 grep -Fq 'PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)"' "$COMMON" ||
@@ -76,6 +91,19 @@ grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
   fail 'Kind does not verify the exact dashboard image it already built'
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
+fi
+grep -Fq 'audience: codewire.internal.gateway-binding.v1' "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not project the exact audience'
+grep -Fq 'mountPath: /var/run/secrets/codewire/gateway-binding' "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not isolate its projected token mount'
+grep -Fq "token=\"\$(cat /var/run/secrets/codewire/gateway-binding/token)\"" "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not reread the projected identity'
+grep -Fq 'anonymous internal binding command was not rejected' "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not assert anonymous rejection'
+grep -Fq 'coordinate capability crossed into gateway binding' "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not assert cross-scope rejection'
+if grep -Fq -- '--post-data="{\"pod\"' "$COMMON"; then
+  fail 'Kind gateway-binding fixture still sends caller-selected Pod coordinates'
 fi
 
 # Sourcing the dispatcher defines every suite without executing one.
@@ -122,6 +150,8 @@ run_integrated_kind_suite() { record integrated; }
 run_retained_dashboard_browser_suite() { record dashboard-browser-retained; }
 run_retained_final_fencing_suite() { record final-fencing; }
 run_retained_environment_session_suite() { record environment-session; }
+run_retained_sandbox_supply_chain_suite() { record sandbox-supply-chain; }
+run_retained_runtime_acceptance_suite() { record runtime-acceptance; }
 dispatch_kind_e2e
 printf '%s\n' integrated | cmp -s - "$CALLS" || fail 'no-argument dispatch changed'
 
@@ -138,6 +168,16 @@ printf '%s\n' final-fencing | cmp -s - "$CALLS" || fail 'final-fencing dispatch 
 dispatch_kind_e2e suite environment-session
 printf '%s\n' environment-session | cmp -s - "$CALLS" ||
   fail 'environment-session dispatch changed'
+
+: >"$CALLS"
+dispatch_kind_e2e suite sandbox-supply-chain
+printf '%s\n' sandbox-supply-chain | cmp -s - "$CALLS" ||
+  fail 'sandbox-supply-chain dispatch changed'
+
+: >"$CALLS"
+dispatch_kind_e2e suite runtime-acceptance
+printf '%s\n' runtime-acceptance | cmp -s - "$CALLS" ||
+  fail 'runtime-acceptance dispatch changed'
 
 expect_failure missing-suite dispatch_kind_e2e suite
 grep -Fq 'requires exactly one suite name' "$FIXTURE/missing-suite.out" ||
@@ -158,6 +198,10 @@ source "$DASHBOARD_BROWSER"
 source "$FINAL_FENCING"
 # shellcheck source=scripts/ci/verify/kind/suites/environment-session.sh
 source "$ENVIRONMENT_SESSION"
+# shellcheck source=scripts/ci/verify/kind/suites/sandbox-supply-chain.sh
+source "$SANDBOX_SUPPLY_CHAIN"
+# shellcheck source=scripts/ci/verify/kind/suites/runtime-acceptance.sh
+source "$RUNTIME_ACCEPTANCE"
 
 # The integrated suite builds before starting its disposable control plane and
 # proves API readiness after image import. Stub every expensive action so this
@@ -217,7 +261,6 @@ coordinator
 billing
 sandbox-temporal
 dashboard-browser
-sandbox-supply-chain
 ttl
 log:green
 EOF
@@ -405,8 +448,9 @@ env \
   fi
   [ "$(grep -Fc "$KIND_DIND_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
     fail 'sealed Kind overlay does not contain the local DinD alias once'
-  [ "$(grep -Fc "$KIND_WORKSPACE_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
-    fail 'sealed Kind overlay does not contain the local warm-pool workspace alias once'
+  if grep -Eq 'SANDBOX_(FULL_WARM_PROFILES|WARM_POOL_WORKSPACE_IMAGE)' "$kind_rendered"; then
+    fail 'sealed Kind overlay retained removed shared warm-pool configuration'
+  fi
   [ "$(grep -Fc "$KIND_POSTGRES_LOCAL_IMAGE" "$kind_rendered")" -eq 2 ] ||
     fail 'sealed Kind overlay does not contain the local Postgres alias twice'
   [ "$(grep -Fc "$KIND_TEMPORAL_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
@@ -422,7 +466,7 @@ env \
     fail 'sealed Kind overlay retained the public DinD image'
   fi
   if grep -Fq 'ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467' "$kind_rendered"; then
-    fail 'sealed Kind overlay retained the public warm-pool workspace image'
+    fail 'sealed Kind overlay retained the public workspace image'
   fi
 BASH
 
@@ -499,6 +543,19 @@ env \
   log() { :; }
 
   assert_sandbox_supply_chain
+
+  accepted_templates_json="$templates_json"
+  templates_json='{"items":[]}'
+  if assert_sandbox_supply_chain >/dev/null 2>&1; then
+    fail 'post-cleanup empty templates were accepted as positive runtime provenance'
+  fi
+  templates_json="$(jq \
+    '.items[0].spec.podTemplate.spec.containers += [{image:"ghcr.io/codewiresh/workspace:unaccepted"}]' \
+    <<<"$accepted_templates_json")"
+  if assert_sandbox_supply_chain >/dev/null 2>&1; then
+    fail 'sealed runtime accepted an unapproved template image alongside the accepted workspace'
+  fi
+  templates_json="$accepted_templates_json"
 
   pods_json="$(jq -cn \
     --arg dind "$KIND_DIND_LOCAL_IMAGE" \
@@ -754,6 +811,8 @@ cmp -s "$FIXTURE/want-prepared-order" "$CALLS" ||
 
 # Retained validation rejects implicit naming, missing clusters, the wrong
 # current context, missing markers, and incompatible marker versions.
+RUN_DIR="$FIXTURE/retained-run"
+mkdir -p "$RUN_DIR"
 KIND_CLUSTER_NAME=retained-fixture
 KIND_CLUSTER_NAME_EXPLICIT=0
 expect_failure implicit-cluster validate_retained_cluster
@@ -765,11 +824,21 @@ FAKE_CONTEXT=kind-retained-fixture
 FAKE_MARKER_VERSION="$KIND_E2E_COMPATIBILITY_VERSION"
 FAKE_MARKER_CLUSTER="$KIND_CLUSTER_NAME"
 FAKE_MARKER_MISSING=0
+FAKE_RETAINED_EXPORT_FAIL=0
+FAKE_RETAINED_REACHABLE=1
+HOSTNAME=retained-local-host
+docker() {
+  case "$*" in
+    'container inspect retained-local-host') return 1 ;;
+    *) fail "unexpected retained local Docker invocation: $*" ;;
+  esac
+}
 kind() {
   case "$*" in
     'get clusters') printf '%s\n' "$FAKE_CLUSTERS" ;;
     'get kubeconfig --name retained-fixture')
-      printf 'apiVersion: v1\ncurrent-context: kind-retained-fixture\n'
+      [ "$FAKE_RETAINED_EXPORT_FAIL" = 0 ] || return 42
+      printf 'apiVersion: v1\ncurrent-context: kind-retained-fixture\nserver: https://127.0.0.1:6443\n'
       ;;
     *) fail "unexpected fake kind invocation: $*" ;;
   esac
@@ -777,7 +846,10 @@ kind() {
 kubectl() {
   case "$*" in
     'config current-context') printf '%s\n' "$FAKE_CONTEXT" ;;
-    *'cluster-info'*) return 0 ;;
+    *'cluster-info'*)
+      [ "$FAKE_RETAINED_REACHABLE" = 1 ] &&
+        grep -Fqx 'server: https://127.0.0.1:6443' "$KUBECONFIG"
+      ;;
     *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"compatibility_version"*)
       if [ "$FAKE_MARKER_MISSING" = 1 ]; then
         printf 'NotFound\n' >&2
@@ -819,6 +891,17 @@ expect_failure incompatible-marker validate_retained_cluster
 grep -Fq 'marker is incompatible' "$FIXTURE/incompatible-marker.out" ||
   fail 'incompatible marker rejection was not decisive'
 
+FAKE_RETAINED_EXPORT_FAIL=1
+expect_failure retained-export-failed validate_retained_cluster
+grep -Fq 'failed to pin kubeconfig' "$FIXTURE/retained-export-failed.out" ||
+  fail 'failed retained kubeconfig export was not decisive'
+FAKE_RETAINED_EXPORT_FAIL=0
+FAKE_RETAINED_REACHABLE=0
+expect_failure retained-api-unreachable validate_retained_cluster
+grep -Fq 'is not reachable' "$FIXTURE/retained-api-unreachable.out" ||
+  fail 'unreachable retained API was not rejected'
+FAKE_RETAINED_REACHABLE=1
+
 mkdir -p "$FIXTURE/bin"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/bin/temporal-fencing-smoke"
 chmod +x "$FIXTURE/bin/temporal-fencing-smoke"
@@ -827,6 +910,225 @@ FAKE_MARKER_VERSION="$KIND_E2E_COMPATIBILITY_VERSION"
 validate_retained_cluster >"$FIXTURE/accepted.out"
 grep -Fq 'accepted at compatibility version' "$FIXTURE/accepted.out" ||
   fail 'compatible retained cluster was not accepted'
+
+# A provenance probe nested inside retained runtime acceptance owns a separate
+# private kubeconfig. Its exit must not remove the parent suite's active file.
+parent_kubeconfig="$RETAINED_KUBECONFIG"
+[ -f "$parent_kubeconfig" ] || fail 'retained parent kubeconfig was not created'
+[ "$(stat -c '%a' "$parent_kubeconfig")" = 600 ] ||
+  fail 'retained parent kubeconfig is not private'
+(
+  trap retained_suite_cleanup EXIT
+  validate_retained_cluster
+  [ "$RETAINED_KUBECONFIG" != "$parent_kubeconfig" ] ||
+    fail 'nested retained suite reused the parent kubeconfig'
+  [ "$(stat -c '%a' "$RETAINED_KUBECONFIG")" = 600 ] ||
+    fail 'retained child kubeconfig is not private'
+  printf '%s\n' "$RETAINED_KUBECONFIG" >"$FIXTURE/child-kubeconfig-path"
+) >"$FIXTURE/nested-retained.out"
+child_kubeconfig="$(<"$FIXTURE/child-kubeconfig-path")"
+[ ! -e "$child_kubeconfig" ] || fail 'retained child did not remove its own kubeconfig'
+[ -f "$parent_kubeconfig" ] || fail 'retained child removed its parent kubeconfig'
+[ "$KUBECONFIG" = "$parent_kubeconfig" ] || fail 'retained child displaced the parent context'
+
+# Compose the real remote bootstrap and nested retained validation. The
+# external endpoint belongs to the sibling DinD daemon, so a child that drops
+# the parent's internal endpoint must fail even though the parent stays live.
+if (
+  HOSTNAME=remote-retained-job
+  KIND_CLUSTER_NAME=remote-retained-fixture
+  KIND_CLUSTER_NAME_EXPLICIT=1
+  RUN_DIR="$FIXTURE/remote-retained-run"
+  mkdir -p "$RUN_DIR"
+  export KUBECONFIG="$RUN_DIR/parent-kubeconfig"
+  CALLS="$RUN_DIR/calls"
+  : >"$CALLS"
+  remote_phase=bootstrap
+  docker() {
+    # shellcheck disable=SC2016 # Match the literal Go-template CLI argument.
+    case "$*" in
+      'container inspect remote-retained-job') return 0 ;;
+      "inspect --format {{range \$name, \$_ := .NetworkSettings.Networks}}{{println \$name}}{{end}} ${KIND_CLUSTER_NAME}-control-plane")
+        [ "$remote_phase" = bootstrap ] || fail 'nested retained suite inspected network topology'
+        printf 'kind\n'
+        ;;
+      'network connect kind remote-retained-job')
+        [ "$remote_phase" = bootstrap ] || fail 'nested retained suite reconnected its parent network'
+        record network-connect
+        ;;
+      *) fail "unexpected composed remote Docker invocation: $*" ;;
+    esac
+  }
+  kind() {
+    local server
+    case "$*" in
+      'get clusters') printf '%s\n' "$KIND_CLUSTER_NAME"; return ;;
+      "get kubeconfig --internal --name $KIND_CLUSTER_NAME")
+        server="https://${KIND_CLUSTER_NAME}-control-plane:6443"
+        ;;
+      "get kubeconfig --name $KIND_CLUSTER_NAME")
+        server='https://127.0.0.1:6443'
+        ;;
+      *) fail "unexpected composed remote Kind invocation: $*" ;;
+    esac
+    printf 'apiVersion: v1\ncurrent-context: kind-%s\nserver: %s\n' \
+      "$KIND_CLUSTER_NAME" "$server"
+  }
+  kubectl() {
+    case "$*" in
+      'config current-context') sed -n 's/^current-context: //p' "$KUBECONFIG" ;;
+      *'cluster-info'*)
+        grep -Fqx "server: https://${KIND_CLUSTER_NAME}-control-plane:6443" "$KUBECONFIG"
+        ;;
+      *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"compatibility_version"*)
+        printf '%s' "$KIND_E2E_COMPATIBILITY_VERSION"
+        ;;
+      *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"cluster-name"*)
+        printf '%s' "$KIND_CLUSTER_NAME"
+        ;;
+      *'get deployment/'*) printf '1' ;;
+      *'get crd/sandboxclaims.extensions.agents.x-k8s.io'*) return 0 ;;
+      *) fail "unexpected composed remote kubectl invocation: $*" ;;
+    esac
+  }
+  start_remote_dind_kind_forwarding() {
+    [ "$remote_phase" = bootstrap ] || fail 'nested retained suite restarted parent forwarders'
+    record forwarder-start
+  }
+  stop_remote_dind_kind_forwarding() { fail 'nested retained suite stopped parent forwarding'; }
+  acquire_kind_host_lock() { fail 'nested provenance suite reacquired the host lock'; }
+  build_images_and_smokes() { fail 'nested provenance suite rebuilt images'; }
+  create_cluster() { fail 'nested provenance suite recreated its cluster'; }
+  deploy_overlay() { fail 'nested provenance suite redeployed its cluster'; }
+  dump_cluster_state() { record failure-dump; }
+  assert_sandbox_supply_chain() {
+    [ "$KUBECONFIG" != "$remote_parent_kubeconfig" ] ||
+      fail 'remote retained child reused its parent kubeconfig'
+    [ "$(stat -c '%a' "$KUBECONFIG")" = 600 ] ||
+      fail 'remote retained child kubeconfig is not private'
+    grep -Fqx "server: https://${KIND_CLUSTER_NAME}-control-plane:6443" "$KUBECONFIG" ||
+      fail 'remote retained child lost its internal API endpoint'
+    printf '%s\n' "$KUBECONFIG" >"$RUN_DIR/child-kubeconfig-path"
+    record provenance
+  }
+  configure_remote_dind_kind_network || exit $?
+  remote_parent_kubeconfig="$KUBECONFIG"
+  remote_parent_content="$(<"$remote_parent_kubeconfig")"
+  [ "$(stat -c '%a' "$remote_parent_kubeconfig")" = 600 ] ||
+    fail 'remote parent kubeconfig is not private'
+  kubectl --context "kind-$KIND_CLUSTER_NAME" cluster-info --request-timeout=10s ||
+    fail 'remote parent did not reach its internal API'
+  remote_phase=retained
+  (
+    # A fresh child dispatcher reinitializes these ownership variables.
+    REMOTE_DIND_JOB_CONTAINER=""
+    REMOTE_DIND_KIND_NETWORK=""
+    REMOTE_DIND_FORWARDER_PID=""
+    RETAINED_KUBECONFIG=""
+    run_retained_sandbox_supply_chain_suite
+  ) || exit $?
+  remote_child_kubeconfig="$(<"$RUN_DIR/child-kubeconfig-path")"
+  [ ! -e "$remote_child_kubeconfig" ] || fail 'remote child leaked its owned kubeconfig'
+  [ -f "$remote_parent_kubeconfig" ] || fail 'remote child removed its parent kubeconfig'
+  [ "$(<"$remote_parent_kubeconfig")" = "$remote_parent_content" ] ||
+    fail 'remote child changed its parent kubeconfig content'
+  [ "$KUBECONFIG" = "$remote_parent_kubeconfig" ] ||
+    fail 'remote child displaced its parent context'
+  kubectl --context "kind-$KIND_CLUSTER_NAME" cluster-info --request-timeout=10s ||
+    fail 'remote child made the parent API unreachable'
+  printf '%s\n' network-connect forwarder-start provenance | cmp -s - "$CALLS" ||
+    fail 'remote retained child changed bootstrap ownership or skipped provenance'
+) >"$FIXTURE/remote-nested-retained.out" 2>&1; then
+  :
+else
+  sed -n '1,120p' "$FIXTURE/remote-nested-retained.out" >&2
+  fail 'remote parent bootstrap did not preserve reachability through nested retained validation'
+fi
+
+# Runtime acceptance propagates the explicit cluster to its nested provenance
+# check. Use a synthetic smoke executable; this fixture never starts a runtime.
+cat >"$FIXTURE/bin/reconciler-ttl-smoke" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ttl-cluster:%s\n' "${KIND_CLUSTER_NAME:?}"
+EOF
+chmod +x "$FIXTURE/bin/reconciler-ttl-smoke"
+rust_reconciler_ttl_e2e >"$FIXTURE/ttl-wrapper.out"
+grep -Fxq 'ttl-cluster:retained-fixture' "$FIXTURE/ttl-wrapper.out" ||
+  fail 'TTL wrapper did not propagate its explicit Kind cluster'
+
+# The two retained capabilities validate their cluster before their real
+# assertion, with no image build, deployment, cluster recreation, or deletion.
+(
+  validate_retained_cluster() { record validate; }
+  assert_sandbox_supply_chain() { record provenance; }
+  rust_reconciler_ttl_e2e() { record ttl; }
+  require_tool() { :; }
+  acquire_kind_host_lock() { record acquire-lock; }
+  build_images_and_smokes() { fail 'retained acceptance rebuilt images'; }
+  create_cluster() { fail 'retained acceptance recreated its cluster'; }
+  deploy_overlay() { fail 'retained acceptance redeployed its cluster'; }
+  docker() { fail "retained acceptance invoked Docker: $*"; }
+  kind() { fail "retained acceptance invoked Kind after validation: $*"; }
+  log() { :; }
+  RETAINED_KUBECONFIG=""
+  : >"$CALLS"
+  (run_retained_sandbox_supply_chain_suite)
+  (run_retained_runtime_acceptance_suite)
+)
+printf '%s\n' validate provenance acquire-lock validate ttl | cmp -s - "$CALLS" ||
+  fail 'retained runtime/provenance suites did not preserve validation-before-proof order'
+
+# A failed prerequisite or proof must remain a failure, without falling through
+# to green or acquiring ownership of the retained cluster's lifecycle.
+for retained_function in run_retained_sandbox_supply_chain_suite \
+    run_retained_runtime_acceptance_suite; do
+  failed_steps=(validate proof)
+  if [ "$retained_function" = run_retained_runtime_acceptance_suite ]; then
+    failed_steps+=(lock)
+  fi
+  for failed_step in "${failed_steps[@]}"; do
+    : >"$CALLS"
+    if (
+      validate_retained_cluster() {
+        record validate
+        [ "$failed_step" != validate ] || return 41
+      }
+      assert_sandbox_supply_chain() { record proof; return 42; }
+      rust_reconciler_ttl_e2e() { record proof; return 42; }
+      require_tool() { :; }
+      acquire_kind_host_lock() {
+        record acquire-lock
+        [ "$failed_step" != lock ] || return 40
+      }
+      stop_gateway_port_forward() { :; }
+      dump_cluster_state() { record dump; }
+      kind() { record "kind:$*"; }
+      docker() { record "docker:$*"; }
+      log() { record "log:$*"; }
+      RETAINED_KUBECONFIG=""
+      "$retained_function"
+    ) >"$FIXTURE/${retained_function}-${failed_step}.out" 2>&1; then
+      fail "$retained_function accepted a failed $failed_step step"
+    else
+      retained_status=$?
+    fi
+    expected_status=42
+    [ "$failed_step" != validate ] || expected_status=41
+    [ "$failed_step" != lock ] || expected_status=40
+    [ "$retained_status" -eq "$expected_status" ] ||
+      fail "$retained_function lost the $failed_step failure status"
+    if [ "$failed_step" != proof ] && grep -Fxq proof "$CALLS"; then
+      fail "$retained_function ran its proof after a failed $failed_step prerequisite"
+    fi
+    if [ "$failed_step" != lock ]; then
+      grep -Fxq dump "$CALLS" || fail "$retained_function did not diagnose its failure"
+    fi
+    if grep -Eq '^(kind:|docker:)|suite green' "$CALLS"; then
+      fail "$retained_function claimed green or changed its retained runtime after failure"
+    fi
+  done
+done
 
 # A retained-suite failure dumps state but never deletes its cluster, even when
 # KEEP_KIND_CLUSTER is unset or zero.

@@ -83,6 +83,41 @@ counts, proves fresh apply and a second no-op run, and keeps checksum, dirty
 ledger, missing-history, concurrent-startup, and accepted-schema fingerprint
 failures mechanical.
 
+### Canonical ProjectSpec cutover
+
+Migration `0016_canonical_project_spec.sql` is a deliberate pre-launch clean
+break. Before changing any table, it requires `environment_presets`,
+`environments`, `repo_configs`, `user_login_keys`, `user_ssh_keys`,
+`user_git_credentials`, `github_oauth_states`, and `user_github_tokens` to
+contain no rows. It also rejects the exact legacy SSH and Git credential keys
+if their metadata is already absent. It does not translate those products or
+retain a second runtime representation. The migration locks all checked tables
+before the preflight, then versions the surviving `tenant_secrets` rows so an
+old writer queued behind the lock cannot recreate retired material. Current
+writers explicitly write storage contract version 1; an omitted version fails
+closed. Once the preflight succeeds, the migration removes the retired
+project-intent columns and their foreign keys, adds one non-null `project_spec`
+JSONB column to each environment-intent table, removes the raw
+`environments.auth_token` credential column, and drops all five retired account
+credential metadata tables.
+It also removes `sandbox_template_config.warm_pool_size`; the applied baseline
+remains byte-for-byte unchanged so SQLx can validate existing migration history
+before applying this clean break. Shared warm starts remain unsupported.
+Auto-created image presets receive a nullable internal image identity with a
+partial organization-scoped unique index. The API writes that identity, the
+canonical preset, and its runtime template projection in one transaction, so
+concurrent image resolution converges on one preset and a projection failure
+cannot leave divergent state.
+
+The lock and writer-version fence make rolling overlap safe from silent data
+loss, but an old process can return errors for secret mutations after migration
+16 commits. An older binary is not supported against a ledger containing
+migration 16. If rollback is required, do not create an in-place down migration:
+recreate only the disposable application `public` schema and activate the
+selected prior source release so its embedded migration history is applied from
+empty state. The PostgreSQL cluster, other databases, credentials, and external
+secret material remain outside this rollback boundary.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

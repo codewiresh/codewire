@@ -3,12 +3,12 @@ import {
   toProtoCreatePresetRequest,
   toProtoUpdatePresetRequest,
 } from "./convert.js";
-import type { PresetClient, SecretClient } from "./transport.js";
+import type { PresetClient } from "./transport.js";
 import { mapConnectError } from "./types.js";
 import type {
-  CreateTemplateRequest,
-  TemplateData,
-  UpdateTemplateRequest,
+  CreatePresetRequest,
+  PresetData,
+  UpdatePresetRequest,
 } from "./types.js";
 
 function resolveOrgId(orgId: string): string {
@@ -20,23 +20,18 @@ function resolveOrgId(orgId: string): string {
   return orgId;
 }
 
-export class Templates {
+export class Presets {
   constructor(
     private presets: PresetClient,
-    private secrets: SecretClient,
     private orgId: string,
   ) {}
 
   /** Create a new preset. */
-  async create(body: CreateTemplateRequest): Promise<TemplateData> {
+  async create(body: CreatePresetRequest): Promise<PresetData> {
     try {
       const orgId = resolveOrgId(this.orgId);
       const response = await this.presets.createPreset(
-        toProtoCreatePresetRequest(
-          orgId,
-          body,
-          await this.resolveSecretProjectId(body.secret_project, false),
-        ),
+        toProtoCreatePresetRequest(orgId, body),
       );
       if (!response.preset) throw new Error("preset response omitted preset");
       return fromProtoPreset(response.preset);
@@ -46,9 +41,9 @@ export class Templates {
   }
 
   /** List presets. */
-  async list(): Promise<TemplateData[]> {
+  async list(): Promise<PresetData[]> {
     try {
-      const presets: TemplateData[] = [];
+      const presets: PresetData[] = [];
       let pageToken = "";
       do {
         const response = await this.presets.listPresets({
@@ -65,7 +60,7 @@ export class Templates {
   }
 
   /** Get a preset by ID. */
-  async get(presetId: string): Promise<TemplateData> {
+  async get(presetId: string): Promise<PresetData> {
     try {
       const response = await this.presets.getPreset({
         orgId: resolveOrgId(this.orgId),
@@ -81,17 +76,12 @@ export class Templates {
   /** Update a preset. */
   async update(
     presetId: string,
-    body: UpdateTemplateRequest,
-  ): Promise<TemplateData> {
+    body: UpdatePresetRequest,
+  ): Promise<PresetData> {
     try {
       const orgId = resolveOrgId(this.orgId);
       const response = await this.presets.updatePreset(
-        toProtoUpdatePresetRequest(
-          orgId,
-          presetId,
-          body,
-          await this.resolveSecretProjectId(body.secret_project, true),
-        ),
+        toProtoUpdatePresetRequest(orgId, presetId, body),
       );
       if (!response.preset) throw new Error("preset response omitted preset");
       return fromProtoPreset(response.preset);
@@ -110,25 +100,5 @@ export class Templates {
     } catch (error) {
       throw mapConnectError(error);
     }
-  }
-
-  private async resolveSecretProjectId(
-    selection: string | null | undefined,
-    update: boolean,
-  ): Promise<string | undefined> {
-    if (selection === undefined) return undefined;
-    if (selection === null || selection === "") return update ? "" : undefined;
-
-    const orgId = resolveOrgId(this.orgId);
-    let pageToken = "";
-    do {
-      const response = await this.secrets.listSecretProjects({ orgId, pageToken });
-      const project = response.secretProjects.find(
-        (candidate) => candidate.id === selection || candidate.name === selection,
-      );
-      if (project) return project.id;
-      pageToken = response.nextPageToken;
-    } while (pageToken !== "");
-    throw new Error(`codewire: secret project not found: ${selection}`);
   }
 }

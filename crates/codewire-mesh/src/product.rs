@@ -7,7 +7,6 @@
 
 use chrono::{Duration, Utc};
 use codewire_proto::codewire::internal::v1::MeshAuthorizationContext;
-use codewire_proto::codewire::v1::OrgRole;
 use codewire_server_core::{AppError, AppResult};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -20,7 +19,7 @@ use crate::mesh_authorization::{
 use crate::store::{
     GROUP_DEBUG_FULL, GROUP_DEBUG_NONE, GROUP_DEBUG_OBSERVE_ONLY, GROUP_MESSAGES_INTERNAL_ONLY,
     GROUP_MESSAGES_OPEN, Group, GroupMember, GroupPolicy, Invite, KVEntry, NETWORK_ROLE_MEMBER,
-    Network, NetworkMember, NodeEnrollment, NodeRecord, SharedStore, StoreError,
+    NETWORK_ROLE_OWNER, Network, NodeEnrollment, NodeRecord, SharedStore, StoreError,
 };
 
 const INVITE_CODE_PREFIX: &str = "cw_inv_";
@@ -106,13 +105,32 @@ impl MeshProductService {
     ) -> AppResult<MeshAuthorizationContext> {
         let network_id = validate_network_id(network_id)?;
         let context = self.authorize_org(organization_id, credential).await?;
-        self.network_for_org(&context.org_id, &network_id).await?;
-        if matches!(required_role, RequiredRole::Owner)
-            && !matches!(
-                context.role.as_known(),
-                Some(OrgRole::Owner | OrgRole::Admin)
-            )
+        match self
+            .store
+            .network_organization_id(&network_id)
+            .await
+            .map_err(store_error)?
         {
+            Some(owner_organization_id) if owner_organization_id == context.org_id => {}
+            Some(_) => return Err(AppError::Forbidden),
+            None => return Err(AppError::NotFound("Mesh network not found".into())),
+        }
+        let member = self
+            .store
+            .network_member_get(&network_id, &context.principal_id)
+            .await
+            .map_err(store_error)?
+            .ok_or(AppError::Forbidden)?;
+        let allowed = match required_role {
+            RequiredRole::Member => {
+                matches!(
+                    member.role.as_str(),
+                    NETWORK_ROLE_MEMBER | NETWORK_ROLE_OWNER
+                )
+            }
+            RequiredRole::Owner => member.role == NETWORK_ROLE_OWNER,
+        };
+        if !allowed {
             return Err(AppError::Forbidden);
         }
         Ok(context)
@@ -124,20 +142,13 @@ impl MeshProductService {
         network_id: &str,
         credential: ForwardedMeshCredential,
     ) -> AppResult<MeshAuthorizationContext> {
-        let organization_id = required_identifier(organization_id, "org_id")?;
-        let network_id = validate_network_id(network_id)?;
-        let adapter = self.authorization.as_ref().ok_or_else(|| {
-            AppError::ServiceUnavailable("Mesh authorization is unavailable".into())
-        })?;
-        let context = adapter
-            .resolve(&organization_id, credential)
-            .await
-            .map_err(authorization_error)?;
-        if context.org_id != organization_id {
-            return Err(AppError::Forbidden);
-        }
-        self.network_for_org(&organization_id, &network_id).await?;
-        Ok(context)
+        self.authorize_network(
+            organization_id,
+            network_id,
+            credential,
+            RequiredRole::Member,
+        )
+        .await
     }
 
     pub(crate) async fn organization_for_network(&self, network_id: &str) -> AppResult<String> {
@@ -156,7 +167,7 @@ impl MeshProductService {
     ) -> AppResult<Vec<Network>> {
         let context = self.authorize_org(organization_id, credential).await?;
         self.store
-            .network_list_by_organization(&context.org_id)
+            .network_list_by_member(&context.org_id, &context.principal_id)
             .await
             .map_err(store_error)
     }
@@ -169,8 +180,9 @@ impl MeshProductService {
     ) -> AppResult<Network> {
         let network_id = validate_network_id(network_id)?;
         let context = self.authorize_org(organization_id, credential).await?;
+        let now = Utc::now();
         self.store
-            .network_create_owned(&network_id, &context.org_id)
+            .network_create_with_owner(&network_id, &context.org_id, &context.principal_id, now)
             .await
             .map_err(store_error)?;
         self.network_for_org(&context.org_id, &network_id).await
@@ -259,27 +271,13 @@ impl MeshProductService {
             .await?;
         let invitation = self
             .store
-            .invite_consume(&code_hash, now)
+            .invite_consume_and_join(&code_hash, now, &principal.org_id, &principal.principal_id)
             .await
             .map_err(store_error)?
             .ok_or(AppError::Forbidden)?;
-        let role = self
-            .store
-            .network_member_get(&invitation.network_id, &principal.principal_id)
-            .await
-            .map_err(store_error)?
-            .map(|member| member.role)
-            .unwrap_or_else(|| NETWORK_ROLE_MEMBER.to_owned());
-        self.store
-            .network_member_upsert(NetworkMember {
-                network_id: invitation.network_id.clone(),
-                subject: principal.principal_id,
-                role,
-                created_at: Utc::now(),
-                created_by: format!("invite:{}", invitation.id),
-            })
-            .await
-            .map_err(store_error)?;
+        if invitation.organization_id != principal.org_id {
+            return Err(AppError::Forbidden);
+        }
         self.network_for_org(&invitation.organization_id, &invitation.network_id)
             .await
     }

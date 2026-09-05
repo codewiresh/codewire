@@ -4,62 +4,38 @@ use axum::http::HeaderValue;
 use codewire_proto::codewire::{
     console::v1::{
         BillingServiceClient, EnvironmentSetupServiceClient, GetBillingOverviewRequest,
-        GetEnvironmentCreateOptionsRequest, GitHubServiceClient, ListGitHubReposRequest,
-        ListResourcePlansRequest,
+        GetEnvironmentCreateOptionsRequest, ListResourcePlansRequest,
     },
     v1::{
         CreateEnvironmentRequest, CreatePortRequest, DeleteEnvironmentRequest, DeletePortRequest,
-        DetectionResult, Environment, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
+        Environment, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
         EnvironmentResizeOperationState, EnvironmentResizePlan, EnvironmentResources,
         EnvironmentServiceClient, EnvironmentState, GetEnvironmentRequest,
         GetEnvironmentResizeOperationRequest, GetEnvironmentTrustReportRequest,
         ListEnvironmentsRequest, ListPortsRequest, PlanEnvironmentResizeRequest, Port, PortAccess,
-        PortServiceClient, ResizeEnvironmentRequest, SetupConfig, StartEnvironmentRequest,
-        StopEnvironmentRequest, WatchEnvironmentCreateRequest, watch_environment_create_response,
+        PortServiceClient, ResizeEnvironmentRequest, StartEnvironmentRequest,
+        StopEnvironmentRequest,
     },
 };
-use connectrpc::{ConnectError, ErrorCode, client::ClientConfig};
-use tokio::sync::mpsc;
+use connectrpc::{ConnectError, client::ClientConfig};
 
 use crate::{
     state::AppState,
     transport::BrowserTransport,
     view::{
-        EnvironmentAgentView, EnvironmentDetectionView, EnvironmentPortRow,
-        EnvironmentPresetOption, EnvironmentResizeConfirmationView, EnvironmentResizeOperationView,
-        EnvironmentRow, EnvironmentTrustSummaryView, GitHubRepositoryOption,
+        EnvironmentAgentView, EnvironmentPortRow, EnvironmentPresetOption,
+        EnvironmentResizeConfirmationView, EnvironmentResizeOperationView, EnvironmentRow,
+        EnvironmentTrustSummaryView,
     },
 };
 
 const UNARY_TIMEOUT: Duration = Duration::from_secs(10);
-const PREPARE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) struct EnvironmentCreateOptions {
-    pub(crate) github_connected: bool,
-    pub(crate) github_username: String,
-    pub(crate) github_repositories_available: bool,
-    pub(crate) github_repositories: Vec<GitHubRepositoryOption>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
     pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) confidential_available: bool,
     pub(crate) confidential_price: String,
-}
-
-pub(crate) enum EnvironmentPrepareEvent {
-    Progress {
-        phase: String,
-        message: String,
-        total: i32,
-    },
-    RepoFetched {
-        index: i32,
-        repo: String,
-        ok: bool,
-    },
-    Complete {
-        draft: Box<CreateEnvironmentRequest>,
-        detection: Box<Option<DetectionResult>>,
-    },
 }
 
 fn transport(state: &AppState, cookie: HeaderValue) -> BrowserTransport {
@@ -186,41 +162,6 @@ pub(crate) async fn create_options(
     .await?
     .into_owned();
 
-    let github = setup.github_status.into_option().unwrap_or_default();
-    let (github_repositories, github_repositories_available) = if github.connected {
-        match GitHubServiceClient::new(
-            transport(state, cookie.clone()),
-            client_config(state, UNARY_TIMEOUT),
-        )
-        .list_git_hub_repos(ListGitHubReposRequest {
-            page: 1,
-            per_page: 100,
-            ..Default::default()
-        })
-        .await
-        {
-            Ok(response) => (
-                response
-                    .into_owned()
-                    .repos
-                    .into_iter()
-                    .map(|repository| GitHubRepositoryOption {
-                        full_name: repository.full_name,
-                        url: repository.html_url,
-                        description: repository.description,
-                        language: repository.language,
-                        private: repository.private,
-                    })
-                    .collect(),
-                true,
-            ),
-            Err(error) if error.code == ErrorCode::Unauthenticated => return Err(error),
-            Err(_) => (Vec::new(), false),
-        }
-    } else {
-        (Vec::new(), false)
-    };
-
     // The catalog is public to organization members.  Failure to read it does
     // not block the create form; the server still performs authoritative,
     // atomic admission when a confidential environment is submitted.
@@ -264,32 +205,31 @@ pub(crate) async fn create_options(
         .presets
         .into_iter()
         .map(|preset| {
-            let uses_legacy_secret_sources = preset_uses_legacy_secret_sources(
-                preset.secret_project_id.as_deref(),
-                preset.default_setup_config.as_option(),
-            );
-            let defaults = preset
-                .default_setup_config
-                .into_option()
-                .unwrap_or_default();
-            EnvironmentPresetOption {
+            let project_spec = preset.project_spec.into_option().ok_or_else(|| {
+                ConnectError::internal("preset omitted its canonical project spec")
+            })?;
+            let project_spec =
+                codewire_project_proto::from_proto(project_spec).map_err(|error| {
+                    ConnectError::internal(format!(
+                        "preset has an invalid canonical project spec: {error}"
+                    ))
+                })?;
+            let uses_protected_secret_bindings =
+                project_spec_uses_protected_secret_bindings(&project_spec);
+            Ok(EnvironmentPresetOption {
                 id: preset.id,
                 name: preset.name,
                 description: preset.description.unwrap_or_default(),
-                image: preset.image.unwrap_or_default(),
-                default_cpu_millicores: preset.default_cpu_millicores,
-                default_memory_mb: preset.default_memory_mb,
-                default_disk_gb: preset.default_disk_gb,
+                image: project_spec.image,
+                default_cpu_millicores: project_spec.resources.cpu_millicores,
+                default_memory_mib: project_spec.resources.memory_mib,
+                default_disk_gib: project_spec.resources.disk_gib,
                 default_ttl_seconds: preset.default_ttl_seconds,
-                default_install_command: defaults.install_command,
-                default_startup_script: defaults.startup_script,
-                default_agents: defaults
-                    .agents
-                    .into_iter()
-                    .map(|agent| agent.r#type)
-                    .collect(),
-                default_app_ports: defaults
-                    .app_ports
+                default_install_command: project_spec.install_command,
+                default_startup_script: project_spec.startup_script,
+                default_agents: project_spec.agents.tools,
+                default_app_ports: project_spec
+                    .application_ports
                     .into_iter()
                     .enumerate()
                     .map(|(index, port)| crate::view::EnvironmentAppPortFormRow {
@@ -299,17 +239,13 @@ pub(crate) async fn create_options(
                         access: port.access,
                     })
                     .collect(),
-                uses_legacy_secret_sources,
+                uses_protected_secret_bindings,
                 official: preset.official,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, ConnectError>>()?;
 
     Ok(EnvironmentCreateOptions {
-        github_connected: github.connected,
-        github_username: github.username,
-        github_repositories_available,
-        github_repositories,
         presets,
         agents: agent_catalog(),
         confidential_available,
@@ -317,109 +253,8 @@ pub(crate) async fn create_options(
     })
 }
 
-fn preset_uses_legacy_secret_sources(
-    secret_project_id: Option<&str>,
-    defaults: Option<&SetupConfig>,
-) -> bool {
-    if secret_project_id.is_some_and(|id| !id.trim().is_empty()) {
-        return true;
-    }
-    let Some(defaults) = defaults else {
-        return false;
-    };
-    if defaults.include_org_secrets.unwrap_or(false)
-        || defaults.include_user_secrets.unwrap_or(false)
-    {
-        return true;
-    }
-    defaults
-        .project_spec
-        .as_option()
-        .and_then(|spec| spec.secrets.as_option())
-        .is_some_and(|secrets| {
-            !secrets.project.trim().is_empty()
-                || secrets.organization
-                || secrets.user
-                || secrets.include_org.unwrap_or(false)
-                || secrets.include_user.unwrap_or(false)
-        })
-}
-
-pub(crate) async fn prepare_events(
-    state: &AppState,
-    cookie: HeaderValue,
-    org_id: String,
-    draft: CreateEnvironmentRequest,
-    analyze: bool,
-) -> Result<mpsc::Receiver<Result<EnvironmentPrepareEvent, ConnectError>>, ConnectError> {
-    let client = EnvironmentServiceClient::new(
-        transport(state, cookie),
-        client_config(state, PREPARE_TIMEOUT),
-    );
-    let mut stream = client
-        .watch_environment_create(WatchEnvironmentCreateRequest {
-            org_id,
-            draft: Some(draft).into(),
-            analyze: Some(analyze),
-            ..Default::default()
-        })
-        .await?;
-    let (sender, receiver) = mpsc::channel(16);
-    tokio::spawn(async move {
-        loop {
-            let message = match tokio::select! {
-                // A dropped browser response closes the route receiver. Stop
-                // waiting on upstream immediately so dropping `stream`
-                // cancels the generated Connect response body as well.
-                _ = sender.closed() => break,
-                message = stream.message::<codewire_proto::codewire::v1::WatchEnvironmentCreateResponse>() => message,
-            } {
-                Ok(Some(message)) => message.to_owned_message(),
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = sender.send(Err(error)).await;
-                    break;
-                }
-            };
-            let event = match message.event {
-                Some(watch_environment_create_response::Event::Progress(progress)) => {
-                    EnvironmentPrepareEvent::Progress {
-                        phase: progress.phase,
-                        message: progress.message,
-                        total: progress.total,
-                    }
-                }
-                Some(watch_environment_create_response::Event::RepoFetched(repo)) => {
-                    EnvironmentPrepareEvent::RepoFetched {
-                        index: repo.index,
-                        repo: repo.repo,
-                        ok: repo.ok,
-                    }
-                }
-                Some(watch_environment_create_response::Event::Complete(complete)) => {
-                    let Some(draft) = complete.draft.into_option() else {
-                        let _ = sender
-                            .send(Err(ConnectError::internal(
-                                "environment preparation omitted its draft",
-                            )))
-                            .await;
-                        break;
-                    };
-                    EnvironmentPrepareEvent::Complete {
-                        draft: Box::new(draft),
-                        detection: Box::new(complete.detection.into_option()),
-                    }
-                }
-                None => continue,
-            };
-            if sender.send(Ok(event)).await.is_err() {
-                // The browser or no-JS caller went away. Dropping this task
-                // drops the generated Connect stream and cancels upstream.
-                break;
-            }
-        }
-    });
-    Ok(receiver)
+fn project_spec_uses_protected_secret_bindings(spec: &codewire_project::ProjectSpec) -> bool {
+    !spec.secrets.is_empty()
 }
 
 pub(crate) async fn create_environment(
@@ -669,20 +504,6 @@ pub(crate) async fn delete_port(
     Ok(())
 }
 
-pub(crate) fn detection_view(detection: Option<DetectionResult>) -> EnvironmentDetectionView {
-    detection
-        .map(|detection| EnvironmentDetectionView {
-            project_type: detection.project_type,
-            language: detection.language,
-            framework: detection.framework,
-            image: detection.preset_image,
-            setup_notes: detection.setup_notes,
-            needs_docker: detection.needs_docker,
-            has_compose: detection.has_compose,
-        })
-        .unwrap_or_default()
-}
-
 fn environment_row(environment: Environment) -> EnvironmentRow {
     let state = state_name(environment.state.to_i32());
     let display_name = if environment.name.trim().is_empty() {
@@ -868,71 +689,32 @@ mod tests {
     }
 
     #[test]
-    fn preset_secret_source_detection_defaults_missing_selectors_off() {
-        assert!(!preset_uses_legacy_secret_sources(None, None));
-        assert!(!preset_uses_legacy_secret_sources(
-            Some(""),
-            Some(&SetupConfig {
-                include_org_secrets: Some(false),
-                include_user_secrets: Some(false),
-                ..Default::default()
-            }),
-        ));
-        assert!(preset_uses_legacy_secret_sources(
-            None,
-            Some(&SetupConfig {
-                include_org_secrets: Some(true),
-                ..Default::default()
-            }),
-        ));
-        assert!(preset_uses_legacy_secret_sources(Some("project-id"), None));
-    }
-
-    #[test]
-    fn preset_secret_source_detection_includes_canonical_nested_bindings() {
+    fn preset_secret_source_detection_uses_only_canonical_bindings() {
         let bindings = [
-            codewire_proto::codewire::v1::ProjectSecretBindings {
+            codewire_project::SecretBindings {
                 project: "development".to_owned(),
                 ..Default::default()
             },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
+            codewire_project::SecretBindings {
                 organization: true,
                 ..Default::default()
             },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
+            codewire_project::SecretBindings {
                 user: true,
-                ..Default::default()
-            },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
-                include_org: Some(true),
-                ..Default::default()
-            },
-            codewire_proto::codewire::v1::ProjectSecretBindings {
-                include_user: Some(true),
                 ..Default::default()
             },
         ];
         for secrets in bindings {
-            let defaults = SetupConfig {
-                project_spec: Some(codewire_proto::codewire::v1::ProjectSpec {
-                    secrets: Some(secrets).into(),
-                    ..Default::default()
-                })
-                .into(),
+            let project_spec = codewire_project::ProjectSpec {
+                secrets,
                 ..Default::default()
             };
-            assert!(preset_uses_legacy_secret_sources(None, Some(&defaults)));
+            assert!(project_spec_uses_protected_secret_bindings(&project_spec));
         }
 
-        let empty = SetupConfig {
-            project_spec: Some(codewire_proto::codewire::v1::ProjectSpec {
-                secrets: Some(Default::default()).into(),
-                ..Default::default()
-            })
-            .into(),
-            ..Default::default()
-        };
-        assert!(!preset_uses_legacy_secret_sources(None, Some(&empty)));
+        assert!(!project_spec_uses_protected_secret_bindings(
+            &codewire_project::ProjectSpec::default()
+        ));
     }
 
     #[test]

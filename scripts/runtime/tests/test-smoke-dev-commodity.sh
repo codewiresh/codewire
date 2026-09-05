@@ -761,7 +761,7 @@ run_kubernetes_failure_artifact_case() {
           printf '%s\n' "{\"metadata\":{\"name\":\"claim-one\"},\"spec\":{\"warmPoolRef\":{\"name\":\"pool-one\"},\"env\":[{\"name\":\"TOKEN\",\"value\":\"$SENSITIVE_SENTINEL\"}]},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"False\",\"reason\":\"SandboxPending\",\"message\":\"$SENSITIVE_SENTINEL\"}]}}"
           ;;
         *" get sandboxwarmpool pool-one "*)
-          printf '%s\n' '{"metadata":{"name":"pool-one","generation":3},"spec":{"replicas":1,"sandboxTemplateRef":{"name":"template-one"}},"status":{"replicas":1,"readyReplicas":0}}'
+          printf '%s\n' '{"metadata":{"name":"pool-one","generation":3},"spec":{"replicas":0,"sandboxTemplateRef":{"name":"template-one"}},"status":{"replicas":0,"readyReplicas":0}}'
           ;;
         *" get sandboxtemplate template-one "*)
           printf '%s\n' "{\"metadata\":{\"name\":\"template-one\",\"annotations\":{\"unsafe\":\"$SENSITIVE_SENTINEL\"}},\"spec\":{\"podTemplate\":{\"spec\":{\"containers\":[{\"env\":[{\"value\":\"$SENSITIVE_SENTINEL\"}]}]}}}}"
@@ -806,7 +806,7 @@ run_kubernetes_failure_artifact_case() {
     .read_state == "available"
     and .count == 1
     and .claims[0].name == "claim-one"
-    and .claims[0].warm_pool == "pool-one"
+    and .claims[0].claim_shadow == "pool-one"
     and .claims[0].conditions[0] == {
       type: "Ready",
       status: "False",
@@ -818,11 +818,11 @@ run_kubernetes_failure_artifact_case() {
   jq -e '
     .name == "pool-one"
     and .template == "template-one"
-    and .desired_replicas == 1
-    and .current_replicas == 1
+    and .desired_replicas == 0
+    and .current_replicas == 0
     and .ready_replicas == 0
-  ' "$artifact_dir/kubernetes-failure/warm-pool.json" >/dev/null || \
-    fail "warm-pool readiness summary is incomplete"
+  ' "$artifact_dir/kubernetes-failure/claim-shadow.json" >/dev/null || \
+    fail "claim-shadow summary is incomplete"
   jq -e '
     .pods[0].phase == "Pending"
     and .pods[0].node_assigned == false

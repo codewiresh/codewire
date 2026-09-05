@@ -1,16 +1,7 @@
 //! Rust-owned workspace setup script builders, pinned byte-for-byte by the
 //! checked-in fixtures under `tests/fixtures/setup_scripts`.
 
-use std::collections::BTreeMap;
-
-/// Well-known SSH host keys for major git providers (ssh_injection.go).
-pub const KNOWN_HOSTS: &str = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
-github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
-gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf
-gitlab.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFSMqzJeV9rUzU4kWitGjeR4PWSa29SPqJ1fVkhtj3Hw9xjLVXVYrU9QlYWrOLXBpQ6KWjbjTDTdDkoohFzgbEY=
-bitbucket.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIazEu89wgQZ4bqs3d63QSMzYVa0MuJ2e2gKTKqu+UUO
-bitbucket.org ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBPIQmuzMBM9kHCqFEVAlZECEbqTqEoxUFBzn/JPC2HC7R7bBcpPGKZ5FZSB6wB5LBGKO0xQEh1dsMySnvIPXlfc=
-";
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Mirrors `shellQuoteLiteral` / sandbox.`shellQuote` (same impl).
 pub fn shell_quote(value: &str) -> String {
@@ -33,111 +24,53 @@ fn go_marshal_indent(map: &BTreeMap<String, String>) -> String {
         .replace('>', "\\u003e")
 }
 
+fn unused_heredoc_delimiter(prefix: &str, content: &str) -> String {
+    let lines = content.lines().collect::<BTreeSet<_>>();
+    for index in 0..=lines.len() {
+        let candidate = format!("{prefix}_{index}");
+        if !lines.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+    unreachable!("one more delimiter candidate exists than occupied lines")
+}
+
 /// Mirrors `buildWorkspaceEnvScript`.
 pub fn build_workspace_env_script(env_vars: &BTreeMap<String, String>) -> String {
-    let mut b = String::new();
-    b.push_str(
-        "set -eu\nmkdir -p \"$HOME/.codewire\"\ncat > \"$HOME/.codewire/environment.sh\" <<'CWEOF'\n",
-    );
+    let mut environment_sh = String::new();
     for (key, value) in env_vars {
-        b.push_str("export ");
-        b.push_str(key);
-        b.push('=');
-        b.push_str(&shell_quote(value));
-        b.push('\n');
+        environment_sh.push_str("export ");
+        environment_sh.push_str(key);
+        environment_sh.push('=');
+        environment_sh.push_str(&shell_quote(value));
+        environment_sh.push('\n');
     }
-    b.push_str("CWEOF\ncat > \"$HOME/.codewire/environment.json\" <<'CWJSON'\n");
-    b.push_str(&go_marshal_indent(env_vars));
-    b.push_str(
-        "\nCWJSON\nchmod 600 \"$HOME/.codewire/environment.sh\" \"$HOME/.codewire/environment.json\"\nfor rc in \"$HOME/.profile\" \"$HOME/.bash_profile\" \"$HOME/.bashrc\" \"$HOME/.zshrc\"; do\n  touch \"$rc\"\n  line='[ -f \"$HOME/.codewire/environment.sh\" ] && . \"$HOME/.codewire/environment.sh\"'\n  if ! grep -Fqx \"$line\" \"$rc\"; then\n    printf '\\n%s\\n' \"$line\" >> \"$rc\"\n  fi\ndone\n",
-    );
-    b
-}
+    let environment_json = go_marshal_indent(env_vars);
+    let shell_delimiter = unused_heredoc_delimiter("CW_ENVIRONMENT_SH", &environment_sh);
+    let json_delimiter = unused_heredoc_delimiter("CW_ENVIRONMENT_JSON", &environment_json);
 
-/// Mirrors `buildSSHSetupScript`.
-pub fn build_ssh_setup_script(private_key: &str, public_key: &str) -> String {
     format!(
-        "set -eu\numask 077\nmkdir -p \"$HOME/.ssh\"\ncat > \"$HOME/.ssh/id_ed25519\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/id_ed25519.pub\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/known_hosts\" << 'CWEOF'\n{}\nCWEOF\ncat > \"$HOME/.ssh/config\" << 'CWEOF'\nHost *\n    IdentityFile ~/.ssh/id_ed25519\n    StrictHostKeyChecking accept-new\nCWEOF\n",
-        private_key.trim(),
-        public_key.trim(),
-        KNOWN_HOSTS.trim(),
-    )
-}
-
-/// Mirrors `buildClaudeBootstrapScript`.
-pub fn build_claude_bootstrap_script(work_dir: &str) -> String {
-    let work_dir = if work_dir.is_empty() {
-        "/workspace"
-    } else {
-        work_dir
-    };
-    format!(
-        r#"set -eu
-mkdir -p "$HOME/.claude"
-cfg="$HOME/.claude.json"
-_cw_workdir={}
-_cw_home="$HOME"
-_cw_trust='{{"hasCompletedProjectOnboarding":true,"hasTrustDialogAccepted":true}}'
-if command -v jq >/dev/null 2>&1 && [ -f "$cfg" ]; then
-  jq --arg workdir "$_cw_workdir" --arg home "$_cw_home" --argjson trust "$_cw_trust" \
-    '.autoUpdaterStatus = "disabled" |
-     .bypassPermissionsModeAccepted = true |
-     .hasAcknowledgedCostThreshold = true |
-     .hasCompletedOnboarding = true |
-     .projects[$workdir] = $trust |
-     .projects[$home] = $trust |
-     .projects["/workspace"] = $trust' \
-    "$cfg" > "${{cfg}}.tmp" && mv "${{cfg}}.tmp" "$cfg"
-else
-  cat > "$cfg" <<CWEOF
-{{
-  "autoUpdaterStatus": "disabled",
-  "bypassPermissionsModeAccepted": true,
-  "hasAcknowledgedCostThreshold": true,
-  "hasCompletedOnboarding": true,
-  "projects": {{
-    "$_cw_workdir": {{
-      "hasCompletedProjectOnboarding": true,
-      "hasTrustDialogAccepted": true
-    }},
-    "$_cw_home": {{
-      "hasCompletedProjectOnboarding": true,
-      "hasTrustDialogAccepted": true
-    }},
-    "/workspace": {{
-      "hasCompletedProjectOnboarding": true,
-      "hasTrustDialogAccepted": true
-    }}
-  }}
-}}
-CWEOF
-  chmod 600 "$cfg"
-fi
-"#,
-        shell_quote(work_dir)
-    )
-}
-
-/// Mirrors `buildCodexBootstrapScript`. Empty string for unknown modes.
-pub fn build_codex_bootstrap_script(mode: &str, value: &str) -> String {
-    match mode {
-        "apikey" => format!(
-            "set -eu\nmkdir -p \"$HOME/.codex\"\necho {} | codex login --with-api-key\n",
-            shell_quote(value)
+        concat!(
+            "set -eu\n",
+            "umask 077\n",
+            "mkdir -p \"$HOME/.codewire\"\n",
+            "cat > \"$HOME/.codewire/environment.sh\" <<'{shell_delimiter}'\n",
+            "{environment_sh}{shell_delimiter}\n",
+            "cat > \"$HOME/.codewire/environment.json\" <<'{json_delimiter}'\n",
+            "{environment_json}\n{json_delimiter}\n",
+            "chmod 600 \"$HOME/.codewire/environment.sh\" \"$HOME/.codewire/environment.json\"\n",
+            "for rc in \"$HOME/.profile\" \"$HOME/.bash_profile\" \"$HOME/.bashrc\" \"$HOME/.zshrc\"; do\n",
+            "  touch \"$rc\"\n",
+            "  line='[ -f \"$HOME/.codewire/environment.sh\" ] && . \"$HOME/.codewire/environment.sh\"'\n",
+            "  if ! grep -Fqx \"$line\" \"$rc\"; then\n",
+            "    printf '\\n%s\\n' \"$line\" >> \"$rc\"\n",
+            "  fi\n",
+            "done\n",
         ),
-        "oauth" => format!(
-            "set -eu\nmkdir -p \"$HOME/.codex\"\ncat > \"$HOME/.codex/auth.json\" <<'CWEOF'\n{}\nCWEOF\nchmod 600 \"$HOME/.codex/auth.json\"\n",
-            value
-        ),
-        _ => String::new(),
-    }
-}
-
-/// Mirrors `buildGhCliAuthScript`.
-pub fn build_gh_cli_auth_script(token: &str, username: &str) -> String {
-    format!(
-        "set -eu\nmkdir -p \"$HOME/.config/gh\"\ncat > \"$HOME/.config/gh/hosts.yml\" << 'CWEOF'\ngithub.com:\n    oauth_token: \"{}\"\n    user: \"{}\"\n    git_protocol: ssh\nCWEOF\n",
-        token, username
+        shell_delimiter = shell_delimiter,
+        environment_sh = environment_sh,
+        json_delimiter = json_delimiter,
+        environment_json = environment_json,
     )
 }
 
@@ -145,6 +78,7 @@ pub fn build_gh_cli_auth_script(token: &str, username: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
 
     fn golden(name: &str) -> String {
         let path = format!(
@@ -170,40 +104,50 @@ mod tests {
     }
 
     #[test]
-    fn ssh_setup_script_matches_golden() {
-        let got = build_ssh_setup_script(
-            "-----BEGIN OPENSSH PRIVATE KEY-----\ngolden-private-key-bytes\n-----END OPENSSH PRIVATE KEY-----\n",
-            "ssh-ed25519 AAAAGoldenPublicKey user@codewire\n",
+    fn workspace_env_script_round_trips_delimiters_and_shell_syntax() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let payload = concat!(
+            "before\n",
+            "CW_ENVIRONMENT_SH_0\n",
+            "touch \"$HOME/injected\"\n",
+            "CW_ENVIRONMENT_JSON_0\n",
+            "$(touch \"$HOME/expanded\")\n",
+            "`touch \"$HOME/backtick\"`\n",
+            "after"
         );
-        assert_eq!(got, golden("ssh_setup.golden.txt"));
-    }
+        let vars = BTreeMap::from([("PAYLOAD".to_owned(), payload.to_owned())]);
+        let script = build_workspace_env_script(&vars);
+        assert!(script.contains("<<'CW_ENVIRONMENT_SH_1'"));
+        assert!(script.contains("<<'CW_ENVIRONMENT_JSON_0'"));
 
-    #[test]
-    fn claude_bootstrap_script_matches_golden() {
-        assert_eq!(
-            build_claude_bootstrap_script("/workspace/my-repo"),
-            golden("claude_bootstrap.golden.txt")
-        );
-    }
+        let status = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .status()
+            .expect("execute generated setup script");
+        assert!(status.success());
+        for marker in ["injected", "expanded", "backtick"] {
+            assert!(!home.path().join(marker).exists(), "created {marker}");
+        }
 
-    #[test]
-    fn codex_bootstrap_scripts_match_golden() {
-        assert_eq!(
-            build_codex_bootstrap_script("apikey", "sk-golden-key"),
-            golden("codex_apikey.golden.txt")
-        );
-        assert_eq!(
-            build_codex_bootstrap_script("oauth", r#"{"tokens":{"access_token":"golden"}}"#),
-            golden("codex_oauth.golden.txt")
-        );
-        assert_eq!(build_codex_bootstrap_script("nope", "x"), "");
-    }
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(". \"$HOME/.codewire/environment.sh\"; printf '%s' \"$PAYLOAD\"")
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("source generated environment");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, payload.as_bytes());
 
-    #[test]
-    fn gh_cli_auth_script_matches_golden() {
-        assert_eq!(
-            build_gh_cli_auth_script("gho_goldentoken", "octocat"),
-            golden("gh_cli_auth.golden.txt")
-        );
+        let json: BTreeMap<String, String> = serde_json::from_slice(
+            &fs::read(home.path().join(".codewire/environment.json")).expect("read generated JSON"),
+        )
+        .expect("parse generated JSON");
+        assert_eq!(json, vars);
     }
 }

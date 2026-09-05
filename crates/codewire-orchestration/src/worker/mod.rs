@@ -22,7 +22,6 @@ pub mod env_log;
 #[cfg(feature = "kind-e2e")]
 pub mod fencing_evidence;
 pub mod gatewayauth;
-pub mod github;
 pub mod lifecycle;
 pub mod loops;
 pub mod organization_deletion;
@@ -77,8 +76,6 @@ pub struct WorkerContext {
     pub kube: Option<kube::Client>,
     /// Tenant secret store shared by the API and every worker activity.
     pub secrets: std::sync::Arc<secrets::SecretStore>,
-    /// GitHub App credentials for user-token refresh.
-    pub github_cfg: github::GitHubAppConfig,
     /// Sandbox/create config slice (env-derived, Go config.Config names).
     pub sandbox_cfg: create::SandboxWorkerCfg,
     /// Platform-only recovery/KBS lifecycle. Never falls back to tenant

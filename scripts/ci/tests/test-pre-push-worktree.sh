@@ -62,6 +62,16 @@ write_stub_tree() {
     "$repo/scripts/ci/tests/test-dashboard-image-network-probe.sh"
   install -m 755 "$ROOT/scripts/ci/verify/dashboard-image.sh" \
     "$repo/scripts/ci/verify/dashboard-image.sh"
+  cat > "$repo/scripts/ci/tests/test-rust-owned-fixtures.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'rust_owned_fixtures\n' >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
+if [ "${PREFLIGHT_TEST_FIXTURE_DRIFT:-0}" = 1 ]; then
+  echo 'fixture checksum mismatch' >&2
+  exit 1
+fi
+EOF
+  chmod +x "$repo/scripts/ci/tests/test-rust-owned-fixtures.sh"
 cat > "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -239,6 +249,31 @@ fi
 assert_contains missing_receipt "$missing_output" \
   'pre-push: no valid receipt (missing). Run exactly: scripts/dev/preflight.sh --for-push --emit-receipt'
 [ ! -s "$normal_log" ] || fail 'missing receipt ran verification tools'
+
+# A selected local policy failure must prevent receipt emission. This catches
+# the regression where CI checked accepted fixture bytes but local preflight
+# could qualify the same drifted tree.
+drift_log="$TMP/fixture-drift-tools.log"
+if drift_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$drift_log" \
+    PREFLIGHT_TEST_FIXTURE_DRIFT=1 \
+    scripts/dev/preflight.sh --for-push --emit-receipt
+} 2>&1)"; then
+  fail 'local preflight accepted fixture checksum drift'
+fi
+assert_contains fixture_drift "$drift_output" 'fixture checksum mismatch'
+assert_contains fixture_drift "$drift_output" \
+  'preflight: Rust-owned schema and fixture guard FAILED'
+assert_not_contains fixture_drift "$drift_output" 'receipt_path='
+if drift_receipt_output="$({
+  cd "$repo"
+  scripts/ci/receipts/local-prepush-receipt.py verify
+} 2>&1)"; then
+  fail 'failed fixture guard left a usable local receipt'
+fi
+assert_contains fixture_drift_receipt "$drift_receipt_output" 'missing'
+
 normal_output="$(push_branch "$repo" normal-docs "$normal_log")"
 assert_contains normal "$normal_output" '  docs/normal.md'
 assert_contains normal "$normal_output" \
@@ -250,6 +285,7 @@ assert_contains normal_tools "$(cat "$normal_log")" \
 assert_contains normal_tools "$(cat "$normal_log")" \
   'repo_checks retired-reference-source'
 assert_contains normal_tools "$(cat "$normal_log")" 'native_desktop_ui'
+assert_contains normal_tools "$(cat "$normal_log")" 'rust_owned_fixtures'
 assert_not_contains normal_tools "$(cat "$normal_log")" 'product '
 assert_not_contains normal_tools "$(cat "$normal_log")" 'integration '
 git -C "$repo" switch -q main

@@ -48,5 +48,4 @@ cw current
 cw current --verbose
 ```
 
-Global `--server` and `--token` flags override the platform target for one
-invocation.
+The global `--server` flag overrides the platform server for one invocation.

@@ -40,12 +40,26 @@ grep -qxF 'USER codewire' "$DOCKERFILE" ||
   fail 'base image does not drop to the codewire runtime user'
 grep -qxF 'ENTRYPOINT ["/entrypoint.sh"]' "$DOCKERFILE" ||
   fail 'base image entrypoint contract is missing'
-grep -qF 'HostKey /etc/codewire/ssh/ssh_host_ed25519_key' "$DOCKERFILE" ||
-  fail 'base image does not preserve the platform SSH host-key path'
-grep -qF 'AuthorizedKeysFile /etc/codewire/ssh/authorized_keys .ssh/authorized_keys' \
-  "$DOCKERFILE" || fail 'base image does not preserve authorized-key lookup'
-grep -qF 'exec "$@"' "$ENTRYPOINT" ||
-  fail 'base image entrypoint does not delegate to the supervised runtime command'
+grep -qF 'openssh-client postgresql-client' "$DOCKERFILE" ||
+  fail 'base image does not retain the SSH client needed by git clone'
+entrypoint_contract="$(sed '/^[[:space:]]*$/d' "$ENTRYPOINT")"
+readonly entrypoint_contract
+[[ "$entrypoint_contract" == $'#!/usr/bin/env bash\nset -euo pipefail\nexec "$@"' ]] ||
+  fail 'base image entrypoint is not the plain supervised-command delegate'
+for retired_ssh_surface in \
+  openssh-server \
+  /run/sshd \
+  /etc/codewire/ssh \
+  authorized_keys \
+  AuthorizedKeysFile \
+  'EXPOSE 2222' \
+  CODEWIRE_SSH_AUTHORIZED_KEYS \
+  ssh-keygen \
+  /usr/sbin/sshd; do
+  if grep -qF "$retired_ssh_surface" "$DOCKERFILE" "$ENTRYPOINT"; then
+    fail "base image retains retired raw SSH surface: $retired_ssh_surface"
+  fi
+done
 if grep -qE '(^|[[:space:]])cw[[:space:]]+node([[:space:]]|$)' "$ENTRYPOINT"; then
   fail 'base image still starts the duplicate legacy Codewire node runtime'
 fi

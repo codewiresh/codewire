@@ -2,12 +2,14 @@ use askama::Template;
 
 use crate::admin_connect::{AdminCatalogView, AdminStatsView, AuditLogRow};
 use crate::billing_connect::BillingPageView;
+#[cfg(test)]
+use crate::view::EnvironmentCreateFormView;
 use crate::view::{
-    ApiKeysPageView, AuthFormView, DashboardView, DevicePageView, EnvironmentCreateFormView,
-    EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
-    OrganizationFormView, OrganizationRow, PresetsPageView, SecretBucketPageView,
-    SecretProjectsPageView, SettingsPageView, SettingsPlaceholderView, SetupTwoFactorView,
-    TerminalPageView, TwoFactorRecoveryView,
+    ApiKeysPageView, AuthFormView, DashboardView, DevicePageView, EnvironmentsPageView,
+    InvitationPageView, MembersPageView, OrganizationContext, OrganizationFormView,
+    OrganizationRow, PresetsPageView, SecretBucketPageView, SecretProjectsPageView,
+    SettingsPageView, SettingsPlaceholderView, SetupTwoFactorView, TerminalPageView,
+    TwoFactorRecoveryView,
 };
 
 #[derive(Template)]
@@ -235,6 +237,7 @@ pub(crate) struct SnapshotsTemplate<'a> {
     pub(crate) organization: &'a OrganizationContext,
 }
 
+#[cfg(test)]
 #[derive(Template)]
 #[template(path = "environment-create-form.html")]
 pub(crate) struct EnvironmentCreateFormTemplate<'a> {

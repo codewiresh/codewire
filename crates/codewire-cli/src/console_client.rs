@@ -62,42 +62,8 @@ pub struct UsageSummary {
     pub storage_gb_hours: f64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct GitHubStatus {
-    pub connected: bool,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub username: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub installation_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connected_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct GitHubAppConfig {
-    pub client_id: String,
-    pub app_slug: String,
-}
-
-/// Write-only GitHub device-flow credential material for GitHubService.
-///
-/// This intentionally does not implement `Debug` or `Serialize`: the access
-/// and refresh tokens must never appear in CLI diagnostics or rendering.
-#[derive(Default)]
-pub struct SaveGitHubToken {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub token_type: String,
-    pub expires_at: Option<rpc::Timestamp>,
-    pub refresh_token_expires_at: Option<rpc::Timestamp>,
-    pub installation_id: Option<i64>,
-    pub github_username: String,
-}
-
-/// Typed console-service facade while the CLI retains its established output
-/// DTOs and direct GitHub OAuth device-flow helpers.
+/// Typed console-service facade while the CLI retains its established billing
+/// output DTOs.
 #[derive(Clone)]
 pub struct ConsoleClient {
     inner: CodewireClient,
@@ -121,50 +87,6 @@ impl ConsoleClient {
             .await
             .map(legacy_billing_overview)
             .map_err(display_client_error)
-    }
-
-    pub async fn get_github_status(&self) -> anyhow::Result<GitHubStatus> {
-        self.inner
-            .get_github_status(rpc::GetGitHubStatusRequest::default())
-            .await
-            .map(legacy_github_status)
-            .map_err(display_client_error)
-    }
-
-    pub async fn get_github_config(&self) -> anyhow::Result<GitHubAppConfig> {
-        self.inner
-            .get_github_config(rpc::GetGitHubConfigRequest::default())
-            .await
-            .map(|value| GitHubAppConfig {
-                client_id: value.client_id,
-                app_slug: value.app_slug,
-            })
-            .map_err(display_client_error)
-    }
-
-    pub async fn save_github_token(&self, value: SaveGitHubToken) -> anyhow::Result<()> {
-        self.inner
-            .save_github_token(rpc::SaveGitHubTokenRequest {
-                access_token: value.access_token,
-                refresh_token: value.refresh_token,
-                token_type: value.token_type,
-                expires_at: value.expires_at.into(),
-                refresh_token_expires_at: value.refresh_token_expires_at.into(),
-                installation_id: value.installation_id,
-                github_username: value.github_username,
-                ..Default::default()
-            })
-            .await
-            .map_err(display_client_error)?;
-        Ok(())
-    }
-
-    pub async fn disconnect_github(&self) -> anyhow::Result<()> {
-        self.inner
-            .delete_github_token(rpc::DeleteGitHubTokenRequest::default())
-            .await
-            .map_err(display_client_error)?;
-        Ok(())
     }
 }
 
@@ -223,15 +145,6 @@ fn legacy_usage_summary(value: rpc::UsageSummary) -> UsageSummary {
     }
 }
 
-fn legacy_github_status(value: rpc::GetGitHubStatusResponse) -> GitHubStatus {
-    GitHubStatus {
-        connected: value.connected,
-        username: value.username,
-        installation_id: value.installation_id,
-        connected_at: value.connected_at.into_option().map(timestamp_to_rfc3339),
-    }
-}
-
 fn timestamp_to_rfc3339(timestamp: rpc::Timestamp) -> String {
     DateTime::<Utc>::from_timestamp(timestamp.seconds, timestamp.nanos as u32)
         .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
@@ -276,17 +189,5 @@ mod tests {
         assert_eq!(value["limits"]["team_members"]["max"], 10);
         assert_eq!(value["subscriptions"], serde_json::Value::Null);
         assert_eq!(value["current_month_usage"]["memory_gb_hours"], 32.25);
-    }
-
-    #[test]
-    fn github_status_conversion_omits_empty_optional_fields() {
-        let value =
-            serde_json::to_value(legacy_github_status(rpc::GetGitHubStatusResponse::default()))
-                .expect("serialize GitHub status");
-
-        assert_eq!(value["connected"], false);
-        assert!(value.get("username").is_none());
-        assert!(value.get("installation_id").is_none());
-        assert!(value.get("connected_at").is_none());
     }
 }

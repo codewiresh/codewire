@@ -25,25 +25,43 @@ impl fmt::Display for RepositoryMountError {
 
 impl std::error::Error for RepositoryMountError {}
 
-/// Return the explicit mount path, or the legacy repository-name-derived path.
-/// The result is always a normalized descendant of `/workspace`.
-pub(crate) fn effective_repository_mount(
+/// Return the explicit canonical mount path.
+///
+/// User-facing project parsing may derive a destination before constructing a
+/// canonical `ProjectSpec`, but the setup boundary never does. That keeps a
+/// missing or stale wire value from changing the target of the worker's
+/// destructive pre-clone removal.
+pub(crate) fn canonical_repository_mount(
     repo_url: &str,
     mount_path: &str,
 ) -> Result<String, RepositoryMountError> {
-    codewire_project::validate_repository_destinations([(repo_url, mount_path)])
-        .map(|mut paths| paths.remove(0))
-        .map_err(|error| RepositoryMountError::new(error.to_string()))
+    validate_repository_mounts([(repo_url, mount_path)]).map(|mut paths| paths.remove(0))
 }
 
-/// Validate every effective checkout path and reject duplicate or nested
+/// Validate every canonical checkout path and reject duplicate or nested
 /// repositories. Nested targets make the setup worker's pre-clone removal
 /// order-dependent and can destroy a sibling checkout.
 pub(crate) fn validate_repository_mounts<'a>(
     repos: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<Vec<String>, RepositoryMountError> {
-    codewire_project::validate_repository_destinations(repos)
-        .map_err(|error| RepositoryMountError::new(error.to_string()))
+    let repos = repos.into_iter().collect::<Vec<_>>();
+    if repos.iter().any(|(_, destination)| destination.is_empty()) {
+        return Err(RepositoryMountError::new(
+            "repository destination is required at the setup boundary",
+        ));
+    }
+    let normalized = codewire_project::validate_repository_destinations(repos.iter().copied())
+        .map_err(|error| RepositoryMountError::new(error.to_string()))?;
+    if repos
+        .iter()
+        .zip(&normalized)
+        .any(|((_, destination), normalized)| *destination != normalized)
+    {
+        return Err(RepositoryMountError::new(
+            "repository destination must already be canonical",
+        ));
+    }
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -51,21 +69,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derives_legacy_repository_mount() {
-        assert_eq!(
-            effective_repository_mount("https://github.com/org/app.git", "").unwrap(),
-            "/workspace/app"
-        );
-        assert_eq!(
-            effective_repository_mount("git@host:org/app.git", "").unwrap(),
-            "/workspace/app"
-        );
+    fn rejects_missing_repository_mount() {
+        assert!(canonical_repository_mount("https://github.com/org/app.git", "").is_err());
+        assert!(canonical_repository_mount("git@host:org/app.git", "").is_err());
     }
 
     #[test]
     fn accepts_normalized_workspace_descendants() {
         assert_eq!(
-            effective_repository_mount("https://example.com/app", "/workspace/services/app")
+            canonical_repository_mount("https://example.com/app", "/workspace/services/app")
                 .unwrap(),
             "/workspace/services/app"
         );
@@ -85,16 +97,21 @@ mod tests {
             "/workspace/app\nother",
         ] {
             assert!(
-                effective_repository_mount("https://example.com/app", path).is_err(),
+                canonical_repository_mount("https://example.com/app", path).is_err(),
                 "accepted {path:?}"
             );
         }
     }
 
     #[test]
-    fn rejects_unsafe_default_repository_names() {
-        assert!(effective_repository_mount("..", "").is_err());
-        assert!(effective_repository_mount("https://example.com/", "").is_err());
+    fn rejects_invalid_repository_sources() {
+        assert!(canonical_repository_mount("..", "/workspace/app").is_err());
+        assert!(canonical_repository_mount("https://example.com/", "/workspace/app").is_err());
+    }
+
+    #[test]
+    fn rejects_noncanonical_destination_whitespace() {
+        assert!(canonical_repository_mount("https://example.com/app", " /workspace/app ").is_err());
     }
 
     #[test]

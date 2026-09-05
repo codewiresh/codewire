@@ -27,7 +27,7 @@ const DEFAULT_SIDECAR_TOKEN: &str = "eyJlbnZpcm9ubWVudF9pZCI6IjAwMDAwMDAwLTAwMDA
 const DEFAULT_MESH_NETWORK: &str = "mesh-kind-owned";
 const DEFAULT_MESH_API_KEY: &str =
     "cw_c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de";
-const DEFAULT_MESH_ENVIRONMENT_TOKEN: &str = "mesh-kind-environment-token";
+const DEFAULT_RETIRED_MESH_ENVIRONMENT_TOKEN: &str = "mesh-kind-environment-token";
 
 fn smoke_error(message: impl Into<String>) -> Box<dyn Error> {
     Box::new(std::io::Error::other(message.into()))
@@ -83,21 +83,27 @@ async fn mesh_coordinate_probe(
     base_url: &str,
     certificate_der: Vec<u8>,
     org_id: &str,
-    environment_id: Uuid,
 ) -> Result<(), Box<dyn Error>> {
     let network_id = std::env::var("KIND_MESH_COORDINATOR_NETWORK")
         .unwrap_or_else(|_| DEFAULT_MESH_NETWORK.into());
     let api_key = std::env::var("KIND_MESH_COORDINATOR_API_KEY")
         .unwrap_or_else(|_| DEFAULT_MESH_API_KEY.into());
-    let environment_token = std::env::var("KIND_MESH_COORDINATOR_ENVIRONMENT_TOKEN")
-        .unwrap_or_else(|_| DEFAULT_MESH_ENVIRONMENT_TOKEN.into());
-    let mut peer = MeshCoordinatorPeerSession::connect_for_kind_e2e_grpc(
+    let retired_environment_token =
+        std::env::var("KIND_MESH_COORDINATOR_RETIRED_ENVIRONMENT_TOKEN")
+            .unwrap_or_else(|_| DEFAULT_RETIRED_MESH_ENVIRONMENT_TOKEN.into());
+    let retired_environment = MeshCoordinatorPeerSession::connect_for_kind_e2e_grpc(
         base_url,
-        &environment_token,
+        &retired_environment_token,
         MeshCoordinateIdentity::peer(org_id, &network_id),
         certificate_der.clone(),
     )
-    .await?;
+    .await;
+    if retired_environment.is_ok() {
+        return Err(smoke_error(
+            "Mesh accepted the retired raw platform environment bearer",
+        ));
+    }
+
     let mut dial = MeshCoordinatorPeerSession::connect_for_kind_e2e_grpc(
         base_url,
         &api_key,
@@ -106,15 +112,6 @@ async fn mesh_coordinate_probe(
     )
     .await?;
 
-    let mut peer_derp = false;
-    peer.run_for_kind_e2e(
-        Duration::from_millis(250),
-        CoordinatorHandlers {
-            on_peers: |_: &[Node]| {},
-            on_derp_map: |_: &serde_json::Value| peer_derp = true,
-        },
-    )
-    .await?;
     let mut dial_derp = false;
     dial.run_for_kind_e2e(
         Duration::from_millis(250),
@@ -124,27 +121,8 @@ async fn mesh_coordinate_probe(
         },
     )
     .await?;
-    if !peer_derp || !dial_derp {
-        return Err(smoke_error(
-            "Mesh peer and dial streams must receive derp_map first",
-        ));
-    }
-
-    peer.update_node(&sample_node(environment_id, 0x41)).await?;
-    dial.subscribe(environment_id.to_string()).await?;
-    let mut dial_peer_count = 0;
-    dial.run_for_kind_e2e(
-        Duration::from_secs(2),
-        CoordinatorHandlers {
-            on_peers: |peers: &[Node]| dial_peer_count = peers.len(),
-            on_derp_map: |_: &serde_json::Value| {},
-        },
-    )
-    .await?;
-    if dial_peer_count != 1 {
-        return Err(smoke_error(format!(
-            "Mesh dial subscription must receive one typed peer, got {dial_peer_count}"
-        )));
+    if !dial_derp {
+        return Err(smoke_error("Mesh API-key dial must receive derp_map first"));
     }
 
     let heartbeat_stats = dial
@@ -162,29 +140,12 @@ async fn mesh_coordinate_probe(
         )));
     }
 
-    tokio::time::timeout(Duration::from_secs(10), peer.finish_for_kind_e2e())
-        .await
-        .map_err(|_| std::io::Error::other("Mesh peer stream did not close cleanly"))??;
-    let mut remaining_peers = 1;
-    dial.run_for_kind_e2e(
-        Duration::from_secs(2),
-        CoordinatorHandlers {
-            on_peers: |peers: &[Node]| remaining_peers = peers.len(),
-            on_derp_map: |_: &serde_json::Value| {},
-        },
-    )
-    .await?;
-    if remaining_peers != 0 {
-        return Err(smoke_error(format!(
-            "Mesh peer removal did not clear the dial snapshot: {remaining_peers} peers"
-        )));
-    }
     tokio::time::timeout(Duration::from_secs(10), dial.finish_for_kind_e2e())
         .await
         .map_err(|_| std::io::Error::other("Mesh dial stream did not close cleanly"))??;
 
     println!(
-        "coordinator-ingress-smoke: Mesh native-gRPC peer/dial auth + subscribe + typed peer update/remove + heartbeat DATA sent={} received={}: OK",
+        "coordinator-ingress-smoke: Mesh rejected the retired raw environment bearer; API-key dial heartbeat DATA sent={} received={}: OK",
         heartbeat_stats.sent, heartbeat_stats.received
     );
     Ok(())
@@ -314,7 +275,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await
     .map_err(|_| std::io::Error::other("direct Connect stream did not close cleanly"))??;
 
-    mesh_coordinate_probe(&base_url, certificate_der, &org_id, environment_id).await?;
+    mesh_coordinate_probe(&base_url, certificate_der, &org_id).await?;
 
     println!(
         "coordinator-ingress-smoke: public gRPC + direct-h2c generated service hello -> derp_map -> bidirectional node/peer_update; public gRPC typed heartbeat DATA sent={} received={} across 65s idle; clean close: OK",

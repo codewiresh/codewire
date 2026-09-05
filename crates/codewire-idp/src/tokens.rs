@@ -3,9 +3,9 @@
 //! The library's generic code→grant / access→grant / refresh→grant model is
 //! mapped onto the existing schema:
 //!
-//! - **authorization codes** reuse `oidc_auth_requests` (Go stored the code
-//!   there too). A code is a single row keyed by its `code`; `consume_code`
-//!   is an atomic `DELETE … RETURNING`.
+//! - **authorization codes** reuse `oidc_auth_requests`. The raw code is
+//!   returned once; only its digest is stored, and `consume_code` is an atomic
+//!   `DELETE … RETURNING` by digest.
 //! - **refresh tokens** live in `oidc_refresh_tokens`; `consume_refresh`
 //!   rotates via `DELETE … RETURNING`, `get_refresh` reads non-destructively.
 //! - **access tokens** are the source of truth in `oidc_access_tokens`
@@ -68,16 +68,18 @@ impl TokenStore for PgTokenStore {
         let auth_time = grant
             .auth_time
             .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0));
+        let code_hash = hash_oauth_token(code);
+        let id = hex_id();
         sqlx::query(
             r#"
             INSERT INTO oidc_auth_requests
                 (id, client_id, scopes, redirect_uri, response_type,
-                 code_challenge, nonce, user_id, auth_time, code, done, expires_at)
-            VALUES ($1, $2, $3, $4, 'code', $5, $6, $7, $8, $1, true,
-                    NOW() + ($9::bigint * interval '1 second'))
+                 code_challenge, nonce, user_id, auth_time, code_hash, done, expires_at)
+            VALUES ($1, $2, $3, $4, 'code', $5, $6, $7, $8, $9, true,
+                    NOW() + ($10::bigint * interval '1 second'))
             "#,
         )
-        .bind(code)
+        .bind(id)
         .bind(&grant.client_id)
         .bind(&grant.scopes.0)
         .bind(&grant.redirect_uri)
@@ -85,6 +87,7 @@ impl TokenStore for PgTokenStore {
         .bind(&grant.nonce)
         .bind(&grant.subject.0)
         .bind(auth_time)
+        .bind(code_hash)
         .bind(expires_in_secs as i64)
         .execute(&self.pool)
         .await
@@ -94,6 +97,7 @@ impl TokenStore for PgTokenStore {
 
     async fn consume_code(&self, code: &str) -> StoreResult<Option<AuthCodeGrant>> {
         // Atomic single-use: delete-and-return the still-valid code row.
+        let code_hash = hash_oauth_token(code);
         let row: Option<(
             String,
             String,
@@ -105,12 +109,12 @@ impl TokenStore for PgTokenStore {
         )> = sqlx::query_as(
             r#"
                 DELETE FROM oidc_auth_requests
-                WHERE code = $1 AND expires_at > NOW()
+                WHERE code_hash = $1 AND expires_at > NOW()
                 RETURNING client_id, redirect_uri, user_id, scopes,
                           code_challenge, nonce, auth_time
                 "#,
         )
-        .bind(code)
+        .bind(code_hash)
         .fetch_optional(&self.pool)
         .await
         .map_err(StoreError::new)?;

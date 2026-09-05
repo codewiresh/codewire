@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_setup_pb2 import DetectRepoRequest, DetectRepoResponse, GetEnvironmentCreateOptionsRequest, GetEnvironmentCreateOptionsResponse, IssueTerminalTicketRequest, IssueTerminalTicketResponse
+from .environment_setup_pb2 import GetEnvironmentCreateOptionsRequest, GetEnvironmentCreateOptionsResponse, IssueTerminalTicketRequest, IssueTerminalTicketResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -36,9 +36,6 @@ _GZIP_COMPRESSION = GzipCompression()
 
 class EnvironmentSetupService(Protocol):
     async def get_environment_create_options(self, request: GetEnvironmentCreateOptionsRequest, ctx: RequestContext[GetEnvironmentCreateOptionsRequest, GetEnvironmentCreateOptionsResponse]) -> GetEnvironmentCreateOptionsResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def detect_repo(self, request: DetectRepoRequest, ctx: RequestContext[DetectRepoRequest, DetectRepoResponse]) -> DetectRepoResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def issue_terminal_ticket(self, request: IssueTerminalTicketRequest, ctx: RequestContext[IssueTerminalTicketRequest, IssueTerminalTicketResponse]) -> IssueTerminalTicketResponse:
@@ -67,16 +64,6 @@ class EnvironmentSetupServiceASGIApplication(ConnectASGIApplication[EnvironmentS
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.get_environment_create_options,
-                ),
-                "/codewire.console.v1.EnvironmentSetupService/DetectRepo": Endpoint.unary(
-                    method=MethodInfo(
-                        name="DetectRepo",
-                        service_name="codewire.console.v1.EnvironmentSetupService",
-                        input=DetectRepoRequest,
-                        output=DetectRepoResponse,
-                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-                    ),
-                    function=svc.detect_repo,
                 ),
                 "/codewire.console.v1.EnvironmentSetupService/IssueTerminalTicket": Endpoint.unary(
                     method=MethodInfo(
@@ -148,28 +135,6 @@ class EnvironmentSetupServiceClient(ConnectClient):
             use_get=use_get,
         )
 
-    async def detect_repo(
-        self,
-        request: DetectRepoRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-        use_get: bool = False,
-    ) -> DetectRepoResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="DetectRepo",
-                service_name="codewire.console.v1.EnvironmentSetupService",
-                input=DetectRepoRequest,
-                output=DetectRepoResponse,
-                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-            use_get=use_get,
-        )
-
     async def issue_terminal_ticket(
         self,
         request: IssueTerminalTicketRequest,
@@ -192,9 +157,6 @@ class EnvironmentSetupServiceClient(ConnectClient):
 
 class EnvironmentSetupServiceSync(Protocol):
     def get_environment_create_options(self, request: GetEnvironmentCreateOptionsRequest, ctx: RequestContext[GetEnvironmentCreateOptionsRequest, GetEnvironmentCreateOptionsResponse]) -> GetEnvironmentCreateOptionsResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def detect_repo(self, request: DetectRepoRequest, ctx: RequestContext[DetectRepoRequest, DetectRepoResponse]) -> DetectRepoResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def issue_terminal_ticket(self, request: IssueTerminalTicketRequest, ctx: RequestContext[IssueTerminalTicketRequest, IssueTerminalTicketResponse]) -> IssueTerminalTicketResponse:
@@ -221,16 +183,6 @@ class EnvironmentSetupServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.get_environment_create_options,
-                ),
-                "/codewire.console.v1.EnvironmentSetupService/DetectRepo": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="DetectRepo",
-                        service_name="codewire.console.v1.EnvironmentSetupService",
-                        input=DetectRepoRequest,
-                        output=DetectRepoResponse,
-                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-                    ),
-                    function=service.detect_repo,
                 ),
                 "/codewire.console.v1.EnvironmentSetupService/IssueTerminalTicket": EndpointSync.unary(
                     method=MethodInfo(
@@ -295,27 +247,6 @@ class EnvironmentSetupServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.EnvironmentSetupService",
                 input=GetEnvironmentCreateOptionsRequest,
                 output=GetEnvironmentCreateOptionsResponse,
-                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-            use_get=use_get,
-        )
-    def detect_repo(
-        self,
-        request: DetectRepoRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-        use_get: bool = False,
-    ) -> DetectRepoResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="DetectRepo",
-                service_name="codewire.console.v1.EnvironmentSetupService",
-                input=DetectRepoRequest,
-                output=DetectRepoResponse,
                 idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,

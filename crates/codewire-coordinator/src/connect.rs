@@ -523,7 +523,9 @@ mod tests {
         }
 
         sqlx::query(
-            "INSERT INTO environment_presets (id, name, slug, official) VALUES ($1, $2, $3, true)",
+            r#"INSERT INTO environment_presets (id, name, slug, official, project_spec)
+               VALUES ($1, $2, $3, true,
+                       '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
         )
         .bind(&preset_id)
         .bind(format!("Coordinator protocol {ns}"))
@@ -534,9 +536,10 @@ mod tests {
 
         for (environment_id, org_id, suffix) in [(env_a, &org_a, "a"), (env_b, &org_b, "b")] {
             sqlx::query(
-                "INSERT INTO environments \
-                 (id, org_id, created_by, type, name, state, preset_id) \
-                 VALUES ($1, $2, $3, 'sandbox', $4, 'running', $5)",
+                r#"INSERT INTO environments
+                   (id, org_id, created_by, type, name, state, preset_id, project_spec)
+                   VALUES ($1, $2, $3, 'sandbox', $4, 'running', $5,
+                           '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
             )
             .bind(environment_id.to_string())
             .bind(org_id)
@@ -776,12 +779,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordinator_rejects_a_daemon_scoped_capability() {
+        let (state, auth) = lazy_state();
+        let authorizer = ProductionAuthorizer { state, auth };
+        let environment_id = Uuid::new_v4().to_string();
+        let daemon_scope = sign_sidecar_token("secret", &environment_id, "daemon");
+
+        let error = match authorizer
+            .authorize(
+                &headers_with_bearer(&daemon_scope),
+                None,
+                Hello {
+                    environment_id,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("daemon capability unexpectedly authorized coordinator access"),
+        };
+        assert_eq!(error.code, connectrpc::ErrorCode::PermissionDenied);
+    }
+
+    #[tokio::test]
     async fn production_credential_dispatch_rejects_with_d3_codes_without_db() {
         let (state, auth) = lazy_state();
         let authorizer = ProductionAuthorizer { state, auth };
         let environment_id = Uuid::new_v4().to_string();
         let sidecar = sign_sidecar_token("secret", &environment_id, SCOPE_COORDINATE);
-        let wrong_scope = sign_sidecar_token("secret", &environment_id, "other");
+        let daemon_scope = sign_sidecar_token("secret", &environment_id, "daemon");
         let other_environment = Uuid::new_v4().to_string();
 
         let cases = [
@@ -795,7 +822,7 @@ mod tests {
                 connectrpc::ErrorCode::Unauthenticated,
             ),
             (
-                headers_with_bearer(&wrong_scope),
+                headers_with_bearer(&daemon_scope),
                 Hello {
                     environment_id: environment_id.clone(),
                     ..Default::default()

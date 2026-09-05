@@ -22,9 +22,6 @@
 //! - the D7 per-RPC log event carries the correct credential kind per row,
 //! - credentialed Connect GET responses carry `Cache-Control: private`
 //!   (D6b cache posture).
-//! - an environment bearer resolves only its active environment and owning
-//!   user, never an `AuthUser`; missing, invalid, and destroyed credentials
-//!   render `unauthenticated` (WS09 D5).
 //!
 //! Skipped unless `DATABASE_URL` is set (same convention as the idp
 //! `db_flow` suite); the migration-integration gate runs it against a
@@ -35,20 +32,15 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::Engine;
-use codewire_proto::codewire::testing::v1::{
-    AdminPingRequest, AdminPingResponse, PingRequest, PingResponse, PingService, PingServiceClient,
-    PublicPingRequest, PublicPingResponse, StreamPingRequest, StreamPingResponse,
-};
+use codewire_proto::codewire::testing::v1::{PingRequest, PingServiceClient};
 use codewire_server_core::AppBuilder;
 use codewire_server_core::auth::{
     AuthState, api_key_prefix, generate_api_key, hash_api_key, hash_oauth_token, hash_session_token,
 };
-use codewire_server_core::connect::{ConnectAuthLayer, ProtocolPolicy, environment_identity};
+use codewire_server_core::connect::{ConnectAuthLayer, ProtocolPolicy};
 use codewire_server_core::connect_testing::{self, ProbePingService};
 use connectrpc::client::{ClientConfig, HttpClient};
-use connectrpc::{
-    ErrorCode, Protocol, RequestContext, ServiceRequest, ServiceResult, ServiceStream,
-};
+use connectrpc::{ErrorCode, Protocol};
 use http::header::AUTHORIZATION;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -132,7 +124,6 @@ fn principal_fingerprint(user_id: &str) -> String {
 struct Seeded {
     user_id: String,
     admin_user_id: String,
-    org_id: String,
     session_token: String,
     admin_session_token: String,
     api_key: String,
@@ -305,7 +296,6 @@ async fn seed(pool: &PgPool, ns: &str) -> Seeded {
     Seeded {
         user_id,
         admin_user_id,
-        org_id,
         session_token,
         admin_session_token,
         api_key,
@@ -314,49 +304,6 @@ async fn seed(pool: &PgPool, ns: &str) -> Seeded {
         identity_oidc_token,
         expired_oidc_token,
     }
-}
-
-async fn seed_environment(
-    pool: &PgPool,
-    seeded: &Seeded,
-    ns: &str,
-    state: &str,
-) -> (String, String) {
-    let environment_id = format!("env_cwi3_{ns}");
-    let preset_id = format!("preset_cwi3_{ns}");
-    let token = format!("envtok_cwi3_{ns}_{}", uuid_like());
-    let desired_state = if state == "destroyed" {
-        "destroyed"
-    } else {
-        "started"
-    };
-
-    sqlx::query("INSERT INTO environment_presets (id, org_id, name, slug) VALUES ($1, $2, $3, $4)")
-        .bind(&preset_id)
-        .bind(&seeded.org_id)
-        .bind(format!("Connect WI3 {ns}"))
-        .bind(&preset_id)
-        .execute(pool)
-        .await
-        .unwrap();
-
-    sqlx::query(
-        "INSERT INTO environments \
-             (id, org_id, created_by, type, state, desired_state, preset_id, auth_token) \
-         VALUES ($1, $2, $3, 'sandbox', $4, $5, $6, $7)",
-    )
-    .bind(&environment_id)
-    .bind(&seeded.org_id)
-    .bind(&seeded.user_id)
-    .bind(state)
-    .bind(desired_state)
-    .bind(&preset_id)
-    .bind(&token)
-    .execute(pool)
-    .await
-    .unwrap();
-
-    (environment_id, token)
 }
 
 fn uuid_like() -> String {
@@ -388,67 +335,6 @@ async fn start_app_with_protocol(
     let app = AppBuilder::new("codewire-server-core-test")
         .with_health()
         .with_connect_routes_auth_and_protocol_policy(connect, auth, protocol_policy)
-        .into_router();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(codewire_server_core::serve_with_listener(app, listener));
-    addr
-}
-
-/// Probe used only to prove that the environment-token mount copies its
-/// resolved identity into the generated Connect request context.
-struct EnvironmentProbePingService;
-
-#[allow(refining_impl_trait)]
-impl PingService for EnvironmentProbePingService {
-    async fn public_ping(
-        &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, PublicPingRequest>,
-    ) -> ServiceResult<PublicPingResponse> {
-        connectrpc::Response::ok(PublicPingResponse::default())
-    }
-
-    async fn ping(
-        &self,
-        ctx: RequestContext,
-        _request: ServiceRequest<'_, PingRequest>,
-    ) -> ServiceResult<PingResponse> {
-        let identity = environment_identity(&ctx)?;
-        connectrpc::Response::ok(PingResponse {
-            message: format!("{}:{}", identity.environment_id, identity.user_id),
-            ..Default::default()
-        })
-    }
-
-    async fn admin_ping(
-        &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, AdminPingRequest>,
-    ) -> ServiceResult<AdminPingResponse> {
-        connectrpc::Response::ok(AdminPingResponse::default())
-    }
-
-    async fn stream_ping(
-        &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, StreamPingRequest>,
-    ) -> ServiceResult<ServiceStream<StreamPingResponse>> {
-        Err(connectrpc::ConnectError::unimplemented(
-            "not used by environment auth probe",
-        ))
-    }
-}
-
-async fn start_environment_app(auth: ConnectAuthLayer) -> SocketAddr {
-    init_log_capture();
-    let connect = connectrpc::Router::new().add_service(Arc::new(EnvironmentProbePingService));
-    let app = AppBuilder::new("codewire-server-core-test")
-        .with_health()
-        .with_connect_routes_auth(connect, auth)
         .into_router();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -647,98 +533,6 @@ async fn locked_api_key_usage_row_does_not_block_authentication() {
             .await
             .expect("read API-key usage timestamp");
     assert!(last_used.is_none());
-}
-
-/// D5 environment-token mount: only an active environment's bearer token
-/// resolves, and handlers receive its environment plus owning-user identity
-/// without gaining product-user authority.
-#[tokio::test]
-async fn environment_token_mount_injects_only_active_environment_identity() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("DATABASE_URL unset — skipping environment-token Connect auth test");
-        return;
-    };
-    let pool = PgPool::connect(&url).await.expect("connect");
-    let seeded = seed(&pool, "environment-token").await;
-    let (environment_id, environment_token) =
-        seed_environment(&pool, &seeded, "environment-token-active", "running").await;
-    let (_, destroyed_token) =
-        seed_environment(&pool, &seeded, "environment-token-destroyed", "destroyed").await;
-
-    let addr = start_environment_app(ConnectAuthLayer::environment_token(AuthState {
-        pool: pool.clone(),
-    }))
-    .await;
-    let client = reqwest::Client::new();
-    let user_fingerprint = principal_fingerprint(&seeded.user_id);
-
-    // The generated Connect handler sees exactly the active environment and
-    // its owner. It has no `AuthUser` extractor path.
-    let resp = post_ping(
-        &client,
-        &ping_url(addr, "Ping"),
-        r#"{"message":"identity"}"#,
-        None,
-        Some(&environment_token),
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        200,
-        "active environment token must authenticate"
-    );
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let expected_identity = format!("{environment_id}:{}", seeded.user_id);
-    assert_eq!(body["message"].as_str(), Some(expected_identity.as_str()));
-    assert_log_line(&[
-        "method=Ping",
-        "code=ok",
-        "credential=environment_token",
-        &format!("principal_fingerprint={user_fingerprint}"),
-    ]);
-    let event = find_log_line(&[
-        "method=Ping",
-        "credential=environment_token",
-        &format!("principal_fingerprint={user_fingerprint}"),
-    ]);
-    for secret_or_identity in [&environment_token, &environment_id, &seeded.user_id] {
-        assert!(
-            !event.contains(secret_or_identity),
-            "environment-token telemetry must not expose a raw token or identity"
-        );
-    }
-
-    // A product session is not an environment credential. The mode reads
-    // only Authorization Bearer and cannot fall back to a cookie.
-    let resp = post_ping(
-        &client,
-        &ping_url(addr, "Ping"),
-        r#"{"message":"identity"}"#,
-        Some(&seeded.session_token),
-        None,
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        401,
-        "product session must not authenticate environment mount"
-    );
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["code"], "unauthenticated");
-
-    for bearer in ["not-an-environment-token", destroyed_token.as_str()] {
-        let resp = post_ping(
-            &client,
-            &ping_url(addr, "Ping"),
-            r#"{"message":"identity"}"#,
-            None,
-            Some(bearer),
-        )
-        .await;
-        assert_eq!(resp.status(), 401, "invalid or destroyed token must reject");
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["code"], "unauthenticated");
-    }
 }
 
 /// The WI-2 acceptance matrix against the production probe wiring

@@ -40,7 +40,7 @@ pub fn resolve_workload_secret_metadata<'a>(
             return Err(WorkloadSecretCodecError::NonCanonicalOrdering);
         }
         previous_source = Some(source);
-        validate_workload_secret_metadata_key(key)?;
+        validate_workload_secret_key(key)?;
         let entry = sources.entry(key.to_owned()).or_default();
         if entry.last() == Some(&source) {
             return Err(WorkloadSecretCodecError::NonCanonicalOrdering);
@@ -80,20 +80,6 @@ pub fn validate_workload_secret_key(key: &str) -> Result<(), WorkloadSecretCodec
     Ok(())
 }
 
-/// Validates key-only resolution metadata across platform and local sources.
-/// Platform storage historically permits an ASCII digit first.
-pub fn validate_workload_secret_metadata_key(key: &str) -> Result<(), WorkloadSecretCodecError> {
-    if key.is_empty()
-        || key.len() > MAX_WORKLOAD_SECRET_KEY_BYTES
-        || !key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err(WorkloadSecretCodecError::InvalidKey);
-    }
-    Ok(())
-}
-
 /// Validates one workload-secret value without rendering or retaining it.
 pub fn validate_workload_secret_value(value: &[u8]) -> Result<(), WorkloadSecretCodecError> {
     if value.is_empty()
@@ -123,7 +109,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workload_secret_key_validation_uses_the_shared_storage_boundary() {
+    fn workload_secret_key_validation_uses_one_canonical_grammar() {
         let below_maximum = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 2));
         let maximum = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES - 1));
         let too_long = format!("A{}", "_".repeat(MAX_WORKLOAD_SECRET_KEY_BYTES));
@@ -133,10 +119,10 @@ mod tests {
         assert_eq!(too_long.len(), 256);
         for valid in [&below_maximum, &maximum] {
             assert!(validate_workload_secret_key(valid).is_ok());
-            assert!(validate_workload_secret_metadata_key(valid).is_ok());
         }
         assert!(validate_workload_secret_key(&too_long).is_err());
-        assert!(validate_workload_secret_metadata_key(&too_long).is_err());
+        assert!(validate_workload_secret_key("_UNDERSCORE_FIRST").is_ok());
+        assert!(validate_workload_secret_key("1DIGIT_FIRST").is_err());
     }
 
     #[test]
@@ -202,14 +188,12 @@ mod tests {
             ])
             .is_err()
         );
-        assert_eq!(
+        assert!(
             resolve_workload_secret_metadata([(
                 WorkloadSecretSource::Organization,
-                "1LEGACY_PLATFORM_KEY",
+                "1DIGIT_FIRST",
             )])
-            .unwrap()[0]
-                .key,
-            "1LEGACY_PLATFORM_KEY"
+            .is_err()
         );
         assert!(
             resolve_workload_secret_metadata([(WorkloadSecretSource::Organization, "unsafe/key",)])

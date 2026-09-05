@@ -461,7 +461,7 @@ mod tests {
             listen_addr: "127.0.0.1:0".into(),
             workspace_root: workspace.clone(),
             home_root: home,
-            auth_token: None,
+            auth_token: crate::DaemonAuthToken::new("daemon-linux-files-test-token").unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
         };

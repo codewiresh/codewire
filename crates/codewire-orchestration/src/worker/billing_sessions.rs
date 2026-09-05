@@ -769,7 +769,7 @@ mod tests {
             "spec": {
                 "podTemplate": {
                     "spec": {
-                        "runtimeClassName": "isol8",
+                        "runtimeClassName": "commodity",
                         "containers": [
                             { "name": "workspace", "resources": { "requests": {
                                 "cpu": "1500m", "memory": "2Gi" } } },
@@ -787,7 +787,7 @@ mod tests {
         assert_eq!(got.cpu_millicores, 1750);
         assert_eq!(got.memory_mib, 2560);
         assert_eq!(got.disk_gib, 20);
-        assert_eq!(got.runtime_class.as_deref(), Some("isol8"));
+        assert_eq!(got.runtime_class.as_deref(), Some("commodity"));
     }
 
     #[test]
@@ -808,7 +808,7 @@ mod tests {
         let sandbox = json!({
             "spec": {
                 "podTemplate": { "spec": {
-                    "runtimeClassName": "isol8",
+                    "runtimeClassName": "commodity",
                     "containers": [
                         { "name": "workspace", "resources": { "requests": {
                             "cpu": "4", "memory": "8Gi" } } },
@@ -828,7 +828,7 @@ mod tests {
         assert_eq!(applied.cpu_millicores, 2250);
         assert_eq!(applied.memory_mib, 4608);
         assert_eq!(applied.disk_gib, 30);
-        assert_eq!(applied.runtime_class.as_deref(), Some("isol8"));
+        assert_eq!(applied.runtime_class.as_deref(), Some("commodity"));
     }
 
     // Mirrors `TestClassify`.

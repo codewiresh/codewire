@@ -7,18 +7,15 @@ use super::naming::{workspace_daemon_service_name, workspace_selector, workspace
 use super::network::workspace_egress_rules;
 use super::runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_CONFIDENTIAL,
-    RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN, RuntimeProfileSpec, dind_image, dind_memory_limit_gib,
-    docker_data_size_gib, kata_coco_kernel_params_annotation, uses_kata_policy_init_data,
-    workspace_storage_class,
+    RuntimeProfileSpec, dind_image, dind_memory_limit_gib, docker_data_size_gib,
+    kata_coco_kernel_params_annotation, uses_kata_policy_init_data, workspace_storage_class,
 };
 use super::{
-    DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, EXTENSIONS_API_VERSION,
-    GATEWAY_DOCKER_UPSTREAM_SOCK_PATH, HOME_ROOT, ISOL8_DISK_GIB_ANNOTATION_KEY,
-    ISOL8_WORKSPACE_ANNOTATION_KEY, KATA_COCO_INIT_DATA_ANNOTATION_KEY,
-    KATA_CONFIDENTIAL_VOLUME_ANNOTATION, KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH,
-    KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, SANDBOX_SERVICE_ACCOUNT, TemplateOpts,
-    WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR, WORKSPACE_DAEMON_PORT,
-    WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
+    DAEMON_AUTH_TOKEN_ENV, DEFAULT_GATEWAY_IMAGE, DIND_SOCKET_PATH, EXTENSIONS_API_VERSION,
+    HOME_ROOT, KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
+    KATA_CONFIDENTIAL_WORKSPACE_DEVICE_PATH, KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY,
+    SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_ANNOTATION_KEY, WORKSPACE_DAEMON_LISTEN_ADDR,
+    WORKSPACE_DAEMON_PORT, WORKSPACE_DISK_GIB_ANNOTATION_KEY, WORKSPACE_EPHEMERAL_STORAGE_GI,
 };
 
 /// Mirrors `sandbox.RenderSandboxTemplate`.
@@ -31,7 +28,7 @@ pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
     })
 }
 
-/// Render the exact SandboxBlueprint copied into warm-pool members.
+/// Render the exact environment-scoped SandboxBlueprint.
 pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
     let support_image = if opts.support_image.is_empty() {
         DEFAULT_GATEWAY_IMAGE
@@ -40,8 +37,8 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
     };
 
     const ENSURE_USER_CMD: &str = "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group;";
-    const WAIT_DAEMON_CMD: &str =
-        "while [ ! -x /codewire/bin/codewire-daemon ]; do sleep 0.1; done;";
+    const WAIT_DAEMON_CMD: &str = "while [ ! -x /codewire/bin/cw ]; do sleep 0.1; done;";
+    const HOSTED_DAEMON_CMD: &str = "/codewire/bin/cw __hosted-daemon";
 
     let ws_command: Vec<Value> = if !opts.image_command.is_empty() {
         let entrypoint = opts
@@ -56,7 +53,7 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
             custom_workspace_supervisor_command(
                 ENSURE_USER_CMD,
                 WAIT_DAEMON_CMD,
-                "/codewire/bin/codewire-daemon",
+                HOSTED_DAEMON_CMD,
                 &entrypoint,
             )
             .into(),
@@ -65,8 +62,7 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
         vec![
             "sh".into(),
             "-c".into(),
-            format!("{ENSURE_USER_CMD} {WAIT_DAEMON_CMD} exec /codewire/bin/codewire-daemon")
-                .into(),
+            format!("{ENSURE_USER_CMD} {WAIT_DAEMON_CMD} exec {HOSTED_DAEMON_CMD}").into(),
         ]
     };
 
@@ -114,7 +110,7 @@ pub(super) fn custom_workspace_supervisor_command(
     format!(
         "{ensure_user} {wait_daemon} \
          {daemon_command} & daemon_pid=$!; \
-         {entrypoint} & workload_pid=$!; \
+         (unset {DAEMON_AUTH_TOKEN_ENV}; exec {entrypoint}) & workload_pid=$!; \
          shutdown() {{ \
            kill \"$workload_pid\" \"$daemon_pid\" 2>/dev/null || true; \
            wait \"$workload_pid\" 2>/dev/null || true; \
@@ -145,15 +141,6 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
             WORKSPACE_DISK_GIB_ANNOTATION_KEY.into(),
             format!("{}", opts.disk_gib).into(),
         );
-    }
-    if runtime_spec.profile == RUNTIME_PROFILE_EXTERNAL_ISOL8_XEN {
-        annotations.insert(ISOL8_WORKSPACE_ANNOTATION_KEY.into(), "true".into());
-        if opts.disk_gib > 0 {
-            annotations.insert(
-                ISOL8_DISK_GIB_ANNOTATION_KEY.into(),
-                format!("{}", opts.disk_gib).into(),
-            );
-        }
     }
     if uses_kata_policy_init_data(opts, &runtime_spec) {
         annotations.insert(
@@ -299,32 +286,6 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
             runtime_spec.runtime_class_name.clone().into(),
         );
     }
-    if !opts.node_selector.is_empty() {
-        let sel: Map<String, Value> = opts
-            .node_selector
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-            .collect();
-        spec.insert("nodeSelector".into(), Value::Object(sel));
-    }
-    if !opts.tolerations.is_empty() {
-        let tolerations: Vec<Value> = opts
-            .tolerations
-            .iter()
-            .map(|t| {
-                let mut tol = Map::new();
-                tol.insert("key".into(), t.key.clone().into());
-                tol.insert("operator".into(), t.operator.clone().into());
-                tol.insert("effect".into(), t.effect.clone().into());
-                if !t.value.is_empty() {
-                    tol.insert("value".into(), t.value.clone().into());
-                }
-                Value::Object(tol)
-            })
-            .collect();
-        spec.insert("tolerations".into(), Value::Array(tolerations));
-    }
-
     let mut containers: Vec<Value> = Vec::new();
     if runtime_spec.docker_mode == DOCKER_MODE_LOCAL_DIND_DIRECT
         || runtime_spec.docker_mode == DOCKER_MODE_GUEST_DIND
@@ -419,7 +380,7 @@ fn daemon_init_container(support_image: &str) -> Value {
         "image": support_image,
         "command": [
             "sh", "-c",
-            "cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw && ln -sf cw /codewire/bin/daemon && ln -sf cw /codewire/bin/codewire-daemon",
+            "cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw",
         ],
         "volumeMounts": [
             { "name": "codewire-bin", "mountPath": "/codewire/bin" },
@@ -453,7 +414,7 @@ elif [ "$mount_mode" != "none" ]; then
   echo "unsupported CODEWIRE_DOCKER_MOUNT_MODE=$mount_mode" >&2
   exit 1
 fi
-exec dockerd --host "unix://{GATEWAY_DOCKER_UPSTREAM_SOCK_PATH}" --group 1000 --data-root "$data_root" --storage-driver vfs"#
+exec dockerd --host "unix://{DIND_SOCKET_PATH}" --group 1000 --data-root "$data_root" --storage-driver vfs"#
     )
 }
 
@@ -468,7 +429,7 @@ fn dind_container(
         json!([
             "dockerd",
             "--host",
-            format!("unix://{GATEWAY_DOCKER_UPSTREAM_SOCK_PATH}"),
+            format!("unix://{DIND_SOCKET_PATH}"),
             "--group",
             "1000",
             "--storage-driver",
@@ -510,15 +471,14 @@ fn dind_container(
 }
 
 fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
-    let mut env = vec![
+    codewire_gateway_proto::DaemonAuthToken::new(opts.daemon_auth_token.clone())
+        .expect("hosted workspace requires a canonical daemon auth token");
+    vec![
         json!({ "name": "CODEWIRE_WORKSPACE_SHIM_ADDR", "value": WORKSPACE_DAEMON_LISTEN_ADDR }),
         json!({ "name": "HOME", "value": HOME_ROOT }),
         json!({ "name": "USER", "value": "codewire" }),
-    ];
-    if !opts.gateway_token.is_empty() {
-        env.push(json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.gateway_token }));
-    }
-    env
+        json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.daemon_auth_token }),
+    ]
 }
 
 fn shell_quote(value: &str) -> String {

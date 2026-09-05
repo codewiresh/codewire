@@ -6,14 +6,10 @@ use axum::{
 };
 use connectrpc::ErrorCode;
 use serde::Deserialize;
-use url::Url;
 
 use crate::{
     auth::{authenticated_identity, enforce_two_factor},
-    connect::{
-        create_git_credential, delete_git_credential, disconnect_github, ensure_ssh_key,
-        regenerate_ssh_key, settings_data, update_git_identity,
-    },
+    connect::{settings_data, update_git_identity},
     error::WebError,
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     security::{
@@ -22,10 +18,7 @@ use crate::{
     },
     state::AppState,
     templates::{SettingsPlaceholderTemplate, SettingsTemplate},
-    view::{
-        CredentialIdSubmission, CsrfSubmission, GitCredentialSubmission, GitIdentitySubmission,
-        SettingsPageView, SettingsPlaceholderView,
-    },
+    view::{GitIdentitySubmission, SettingsPageView, SettingsPlaceholderView},
 };
 
 const SETTINGS_PATH: &str = "/settings/";
@@ -79,7 +72,6 @@ pub(super) async fn settings(
     let settings = SettingsPageView {
         data,
         csrf_token: csrf.clone(),
-        github_connect_url: github_connect_url(&state, &query.org),
         message: approved_message(&query.message).to_owned(),
         error: approved_error(&query.error).to_owned(),
     };
@@ -90,76 +82,6 @@ pub(super) async fn settings(
         }),
         csrf_cookie(&state.public_origin, &csrf),
     )
-}
-
-pub(super) async fn disconnect_github_action(
-    State(state): State<AppState>,
-    Query(query): Query<SettingsQuery>,
-    headers: HeaderMap,
-    Form(form): Form<CsrfSubmission>,
-) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    match disconnect_github(&state, cookie).await {
-        Ok(()) => settings_redirect("github-disconnected", false, &query.org, &headers),
-        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
-    }
-}
-
-pub(super) async fn create_credential_action(
-    State(state): State<AppState>,
-    Query(query): Query<SettingsQuery>,
-    headers: HeaderMap,
-    Form(form): Form<GitCredentialSubmission>,
-) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    let name = form.name.trim();
-    let host = form.host.trim();
-    if name.is_empty()
-        || host.is_empty()
-        || form.password.is_empty()
-        || name.len() > 128
-        || host.len() > 253
-    {
-        return settings_redirect("credential-invalid", true, &query.org, &headers);
-    }
-    match create_git_credential(
-        &state,
-        cookie,
-        name.to_owned(),
-        host.to_owned(),
-        form.username.trim().to_owned(),
-        form.password,
-    )
-    .await
-    {
-        Ok(()) => settings_redirect("credential-created", false, &query.org, &headers),
-        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
-    }
-}
-
-pub(super) async fn delete_credential_action(
-    State(state): State<AppState>,
-    Query(query): Query<SettingsQuery>,
-    headers: HeaderMap,
-    Form(form): Form<CredentialIdSubmission>,
-) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    if form.credential_id.is_empty() || form.credential_id.len() > 256 {
-        return settings_redirect("credential-invalid", true, &query.org, &headers);
-    }
-    match delete_git_credential(&state, cookie, form.credential_id).await {
-        Ok(()) => settings_redirect("credential-deleted", false, &query.org, &headers),
-        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
-    }
 }
 
 pub(super) async fn update_identity_action(
@@ -184,38 +106,6 @@ pub(super) async fn update_identity_action(
     .await
     {
         Ok(()) => settings_redirect("identity-saved", false, &query.org, &headers),
-        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
-    }
-}
-
-pub(super) async fn ensure_ssh_action(
-    State(state): State<AppState>,
-    Query(query): Query<SettingsQuery>,
-    headers: HeaderMap,
-    Form(form): Form<CsrfSubmission>,
-) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    match ensure_ssh_key(&state, cookie).await {
-        Ok(()) => settings_redirect("ssh-created", false, &query.org, &headers),
-        Err(error) => connect_mutation_error(error.code, &query.org, &headers),
-    }
-}
-
-pub(super) async fn regenerate_ssh_action(
-    State(state): State<AppState>,
-    Query(query): Query<SettingsQuery>,
-    headers: HeaderMap,
-    Form(form): Form<CsrfSubmission>,
-) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    match regenerate_ssh_key(&state, cookie).await {
-        Ok(()) => settings_redirect("ssh-regenerated", false, &query.org, &headers),
         Err(error) => connect_mutation_error(error.code, &query.org, &headers),
     }
 }
@@ -364,36 +254,15 @@ fn settings_redirect(
     redirect(format!("{SETTINGS_PATH}?{}", query.finish()), headers)
 }
 
-fn github_connect_url(state: &AppState, selected_slug: &str) -> String {
-    let mut url = Url::parse(&format!(
-        "{}/api/v1/github/oauth/authorize",
-        state.browser_api_origin
-    ))
-    .expect("validated API origin");
-    let return_url = if selected_slug.is_empty() {
-        format!("{}/settings/", state.public_origin)
-    } else {
-        format!("{}/settings/?org={selected_slug}", state.public_origin)
-    };
-    url.query_pairs_mut().append_pair("return_url", &return_url);
-    url.into()
-}
-
 fn approved_message(code: &str) -> &'static str {
     match code {
-        "github-disconnected" => "GitHub was disconnected.",
-        "credential-created" => "Git credential saved.",
-        "credential-deleted" => "Git credential deleted.",
         "identity-saved" => "Git identity saved.",
-        "ssh-created" => "SSH key created.",
-        "ssh-regenerated" => "SSH key regenerated. The old key no longer works.",
         _ => "",
     }
 }
 
 fn approved_error(code: &str) -> &'static str {
     match code {
-        "credential-invalid" => "Enter a name, host, and token or password.",
         "identity-invalid" => "The Git identity values are too long.",
         "request-failed" => "The settings change could not be completed. Try again.",
         _ => "",
@@ -410,21 +279,16 @@ mod tests {
         view::{DashboardView, SettingsData},
     };
 
-    type SettingsOutage = (&'static str, fn(&mut SettingsData), &'static str);
-
     fn dashboard_view() -> DashboardView {
         DashboardView {
             user_name: "Dashboard User".into(),
             is_admin: false,
             organizations: Vec::new(),
             has_organizations: false,
-            github_connected: false,
-            github_available: false,
             show_checklist: false,
             new_organization_url: "/organizations/new/".into(),
             settings_url: SETTINGS_PATH.into(),
             global_context_query: String::new(),
-            github_connect_url: String::new(),
             has_selected_organization: false,
             selected_organization_name: String::new(),
             selected_organization_slug: String::new(),
@@ -444,71 +308,60 @@ mod tests {
 
     #[test]
     fn optional_outages_keep_unaffected_controls_and_hide_unknown_mutations() {
-        let outages: [SettingsOutage; 4] = [
-            (
-                "github",
-                |data| data.github_available = false,
-                "Other settings remain usable",
-            ),
-            (
-                "credentials",
-                |data| data.credentials_available = false,
-                "You can still add a credential",
-            ),
-            (
-                "identity",
-                |data| data.git_identity_available = false,
-                "Reload before changing it",
-            ),
-            (
-                "ssh",
-                |data| data.ssh_key_status_available = false,
-                "Reload before changing it",
-            ),
-        ];
-
-        for (name, inject, notice) in outages {
-            let mut data = SettingsData {
-                github_available: true,
-                credentials_available: true,
-                git_identity_available: true,
-                ssh_key_status_available: true,
-                ..Default::default()
-            };
-            inject(&mut data);
-            let settings = SettingsPageView {
-                data,
-                csrf_token: "csrf".into(),
-                github_connect_url: "/github/connect".into(),
-                message: String::new(),
-                error: String::new(),
-            };
-            let body = SettingsTemplate {
-                view: &dashboard_view(),
-                settings: &settings,
-            }
-            .render()
-            .expect("render degraded settings");
-
-            assert!(body.contains(notice), "{name}");
-            assert!(body.contains("/settings/"), "{name}");
-            assert!(
-                body.contains("/settings/_actions/credentials/create"),
-                "{name}"
-            );
-            assert!(!body.contains("upstream-sensitive-detail"), "{name}");
-            if name == "identity" {
-                assert!(!body.contains("/settings/_actions/git-identity"));
-            }
-            if name == "ssh" {
-                assert!(!body.contains("/settings/_actions/ssh/ensure"));
-                assert!(!body.contains("/settings/_actions/ssh/regenerate"));
-            }
-            if name == "github" {
-                assert!(!body.contains("/settings/_actions/github/disconnect"));
-                assert!(!body.contains("/github/connect"));
-            }
+        let settings = SettingsPageView {
+            data: SettingsData::default(),
+            csrf_token: "csrf".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let body = SettingsTemplate {
+            view: &dashboard_view(),
+            settings: &settings,
         }
+        .render()
+        .expect("render degraded settings");
+
+        assert!(body.contains("Reload before changing it"));
+        assert!(body.contains("/settings/"));
+        assert!(!body.contains("upstream-sensitive-detail"));
+        assert!(!body.contains("/settings/_actions/git-identity"));
+    }
+
+    #[test]
+    fn retired_account_credential_products_are_absent_from_settings() {
+        let settings = SettingsPageView {
+            data: SettingsData {
+                git_identity_available: true,
+                ..Default::default()
+            },
+            csrf_token: "csrf".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let body = SettingsTemplate {
+            view: &dashboard_view(),
+            settings: &settings,
+        }
+        .render()
+        .expect("render account settings");
+
+        for retired in [
+            "Git authentication",
+            "Create SSH key",
+            "Regenerate key",
+            "/settings/_actions/credentials/",
+            "/settings/_actions/ssh/",
+            "Connect GitHub",
+            "/settings/_actions/github/",
+            "/api/v1/github/",
+        ] {
+            assert!(
+                !body.contains(retired),
+                "retired surface remains: {retired}"
+            );
+        }
+        assert!(body.contains("Git identity"));
+        assert!(body.contains("/settings/_actions/git-identity"));
     }
 
     #[test]

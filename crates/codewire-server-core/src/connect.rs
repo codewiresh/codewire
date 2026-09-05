@@ -2,8 +2,8 @@
 //!
 //! Program doc: `docs/plans/connect-rpc/03-connect-server-infrastructure.md`
 //! (WI-1; design decisions D1, D6b, D7, D9). Connect services mount into the
-//! same axum binaries as REST — same port, same [`AppBuilder`] middleware
-//! stack — via [`AppBuilder::with_connect_routes`], which delegates to
+//! same axum binaries as REST — same port, same [`crate::AppBuilder`] middleware
+//! stack — via [`crate::AppBuilder::with_connect_routes`], which delegates to
 //! [`connect_router`] here.
 //!
 //! What the mount adds around the raw `connectrpc` service:
@@ -60,9 +60,8 @@ use http::{HeaderValue, Method, StatusCode, header};
 use sha2::{Digest, Sha256};
 
 use crate::auth::{
-    AuthState, AuthUser, CredentialContext, EnvironmentIdentity, authenticate_environment_token,
-    authenticate_product_credential, bearer_token, require_product_access, resolve_authentication,
-    session_cookie,
+    AuthState, AuthUser, CredentialContext, authenticate_product_credential, bearer_token,
+    require_product_access, resolve_authentication, session_cookie,
 };
 use crate::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
 use crate::error::AppError;
@@ -387,11 +386,9 @@ async fn unbuffer_streaming_responses(
 ///   `permission_denied` for every method of the mount (`require_admin`
 ///   twin). Admin gating is per-Service: `codewire.admin.v1` services use
 ///   this whole-mount mode (D3).
-/// - [`ConnectAuthLayer::environment_token`] — resolve only an active
-///   environment's Bearer `auth_token`, then attach [`EnvironmentIdentity`].
-///   It never attaches an [`AuthUser`] or accepts product credentials.
-/// - pod-keyed internal services mount without any auth layer
-///   ([`connect_router`]); their handlers validate their own credentials.
+/// - self-authenticating internal services mount without this product-user
+///   auth layer ([`connect_router`]); their handlers must validate their
+///   dedicated machine identity before any domain lookup.
 ///
 /// Two explicit per-method sets refine a mount, both defaulting to empty
 /// (secure by default) and both reviewed like a route registration:
@@ -414,16 +411,10 @@ async fn unbuffer_streaming_responses(
 #[derive(Clone)]
 pub struct ConnectAuthLayer {
     state: AuthState,
-    mode: ConnectAuthMode,
+    admin_mount: bool,
     public_methods: BTreeSet<String>,
     admin_methods: BTreeSet<String>,
     synthetic_user_ids: BTreeSet<String>,
-}
-
-#[derive(Clone, Copy)]
-enum ConnectAuthMode {
-    Product { admin_mount: bool },
-    EnvironmentToken,
 }
 
 impl ConnectAuthLayer {
@@ -431,7 +422,7 @@ impl ConnectAuthLayer {
     pub fn authenticated(state: AuthState) -> Self {
         Self {
             state,
-            mode: ConnectAuthMode::Product { admin_mount: false },
+            admin_mount: false,
             public_methods: BTreeSet::new(),
             admin_methods: BTreeSet::new(),
             synthetic_user_ids: BTreeSet::new(),
@@ -442,17 +433,7 @@ impl ConnectAuthLayer {
     /// (non-admin users get `permission_denied`).
     pub fn admin(state: AuthState) -> Self {
         Self {
-            mode: ConnectAuthMode::Product { admin_mount: true },
-            ..Self::authenticated(state)
-        }
-    }
-
-    /// Internal environment-token mount. Only the Bearer token stored on an
-    /// active environment validates; session cookies, API keys, and OIDC
-    /// access tokens are not user-session substitutes here.
-    pub fn environment_token(state: AuthState) -> Self {
-        Self {
-            mode: ConnectAuthMode::EnvironmentToken,
+            admin_mount: true,
             ..Self::authenticated(state)
         }
     }
@@ -529,7 +510,6 @@ pub enum MeshAuthorizationPrincipal {
         user: AuthUser,
         credential: CredentialContext,
     },
-    Environment(EnvironmentIdentity),
 }
 
 /// Extracts the original caller identity established by
@@ -720,29 +700,15 @@ async fn enforce_mesh_authorization(
                     );
                 }
             };
-            match bounded_authentication(
+            bounded_authentication(
                 authenticate_product_credential(&layer.state, None, Some(bearer)),
                 auth_timeout,
             )
             .await
-            {
-                Ok(authentication) => Ok(MeshAuthorizationPrincipal::User {
-                    user: authentication.user,
-                    credential: authentication.credential,
-                }),
-                // Environment identities are not product credentials. Fall
-                // back only after an otherwise unrecognized bearer, never
-                // after an OAuth scope or API-key authorization denial.
-                Err(AuthResolutionFailure::Authentication(AppError::Unauthorized)) => {
-                    bounded_authentication(
-                        authenticate_environment_token(&layer.state, Some(bearer)),
-                        auth_timeout,
-                    )
-                    .await
-                    .map(MeshAuthorizationPrincipal::Environment)
-                }
-                Err(error) => Err(error),
-            }
+            .map(|authentication| MeshAuthorizationPrincipal::User {
+                user: authentication.user,
+                credential: authentication.credential,
+            })
         }
     };
     let principal = match principal {
@@ -757,16 +723,9 @@ async fn enforce_mesh_authorization(
         }
     };
 
-    let (credential, principal_evidence) = match &principal {
-        MeshAuthorizationPrincipal::User { user, credential } => (
-            RpcCredentialKind(credential.kind().as_str()),
-            RpcPrincipalEvidence::authenticated(&user.user_id, &BTreeSet::new()),
-        ),
-        MeshAuthorizationPrincipal::Environment(identity) => (
-            RpcCredentialKind("environment_token"),
-            RpcPrincipalEvidence::authenticated(&identity.user_id, &BTreeSet::new()),
-        ),
-    };
+    let MeshAuthorizationPrincipal::User { user, credential } = &principal;
+    let credential = RpcCredentialKind(credential.kind().as_str());
+    let principal_evidence = RpcPrincipalEvidence::authenticated(&user.user_id, &BTreeSet::new());
     req.extensions_mut().insert(principal);
     let mut response = next.run(req).await;
     response.extensions_mut().insert(credential);
@@ -874,78 +833,49 @@ async fn enforce_connect_auth(
     let bearer = bearer_token(req.headers()).map(str::to_owned);
     let auth_timeout = connect_auth_resolution_timeout(req.headers());
     let is_get = req.method() == Method::GET;
-    let resolved = match layer.mode {
-        ConnectAuthMode::Product { admin_mount } => {
-            let auth = match bounded_authentication(
-                resolve_authentication(&layer.state, session_token.as_deref(), bearer.as_deref()),
+    let auth = match bounded_authentication(
+        resolve_authentication(&layer.state, session_token.as_deref(), bearer.as_deref()),
+        auth_timeout,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            return connect_auth_failure_response(
+                failure,
                 auth_timeout,
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(failure) => {
-                    return connect_auth_failure_response(
-                        failure,
-                        auth_timeout,
-                        request_id.as_deref(),
-                        &request_headers,
-                    );
-                }
-            };
-
-            let credential = RpcCredentialKind(auth.credential.kind().as_str());
-            let principal_evidence =
-                RpcPrincipalEvidence::authenticated(&auth.user.user_id, &layer.synthetic_user_ids);
-
-            if let Err(err) = require_product_access(&auth) {
-                let mut resp = rejection_response(&err, request_id.as_deref(), &request_headers);
-                // Authentication succeeded even though authorization failed, so the
-                // event retains the validated credential and principal evidence.
-                resp.extensions_mut().insert(credential);
-                resp.extensions_mut().insert(principal_evidence);
-                return resp;
-            }
-
-            if (admin_mount || layer.admin_methods.contains(req.uri().path()))
-                && let Err(err) = auth.user.require_global_admin()
-            {
-                let mut resp = rejection_response(&err, request_id.as_deref(), &request_headers);
-                // Authentication succeeded even though authorization failed, so the
-                // event retains the validated principal classification.
-                resp.extensions_mut().insert(credential);
-                resp.extensions_mut().insert(principal_evidence);
-                return resp;
-            }
-
-            req.extensions_mut().insert(auth.credential);
-            req.extensions_mut().insert(auth.user);
-            (credential, principal_evidence)
-        }
-        ConnectAuthMode::EnvironmentToken => {
-            let identity = match bounded_authentication(
-                authenticate_environment_token(&layer.state, bearer.as_deref()),
-                auth_timeout,
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(failure) => {
-                    return connect_auth_failure_response(
-                        failure,
-                        auth_timeout,
-                        request_id.as_deref(),
-                        &request_headers,
-                    );
-                }
-            };
-            let principal_evidence =
-                RpcPrincipalEvidence::authenticated(&identity.user_id, &layer.synthetic_user_ids);
-            req.extensions_mut().insert(identity);
-            (RpcCredentialKind("environment_token"), principal_evidence)
+                request_id.as_deref(),
+                &request_headers,
+            );
         }
     };
 
-    let (credential, principal_evidence) = resolved;
+    let credential = RpcCredentialKind(auth.credential.kind().as_str());
+    let principal_evidence =
+        RpcPrincipalEvidence::authenticated(&auth.user.user_id, &layer.synthetic_user_ids);
+
+    if let Err(err) = require_product_access(&auth) {
+        let mut resp = rejection_response(&err, request_id.as_deref(), &request_headers);
+        // Authentication succeeded even though authorization failed, so the
+        // event retains the validated credential and principal evidence.
+        resp.extensions_mut().insert(credential);
+        resp.extensions_mut().insert(principal_evidence);
+        return resp;
+    }
+
+    if (layer.admin_mount || layer.admin_methods.contains(req.uri().path()))
+        && let Err(err) = auth.user.require_global_admin()
+    {
+        let mut resp = rejection_response(&err, request_id.as_deref(), &request_headers);
+        // Authentication succeeded even though authorization failed, so the
+        // event retains the validated principal classification.
+        resp.extensions_mut().insert(credential);
+        resp.extensions_mut().insert(principal_evidence);
+        return resp;
+    }
+
+    req.extensions_mut().insert(auth.credential);
+    req.extensions_mut().insert(auth.user);
     let mut resp = next.run(req).await;
     resp.extensions_mut().insert(credential);
     resp.extensions_mut().insert(principal_evidence);
@@ -1059,21 +989,6 @@ pub fn auth_context(
     ctx.extensions().get::<CredentialContext>().ok_or_else(|| {
         connectrpc::ConnectError::unauthenticated("request has no authenticated credential")
     })
-}
-
-/// Extracts the active environment identity attached by an
-/// [`ConnectAuthLayer::environment_token`] mount.
-///
-/// This intentionally has no fallback to [`auth_user`]: an environment token
-/// is not user-session authority.
-pub fn environment_identity(
-    ctx: &connectrpc::RequestContext,
-) -> Result<&EnvironmentIdentity, connectrpc::ConnectError> {
-    ctx.extensions()
-        .get::<EnvironmentIdentity>()
-        .ok_or_else(|| {
-            connectrpc::ConnectError::unauthenticated("request has no authenticated environment")
-        })
 }
 
 // --- error wire bridge (01 renderer → Connect wire, D4) ----------------------

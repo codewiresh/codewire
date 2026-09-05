@@ -18,7 +18,7 @@ func TestE2E_FirstPartyEnv(t *testing.T) {
 	ctx := context.Background()
 
 	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{
-		PresetSlug: ptr("python"),
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Preset: "python", WorkingDirectory: "/workspace"},
 	}, codewire.CreateOptions{Wait: true})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -70,7 +70,7 @@ func TestE2E_ArbitraryImage(t *testing.T) {
 	ctx := context.Background()
 
 	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{
-		Image: ptr("python:3.12-slim"),
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Image: "python:3.12-slim", WorkingDirectory: "/workspace"},
 	}, codewire.CreateOptions{Wait: true})
 	if err != nil {
 		t.Fatalf("create: %v", err)

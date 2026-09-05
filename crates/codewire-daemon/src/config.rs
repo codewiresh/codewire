@@ -1,6 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use codewire_gateway_proto::DaemonAuthToken;
 use uuid::Uuid;
 
 use crate::execution::ProcessExecution;
@@ -19,7 +20,7 @@ pub struct Config {
     pub listen_addr: String,
     pub workspace_root: PathBuf,
     pub home_root: PathBuf,
-    pub auth_token: Option<String>,
+    pub auth_token: DaemonAuthToken,
     pub process_execution: ProcessExecution,
     /// Local/platform placement-specific guest endpoint for material-free
     /// credential requests. Protected values never enter this configuration.
@@ -36,21 +37,31 @@ pub struct CredentialBridgeConfig {
 }
 
 impl Config {
-    pub fn from_env() -> Self {
-        Self {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let auth_token = match env::var(DAEMON_AUTH_TOKEN_ENV) {
+            Ok(value) => {
+                DaemonAuthToken::new(value).map_err(|_| ConfigError::InvalidDaemonAuthToken)?
+            }
+            Err(env::VarError::NotPresent) => return Err(ConfigError::MissingDaemonAuthToken),
+            Err(env::VarError::NotUnicode(_)) => return Err(ConfigError::InvalidDaemonAuthToken),
+        };
+        Ok(Self {
             listen_addr: env_value(SHIM_ADDR_ENV).unwrap_or_else(|| DEFAULT_LISTEN_ADDR.into()),
             workspace_root: env_path(WORKSPACE_ROOT_ENV, DEFAULT_WORKSPACE_ROOT),
             home_root: env_path(HOME_ROOT_ENV, DEFAULT_HOME_ROOT),
-            auth_token: env_value(DAEMON_AUTH_TOKEN_ENV),
+            auth_token,
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
-        }
+        })
     }
+}
 
-    pub fn with_listen_addr(mut self, listen_addr: impl Into<String>) -> Self {
-        self.listen_addr = listen_addr.into();
-        self
-    }
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ConfigError {
+    #[error("{DAEMON_AUTH_TOKEN_ENV} is required")]
+    MissingDaemonAuthToken,
+    #[error("{DAEMON_AUTH_TOKEN_ENV} must be nonblank canonical ASCII metadata")]
+    InvalidDaemonAuthToken,
 }
 
 fn env_value(key: &str) -> Option<String> {
@@ -112,5 +123,22 @@ mod tests {
         );
         assert_eq!(clean_path(Path::new("a/./b/../c")), PathBuf::from("a/c"));
         assert_eq!(clean_path(Path::new("../../x")), PathBuf::from("../../x"));
+    }
+
+    #[test]
+    fn config_debug_redacts_daemon_credential() {
+        let marker = "daemon-config-secret-marker";
+        let config = Config {
+            listen_addr: DEFAULT_LISTEN_ADDR.into(),
+            workspace_root: DEFAULT_WORKSPACE_ROOT.into(),
+            home_root: DEFAULT_HOME_ROOT.into(),
+            auth_token: DaemonAuthToken::new(marker).unwrap(),
+            process_execution: ProcessExecution::Native,
+            credential_bridge: None,
+        };
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(marker));
     }
 }

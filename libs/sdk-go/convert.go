@@ -208,39 +208,34 @@ func fromProtoPreset(preset *codewirev1.Preset) (Preset, error) {
 		return Preset{}, err
 	}
 	if preset == nil {
-		return Preset{}, nil
+		return Preset{}, fmt.Errorf("codewire: preset response omitted preset")
 	}
 	createdAt, err := formatSDKTimestamp("preset created_at", preset.GetCreatedAt())
 	if err != nil {
 		return Preset{}, err
 	}
-	defaultSetupConfig, err := fromProtoSetupConfig(preset.GetDefaultSetupConfig())
-	if err != nil {
-		return Preset{}, err
+	if preset.GetProjectSpec() == nil {
+		return Preset{}, fmt.Errorf("codewire: preset response omitted project_spec")
 	}
+	projectSpec := fromProtoProjectSpec(preset.GetProjectSpec())
 	var ttl *int64
 	if preset.DefaultTtlSeconds != nil {
 		value := int64(*preset.DefaultTtlSeconds)
 		ttl = &value
 	}
 	return Preset{
-		BuildError:           copyStringPointer(preset.BuildError),
-		BuildStatus:          preset.GetBuildStatus(),
-		CreatedAt:            valueOrEmpty(createdAt),
-		DefaultCpuMillicores: int64(preset.GetDefaultCpuMillicores()),
-		DefaultDiskGb:        int64(preset.GetDefaultDiskGb()),
-		DefaultMemoryMb:      int64(preset.GetDefaultMemoryMb()),
-		DefaultSetupConfig:   defaultSetupConfig,
-		DefaultTtlSeconds:    ttl,
-		Description:          copyStringPointer(preset.Description),
-		Id:                   preset.GetId(),
-		Image:                copyStringPointer(preset.Image),
-		Language:             copyStringPointer(preset.Language),
-		Name:                 preset.GetName(),
-		Official:             preset.GetOfficial(),
-		OrgId:                copyStringPointer(preset.OrgId),
-		SecretProjectId:      copyStringPointer(preset.SecretProjectId),
-		Slug:                 copyStringPointer(preset.Slug),
+		BuildError:        copyStringPointer(preset.BuildError),
+		BuildStatus:       preset.GetBuildStatus(),
+		CreatedAt:         valueOrEmpty(createdAt),
+		DefaultTtlSeconds: ttl,
+		Description:       copyStringPointer(preset.Description),
+		Id:                preset.GetId(),
+		Language:          copyStringPointer(preset.Language),
+		Name:              preset.GetName(),
+		Official:          preset.GetOfficial(),
+		OrgId:             copyStringPointer(preset.OrgId),
+		Slug:              copyStringPointer(preset.Slug),
+		ProjectSpec:       *projectSpec,
 	}, nil
 }
 
@@ -297,159 +292,66 @@ func formatSDKTimestamp(name string, timestamp *timestamppb.Timestamp) (*string,
 	return &formatted, nil
 }
 
-func fromProtoSetupConfig(config *codewirev1.SetupConfig) (*SetupConfig, error) {
-	if err := ensureSetupConfigConverterCoverage(); err != nil {
-		return nil, err
-	}
-	if config == nil {
-		return nil, nil
-	}
-	converted := &SetupConfig{
-		Agent:              stringPointer(config.GetAgent()),
-		AgentEnv:           stringMapPointer(config.GetAgentEnv()),
-		AppPorts:           fromProtoAppPorts(config.GetAppPorts()),
-		Branch:             stringPointer(config.GetBranch()),
-		EnvVars:            stringMapPointer(config.GetEnvVars()),
-		IncludeOrgSecrets:  copyBoolPointer(config.IncludeOrgSecrets),
-		IncludeUserSecrets: copyBoolPointer(config.IncludeUserSecrets),
-		InstallAgents:      copyBoolPointer(config.InstallAgents),
-		InstallCommand:     stringPointer(config.GetInstallCommand()),
-		RepoUrl:            stringPointer(config.GetRepoUrl()),
-		Repos:              fromProtoRepoEntries(config.GetRepos()),
-		StartupScript:      stringPointer(config.GetStartupScript()),
-		ProjectSpec:        fromProtoProjectSpec(config.GetProjectSpec()),
-	}
-	converted.Agents = fromProtoSetupAgents(config.GetAgents())
-	return converted, nil
-}
-
-func stringMapPointer(value map[string]string) *map[string]string {
-	if len(value) == 0 {
-		return nil
-	}
-	copy := copyStringMap(value)
-	return &copy
-}
-
-func fromProtoSetupAgents(agents []*codewirev1.SetupAgent) *[]SetupAgent {
-	if len(agents) == 0 {
-		return nil
-	}
-	converted := make([]SetupAgent, 0, len(agents))
-	for _, agent := range agents {
-		converted = append(converted, SetupAgent{Type: agent.GetType()})
-	}
-	return &converted
-}
-
-func fromProtoAppPorts(ports []*codewirev1.AppPort) *[]AppPort {
+func fromProtoApplicationPorts(ports []*codewirev1.ApplicationPort) *[]ApplicationPort {
 	if len(ports) == 0 {
 		return nil
 	}
-	converted := make([]AppPort, 0, len(ports))
+	converted := make([]ApplicationPort, 0, len(ports))
 	for _, port := range ports {
-		converted = append(converted, AppPort{
+		converted = append(converted, ApplicationPort{
 			Access: stringPointer(port.GetAccess()), Label: port.GetLabel(), Port: int64(port.GetPort()),
 		})
 	}
 	return &converted
 }
 
-func fromProtoRepoEntries(repos []*codewirev1.RepoEntry) *[]RepoEntry {
-	if len(repos) == 0 {
+func fromProtoRepositorySpecs(repositories []*codewirev1.RepositorySpec) *[]RepositorySpec {
+	if len(repositories) == 0 {
 		return nil
 	}
-	converted := make([]RepoEntry, 0, len(repos))
-	for _, repo := range repos {
-		converted = append(converted, RepoEntry{
-			Url: repo.GetUrl(), Branch: stringPointer(repo.GetBranch()), MountPath: stringPointer(repo.GetMountPath()), Revision: stringPointer(repo.GetRevision()),
+	converted := make([]RepositorySpec, 0, len(repositories))
+	for _, repository := range repositories {
+		converted = append(converted, RepositorySpec{
+			Source: repository.GetSource(), Branch: stringPointer(repository.GetBranch()), Destination: stringPointer(repository.GetDestination()), Revision: stringPointer(repository.GetRevision()),
 		})
 	}
 	return &converted
 }
 
-func createPresetRequest(orgID string, body CreatePresetBody, secretProjectID *string) (*codewirev1.CreatePresetRequest, error) {
-	cpu, err := int32FromInt64("default_cpu_millicores", body.DefaultCpuMillicores)
-	if err != nil {
-		return nil, err
-	}
-	memory, err := int32FromInt64("default_memory_mb", body.DefaultMemoryMb)
-	if err != nil {
-		return nil, err
-	}
-	disk, err := int32FromInt64("default_disk_gb", body.DefaultDiskGb)
-	if err != nil {
+func createPresetRequest(orgID string, body CreatePresetBody) (*codewirev1.CreatePresetRequest, error) {
+	if err := ensurePresetConverterCoverage(); err != nil {
 		return nil, err
 	}
 	ttl, err := int32FromInt64("default_ttl_seconds", body.DefaultTtlSeconds)
 	if err != nil {
 		return nil, err
 	}
-	agents, err := toProtoSetupAgents(body.Agents)
-	if err != nil {
-		return nil, err
-	}
-	ports, err := toProtoAppPorts(body.AppPorts)
+	projectSpec, err := toProtoProjectSpec(&body.ProjectSpec)
 	if err != nil {
 		return nil, err
 	}
 	return &codewirev1.CreatePresetRequest{
 		OrgId: orgID, Name: body.Name, Slug: valueOrEmpty(body.Slug), Description: copyStringPointer(body.Description),
-		DefaultCpuMillicores: cpu, DefaultMemoryMb: memory, DefaultDiskGb: disk, DefaultTtlSeconds: ttl,
-		Image: valueOrEmpty(body.Image), InstallCommand: valueOrEmpty(body.InstallCommand), StartupScript: valueOrEmpty(body.StartupScript),
-		EnvVars: copyStringMapPointer(body.EnvVars), Agents: agents, InstallAgents: copyBoolPointer(body.InstallAgents),
-		Agent: valueOrEmpty(body.Agent), AgentEnv: copyStringMapPointer(body.AgentEnv), AppPorts: ports,
-		IncludeOrgSecrets: copyBoolPointer(body.IncludeOrgSecrets), IncludeUserSecrets: copyBoolPointer(body.IncludeUserSecrets),
-		SecretProjectId: copyStringPointer(secretProjectID),
+		DefaultTtlSeconds: ttl, ProjectSpec: projectSpec,
 	}, nil
 }
 
-func updatePresetRequest(orgID, presetID string, body UpdatePresetBody, secretProjectID *string) (*codewirev1.UpdatePresetRequest, error) {
-	cpu, err := int32FromInt64("default_cpu_millicores", body.DefaultCpuMillicores)
-	if err != nil {
-		return nil, err
-	}
-	memory, err := int32FromInt64("default_memory_mb", body.DefaultMemoryMb)
-	if err != nil {
-		return nil, err
-	}
-	disk, err := int32FromInt64("default_disk_gb", body.DefaultDiskGb)
-	if err != nil {
+func updatePresetRequest(orgID, presetID string, body UpdatePresetBody) (*codewirev1.UpdatePresetRequest, error) {
+	if err := ensurePresetConverterCoverage(); err != nil {
 		return nil, err
 	}
 	ttl, err := int32FromInt64("default_ttl_seconds", body.DefaultTtlSeconds)
 	if err != nil {
 		return nil, err
 	}
-	agents, err := toProtoSetupAgents(body.Agents)
+	projectSpec, err := toProtoProjectSpec(body.ProjectSpec)
 	if err != nil {
 		return nil, err
 	}
-	ports, err := toProtoAppPorts(body.AppPorts)
-	if err != nil {
-		return nil, err
-	}
-	request := &codewirev1.UpdatePresetRequest{
+	return &codewirev1.UpdatePresetRequest{
 		OrgId: orgID, PresetId: presetID, Name: copyStringPointer(body.Name), Description: copyStringPointer(body.Description),
-		Slug: copyStringPointer(body.Slug), DefaultCpuMillicores: cpu, DefaultMemoryMb: memory, DefaultDiskGb: disk,
-		DefaultTtlSeconds: ttl, Image: copyStringPointer(body.Image), InstallCommand: copyStringPointer(body.InstallCommand),
-		StartupScript: copyStringPointer(body.StartupScript), InstallAgents: copyBoolPointer(body.InstallAgents), Agent: copyStringPointer(body.Agent),
-		IncludeOrgSecrets: copyBoolPointer(body.IncludeOrgSecrets), IncludeUserSecrets: copyBoolPointer(body.IncludeUserSecrets),
-		SecretProjectId: copyStringPointer(secretProjectID),
-	}
-	if body.EnvVars != nil {
-		request.EnvVars = &codewirev1.EnvVarMap{Values: copyStringMap(*body.EnvVars)}
-	}
-	if body.Agents != nil {
-		request.Agents = &codewirev1.AgentList{Values: agents}
-	}
-	if body.AgentEnv != nil {
-		request.AgentEnv = &codewirev1.AgentEnvMap{Values: copyStringMap(*body.AgentEnv)}
-	}
-	if body.AppPorts != nil {
-		request.AppPorts = &codewirev1.AppPortList{Values: ports}
-	}
-	return request, nil
+		Slug: copyStringPointer(body.Slug), DefaultTtlSeconds: ttl, ProjectSpec: projectSpec,
+	}, nil
 }
 
 func copyStringMapPointer(value *map[string]string) map[string]string {
@@ -459,39 +361,28 @@ func copyStringMapPointer(value *map[string]string) map[string]string {
 	return copyStringMap(*value)
 }
 
-func toProtoSetupAgents(agents *[]SetupAgent) ([]*codewirev1.SetupAgent, error) {
-	if agents == nil {
-		return nil, nil
-	}
-	converted := make([]*codewirev1.SetupAgent, 0, len(*agents))
-	for _, agent := range *agents {
-		converted = append(converted, &codewirev1.SetupAgent{Type: agent.Type})
-	}
-	return converted, nil
-}
-
-func toProtoAppPorts(ports *[]AppPort) ([]*codewirev1.AppPort, error) {
+func toProtoApplicationPorts(ports *[]ApplicationPort) ([]*codewirev1.ApplicationPort, error) {
 	if ports == nil {
 		return nil, nil
 	}
-	converted := make([]*codewirev1.AppPort, 0, len(*ports))
+	converted := make([]*codewirev1.ApplicationPort, 0, len(*ports))
 	for _, port := range *ports {
 		if port.Port < math.MinInt32 || port.Port > math.MaxInt32 {
 			return nil, fmt.Errorf("codewire: app port is outside the API integer range")
 		}
-		converted = append(converted, &codewirev1.AppPort{Port: int32(port.Port), Label: port.Label, Access: valueOrEmpty(port.Access)})
+		converted = append(converted, &codewirev1.ApplicationPort{Port: int32(port.Port), Label: port.Label, Access: valueOrEmpty(port.Access)})
 	}
 	return converted, nil
 }
 
-func toProtoRepoEntries(repos *[]RepoEntry) []*codewirev1.RepoEntry {
-	if repos == nil {
+func toProtoRepositorySpecs(repositories *[]RepositorySpec) []*codewirev1.RepositorySpec {
+	if repositories == nil {
 		return nil
 	}
-	converted := make([]*codewirev1.RepoEntry, 0, len(*repos))
-	for _, repo := range *repos {
-		converted = append(converted, &codewirev1.RepoEntry{
-			Url: repo.Url, Branch: valueOrEmpty(repo.Branch), MountPath: valueOrEmpty(repo.MountPath), Revision: valueOrEmpty(repo.Revision),
+	converted := make([]*codewirev1.RepositorySpec, 0, len(*repositories))
+	for _, repository := range *repositories {
+		converted = append(converted, &codewirev1.RepositorySpec{
+			Source: repository.Source, Branch: valueOrEmpty(repository.Branch), Destination: valueOrEmpty(repository.Destination), Revision: valueOrEmpty(repository.Revision),
 		})
 	}
 	return converted
@@ -509,9 +400,8 @@ func fromProtoProjectSpec(value *codewirev1.ProjectSpec) *ProjectSpec {
 		InstallCommand:   value.GetInstallCommand(),
 		StartupScript:    value.GetStartupScript(),
 		Environment:      copyStringMap(value.GetEnvironment()),
-		AgentEnvironment: copyStringMap(value.GetAgentEnvironment()),
 	}
-	if repositories := fromProtoRepoEntries(value.GetRepositories()); repositories != nil {
+	if repositories := fromProtoRepositorySpecs(value.GetRepositories()); repositories != nil {
 		result.Repositories = *repositories
 	}
 	if agents := value.GetAgents(); agents != nil {
@@ -522,7 +412,7 @@ func fromProtoProjectSpec(value *codewirev1.ProjectSpec) *ProjectSpec {
 			Source: projectSkillSource(skill.GetSource()), Reference: skill.GetReference(), Agents: append([]string(nil), skill.GetAgents()...),
 		})
 	}
-	if ports := fromProtoAppPorts(value.GetApplicationPorts()); ports != nil {
+	if ports := fromProtoApplicationPorts(value.GetApplicationPorts()); ports != nil {
 		result.ApplicationPorts = *ports
 	}
 	if resources := value.GetResources(); resources != nil {
@@ -548,7 +438,7 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 		return nil, nil
 	}
 	ports := value.ApplicationPorts
-	applicationPorts, err := toProtoAppPorts(&ports)
+	applicationPorts, err := toProtoApplicationPorts(&ports)
 	if err != nil {
 		return nil, err
 	}
@@ -560,11 +450,10 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 		InstallCommand:   value.InstallCommand,
 		StartupScript:    value.StartupScript,
 		Environment:      copyStringMap(value.Environment),
-		AgentEnvironment: copyStringMap(value.AgentEnvironment),
 		ApplicationPorts: applicationPorts,
 	}
 	repositories := value.Repositories
-	result.Repositories = toProtoRepoEntries(&repositories)
+	result.Repositories = toProtoRepositorySpecs(&repositories)
 	if value.Agents != nil {
 		result.Agents = &codewirev1.ProjectAgents{Install: copyBoolPointer(value.Agents.Install), Tools: append([]string(nil), value.Agents.Tools...)}
 	}
@@ -621,27 +510,7 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 	if err := ensureEnvironmentConverterCoverage(); err != nil {
 		return nil, err
 	}
-	cpu, err := int32FromInt64("cpu_millicores", body.CpuMillicores)
-	if err != nil {
-		return nil, err
-	}
-	memory, err := int32FromInt64("memory_mb", body.MemoryMb)
-	if err != nil {
-		return nil, err
-	}
-	disk, err := int32FromInt64("disk_gb", body.DiskGb)
-	if err != nil {
-		return nil, err
-	}
 	ttl, err := int32FromInt64("ttl_seconds", body.TtlSeconds)
-	if err != nil {
-		return nil, err
-	}
-	agents, err := toProtoSetupAgents(body.Agents)
-	if err != nil {
-		return nil, err
-	}
-	ports, err := toProtoAppPorts(body.AppPorts)
 	if err != nil {
 		return nil, err
 	}
@@ -649,22 +518,13 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 	if err != nil {
 		return nil, err
 	}
-	projectSpec, err := toProtoProjectSpec(body.ProjectSpec)
+	projectSpec, err := toProtoProjectSpec(&body.ProjectSpec)
 	if err != nil {
 		return nil, err
 	}
 	return &codewirev1.CreateEnvironmentRequest{
 		OrgId: orgID, PresetId: copyStringPointer(body.PresetId), Name: copyStringPointer(body.Name),
-		CpuMillicores: cpu, MemoryMb: memory, DiskGb: disk, TtlSeconds: ttl,
-		PresetSlug: valueOrEmpty(body.PresetSlug), RepoUrl: valueOrEmpty(body.RepoUrl), Branch: valueOrEmpty(body.Branch),
-		Repos: toProtoRepoEntries(body.Repos), Image: valueOrEmpty(body.Image),
-		InstallCommand: valueOrEmpty(body.InstallCommand), StartupScript: valueOrEmpty(body.StartupScript),
-		EnvVars: copyStringMapPointer(body.EnvVars), Agents: agents, InstallAgents: copyBoolPointer(body.InstallAgents),
-		Agent: valueOrEmpty(body.Agent), AgentEnv: copyStringMapPointer(body.AgentEnv),
-		SecretProject: valueOrEmpty(body.SecretProject), AppPorts: ports,
-		IncludeOrgSecrets: copyBoolPointer(body.IncludeOrgSecrets), IncludeUserSecrets: copyBoolPointer(body.IncludeUserSecrets),
-		IsolationTier: isolation,
-		ProjectSpec:   projectSpec,
+		TtlSeconds: ttl, IsolationTier: isolation, ProjectSpec: projectSpec,
 	}, nil
 }
 
@@ -1078,9 +938,21 @@ func toProtoPortAccess(access *string) codewirev1.PortAccess {
 
 func ensurePresetConverterCoverage() error {
 	presetConverterCoverageOnce.Do(func() {
-		presetConverterCoverageErr = ensureDescriptorCoverage("preset", codewirev1.File_codewire_v1_preset_proto.Messages().ByName("Preset"), map[protoreflect.FieldNumber]protoreflect.Name{
-			1: "id", 2: "org_id", 3: "name", 4: "slug", 5: "language", 6: "official", 7: "description", 8: "build_status", 9: "build_error", 10: "default_cpu_millicores", 11: "default_memory_mb", 12: "default_disk_gb", 13: "default_ttl_seconds", 14: "image", 15: "default_setup_config", 16: "secret_project_id", 17: "created_at",
-		})
+		if err := ensureProjectSpecConverterCoverage(); err != nil {
+			presetConverterCoverageErr = err
+			return
+		}
+		messages := codewirev1.File_codewire_v1_preset_proto.Messages()
+		for name, fields := range map[string]map[protoreflect.FieldNumber]protoreflect.Name{
+			"Preset":              {1: "id", 2: "org_id", 3: "name", 4: "slug", 5: "language", 6: "official", 7: "description", 8: "build_status", 9: "build_error", 13: "default_ttl_seconds", 17: "created_at", 18: "project_spec"},
+			"CreatePresetRequest": {1: "org_id", 2: "name", 3: "slug", 4: "description", 8: "default_ttl_seconds", 21: "project_spec"},
+			"UpdatePresetRequest": {1: "org_id", 2: "preset_id", 3: "name", 4: "description", 5: "slug", 9: "default_ttl_seconds", 22: "project_spec"},
+		} {
+			if err := ensureDescriptorCoverage("preset "+name, messages.ByName(protoreflect.Name(name)), fields); err != nil {
+				presetConverterCoverageErr = err
+				return
+			}
+		}
 	})
 	return presetConverterCoverageErr
 }
@@ -1099,36 +971,18 @@ func ensureSecretProjectConverterCoverage() error {
 	return secretProjectCoverageErr
 }
 
-func ensureSetupConfigConverterCoverage() error {
-	messages := codewirev1.File_codewire_v1_common_proto.Messages()
-	if err := ensureProjectSpecConverterCoverage(); err != nil {
-		return err
-	}
-	if err := ensureDescriptorCoverage("setup config", messages.ByName("SetupConfig"), map[protoreflect.FieldNumber]protoreflect.Name{
-		1: "repo_url", 2: "branch", 3: "repos", 4: "install_command", 5: "startup_script", 6: "env_vars", 7: "agents", 8: "install_agents", 9: "agent", 10: "agent_env", 11: "app_ports", 12: "include_org_secrets", 13: "include_user_secrets", 14: "project_spec",
-	}); err != nil {
-		return err
-	}
-	if err := ensureDescriptorCoverage("setup agent", messages.ByName("SetupAgent"), map[protoreflect.FieldNumber]protoreflect.Name{1: "type"}); err != nil {
-		return err
-	}
-	if err := ensureDescriptorCoverage("app port", messages.ByName("AppPort"), map[protoreflect.FieldNumber]protoreflect.Name{1: "port", 2: "label", 3: "access"}); err != nil {
-		return err
-	}
-	return ensureDescriptorCoverage("repo entry", messages.ByName("RepoEntry"), map[protoreflect.FieldNumber]protoreflect.Name{1: "url", 2: "branch", 3: "mount_path", 4: "revision"})
-}
-
 func ensureProjectSpecConverterCoverage() error {
 	messages := codewirev1.File_codewire_v1_common_proto.Messages()
 	for name, fields := range map[string]map[protoreflect.FieldNumber]protoreflect.Name{
-		"ProjectAgents":              {1: "install", 2: "tools"},
-		"ProjectSkillSelection":      {1: "source", 2: "reference", 3: "agents"},
-		"ProjectResources":           {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
-		"ProjectSecretBindings":      {1: "project", 2: "include_org", 3: "include_user", 4: "organization", 5: "user"},
-		"ProjectCredentialReference": {1: "provider", 2: "account"}, // Deprecated wire tombstone; not exposed by the ergonomic SDK.
-		"ProjectAccessBinding":       {1: "profile"},
+		"RepositorySpec":        {1: "source", 2: "branch", 3: "destination", 4: "revision"},
+		"ApplicationPort":       {1: "port", 2: "label", 3: "access"},
+		"ProjectAgents":         {1: "install", 2: "tools"},
+		"ProjectSkillSelection": {1: "source", 2: "reference", 3: "agents"},
+		"ProjectResources":      {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
+		"ProjectSecretBindings": {1: "project", 4: "organization", 5: "user"},
+		"ProjectAccessBinding":  {1: "profile"},
 		"ProjectSpec": {
-			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 10: "agent_environment", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 15: "credentials", 16: "workspace_mode", 17: "access",
+			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 17: "access",
 		},
 	} {
 		if err := ensureDescriptorCoverage("project "+name, messages.ByName(protoreflect.Name(name)), fields); err != nil {
@@ -1151,7 +1005,7 @@ func ensureEnvironmentConverterCoverage() error {
 			return
 		}
 		environmentCoverageErr = ensureDescriptorCoverage("create environment request", codewirev1.File_codewire_v1_environment_proto.Messages().ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
-			1: "org_id", 2: "preset_id", 3: "name", 4: "cpu_millicores", 5: "memory_mb", 6: "disk_gb", 7: "ttl_seconds", 8: "preset_slug", 9: "repo_url", 10: "branch", 11: "repos", 12: "image", 13: "install_command", 14: "startup_script", 15: "env_vars", 16: "agents", 17: "install_agents", 18: "agent", 19: "agent_env", 20: "secret_project", 21: "app_ports", 22: "include_org_secrets", 23: "include_user_secrets", 24: "isolation_tier", 25: "project_spec",
+			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec",
 		})
 	})
 	return environmentCoverageErr

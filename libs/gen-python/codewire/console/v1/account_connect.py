@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .account_pb2 import CreateGitCredentialRequest, CreateGitCredentialResponse, CreateLoginKeyRequest, CreateLoginKeyResponse, DeleteGitCredentialRequest, DeleteGitCredentialResponse, DeleteLoginKeyRequest, DeleteLoginKeyResponse, EnsureSshKeyRequest, EnsureSshKeyResponse, GetGitIdentityRequest, GetGitIdentityResponse, GetSshKeyRequest, GetSshKeyResponse, ListGitCredentialsRequest, ListGitCredentialsResponse, ListLoginKeysRequest, ListLoginKeysResponse, RegenerateSshKeyRequest, RegenerateSshKeyResponse, UpdateGitCredentialRequest, UpdateGitCredentialResponse, UpdateGitIdentityRequest, UpdateGitIdentityResponse
+from .account_pb2 import GetGitIdentityRequest, GetGitIdentityResponse, UpdateGitIdentityRequest, UpdateGitIdentityResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -35,40 +35,10 @@ _PROTO_BINARY_CODEC = google_protobuf_binary_codec()
 _GZIP_COMPRESSION = GzipCompression()
 
 class AccountService(Protocol):
-    async def list_login_keys(self, request: ListLoginKeysRequest, ctx: RequestContext[ListLoginKeysRequest, ListLoginKeysResponse]) -> ListLoginKeysResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def create_login_key(self, request: CreateLoginKeyRequest, ctx: RequestContext[CreateLoginKeyRequest, CreateLoginKeyResponse]) -> CreateLoginKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def delete_login_key(self, request: DeleteLoginKeyRequest, ctx: RequestContext[DeleteLoginKeyRequest, DeleteLoginKeyResponse]) -> DeleteLoginKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def ensure_ssh_key(self, request: EnsureSshKeyRequest, ctx: RequestContext[EnsureSshKeyRequest, EnsureSshKeyResponse]) -> EnsureSshKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def get_ssh_key(self, request: GetSshKeyRequest, ctx: RequestContext[GetSshKeyRequest, GetSshKeyResponse]) -> GetSshKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def regenerate_ssh_key(self, request: RegenerateSshKeyRequest, ctx: RequestContext[RegenerateSshKeyRequest, RegenerateSshKeyResponse]) -> RegenerateSshKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
     async def get_git_identity(self, request: GetGitIdentityRequest, ctx: RequestContext[GetGitIdentityRequest, GetGitIdentityResponse]) -> GetGitIdentityResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def update_git_identity(self, request: UpdateGitIdentityRequest, ctx: RequestContext[UpdateGitIdentityRequest, UpdateGitIdentityResponse]) -> UpdateGitIdentityResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def list_git_credentials(self, request: ListGitCredentialsRequest, ctx: RequestContext[ListGitCredentialsRequest, ListGitCredentialsResponse]) -> ListGitCredentialsResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def create_git_credential(self, request: CreateGitCredentialRequest, ctx: RequestContext[CreateGitCredentialRequest, CreateGitCredentialResponse]) -> CreateGitCredentialResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def update_git_credential(self, request: UpdateGitCredentialRequest, ctx: RequestContext[UpdateGitCredentialRequest, UpdateGitCredentialResponse]) -> UpdateGitCredentialResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def delete_git_credential(self, request: DeleteGitCredentialRequest, ctx: RequestContext[DeleteGitCredentialRequest, DeleteGitCredentialResponse]) -> DeleteGitCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -85,66 +55,6 @@ class AccountServiceASGIApplication(ConnectASGIApplication[AccountService]):
         super().__init__(
             service=service,
             endpoints=lambda svc: {
-                "/codewire.console.v1.AccountService/ListLoginKeys": Endpoint.unary(
-                    method=MethodInfo(
-                        name="ListLoginKeys",
-                        service_name="codewire.console.v1.AccountService",
-                        input=ListLoginKeysRequest,
-                        output=ListLoginKeysResponse,
-                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-                    ),
-                    function=svc.list_login_keys,
-                ),
-                "/codewire.console.v1.AccountService/CreateLoginKey": Endpoint.unary(
-                    method=MethodInfo(
-                        name="CreateLoginKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=CreateLoginKeyRequest,
-                        output=CreateLoginKeyResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.create_login_key,
-                ),
-                "/codewire.console.v1.AccountService/DeleteLoginKey": Endpoint.unary(
-                    method=MethodInfo(
-                        name="DeleteLoginKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=DeleteLoginKeyRequest,
-                        output=DeleteLoginKeyResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.delete_login_key,
-                ),
-                "/codewire.console.v1.AccountService/EnsureSshKey": Endpoint.unary(
-                    method=MethodInfo(
-                        name="EnsureSshKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=EnsureSshKeyRequest,
-                        output=EnsureSshKeyResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.ensure_ssh_key,
-                ),
-                "/codewire.console.v1.AccountService/GetSshKey": Endpoint.unary(
-                    method=MethodInfo(
-                        name="GetSshKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=GetSshKeyRequest,
-                        output=GetSshKeyResponse,
-                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-                    ),
-                    function=svc.get_ssh_key,
-                ),
-                "/codewire.console.v1.AccountService/RegenerateSshKey": Endpoint.unary(
-                    method=MethodInfo(
-                        name="RegenerateSshKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=RegenerateSshKeyRequest,
-                        output=RegenerateSshKeyResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.regenerate_ssh_key,
-                ),
                 "/codewire.console.v1.AccountService/GetGitIdentity": Endpoint.unary(
                     method=MethodInfo(
                         name="GetGitIdentity",
@@ -164,46 +74,6 @@ class AccountServiceASGIApplication(ConnectASGIApplication[AccountService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.update_git_identity,
-                ),
-                "/codewire.console.v1.AccountService/ListGitCredentials": Endpoint.unary(
-                    method=MethodInfo(
-                        name="ListGitCredentials",
-                        service_name="codewire.console.v1.AccountService",
-                        input=ListGitCredentialsRequest,
-                        output=ListGitCredentialsResponse,
-                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-                    ),
-                    function=svc.list_git_credentials,
-                ),
-                "/codewire.console.v1.AccountService/CreateGitCredential": Endpoint.unary(
-                    method=MethodInfo(
-                        name="CreateGitCredential",
-                        service_name="codewire.console.v1.AccountService",
-                        input=CreateGitCredentialRequest,
-                        output=CreateGitCredentialResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.create_git_credential,
-                ),
-                "/codewire.console.v1.AccountService/UpdateGitCredential": Endpoint.unary(
-                    method=MethodInfo(
-                        name="UpdateGitCredential",
-                        service_name="codewire.console.v1.AccountService",
-                        input=UpdateGitCredentialRequest,
-                        output=UpdateGitCredentialResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.update_git_credential,
-                ),
-                "/codewire.console.v1.AccountService/DeleteGitCredential": Endpoint.unary(
-                    method=MethodInfo(
-                        name="DeleteGitCredential",
-                        service_name="codewire.console.v1.AccountService",
-                        input=DeleteGitCredentialRequest,
-                        output=DeleteGitCredentialResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.delete_git_credential,
                 ),
             },
             interceptors=interceptors,
@@ -243,130 +113,6 @@ class AccountServiceClient(ConnectClient):
             interceptors=interceptors,
             http_client=http_client,
         )
-    async def list_login_keys(
-        self,
-        request: ListLoginKeysRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-        use_get: bool = False,
-    ) -> ListLoginKeysResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="ListLoginKeys",
-                service_name="codewire.console.v1.AccountService",
-                input=ListLoginKeysRequest,
-                output=ListLoginKeysResponse,
-                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-            use_get=use_get,
-        )
-
-    async def create_login_key(
-        self,
-        request: CreateLoginKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> CreateLoginKeyResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="CreateLoginKey",
-                service_name="codewire.console.v1.AccountService",
-                input=CreateLoginKeyRequest,
-                output=CreateLoginKeyResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
-    async def delete_login_key(
-        self,
-        request: DeleteLoginKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> DeleteLoginKeyResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="DeleteLoginKey",
-                service_name="codewire.console.v1.AccountService",
-                input=DeleteLoginKeyRequest,
-                output=DeleteLoginKeyResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
-    async def ensure_ssh_key(
-        self,
-        request: EnsureSshKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> EnsureSshKeyResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="EnsureSshKey",
-                service_name="codewire.console.v1.AccountService",
-                input=EnsureSshKeyRequest,
-                output=EnsureSshKeyResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
-    async def get_ssh_key(
-        self,
-        request: GetSshKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-        use_get: bool = False,
-    ) -> GetSshKeyResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="GetSshKey",
-                service_name="codewire.console.v1.AccountService",
-                input=GetSshKeyRequest,
-                output=GetSshKeyResponse,
-                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-            use_get=use_get,
-        )
-
-    async def regenerate_ssh_key(
-        self,
-        request: RegenerateSshKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> RegenerateSshKeyResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="RegenerateSshKey",
-                service_name="codewire.console.v1.AccountService",
-                input=RegenerateSshKeyRequest,
-                output=RegenerateSshKeyResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
     async def get_git_identity(
         self,
         request: GetGitIdentityRequest,
@@ -409,123 +155,11 @@ class AccountServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
-    async def list_git_credentials(
-        self,
-        request: ListGitCredentialsRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-        use_get: bool = False,
-    ) -> ListGitCredentialsResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="ListGitCredentials",
-                service_name="codewire.console.v1.AccountService",
-                input=ListGitCredentialsRequest,
-                output=ListGitCredentialsResponse,
-                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-            use_get=use_get,
-        )
-
-    async def create_git_credential(
-        self,
-        request: CreateGitCredentialRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> CreateGitCredentialResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="CreateGitCredential",
-                service_name="codewire.console.v1.AccountService",
-                input=CreateGitCredentialRequest,
-                output=CreateGitCredentialResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
-    async def update_git_credential(
-        self,
-        request: UpdateGitCredentialRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> UpdateGitCredentialResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="UpdateGitCredential",
-                service_name="codewire.console.v1.AccountService",
-                input=UpdateGitCredentialRequest,
-                output=UpdateGitCredentialResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
-    async def delete_git_credential(
-        self,
-        request: DeleteGitCredentialRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> DeleteGitCredentialResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="DeleteGitCredential",
-                service_name="codewire.console.v1.AccountService",
-                input=DeleteGitCredentialRequest,
-                output=DeleteGitCredentialResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
 class AccountServiceSync(Protocol):
-    def list_login_keys(self, request: ListLoginKeysRequest, ctx: RequestContext[ListLoginKeysRequest, ListLoginKeysResponse]) -> ListLoginKeysResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def create_login_key(self, request: CreateLoginKeyRequest, ctx: RequestContext[CreateLoginKeyRequest, CreateLoginKeyResponse]) -> CreateLoginKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def delete_login_key(self, request: DeleteLoginKeyRequest, ctx: RequestContext[DeleteLoginKeyRequest, DeleteLoginKeyResponse]) -> DeleteLoginKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def ensure_ssh_key(self, request: EnsureSshKeyRequest, ctx: RequestContext[EnsureSshKeyRequest, EnsureSshKeyResponse]) -> EnsureSshKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def get_ssh_key(self, request: GetSshKeyRequest, ctx: RequestContext[GetSshKeyRequest, GetSshKeyResponse]) -> GetSshKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def regenerate_ssh_key(self, request: RegenerateSshKeyRequest, ctx: RequestContext[RegenerateSshKeyRequest, RegenerateSshKeyResponse]) -> RegenerateSshKeyResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
     def get_git_identity(self, request: GetGitIdentityRequest, ctx: RequestContext[GetGitIdentityRequest, GetGitIdentityResponse]) -> GetGitIdentityResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def update_git_identity(self, request: UpdateGitIdentityRequest, ctx: RequestContext[UpdateGitIdentityRequest, UpdateGitIdentityResponse]) -> UpdateGitIdentityResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def list_git_credentials(self, request: ListGitCredentialsRequest, ctx: RequestContext[ListGitCredentialsRequest, ListGitCredentialsResponse]) -> ListGitCredentialsResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def create_git_credential(self, request: CreateGitCredentialRequest, ctx: RequestContext[CreateGitCredentialRequest, CreateGitCredentialResponse]) -> CreateGitCredentialResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def update_git_credential(self, request: UpdateGitCredentialRequest, ctx: RequestContext[UpdateGitCredentialRequest, UpdateGitCredentialResponse]) -> UpdateGitCredentialResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def delete_git_credential(self, request: DeleteGitCredentialRequest, ctx: RequestContext[DeleteGitCredentialRequest, DeleteGitCredentialResponse]) -> DeleteGitCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -540,66 +174,6 @@ class AccountServiceWSGIApplication(ConnectWSGIApplication):
     ) -> None:
         super().__init__(
             endpoints={
-                "/codewire.console.v1.AccountService/ListLoginKeys": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="ListLoginKeys",
-                        service_name="codewire.console.v1.AccountService",
-                        input=ListLoginKeysRequest,
-                        output=ListLoginKeysResponse,
-                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-                    ),
-                    function=service.list_login_keys,
-                ),
-                "/codewire.console.v1.AccountService/CreateLoginKey": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="CreateLoginKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=CreateLoginKeyRequest,
-                        output=CreateLoginKeyResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.create_login_key,
-                ),
-                "/codewire.console.v1.AccountService/DeleteLoginKey": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="DeleteLoginKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=DeleteLoginKeyRequest,
-                        output=DeleteLoginKeyResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.delete_login_key,
-                ),
-                "/codewire.console.v1.AccountService/EnsureSshKey": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="EnsureSshKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=EnsureSshKeyRequest,
-                        output=EnsureSshKeyResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.ensure_ssh_key,
-                ),
-                "/codewire.console.v1.AccountService/GetSshKey": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="GetSshKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=GetSshKeyRequest,
-                        output=GetSshKeyResponse,
-                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-                    ),
-                    function=service.get_ssh_key,
-                ),
-                "/codewire.console.v1.AccountService/RegenerateSshKey": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="RegenerateSshKey",
-                        service_name="codewire.console.v1.AccountService",
-                        input=RegenerateSshKeyRequest,
-                        output=RegenerateSshKeyResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.regenerate_ssh_key,
-                ),
                 "/codewire.console.v1.AccountService/GetGitIdentity": EndpointSync.unary(
                     method=MethodInfo(
                         name="GetGitIdentity",
@@ -619,46 +193,6 @@ class AccountServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.update_git_identity,
-                ),
-                "/codewire.console.v1.AccountService/ListGitCredentials": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="ListGitCredentials",
-                        service_name="codewire.console.v1.AccountService",
-                        input=ListGitCredentialsRequest,
-                        output=ListGitCredentialsResponse,
-                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-                    ),
-                    function=service.list_git_credentials,
-                ),
-                "/codewire.console.v1.AccountService/CreateGitCredential": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="CreateGitCredential",
-                        service_name="codewire.console.v1.AccountService",
-                        input=CreateGitCredentialRequest,
-                        output=CreateGitCredentialResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.create_git_credential,
-                ),
-                "/codewire.console.v1.AccountService/UpdateGitCredential": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="UpdateGitCredential",
-                        service_name="codewire.console.v1.AccountService",
-                        input=UpdateGitCredentialRequest,
-                        output=UpdateGitCredentialResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.update_git_credential,
-                ),
-                "/codewire.console.v1.AccountService/DeleteGitCredential": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="DeleteGitCredential",
-                        service_name="codewire.console.v1.AccountService",
-                        input=DeleteGitCredentialRequest,
-                        output=DeleteGitCredentialResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.delete_git_credential,
                 ),
             },
             interceptors=interceptors,
@@ -698,124 +232,6 @@ class AccountServiceClientSync(ConnectClientSync):
             interceptors=interceptors,
             http_client=http_client,
         )
-    def list_login_keys(
-        self,
-        request: ListLoginKeysRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-        use_get: bool = False,
-    ) -> ListLoginKeysResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="ListLoginKeys",
-                service_name="codewire.console.v1.AccountService",
-                input=ListLoginKeysRequest,
-                output=ListLoginKeysResponse,
-                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-            use_get=use_get,
-        )
-    def create_login_key(
-        self,
-        request: CreateLoginKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> CreateLoginKeyResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="CreateLoginKey",
-                service_name="codewire.console.v1.AccountService",
-                input=CreateLoginKeyRequest,
-                output=CreateLoginKeyResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-    def delete_login_key(
-        self,
-        request: DeleteLoginKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> DeleteLoginKeyResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="DeleteLoginKey",
-                service_name="codewire.console.v1.AccountService",
-                input=DeleteLoginKeyRequest,
-                output=DeleteLoginKeyResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-    def ensure_ssh_key(
-        self,
-        request: EnsureSshKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> EnsureSshKeyResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="EnsureSshKey",
-                service_name="codewire.console.v1.AccountService",
-                input=EnsureSshKeyRequest,
-                output=EnsureSshKeyResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-    def get_ssh_key(
-        self,
-        request: GetSshKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-        use_get: bool = False,
-    ) -> GetSshKeyResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="GetSshKey",
-                service_name="codewire.console.v1.AccountService",
-                input=GetSshKeyRequest,
-                output=GetSshKeyResponse,
-                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-            use_get=use_get,
-        )
-    def regenerate_ssh_key(
-        self,
-        request: RegenerateSshKeyRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> RegenerateSshKeyResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="RegenerateSshKey",
-                service_name="codewire.console.v1.AccountService",
-                input=RegenerateSshKeyRequest,
-                output=RegenerateSshKeyResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
     def get_git_identity(
         self,
         request: GetGitIdentityRequest,
@@ -851,84 +267,6 @@ class AccountServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.AccountService",
                 input=UpdateGitIdentityRequest,
                 output=UpdateGitIdentityResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-    def list_git_credentials(
-        self,
-        request: ListGitCredentialsRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-        use_get: bool = False,
-    ) -> ListGitCredentialsResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="ListGitCredentials",
-                service_name="codewire.console.v1.AccountService",
-                input=ListGitCredentialsRequest,
-                output=ListGitCredentialsResponse,
-                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-            use_get=use_get,
-        )
-    def create_git_credential(
-        self,
-        request: CreateGitCredentialRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> CreateGitCredentialResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="CreateGitCredential",
-                service_name="codewire.console.v1.AccountService",
-                input=CreateGitCredentialRequest,
-                output=CreateGitCredentialResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-    def update_git_credential(
-        self,
-        request: UpdateGitCredentialRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> UpdateGitCredentialResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="UpdateGitCredential",
-                service_name="codewire.console.v1.AccountService",
-                input=UpdateGitCredentialRequest,
-                output=UpdateGitCredentialResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-    def delete_git_credential(
-        self,
-        request: DeleteGitCredentialRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> DeleteGitCredentialResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="DeleteGitCredential",
-                service_name="codewire.console.v1.AccountService",
-                input=DeleteGitCredentialRequest,
-                output=DeleteGitCredentialResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

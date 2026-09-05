@@ -10,31 +10,9 @@ use codewire_proto::codewire::v1 as proto;
 pub fn from_proto(
     value: proto::ProjectSpec,
 ) -> Result<project::ProjectSpec, project::ProjectError> {
-    if !value.credentials.is_empty() {
-        return invalid(
-            "project_spec.credentials",
-            "is retired; select one scope-qualified access profile",
-        );
-    }
-    match value.workspace_mode.as_known() {
-        Some(proto::ProjectWorkspaceMode::Unspecified) => {}
-        Some(_) => {
-            return invalid(
-                "project_spec.workspace_mode",
-                "is retired; use portable repositories or placement-specific mounts",
-            );
-        }
-        None => return invalid("project_spec.workspace_mode", "contains an unknown value"),
-    }
     let agents = value.agents.into_option().unwrap_or_default();
     let resources = value.resources.into_option().unwrap_or_default();
     let secrets = value.secrets.into_option().unwrap_or_default();
-    if secrets.include_org.is_some() || secrets.include_user.is_some() {
-        return invalid(
-            "project_spec.secrets",
-            "preview include_org/include_user fields are retired; use organization/user",
-        );
-    }
     let access = value
         .access
         .into_option()
@@ -74,10 +52,10 @@ pub fn from_proto(
             .repositories
             .into_iter()
             .map(|repository| project::RepositorySpec {
-                source: repository.url,
+                source: repository.source,
                 revision: repository.revision,
                 branch: repository.branch,
-                destination: repository.mount_path,
+                destination: repository.destination,
             })
             .collect(),
         working_directory: value.working_directory,
@@ -88,7 +66,6 @@ pub fn from_proto(
             install: agents.install,
             tools: agents.tools,
         },
-        agent_environment: ordered_map(value.agent_environment),
         skills,
         application_ports: value
             .application_ports
@@ -144,10 +121,10 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
         repositories: value
             .repositories
             .into_iter()
-            .map(|repository| proto::RepoEntry {
-                url: repository.source,
+            .map(|repository| proto::RepositorySpec {
+                source: repository.source,
                 branch: repository.branch,
-                mount_path: repository.destination,
+                destination: repository.destination,
                 revision: repository.revision,
                 ..Default::default()
             })
@@ -157,7 +134,6 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
         startup_script: value.startup_script,
         environment: value.environment.into_iter().collect(),
         agents: agents.into(),
-        agent_environment: value.agent_environment.into_iter().collect(),
         skills: value
             .skills
             .into_iter()
@@ -176,7 +152,7 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
         application_ports: value
             .application_ports
             .into_iter()
-            .map(|port| proto::AppPort {
+            .map(|port| proto::ApplicationPort {
                 port: i32::from(port.port),
                 label: port.label,
                 access: port.access,
@@ -216,20 +192,27 @@ repositories:
     revision: deadbeef
     destination: /workspace/app
 working_directory: /workspace/app
-env: {RUST_LOG: info}
-agents: [claude, codex]
-skills: [{path: .agents/skills/rust, agents: [codex]}]
+environment: {RUST_LOG: info}
+agents: {tools: [claude-code, codex]}
+skills: [{source: repository, path: .agents/skills/rust, agents: [codex]}]
 ports: [{port: 8080, label: web, access: private}]
-cpu: 2
-memory: 16Gi
-disk: 40Gi
+cpu: "2"
+memory: "16Gi"
+disk: "40Gi"
 secrets: {project: dev, organization: false, user: true}
 access: {profile: user/work}
 "#,
         )
         .unwrap()
         .spec;
-        let decoded = from_proto(to_proto(original.clone())).unwrap();
+        let encoded = to_proto(original.clone());
+        assert_eq!(
+            encoded.repositories[0].source,
+            "https://example.test/org/app.git"
+        );
+        assert_eq!(encoded.repositories[0].destination, "/workspace/app");
+        assert_eq!(encoded.application_ports[0].port, 8080);
+        let decoded = from_proto(encoded).unwrap();
         assert_eq!(decoded, original);
         assert_eq!(
             decoded.canonical_json().unwrap(),
@@ -250,31 +233,6 @@ access: {profile: user/work}
             ..Default::default()
         };
         assert!(from_proto(proto).is_err());
-
-        let retired = proto::ProjectSpec {
-            schema_version: project::PROJECT_SCHEMA_VERSION,
-            secrets: Some(proto::ProjectSecretBindings {
-                include_user: Some(false),
-                ..Default::default()
-            })
-            .into(),
-            ..Default::default()
-        };
-        assert!(from_proto(retired).is_err());
-
-        let mut retired = proto::ProjectSpec {
-            schema_version: project::PROJECT_SCHEMA_VERSION,
-            ..Default::default()
-        };
-        retired.credentials.insert(
-            "work".to_string(),
-            proto::ProjectCredentialReference {
-                provider: "openai".to_string(),
-                account: "acct-work".to_string(),
-                ..Default::default()
-            },
-        );
-        assert!(from_proto(retired).is_err());
 
         let descriptor_json = serde_json::to_string(&to_proto(project::ProjectSpec::default()))
             .expect("serialize public project spec");

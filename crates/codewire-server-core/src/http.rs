@@ -83,8 +83,8 @@ impl AppBuilder {
     ///
     /// This mount carries **no user-auth layer** (D3's internal /
     /// self-authenticating mode — handlers validate their own credentials).
-    /// User-facing services mount via [`with_connect_routes_auth`]
-    /// (`AppBuilder::with_connect_routes_auth`).
+    /// User-facing services mount via
+    /// [`AppBuilder::with_connect_routes_auth`].
     pub fn with_connect_routes(mut self, connect: connectrpc::Router) -> Self {
         self.connect_routes
             .push(crate::connect::connect_router(connect));

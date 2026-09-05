@@ -183,6 +183,26 @@ def self_test(sources: dict[str, str], policy: dict[str, Any]) -> None:
     ):
         raise RuntimeError("self-test did not reject a new retired provider source file")
 
+    with_ambient_github = dict(sources)
+    with_ambient_github[
+        "crates/codewire-desktop/src/ambient_github_fixture.rs"
+    ] = 'fn probe() { let _ = Command::new("gh"); }\n'
+    if not any(
+        "ambient_github_fixture.rs restores forbidden native legacy fragment" in item
+        for item in failures_for(with_ambient_github, policy)
+    ):
+        raise RuntimeError("self-test did not reject ambient GitHub CLI access")
+
+    with_ambient_provider_secret = dict(sources)
+    with_ambient_provider_secret[
+        "crates/codewire-desktop/src/ambient_provider_secret_fixture.rs"
+    ] = 'fn probe() { let _ = std::env::var("ANTHROPIC_API_KEY"); }\n'
+    if not any(
+        "ambient_provider_secret_fixture.rs restores forbidden native legacy fragment" in item
+        for item in failures_for(with_ambient_provider_secret, policy)
+    ):
+        raise RuntimeError("self-test did not reject ambient provider credentials")
+
     with_new_legacy_file = dict(sources)
     with_new_legacy_file[
         "crates/codewire-desktop/src/legacy_client_fixture.rs"

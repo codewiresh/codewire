@@ -2,10 +2,7 @@ syntax = "proto3";
 
 package codewire.console.v1;
 
-import "codewire/v1/environment.proto";
 import "codewire/v1/preset.proto";
-import "codewire/v1/secret.proto";
-import "google/protobuf/timestamp.proto";
 
 // EnvironmentSetupService supplies the first-party environment-creation UX.
 // The content-negotiated prepare handler is represented by
@@ -17,10 +14,6 @@ service EnvironmentSetupService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
-  rpc DetectRepo(DetectRepoRequest) returns (DetectRepoResponse) {
-    option idempotency_level = NO_SIDE_EFFECTS;
-  }
-
   rpc IssueTerminalTicket(IssueTerminalTicketRequest) returns (IssueTerminalTicketResponse);
 }
 
@@ -29,27 +22,10 @@ message GetEnvironmentCreateOptionsRequest {
 }
 
 message GetEnvironmentCreateOptionsResponse {
-  GitHubConnection github_status = 1;
+  reserved 1, 3;
+  reserved "github_status", "secret_projects";
+
   repeated codewire.v1.Preset presets = 2;
-  repeated codewire.v1.SecretProject secret_projects = 3;
-}
-
-// GitHubConnection is the environment-creation view of the caller's stored
-// GitHub connection. No token material is exposed.
-message GitHubConnection {
-  bool connected = 1;
-  string username = 2;
-  optional int64 installation_id = 3;
-  optional google.protobuf.Timestamp connected_at = 4;
-}
-
-message DetectRepoRequest {
-  string repo_url = 1;
-  string branch = 2;
-}
-
-message DetectRepoResponse {
-  codewire.v1.DetectionResult result = 1;
 }
 
 message IssueTerminalTicketRequest {}

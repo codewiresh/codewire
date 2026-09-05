@@ -1,10 +1,10 @@
 use async_trait::async_trait;
-use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
 use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::{DAEMON_AUTH_TOKEN_HEADER, DaemonAuthToken};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
-use tonic::metadata::MetadataValue;
+use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::Channel;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,7 +129,7 @@ pub trait DaemonClient: Send + Sync {
 #[derive(Clone)]
 pub struct DaemonSessionClient {
     inner: v1::daemon_service_client::DaemonServiceClient<Channel>,
-    auth_token: Option<String>,
+    auth_token: MetadataValue<Ascii>,
 }
 
 pub struct ExecDaemonSession {
@@ -153,25 +153,16 @@ pub struct PtyDaemonSessionInput {
 }
 
 impl DaemonSessionClient {
-    pub async fn connect_shim(shim_addr: impl AsRef<str>) -> Result<Self, DaemonClientError> {
-        Self::connect_shim_with_auth(shim_addr, None).await
-    }
-
-    pub async fn connect_shim_with_auth(
+    pub async fn connect_shim(
         shim_addr: impl AsRef<str>,
-        auth_token: Option<String>,
+        auth_token: DaemonAuthToken,
     ) -> Result<Self, DaemonClientError> {
-        Self::connect_endpoint_with_auth(daemon_endpoint_for_shim(shim_addr.as_ref()), auth_token)
-            .await
+        Self::connect_endpoint(daemon_endpoint_for_shim(shim_addr.as_ref()), auth_token).await
     }
 
-    pub async fn connect_endpoint(endpoint: String) -> Result<Self, DaemonClientError> {
-        Self::connect_endpoint_with_auth(endpoint, None).await
-    }
-
-    pub async fn connect_endpoint_with_auth(
+    pub async fn connect_endpoint(
         endpoint: String,
-        auth_token: Option<String>,
+        auth_token: DaemonAuthToken,
     ) -> Result<Self, DaemonClientError> {
         let channel = Channel::from_shared(endpoint.clone())
             .map_err(|source| DaemonClientError::InvalidEndpoint {
@@ -184,6 +175,9 @@ impl DaemonSessionClient {
                 endpoint: endpoint.clone(),
                 source,
             })?;
+        let mut auth_token = MetadataValue::try_from(auth_token.expose_secret())
+            .expect("DaemonAuthToken guarantees valid ASCII metadata");
+        auth_token.set_sensitive(true);
         Ok(Self {
             inner: v1::daemon_service_client::DaemonServiceClient::new(channel),
             auth_token,
@@ -191,13 +185,9 @@ impl DaemonSessionClient {
     }
 
     fn authorize<T>(&self, request: &mut Request<T>) {
-        if let Some(token) = self.auth_token.as_deref()
-            && let Ok(value) = MetadataValue::try_from(token)
-        {
-            request
-                .metadata_mut()
-                .insert(DAEMON_AUTH_TOKEN_HEADER, value);
-        }
+        request
+            .metadata_mut()
+            .insert(DAEMON_AUTH_TOKEN_HEADER, self.auth_token.clone());
     }
 }
 
@@ -775,9 +765,12 @@ mod tests {
     async fn grpc_file_rpcs_round_trip_daemon_requests() {
         let daemon = RecordingDaemon::default();
         let addr = spawn_recording_daemon(daemon.clone()).await;
-        let client = DaemonSessionClient::connect_endpoint(format!("http://{addr}"))
-            .await
-            .unwrap();
+        let client = DaemonSessionClient::connect_endpoint(
+            format!("http://{addr}"),
+            DaemonAuthToken::new("gateway-daemon-test-token").unwrap(),
+        )
+        .await
+        .unwrap();
 
         let entries = client.list("/workspace").await.unwrap();
         assert_eq!(entries[0].name, "file.txt");
@@ -949,9 +942,12 @@ mod tests {
     async fn grpc_exec_session_round_trips_daemon_frames() {
         let daemon = RecordingDaemon::default();
         let addr = spawn_recording_daemon(daemon.clone()).await;
-        let client = DaemonSessionClient::connect_endpoint(format!("http://{addr}"))
-            .await
-            .unwrap();
+        let client = DaemonSessionClient::connect_endpoint(
+            format!("http://{addr}"),
+            DaemonAuthToken::new("gateway-daemon-test-token").unwrap(),
+        )
+        .await
+        .unwrap();
 
         let mut session = client
             .exec_session(SessionStart {
@@ -1000,9 +996,12 @@ mod tests {
     async fn grpc_pty_session_round_trips_daemon_frames() {
         let daemon = RecordingDaemon::default();
         let addr = spawn_recording_daemon(daemon.clone()).await;
-        let client = DaemonSessionClient::connect_endpoint(format!("http://{addr}"))
-            .await
-            .unwrap();
+        let client = DaemonSessionClient::connect_endpoint(
+            format!("http://{addr}"),
+            DaemonAuthToken::new("gateway-daemon-test-token").unwrap(),
+        )
+        .await
+        .unwrap();
 
         let mut session = client
             .pty_session(PtyStart {
@@ -1075,9 +1074,12 @@ mod tests {
             ..Default::default()
         };
         let addr = spawn_recording_daemon(daemon).await;
-        let client = DaemonSessionClient::connect_endpoint(format!("http://{addr}"))
-            .await
-            .unwrap();
+        let client = DaemonSessionClient::connect_endpoint(
+            format!("http://{addr}"),
+            DaemonAuthToken::new("gateway-daemon-test-token").unwrap(),
+        )
+        .await
+        .unwrap();
 
         let mut exec = client
             .exec_session(SessionStart {

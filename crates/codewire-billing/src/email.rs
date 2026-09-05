@@ -42,7 +42,7 @@ pub struct ReceiptData {
 impl EmailClient {
     /// `api_key` empty -> emails disabled. Callers usually check
     /// [`Self::is_configured`] like the Go `resendAPIKey != ""` guards, and
-    /// [`Self::send`] also no-ops so a missed guard cannot perform external
+    /// `Self::send` also no-ops so a missed guard cannot perform external
     /// network I/O in CI or local test runs.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {

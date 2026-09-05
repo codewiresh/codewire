@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - Terminal rendering using alacritty_terminal
-//! - SSH shell spawn with session attachment
+//! - Local and Codewire environment sessions
 //! - Full keyboard passthrough
 
 pub mod backend;
