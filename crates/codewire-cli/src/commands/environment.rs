@@ -2367,10 +2367,10 @@ pub(crate) fn collect_env_create_repos(
     if branch.is_some() && inputs.len() > 1 {
         anyhow::bail!("--branch can be used only with one repository");
     }
-    if let (Some(branch), Some((_, repo_branch, _))) = (branch, inputs.first_mut()) {
-        if repo_branch.is_empty() {
-            *repo_branch = branch.to_string();
-        }
+    if let (Some(branch), Some((_, repo_branch, _))) = (branch, inputs.first_mut())
+        && repo_branch.is_empty()
+    {
+        *repo_branch = branch.to_string();
     }
     let destinations = codewire_project::validate_repository_destinations(
         inputs
