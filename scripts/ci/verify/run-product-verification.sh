@@ -438,6 +438,16 @@ run_rust() {
   if has_root_rust_selection; then
     run_rust_packages rust_pkg_
   fi
+  if selected rust_workspace || selected rust_pkg_codewire_protected_store \
+      || selected rust_pkg_codewire_orchestration; then
+    scripts/ci/tests/test-openbao-only-secret-authority.sh --production-features
+  fi
+  if selected rust_workspace || selected rust_pkg_codewire_protected_store; then
+    # Platform primitives are optional; default workspace/package tests alone
+    # do not promise that their tests or warning-denied targets are exercised.
+    cargo clippy --locked -p codewire-protected-store --features platform --all-targets -- -D warnings
+    cargo test --locked -p codewire-protected-store --features platform --all-targets
+  fi
   if selected rust_pkg_codewire_oidc; then
     cargo check -p codewire-oidc --no-default-features
     cargo test -p codewire-oidc --features axum

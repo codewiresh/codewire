@@ -371,19 +371,18 @@ pub trait KekProvider: Send + Sync {
         wrapped: &WrappedDek,
     ) -> Result<WrappedDek, SecretEnvelopeError>;
 
-    /// Return the provider authority identity. Keyring providers have no
-    /// external authority and return `None`; OpenBao validates and returns its
-    /// configured cluster id.
+    /// Return the validated OpenBao cluster identity. The synthetic test
+    /// provider has no external authority and returns `None`.
     async fn authority_id(&self) -> Result<Option<String>, SecretEnvelopeError>;
 }
 
 /// In-memory provider used only by tests which need the encrypted PostgreSQL
 /// store without a live OpenBao service. It persists the same OpenBao-shaped
 /// envelope fields so schema tests exercise the production contract.
-#[cfg(any(test, feature = "kind-e2e"))]
-pub(crate) struct TestKekProvider;
+#[cfg(any(test, feature = "platform-test-support"))]
+pub struct TestKekProvider;
 
-#[cfg(any(test, feature = "kind-e2e"))]
+#[cfg(any(test, feature = "platform-test-support"))]
 #[async_trait]
 impl KekProvider for TestKekProvider {
     fn kind(&self) -> KekProviderKind {
@@ -631,7 +630,7 @@ struct BaoHealthResponse {
 }
 
 impl OpenBaoTransitProvider {
-    pub(crate) fn new(
+    pub fn new(
         config: OpenBaoTransitConfig,
         identity: Arc<dyn OpenBaoWorkloadIdentity>,
     ) -> Result<Self, SecretEnvelopeError> {

@@ -23,19 +23,19 @@ const MAXIMUM_USABLE_LIFETIME_SECONDS: i64 = TOKEN_EXPIRATION_SECONDS + 60;
 const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum WorkloadIdentityError {
+pub enum WorkloadIdentityError {
     #[error("invalid OpenBao workload identity configuration: {0}")]
     Configuration(&'static str),
     #[error("Kubernetes TokenRequest was unavailable")]
     RequestUnavailable,
-    #[error("Kubernetes TokenRequest was rejected ({code} {reason})")]
-    RequestRejected { code: u16, reason: String },
+    #[error("Kubernetes TokenRequest was rejected ({code})")]
+    RequestRejected { code: u16 },
     #[error("Kubernetes TokenRequest returned an invalid response: {0}")]
     InvalidResponse(&'static str),
 }
 
 impl WorkloadIdentityError {
-    pub(crate) fn failure_class(&self) -> &'static str {
+    pub fn failure_class(&self) -> &'static str {
         match self {
             Self::Configuration(_) => "openbao-workload-identity-invalid",
             Self::RequestUnavailable => "openbao-tokenrequest-unavailable",
@@ -46,7 +46,7 @@ impl WorkloadIdentityError {
 }
 
 #[async_trait]
-pub(crate) trait OpenBaoWorkloadIdentity: Send + Sync {
+pub trait OpenBaoWorkloadIdentity: Send + Sync {
     async fn token(&self) -> Result<Zeroizing<String>, WorkloadIdentityError>;
 }
 
@@ -142,6 +142,17 @@ struct KubeTokenRequester {
     service_accounts: Api<ServiceAccount>,
 }
 
+fn map_token_request_error(error: kube::Error) -> WorkloadIdentityError {
+    // Upstream Status text is not a redacted diagnostic contract. Retain only
+    // the numeric code, never the reason, message, details, or source error.
+    match error {
+        kube::Error::Api(response) => WorkloadIdentityError::RequestRejected {
+            code: response.code,
+        },
+        _ => WorkloadIdentityError::RequestUnavailable,
+    }
+}
+
 #[async_trait]
 impl TokenRequester for KubeTokenRequester {
     async fn request(
@@ -152,23 +163,17 @@ impl TokenRequester for KubeTokenRequester {
         self.service_accounts
             .create_token_request(service_account_name, &PostParams::default(), request)
             .await
-            .map_err(|error| match error {
-                kube::Error::Api(response) => WorkloadIdentityError::RequestRejected {
-                    code: response.code,
-                    reason: response.reason,
-                },
-                _ => WorkloadIdentityError::RequestUnavailable,
-            })
+            .map_err(map_token_request_error)
     }
 }
 
-pub(crate) struct KubernetesOpenBaoWorkloadIdentity {
+pub struct KubernetesOpenBaoWorkloadIdentity {
     config: WorkloadIdentityConfig,
     requester: Arc<dyn TokenRequester>,
 }
 
 impl KubernetesOpenBaoWorkloadIdentity {
-    pub(crate) fn from_env(
+    pub fn from_env(
         client: Client,
         openbao_audience_env: &'static str,
     ) -> Result<Self, WorkloadIdentityError> {
@@ -232,8 +237,8 @@ impl OpenBaoWorkloadIdentity for KubernetesOpenBaoWorkloadIdentity {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn static_workload_identity(token: &str) -> Arc<dyn OpenBaoWorkloadIdentity> {
+#[cfg(any(test, feature = "platform-test-support"))]
+pub fn static_workload_identity(token: &str) -> Arc<dyn OpenBaoWorkloadIdentity> {
     struct StaticIdentity(Zeroizing<String>);
 
     #[async_trait]
@@ -254,6 +259,37 @@ mod tests {
     use k8s_openapi::jiff::{SignedDuration, Timestamp};
 
     use super::*;
+
+    #[test]
+    fn token_request_api_errors_discard_upstream_text() {
+        let response = kube::core::Status::failure(
+            "synthetic-sensitive-upstream-message",
+            "synthetic-sensitive-upstream-reason\nforged-log-field=true",
+        )
+        .with_code(403);
+        let error = map_token_request_error(kube::Error::Api(response.boxed()));
+
+        assert!(matches!(
+            error,
+            WorkloadIdentityError::RequestRejected { code: 403, .. }
+        ));
+        assert_eq!(error.failure_class(), "openbao-tokenrequest-rejected");
+        for rendered in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(!rendered.contains("synthetic-sensitive-upstream-message"));
+            assert!(!rendered.contains("synthetic-sensitive-upstream-reason"));
+            assert!(!rendered.contains("forged-log-field"));
+        }
+        assert_eq!(
+            error.to_string(),
+            "Kubernetes TokenRequest was rejected (403)"
+        );
+        assert_eq!(format!("{error:?}"), "RequestRejected { code: 403 }");
+        assert!(std::error::Error::source(&error).is_none());
+    }
 
     struct FakeRequester {
         requests: Mutex<Vec<(String, TokenRequest)>>,

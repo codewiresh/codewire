@@ -29,7 +29,6 @@ pub mod port_dns;
 pub mod postgres_secrets;
 pub mod resize;
 pub mod scripts;
-pub mod secret_envelope;
 pub mod secrets;
 pub mod setup;
 pub mod setup_lease;
