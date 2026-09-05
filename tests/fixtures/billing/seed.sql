@@ -121,13 +121,14 @@ VALUES
     ('omasn_contract_1', 'orgm_contract_2', 'developer', 'usr_contract_admin'),
     ('omasn_contract_2', 'orgm_contract_2', 'viewer',    'usr_contract_admin');
 
--- A seeded PENDING invitation in org_contract_1 (fixed id/token/timestamps,
+-- A seeded PENDING invitation in org_contract_1 (fixed id/capability/timestamps,
 -- expires in the future) drives the invitations list, the 409 "pending
 -- invitation already exists" create branch, and the revoke success/404 rows.
 -- invited_by = the org owner.
-INSERT INTO org_invitations (id, org_id, email, role, invited_by, token, status, expires_at, created_at, assignments)
+INSERT INTO org_invitations (id, org_id, email, role, invited_by, token_hash, status, expires_at, created_at, assignments)
 VALUES ('inv_contract_1', 'org_contract_1', 'invitee@codewire.test', 'member', 'usr_contract_admin',
-        'invtoken_contract_1', 'pending', '2027-01-01 00:00:00', '2026-01-20 00:00:00', ARRAY['viewer']);
+        encode(digest('invtoken_contract_1', 'sha256'), 'hex'), 'pending',
+        '2027-01-01 00:00:00', '2026-01-20 00:00:00', ARRAY['viewer']);
 
 -- A seeded empty secret project (org_id FK → organizations). Encrypted values
 -- are created through the API so fixtures never duplicate envelope logic.
@@ -230,10 +231,10 @@ VALUES ('orgm_contract_4', 'org_contract_2', 'usr_contract_member2', 'member', '
 -- the revoke success + 404 "already processed" cycle. org_contract_2
 -- invitations are not listed by the org_contract_1 contract rows, so these
 -- don't perturb the org_contract_1 list.
-INSERT INTO org_invitations (id, org_id, email, role, invited_by, token, status, expires_at, created_at, assignments)
+INSERT INTO org_invitations (id, org_id, email, role, invited_by, token_hash, status, expires_at, created_at, assignments)
 VALUES
-    ('inv_rev_go', 'org_contract_2', 'revgo@codewire.test', 'member', 'usr_contract_user', 'tok_rev_go', 'pending', '2027-01-01 00:00:00', '2026-01-22 00:00:00', ARRAY['viewer']),
-    ('inv_rev_rs', 'org_contract_2', 'revrs@codewire.test', 'member', 'usr_contract_user', 'tok_rev_rs', 'pending', '2027-01-01 00:00:00', '2026-01-22 00:00:00', ARRAY['viewer']);
+    ('inv_rev_go', 'org_contract_2', 'revgo@codewire.test', 'member', 'usr_contract_user', encode(digest('tok_rev_go', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-22 00:00:00', ARRAY['viewer']),
+    ('inv_rev_rs', 'org_contract_2', 'revrs@codewire.test', 'member', 'usr_contract_user', encode(digest('tok_rev_rs', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-22 00:00:00', ARRAY['viewer']);
 
 -- Invitation-accept fixtures. A revoked invitation (400 "invitation is
 -- revoked", status-checked before email) and an email-mismatch pending one
@@ -246,12 +247,12 @@ VALUES
     ('org_contract_3', 'Contract Org Three', 'contract-org-three', 'usr_contract_admin', NOW(), NOW()),
     ('org_contract_4', 'Contract Org Four',  'contract-org-four',  'usr_contract_admin', NOW(), NOW());
 
-INSERT INTO org_invitations (id, org_id, email, role, invited_by, token, status, expires_at, created_at, assignments)
+INSERT INTO org_invitations (id, org_id, email, role, invited_by, token_hash, status, expires_at, created_at, assignments)
 VALUES
-    ('inv_accept_revoked',  'org_contract_1', 'whoever@codewire.test',      'member', 'usr_contract_admin', 'tok_accept_revoked',  'revoked', '2027-01-01 00:00:00', '2026-01-23 00:00:00', ARRAY['viewer']),
-    ('inv_accept_mismatch', 'org_contract_1', 'someone-else@codewire.test', 'member', 'usr_contract_admin', 'tok_accept_mismatch', 'pending', '2027-01-01 00:00:00', '2026-01-23 00:00:00', ARRAY['viewer']),
-    ('inv_accept_go', 'org_contract_3', 'contract-user@codewire.test', 'member', 'usr_contract_admin', 'tok_accept_go', 'pending', '2027-01-01 00:00:00', '2026-01-24 00:00:00', ARRAY['viewer']),
-    ('inv_accept_rs', 'org_contract_4', 'contract-user@codewire.test', 'member', 'usr_contract_admin', 'tok_accept_rs', 'pending', '2027-01-01 00:00:00', '2026-01-24 00:00:00', ARRAY['viewer']);
+    ('inv_accept_revoked',  'org_contract_1', 'whoever@codewire.test',      'member', 'usr_contract_admin', encode(digest('tok_accept_revoked', 'sha256'), 'hex'),  'revoked', '2027-01-01 00:00:00', '2026-01-23 00:00:00', ARRAY['viewer']),
+    ('inv_accept_mismatch', 'org_contract_1', 'someone-else@codewire.test', 'member', 'usr_contract_admin', encode(digest('tok_accept_mismatch', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-23 00:00:00', ARRAY['viewer']),
+    ('inv_accept_go', 'org_contract_3', 'contract-user@codewire.test', 'member', 'usr_contract_admin', encode(digest('tok_accept_go', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-24 00:00:00', ARRAY['viewer']),
+    ('inv_accept_rs', 'org_contract_4', 'contract-user@codewire.test', 'member', 'usr_contract_admin', encode(digest('tok_accept_rs', 'sha256'), 'hex'), 'pending', '2027-01-01 00:00:00', '2026-01-24 00:00:00', ARRAY['viewer']);
 
 -- Terminal log fixture: the SSE stream closes after the initial batch
 -- (phase=complete), making the stream diffable end-to-end. Fixed

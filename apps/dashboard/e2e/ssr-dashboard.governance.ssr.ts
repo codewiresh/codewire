@@ -8,7 +8,6 @@ import {
   addOrgMember,
   cleanupTestOrg,
   ensureTestOrg,
-  getOrgInvitationToken,
 } from "./helpers/org";
 import { TEST_PASSWORD, USERS } from "./helpers/seed";
 
@@ -139,7 +138,11 @@ test.describe.serial("server-rendered organization governance", () => {
       await page.getByRole("button", { name: "Send Invite" }).click();
       await expect(page.getByRole("status")).toContainText("Invitation sent");
 
-      const token = await getOrgInvitationToken(USERS.outsider.email);
+      const invitationUrl = (await page
+        .locator('[data-secret-kind="invitation-url"]')
+        .textContent())?.trim();
+      expect(invitationUrl).toBeTruthy();
+      const token = new URL(invitationUrl!).searchParams.get("token");
       expect(token).toBeTruthy();
       await page.context().clearCookies();
       await page.goto(`/accept-invite?token=${token}`);
