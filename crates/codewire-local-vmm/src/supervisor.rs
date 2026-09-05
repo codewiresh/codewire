@@ -2309,11 +2309,11 @@ impl SupervisorCore {
                         // latest durable checkpoint for its next worker run.
                         return Err(SupervisorError::CredentialAuthorityUnavailable);
                     }
-                    Err(_) => {
+                    Err(error) => {
                         let error_code = if recovering {
                             "create_interrupted"
                         } else {
-                            "create_failed"
+                            create_failure_code(&error)
                         };
                         self.fail_replayed_operation(&operation, name, error_code)?;
                         // If failure happened before RecordEnvironment, the
@@ -7659,6 +7659,49 @@ pub enum SupervisorError {
     Store(#[from] SupervisorStoreError),
     #[error("filesystem operation failed for {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
+}
+
+// Persist only closed classes, never Display/Debug or a source chain: nested
+// registry, skill and filesystem errors can contain arbitrary upstream bytes
+// or owner paths. The existing operation error_code is the diagnostic surface.
+fn create_failure_code(error: &SupervisorError) -> &'static str {
+    match error {
+        SupervisorError::RegistryResolver(error) => match error {
+            RegistryResolverError::Client => "create_registry_client",
+            RegistryResolverError::Transport => "create_registry_transport",
+            RegistryResolverError::AuthenticationRequired => "create_registry_auth_required",
+            RegistryResolverError::AuthenticationFailed => "create_registry_auth_failed",
+            RegistryResolverError::NotFound => "create_registry_not_found",
+            RegistryResolverError::RegistryResponse => "create_registry_response",
+            RegistryResolverError::UnsafeUrl
+            | RegistryResolverError::UnsafeRedirect
+            | RegistryResolverError::TooManyRedirects => "create_registry_url_rejected",
+            RegistryResolverError::UnsupportedHostArchitecture
+            | RegistryResolverError::PlatformUnavailable
+            | RegistryResolverError::AmbiguousPlatform
+            | RegistryResolverError::UnsupportedPlatform => "create_registry_platform",
+            RegistryResolverError::Reference(_) => "create_registry_reference",
+            RegistryResolverError::Content(ContentStoreError::Stream) => {
+                "create_registry_blob_stream"
+            }
+            RegistryResolverError::Content(
+                ContentStoreError::SizeMismatch { .. }
+                | ContentStoreError::DigestMismatch
+                | ContentStoreError::ExistingBlobInvalid,
+            ) => "create_registry_blob_integrity",
+            RegistryResolverError::Content(_) => "create_registry_content_store",
+            _ => "create_registry_admission",
+        },
+        SupervisorError::RegistryReference(_) => "create_registry_reference",
+        SupervisorError::SkillSnapshot(_) => "create_skill_snapshot",
+        SupervisorError::WorkspaceGenerationProvisionTask => "create_workspace_generation_task",
+        SupervisorError::WorkspaceGeneration => "create_workspace_generation_invalid",
+        SupervisorError::ContentStore(_) => "create_content_store",
+        SupervisorError::Path(_) | SupervisorError::Io { .. } => "create_filesystem",
+        SupervisorError::InvalidState => "create_state_invalid",
+        SupervisorError::InvalidConfiguration => "create_configuration_invalid",
+        _ => "create_failed",
+    }
 }
 
 impl SupervisorError {
@@ -13231,6 +13274,161 @@ mod tests {
                 .contains_verified(&bundle_digest, bundle_bytes.len() as u64)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn create_failure_codes_are_closed_and_discard_opaque_error_details() {
+        const CANARY: &str = "synthetic-create-failure-secret-must-not-escape";
+        let cases = [
+            (
+                SupervisorError::RegistryResolver(RegistryResolverError::Transport),
+                "create_registry_transport",
+            ),
+            (
+                SupervisorError::RegistryResolver(RegistryResolverError::AuthenticationFailed),
+                "create_registry_auth_failed",
+            ),
+            (
+                SupervisorError::RegistryResolver(RegistryResolverError::NotFound),
+                "create_registry_not_found",
+            ),
+            (
+                SupervisorError::RegistryResolver(RegistryResolverError::InvalidManifest),
+                "create_registry_admission",
+            ),
+            (
+                SupervisorError::RegistryResolver(RegistryResolverError::Content(
+                    ContentStoreError::Stream,
+                )),
+                "create_registry_blob_stream",
+            ),
+            (
+                SupervisorError::RegistryResolver(RegistryResolverError::Content(
+                    ContentStoreError::SizeMismatch {
+                        expected: 3,
+                        actual: 2,
+                    },
+                )),
+                "create_registry_blob_integrity",
+            ),
+            (
+                SupervisorError::RegistryResolver(RegistryResolverError::Content(
+                    ContentStoreError::UnexpectedObject(PathBuf::from(CANARY)),
+                )),
+                "create_registry_content_store",
+            ),
+            (
+                SupervisorError::SkillSnapshot(
+                    SkillSnapshotPreparationError::MissingRepositorySkill(CANARY.to_owned()),
+                ),
+                "create_skill_snapshot",
+            ),
+            (
+                SupervisorError::SkillSnapshot(SkillSnapshotPreparationError::Io {
+                    path: PathBuf::from(CANARY),
+                    source: io::Error::other(CANARY),
+                }),
+                "create_skill_snapshot",
+            ),
+            (
+                SupervisorError::ContentStore(ContentStoreError::Io(io::Error::other(CANARY))),
+                "create_content_store",
+            ),
+            (
+                SupervisorError::Io {
+                    path: PathBuf::from(CANARY),
+                    source: io::Error::other(CANARY),
+                },
+                "create_filesystem",
+            ),
+            (SupervisorError::VmStart(CANARY.to_owned()), "create_failed"),
+        ];
+        for (error, expected) in cases {
+            let code = create_failure_code(&error);
+            assert_eq!(code, expected);
+            assert!(code.len() <= 64);
+            assert!(
+                code.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            );
+            assert!(!code.contains(CANARY));
+        }
+    }
+
+    #[tokio::test]
+    async fn create_failure_code_survives_replay_storage_and_public_operation_without_details() {
+        const CANARY: &str = "synthetic-content-path-must-not-escape";
+        for (recovering, expected_code) in [
+            (false, "create_content_store"),
+            (true, "create_interrupted"),
+        ] {
+            let mut environment = project_environment();
+            environment.generation = 0;
+            let environment_id = environment.id;
+            let request = v1::CreateEnvironmentRequest {
+                name: environment.name.clone(),
+                source_path: "/workspace/source".to_owned(),
+                vcpus: u32::from(environment.vcpus),
+                memory_mib: environment.memory_mib,
+                disk_bytes: environment.disk_bytes,
+                docker_disk_bytes: 0,
+                request_id: Uuid::new_v4().to_string(),
+                project_spec_json: environment.project_spec_json.clone().unwrap(),
+                project_spec_sha256: environment.project_spec_sha256.clone().unwrap(),
+                implicit_path_mode: "clone".to_owned(),
+                ..Default::default()
+            };
+            let payload = create_operation_payload(&request, &environment.workspace_plan).unwrap();
+            let (_parent, mut core) = test_supervisor_core(environment);
+            let operation = begin_and_advance_test_operation(
+                &core.store,
+                environment_id,
+                OperationKind::Create,
+                &payload,
+                3,
+            );
+            assert_eq!(
+                supervisor_effect(operation.kind, operation.checkpoint).unwrap(),
+                Some(LifecycleEffect::StageWorkspaceGeneration),
+            );
+            let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+            ContentStore::create(&engine).unwrap();
+            // The real staging boundary rejects this synthetic unknown object
+            // before any registry request, skill execution, runner or VM boot.
+            let unexpected = engine.path().join("content").join(CANARY);
+            fs::write(&unexpected, b"synthetic-invalid-content-object").unwrap();
+
+            core.run_pending_operations(recovering).await.unwrap();
+
+            let reader = SupervisorOperationReader::open(&core.root).unwrap();
+            let persisted = reader
+                .operation_by_id(operation.operation_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.phase, OperationPhase::Failed);
+            assert_eq!(persisted.checkpoint, 4);
+            assert_eq!(persisted.error_code.as_deref(), Some(expected_code));
+            assert!(persisted.result.is_none());
+            let environment = core.environment("dev").unwrap();
+            assert_eq!(environment.state, StoredEnvironmentState::Error);
+            assert_eq!(environment.generation, 0);
+            assert!(environment.runner.is_none());
+            assert!(environment.staging_workspace_generation.is_none());
+            assert!(unexpected.is_file(), "unsafe objects remain quarantined");
+            let public = operation_proto(&persisted).unwrap();
+            assert_eq!(public.error_code, expected_code);
+            assert_eq!(public.checkpoint, 4);
+            assert_eq!(public.stage, v1::OperationStage::Failed as i32);
+            let failure = operation_outcome(public).unwrap_err();
+            assert_eq!(failure.code(), tonic::Code::FailedPrecondition);
+            assert!(failure.message().ends_with(expected_code));
+            assert!(!failure.message().contains(CANARY));
+            assert!(
+                !serde_json::to_string(&persisted.payload)
+                    .unwrap()
+                    .contains(CANARY)
+            );
+        }
     }
 
     #[test]

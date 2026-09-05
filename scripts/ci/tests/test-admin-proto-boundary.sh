@@ -10,6 +10,32 @@ fail() {
   exit 1
 }
 
+# Policy uses only checked-in source/descriptor inputs. Resolve the real CLI
+# dependency graph only in the separately provisioned Rust capability.
+if [[ "$#" -gt 0 ]]; then
+  [[ "$#" -eq 1 && "$1" == --cli-dependencies ]] || {
+    printf 'usage: %s [--cli-dependencies]\n' "$0" >&2
+    exit 2
+  }
+  # Capture the complete command before matching: an if-pipeline both masks a
+  # Cargo failure and permits grep -q to SIGPIPE a successful graph producer.
+  if cli_tree="$(cargo tree --locked -p codewire-cli-bin --prefix none)"; then
+    :
+  else
+    cargo_status=$?
+    printf '[test-admin-proto-boundary] ERROR: CLI dependency graph failed (status=%s)\n' \
+      "$cargo_status" >&2
+    exit "$cargo_status"
+  fi
+  grep -q '^codewire-cli-bin ' <<<"$cli_tree" ||
+    fail 'dependency graph omits the customer CLI root'
+  if grep -q '^codewire-admin-proto ' <<<"$cli_tree"; then
+    fail 'customer CLI transitively depends on administrator-only contracts'
+  fi
+  printf '[test-admin-proto-boundary] customer CLI dependency boundary passed\n'
+  exit 0
+fi
+
 readonly CUSTOMER_BUILD='crates/codewire-proto/build.rs'
 readonly ADMIN_BUILD='crates/codewire-admin-proto/build.rs'
 
@@ -34,8 +60,4 @@ rg -a -qF 'BillingCatalogService' \
   crates/codewire-admin-proto/codewire_admin_descriptor.bin ||
   fail 'administrator descriptor omits BillingCatalogService'
 
-if cargo tree --locked -p codewire-cli-bin --prefix none | grep -q '^codewire-admin-proto '; then
-  fail 'customer CLI transitively depends on administrator-only contracts'
-fi
-
-printf '[test-admin-proto-boundary] customer and administrator contract boundaries passed\n'
+printf '[test-admin-proto-boundary] static customer and administrator contract boundaries passed\n'

@@ -97,6 +97,10 @@ if [ "$1" = policy ] && [ "${PREFLIGHT_TEST_POLICY_FAIL:-0}" = 1 ]; then
   echo 'synthetic shared policy failure' >&2
   exit 42
 fi
+if [ "$1" = rust ] && [ "${PREFLIGHT_TEST_RUST_FAIL:-0}" = 1 ]; then
+  echo 'synthetic optional Rust feature failure' >&2
+  exit 86
+fi
 if [ "$1" = policy ]; then
   scripts/ci/tests/test-rust-owned-fixtures.sh
   scripts/ci/tests/test-dashboard-image-network-probe.sh
@@ -491,6 +495,28 @@ if source_failure_receipt_output="$({
 fi
 assert_contains source_policy_failure_receipt \
   "$source_failure_receipt_output" 'missing'
+# An optional-feature failure propagated by the shared Rust runner must also
+# stop qualification before receipt emission, after successful policy checks.
+rust_failure_log="$TMP/source-rust-failure-tools.log"
+if rust_failure_output="$({
+  cd "$linked_source"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$rust_failure_log" \
+    PREFLIGHT_TEST_RUST_FAIL=1 \
+    scripts/dev/preflight.sh --for-push --emit-receipt
+} 2>&1)"; then
+  fail 'Rust-selected preflight accepted a failing optional feature'
+fi
+assert_contains rust_failure "$rust_failure_output" 'synthetic optional Rust feature failure'
+assert_contains rust_failure "$rust_failure_output" 'preflight: Rust verification FAILED'
+assert_contains rust_failure_tools "$(cat "$rust_failure_log")" 'product rust '
+assert_not_contains rust_failure "$rust_failure_output" 'receipt_path='
+if rust_failure_receipt_output="$({
+  cd "$linked_source"
+  scripts/ci/receipts/local-prepush-receipt.py verify
+} 2>&1)"; then
+  fail 'failed optional Rust feature left a usable local receipt'
+fi
+assert_contains rust_failure_receipt "$rust_failure_receipt_output" 'missing'
 source_log="$TMP/source-tools.log"
 source_output="$(push_branch "$linked_source" linked-source "$source_log")"
 assert_contains linked_source "$source_output" \

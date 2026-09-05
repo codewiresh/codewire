@@ -1419,6 +1419,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "org_invitations:cascade",
             "org_members:cascade",
             "org_subscriptions:cascade",
+            "platform_access_profiles:cascade",
             "platform_credentials:cascade",
             "repo_configs:no_action",
             "sandbox_running_sessions:cascade",
@@ -1441,6 +1442,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_ports:cascade",
             "environment_resize_operations:cascade",
             "environment_sessions:cascade",
+            "platform_environment_access_bindings:cascade",
             "sandbox_environment_backend:cascade",
             "sandbox_running_sessions:cascade",
         ]

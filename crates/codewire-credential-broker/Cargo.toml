@@ -36,7 +36,9 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 codewire-local-credentials = { workspace = true }
 codewire-protected-store = { workspace = true }
+rusqlite = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }

@@ -15,8 +15,10 @@
 //!
 //! OpenBao work precedes short, owner-fenced database transactions. Every
 //! material replacement uses a fresh DEK and atomically publishes its envelope
-//! with the matching metadata version. PostgreSQL owns crash atomicity; no
-//! second journal, environment generation, or local-store fallback is used.
+//! with the matching metadata version. PostgreSQL owns publication atomicity.
+//! A durable OAuth attempt records whether a provider request may have started
+//! and retains encrypted results for recovery; it is not a second environment
+//! generation or a local-store fallback.
 //! The shared Transit key and generic workload-secret DEKs are never deleted.
 //!
 //! A successful material read establishes one storage admission point. It does
@@ -24,9 +26,16 @@
 //! broker's per-operation grant, lifecycle, expiry and revocation checks.
 
 mod model;
+mod profiles;
+mod refresh;
 mod store;
 
 pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
+pub use profiles::{PlatformAccessProfileStore, PlatformProfileError};
+pub use refresh::{
+    OAuthRefreshAttemptInfo, OAuthRefreshState, PreparedOAuthRefresh, PreparedOAuthRefreshResult,
+    StartedOAuthRefresh,
+};
 pub use store::{CredentialMetadataReader, PlatformCredentialStore};
 
 /// Closed, value-blind errors. SQL/provider errors are deliberately discarded:
@@ -43,6 +52,14 @@ pub enum PlatformCredentialError {
     AlreadyExists,
     #[error("credential version changed")]
     StaleVersion,
+    #[error("credential refresh is in progress")]
+    RefreshInProgress,
+    #[error("credential refresh attempt changed")]
+    StaleRefresh,
+    #[error("credential refresh outcome is unknown")]
+    RefreshOutcomeUnknown,
+    #[error("credential is referenced by a current profile or environment binding")]
+    CredentialInUse,
     #[error("credential is not active")]
     Inactive,
     #[error("credential is expired")]

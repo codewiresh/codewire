@@ -557,6 +557,16 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      scripts/ci/tests/test-admin-proto-boundary.sh)
+        # A guard change must exercise its real dependency graph in provisioned
+        # Rust, while shared Policy retains only its static descriptor checks.
+        select_token rust
+        select_token rust_pkg_codewire_cli_bin
+        recognized=true
+        ;;
+    esac
+
+    case "$path" in
       proto/*|buf.yaml|buf.gen*.yaml)
         select_token contracts
         select_token contracts_proto
@@ -571,13 +581,12 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/proto/build-rust-descriptors.sh|\
-      scripts/ci/tests/test-admin-proto-boundary.sh|\
       scripts/checks/proto_breaking.py|\
       scripts/checks/contracts/proto-retirements.sha256|\
       scripts/checks/contracts/proto-breaking-preimages.sha256)
-        # The Rust audience-descriptor builder and its CLI dependency-boundary
-        # guard, plus the exact clean-break preimage policy, alter contract
-        # verification rather than runtime behavior.
+        # The Rust audience-descriptor builder and the exact clean-break
+        # preimage policy alter contract verification rather than runtime
+        # behavior.
         select_token contracts
         select_token contracts_proto
         recognized=true

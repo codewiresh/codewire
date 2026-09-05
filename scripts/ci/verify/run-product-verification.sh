@@ -438,6 +438,11 @@ run_rust() {
   if has_root_rust_selection; then
     run_rust_packages rust_pkg_
   fi
+  if selected rust_workspace || selected rust_pkg_codewire_cli \
+      || selected rust_pkg_codewire_cli_bin || selected rust_pkg_codewire_admin_proto \
+      || selected rust_pkg_codewire_proto; then
+    scripts/ci/tests/test-admin-proto-boundary.sh --cli-dependencies
+  fi
   if selected rust_workspace || selected rust_pkg_codewire_protected_store \
       || selected rust_pkg_codewire_orchestration; then
     scripts/ci/tests/test-openbao-only-secret-authority.sh --production-features
