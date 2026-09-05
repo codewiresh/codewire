@@ -1,5 +1,5 @@
 {
-  "$comment": "Permanent WS18 WI-9B Mesh guard. Mesh exposes generated codewire.v1 Connect services, the typed internal coordinator, and health/readiness only; peer streams consume one-use enrollment capabilities and persistent environment bearers remain retired.",
+  "$comment": "Permanent WS18 WI-9B Mesh guard. Mesh exposes generated codewire.v1 Connect services, the typed internal coordinator, and health/readiness only; network ownership and invitation redemption are atomic, peer streams consume one-use enrollment capabilities, and persistent environment bearers remain retired.",
   "schema_version": 1,
   "required_server_fragments": [
     "AppBuilder::new(\"mesh\")",
@@ -32,7 +32,8 @@
     "crates/codewire-mesh/src/store.rs": [
       "async fn node_enrollment_create",
       "async fn invite_create",
-      "async fn network_create_owned"
+      "async fn network_create_with_owner(",
+      "async fn invite_consume_and_join("
     ],
     "crates/codewire-cli/src/commands/mesh_commands.rs": [
       "CODEWIRE_MESH_LOCAL_API_KEY_HASH"
@@ -69,7 +70,9 @@
       "async fn user_get_by_username",
       "async fn oauth_state_create",
       "async fn oidc_user_upsert",
-      "async fn oidc_session_create"
+      "async fn oidc_session_create",
+      "async fn network_create_owned(",
+      "async fn invite_consume("
     ],
     "crates/codewire-cli/src/commands/mesh_commands.rs": [
       ".env(\"CODEWIRE_MESH_AUTH_MODE\"",
