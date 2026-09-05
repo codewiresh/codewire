@@ -167,10 +167,9 @@ if grep -Eq '^COPY (Cargo|crates|proto|libs)' <<<"$builder_stage"; then
 fi
 grep -qF 'COPY --from=cw-builder /out/cw /usr/local/bin/cw' \
   "$WORKSPACE_DOCKERFILE" || fail 'workspace final stage receives more than the exported cw binary'
-grep -qF 'ln -s cw /usr/local/bin/daemon' "$WORKSPACE_DOCKERFILE" ||
-  fail 'workspace image does not expose the daemon process alias through cw'
-grep -qF 'ln -s cw /usr/local/bin/codewire-daemon' "$WORKSPACE_DOCKERFILE" ||
-  fail 'workspace image does not expose the codewire-daemon process alias through cw'
+if grep -Eq '/usr/local/bin/(daemon|codewire-daemon)' "$WORKSPACE_DOCKERFILE"; then
+  fail 'workspace image still exposes a public daemon process alias'
+fi
 cw_copy_line="$(grep -n -m1 'COPY --from=cw-builder /out/cw /usr/local/bin/cw' \
   "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
 for moving_tool_pattern in \

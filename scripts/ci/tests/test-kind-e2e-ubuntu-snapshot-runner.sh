@@ -29,6 +29,13 @@ emit_renderer_dockerfile >"$dockerfile"
   die 'renderer PATH changed without updating its immutable-base contract'
 [ "$FIXTURE_RUN_ID" = 'ubuntu24-cft145' ] ||
   die 'Ubuntu snapshot fixture run ID changed without updating its contract'
+[ "$(retired_snapshots)" = "$(cat <<'EOF'
+environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png
+environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+environments-prepared-image-mobile-dashboard-ssr-mobile-linux.png
+environments-prepared-image-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+)" ] || die 'retired snapshot deletion allowlist changed without updating its contract'
 [ "$CHROMIUM_SHA256" = "$(sed -n "s/^readonly chromium_sha256='\([^']*\)'/\1/p" "$CHROMIUM_INSTALLER")" ] ||
   die 'snapshot updater Chromium checksum drifted from the pinned installer'
 [ "$(renderer_deb_manifest | wc -l | tr -d '[:space:]')" = 4 ] ||
@@ -74,8 +81,9 @@ for required in \
     '--env DOCKER_HOST=unix:///nonexistent' \
     '--env HTTP_PROXY= --env HTTPS_PROXY= --env ALL_PROXY=' \
     '--env NO_PROXY=localhost,127.0.0.1' \
-    '--env RUN_AI_ANALYSIS_E2E=0' \
     '--env CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID="$FIXTURE_RUN_ID"' \
+    'validate_snapshot_worktree "$ROOT" "$SNAPSHOT_RELATIVE_DIR"' \
+    'existing_tracked_paths "$ROOT" >"$tracked_paths"' \
     'rm -f -- "$snapshot_stage/$relative"' \
     '--project=dashboard-ssr-desktop' \
     '--project=dashboard-ssr-mobile' \
@@ -130,9 +138,15 @@ tracked_paths="$fixture/tracked-paths"
 mkdir -p "$source_repo/apps/dashboard/e2e"
 git -C "$source_repo" init -q
 printf 'tracked source\n' >"$source_repo/apps/dashboard/e2e/example.ts"
+printf 'retired source\n' >"$source_repo/apps/dashboard/e2e/retired.ts"
 ln -s apps/dashboard/e2e/example.ts "$source_repo/example-link"
-git -C "$source_repo" add apps/dashboard/e2e/example.ts example-link
-git -C "$source_repo" ls-files -z >"$tracked_paths"
+git -C "$source_repo" add apps/dashboard/e2e/example.ts \
+  apps/dashboard/e2e/retired.ts example-link
+rm "$source_repo/apps/dashboard/e2e/retired.ts"
+existing_tracked_paths "$source_repo" >"$tracked_paths"
+if tr '\0' '\n' <"$tracked_paths" | grep -Fxq 'apps/dashboard/e2e/retired.ts'; then
+  die 'tracked-source projection retained a deleted tracked path'
+fi
 source_fingerprint="$(tracked_source_archive_sha256 "$source_repo" "$tracked_paths")"
 saved_root="$ROOT"
 ROOT="$source_repo"
@@ -232,7 +246,6 @@ grep -- '--mount ' "$RUNNER" | grep -v 'readonly' |
 
 for title in \
     'renders server-owned create options and resources with no browser service caller' \
-    'keeps image, repositories, mounts, protected secret boundary, agents, and runtime on one compact form' \
     'keeps environment create and inventory usable on mobile'; do
   grep -Fq "$title" "$RUNNER" || die "focused visual test is not selected: $title"
   grep -Fq "test(\"$title\"" "$ENVIRONMENT_SPEC" ||
@@ -327,6 +340,49 @@ chmod 0700 "$runtime_directory"
 ln -s "$runtime_directory" "$fixture/runtime-link"
 if prepare_private_runtime_directory "$fixture/runtime-link" >/dev/null 2>&1; then
   die 'symlinked runtime base was accepted'
+fi
+
+snapshot_repo="$fixture/snapshot-repo"
+snapshot_relative_dir='apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts-snapshots'
+mkdir -p "$snapshot_repo/$snapshot_relative_dir"
+git -C "$snapshot_repo" init -q
+while IFS= read -r snapshot; do
+  printf '\x89PNG\r\n\x1a\n%s\n' "$snapshot" >"$snapshot_repo/$snapshot_relative_dir/$snapshot"
+done < <(retired_snapshots)
+printf '\x89PNG\r\n\x1a\ncurrent\n' > \
+  "$snapshot_repo/$snapshot_relative_dir/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png"
+git -C "$snapshot_repo" add "$snapshot_relative_dir"
+git -C "$snapshot_repo" -c user.name=Codewire -c user.email=codewire@example.invalid \
+  commit -qm 'snapshot validator fixture'
+while IFS= read -r snapshot; do
+  rm "$snapshot_repo/$snapshot_relative_dir/$snapshot"
+done < <(retired_snapshots)
+validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" ||
+  die 'the exact retired snapshot deletions were rejected'
+
+retired_type_change='environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png'
+ln -s environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png \
+  "$snapshot_repo/$snapshot_relative_dir/$retired_type_change"
+if validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" >/dev/null 2>&1; then
+  die 'a retired snapshot type change was accepted as a deletion'
+fi
+rm "$snapshot_repo/$snapshot_relative_dir/$retired_type_change"
+
+current_snapshot='environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png'
+printf 'unapproved change\n' >>"$snapshot_repo/$snapshot_relative_dir/$current_snapshot"
+if validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" >/dev/null 2>&1; then
+  die 'a current snapshot modification was accepted beside the retired deletions'
+fi
+git -C "$snapshot_repo" checkout -q -- "$snapshot_relative_dir/$current_snapshot"
+unexpected_snapshot='unexpected-prepared-image-dashboard-ssr-desktop-linux.png'
+printf '\x89PNG\r\n\x1a\nunexpected\n' > \
+  "$snapshot_repo/$snapshot_relative_dir/$unexpected_snapshot"
+git -C "$snapshot_repo" add "$snapshot_relative_dir/$unexpected_snapshot"
+git -C "$snapshot_repo" -c user.name=Codewire -c user.email=codewire@example.invalid \
+  commit -qm 'add unapproved deletion fixture'
+rm "$snapshot_repo/$snapshot_relative_dir/$unexpected_snapshot"
+if validate_snapshot_worktree "$snapshot_repo" "$snapshot_relative_dir" >/dev/null 2>&1; then
+  die 'an unapproved tracked snapshot deletion was accepted'
 fi
 
 baseline="$fixture/baseline"

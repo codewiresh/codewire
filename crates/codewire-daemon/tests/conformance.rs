@@ -2,7 +2,6 @@ mod support;
 
 use std::time::Duration;
 
-use codewire_daemon::Config;
 use codewire_daemon::client::{SessionClient, SessionClientError};
 use codewire_daemon::service::DaemonRuntimeState;
 use codewire_gateway_proto::daemon::v1;
@@ -189,37 +188,6 @@ async fn injected_transport_rejects_unauthenticated_side_effects() {
     harness.shutdown().await;
 }
 
-#[tokio::test]
-async fn injected_transport_requires_an_auth_token_at_startup() {
-    let temp = tempfile::tempdir().expect("daemon startup tempdir");
-    let workspace_root = temp.path().join("workspace");
-    let home_root = temp.path().join("home");
-    std::fs::create_dir_all(&workspace_root).expect("create workspace root");
-    std::fs::create_dir_all(&home_root).expect("create home root");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind injected listener");
-    let address = listener.local_addr().expect("injected listener address");
-    let error = codewire_daemon::serve_grpc_with_incoming(
-        Config {
-            listen_addr: address.to_string(),
-            workspace_root,
-            home_root,
-            auth_token: None,
-            process_execution: codewire_daemon::execution::ProcessExecution::Native,
-            credential_bridge: None,
-        },
-        tokio_stream::wrappers::TcpListenerStream::new(listener),
-        std::future::pending(),
-    )
-    .await
-    .expect_err("missing injected daemon token fails startup");
-    assert_eq!(
-        error.to_string(),
-        "workspace daemon gRPC transport requires an auth token"
-    );
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn injected_transport_does_not_mount_http_diagnostics() {
@@ -270,26 +238,26 @@ async fn injected_transport_does_not_mount_http_diagnostics() {
 }
 
 #[tokio::test]
-async fn legacy_tcp_transport_preserves_typed_lifecycle_and_files() {
-    let harness = DaemonHarness::spawn_tcp().await;
+async fn hosted_tcp_transport_preserves_authenticated_typed_lifecycle_and_files() {
+    let harness = DaemonHarness::spawn_hosted_tcp().await;
     let mut client = harness.client().await;
     let health = client
         .get_health(v1::GetHealthRequest {})
         .await
-        .expect("legacy TCP daemon health")
+        .expect("hosted TCP daemon health")
         .into_inner();
     assert_eq!(health.state, v1::DaemonState::Ready as i32);
 
     let session_id = client
         .launch_session(v1::LaunchSessionRequest {
-            command: vec!["sh".into(), "-c".into(), "printf legacy-tcp".into()],
+            command: vec!["sh".into(), "-c".into(), "printf hosted-tcp".into()],
             ..Default::default()
         })
         .await
-        .expect("legacy TCP launch")
+        .expect("hosted TCP launch")
         .into_inner()
         .session
-        .expect("legacy TCP session")
+        .expect("hosted TCP session")
         .session_id;
     let exited = wait_for_session_state(
         &mut client,
@@ -302,7 +270,7 @@ async fn legacy_tcp_transport_preserves_typed_lifecycle_and_files() {
 
     client
         .open_file(v1::OpenFileRequest {
-            path: "legacy-tcp.txt".into(),
+            path: "hosted-tcp.txt".into(),
             options: Some(v1::FileOpenOptions {
                 write: true,
                 create: true,
@@ -312,15 +280,15 @@ async fn legacy_tcp_transport_preserves_typed_lifecycle_and_files() {
             perm: 0o600,
         })
         .await
-        .expect("legacy TCP file create");
+        .expect("hosted TCP file create");
     let write = client
         .write(v1::WriteRequest {
-            path: "legacy-tcp.txt".into(),
+            path: "hosted-tcp.txt".into(),
             offset: 0,
-            data: b"legacy".to_vec(),
+            data: b"hosted".to_vec(),
         })
         .await
-        .expect("legacy TCP file write")
+        .expect("hosted TCP file write")
         .into_inner();
     assert_eq!(write.bytes_written, 6);
     drop(client);

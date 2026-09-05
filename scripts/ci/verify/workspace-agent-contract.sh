@@ -5,6 +5,7 @@ set -euo pipefail
 
 cgroup_root="${CODEWIRE_CGROUP_ROOT:-/sys/fs/cgroup}"
 expected_pids_max="${CODEWIRE_EXPECTED_PIDS_MAX:-2048}"
+bin_root="${CODEWIRE_BIN_ROOT:-/usr/local/bin}"
 
 emit_pid_evidence_on_failure() {
   status=$?
@@ -57,10 +58,8 @@ check_version() {
 # tool whenever the image changes so one repaired installer cannot hide a
 # broken sibling or architecture-specific omission.
 check_version cw cw --version
-cw_executable="$(readlink -f "$(command -v cw)")"
-for alias in daemon codewire-daemon; do
-  test "$(readlink -f "$(command -v "$alias")")" = "$cw_executable"
-done
+test ! -e "$bin_root/daemon"
+test ! -e "$bin_root/codewire-daemon"
 check_version docker docker --version
 check_version dockerd dockerd --version
 check_version docker docker buildx version

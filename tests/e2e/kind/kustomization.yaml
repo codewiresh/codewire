@@ -91,8 +91,6 @@ patches:
                   # manifests can reject managed runc by default.
                   - name: SANDBOX_RUNTIME_PROFILE
                     value: runc
-                  - name: SANDBOX_RUNTIME_CLASS
-                    value: runc
                   - name: SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME
                     value: "true"
                   # Workspace pod's gateway container = the kind-loaded Rust image (the
@@ -100,28 +98,6 @@ patches:
                   # in kind → ImagePullBackOff → env never reaches running).
                   - name: SANDBOX_GATEWAY_IMAGE
                     value: codewire-gateway:e2e
-                  # The sealed Kind harness rewrites this exact immutable
-                  # product identity to its verified, side-loaded local alias.
-                  # Production omits the override and retains the canonical
-                  # workspace digest default.
-                  - name: SANDBOX_WARM_POOL_WORKSPACE_IMAGE
-                    value: ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467
-                  # Warm-pool reconciler config (#137). A SINGLE small profile so
-                  # exactly one pre-warmed pod is provisioned and it fits the one
-                  # 2-vCPU runner node alongside postgres/temporal/billing/
-                  # orchestration/ingress (the default profiles —
-                  # 1000m/2048Mi×2 + 2000m/4096Mi×2 — can't schedule here). The
-                  # format is cpuMillicores:memoryMiB:diskGiB:replicas
-                  # (worker/create.rs parse_canonical_full_warm_pool_profiles).
-                  # 500:1024:5:1 yields the non-default-SKU warm template name
-                  # `workspace-500m-1024mib-5gib`
-                  # (canonical_full_warm_pool_template_name); the warm-pool claim
-                  # e2e creates an env at this EXACT SKU so environment_claim_opts
-                  # (worker/create.rs) matches the profile and points the claim
-                  # at that shared warm template — the WARM path, as opposed to
-                  # the digest-image COLD path the env-lifecycle e2e uses.
-                  - name: SANDBOX_FULL_WARM_PROFILES
-                    value: "500:1024:5:1"
                   # Mount the Connect conformance probe (docs/plans/
                   # connect-rpc/03 D8) — kind/e2e manifests only, never
                   # base or production.

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use codewire_daemon::service::DaemonRuntimeState;
-use codewire_daemon::{Config, server};
+use codewire_daemon::{Config, DaemonAuthToken, server};
 use codewire_gateway_proto::DAEMON_AUTH_TOKEN_HEADER;
 use codewire_gateway_proto::daemon::v1;
 use codewire_gateway_proto::daemon::v1::daemon_service_client::DaemonServiceClient;
@@ -11,7 +11,6 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-#[cfg(not(unix))]
 use tokio_stream::wrappers::TcpListenerStream;
 #[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
@@ -42,7 +41,7 @@ pub type HarnessClient = DaemonServiceClient<InterceptedService<Channel, Harness
 #[derive(Clone, Copy)]
 enum HarnessTransport {
     Injected,
-    LegacyTcp,
+    HostedTcp,
 }
 
 pub struct DaemonHarness {
@@ -74,11 +73,11 @@ impl DaemonHarness {
         .await
     }
 
-    pub async fn spawn_tcp() -> Self {
+    pub async fn spawn_hosted_tcp() -> Self {
         Self::spawn_owned(
             DaemonRuntimeState::ready(),
             DEFAULT_TEST_AUTH_TOKEN.into(),
-            HarnessTransport::LegacyTcp,
+            HarnessTransport::HostedTcp,
         )
         .await
     }
@@ -87,7 +86,7 @@ impl DaemonHarness {
         Self::spawn_owned(
             runtime_state,
             DEFAULT_TEST_AUTH_TOKEN.into(),
-            HarnessTransport::LegacyTcp,
+            HarnessTransport::HostedTcp,
         )
         .await
     }
@@ -161,7 +160,8 @@ impl DaemonHarness {
                     listen_addr: endpoint.clone(),
                     workspace_root: workspace_root.clone(),
                     home_root: home_root.clone(),
-                    auth_token: Some(auth_token.clone()),
+                    auth_token: DaemonAuthToken::new(auth_token.clone())
+                        .expect("valid daemon harness token"),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
                 };
@@ -185,7 +185,7 @@ impl DaemonHarness {
                     server,
                 )
             }
-            HarnessTransport::LegacyTcp => {
+            HarnessTransport::HostedTcp => {
                 let listener = TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind daemon TCP harness");
@@ -195,21 +195,23 @@ impl DaemonHarness {
                     listen_addr: addr.to_string(),
                     workspace_root: workspace_root.clone(),
                     home_root: home_root.clone(),
-                    auth_token: Some(auth_token.clone()),
+                    auth_token: DaemonAuthToken::new(auth_token.clone())
+                        .expect("valid daemon harness token"),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {
-                    axum::serve(
-                        listener,
-                        server::router_with_runtime_state(config, runtime_state),
+                    server::serve_grpc_with_incoming_and_runtime_state(
+                        config,
+                        runtime_state,
+                        TcpListenerStream::new(listener),
+                        async {
+                            let _ = shutdown_rx.await;
+                        },
                     )
-                    .with_graceful_shutdown(async {
-                        let _ = shutdown_rx.await;
-                    })
                     .await
-                    .expect("serve daemon TCP harness");
+                    .expect("serve hosted daemon TCP harness");
                 });
                 (None, endpoint, None, shutdown_tx, server)
             }
@@ -226,7 +228,8 @@ impl DaemonHarness {
                 listen_addr: addr.to_string(),
                 workspace_root: workspace_root.clone(),
                 home_root: home_root.clone(),
-                auth_token: Some(auth_token.clone()),
+                auth_token: DaemonAuthToken::new(auth_token.clone())
+                    .expect("valid daemon harness token"),
                 process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 credential_bridge: None,
             };
@@ -243,16 +246,17 @@ impl DaemonHarness {
                     .await
                     .expect("serve daemon injected transport harness");
                 }),
-                HarnessTransport::LegacyTcp => tokio::spawn(async move {
-                    axum::serve(
-                        listener,
-                        server::router_with_runtime_state(config, runtime_state),
+                HarnessTransport::HostedTcp => tokio::spawn(async move {
+                    server::serve_grpc_with_incoming_and_runtime_state(
+                        config,
+                        runtime_state,
+                        TcpListenerStream::new(listener),
+                        async {
+                            let _ = shutdown_rx.await;
+                        },
                     )
-                    .with_graceful_shutdown(async {
-                        let _ = shutdown_rx.await;
-                    })
                     .await
-                    .expect("serve daemon TCP harness");
+                    .expect("serve hosted daemon TCP harness");
                 }),
             };
             (None, endpoint, None, shutdown_tx, server)

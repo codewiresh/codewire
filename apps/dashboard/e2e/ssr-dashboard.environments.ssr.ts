@@ -28,7 +28,6 @@ const orgName = "SSR Environment Workspace";
 const presetName = "ssr-environment-preset";
 const environmentName = "ssr-terminal-workspace";
 const repositoryUrl = `https://example.test/codewire/${slug}`;
-const aiRepositoryUrl = "https://github.com/noeljackson/stocks";
 // Immutable workspace image accepted by the Connect-RPC C2 runtime evidence.
 // This browser proof must never turn a floating registry tag into a test input.
 const workspaceImage = "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467";
@@ -130,67 +129,51 @@ async function seedPinnedPreset() {
   presetId = crypto.randomUUID();
   await sql`
     INSERT INTO environment_presets
-      (id, org_id, name, description, build_status,
-       default_cpu_millicores, default_memory_mb, default_disk_gb, default_ttl_seconds,
-       default_setup_config)
+      (id, org_id, name, slug, description, build_status, default_ttl_seconds, project_spec)
     VALUES
-      (${presetId}, ${orgId}, ${presetName}, 'Pinned SSR environment lifecycle preset', 'ready',
-       1000, 2048, 10, 3600,
+      (${presetId}, ${orgId}, ${presetName}, ${presetName},
+       'Pinned SSR environment lifecycle preset', 'ready', 3600,
        ${sql.json({
+         schema_version: 1,
+         image: workspaceRuntimeImage,
+         working_directory: "/workspace",
          install_command: "printf 'prepared-by-preset\\n'",
          startup_script: "printf 'started-by-preset\\n'",
-         agents: [{ type: "codex" }],
-         app_ports: [{ port: 3000, label: "web", access: "creator" }],
-         include_org_secrets: false,
-         include_user_secrets: false,
+         agents: { tools: ["codex"] },
+         application_ports: [{ port: 3000, label: "web", access: "creator" }],
+         resources: { cpu_millicores: 1000, memory_mib: 2048, disk_gib: 10 },
        })})
   `;
   await sql`
     INSERT INTO sandbox_template_config
-      (preset_id, image_ref, sandbox_template_name, warm_pool_size, persistent_storage)
+      (preset_id, image_ref, sandbox_template_name, persistent_storage)
     VALUES
-      (${presetId}, ${workspaceRuntimeImage}, ${`ssr-environment-${runId}`}, 0, false)
+      (${presetId}, ${workspaceRuntimeImage}, ${`ssr-environment-${runId}`}, false)
   `;
   await sql`
-    INSERT INTO repo_configs (id, org_id, repo_url, preset_id, setup_config, created_by)
-    VALUES (${crypto.randomUUID()}, ${orgId}, ${repositoryUrl}, ${presetId}, '{}', ${ownerId})
+    INSERT INTO repo_configs (id, org_id, repo_url, project_spec, created_by)
+    VALUES (
+      ${crypto.randomUUID()}, ${orgId}, ${repositoryUrl},
+      ${sql.json({
+        schema_version: 1,
+        preset: presetName,
+        working_directory: "/workspace",
+      })},
+      ${ownerId}
+    )
   `;
 }
 
-async function disconnectSyntheticGitHub() {
-  await sql`DELETE FROM user_github_tokens WHERE user_id = ${ownerId}`;
-}
-
-async function connectSyntheticUnavailableGitHub() {
-  await sql`
-    INSERT INTO user_github_tokens
-      (user_id, access_token, token_type, github_username)
-    VALUES
-      (${ownerId}, 'e2e-intentionally-invalid-token', 'bearer', 'e2e-unavailable')
-    ON CONFLICT (user_id) DO UPDATE SET
-      access_token = EXCLUDED.access_token,
-      refresh_token = NULL,
-      token_type = EXCLUDED.token_type,
-      expires_at = NULL,
-      refresh_token_expires_at = NULL,
-      installation_id = NULL,
-      github_username = EXCLUDED.github_username,
-      updated_at = NOW()
-  `;
-}
-
-async function openPreparedImageForm(page: Page) {
+async function openConfiguredImageForm(page: Page) {
   await page.goto(`/${slug}/new/`);
-  await page.getByLabel("Repository URL", { exact: true }).fill(repositoryUrl);
-  const stream = page.waitForResponse((response) => (
-    response.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
-      && response.request().method() === "POST"
-  ));
-  await page.getByRole("button", { name: "Analyze and generate from repo" }).click();
-  const response = await stream;
-  expect(response.status()).toBe(200);
-  expect(response.headers()["content-type"]).toContain("text/event-stream");
-  await expect(page.getByLabel("Install Command")).toHaveValue("printf 'prepared-by-preset\\n'");
+  await page.getByLabel("Workspace image").fill(workspaceRuntimeImage);
+  await page.getByLabel("Install Command").fill("printf 'configured-explicitly\\n'");
+  await page.getByLabel("Startup Script").fill("printf 'started-explicitly\\n'");
+  await page.getByLabel("TTL").fill("3600s");
+  await page.locator('input[name="agent"][value="codex"]').check();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByLabel("Container port").fill("3000");
+  await page.getByLabel("Port label").fill("web");
 }
 
 test.describe.serial("server-rendered environments", () => {
@@ -198,35 +181,25 @@ test.describe.serial("server-rendered environments", () => {
     const seededOwnerId = await getUserId(USERS.master.email);
     if (!seededOwnerId) throw new Error("E2E owner was not seeded");
     ownerId = seededOwnerId;
-    await disconnectSyntheticGitHub();
     orgId = await ensureTestOrg(orgName, slug, ownerId);
     await seedPinnedPreset();
   });
 
   test.afterAll(async () => {
-    await disconnectSyntheticGitHub();
     await cleanupEnvironments(slug);
     await cleanupTestOrg(slug);
   });
 
-  test("keeps repository entry usable when the connected GitHub picker is unavailable", async ({ page, isMobile }) => {
-    test.skip(!!isMobile, "desktop connected-GitHub failure contract");
-    await connectSyntheticUnavailableGitHub();
-
-    try {
-      const response = await page.goto(`/${slug}/new/`);
-      expect(response?.status()).toBe(200);
-      await expect(page.getByText("GitHub connected as @e2e-unavailable", { exact: true })).toBeVisible();
-      await expect(page.getByText(
-        "GitHub repositories are temporarily unavailable. Paste a repository URL to continue.",
-        { exact: true },
-      )).toBeVisible();
-      await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
-      await expect(page.locator("[data-github-repository-picker]")).toHaveCount(0);
-      await expect(page.getByRole("button", { name: "Pick from list" })).toHaveCount(0);
-    } finally {
-      await disconnectSyntheticGitHub();
-    }
+  test("keeps manual repository URL, branch, and mount entry always available", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop repository-entry contract");
+    const response = await page.goto(`/${slug}/new/`);
+    expect(response?.status()).toBe(200);
+    await expect(page.getByLabel("Repository URL", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Branch", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Mount path", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-github-repository-picker]")).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Connect GitHub" })).toHaveCount(0);
+    await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
   });
 
   test("renders server-owned create options and resources with no browser service caller", async ({ page, isMobile }) => {
@@ -270,7 +243,9 @@ test.describe.serial("server-rendered environments", () => {
     await page.locator("#environment-name").focus();
     await expect(page.locator("#environment-snapshot")).toBeDisabled();
     await expect(page.locator('#environment-snapshot[name]')).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
+    await expect(page.locator('[action$="/_actions/sandboxes/prepare"]')).toHaveCount(0);
+    await expect(page.locator('[data-event-action$="/_events/sandboxes/prepare"]')).toHaveCount(0);
     const drawerGeometry = await drawer.evaluate((element) => {
       const box = element.getBoundingClientRect();
       return { width: box.width, height: box.height, right: box.right, viewportWidth: innerWidth, viewportHeight: innerHeight };
@@ -327,26 +302,24 @@ test.describe.serial("server-rendered environments", () => {
     );
     await page.getByLabel("Workspace image").fill("registry.example.test/team/workspace:v1");
     await page.getByLabel("Repository URL", { exact: true }).fill(repositoryUrl);
-    await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toBeEnabled();
     await page.getByLabel("Mount path", { exact: true }).fill("codewire");
     await page.getByRole("button", { name: "Add another URL" }).click();
     await page.getByLabel("Repository URL").nth(1).fill("https://example.test/codewire/secondary");
     await page.getByLabel("Mount path").nth(1).fill("secondary");
-
-    const repositoryRequest = page.waitForRequest((request) => (
-      request.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
-      && request.method() === "POST"
-    ));
-    await page.getByRole("button", { name: "Analyze and generate from repo" }).click();
-    const repositoryBody = (await repositoryRequest).postData() || "";
-    expect(repositoryBody).toContain(`repo_url_100=${encodeURIComponent(repositoryUrl)}`);
-    expect(repositoryBody).toContain("repo_mount_100=codewire");
-    expect(repositoryBody).toContain(
-      "repo_url_101=https%3A%2F%2Fexample.test%2Fcodewire%2Fsecondary",
+    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue(repositoryUrl);
+    await expect(page.getByLabel("Mount path", { exact: true })).toHaveValue("codewire");
+    await expect(page.getByLabel("Repository URL").nth(1)).toHaveValue(
+      "https://example.test/codewire/secondary",
     );
-    expect(repositoryBody).toContain("repo_mount_101=secondary");
-    expect(repositoryBody).toContain("image=registry.example.test%2Fteam%2Fworkspace%3Av1");
+    await expect(page.getByLabel("Mount path").nth(1)).toHaveValue("secondary");
+    await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
 
+    await page.locator('input[name="agent"][value="codex"]').check();
+    await page.getByRole("button", { name: "Add", exact: true }).click();
+    await page.getByLabel("Container port").fill("3000");
+    await page.getByLabel("Port label").fill("web");
+    await page.getByLabel("Install Command").fill("bun install");
+    await page.getByLabel("Startup Script").fill("bun run dev");
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
     await expect(page.getByLabel("Container port")).toHaveValue("3000");
     await expect(page.getByLabel("Port label")).toHaveValue("web");
@@ -361,122 +334,41 @@ test.describe.serial("server-rendered environments", () => {
       'input[name="include_user_secrets"]',
       'input[name^="agent_secret_"]',
     ].join(","))).toHaveCount(0);
-    await expect(page.getByLabel("Install Command")).toHaveValue(
-      "printf 'prepared-by-preset\\n'",
-    );
-    await expect(page.getByLabel("Startup Script")).toHaveValue(
-      "printf 'started-by-preset\\n'",
-    );
+    await expect(page.getByLabel("Install Command")).toHaveValue("bun install");
+    await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
     await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
     await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
     await expect(page.getByLabel("Disk", { exact: true })).toHaveValue("10");
-    await expect(page.getByLabel("TTL")).toHaveValue("3600s");
+    await expect(page.getByLabel("TTL")).toHaveValue("infinity");
     await expect(page.getByLabel("Workspace image")).toHaveValue(
       "registry.example.test/team/workspace:v1",
     );
-    await expect(page).toHaveScreenshot("environments-prepared-image-desktop.png");
   });
 
-  test("analyzes a real public repository when local AI analysis is explicitly enabled", async ({ page, isMobile }) => {
-    test.skip(!!isMobile, "one external analysis proof is sufficient");
-    test.skip(
-      process.env.RUN_AI_ANALYSIS_E2E !== "1",
-      "requires an explicitly mounted local AI credential and external GitHub access",
-    );
-    test.setTimeout(150_000);
+  test("fails closed when repository-only create has no saved configuration", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop repository-resolution contract");
+    const name = `unknown-repository-${runId}`;
+    const unknownRepository = `https://example.test/codewire/${slug}/unknown`;
 
     await page.goto(`/${slug}/new/`);
-    await page.getByLabel("Repository URL").fill(aiRepositoryUrl);
-    const stream = page.waitForResponse((response) => (
-      response.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
-      && response.request().method() === "POST"
+    await page.getByLabel("Name").fill(name);
+    await page.getByLabel("Workspace image").fill("");
+    await page.getByLabel("Repository URL", { exact: true }).fill(unknownRepository);
+    const response = page.waitForResponse((candidate) => (
+      candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`)
+      && candidate.request().method() === "POST"
     ));
-    await page.getByRole("button", { name: "Analyze and generate from repo" }).click();
-    expect((await stream).status()).toBe(200);
-    const configuration = page.locator(".cw-detection-summary");
-    const streamError = page.locator('[data-environment-stream-status][data-state="error"]');
-    const streamMessage = page.locator("[data-environment-stream-message]");
-    const outcome = await Promise.race([
-      configuration.waitFor({ state: "visible", timeout: 120_000 }).then(() => "complete" as const),
-      streamError.waitFor({ state: "visible", timeout: 120_000 }).then(() => "error" as const),
-    ]);
-    if (outcome === "error") {
-      throw new Error(`Repository analysis failed: ${(await streamMessage.textContent())?.trim() || "unknown error"}`);
-    }
-    await expect(page.getByLabel("Repository URL")).toHaveValue(aiRepositoryUrl);
-    await expect(page.getByRole("alert")).toHaveCount(0);
-  });
-
-  test("streams a repository draft, cancels it, and accepts the next stream without browser Connect", async ({ page, isMobile }) => {
-    test.skip(!!isMobile, "desktop repository stream contract");
-    const disallowedBrowserCalls = watchDisallowedBrowserCalls(page);
-    const streamRequests: string[] = [];
-    page.on("request", (request) => {
-      if (new URL(request.url()).pathname.endsWith("/_events/sandboxes/prepare")) {
-        streamRequests.push(request.url());
-      }
-    });
-
-    await page.goto(`/${slug}/new/`);
-    await page.getByLabel("Repository URL").fill(repositoryUrl);
-    // The saved repo configuration resolves to the pinned preset, keeping
-    // this proof deterministic without cloning from a third party.
-    await page.getByRole("button", { name: "Analyze and generate from repo" }).click();
-    await expect(page.locator("[data-environment-stream-status]")).toBeVisible();
-    await page.locator("[data-environment-cancel]").dispatchEvent("click");
-    await expect(page.locator("[data-environment-stream-message]")).toHaveText(
-      "Preparation cancelled.",
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
+    expect((await response).status()).toBe(422);
+    await expect(page.getByRole("alert")).toContainText(
+      "This repository has no saved Sandbox configuration. Enter a workspace image or use a configured repository.",
     );
-
-    const secondStream = page.waitForResponse((response) => (
-      response.url().endsWith(`/${slug}/_events/sandboxes/prepare`)
-        && response.request().method() === "POST"
-    ));
-    await page.getByRole("button", { name: "Analyze and generate from repo" }).click();
-    const secondResponse = await secondStream;
-    expect(secondResponse.status()).toBe(200);
-    expect(secondResponse.headers()["content-type"]).toContain("text/event-stream");
-    await expect(page.locator(".cw-detection-summary")).toBeVisible();
-    expect(streamRequests).toHaveLength(2);
-    expect(disallowedBrowserCalls).toEqual([]);
-  });
-
-  test("collects the server stream into a complete no-JavaScript form", async ({ browser, isMobile }) => {
-    test.skip(!!isMobile, "desktop no-JavaScript fallback contract");
-    const context = await browser.newContext({
-      baseURL: ssrUrl,
-      javaScriptEnabled: false,
-      storageState: authState,
-    });
-    const page = await context.newPage();
-    await page.goto(`/${slug}/new/`);
-    const csrf = await page.locator('input[name="_csrf"]').inputValue();
-    const response = await context.request.post(
-      `/${slug}/_actions/sandboxes/prepare`,
-      {
-        form: {
-          _csrf: csrf,
-          mode: "image",
-          preset_id: presetId,
-          image: "",
-          cpu: "",
-          memory: "",
-          disk: "",
-          ttl: "",
-        },
-        headers: { Origin: ssrUrl },
-      },
-    );
-    expect(response.status()).toBe(200);
-    expect(response.headers()["content-type"]).toContain("text/html");
-    const body = await response.text();
-    expect(body).toContain("<!doctype html>");
-    expect(body).toContain("Create Sandbox");
-    expect(body).toMatch(/name="cpu"[^>]*>[\s\S]*?<option value="1000" selected/);
-    expect(body).toMatch(/name="memory"[^>]*>[\s\S]*?<option value="2048" selected/);
-    expect(body).toMatch(/name="disk"[^>]*>[\s\S]*?<option value="10" selected/);
-    expect(body).toMatch(/name="ttl"[^>]+value="3600s"/);
-    await context.close();
+    await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
+    const [environment] = await sql`
+      SELECT COUNT(*)::int AS count FROM environments
+      WHERE org_id = ${orgId} AND name = ${name}
+    `;
+    expect(environment.count).toBe(0);
   });
 
   test("keeps environment create and inventory usable on mobile", async ({ page, isMobile }) => {
@@ -484,17 +376,17 @@ test.describe.serial("server-rendered environments", () => {
     await page.goto(`/${slug}/new/`);
     await expect(page.getByRole("heading", { name: "Create Sandbox" })).toBeVisible();
     await expect(page.getByLabel("TTL")).toHaveValue("infinity");
-    const analyze = page.getByRole("button", { name: "Analyze and generate from repo" });
-    await expect(analyze).toBeDisabled();
-    await analyze.scrollIntoViewIfNeeded();
-    await expect(analyze).toBeInViewport();
+    await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
     await page.locator(".cw-drawer-body").evaluate((element) => { element.scrollTop = 0; });
     expect(await page.locator("#environment-create-card").evaluate((element) => element.getBoundingClientRect().top)).toBe(0);
     await expect(page).toHaveScreenshot("environments-create-mobile.png");
     await page.getByLabel("Repository URL", { exact: true }).fill(repositoryUrl);
-    await expect(analyze).toBeEnabled();
-    await analyze.click();
-    await expect(page.locator(".cw-detection-summary")).toBeVisible();
+    await page.getByLabel("Branch", { exact: true }).fill("main");
+    await page.getByLabel("Mount path", { exact: true }).fill("codewire");
+    await expect(page.getByRole("heading", { name: "Runtime", exact: true })).toBeVisible();
+    await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue(repositoryUrl);
+    await expect(page.getByLabel("Branch", { exact: true })).toHaveValue("main");
+    await expect(page.getByLabel("Mount path", { exact: true })).toHaveValue("codewire");
     const mobileCard = page.locator("#environment-create-card");
     const dimensions = await mobileCard.evaluate((element) => ({
       clientWidth: element.clientWidth,
@@ -506,7 +398,6 @@ test.describe.serial("server-rendered environments", () => {
       "Saved secrets cannot be attached to a Sandbox until protected access is available.",
       { exact: true },
     )).toBeVisible();
-    await expect(page).toHaveScreenshot("environments-prepared-image-mobile.png");
   });
 
   test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile }) => {
@@ -529,16 +420,10 @@ test.describe.serial("server-rendered environments", () => {
       };
     });
 
-    await openPreparedImageForm(page);
+    await openConfiguredImageForm(page);
     await expect(page.getByLabel("CPU", { exact: true })).toHaveValue("1000");
     await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
     await expect(page.getByLabel("Disk", { exact: true })).toHaveValue("10");
-    // repositoryUrl is a synthetic lookup key for the saved-preset fixture,
-    // not a cloneable repository. Repository propagation and mount paths are
-    // asserted above; remove the lookup-only row before exercising the real
-    // sandbox lifecycle.
-    await page.getByLabel("Repository URL", { exact: true }).fill("");
-    await page.getByLabel("Mount path", { exact: true }).fill("");
     await page.getByLabel("Name").fill(environmentName);
     await page.getByRole("button", { name: "Create Sandbox" }).click();
     await expect(page).toHaveURL(
@@ -589,7 +474,7 @@ test.describe.serial("server-rendered environments", () => {
 
     const [created] = await sql`
       SELECT id, cpu_millicores, memory_mb, disk_gb, ttl_seconds,
-             setup_config, secret_project_id
+             project_spec
       FROM environments WHERE org_id = ${orgId} AND name = ${environmentName}
     `;
     expect(created?.id).toBeTruthy();
@@ -598,15 +483,16 @@ test.describe.serial("server-rendered environments", () => {
     expect(created.memory_mb).toBe(2048);
     expect(created.disk_gb).toBe(10);
     expect(created.ttl_seconds).toBe(3600);
-    expect(created.secret_project_id).toBeNull();
-    expect(created.setup_config).toMatchObject({
-      install_command: "printf 'prepared-by-preset\\n'",
-      startup_script: "printf 'started-by-preset\\n'",
-      agents: [{ type: "codex" }],
-      include_org_secrets: false,
-      include_user_secrets: false,
-      app_ports: [{ port: 3000, label: "web", access: "creator" }],
+    expect(created.project_spec).toMatchObject({
+      schema_version: 1,
+      working_directory: "/workspace",
+      install_command: "printf 'configured-explicitly\\n'",
+      startup_script: "printf 'started-explicitly\\n'",
+      agents: { tools: ["codex"] },
+      application_ports: [{ port: 3000, label: "web", access: "creator" }],
+      resources: { cpu_millicores: 1000, memory_mib: 2048, disk_gib: 10 },
     });
+    expect(created.project_spec).not.toHaveProperty("secrets");
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await page.reload();
     let row = page.locator("tr", { hasText: environmentName }).first();

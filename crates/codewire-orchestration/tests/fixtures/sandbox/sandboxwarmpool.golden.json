@@ -2,13 +2,17 @@
   "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
   "kind": "SandboxWarmPool",
   "metadata": {
-    "name": "warm-golden",
+    "labels": {
+      "codewire.sh/environment-id": "env-golden",
+      "codewire.sh/type": "sandbox-claim-shadow"
+    },
+    "name": "shadow-golden",
     "namespace": "codewire-runtime"
   },
   "spec": {
-    "replicas": 3,
+    "replicas": 0,
     "sandboxTemplateRef": {
-      "name": "tmpl-golden-isol8"
+      "name": "tmpl-golden"
     }
   }
 }

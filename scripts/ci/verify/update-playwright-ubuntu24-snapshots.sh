@@ -27,7 +27,7 @@ usage() {
   cat <<'EOF'
 Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH
 
-Regenerate the four environment-create snapshots whose checked-in suffix is
+Regenerate the two environment-create snapshots whose checked-in suffix is
 ubuntu24-cft145. The local Kind stack must already be running through `make up`.
 
 The Chromium archive must be chrome-linux64.zip for version 145.0.7632.6 with
@@ -63,10 +63,50 @@ isolated_docker_client() (
 expected_snapshots() {
   cat <<'EOF'
 environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
-environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
 environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+}
+
+retired_snapshots() {
+  cat <<'EOF'
+environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png
+environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
+environments-prepared-image-mobile-dashboard-ssr-mobile-linux.png
 environments-prepared-image-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
+}
+
+is_retired_snapshot() {
+  local candidate="$1" expected
+
+  while IFS= read -r expected; do
+    [ "$candidate" = "$expected" ] && return 0
+  done < <(retired_snapshots)
+  return 1
+}
+
+validate_snapshot_worktree() {
+  local source_root="$1" snapshot_relative_dir="$2"
+  local record status path relative invalid=''
+
+  while IFS= read -r -d '' record; do
+    status="${record:0:2}"
+    path="${record:3}"
+    relative="${path#"$snapshot_relative_dir/"}"
+    if [ "$path" = "$snapshot_relative_dir/$relative" ] &&
+        { [ "$status" = ' D' ] || [ "$status" = 'D ' ]; } &&
+        is_retired_snapshot "$relative"; then
+      continue
+    fi
+    invalid="$status $path"
+    break
+  done < <(git -C "$source_root" status --porcelain=v1 -z --untracked-files=all -- \
+    "$snapshot_relative_dir")
+
+  [ -z "$invalid" ] || {
+    fail "the environment snapshot directory has an unapproved change: $invalid"
+    return 1
+  }
 }
 
 snapshot_run_cleanup() {
@@ -125,9 +165,7 @@ read_container_id() {
 is_expected_snapshot() {
   case "$1" in
     environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png|\
-    environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png|\
-    environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png|\
-    environments-prepared-image-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png)
+    environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png)
       return 0
       ;;
     *)
@@ -331,6 +369,19 @@ tracked_source_archive_sha256() {
   ) | sha256sum | awk '{ print $1 }'
 }
 
+existing_tracked_paths() {
+  local source_root="$1" relative
+
+  while IFS= read -r -d '' relative; do
+    if [ -f "$source_root/$relative" ] || [ -L "$source_root/$relative" ]; then
+      printf '%s\0' "$relative"
+    elif [ -e "$source_root/$relative" ]; then
+      fail "tracked path has an unsupported filesystem type: $relative"
+      return 1
+    fi
+  done < <(git -C "$source_root" ls-files -z)
+}
+
 copy_tracked_source() {
   local destination="$1" tracked_paths="$2"
 
@@ -465,9 +516,7 @@ main() {
   while IFS= read -r relative; do
     [ -f "$snapshot_dir/$relative" ] || fail "required baseline is missing: $relative"
   done < <(expected_snapshots)
-  if [ -n "$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all -- "$SNAPSHOT_RELATIVE_DIR")" ]; then
-    fail 'the environment snapshot directory already has uncommitted changes'
-  fi
+  validate_snapshot_worktree "$ROOT" "$SNAPSHOT_RELATIVE_DIR"
 
   runtime_parent="$(prepare_private_runtime_directory "${XDG_RUNTIME_DIR:-}")"
   validate_docker_mount_path "$ROOT"
@@ -518,7 +567,7 @@ main() {
     # renamed or newly skipped test from silently retaining a stale baseline.
     rm -f -- "$snapshot_stage/$relative"
   done < <(expected_snapshots) >"$target_manifest"
-  git -C "$ROOT" ls-files -z >"$tracked_paths"
+  existing_tracked_paths "$ROOT" >"$tracked_paths"
   source_fingerprint="$(tracked_source_archive_sha256 "$ROOT" "$tracked_paths")"
   copy_tracked_source "$source_tree" "$tracked_paths"
   projection_fingerprint="$(tracked_source_archive_sha256 "$source_tree" "$tracked_paths")"
@@ -589,7 +638,6 @@ main() {
       --env DATABASE_URL="$DATABASE_URL" \
       --env SERVER_URL="$PLAYWRIGHT_BASE_URL" \
       --env PLAYWRIGHT_BASE_URL="$PLAYWRIGHT_BASE_URL" \
-      --env RUN_AI_ANALYSIS_E2E=0 \
       --env PATH="$RENDERER_PATH" \
       --workdir /workspace --entrypoint /bin/bash "$renderer_image_id" \
       -euo pipefail -c '
@@ -615,7 +663,7 @@ main() {
           --project=dashboard-ssr-desktop \
           --project=dashboard-ssr-mobile \
           apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
-          --grep "renders server-owned create options and resources with no browser service caller|keeps image, repositories, mounts, protected secret boundary, agents, and runtime on one compact form|keeps environment create and inventory usable on mobile" \
+          --grep "renders server-owned create options and resources with no browser service caller|keeps environment create and inventory usable on mobile" \
           --output /tmp/codewire-run/test-results \
           --update-snapshots=changed --retries=0 --workers=1 --reporter=line
       ' 2>&1 | tee "$renderer_log"
@@ -627,7 +675,7 @@ main() {
   container_id="$(read_container_id "$container_cidfile")"
   [ -n "$container_id" ] || fail 'Docker did not record the snapshot renderer container ID'
   validate_snapshot_stage "$snapshot_baseline" "$snapshot_stage"
-  git -C "$ROOT" ls-files -z >"$current_tracked_paths"
+  existing_tracked_paths "$ROOT" >"$current_tracked_paths"
   cmp -s "$tracked_paths" "$current_tracked_paths" ||
     fail 'the tracked source set changed while snapshots were rendered'
   [ "$(tracked_source_archive_sha256 "$ROOT" "$tracked_paths")" = "$source_fingerprint" ] ||

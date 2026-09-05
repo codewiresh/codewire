@@ -13,8 +13,7 @@ MATRIX_SANDBOX_NAMESPACE="${MATRIX_SANDBOX_NAMESPACE:-}"
 MATRIX_CORDON_OTHER_RUNTIME_NODES="${MATRIX_CORDON_OTHER_RUNTIME_NODES:-1}"
 EXPECTED_NODE="${EXPECTED_NODE:-}"
 EXPECTED_RUNTIME_NODE_SELECTOR="${EXPECTED_RUNTIME_NODE_SELECTOR:-katacontainers.io/kata-runtime=true}"
-MATRIX_WORKER_LOOPS="${MATRIX_WORKER_LOOPS:-env-reconciler,sandbox-liveness,billing-session,warm-pool-reconciler}"
-MATRIX_TEMPLATE_SOURCE_NAMESPACE="${MATRIX_TEMPLATE_SOURCE_NAMESPACE:-dev-sandboxes}"
+MATRIX_WORKER_LOOPS="${MATRIX_WORKER_LOOPS:-env-reconciler,sandbox-liveness,billing-session}"
 MATRIX_GATEWAY_TAG="${MATRIX_GATEWAY_TAG:-}"
 MATRIX_BUILD_GATEWAY="${MATRIX_BUILD_GATEWAY:-0}"
 MATRIX_CANDIDATE_IMAGES="${MATRIX_CANDIDATE_IMAGES:-services gateway}"
@@ -58,9 +57,7 @@ Environment:
   MATRIX_CORDON_OTHER_RUNTIME_NODES cordon runtime nodes other than EXPECTED_NODE
                                     during the run, default 1
   MATRIX_WORKER_LOOPS               WORKER_LOOPS override for the candidate
-                                    window, default includes warm-pool-reconciler
-  MATRIX_TEMPLATE_SOURCE_NAMESPACE  Namespace to copy SandboxTemplates from,
-                                    default dev-sandboxes
+                                    window
   MATRIX_GATEWAY_TAG                Gateway image tag to test. Defaults to the
                                     currently deployed dev tag.
   MATRIX_BUILD_GATEWAY              Build and push MATRIX_GATEWAY_TAG when 1,
@@ -316,7 +313,6 @@ cordon_other_runtime_nodes
 log "running fresh-node direct_udp + forced DERP + websocket smoke in $MATRIX_SANDBOX_NAMESPACE with gateway tag $GATEWAY_TAG"
 if ! EXPECTED_TAILNET_PATH_TRANSPORT=direct_udp \
     CANDIDATE_WORKER_LOOPS="$MATRIX_WORKER_LOOPS" \
-    CANDIDATE_SEED_SANDBOX_TEMPLATES_FROM_NAMESPACE="$MATRIX_TEMPLATE_SOURCE_NAMESPACE" \
     EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB="$EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB" \
     SMOKE_KEEP_ENV=1 \
     SMOKE_SKIP_DOCKER=1 \

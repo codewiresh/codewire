@@ -99,15 +99,19 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await context.close();
   });
 
-  test("settings render the current typed integrations and no-JS forms", async ({ page, isMobile }) => {
+  test("settings render the current account surfaces and no-JS forms", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop settings contract");
     const response = await page.goto("/settings/");
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: "Account", exact: true }).first()).toBeVisible();
-    await expect(page.getByRole("heading", { name: "GitHub", exact: true })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Git authentication" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "GitHub", exact: true })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Git identity" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "SSH key" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Git authentication" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "SSH key" })).toHaveCount(0);
+    await expect(page.locator('form[action^="/settings/_actions/credentials/"]')).toHaveCount(0);
+    await expect(page.locator('form[action^="/settings/_actions/ssh/"]')).toHaveCount(0);
+    await expect(page.locator('form[action^="/settings/_actions/github/"]')).toHaveCount(0);
+    await expect(page.locator('a[href*="/api/v1/github/"]')).toHaveCount(0);
     await expect(page.locator('form[action="/settings/_actions/sign-out"]')).toHaveCount(1);
     await expect(page.locator('input[name="_csrf"]')).not.toHaveCount(0);
   });

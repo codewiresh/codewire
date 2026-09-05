@@ -8,7 +8,6 @@
     "codewire.console.v1.AccountService": "orchestration",
     "codewire.console.v1.BillingService": "billing",
     "codewire.console.v1.EnvironmentSetupService": "orchestration",
-    "codewire.console.v1.GitHubService": "orchestration",
     "codewire.testing.v1.PingService": "testing",
     "codewire.v1.ApiKeyService": "orchestration",
     "codewire.v1.EnvironmentService": "orchestration",

@@ -41,11 +41,16 @@ record() {
 
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
   "$ENVIRONMENT_SESSION" "$0"
-grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN="$daemon_token"' "$COMMON" ||
-  fail 'local gateway and workspace daemon do not share the derived credential'
+grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN="$gateway_token"' "$COMMON" ||
+  fail 'local gateway does not receive its coordinate-scoped capability'
+grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' "$COMMON" ||
+  fail 'local gateway and workspace daemon do not receive the daemon-scoped capability'
 grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'local CRD smoke permits an unrelated literal gateway credential'
+grep -Fq 'CRD_SMOKE_DAEMON_AUTH_TOKEN is required with CRD_SMOKE_LOCAL_GATEWAY=1' \
+  "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
+  fail 'local CRD smoke permits an unrelated literal daemon credential'
 grep -Fq 'std::env::var("CRD_SMOKE_WORKSPACE_IMAGE")' \
   "$ROOT/crates/codewire-orchestration/src/bin/crd-smoke.rs" ||
   fail 'CRD smoke cannot consume the sealed workspace alias'
@@ -76,6 +81,19 @@ grep -Fq 'configure_remote_dind_kind_network' "$COMMON" ||
   fail 'Kind does not verify the exact dashboard image it already built'
 if grep -Fq '127.0.0.1:25432/codewire' "$COMMON"; then
   fail 'Kind smoke callers bypass the configurable Postgres URL'
+fi
+grep -Fq 'audience: codewire.internal.gateway-binding.v1' "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not project the exact audience'
+grep -Fq 'mountPath: /var/run/secrets/codewire/gateway-binding' "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not isolate its projected token mount'
+grep -Fq "token=\"\$(cat /var/run/secrets/codewire/gateway-binding/token)\"" "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not reread the projected identity'
+grep -Fq 'anonymous internal binding command was not rejected' "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not assert anonymous rejection'
+grep -Fq 'coordinate capability crossed into gateway binding' "$COMMON" ||
+  fail 'Kind gateway-binding fixture does not assert cross-scope rejection'
+if grep -Fq -- '--post-data="{\"pod\"' "$COMMON"; then
+  fail 'Kind gateway-binding fixture still sends caller-selected Pod coordinates'
 fi
 
 # Sourcing the dispatcher defines every suite without executing one.
@@ -405,8 +423,9 @@ env \
   fi
   [ "$(grep -Fc "$KIND_DIND_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
     fail 'sealed Kind overlay does not contain the local DinD alias once'
-  [ "$(grep -Fc "$KIND_WORKSPACE_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
-    fail 'sealed Kind overlay does not contain the local warm-pool workspace alias once'
+  if grep -Eq 'SANDBOX_(FULL_WARM_PROFILES|WARM_POOL_WORKSPACE_IMAGE)' "$kind_rendered"; then
+    fail 'sealed Kind overlay retained removed shared warm-pool configuration'
+  fi
   [ "$(grep -Fc "$KIND_POSTGRES_LOCAL_IMAGE" "$kind_rendered")" -eq 2 ] ||
     fail 'sealed Kind overlay does not contain the local Postgres alias twice'
   [ "$(grep -Fc "$KIND_TEMPORAL_LOCAL_IMAGE" "$kind_rendered")" -eq 1 ] ||
@@ -422,7 +441,7 @@ env \
     fail 'sealed Kind overlay retained the public DinD image'
   fi
   if grep -Fq 'ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467' "$kind_rendered"; then
-    fail 'sealed Kind overlay retained the public warm-pool workspace image'
+    fail 'sealed Kind overlay retained the public workspace image'
   fi
 BASH
 

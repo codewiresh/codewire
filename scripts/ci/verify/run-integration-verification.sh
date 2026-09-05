@@ -168,7 +168,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 9
+  assert_passed_count "server-core migration matrix" "$logfile" 17
 
   logfile="$RUN_DIR/session-hash-only.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -356,7 +356,7 @@ build_selected_services() {
   fi
   if selected service_orchestration; then
     selected service_temporal && orchestration_bins+=( --bin temporal-smoke )
-    cargo_ci build --locked --profile ci -p codewire-daemon --bin codewire-daemon
+    cargo_ci build --locked --profile ci -p codewire-cli-bin --bin cw
     cargo_ci build --locked --profile ci -p codewire-orchestration \
       "${orchestration_bins[@]}" --features kind-e2e
   fi
@@ -732,7 +732,7 @@ import os
 environment_id = os.environ["CODEWIRE_TOKEN_ENVIRONMENT_ID"]
 secret = os.environ["CODEWIRE_TOKEN_SECRET"].encode()
 payload = json.dumps(
-    {"environment_id": environment_id, "scope": "coordinate"},
+    {"environment_id": environment_id, "scope": "daemon"},
     separators=(",", ":"),
 ).encode()
 encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
@@ -750,7 +750,7 @@ PY
     CODEWIRE_WORKSPACE_ROOT="$workspace_root" \
     CODEWIRE_HOME_ROOT="$home_root" \
     CODEWIRE_DAEMON_AUTH_TOKEN="$token" \
-    "$CARGO_CI_DIR/codewire-daemon" \
+    "$CARGO_CI_DIR/cw" __hosted-daemon \
     > "$RUN_DIR/orchestration-daemon.log" 2>&1 &
   echo $! > "$RUN_DIR/orchestration-daemon.pid"
   local _
@@ -777,12 +777,11 @@ PY
 }
 
 start_orchestration_process() {
-  local kube_mode="$1" kubeconfig anthropic_api_key
+  local kube_mode="$1" kubeconfig
   local -a daemon_endpoint_environment=()
   case "$kube_mode" in
     configured)
       kubeconfig="$(write_orchestration_kubeconfig)"
-      anthropic_api_key=contract-test-key
       daemon_endpoint_environment=(
         CODEWIRE_TEST_ENVIRONMENT_DAEMON_ENDPOINTS_JSON="{\"env_exec_contract_backend\":\"http://127.0.0.1:${ORCHESTRATION_DAEMON_PORT}\",\"env_exec_contract_unavailable\":\"http://127.0.0.1:${ORCHESTRATION_UNAVAILABLE_DAEMON_PORT}\"}"
       )
@@ -790,7 +789,6 @@ start_orchestration_process() {
     unconfigured)
       kubeconfig="$RUN_DIR/orchestration-deliberately-missing-kubeconfig"
       rm -f "$kubeconfig"
-      anthropic_api_key=
       ;;
     *)
       echo "::error::unknown orchestration kube mode: ${kube_mode}"
@@ -804,7 +802,6 @@ start_orchestration_process() {
     DATABASE_URL="$DATABASE_URL_RUST" SESSION_SECRET="$SESSION_SECRET" \
     CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER=true \
     ORCHESTRATION_PORT="$ORCHESTRATION_PORT" \
-    ANTHROPIC_API_KEY="$anthropic_api_key" \
     TEMPORAL_HOST_PORT="$TEMPORAL_HOST_PORT" WORKER_CONSUMERS= WORKER_LOOPS= \
     "${daemon_endpoint_environment[@]}" \
     CONNECT_TESTING_SURFACE=1 "$CARGO_CI_DIR/codewire-orchestration"
@@ -895,16 +892,17 @@ run_orchestration_temporal() {
   [ -f "$RUN_DIR/orchestration.pid" ] || start_orchestration
   local env_id="env-temporal-verification-${GITHUB_RUN_ID:-local}" state reason
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v env_id="$env_id" <<'SQL'
-INSERT INTO environment_presets (id, org_id, name, slug)
+INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
 VALUES (
   'preset_temporal_verification',
   'org_apikey_contract_1',
   'Temporal Verification',
-  'temporal-verification'
+  'temporal-verification',
+  '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
 );
 INSERT INTO environments (
   id, org_id, created_by, type, state, desired_state,
-  cpu_millicores, memory_mb, disk_gb, preset_id
+  cpu_millicores, memory_mb, disk_gb, preset_id, project_spec
 )
 VALUES (
   :'env_id',
@@ -916,7 +914,8 @@ VALUES (
   2000,
   4096,
   10,
-  'preset_temporal_verification'
+  'preset_temporal_verification',
+  '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
 );
 SQL
   TEMPORAL_ADDRESS="http://${TEMPORAL_HOST_PORT}" \

@@ -19,8 +19,6 @@ EXPECTED_UDP_RELAY_BIND_ADDRS="${EXPECTED_UDP_RELAY_BIND_ADDRS:-codewire-udp-rel
 EXPECTED_RUNTIME_NODE_SELECTOR="${EXPECTED_RUNTIME_NODE_SELECTOR:-katacontainers.io/kata-runtime=true}"
 EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB="${EXPECTED_RUNTIME_NODE_MIN_EPHEMERAL_GIB:-400}"
 CANDIDATE_WORKER_LOOPS="${CANDIDATE_WORKER_LOOPS:-}"
-CANDIDATE_SEED_SANDBOX_TEMPLATES_FROM_NAMESPACE="${CANDIDATE_SEED_SANDBOX_TEMPLATES_FROM_NAMESPACE:-}"
-CANDIDATE_SEED_SANDBOX_TEMPLATE_NAMES="${CANDIDATE_SEED_SANDBOX_TEMPLATE_NAMES:-workspace workspace-2000m-4096mib-10gib}"
 
 CURRENT_DEV=0
 FORCE_SHARED_DEV=0
@@ -101,14 +99,6 @@ Environment:
                              gateway/tailnet change against dev.
   CANDIDATE_WORKER_LOOPS     Temporarily set WORKER_LOOPS while the candidate
                              smoke mutates dev, then restore it on exit.
-                             Useful for isolated runtime-node smokes that must
-                             not start the warm-pool reconciler.
-  CANDIDATE_SEED_SANDBOX_TEMPLATES_FROM_NAMESPACE
-                             Copy named SandboxTemplates from this namespace
-                             into the candidate sandbox namespace before smoke.
-  CANDIDATE_SEED_SANDBOX_TEMPLATE_NAMES
-                             Space-separated template names to seed. Defaults
-                             to workspace and workspace-2000m-4096mib-10gib.
   EXPECTED_RUNTIME_NODE_SELECTOR
                              Kubernetes selector for runtime node storage
                              preflight. Defaults to katacontainers.io/kata-runtime=true.
@@ -204,7 +194,7 @@ add_configmap_name() {
 
 preflight_runtime_config() {
   local expected_namespace="${1:-}"
-  local config_json runtime_profile runtime_class configured_sandbox_namespace configured_billing_namespace
+  local config_json runtime_profile configured_sandbox_namespace configured_billing_namespace
   local stun_host stun_port udp_relay_advertise_addrs udp_relay_allocator_url udp_relay_bind_addrs
   local direct_udp_lb_enabled direct_udp_lb_ip direct_udp_lb_class direct_udp_transport_zone
   local runtime_transport_zones_json
@@ -213,7 +203,6 @@ preflight_runtime_config() {
 
   config_json="$(kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$CONFIGMAP_NAME" -o json)"
   runtime_profile="$(jq -r '.data.SANDBOX_RUNTIME_PROFILE // empty' <<<"$config_json")"
-  runtime_class="$(jq -r '.data.SANDBOX_RUNTIME_CLASS // empty' <<<"$config_json")"
   configured_sandbox_namespace="$(jq -r '.data.SANDBOX_NAMESPACE // empty' <<<"$config_json")"
   configured_billing_namespace="$(jq -r '.data.BILLING_CONTROLLER_NAMESPACE // empty' <<<"$config_json")"
   stun_host="$(jq -r '.data.STUN_HOST // empty' <<<"$config_json")"
@@ -229,8 +218,6 @@ preflight_runtime_config() {
 
   [[ "$runtime_profile" == "commodity" ]] || \
     die "runtime ConfigMap SANDBOX_RUNTIME_PROFILE=$runtime_profile, want commodity"
-  [[ "$runtime_class" == "commodity" ]] || \
-    die "runtime ConfigMap SANDBOX_RUNTIME_CLASS=$runtime_class, want commodity"
   [[ -n "$stun_host" ]] || \
     die "runtime ConfigMap STUN_HOST is empty; tailnet UDP discovery requires STUN"
   [[ "$stun_port" == "3478" ]] || \
@@ -279,7 +266,7 @@ preflight_runtime_config() {
     fi
   fi
 
-  log "runtime ConfigMap preflight passed: profile=$runtime_profile class=$runtime_class stun=${stun_host}:${stun_port}${expected_namespace:+ namespace=$expected_namespace}"
+  log "runtime ConfigMap preflight passed: profile=$runtime_profile stun=${stun_host}:${stun_port}${expected_namespace:+ namespace=$expected_namespace}"
 }
 
 quantity_to_bytes() {
@@ -798,73 +785,6 @@ wait_for_rollouts() {
   done
 }
 
-refresh_sandbox_templates_for_gateway_image() {
-  local namespace="$1"
-  local expected_image
-
-  [[ -n "$namespace" ]] || return 0
-  expected_image="$(current_gateway_image_ref)"
-  [[ -n "$expected_image" ]] || return 0
-
-  log "gateway image $expected_image is applied by per-environment gateway Deployments; skipping SandboxTemplate refresh in $namespace"
-}
-
-wait_for_gateway_templates_for_gateway_image() {
-  local namespace="$1"
-  local expected_image
-
-  [[ -n "$namespace" ]] || return 0
-  expected_image="$(current_gateway_image_ref)"
-  [[ -n "$expected_image" ]] || return 0
-
-  log "gateway image $expected_image will be checked on the smoke-created gateway Deployment"
-}
-
-seed_sandbox_templates_from_namespace() {
-  local source_namespace="$1"
-  local target_namespace="$2"
-  local expected_image name
-
-  [[ -n "$source_namespace" ]] || return 0
-  [[ -n "$target_namespace" ]] || return 0
-  if [[ "$source_namespace" == "$target_namespace" ]]; then
-    return 0
-  fi
-
-  expected_image="$(current_gateway_image_ref)"
-  log "seeding SandboxTemplates from $source_namespace into $target_namespace: $CANDIDATE_SEED_SANDBOX_TEMPLATE_NAMES"
-  for name in $CANDIDATE_SEED_SANDBOX_TEMPLATE_NAMES; do
-    if [[ "$DRY_RUN" == "1" ]]; then
-      log "dry-run: seed SandboxTemplate $name from $source_namespace into $target_namespace"
-      continue
-    fi
-    kubectl_dev -n "$source_namespace" get sandboxtemplates.extensions.agents.x-k8s.io "$name" -o json |
-      jq --arg namespace "$target_namespace" --arg image "$expected_image" '
-        .metadata = {name: .metadata.name, namespace: $namespace}
-        | del(.status)
-        | if $image != "" then
-            .spec.podTemplate.spec.initContainers =
-              ((.spec.podTemplate.spec.initContainers // [])
-                | map(if .name == "codewire-daemon-init" then .image = $image else . end))
-          else
-            .
-          end
-      ' |
-      kubectl_dev apply -f - >/dev/null
-  done
-}
-
-cycle_warm_pool_pods_for_gateway_image() {
-  local namespace="$1"
-  local expected_image
-
-  [[ -n "$namespace" ]] || return 0
-  expected_image="$(current_gateway_image_ref)"
-  [[ -n "$expected_image" ]] || return 0
-
-  log "warm-pool workspace pods no longer carry the gateway image; no warm-pool cycling needed for $expected_image"
-}
-
 rollout_status() {
   local deployment="$1"
   local attempt rc err
@@ -1119,10 +1039,6 @@ apply_candidate_images() {
   fi
 
   wait_for_rollouts
-  refresh_sandbox_templates_for_gateway_image "$namespace"
-  seed_sandbox_templates_from_namespace "$CANDIDATE_SEED_SANDBOX_TEMPLATES_FROM_NAMESPACE" "$namespace"
-  cycle_warm_pool_pods_for_gateway_image "$namespace"
-  wait_for_gateway_templates_for_gateway_image "$namespace"
 }
 
 restore_dev() {

@@ -94,7 +94,6 @@ test.describe.serial("rounded management interface", () => {
         `${snapshot}-${isMobile ? "mobile" : "desktop"}.png`,
         {
           fullPage: false,
-          mask: [page.locator(".cw-public-key"), page.locator(".cw-public-key + p")],
         },
       );
     }

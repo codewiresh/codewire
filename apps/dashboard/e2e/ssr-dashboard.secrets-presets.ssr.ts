@@ -245,10 +245,12 @@ test.describe.serial("server-rendered secrets and presets", () => {
     activeEnvironmentId = crypto.randomUUID();
     await sql`
       INSERT INTO environments
-        (id, org_id, created_by, type, preset_id, name, state, desired_state)
+        (id, org_id, created_by, type, preset_id, name, state, desired_state,
+         project_spec)
       VALUES
         (${activeEnvironmentId}, ${orgId}, ${ownerId}, 'sandbox', ${presetId},
-         ${`ssr-preset-in-use-${runId}`}, 'running', 'started')
+         ${`ssr-preset-in-use-${runId}`}, 'running', 'started',
+         ${sql.json({ schema_version: 1, working_directory: "/workspace" })})
     `;
     await page.reload();
     preset = page.locator(".cw-preset-card", { hasText: updatedPresetName });

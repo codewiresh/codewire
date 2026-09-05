@@ -16,12 +16,7 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             # ingress-ready: schedules the vendored ingress-nginx controller.
-            # node-pool=sandbox + isol8.../enabled: workspace pods carry these
-            # as nodeSelectors (prod's sandbox node-pool); without them the pod
-            # is unschedulable and the env never leaves `creating`. These are
-            # non-kubernetes.io labels, so NodeRestriction permits the kubelet
-            # to self-apply them.
-            node-labels: "ingress-ready=true,codewire.sh/node-pool=sandbox,isol8.codewire.sh/enabled=true"
+            node-labels: "ingress-ready=true"
     extraPortMappings:
       - containerPort: 80
         hostPort: 8090

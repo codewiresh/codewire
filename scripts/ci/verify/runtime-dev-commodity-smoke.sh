@@ -100,7 +100,6 @@ if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
   kubectl_dev -n "$CODEWIRE_SERVER_NAMESPACE" get configmap "$runtime_configmap" -o json >"$config_json"
 
   runtime_profile="$(jq -r '.data.SANDBOX_RUNTIME_PROFILE // empty' "$config_json")"
-  runtime_class="$(jq -r '.data.SANDBOX_RUNTIME_CLASS // empty' "$config_json")"
   configured_sandbox_namespace="$(jq -r '.data.SANDBOX_NAMESPACE // empty' "$config_json")"
   configured_billing_namespace="$(jq -r '.data.BILLING_CONTROLLER_NAMESPACE // empty' "$config_json")"
   stun_host="$(jq -r '.data.STUN_HOST // empty' "$config_json")"
@@ -112,7 +111,6 @@ if [[ "$SMOKE_SKIP_KUBE" != "1" ]]; then
   kata_agent_policy_enabled="$(jq -r '.data.SANDBOX_KATA_AGENT_POLICY_ENABLED // "false"' "$config_json")"
 
   [[ "$runtime_profile" == "commodity" ]] || die "SANDBOX_RUNTIME_PROFILE=$runtime_profile, want commodity"
-  [[ "$runtime_class" == "commodity" ]] || die "SANDBOX_RUNTIME_CLASS=$runtime_class, want commodity"
   if [[ -n "$configured_sandbox_namespace" && "$configured_sandbox_namespace" != "$SANDBOX_NAMESPACE" ]]; then
     die "runtime ConfigMap SANDBOX_NAMESPACE=$configured_sandbox_namespace, smoke SANDBOX_NAMESPACE=$SANDBOX_NAMESPACE"
   fi

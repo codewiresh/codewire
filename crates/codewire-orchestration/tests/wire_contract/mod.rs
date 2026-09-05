@@ -116,7 +116,7 @@ impl Harness {
 
     pub async fn run(&self) {
         if self.scope == Scope::RuntimeBoundary {
-            connect_smoke::assert_detection_unconfigured(self).await;
+            connect_smoke::assert_retired_github_and_detection_surfaces_absent(self).await;
             exec_file::assert_runtime_boundaries(self).await;
             return;
         }

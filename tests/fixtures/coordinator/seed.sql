@@ -64,16 +64,17 @@ VALUES (
     NOW()
 );
 
-INSERT INTO environment_presets (id, org_id, name)
+INSERT INTO environment_presets (id, org_id, name, project_spec)
 VALUES (
     'preset_coordinator_contract',
     'org_coordinator_contract',
-    'Coordinator Contract Preset'
+    'Coordinator Contract Preset',
+    '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 );
 
 INSERT INTO environments (
     id, org_id, created_by, type, state, name, preset_id,
-    cpu_millicores, memory_mb, total_running_seconds
+    cpu_millicores, memory_mb, total_running_seconds, project_spec
 )
 VALUES
     (
@@ -86,7 +87,8 @@ VALUES
         'preset_coordinator_contract',
         500,
         1024,
-        0
+        0,
+        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
     ),
     (
         '00000000-0000-4000-8000-000000000902',
@@ -98,5 +100,6 @@ VALUES
         'preset_coordinator_contract',
         500,
         1024,
-        0
+        0,
+        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
     );

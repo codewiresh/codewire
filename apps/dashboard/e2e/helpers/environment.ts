@@ -33,14 +33,23 @@ export async function ensureTestSandboxPreset(
   await sql`
     INSERT INTO environment_presets
       (id, org_id, name, description, build_status,
-       default_cpu_millicores, default_memory_mb, default_disk_gb, default_ttl_seconds)
+       default_ttl_seconds, project_spec)
     VALUES (${presetId}, ${orgId}, ${name}, 'E2E test preset', 'ready',
-            1000, 2048, 5, 3600)
+            3600, jsonb_build_object(
+              'schema_version', 1,
+              'working_directory', '/workspace',
+              'image', 'python:3.12-slim',
+              'resources', jsonb_build_object(
+                'cpu_millicores', 1000,
+                'memory_mib', 2048,
+                'disk_gib', 5
+              )
+            ))
   `;
   await sql`
     INSERT INTO sandbox_template_config
-      (preset_id, image_ref, sandbox_template_name, warm_pool_size, persistent_storage)
-    VALUES (${presetId}, 'python:3.12-slim', 'e2e-sandbox', 0, false)
+      (preset_id, image_ref, sandbox_template_name, persistent_storage)
+    VALUES (${presetId}, 'python:3.12-slim', 'e2e-sandbox', false)
   `;
   return presetId;
 }
@@ -113,14 +122,23 @@ export async function ensureSystemPreset(
   await sql`
     INSERT INTO environment_presets
       (id, org_id, name, description, build_status, official,
-       default_cpu_millicores, default_memory_mb, default_disk_gb, default_ttl_seconds)
+       default_ttl_seconds, project_spec)
     VALUES (${presetId}, NULL, ${name}, 'E2E system preset', 'ready', true,
-            2000, 4096, 10, 7200)
+            7200, jsonb_build_object(
+              'schema_version', 1,
+              'working_directory', '/workspace',
+              'image', ${image},
+              'resources', jsonb_build_object(
+                'cpu_millicores', 2000,
+                'memory_mib', 4096,
+                'disk_gib', 10
+              )
+            ))
   `;
   await sql`
     INSERT INTO sandbox_template_config
-      (preset_id, image_ref, sandbox_template_name, warm_pool_size, persistent_storage)
-    VALUES (${presetId}, ${image}, 'e2e-system', 0, false)
+      (preset_id, image_ref, sandbox_template_name, persistent_storage)
+    VALUES (${presetId}, ${image}, 'e2e-system', false)
   `;
   return presetId;
 }

@@ -61,8 +61,9 @@ async fn seed(pool: &PgPool, state: &str) -> Fixture {
     .await
     .unwrap();
     sqlx::query(
-        r#"INSERT INTO environment_presets (id, org_id, name, slug)
-           VALUES ($1, $2, 'Environment cleanup preset', $3)"#,
+        r#"INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+           VALUES ($1, $2, 'Environment cleanup preset', $3,
+                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
     )
     .bind(&fixture.preset_id)
     .bind(&fixture.org_id)
@@ -72,8 +73,9 @@ async fn seed(pool: &PgPool, state: &str) -> Fixture {
     .unwrap();
     sqlx::query(
         r#"INSERT INTO environments
-               (id, org_id, created_by, type, state, desired_state, preset_id)
-           VALUES ($1, $2, $3, 'sandbox', $4, 'destroyed', $5)"#,
+               (id, org_id, created_by, type, state, desired_state, preset_id, project_spec)
+           VALUES ($1, $2, $3, 'sandbox', $4, 'destroyed', $5,
+                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
     )
     .bind(&fixture.env_id)
     .bind(&fixture.org_id)

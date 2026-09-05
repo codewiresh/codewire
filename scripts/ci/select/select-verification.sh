@@ -623,7 +623,8 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      proto/codewire/v1/common.proto|proto/codewire/v1/environment.proto)
+      proto/codewire/v1/common.proto|proto/codewire/v1/environment.proto|\
+      proto/codewire/v1/preset.proto)
         # These public adapters are hand-owned in every SDK. Run all three
         # whenever their canonical request/response schema changes.
         select_token sdk_go
@@ -634,6 +635,32 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      proto/codewire/v1/environment.proto)
+        # Environment requests are consumed directly by the platform clients,
+        # dashboard, orchestration adapter, and local VMM public API.
+        select_token rust
+        select_token rust_pkg_codewire_cli
+        select_token rust_pkg_codewire_client
+        select_token rust_pkg_codewire_dashboard_web
+        select_token rust_pkg_codewire_orchestration
+        select_token rust_pkg_codewire_proto
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token web
+        recognized=true
+        ;;
+      proto/codewire/v1/preset.proto)
+        # Preset requests are consumed directly by the platform clients,
+        # dashboard, and orchestration adapter.
+        select_token rust
+        select_token rust_pkg_codewire_cli
+        select_token rust_pkg_codewire_client
+        select_token rust_pkg_codewire_dashboard_web
+        select_token rust_pkg_codewire_orchestration
+        select_token rust_pkg_codewire_proto
+        select_token web
+        recognized=true
+        ;;
       proto/codewire/v1/common.proto)
         # The shared setup and project messages also have handwritten Rust and
         # dashboard consumers outside the generated-proto crate.
@@ -767,7 +794,22 @@ if [ "$event_selected" = false ]; then
       crate="${crate%%/*}"
       crate_token="${crate//-/_}"
       case "$crate" in
-        codewire-desktop|codewire-platform-native|codewire-ui)
+        codewire-desktop|codewire-ui)
+          select_token policy
+          select_token rust
+          select_token rust_pkg_codewire_desktop
+          ;;
+        codewire-types)
+          # The retained shared types are a compiled desktop input and are also
+          # covered by the native desktop no-legacy policy.
+          select_token policy
+          select_token rust
+          select_token rust_pkg_codewire_desktop
+          select_token rust_pkg_codewire_types
+          ;;
+        codewire-platform-native)
+          # Deletion-only tombstone: a revival of the retired ambient-SSH
+          # adapter must still run the detached desktop verification.
           select_token policy
           select_token rust
           select_token rust_pkg_codewire_desktop
@@ -854,9 +896,9 @@ if [ "$event_selected" = false ]; then
         select_token database
         ;;
       crates/codewire-mesh/src/store.rs)
-        # Mesh's PostgreSQL store owns its embedded SQLx ledger and the
-        # fail-closed prelaunch retirement path. Compile-only transport checks
-        # cannot exercise those database state transitions.
+        # Mesh's PostgreSQL store owns its embedded SQLx ledger and transactional
+        # product state. Compile-only transport checks cannot exercise those
+        # database state transitions.
         select_token database
         ;;
       crates/codewire-server-core/*)

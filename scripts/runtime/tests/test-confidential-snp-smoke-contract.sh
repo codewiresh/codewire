@@ -213,9 +213,17 @@ fi
 
 rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$COMMODITY_PROFILE" >/dev/null
 rg -F 'SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "false"' "$COMMODITY_PROFILE" >/dev/null
-rg -F 'SANDBOX_RUNTIME_CLASS: commodity' "$COMMODITY_PROFILE" >/dev/null
 rg -F 'SANDBOX_RUNTIME_PROFILE: commodity' "$CONFIDENTIAL_PROFILE" >/dev/null
-rg -F 'SANDBOX_RUNTIME_CLASS: commodity' "$CONFIDENTIAL_PROFILE" >/dev/null
+if rg -F 'SANDBOX_RUNTIME_CLASS' \
+  "$ROOT/deployments/k8s/base/config.env" \
+  "$COMMODITY_PROFILE" \
+  "$CONFIDENTIAL_PROFILE" \
+  "$ROOT/deployments/k8s/overlays/local-kind/configmap-patch.yaml" \
+  "$ROOT/deployments/k8s/overlays/local-kind-static/configmap-patch.yaml" \
+  "$ROOT/deployments/k8s/overlays/production/kustomization.yaml" >/dev/null; then
+  printf 'active deployment config still exposes the removed runtime-class selector\n' >&2
+  exit 1
+fi
 rg -F 'SANDBOX_DOCKER_MODE: profile-default' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_CONFIDENTIAL_STORAGE_ENABLED: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null
 rg -F 'SANDBOX_CONFIDENTIAL_ADMIN_ONLY: "true"' "$CONFIDENTIAL_PROFILE" >/dev/null

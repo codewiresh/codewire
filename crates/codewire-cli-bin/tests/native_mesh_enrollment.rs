@@ -22,7 +22,6 @@ use codewire_local_vmm::mesh_enrollment::{
     encode_mesh_enrollment_bootstrap,
 };
 use codewire_local_vmm::mesh_ingress::MeshAttachment;
-use codewire_mesh::mesh_authorization::hash_local_environment_token;
 use codewire_mesh::{Config as MeshConfig, LocalMeshAuthorizationConfig};
 use codewire_proto::codewire::v1::{CreateMeshNetworkRequest, MeshNetworkServiceClient};
 use codewire_server_core::auth::hash_api_key;
@@ -34,8 +33,6 @@ const ORGANIZATION_ID: &str = "org-native-enrollment";
 const NETWORK_ID: &str = "network-native-enrollment";
 const NODE_NAME: &str = "sandbox-native-enrollment";
 const API_KEY: &str = "cw_native-enrollment-owner-secret";
-const OWNER_ENVIRONMENT_ID: &str = "native-enrollment-owner";
-const OWNER_ENVIRONMENT_TOKEN: &str = "native-enrollment-environment-token";
 const GUEST_PORT: u16 = 3_000;
 
 struct ChildGuard(Option<Child>);
@@ -95,8 +92,6 @@ async fn start_mesh_fixture() -> MeshFixture {
         local_authorization: Some(LocalMeshAuthorizationConfig {
             organization_id: ORGANIZATION_ID.to_owned(),
             api_key_hash: hash_api_key(API_KEY),
-            environment_id: OWNER_ENVIRONMENT_ID.to_owned(),
-            environment_token_hash: hash_local_environment_token(OWNER_ENVIRONMENT_TOKEN),
         }),
     });
     let task = tokio::spawn(async move {
@@ -126,7 +121,7 @@ fn private_roots(mesh_url: &str) -> (TempDir, std::path::PathBuf, std::path::Pat
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&mesh, fs::Permissions::from_mode(0o700)).unwrap();
     let config = format!(
-        "mesh_url = {mesh_url:?}\nmesh_auth_token = {API_KEY:?}\n\n[local_identity]\norganization_id = {ORGANIZATION_ID:?}\napi_key = {API_KEY:?}\nenvironment_id = {OWNER_ENVIRONMENT_ID:?}\nenvironment_token = {OWNER_ENVIRONMENT_TOKEN:?}\n"
+        "mesh_url = {mesh_url:?}\nmesh_auth_token = {API_KEY:?}\n\n[local_identity]\norganization_id = {ORGANIZATION_ID:?}\napi_key = {API_KEY:?}\n"
     );
     let config_path = mesh.join("config.toml");
     fs::write(&config_path, config).unwrap();

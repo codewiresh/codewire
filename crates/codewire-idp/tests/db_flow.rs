@@ -16,6 +16,7 @@ use codewire_server_core::auth::{
     AuthState, AuthUser, CredentialContext, api_key_prefix, generate_api_key, hash_api_key,
     hash_oauth_token, hash_session_token, require_auth,
 };
+use hmac::{Hmac, Mac as _};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -29,6 +30,7 @@ const CLIENT: &str = "codewire-desktop";
 const REDIRECT: &str = "http://localhost:9876/callback";
 const IOS_CLIENT: &str = "codewire-ios";
 const IOS_REDIRECT: &str = "sh.codewire.ios:/oauth/callback";
+const TEST_CAPABILITY_HMAC_SECRET: &str = "synthetic-idp-capability-hmac-secret";
 type PersistedNewKeyRow = (String, String, Vec<u8>, Vec<u8>, String, i16);
 type PersistedEnvelopeFields = (
     Option<Vec<u8>>,
@@ -54,6 +56,18 @@ fn test_signing_keyring() -> SigningKekKeyring {
             SigningKekKeyring::load(&dir, "v1").expect("load synthetic test keyring")
         })
         .clone()
+}
+
+fn test_device_user_code_digest(raw: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(TEST_CAPABILITY_HMAC_SECRET.as_bytes())
+        .expect("HMAC-SHA256 accepts keys of every size");
+    mac.update(b"codewire/idp/device-user-code/v1\0");
+    mac.update(raw.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn rotation_test_keyrings(label: &str) -> (SigningKekKeyring, SigningKekKeyring) {
@@ -211,9 +225,14 @@ async fn native_clients_full_flow_against_postgres() {
             "codewire.api".into(),
         ],
     };
-    let p = build_provider(pool.clone(), &cfg, test_signing_keyring())
-        .await
-        .unwrap();
+    let p = build_provider(
+        pool.clone(),
+        &cfg,
+        test_signing_keyring(),
+        TEST_CAPABILITY_HMAC_SECRET,
+    )
+    .await
+    .unwrap();
     let published_jwks = p.jwks().await.unwrap();
     assert!(
         !published_jwks.keys.is_empty(),
@@ -248,6 +267,16 @@ async fn native_clients_full_flow_against_postgres() {
         .next()
         .unwrap()
         .to_string();
+    let stored_code_hash: String = sqlx::query_scalar(
+        "SELECT code_hash FROM oidc_auth_requests \
+         WHERE user_id = $1 AND done = true ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(USER)
+    .fetch_one(&pool)
+    .await
+    .expect("authorization code digest");
+    assert_eq!(stored_code_hash, hash_oauth_token(&code));
+    assert_ne!(stored_code_hash, code, "raw authorization code persisted");
 
     // 2. exchange the code (public client + PKCE) -> tokens.
     let tokens = p
@@ -455,9 +484,14 @@ async fn oidc_access_token_authenticates_product_api_against_postgres() {
             "codewire.api".into(),
         ],
     };
-    let p = build_provider(pool.clone(), &cfg, test_signing_keyring())
-        .await
-        .unwrap();
+    let p = build_provider(
+        pool.clone(),
+        &cfg,
+        test_signing_keyring(),
+        TEST_CAPABILITY_HMAC_SECRET,
+    )
+    .await
+    .unwrap();
     let ctx = RequestContext {
         cookie: Some(format!("codewire.session_token={session_token}")),
     };
@@ -778,7 +812,13 @@ async fn provider_startup_publishes_jwks_before_token_issuance() {
             scopes_supported: vec!["openid".into()],
         };
 
-        let provider = build_provider(pool.clone(), &cfg, test_signing_keyring()).await?;
+        let provider = build_provider(
+            pool.clone(),
+            &cfg,
+            test_signing_keyring(),
+            TEST_CAPABILITY_HMAC_SECRET,
+        )
+        .await?;
         let jwks = provider.jwks().await?;
         anyhow::ensure!(jwks.keys.len() == 1, "expected one initial public key");
         let key = &jwks.keys[0];
@@ -1382,9 +1422,14 @@ async fn jwk_final_schema_uses_only_envelopes_and_fails_closed() {
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
-        let error = build_provider(pool.clone(), &cfg, test_signing_keyring())
-            .await
-            .expect_err("public-only registry must stop provider startup");
+        let error = build_provider(
+            pool.clone(),
+            &cfg,
+            test_signing_keyring(),
+            TEST_CAPABILITY_HMAC_SECRET,
+        )
+        .await
+        .expect_err("public-only registry must stop provider startup");
         anyhow::ensure!(
             error
                 .to_string()
@@ -1417,9 +1462,14 @@ async fn jwk_final_schema_uses_only_envelopes_and_fails_closed() {
             .await
             .expect_err("corrupt envelope must fail closed");
         anyhow::ensure!(error.0.contains("failure_class=invalid-nonce-length"));
-        let error = build_provider(pool.clone(), &cfg, test_signing_keyring())
-            .await
-            .expect_err("unreadable registry must stop provider startup");
+        let error = build_provider(
+            pool.clone(),
+            &cfg,
+            test_signing_keyring(),
+            TEST_CAPABILITY_HMAC_SECRET,
+        )
+        .await
+        .expect_err("unreadable registry must stop provider startup");
         anyhow::ensure!(
             error
                 .to_string()
@@ -1570,9 +1620,14 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
             "codewire.api".into(),
         ],
     };
-    let provider = build_provider(pool.clone(), &cfg, test_signing_keyring())
-        .await
-        .expect("build provider");
+    let provider = build_provider(
+        pool.clone(),
+        &cfg,
+        test_signing_keyring(),
+        TEST_CAPABILITY_HMAC_SECRET,
+    )
+    .await
+    .expect("build provider");
     assert_eq!(
         provider
             .discovery()
@@ -1589,6 +1644,21 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
         .await
         .expect("authorize device");
     assert_eq!(device.verification_uri, "https://app.codewire.test/device");
+    let stored_codes: (String, String) = sqlx::query_as(
+        "SELECT device_code_hash, user_code_hash \
+         FROM oidc_device_authorizations WHERE client_id = 'codewire-cli'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("stored device authorization digests");
+    assert_eq!(stored_codes.0, hash_oauth_token(&device.device_code));
+    assert_eq!(
+        stored_codes.1,
+        test_device_user_code_digest(&device.user_code)
+    );
+    assert_ne!(stored_codes.1, hash_oauth_token(&device.user_code));
+    assert_ne!(stored_codes.0, device.device_code);
+    assert_ne!(stored_codes.1, device.user_code);
     assert!(
         provider
             .lookup_user_code(&device.user_code)
@@ -1679,9 +1749,9 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
         user
     );
     let pending_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM oidc_device_authorizations WHERE device_code = $1",
+        "SELECT count(*) FROM oidc_device_authorizations WHERE device_code_hash = $1",
     )
-    .bind(&device.device_code)
+    .bind(hash_oauth_token(&device.device_code))
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -1804,13 +1874,15 @@ async fn session_auth_flow_against_postgres() {
     .await;
     assert_eq!(st, 200, "signup: {body}");
     assert_eq!(body["user"]["email"], email);
+    assert!(body["session"].get("token").is_none());
     assert!(
         cookie
             .as_deref()
             .unwrap()
             .starts_with("codewire.session_token=")
     );
-    let token = body["session"]["token"].as_str().unwrap().to_string();
+    assert!(cookie.as_deref().unwrap().contains("HttpOnly"));
+    let token = session_token_from_set_cookie(cookie.as_deref().unwrap());
     let created: String =
         sqlx::query_scalar("SELECT token_hash FROM sessions WHERE token_hash = $1")
             .bind(hash_session_token(&token))
@@ -1823,6 +1895,7 @@ async fn session_auth_flow_against_postgres() {
     let (st, body, _) = sess_req(&app, "GET", "/api/auth/get-session", Some(&token), "").await;
     assert_eq!(st, 200);
     assert_eq!(body["user"]["email"], email);
+    assert!(body["session"].get("token").is_none());
 
     // 4. duplicate sign-up → 409.
     let (st, _b, _) = sess_req(
@@ -1850,6 +1923,7 @@ async fn session_auth_flow_against_postgres() {
     assert_eq!(st, 200, "signin: {body}");
     assert!(cookie.is_some());
     assert_eq!(body["user"]["email"], email);
+    assert!(body["session"].get("token").is_none());
 
     // 6. sign-in (wrong) → 401, then four more wrong → lockout (429).
     let bad = format!(r#"{{"email":"{email}","password":"nope"}}"#);
@@ -1974,7 +2048,7 @@ async fn get_session_accepts_codewire_api_key_against_postgres() {
     assert_eq!(st, 200, "api-key get-session: {body}");
     assert_eq!(body["user"]["email"], email);
     assert_eq!(body["session"]["id"], "");
-    assert_eq!(body["session"]["token"], "");
+    assert!(body["session"].get("token").is_none());
 
     let mut last_used: Option<chrono::NaiveDateTime> = None;
     for _ in 0..50 {
@@ -2080,11 +2154,28 @@ async fn email_password_flow_against_postgres() {
     .await;
     assert_eq!(st, 200, "send verification: {body}");
     assert_eq!(body["sent"], true);
-    let verify_token: String = sqlx::query_scalar(
-        "SELECT value FROM verifications WHERE identifier=$1 ORDER BY created_at DESC LIMIT 1",
+    let (purpose, stored_hash): (String, String) = sqlx::query_as(
+        "SELECT purpose, token_hash FROM verifications \
+         WHERE identifier=$1 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(email)
     .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(purpose, "email_verification");
+    assert_eq!(stored_hash.len(), 64);
+    assert!(!stored_hash.contains("email-password-e2e"));
+
+    let verify_token = "synthetic-email-verification-capability";
+    sqlx::query(
+        "INSERT INTO verifications \
+         (id, identifier, purpose, token_hash, expires_at) \
+         VALUES ($1,$2,'email_verification',$3,NOW() + interval '1 hour')",
+    )
+    .bind("ver_email_password_known")
+    .bind(email)
+    .bind(verification_token_hash("email_verification", verify_token))
+    .execute(&pool)
     .await
     .unwrap();
 
@@ -2105,11 +2196,12 @@ async fn email_password_flow_against_postgres() {
         .await
         .unwrap();
     assert!(verified);
-    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM verifications WHERE value=$1")
-        .bind(&verify_token)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE token_hash=$1")
+            .bind(verification_token_hash("email_verification", verify_token))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(remaining, 0);
 
     // 3. Already verified users get the Go omitempty shape:
@@ -2169,11 +2261,27 @@ async fn email_password_flow_against_postgres() {
     .await;
     assert_eq!(st, 200, "forget existing: {body}");
     assert_eq!(body["sent"], true);
-    let reset_token: String = sqlx::query_scalar(
-        "SELECT value FROM verifications WHERE identifier=$1 ORDER BY created_at DESC LIMIT 1",
+    let (purpose, stored_hash): (String, String) = sqlx::query_as(
+        "SELECT purpose, token_hash FROM verifications \
+         WHERE identifier=$1 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(email)
     .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(purpose, "password_reset");
+    assert_eq!(stored_hash.len(), 64);
+
+    let reset_token = "synthetic-password-reset-capability";
+    sqlx::query(
+        "INSERT INTO verifications \
+         (id, identifier, purpose, token_hash, expires_at) \
+         VALUES ($1,$2,'password_reset',$3,NOW() + interval '1 hour')",
+    )
+    .bind("ver_email_password_reset_known")
+    .bind(email)
+    .bind(verification_token_hash("password_reset", reset_token))
+    .execute(&pool)
     .await
     .unwrap();
 
@@ -2187,11 +2295,12 @@ async fn email_password_flow_against_postgres() {
     )
     .await;
     assert_eq!(st, 400);
-    let still_there: i64 = sqlx::query_scalar("SELECT count(*) FROM verifications WHERE value=$1")
-        .bind(&reset_token)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let still_there: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE token_hash=$1")
+            .bind(verification_token_hash("password_reset", reset_token))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(still_there, 1);
 
     // 7. Invalid and expired reset tokens return 400; expired tokens are
@@ -2206,13 +2315,20 @@ async fn email_password_flow_against_postgres() {
     .await;
     assert_eq!(st, 400);
 
-    sqlx::query("INSERT INTO verifications (id, identifier, value, expires_at) VALUES ($1,$2,$3,NOW() - interval '1 minute')")
-        .bind("ver_email_password_expired")
-        .bind(email)
-        .bind("expired-reset-token")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO verifications \
+         (id, identifier, purpose, token_hash, expires_at) \
+         VALUES ($1,$2,'password_reset',$3,NOW() - interval '1 minute')",
+    )
+    .bind("ver_email_password_expired")
+    .bind(email)
+    .bind(verification_token_hash(
+        "password_reset",
+        "expired-reset-token",
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
     let (st, _body, _) = sess_req(
         &app,
         "POST",
@@ -2223,27 +2339,70 @@ async fn email_password_flow_against_postgres() {
     .await;
     assert_eq!(st, 400);
     let expired_remaining: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE value='expired-reset-token'")
+        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE token_hash=$1")
+            .bind(verification_token_hash(
+                "password_reset",
+                "expired-reset-token",
+            ))
             .fetch_one(&pool)
             .await
             .unwrap();
     assert_eq!(expired_remaining, 0);
 
-    // 8. Successful reset consumes the token and writes a credential hash
-    // that Rust sign-in can verify.
-    let (st, body, _) = sess_req(
+    // 8. Purpose binding prevents an email-verification capability from being
+    // accepted by the password-reset route, while the intended route can
+    // still claim it.
+    let cross_purpose_token = "synthetic-cross-purpose-capability";
+    sqlx::query(
+        "INSERT INTO verifications \
+         (id, identifier, purpose, token_hash, expires_at) \
+         VALUES ($1,$2,'email_verification',$3,NOW() + interval '1 hour')",
+    )
+    .bind("ver_email_password_cross_purpose")
+    .bind(email)
+    .bind(verification_token_hash(
+        "email_verification",
+        cross_purpose_token,
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, _, _) = sess_req(
         &app,
         "POST",
         "/api/auth/reset-password",
         None,
-        &format!(r#"{{"token":"{reset_token}","newPassword":"{new_pw}"}}"#),
+        &format!(r#"{{"token":"{cross_purpose_token}","newPassword":"{new_pw}"}}"#),
     )
     .await;
-    assert_eq!(st, 200, "reset success: {body}");
-    assert_eq!(body["reset"], true);
+    assert_eq!(st, 400, "wrong-purpose capability must fail closed");
+    let (st, _, _) = sess_req(
+        &app,
+        "GET",
+        &format!("/api/auth/verify-email?token={cross_purpose_token}"),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, 200, "wrong-purpose attempt must not consume capability");
+
+    // 9. Concurrent successful resets have exactly one claimant. The winner
+    // writes a credential hash which Rust sign-in can verify.
+    let reset_body = format!(r#"{{"token":"{reset_token}","newPassword":"{new_pw}"}}"#);
+    let (first, second) = tokio::join!(
+        sess_req(&app, "POST", "/api/auth/reset-password", None, &reset_body),
+        sess_req(&app, "POST", "/api/auth/reset-password", None, &reset_body),
+    );
+    let mut statuses = [first.0, second.0];
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        [200, 400],
+        "one reset claim wins: {first:?} {second:?}"
+    );
     let reset_remaining: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE value=$1")
-            .bind(&reset_token)
+        sqlx::query_scalar("SELECT count(*) FROM verifications WHERE token_hash=$1")
+            .bind(verification_token_hash("password_reset", reset_token))
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -2422,6 +2581,7 @@ async fn two_factor_flow_against_postgres() {
     assert_eq!(st, 200, "validate totp: {body}");
     assert_eq!(body["user"]["email"], email);
     assert_eq!(body["user"]["two_factor_enabled"], true);
+    assert!(body["session"].get("token").is_none());
     assert!(cookie.unwrap().starts_with("codewire.session_token="));
     let remaining: i64 =
         sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE id='tf_2fa_e2e_1'")
@@ -2443,6 +2603,7 @@ async fn two_factor_flow_against_postgres() {
     .await;
     assert_eq!(st, 200, "validate backup: {body}");
     assert_eq!(body["user"]["email"], email);
+    assert!(body["session"].get("token").is_none());
     assert!(cookie.is_some());
     let (session_count, digest_count): (i64, i64) = sqlx::query_as(
         "SELECT count(*), \
@@ -2569,7 +2730,7 @@ async fn two_factor_attempts_lock_account_against_postgres() {
 
     // Create a real credential account, then enable and verify 2FA through
     // the same HTTP handlers used by the login page.
-    let (st, body, _) = sess_req(
+    let (st, body, cookie) = sess_req(
         &app,
         "POST",
         "/api/auth/sign-up",
@@ -2578,7 +2739,8 @@ async fn two_factor_attempts_lock_account_against_postgres() {
     )
     .await;
     assert_eq!(st, 200, "sign up: {body}");
-    let session = body["session"]["token"].as_str().unwrap().to_string();
+    assert!(body["session"].get("token").is_none());
+    let session = session_token_from_set_cookie(cookie.as_deref().unwrap());
     let user: String = sqlx::query_scalar("SELECT id FROM users WHERE email=$1")
         .bind(email)
         .fetch_one(&pool)
@@ -2615,6 +2777,13 @@ async fn two_factor_attempts_lock_account_against_postgres() {
     let (st, body, _) = sign_in().await;
     assert_eq!(st, 200, "sign in for concurrent claim: {body}");
     let token = body["twoFactorToken"].as_str().unwrap().to_string();
+    let persisted_token_hash: String =
+        sqlx::query_scalar("SELECT token_hash FROM two_factor_tokens WHERE token_hash = $1")
+            .bind(hash_session_token(&token))
+            .fetch_one(&pool)
+            .await
+            .expect("persisted two-factor challenge digest");
+    assert_ne!(persisted_token_hash, token);
     let code = current_totp_code(&secret, email);
     let validate_body = format!(r#"{{"code":"{code}","token":"{token}"}}"#);
     let (first, second) = tokio::join!(
@@ -2641,8 +2810,8 @@ async fn two_factor_attempts_lock_account_against_postgres() {
         "one concurrent claimant: {first:?} {second:?}"
     );
     let remaining: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token=$1")
-            .bind(&token)
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token_hash=$1")
+            .bind(hash_session_token(&token))
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -2664,8 +2833,8 @@ async fn two_factor_attempts_lock_account_against_postgres() {
         "empty code keeps the required-fields response: {body}"
     );
     let remaining: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token=$1")
-            .bind(&token)
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token_hash=$1")
+            .bind(hash_session_token(&token))
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -2716,9 +2885,9 @@ async fn two_factor_attempts_lock_account_against_postgres() {
         "backup code has one concurrent winner: {first:?} {second:?}"
     );
     let remaining: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token IN ($1, $2)")
-            .bind("tf-token-2fa-lockout-backup-a")
-            .bind("tf-token-2fa-lockout-backup-b")
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token_hash IN ($1, $2)")
+            .bind(hash_session_token("tf-token-2fa-lockout-backup-a"))
+            .bind(hash_session_token("tf-token-2fa-lockout-backup-b"))
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -2858,8 +3027,8 @@ async fn two_factor_attempts_lock_account_against_postgres() {
         assert_eq!(st, expected, "failed 2FA attempt {attempt}: {body}");
 
         let remaining: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token=$1")
-                .bind(&token)
+            sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token_hash=$1")
+                .bind(hash_session_token(&token))
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -2886,8 +3055,8 @@ async fn two_factor_attempts_lock_account_against_postgres() {
     .await;
     assert_eq!(st, 429, "active lock rejects valid TOTP: {body}");
     let remaining: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token=$1")
-            .bind(&probe)
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE token_hash=$1")
+            .bind(hash_session_token(&probe))
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -2927,6 +3096,7 @@ async fn two_factor_attempts_lock_account_against_postgres() {
     .await;
     assert_eq!(st, 200, "full 2FA success: {body}");
     assert!(cookie.is_some());
+    assert!(body["session"].get("token").is_none());
     let (failed, locked): (i32, Option<chrono::NaiveDateTime>) =
         sqlx::query_as("SELECT failed_login_attempts, locked_until FROM users WHERE id=$1")
             .bind(&user)
@@ -2941,14 +3111,32 @@ async fn two_factor_attempts_lock_account_against_postgres() {
 
 async fn insert_two_factor_token(pool: &PgPool, id: &str, user: &str, token: &str) {
     sqlx::query(
-        "INSERT INTO two_factor_tokens (id, user_id, token, expires_at) VALUES ($1,$2,$3,NOW() + interval '10 minutes')",
+        "INSERT INTO two_factor_tokens (id, user_id, token_hash, expires_at) VALUES ($1,$2,$3,NOW() + interval '10 minutes')",
     )
     .bind(id)
     .bind(user)
-    .bind(token)
+    .bind(hash_session_token(token))
     .execute(pool)
     .await
     .unwrap();
+}
+
+fn verification_token_hash(purpose: &str, token: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"codewire/idp/verification/v1\0");
+    digest.update(purpose.as_bytes());
+    digest.update(b"\0");
+    digest.update(token.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn session_token_from_set_cookie(set_cookie: &str) -> String {
+    set_cookie
+        .strip_prefix("codewire.session_token=")
+        .and_then(|value| value.split(';').next())
+        .filter(|value| !value.is_empty())
+        .expect("non-empty HttpOnly session cookie")
+        .to_owned()
 }
 
 fn current_totp_code(secret: &str, account_name: &str) -> String {

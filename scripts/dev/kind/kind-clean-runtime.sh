@@ -115,7 +115,6 @@ log "cleaning orphan sandbox resources in namespace ${SANDBOX_NAMESPACE}"
 
 while IFS= read -r pod_name; do
   [[ -z "$pod_name" ]] && continue
-  [[ "$pod_name" == sandbox-warmpool-* ]] && continue
   if [[ "$pod_name" =~ $uuid_re ]]; then
     env_id="${BASH_REMATCH[1]}"
     if contains_line "$env_id" "$active_sandbox_ids"; then
@@ -142,6 +141,16 @@ while IFS= read -r claim_name; do
     delete_if_exists "$SANDBOX_NAMESPACE" sandboxclaim "$claim_name"
   fi
 done < <(kubectl --context "$KUBE_CONTEXT" -n "$SANDBOX_NAMESPACE" get sandboxclaim -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+
+while IFS=$'\t' read -r pool_name env_id; do
+  [[ -z "$pool_name" ]] && continue
+  if contains_line "$env_id" "$active_sandbox_ids"; then
+    continue
+  fi
+  log "  deleting orphan sandbox claim shadow ${pool_name}"
+  delete_if_exists "$SANDBOX_NAMESPACE" sandboxwarmpool "$pool_name"
+done < <(kubectl --context "$KUBE_CONTEXT" -n "$SANDBOX_NAMESPACE" get sandboxwarmpool \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.codewire\.sh/environment-id}{"\n"}{end}' 2>/dev/null || true)
 
 while IFS= read -r template_name; do
   [[ -z "$template_name" ]] && continue

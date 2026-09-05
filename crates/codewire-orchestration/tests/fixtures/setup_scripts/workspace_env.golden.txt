@@ -1,17 +1,18 @@
 set -eu
+umask 077
 mkdir -p "$HOME/.codewire"
-cat > "$HOME/.codewire/environment.sh" <<'CWEOF'
+cat > "$HOME/.codewire/environment.sh" <<'CW_ENVIRONMENT_SH_0'
 export ALPHA_KEY='plain-value'
 export CONNECT_URL='postgres://u:p@h:5432/db?sslmode=disable'
 export ZETA_TOKEN='it'\''s quoted'
-CWEOF
-cat > "$HOME/.codewire/environment.json" <<'CWJSON'
+CW_ENVIRONMENT_SH_0
+cat > "$HOME/.codewire/environment.json" <<'CW_ENVIRONMENT_JSON_0'
 {
   "ALPHA_KEY": "plain-value",
   "CONNECT_URL": "postgres://u:p@h:5432/db?sslmode=disable",
   "ZETA_TOKEN": "it's quoted"
 }
-CWJSON
+CW_ENVIRONMENT_JSON_0
 chmod 600 "$HOME/.codewire/environment.sh" "$HOME/.codewire/environment.json"
 for rc in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
   touch "$rc"

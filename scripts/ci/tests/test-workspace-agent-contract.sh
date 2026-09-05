@@ -42,7 +42,7 @@ chmod +x "$work/bin/id" "$work/bin/agent" "$work/bin/npm"
 for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
 done
-for tool in cw daemon codewire-daemon docker dockerd docker-compose gh git go gopls hcloud \
+for tool in cw docker dockerd docker-compose gh git go gopls hcloud \
   node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc psql protoc; do
   ln -s agent "$work/bin/$tool"
 done
@@ -50,6 +50,7 @@ done
 run_contract() {
   env PATH="$work/bin:$PATH" \
     CODEWIRE_CGROUP_ROOT="$work/cgroup" \
+    CODEWIRE_BIN_ROOT="$work/bin" \
     CODEWIRE_EXPECTED_PIDS_MAX=2048 \
     FAIL_AGENT="${FAIL_AGENT:-}" \
     bash "$CONTRACT"

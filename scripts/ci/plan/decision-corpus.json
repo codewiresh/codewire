@@ -93,7 +93,7 @@
       "paths": ["proto/codewire/v1/environment.proto"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["contracts", "contracts_proto", "edge_kind", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "sdk_go", "sdk_python", "sdk_ts"],
+        "selection_tokens": ["contracts", "contracts_proto", "edge_kind", "go_consumer_interop", "go_support", "policy", "policy_shell_omittable", "rust", "rust_pkg_codewire_cli", "rust_pkg_codewire_client", "rust_pkg_codewire_dashboard_web", "rust_pkg_codewire_orchestration", "rust_pkg_codewire_proto", "sdk_go", "sdk_python", "sdk_ts", "transport", "transport_pkg_codewire_local_vmm", "web"],
         "required_local_mode": "default"
       }
     },

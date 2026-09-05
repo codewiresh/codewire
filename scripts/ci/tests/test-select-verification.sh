@@ -316,7 +316,10 @@ run_paths_case leaf_rust pull_request refs/pull/4/head false \
 run_paths_case detached_desktop pull_request refs/pull/401/head false \
   'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-desktop/src/main.rs
-run_paths_case detached_platform_native pull_request refs/pull/402/head false \
+run_paths_case desktop_shared_types pull_request refs/pull/4011/head false \
+  'policy rust rust_pkg_codewire_desktop rust_pkg_codewire_types' \
+  crates/codewire-types/src/types.rs
+run_paths_case retired_platform_native pull_request refs/pull/402/head false \
   'policy rust rust_pkg_codewire_desktop' \
   crates/codewire-platform-native/src/lib.rs
 run_paths_case detached_ui pull_request refs/pull/403/head false \
@@ -511,8 +514,11 @@ run_paths_case common_proto pull_request refs/pull/109/head false \
   'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
   proto/codewire/v1/common.proto
 run_paths_case environment_proto pull_request refs/pull/110/head false \
-  'contracts contracts_proto edge_kind go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
+  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm web' \
   proto/codewire/v1/environment.proto
+run_paths_case preset_proto pull_request refs/pull/1101/head false \
+  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_proto sdk_go sdk_python sdk_ts web' \
+  proto/codewire/v1/preset.proto
 run_paths_case admin_rust_proto_boundary pull_request refs/pull/1111/head false \
   'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto' \
   crates/codewire-admin-proto/Cargo.toml \

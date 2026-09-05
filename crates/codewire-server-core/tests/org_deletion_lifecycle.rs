@@ -1186,7 +1186,9 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
     let project_id = format!("project_orgdel_{suffix}");
 
     sqlx::query(
-        "INSERT INTO environment_presets (id, org_id, name) VALUES ($1, $2, 'deletion fixture')",
+        r#"INSERT INTO environment_presets (id, org_id, name, project_spec)
+           VALUES ($1, $2, 'deletion fixture',
+                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
     )
     .bind(&preset_id)
     .bind(&fixture.org_id)
@@ -1196,8 +1198,9 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
     sqlx::query(
         r#"INSERT INTO environments
                (id, org_id, created_by, type, state, desired_state, preset_id,
-                external_cleanup_completed_at)
-           VALUES ($1, $2, $3, 'sandbox', 'destroyed', 'destroyed', $4, NOW())"#,
+                external_cleanup_completed_at, project_spec)
+           VALUES ($1, $2, $3, 'sandbox', 'destroyed', 'destroyed', $4, NOW(),
+                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
     )
     .bind(&environment_id)
     .bind(&fixture.org_id)
@@ -1207,12 +1210,12 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
     .await
     .unwrap();
     sqlx::query(
-        r#"INSERT INTO repo_configs (id, org_id, repo_url, preset_id, created_by)
-           VALUES ($1, $2, 'https://example.test/repo.git', $3, $4)"#,
+        r#"INSERT INTO repo_configs (id, org_id, repo_url, project_spec, created_by)
+           VALUES ($1, $2, 'https://example.test/repo.git',
+                   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb, $3)"#,
     )
     .bind(format!("repo_orgdel_{suffix}"))
     .bind(&fixture.org_id)
-    .bind(&preset_id)
     .bind(&fixture.owner.user_id)
     .execute(&pool)
     .await
@@ -1272,9 +1275,9 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
     ] {
         sqlx::query(
             "INSERT INTO tenant_secrets \
-             (path, key, dek_id, scope, scope_id, ciphertext, nonce) \
+             (path, key, dek_id, scope, scope_id, ciphertext, nonce, storage_contract_version) \
              VALUES ($1, 'CANARY', $2, 'org', $3, \
-                     decode(repeat('11', 16), 'hex'), decode(repeat('22', 12), 'hex'))",
+                     decode(repeat('11', 16), 'hex'), decode(repeat('22', 12), 'hex'), 1)",
         )
         .bind(path)
         .bind(format!("dek-orgdel-{suffix}"))
@@ -1424,11 +1427,7 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
     );
     assert_eq!(
         referencing_tables(&pool, "environment_presets").await,
-        vec![
-            "environments:no_action",
-            "repo_configs:no_action",
-            "sandbox_template_config:cascade"
-        ]
+        vec!["environments:no_action", "sandbox_template_config:cascade"]
     );
     assert_eq!(
         referencing_tables(&pool, "environments").await,
