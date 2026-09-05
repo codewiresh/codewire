@@ -1,13 +1,18 @@
 //! Shared public `FileService` adapter for the private guest daemon.
 //!
 //! Uploads are staged beside their destination and renamed only after the
-//! complete stream arrives. A cancellation guard removes the staging object;
-//! no public response or log contains its private name.
+//! complete stream arrives. An owned upload worker removes canceled staging objects;
+//! no public response or log contains its private name. Cleanup is best effort
+//! after transport loss or a mutation deadline; an unknown outcome is never
+//! retried and cancellation never removes an already published destination.
+//! Process/runtime shutdown does not guarantee that cleanup has drained.
 
+use std::future::Future;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use buffa_types::Timestamp;
@@ -25,6 +30,8 @@ const STREAM_BUFFER: usize = 8;
 const DOWNLOAD_CHUNK_BYTES: i64 = 64 * 1024;
 const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
 const UPLOAD_MODE: u32 = 0o644;
+// Bound individual private unary operations, not the whole file transfer.
+const UPLOAD_MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 const UPLOAD_DIRECTORY_MODE: u32 = 0o755;
 const MAX_UPLOAD_PATH_BYTES: usize = 4096;
 const MAX_UPLOAD_PATH_COMPONENTS: usize = 256;
@@ -249,130 +256,213 @@ where
             .await
             .map_err(|error| self.backend.daemon_error(error, request_id.as_deref()))?;
         ensure_upload_parent(&daemon, &staging_path, &self.backend, request_id.as_deref()).await?;
-        daemon
-            .open_file(v1::OpenFileRequest {
-                path: staging_path.clone(),
-                options: Some(v1::FileOpenOptions {
-                    write: true,
-                    create: true,
-                    truncate: true,
-                    exclusive: true,
-                    ..Default::default()
-                }),
-                perm: 0o600,
-            })
-            .await
-            .map_err(|error| self.backend.daemon_error(error, request_id.as_deref()))?;
-        let mut staging = UploadStaging::new(daemon, staging_path);
-        let mut offset = 0_i64;
-
-        while let Some(message) = requests.next().await {
-            let message = match message {
-                Ok(message) => message.to_owned_message(),
-                Err(error) => {
-                    staging.abort().await;
-                    return Err(error);
-                }
-            };
-            let chunk = match message.payload {
-                Some(proto::upload_file_request::Payload::Chunk(chunk)) => chunk,
-                Some(proto::upload_file_request::Payload::Header(_)) => {
-                    staging.abort().await;
-                    return Err(self.backend.validation_error(
-                        vec![FieldViolation {
-                            path: "/payload/header",
-                            message: "must appear only once",
-                        }],
-                        request_id.as_deref(),
-                    ));
-                }
-                None => {
-                    staging.abort().await;
-                    return Err(self.backend.validation_error(
-                        vec![FieldViolation {
-                            path: "/payload",
-                            message: "is required",
-                        }],
-                        request_id.as_deref(),
-                    ));
-                }
-            };
-            for private_chunk in chunk.chunks(UPLOAD_CHUNK_BYTES) {
-                let expected = match i64::try_from(private_chunk.len()) {
-                    Ok(expected) => expected,
-                    Err(_) => {
-                        staging.abort().await;
-                        return Err(self.backend.daemon_error(
-                            DaemonClientError::InvalidFrame("file write length"),
-                            request_id.as_deref(),
-                        ));
-                    }
-                };
-                let written = match staging
-                    .client
-                    .write_file(v1::WriteRequest {
-                        path: staging.path().to_string(),
-                        offset,
-                        data: private_chunk.to_vec(),
-                    })
-                    .await
-                {
-                    Ok(written) => written,
-                    Err(error) => {
-                        staging.abort().await;
-                        return Err(self.backend.daemon_error(error, request_id.as_deref()));
-                    }
-                };
-                if written != expected {
-                    staging.abort().await;
-                    return Err(self.backend.daemon_error(
-                        DaemonClientError::InvalidFrame("file write"),
-                        request_id.as_deref(),
-                    ));
-                }
-                offset = match offset.checked_add(written) {
-                    Some(offset) => offset,
-                    None => {
-                        staging.abort().await;
-                        return Err(self.backend.daemon_error(
-                            DaemonClientError::InvalidFrame("file write offset"),
-                            request_id.as_deref(),
-                        ));
-                    }
-                };
-            }
-        }
-
-        if let Err(error) = staging
-            .client
-            .set_stat(v1::SetStatRequest {
-                path: staging.path().to_string(),
-                mode: Some(UPLOAD_MODE),
-                ..Default::default()
-            })
-            .await
-        {
-            staging.abort().await;
-            return Err(self.backend.daemon_error(error, request_id.as_deref()));
-        }
-        if let Err(error) = staging
-            .client
-            .rename(v1::RenameRequest {
-                old_path: staging.path().to_string(),
-                new_path: destination.clone(),
-            })
-            .await
-        {
-            staging.abort().await;
-            return Err(self.backend.daemon_error(error, request_id.as_deref()));
-        }
-        staging.commit();
-        connectrpc::Response::ok(proto::UploadFileResponse {
-            path: destination,
-            size: offset,
-            ..Default::default()
+        // The worker owns every issued mutation until its reply or deadline. Dropping
+        // the public request closes response_rx, but cannot race cleanup against
+        // a pending create/write or strand the staging file before its guard exists.
+        let backend = self.backend.clone();
+        let (mut response_tx, response_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = upload_to_daemon(
+                daemon,
+                staging_path,
+                destination,
+                requests,
+                backend,
+                request_id,
+                &mut response_tx,
+            )
+            .await;
+            let _ = response_tx.send(result);
+        });
+        response_rx.await.unwrap_or_else(|_| {
+            Err(connectrpc::ConnectError::new(
+                connectrpc::ErrorCode::Internal,
+                "upload worker stopped",
+            ))
         })
     }
+}
+
+// Public-request cancellation is observed between mutations, not by dropping
+// an issued RPC. A mutation deadline separately bounds unknown remote outcomes.
+// Once Rename is issued it may publish successfully; cancellation cleanup only
+// removes the staging name, never a destination that may already be committed.
+async fn upload_to_daemon<B: FileBackend>(
+    daemon: DaemonClient,
+    staging_path: String,
+    destination: String,
+    mut requests: InboundStream<proto::UploadFileRequest>,
+    backend: B,
+    request_id: Option<String>,
+    response: &mut tokio::sync::oneshot::Sender<ServiceResult<proto::UploadFileResponse>>,
+) -> ServiceResult<proto::UploadFileResponse> {
+    if response.is_closed() {
+        return Err(upload_canceled());
+    }
+    upload_mutation(daemon.open_file(v1::OpenFileRequest {
+        path: staging_path.clone(),
+        options: Some(v1::FileOpenOptions {
+            write: true,
+            create: true,
+            truncate: true,
+            exclusive: true,
+            ..Default::default()
+        }),
+        perm: 0o600,
+    }))
+    .await
+    .map_err(|error| backend.daemon_error(error, request_id.as_deref()))?;
+    let mut staging = UploadStaging::new(daemon, staging_path);
+    let mut offset = 0_i64;
+
+    while let Some(message) = tokio::select! {
+        biased;
+        _ = response.closed() => {
+            staging.abort().await;
+            return Err(upload_canceled());
+        }
+        message = requests.next() => message,
+    } {
+        let message = match message {
+            Ok(message) => message.to_owned_message(),
+            Err(error) => {
+                staging.abort().await;
+                return Err(error);
+            }
+        };
+        let chunk = match message.payload {
+            Some(proto::upload_file_request::Payload::Chunk(chunk)) => chunk,
+            Some(proto::upload_file_request::Payload::Header(_)) => {
+                staging.abort().await;
+                return Err(backend.validation_error(
+                    vec![FieldViolation {
+                        path: "/payload/header",
+                        message: "must appear only once",
+                    }],
+                    request_id.as_deref(),
+                ));
+            }
+            None => {
+                staging.abort().await;
+                return Err(backend.validation_error(
+                    vec![FieldViolation {
+                        path: "/payload",
+                        message: "is required",
+                    }],
+                    request_id.as_deref(),
+                ));
+            }
+        };
+        for private_chunk in chunk.chunks(UPLOAD_CHUNK_BYTES) {
+            if response.is_closed() {
+                staging.abort().await;
+                return Err(upload_canceled());
+            }
+            let expected = match i64::try_from(private_chunk.len()) {
+                Ok(expected) => expected,
+                Err(_) => {
+                    staging.abort().await;
+                    return Err(backend.daemon_error(
+                        DaemonClientError::InvalidFrame("file write length"),
+                        request_id.as_deref(),
+                    ));
+                }
+            };
+            let written = match upload_mutation(staging.client.write_file(v1::WriteRequest {
+                path: staging.path().to_string(),
+                offset,
+                data: private_chunk.to_vec(),
+            }))
+            .await
+            {
+                Ok(written) => written,
+                Err(error) => {
+                    staging.abort().await;
+                    return Err(backend.daemon_error(error, request_id.as_deref()));
+                }
+            };
+            if written != expected {
+                staging.abort().await;
+                return Err(backend.daemon_error(
+                    DaemonClientError::InvalidFrame("file write"),
+                    request_id.as_deref(),
+                ));
+            }
+            offset = match offset.checked_add(written) {
+                Some(offset) => offset,
+                None => {
+                    staging.abort().await;
+                    return Err(backend.daemon_error(
+                        DaemonClientError::InvalidFrame("file write offset"),
+                        request_id.as_deref(),
+                    ));
+                }
+            };
+        }
+    }
+
+    if response.is_closed() {
+        staging.abort().await;
+        return Err(upload_canceled());
+    }
+    if let Err(error) = upload_mutation(staging.client.set_stat(v1::SetStatRequest {
+        path: staging.path().to_string(),
+        mode: Some(UPLOAD_MODE),
+        ..Default::default()
+    }))
+    .await
+    {
+        staging.abort().await;
+        return Err(backend.daemon_error(error, request_id.as_deref()));
+    }
+    if response.is_closed() {
+        staging.abort().await;
+        return Err(upload_canceled());
+    }
+    if let Err(error) = upload_mutation(staging.client.rename(v1::RenameRequest {
+        old_path: staging.path().to_string(),
+        new_path: destination.clone(),
+    }))
+    .await
+    {
+        staging.abort().await;
+        return Err(backend.daemon_error(error, request_id.as_deref()));
+    }
+    staging.commit();
+    connectrpc::Response::ok(proto::UploadFileResponse {
+        path: destination,
+        size: offset,
+        ..Default::default()
+    })
+}
+
+async fn upload_mutation<T>(
+    operation: impl Future<Output = Result<T, DaemonClientError>>,
+) -> Result<T, DaemonClientError> {
+    upload_mutation_until(
+        tokio::time::Instant::now() + UPLOAD_MUTATION_TIMEOUT,
+        operation,
+    )
+    .await
+}
+
+async fn upload_mutation_until<T>(
+    deadline: tokio::time::Instant,
+    operation: impl Future<Output = Result<T, DaemonClientError>>,
+) -> Result<T, DaemonClientError> {
+    // A deadline bounds retention, not the remote effect. Never retry the
+    // mutation or treat this error as proof that it did not happen.
+    tokio::time::timeout_at(deadline, operation)
+        .await
+        .map_err(|_| {
+            DaemonClientError::Status(tonic::Status::deadline_exceeded(
+                "upload operation deadline exceeded",
+            ))
+        })?
+}
+
+fn upload_canceled() -> connectrpc::ConnectError {
+    connectrpc::ConnectError::new(connectrpc::ErrorCode::Canceled, "upload canceled")
 }
 
 async fn ensure_upload_parent<B: FileBackend>(
@@ -535,13 +625,16 @@ impl UploadStaging {
     }
 
     async fn abort(&mut self) {
-        let Some(path) = self.path.take() else {
+        let Some(path) = self.path.as_ref() else {
             return;
         };
-        let _ = self
-            .client
-            .remove(v1::RemoveRequest { path, dir: false })
-            .await;
+        // Keep Drop cleanup armed while Remove is pending as well.
+        let _ = upload_mutation(self.client.remove(v1::RemoveRequest {
+            path: path.clone(),
+            dir: false,
+        }))
+        .await;
+        self.path = None;
     }
 
     fn commit(&mut self) {
@@ -557,7 +650,8 @@ impl Drop for UploadStaging {
         let client = self.client.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = client.remove(v1::RemoveRequest { path, dir: false }).await;
+                let _ =
+                    upload_mutation(client.remove(v1::RemoveRequest { path, dir: false })).await;
             });
         }
     }
@@ -705,6 +799,8 @@ fn receiver_stream<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    mod cancellation;
+
     use std::time::{Duration, Instant};
 
     use tokio_stream::wrappers::ReceiverStream;
@@ -908,6 +1004,27 @@ mod tests {
         assert!(!outside.join("created").exists());
 
         harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn upload_mutation_deadline_bounds_a_stalled_operation_without_replay() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let operation = async {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<Result<(), DaemonClientError>>().await
+        };
+        let result = upload_mutation_until(
+            tokio::time::Instant::now() + Duration::from_millis(10),
+            operation,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(DaemonClientError::Status(status)) if status.code() == tonic::Code::DeadlineExceeded)
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(UPLOAD_MUTATION_TIMEOUT, Duration::from_secs(30));
     }
 
     #[tokio::test]
