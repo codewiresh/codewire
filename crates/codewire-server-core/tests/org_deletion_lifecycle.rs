@@ -1247,14 +1247,14 @@ async fn configured_finalizer_is_dependency_ordered_idempotent_and_value_blind()
         .unwrap();
     sqlx::query(
         r#"INSERT INTO org_invitations
-               (id, org_id, email, role, invited_by, token, expires_at)
+               (id, org_id, email, role, invited_by, token_hash, expires_at)
            VALUES ($1, $2, 'invitee@example.test', 'member', $3, $4,
                    NOW() + INTERVAL '1 day')"#,
     )
     .bind(format!("invite_orgdel_{suffix}"))
     .bind(&fixture.org_id)
     .bind(&fixture.owner.user_id)
-    .bind(format!("token_orgdel_{suffix}"))
+    .bind("11".repeat(32))
     .execute(&pool)
     .await
     .unwrap();
