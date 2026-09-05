@@ -230,6 +230,11 @@ run_paths_case repo_checks pull_request refs/pull/21/head false \
 run_paths_case repo_policy_modules pull_request refs/pull/22/head false \
   'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/checks/repo_policy/mesh.py
+run_paths_case repo_license_inventory pull_request refs/pull/2201/head false \
+  'policy' scripts/checks/repo_policy/licensing.py
+run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head false \
+  'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
+  scripts/checks/repo_policy/licensing.py scripts/checks/repo_policy/mesh.py
 run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
   'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/ci/tests/test-repo-checks-modules.py

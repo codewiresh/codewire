@@ -536,6 +536,12 @@ if [ "$event_selected" = false ]; then
         select_js_security
         recognized=true
         ;;
+      scripts/checks/repo_policy/licensing.py)
+        # The package inventory is enforced by policy-core; it does not
+        # execute contracts, deployments, releases, or runtime security.
+        select_token policy
+        recognized=true
+        ;;
       scripts/checks/repo_checks.py|scripts/checks/repo_policy/*.py|\
       scripts/ci/tests/test-repo-checks-modules.py)
         select_token contracts
