@@ -97,8 +97,40 @@ impl EnvironmentResidue {
 
 const DELETION_PROTECTION_FINALIZER: &str = "codewire.sh/deletion-protection";
 const LONGHORN_NAMESPACE: &str = "longhorn-system";
+const LEGACY_SHARED_WARM_POOL_PREFIX: &str = "sandbox-warmpool-workspace";
 const DEFAULT_DIRECT_UDP_LB_PORT_START: u16 = 32000;
 const DEFAULT_DIRECT_UDP_LB_PORT_END: u16 = 60999;
+
+fn legacy_shared_warm_pool_name_matches(name: &str, template_name: &str) -> bool {
+    fn positive_number_with_suffix(value: &str, suffix: &str) -> bool {
+        value
+            .strip_suffix(suffix)
+            .and_then(|number| number.parse::<u32>().ok())
+            .is_some_and(|number| number > 0)
+    }
+
+    let canonical_template = template_name == "workspace"
+        || template_name.strip_prefix("workspace-").is_some_and(|sku| {
+            let fields = sku.split('-').collect::<Vec<_>>();
+            fields.len() == 3
+                && positive_number_with_suffix(fields[0], "m")
+                && positive_number_with_suffix(fields[1], "mib")
+                && positive_number_with_suffix(fields[2], "gib")
+        });
+    if !canonical_template {
+        return false;
+    }
+
+    name.strip_prefix("sandbox-warmpool-")
+        .and_then(|remainder| remainder.strip_prefix(template_name))
+        .and_then(|remainder| remainder.strip_prefix('-'))
+        .is_some_and(|revision| {
+            revision.len() == 8
+                && revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
 
 /// Namespaced client for SandboxClaim operations.
 #[derive(Clone)]
@@ -2056,6 +2088,96 @@ impl SandboxClient {
         }
     }
 
+    /// Retire shared performance warm pools from releases that predate the
+    /// per-environment authenticated daemon boundary. The new create path can
+    /// emit only `shadow-pool-*` objects, so every accepted candidate is
+    /// historical. Observe every claim before the first delete so a retained
+    /// or in-flight environment fails the whole pass closed.
+    pub async fn retire_legacy_shared_warm_pools(&self) -> anyhow::Result<usize> {
+        let pools = self.warm_pools();
+        let listed = pools
+            .list(&ListParams::default())
+            .await
+            .map_err(|error| anyhow::anyhow!("list legacy SandboxWarmPools: {error}"))?;
+        let mut candidates = BTreeSet::new();
+        for pool in listed.items {
+            let name = pool.metadata.name.unwrap_or_default();
+            if !name.starts_with(LEGACY_SHARED_WARM_POOL_PREFIX) {
+                continue;
+            }
+            let template_name = pool
+                .data
+                .pointer("/spec/sandboxTemplateRef/name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("legacy SandboxWarmPool {name} has no exact template reference")
+                })?;
+            anyhow::ensure!(
+                legacy_shared_warm_pool_name_matches(&name, template_name),
+                "refusing malformed legacy SandboxWarmPool {name} for template {template_name}"
+            );
+            candidates.insert(name);
+        }
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let claims = self
+            .claims
+            .list(&ListParams::default())
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("list SandboxClaims before legacy retirement: {error}")
+            })?;
+        let mut referenced = BTreeSet::new();
+        for claim in claims.items {
+            let Some(pool_name) = claim
+                .data
+                .pointer("/spec/warmPoolRef/name")
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if candidates.contains(pool_name) {
+                referenced.insert(pool_name.to_string());
+            }
+        }
+        anyhow::ensure!(
+            referenced.is_empty(),
+            "legacy shared warm pools remain referenced by SandboxClaims: {}",
+            referenced.into_iter().collect::<Vec<_>>().join(",")
+        );
+
+        let mut retired = 0;
+        for name in candidates {
+            match pools.delete(&name, &DeleteParams::default()).await {
+                Ok(_) => {
+                    retired += 1;
+                    tracing::info!(
+                        name,
+                        namespace = self.namespace,
+                        "retired legacy shared SandboxWarmPool"
+                    );
+                }
+                Err(kube::Error::Api(error)) if error.code == 404 => {
+                    retired += 1;
+                    tracing::info!(
+                        name,
+                        namespace = self.namespace,
+                        "legacy shared SandboxWarmPool was already absent"
+                    );
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "delete legacy SandboxWarmPool {name}: {error}"
+                    ));
+                }
+            }
+        }
+        Ok(retired)
+    }
+
     /// Mirrors `GetSandboxClaimReadyStatus`: (exists, ready, reason).
     pub async fn get_sandbox_claim_ready_status(
         &self,
@@ -3623,6 +3745,167 @@ mod tests {
         });
         let client = Client::new(service, "default");
         (SandboxClient::new(client, "dev-sandboxes"), requests)
+    }
+
+    fn warm_pool_list(items: Vec<Value>) -> Value {
+        json!({
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxWarmPoolList",
+            "metadata": {"resourceVersion": "1"},
+            "items": items,
+        })
+    }
+
+    fn warm_pool(name: &str, template_name: &str) -> Value {
+        json!({
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxWarmPool",
+            "metadata": {"name": name, "namespace": "dev-sandboxes"},
+            "spec": {
+                "replicas": 2,
+                "sandboxTemplateRef": {"name": template_name},
+            },
+        })
+    }
+
+    fn claim_list(items: Vec<Value>) -> Value {
+        json!({
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxClaimList",
+            "metadata": {"resourceVersion": "1"},
+            "items": items,
+        })
+    }
+
+    #[test]
+    fn legacy_shared_warm_pool_selector_excludes_environment_shadows() {
+        assert!(legacy_shared_warm_pool_name_matches(
+            "sandbox-warmpool-workspace-5513aec3",
+            "workspace"
+        ));
+        assert!(legacy_shared_warm_pool_name_matches(
+            "sandbox-warmpool-workspace-2000m-4096mib-10gib-e1354543",
+            "workspace-2000m-4096mib-10gib"
+        ));
+        assert!(!legacy_shared_warm_pool_name_matches(
+            "shadow-pool-workspace-env-test",
+            "workspace-env-test"
+        ));
+        assert!(!legacy_shared_warm_pool_name_matches(
+            "sandbox-warmpool-workspace-env-test-deadbeef",
+            "workspace-env-test"
+        ));
+        assert!(!legacy_shared_warm_pool_name_matches(
+            "sandbox-warmpool-workspace-5513AEC3",
+            "workspace"
+        ));
+    }
+
+    #[tokio::test]
+    async fn legacy_shared_warm_pool_retirement_preserves_shadows() {
+        let default_pool = "sandbox-warmpool-workspace-5513aec3";
+        let legacy_pool = "sandbox-warmpool-workspace-2000m-4096mib-10gib-e1354543";
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (
+                StatusCode::OK,
+                warm_pool_list(vec![
+                    warm_pool(default_pool, "workspace"),
+                    warm_pool(legacy_pool, "workspace-2000m-4096mib-10gib"),
+                    warm_pool("shadow-pool-workspace-env-test", "workspace-env-test"),
+                ]),
+            ),
+            (StatusCode::OK, claim_list(Vec::new())),
+            (StatusCode::OK, kubernetes_status("Success", 200)),
+            (StatusCode::OK, kubernetes_status("Success", 200)),
+        ]);
+
+        assert_eq!(client.retire_legacy_shared_warm_pools().await.unwrap(), 2);
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &[
+                (
+                    Method::GET,
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxwarmpools".into(),
+                ),
+                (
+                    Method::GET,
+                    "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims".into(),
+                ),
+                (
+                    Method::DELETE,
+                    format!(
+                        "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxwarmpools/{legacy_pool}"
+                    ),
+                ),
+                (
+                    Method::DELETE,
+                    format!(
+                        "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxwarmpools/{default_pool}"
+                    ),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_shared_warm_pool_retirement_denies_referenced_pool() {
+        let pool_name = "sandbox-warmpool-workspace-5513aec3";
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (
+                StatusCode::OK,
+                warm_pool_list(vec![warm_pool(pool_name, "workspace")]),
+            ),
+            (
+                StatusCode::OK,
+                claim_list(vec![json!({
+                    "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+                    "kind": "SandboxClaim",
+                    "metadata": {"name": "sandbox-env-live", "namespace": "dev-sandboxes"},
+                    "spec": {"warmPoolRef": {"name": pool_name}},
+                })]),
+            ),
+        ]);
+
+        let error = client.retire_legacy_shared_warm_pools().await.unwrap_err();
+        assert!(error.to_string().contains(pool_name));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn legacy_shared_warm_pool_retirement_retries_partial_deletion() {
+        let default_pool = "sandbox-warmpool-workspace-5513aec3";
+        let legacy_pool = "sandbox-warmpool-workspace-2000m-4096mib-10gib-e1354543";
+        let (client, requests) = sandbox_client_with_secret_responses(vec![
+            (
+                StatusCode::OK,
+                warm_pool_list(vec![
+                    warm_pool(default_pool, "workspace"),
+                    warm_pool(legacy_pool, "workspace-2000m-4096mib-10gib"),
+                ]),
+            ),
+            (StatusCode::OK, claim_list(Vec::new())),
+            (StatusCode::OK, kubernetes_status("Success", 200)),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                kubernetes_status("InternalError", 500),
+            ),
+            (
+                StatusCode::OK,
+                warm_pool_list(vec![warm_pool(default_pool, "workspace")]),
+            ),
+            (StatusCode::OK, claim_list(Vec::new())),
+            (StatusCode::OK, kubernetes_status("Success", 200)),
+        ]);
+
+        assert!(client.retire_legacy_shared_warm_pools().await.is_err());
+        assert_eq!(client.retire_legacy_shared_warm_pools().await.unwrap(), 1);
+        let deletes = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| *method == Method::DELETE)
+            .count();
+        assert_eq!(deletes, 3);
     }
 
     #[tokio::test]

@@ -148,10 +148,12 @@ async fn reconciler_loop(
     let mut ticker = tokio::time::interval(RECONCILER_INTERVAL);
     ticker.tick().await; // align with Go's NewTicker (first fire after interval)
     let mut startup_recovery_observed = false;
+    let mut legacy_warm_pool_retirement_complete = false;
     loop {
         tokio::select! {
             _ = leader_notify.notified() => {
                 if is_leader.load(Ordering::SeqCst) {
+                    legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(&ctx).await;
                     recover_on_startup(&ctx).await;
                     startup_recovery_observed = true;
                 }
@@ -166,11 +168,43 @@ async fn reconciler_loop(
                         recover_on_startup(&ctx).await;
                         startup_recovery_observed = true;
                     }
+                    if !legacy_warm_pool_retirement_complete {
+                        legacy_warm_pool_retirement_complete = retire_legacy_shared_warm_pools(&ctx).await;
+                    }
                     run_reconciliation(&ctx).await;
                 } else {
                     startup_recovery_observed = false;
+                    legacy_warm_pool_retirement_complete = false;
                 }
             }
+        }
+    }
+}
+
+async fn retire_legacy_shared_warm_pools(ctx: &WorkerContext) -> bool {
+    let Some(kube) = &ctx.kube else {
+        tracing::warn!("reconciler: legacy shared warm-pool retirement requires Kubernetes access");
+        return false;
+    };
+    let client = SandboxClient::new(kube.clone(), &ctx.sandbox_cfg.sandbox_namespace);
+    match client.retire_legacy_shared_warm_pools().await {
+        Ok(0) => {
+            tracing::info!("reconciler: legacy shared warm-pool retirement complete");
+            true
+        }
+        Ok(retired) => {
+            tracing::info!(
+                retired,
+                "reconciler: legacy shared warm-pool retirement requested"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "reconciler: legacy shared warm-pool retirement remains pending"
+            );
+            false
         }
     }
 }
