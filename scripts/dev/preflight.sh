@@ -211,48 +211,6 @@ selection_has_any() {
   return 1
 }
 
-run_policy_local() {
-  local syntax_files=()
-  local candidate
-  for candidate in \
-      .githooks/pre-push \
-      scripts/dev/preflight.sh \
-      scripts/dev/install-hooks.sh \
-      scripts/ci/select/select-verification.sh \
-      scripts/ci/receipts/verify-release-tag-receipt.sh \
-      scripts/ci/tests/test-select-verification.sh \
-      scripts/ci/tests/test-verify-release-tag-receipt.sh \
-      scripts/ci/tests/test-pre-push-worktree.sh \
-      scripts/ci/verify/integration-postgres.sh \
-      scripts/ci/verify/run-product-verification.sh \
-      scripts/ci/verify/check-curated-rust-locks.sh \
-      scripts/ci/tests/test-curated-rust-locks.sh \
-      scripts/ci/verify/run-integration-verification.sh \
-      scripts/ci/tests/test-integration-postgres.sh \
-      scripts/ci/verify/rust-stack-rehearsal.sh; do
-    [ -f "$candidate" ] && syntax_files+=("$candidate")
-  done
-  if [ -d scripts/runtime ]; then
-    while IFS= read -r -d '' candidate; do
-      syntax_files+=("$candidate")
-    done < <(find scripts/runtime -type f -name '*.sh' -print0)
-  fi
-  if [ "${#syntax_files[@]}" -gt 0 ]; then
-    run_step "verification shell syntax" bash -n "${syntax_files[@]}"
-  fi
-  run_step "Rust-owned schema and fixture guard" \
-    scripts/ci/tests/test-rust-owned-fixtures.sh
-  run_step "package license map" python3 scripts/checks/repo_checks.py license-map
-  run_step "Permanent raw surface policy" python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
-  run_step "Rust validation source guard" python3 scripts/checks/repo_checks.py rust-validation-source
-  run_step "retired reference guard" python3 scripts/checks/repo_checks.py retired-reference-source
-  run_step "native desktop UI guard" \
-    python3 scripts/checks/source/check-native-desktop-ui.py
-  run_step "Go source classification guard" python3 scripts/checks/repo_checks.py go-source-classification
-  run_step "dashboard image network probe contract" \
-    scripts/ci/tests/test-dashboard-image-network-probe.sh
-}
-
 run_selected_family() {
   local token="$1" family="$2" label="$3"
   if selection_has "$token"; then
@@ -355,9 +313,7 @@ if [ "$PREFLIGHT_MODE" = full ]; then
   printf 'preflight full selection: %s\n' "$VERIFICATION_SELECTION"
 fi
 
-if selection_has policy; then
-  run_policy_local
-fi
+run_selected_family policy policy "policy verification"
 
 run_selected_family contracts contracts "contract verification"
 run_selected_family rust rust "Rust verification"

@@ -68,13 +68,17 @@ Program mutation except read-only diagnosis and control repair.
 
 For long-running work, use one staged proof loop: confirm canonical control and
 risk; get an independent design/security read before broad implementation;
-build the smallest coherent slice; run focused checks; review the resulting
-diff; then run one exact-tree acceptance gate. Commit and update Program
-control/evidence only after that gate. Parallelize read-only audits and disjoint
-edits, with one owner for each mutation surface. If review invalidates a trust
-boundary, remove or defer that slice before spending the expensive gate. Keep
-the main checkout clean, investigate unexpected dirt before changing it, and
-reconcile `origin/main` immediately before landing.
+build the smallest coherent slice; run focused checks and review the diff before
+committing a credible candidate. Then run the selected exact-tree local
+qualification once before push, reusing valid evidence. Complete remaining
+exact-head landing gates before merge. Each PR states one bounded
+outcome, its dependencies, affected contracts, and acceptance; keep generated
+contracts and their consumers atomic. Update Program control at admissions and
+material transitions, with evidence labeled accurately. Parallelize read-only
+audits and disjoint edits, with one owner for each mutation surface. If review
+invalidates a trust boundary, remove or defer that slice before spending the
+expensive gate. Keep the main checkout clean, investigate unexpected dirt before
+changing it, and reconcile `origin/main` immediately before landing.
 
 ## Delivery and verification
 
@@ -91,6 +95,10 @@ are the development loop. Hosted CI is required only when a hosted-only claim
 equivalent accepted exact local/read-only evidence, or repository protection
 explicitly requires it. Otherwise CI is optional confirmation, not a reason to
 delay equivalent exact-tree proof.
+
+Local and hosted policy checks share one checked-in core. Never maintain a
+separate local subset; preserve capability-selected expensive checks. A failing
+guard must fail qualification and prevent successful receipt emission.
 
 Do not run the same exact-tree qualification twice. Reuse a valid receipt or an
 already-running owner. If an obviously narrow path selects the full product or
@@ -109,6 +117,16 @@ the pushed head once and do not merge until its required exact-head CI succeeds.
 
 Bind a hosted run once and use a transition watcher; never spend turns polling
 unchanged CI. Inspect component logs after failure before proposing a mechanism.
+Verify how terminal events reach the coordinating session. Starting a watcher
+is not proof of notification delivery; record a bounded fallback when the host
+has no supported wake interface. Keep observer failure distinct from CI failure.
+
+Record actual commands, exit status and required test counts. Distinguish full
+runs, composed component proof, pending checks and unchanged inherited results.
+Reuse evidence only while its relevant source, dependencies/features, fixtures,
+toolchain, topology, selector and entrypoint inputs still match. Missing,
+interrupted or stale proof is not success; emitting a receipt is not running a
+check.
 
 Use only checked-in verification topology. Never add an ad-hoc proxy, relay,
 tunnel, port-forward, route, hosts entry, firewall rule, or fixture rewrite to
@@ -165,6 +183,9 @@ weakening of the required local hardware gate.
 ## Repository invariants
 
 - Migrations require compatibility, database proof, and rollback.
+- Applied migration bytes are immutable. Upgrade fixtures bind accepted prior
+  bytes/checksums, not a historical ledger derived from the edited branch.
+  Historical migration files do not imply legacy runtime support.
 - Public/generated contracts ship generated clients, wrappers, and tests
   together.
 - Search existing users before adding global identifiers; send new packages and

@@ -105,22 +105,42 @@ has_root_rust_selection() {
   return 1
 }
 
-run_shell_policy() {
-  local runtime_shell_files=()
-  local runtime_shell_file
+run_verification_shell_syntax() {
+  local candidate
+  for candidate in \
+      .githooks/pre-push \
+      scripts/dev/preflight.sh \
+      scripts/dev/install-hooks.sh \
+      scripts/ci/select/select-verification.sh \
+      scripts/ci/receipts/verify-release-tag-receipt.sh \
+      scripts/ci/tests/test-select-verification.sh \
+      scripts/ci/tests/test-verify-release-tag-receipt.sh \
+      scripts/ci/tests/test-pre-push-worktree.sh \
+      scripts/ci/verify/integration-postgres.sh \
+      scripts/ci/verify/run-product-verification.sh \
+      scripts/ci/verify/check-curated-rust-locks.sh \
+      scripts/ci/tests/test-curated-rust-locks.sh \
+      scripts/ci/verify/run-integration-verification.sh \
+      scripts/ci/tests/test-integration-postgres.sh \
+      scripts/ci/verify/rust-stack-rehearsal.sh; do
+    if [ -f "$candidate" ]; then
+      bash -n "$candidate"
+    fi
+  done
   if [ -d scripts/runtime ]; then
-    while IFS= read -r -d '' runtime_shell_file; do
-      runtime_shell_files+=("$runtime_shell_file")
+    while IFS= read -r -d '' candidate; do
+      bash -n "$candidate"
     done < <(find scripts/runtime -type f -name '*.sh' -print0)
   fi
-  if [ "${#runtime_shell_files[@]}" -gt 0 ]; then
-    bash -n "${runtime_shell_files[@]}"
-  fi
+}
+
+run_shell_policy() {
   scripts/ci/verify/check-shell-scripts.sh --self-test
   scripts/ci/verify/check-shell-scripts.sh
 }
 
 run_policy_core() {
+  run_verification_shell_syntax
   scripts/ci/tests/test-setup-kubeconfig.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-select-verification.sh
@@ -137,6 +157,7 @@ run_policy_core() {
   scripts/ci/tests/test-admin-proto-boundary.sh
   scripts/ci/tests/test-ci-tool-downloads.sh
   scripts/ci/tests/test-build-local-image.sh
+  scripts/ci/tests/test-dashboard-image-network-probe.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
   scripts/ci/tests/test-openbao-only-secret-authority.sh

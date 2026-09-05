@@ -30,6 +30,18 @@ assert_not_contains() {
   fi
 }
 
+assert_policy_only() {
+  local name="$1" output="$2"
+  assert_contains "$name" "$output" 'product policy '
+  [ "$(grep -c '^product ' <<<"$output")" -eq 1 ] || \
+    fail "$name did not execute exactly one product policy family"
+  assert_not_contains "$name" "$output" 'integration '
+  assert_not_contains "$name" "$output" 'kind'
+  assert_not_contains "$name" "$output" 'bun '
+  assert_not_contains "$name" "$output" 'repo_checks '
+  assert_not_contains "$name" "$output" 'native_desktop_ui'
+}
+
 commit_all() {
   local repo="$1" message="$2"
   git -C "$repo" add -A
@@ -62,16 +74,6 @@ write_stub_tree() {
     "$repo/scripts/ci/tests/test-dashboard-image-network-probe.sh"
   install -m 755 "$ROOT/scripts/ci/verify/dashboard-image.sh" \
     "$repo/scripts/ci/verify/dashboard-image.sh"
-  cat > "$repo/scripts/ci/tests/test-rust-owned-fixtures.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf 'rust_owned_fixtures\n' >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
-if [ "${PREFLIGHT_TEST_FIXTURE_DRIFT:-0}" = 1 ]; then
-  echo 'fixture checksum mismatch' >&2
-  exit 1
-fi
-EOF
-  chmod +x "$repo/scripts/ci/tests/test-rust-owned-fixtures.sh"
 cat > "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -87,8 +89,27 @@ EOF
   cat > "$repo/scripts/ci/verify/run-product-verification.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# This is a terminal orchestration stub, never the real policy core: the core
+# itself runs this fixture through test-select-verification.sh.
 printf 'product %s %s\n' "$1" "${VERIFICATION_SELECTION:?}" \
   >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
+if [ "$1" = policy ] && [ "${PREFLIGHT_TEST_POLICY_FAIL:-0}" = 1 ]; then
+  echo 'synthetic shared policy failure' >&2
+  exit 42
+fi
+if [ "$1" = policy ]; then
+  scripts/ci/tests/test-rust-owned-fixtures.sh
+  scripts/ci/tests/test-dashboard-image-network-probe.sh
+fi
+EOF
+  cat > "$repo/scripts/ci/tests/test-rust-owned-fixtures.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'rust_owned_fixtures\n' >> "${PREFLIGHT_TEST_TOOL_LOG:?}"
+if [ "${PREFLIGHT_TEST_FIXTURE_DRIFT:-0}" = 1 ]; then
+  echo 'fixture checksum mismatch' >&2
+  exit 1
+fi
 EOF
   cat > "$repo/scripts/ci/verify/run-integration-verification.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -121,6 +142,7 @@ EOF
     "$repo/scripts/ci/verify/run-integration-verification.sh" \
     "$repo/scripts/ci/verify/kind-e2e.sh" \
     "$repo/scripts/ci/receipts/verify-release-tag-receipt.sh" \
+    "$repo/scripts/ci/tests/test-rust-owned-fixtures.sh" \
     "$repo/scripts/checks/repo_checks.py" \
     "$repo/scripts/checks/source/check-native-desktop-ui.py"
 
@@ -250,9 +272,37 @@ assert_contains missing_receipt "$missing_output" \
   'pre-push: no valid receipt (missing). Run exactly: scripts/dev/preflight.sh --for-push --emit-receipt'
 [ ! -s "$normal_log" ] || fail 'missing receipt ran verification tools'
 
-# A selected local policy failure must prevent receipt emission. This catches
-# the regression where CI checked accepted fixture bytes but local preflight
-# could qualify the same drifted tree.
+# Fail only the terminal shared-policy stub: a private local checklist cannot
+# qualify this tree or emit a receipt without observing the policy failure.
+policy_failure_log="$TMP/policy-failure-tools.log"
+if policy_failure_output="$({
+  cd "$repo"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$policy_failure_log" \
+    PREFLIGHT_TEST_POLICY_FAIL=1 \
+    scripts/dev/preflight.sh --for-push --emit-receipt
+} 2>&1)"; then
+  fail 'local preflight accepted a failing shared-policy entrypoint'
+fi
+assert_contains policy_failure "$policy_failure_output" \
+  'synthetic shared policy failure'
+assert_contains policy_failure "$policy_failure_output" \
+  'preflight: policy verification FAILED'
+assert_not_contains policy_failure "$policy_failure_output" 'receipt_path='
+assert_policy_only policy_failure_tools "$(cat "$policy_failure_log")"
+assert_not_contains policy_failure_tools "$(cat "$policy_failure_log")" \
+  'rust_owned_fixtures'
+assert_not_contains policy_failure "$policy_failure_output" \
+  'dashboard image network probe contract: OK'
+if policy_failure_receipt_output="$({
+  cd "$repo"
+  scripts/ci/receipts/local-prepush-receipt.py verify
+} 2>&1)"; then
+  fail 'failed shared policy left a usable local receipt'
+fi
+assert_contains policy_failure_receipt "$policy_failure_receipt_output" 'missing'
+
+# Preserve the accepted-byte guard regression from the credential cutover:
+# fixture drift must still fail via the shared policy family, before a receipt.
 drift_log="$TMP/fixture-drift-tools.log"
 if drift_output="$({
   cd "$repo"
@@ -264,8 +314,11 @@ if drift_output="$({
 fi
 assert_contains fixture_drift "$drift_output" 'fixture checksum mismatch'
 assert_contains fixture_drift "$drift_output" \
-  'preflight: Rust-owned schema and fixture guard FAILED'
+  'preflight: policy verification FAILED'
 assert_not_contains fixture_drift "$drift_output" 'receipt_path='
+assert_policy_only fixture_drift_tools "$(cat "$drift_log")"
+assert_not_contains fixture_drift "$drift_output" \
+  'dashboard image network probe contract: OK'
 if drift_receipt_output="$({
   cd "$repo"
   scripts/ci/receipts/local-prepush-receipt.py verify
@@ -280,14 +333,8 @@ assert_contains normal "$normal_output" \
   'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
 assert_contains normal "$normal_output" \
   'dashboard image network probe contract: OK'
-assert_contains normal_tools "$(cat "$normal_log")" \
-  'repo_checks permanent-raw-surface --self-test'
-assert_contains normal_tools "$(cat "$normal_log")" \
-  'repo_checks retired-reference-source'
-assert_contains normal_tools "$(cat "$normal_log")" 'native_desktop_ui'
 assert_contains normal_tools "$(cat "$normal_log")" 'rust_owned_fixtures'
-assert_not_contains normal_tools "$(cat "$normal_log")" 'product '
-assert_not_contains normal_tools "$(cat "$normal_log")" 'integration '
+assert_policy_only normal_tools "$(cat "$normal_log")"
 git -C "$repo" switch -q main
 
 git -C "$repo" switch -q -c ci-owned main
@@ -413,7 +460,7 @@ linked_docs_output="$(push_branch "$linked_docs" linked-docs "$linked_docs_log")
 assert_contains linked_docs "$linked_docs_output" '  docs/linked.md'
 assert_contains linked_docs "$linked_docs_output" \
   'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
-assert_not_contains linked_docs_tools "$(cat "$linked_docs_log")" 'product '
+assert_policy_only linked_docs_tools "$(cat "$linked_docs_log")"
 
 linked_source="$TMP/linked-source"
 git -C "$repo" worktree add -q -b linked-source "$linked_source" main
@@ -421,6 +468,29 @@ mkdir -p "$linked_source/crates/codewire-cli/src"
 printf 'pub fn linked_fixture() {}\n' > \
   "$linked_source/crates/codewire-cli/src/worktree_fixture.rs"
 commit_all "$linked_source" 'test: linked Rust source fixture'
+source_failure_log="$TMP/source-policy-failure-tools.log"
+if source_failure_output="$({
+  cd "$linked_source"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_TEST_TOOL_LOG="$source_failure_log" \
+    PREFLIGHT_TEST_POLICY_FAIL=1 \
+    scripts/dev/preflight.sh --for-push --emit-receipt
+} 2>&1)"; then
+  fail 'Rust-selected preflight accepted a failing shared-policy entrypoint'
+fi
+assert_contains source_policy_failure "$source_failure_output" \
+  '|policy|policy_shell_omittable|rust|rust_pkg_codewire_cli|complete|'
+assert_contains source_policy_failure "$source_failure_output" \
+  'synthetic shared policy failure'
+assert_policy_only source_policy_failure_tools "$(cat "$source_failure_log")"
+assert_not_contains source_policy_failure "$source_failure_output" 'receipt_path='
+if source_failure_receipt_output="$({
+  cd "$linked_source"
+  scripts/ci/receipts/local-prepush-receipt.py verify
+} 2>&1)"; then
+  fail 'failed Rust-selected policy left a usable local receipt'
+fi
+assert_contains source_policy_failure_receipt \
+  "$source_failure_receipt_output" 'missing'
 source_log="$TMP/source-tools.log"
 source_output="$(push_branch "$linked_source" linked-source "$source_log")"
 assert_contains linked_source "$source_output" \
@@ -531,7 +601,7 @@ diagnostic_output="$({
 assert_contains diagnostic "$diagnostic_output" '  docs/diagnostic.md'
 assert_contains diagnostic "$diagnostic_output" \
   'preflight selection: |valid:v3|policy|policy_shell_omittable|complete|'
-assert_not_contains diagnostic_tools "$(cat "$diagnostic_log")" 'product '
+assert_policy_only diagnostic_tools "$(cat "$diagnostic_log")"
 
 kind_mode_paths="$TMP/kind-mode.paths"
 printf 'Caddyfile\n' > "$kind_mode_paths"
