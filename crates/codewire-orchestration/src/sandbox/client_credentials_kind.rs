@@ -149,6 +149,14 @@ async fn prove_bootstrap(
             "issuerRef",
             json!({"name":"foreign","kind":"Issuer","group":"cert-manager.io"}),
         ),
+        (
+            "privateKey",
+            json!({"algorithm":"ECDSA","size":384,"encoding":"PKCS8","rotationPolicy":"Always"}),
+        ),
+        (
+            "privateKey",
+            json!({"algorithm":"ECDSA","size":256,"encoding":"PKCS8","rotationPolicy":"Never"}),
+        ),
     ] {
         let mut invalid = orchestration.credential_certificates().get(&name).await?;
         invalid.data["spec"][field] = value;

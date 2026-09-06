@@ -66,7 +66,7 @@ def assert_credential_bootstrap(resources: list[str], target: dict[str, str], la
             "object.spec.isCA == false",
             "object.spec.usages == ['digital signature', 'server auth']",
             "object.spec.duration == '24h' && object.spec.renewBefore == '8h'",
-            "object.spec.privateKey == {'algorithm':'ECDSA','size':256,'encoding':'PKCS8','rotationPolicy':'Always'}",
+            "object.spec.privateKey == {'algorithm':dyn('ECDSA'),'size':dyn(256),'encoding':dyn('PKCS8'),'rotationPolicy':dyn('Always')}",
             "object.spec.revisionHistoryLimit == 1",
             "object.spec.secretTemplate.labels == variables.labels",
         ] + [f"!has(object.spec.{field})" for field in [
@@ -406,6 +406,9 @@ def check_orchestration_host_key_authz(args: argparse.Namespace) -> int:
             ("'name':'codewire-credential-gateway'", "'name':'unrelated-issuer'"),
             ("'kind':'Issuer'", "'kind':'ClusterIssuer'"),
             ("object.spec.isCA == false", "object.spec.isCA == true"),
+            ("'size':dyn(256)", "'size':dyn(384)"),
+            ("'rotationPolicy':dyn('Always')", "'rotationPolicy':dyn('Never')"),
+            ("'size':dyn(256)", "'size':256"),
             ("!has(object.spec.uris)", "true"),
             ("!has(object.spec.keystores)", "true"),
             ("!has(object.binaryData)", "true"),
