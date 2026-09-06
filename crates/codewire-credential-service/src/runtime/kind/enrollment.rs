@@ -24,6 +24,7 @@ impl Fixture {
     pub(super) fn create(runtime: &Path) -> Result<(Self, CodexEnrollmentConfig), RuntimeError> {
         let mut directory = tempfile::Builder::new()
             .prefix("kind-credential-fixture-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in(runtime)
             .map_err(|_| RuntimeError::Enrollment)?;
         validate_private_tmpfs_runtime(directory.path()).map_err(|_| RuntimeError::Enrollment)?;
@@ -69,4 +70,55 @@ impl Fixture {
     pub(super) fn retain(self) {
         let _ = self.directory.keep();
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fixture_is_private_with_permissive_umask() {
+    const CHILD: &str = "CODEWIRE_KIND_FIXTURE_MODE_CHILD";
+    const TEST: &str = "runtime::kind::enrollment::fixture_is_private_with_permissive_umask";
+    if std::env::var_os(CHILD).is_none() {
+        // A process umask is global: isolate it from the parallel test runner.
+        // The child receives no ambient homes, credentials or runtime paths.
+        let result = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "umask 022; exec \"$1\" --exact \"$2\" --nocapture",
+                "fixture-mode",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .arg(TEST)
+            .env_clear()
+            .env(CHILD, "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "isolated fixture mode check failed: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    let runtime = tempfile::Builder::new()
+        .prefix("codewire-kind-fixture-mode-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in("/dev/shm")
+        .unwrap();
+    let (fixture, _config) = Fixture::create(runtime.path()).unwrap();
+    validate_private_tmpfs_runtime(fixture.directory.path()).unwrap();
+    assert_eq!(
+        fixture
+            .directory
+            .path()
+            .metadata()
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+    );
+    fixture.close().unwrap();
 }
