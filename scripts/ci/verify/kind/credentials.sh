@@ -186,7 +186,20 @@ kind_credential_cli() {
 wait_kind_credential_environment() {
   local environment="$1" expected="$2" state attempt
   for ((attempt = 0; attempt < 180; attempt++)); do
-    state="$(kind_credential_cli env --platform info "$environment" --output json | jq -er '.state')"
+    if [ "$expected" = destroyed ]; then
+      # The CLI resolves targets through the active environment list, which
+      # hides destroying as well as destroyed rows. Absence there is not
+      # terminal proof. Observe the exact owned row through the managed Kind
+      # database, just as the other lifecycle acceptance probes do.
+      state="$(kubectl -n "$NS" exec -i deploy/postgres -- psql -U codewire -d codewire \
+        -v ON_ERROR_STOP=1 -v environment="$environment" -At <<'SQL'
+SELECT state FROM environments
+WHERE id = :'environment' AND org_id = 'org_contract_1';
+SQL
+      )"
+    else
+      state="$(kind_credential_cli env --platform info "$environment" --output json | jq -er '.state')"
+    fi
     if [ "$state" = "$expected" ]; then return 0; fi
     if [ "$state" = error ]; then
       echo '::error::credential fixture environment entered error state' >&2
@@ -269,8 +282,10 @@ kind_credential_native_smoke() (
       and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
   kind_credential_cli credentials --platform profile create "$profile_name"
   kind_credential_cli credentials --platform profile set "$profile_name" codex "$credential_name"
+  # Let the public create path resolve a runnable preset for the exact runtime
+  # image. preset_contract_1 is an API contract fixture with no template config.
   environment="$(kind_credential_cli env --platform create --name "$profile_name" \
-    --preset-id preset_contract_1 --image "$(kind_workspace_runtime_image)" \
+    --image "$(kind_workspace_runtime_image)" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   wait_kind_credential_environment "$environment" running

@@ -133,6 +133,29 @@ class WorkspaceProbe(unittest.TestCase):
 
 
 class HarnessGuards(unittest.TestCase):
+    def test_native_flow_resolves_the_selected_runtime_image_not_a_contract_only_preset(self):
+        source = HELPERS.read_text()
+        self.assertIn('--image "$(kind_workspace_runtime_image)"', source)
+        self.assertNotIn('--preset-id preset_contract_1', source)
+
+    def test_terminal_wait_requires_exact_destroyed_state_not_missing_cli_target(self):
+        for state, expected in (("destroyed", 0), ("destroying", 1), ("", 1), ("error", 1)):
+            result = self.shell('''
+NS=codewire-e2e
+kind_credential_cli() { echo unexpected-cli-target-resolution >&2; return 98; }
+sleep() { :; }
+kubectl() {
+  [ "$*" = '-n codewire-e2e exec -i deploy/postgres -- psql -U codewire -d codewire -v ON_ERROR_STOP=1 -v environment=%s -At' ] || return 99
+  local query
+  query="$(</dev/stdin)"
+  [[ "$query" == *"WHERE id = :'environment' AND org_id = 'org_contract_1'"* ]] || return 99
+  printf '%%s\\n' '%s'
+}
+wait_kind_credential_environment '%s' destroyed
+''' % (ENVIRONMENT, state, ENVIRONMENT))
+            self.assertEqual(result.returncode, expected, result.stderr)
+            self.assertNotIn("unexpected-cli", result.stderr)
+
     def test_host_cli_build_selects_its_actual_binary_package(self):
         manifest = tomllib.loads((ROOT / "crates/codewire-cli-bin/Cargo.toml").read_text())
         self.assertIn("cw", [binary["name"] for binary in manifest["bin"]])
