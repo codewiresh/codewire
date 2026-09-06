@@ -80,14 +80,14 @@ export async function runAccessProfileTests(): Promise<void> {
   const beforeErrors = calls.length;
   await assert.rejects(cw.accessProfiles.update("stale", exact, []), (error: unknown) => error instanceof CodewireError && error.status === 409);
   assert.equal(calls.length, beforeErrors + 1, "stale CAS must not fetch and retry");
-  const beforeLocalErrors = calls.length;
+  const callsBeforeValidation = calls.length;
   await assert.rejects(cw.accessProfiles.create("duplicate", [entries[0], entries[0]]), /duplicate/);
   await assert.rejects(cw.accessProfiles.update("profile-one", exact, [entries[0], entries[0]]), /duplicate/);
   await assert.rejects(cw.accessProfiles.get("profile-one", 0n), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", 42 as unknown as bigint), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", maximum + 1n), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.setEnvironmentBinding({ binding } as never), /explicit boolean/);
-  assert.equal(calls.length, beforeLocalErrors);
+  assert.equal(calls.length, callsBeforeValidation);
   await assert.rejects(cw.accessProfiles.get("missing-response"), /omitted access_profile/);
   await assert.rejects(cw.accessProfiles.get("missing"), (error: unknown) => error instanceof CodewireError && error.status === 404);
   await cw.accessProfiles.delete("profile-one", maximum);
