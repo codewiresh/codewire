@@ -585,15 +585,24 @@ test.describe.serial("server-rendered environments", () => {
     await openRowActions(row);
     await row.getByRole("link", { name: "Ports" }).click();
     const portPanel = page.locator(".cw-port-panel");
+    const configuredPort = portPanel.locator(".cw-port-row", {
+      has: page.getByText("web", { exact: true }),
+    });
+    await expect(configuredPort).toHaveCount(1);
+    await expect(configuredPort).toContainText("3000 · Creator");
     await portPanel.getByRole("spinbutton", { name: "Port" }).fill("8080");
-    await portPanel.getByLabel("Label", { exact: true }).fill("web");
+    await portPanel.getByLabel("Label", { exact: true }).fill("manual-http");
     await portPanel.getByRole("button", { name: "Add port", exact: true }).click();
     await expect(page.getByRole("status")).toContainText("Port created");
-    const port = page.locator(".cw-port-row", { hasText: "web" });
+    const port = portPanel.locator(".cw-port-row", {
+      has: page.getByText("manual-http", { exact: true }),
+    });
     await expect(port).toContainText("8080");
     await port.getByRole("button", { name: "Delete" }).click();
     await expect(page.getByRole("status")).toContainText("Port deleted");
-    await expect(page.locator(".cw-port-row", { hasText: "web" })).toHaveCount(0);
+    await expect(port).toHaveCount(0);
+    await expect(configuredPort).toHaveCount(1);
+    await expect(configuredPort).toContainText("3000 · Creator");
 
     row = page.locator("tr", { hasText: environmentName }).first();
     await openRowActions(row);
