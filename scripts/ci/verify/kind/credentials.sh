@@ -148,6 +148,31 @@ start_kind_credential_fixture() {
   kubectl -n "$NS" rollout status deployment/codewire-credential-service --timeout=180s
 }
 
+prepare_kind_credential_cli() (
+  # Model an already-authenticated personal Codewire login, not an org API
+  # key. The shared seed has multiple memberships, so normal saved-login org
+  # selection is required. This is not proof of Codewire's device-login flow.
+  # Only the fixed synthetic bearer is stored; refresh is deliberately absent
+  # from the seed and any attempt to refresh must fail closed.
+  [ ! -L "$KIND_CREDENTIAL_CLI_HOME" ] \
+    && [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] \
+    && [ "$(stat -c %u "$KIND_CREDENTIAL_CLI_HOME")" = "$(id -u)" ] \
+    && [ "$(stat -c %a "$KIND_CREDENTIAL_CLI_HOME")" = 700 ] || {
+    echo '::error::synthetic CLI login requires an owned private tmpfs home' >&2
+    return 1
+  }
+  umask 077
+  mkdir "$KIND_CREDENTIAL_CLI_HOME/cw" || return 1
+  jq -n --arg server "$KIND_INGRESS_URL" '{server_url: $server}' \
+    > "$KIND_CREDENTIAL_CLI_HOME/cw/config.json"
+  jq -n --arg issuer "${KIND_INGRESS_URL%/}" '{
+    issuer: $issuer, client_id: "oidc_kind_connect",
+    access_token: "at_kind_connect_oidc_codewire_api",
+    refresh_token: "kind-synthetic-refresh-not-issued",
+    expires_at_unix: (now | floor) + 3600, scope: "openid codewire.api"
+  }' > "$KIND_CREDENTIAL_CLI_HOME/cw/credentials.json"
+)
+
 kind_credential_cli() {
   env -i PATH=/usr/bin:/bin HOME="$KIND_CREDENTIAL_CLI_HOME" \
     XDG_CONFIG_HOME="$KIND_CREDENTIAL_CLI_HOME/config" \
@@ -155,7 +180,6 @@ kind_credential_cli() {
     XDG_CACHE_HOME="$KIND_CREDENTIAL_CLI_HOME/cache" \
     CW_CONFIG_DIR="$KIND_CREDENTIAL_CLI_HOME/cw" \
     CODEWIRE_SERVER_URL="$KIND_INGRESS_URL" \
-    CODEWIRE_API_KEY=at_kind_connect_oidc_codewire_api \
     "$CARGO_CI_DIR/cw" "$@"
 }
 
@@ -228,10 +252,17 @@ kind_credential_native_smoke() (
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   credential_name="kind-codex-${RANDOM}-${RANDOM}"
   profile_name="kind-profile-${RANDOM}-${RANDOM}"
-  # An explicit bearer uses the single-membership path, not a saved login's
-  # selected organization. Prove that identity without creating auth config.
+  prepare_kind_credential_cli
+  # Keep both seeded memberships intact. Explicitly choose the member scope,
+  # never the other organization where this same test user is an owner.
   kind_credential_cli org list --output json | jq -e \
-    'length == 1 and .[0].id == "org_contract_1"' >/dev/null
+    'map({id, role}) | sort_by(.id) == [
+      {id: "org_contract_1", role: "member"},
+      {id: "org_contract_2", role: "owner"}]' >/dev/null
+  kind_credential_cli org set org_contract_1
+  kind_credential_cli org current | awk '
+    $1 == "ID:" { id = $2; count++ }
+    END { exit !(count == 1 && id == "org_contract_1") }'
   kind_credential_cli credentials --platform connect codex --name "$credential_name"
   kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name

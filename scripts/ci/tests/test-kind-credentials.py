@@ -197,23 +197,59 @@ start_kind_credential_fixture
             self.assertIn("exact non-promotable", result.stderr)
             self.assertNotIn("unexpected-kubectl", result.stdout)
 
-    def test_explicit_bearer_requires_exact_single_org_without_saved_config(self):
+    def test_saved_synthetic_login_requires_membership_and_selects_org(self):
         for orgs, expected in (([], 1), ([{"id": "foreign"}], 1),
-                               ([{"id": "org_contract_1"}, {"id": "foreign"}], 1),
-                               ([{"id": "org_contract_1"}], 97)):
+                               ([{"id": "org_contract_1", "role": "owner"}], 1),
+                               ([{"id": "org_contract_2", "role": "owner"},
+                                 {"id": "org_contract_1", "role": "member"}], 97)):
             result = self.shell('''
 log() { :; }
+KIND_INGRESS_URL=http://127.0.0.1:8090
 kind_credential_cli() {
-  if [ "$*" = 'org list --output json' ]; then
-    printf '%%s\\n' '%s'
-  else
-    [ "$*" != 'org set org_contract_1' ] || return 98
-    return 97
-  fi
+  case "$*" in
+    'org list --output json') printf '%%s\\n' '%s' ;;
+    'org set org_contract_1') echo selected ;;
+    'org current') touch "$KIND_CREDENTIAL_CLI_HOME/org-current"; echo 'ID: org_contract_1' ;;
+    *) [ -f "$KIND_CREDENTIAL_CLI_HOME/org-current" ] || return 98; return 97 ;;
+  esac
 }
 kind_credential_native_smoke
 ''' % json.dumps(orgs))
             self.assertEqual(result.returncode, expected, result.stderr)
+            self.assertEqual(result.stdout, "selected\n" if expected == 97 else "")
+
+    def test_synthetic_cli_store_is_private_fresh_and_not_an_ambient_bearer(self):
+        with tempfile.TemporaryDirectory(dir="/dev/shm", prefix="kind-cli-fixture-") as scratch:
+            result = self.shell('''
+KIND_CREDENTIAL_CLI_HOME='%s'
+KIND_INGRESS_URL=http://127.0.0.1:8090
+umask 022
+prepare_kind_credential_cli
+[ "$(stat -c %%a "$KIND_CREDENTIAL_CLI_HOME/cw")" = 700 ]
+[ "$(stat -c %%a "$KIND_CREDENTIAL_CLI_HOME/cw/config.json")" = 600 ]
+[ "$(stat -c %%a "$KIND_CREDENTIAL_CLI_HOME/cw/credentials.json")" = 600 ]
+jq -e '.server_url == "http://127.0.0.1:8090" and (has("default_org") | not)' \
+  "$KIND_CREDENTIAL_CLI_HOME/cw/config.json" >/dev/null
+jq -e '.issuer == "http://127.0.0.1:8090" and .client_id == "oidc_kind_connect"
+  and .access_token == "at_kind_connect_oidc_codewire_api"
+  and .refresh_token == "kind-synthetic-refresh-not-issued"
+  and .scope == "openid codewire.api"
+  and .expires_at_unix > now and .expires_at_unix <= now + 3600' \
+  "$KIND_CREDENTIAL_CLI_HOME/cw/credentials.json" >/dev/null
+if prepare_kind_credential_cli; then exit 98; fi
+env() {
+  [ "$1" = -i ] || return 98
+  local arg
+  for arg in "$@"; do
+    case "$arg" in CODEWIRE_API_KEY=*) return 99 ;; esac
+  done
+}
+CARGO_CI_DIR=/synthetic/bin
+CODEWIRE_API_KEY=ambient-synthetic-must-not-forward
+kind_credential_cli org current
+''' % scratch)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
 
     def test_non_kind_context_cannot_install_certificate_controller(self):
         result = self.shell('''
