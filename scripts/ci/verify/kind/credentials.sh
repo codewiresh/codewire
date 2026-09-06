@@ -169,7 +169,7 @@ prepare_kind_credential_cli() (
     issuer: $issuer, client_id: "oidc_kind_connect",
     access_token: "at_kind_connect_oidc_codewire_api",
     refresh_token: "kind-synthetic-refresh-not-issued",
-    expires_at_unix: (now | floor) + 3600, scope: "openid codewire.api"
+    expires_at_unix: ((now | floor) + 3600), scope: "openid codewire.api"
   }' > "$KIND_CREDENTIAL_CLI_HOME/cw/credentials.json"
 )
 
