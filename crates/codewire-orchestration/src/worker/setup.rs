@@ -1713,6 +1713,10 @@ pub async fn handle_environment_setup(
     };
 
     if backend.setup_complete {
+        if super::create::requires_running_runtime_identity(&env.state, &env.desired_state) {
+            super::create::reconcile_runtime_identity(ctx, &env, &backend, authority, &["running"])
+                .await?;
+        }
         return Ok(());
     }
 
@@ -1751,6 +1755,10 @@ pub async fn handle_environment_setup(
         return Ok(()); // environment is still usable — don't retry
     }
 
+    let environment = load_environment(&ctx.pool, env_id).await?;
+    let backend = load_backend_row(&ctx.pool, env_id).await?;
+    super::create::reconcile_runtime_identity(ctx, &environment, &backend, authority, &["running"])
+        .await?;
     tracing::info!(environment_id = env_id, "environment.setup completed");
     Ok(())
 }

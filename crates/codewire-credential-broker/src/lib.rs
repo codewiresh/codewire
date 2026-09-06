@@ -9,11 +9,15 @@
 //! values must remain inside that process.
 
 mod bridge;
+#[cfg(feature = "codex-enrollment")]
+pub mod codex_enrollment;
 mod codex_oauth;
 mod network;
 mod openai;
 #[cfg(feature = "platform")]
 pub mod platform;
+#[cfg(feature = "codex-enrollment")]
+pub mod provider_enrollment;
 mod runtime;
 
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
@@ -104,6 +108,7 @@ pub enum CredentialBrokerError {
     InvalidCredentialMaterial,
 }
 pub use bridge::{
-    AdmittedCredentialBridge, BrokerBridgeError, admit_credential_bridge,
-    run_admitted_credential_bridge, run_credential_bridge,
+    AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeResponseSink,
+    CredentialBridgeTransport, admit_credential_bridge, run_admitted_credential_bridge,
+    run_credential_bridge,
 };

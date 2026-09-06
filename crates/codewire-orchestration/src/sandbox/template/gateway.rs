@@ -6,6 +6,7 @@ use codewire_gateway_proto::{
 };
 use serde_json::{Map, Value, json};
 
+use super::credentials;
 use super::encoding::kata_policy_init_data_annotation;
 use super::naming::{
     gateway_direct_udp_service_name, gateway_host_key_secret_name, gateway_labels,
@@ -171,11 +172,12 @@ pub(super) fn build_sidecar_env(opts: &TemplateOpts) -> Vec<Value> {
         "name": "CODEWIRE_SSH_HOST_KEY_PATH",
         "value": GATEWAY_HOST_KEY_PATH,
     }));
+    env.extend(credentials::gateway_environment(opts));
     env
 }
 
 pub fn render_gateway_service(namespace: &str, opts: &TemplateOpts) -> Value {
-    json!({
+    let mut service = json!({
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": {
@@ -192,7 +194,18 @@ pub fn render_gateway_service(namespace: &str, opts: &TemplateOpts) -> Value {
                 { "name": "tailnet-udp", "protocol": "UDP", "port": GATEWAY_TAILNET_UDP_PORT, "targetPort": GATEWAY_TAILNET_UDP_PORT },
             ],
         },
-    })
+    });
+    if let Some(config) = &opts.credential_runtime {
+        config.assert_namespace(namespace);
+        service["spec"]["ports"]
+            .as_array_mut()
+            .expect("gateway ports")
+            .push(json!({
+                "name":"credentials", "protocol":"TCP", "port":443,
+                "targetPort":credentials::CREDENTIAL_GATEWAY_HTTPS_PORT,
+            }));
+    }
+    service
 }
 
 pub fn render_gateway_direct_udp_service(namespace: &str, opts: &TemplateOpts) -> Option<Value> {
@@ -341,6 +354,16 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
             "limits": { "cpu": "500m", "memory": "256Mi" },
         },
     });
+    if let Some(config) = &opts.credential_runtime {
+        config.assert_namespace(namespace);
+        gateway_container["ports"].as_array_mut().expect("gateway ports").push(json!({
+            "name":"credentials", "protocol":"TCP", "containerPort":credentials::CREDENTIAL_GATEWAY_HTTPS_PORT,
+        }));
+        gateway_container["volumeMounts"]
+            .as_array_mut()
+            .expect("gateway mounts")
+            .extend(credentials::gateway_mounts());
+    }
     apply_sidecar_probes(
         &mut gateway_container,
         runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL,
@@ -393,6 +416,13 @@ pub fn render_gateway_deployment(namespace: &str, opts: &TemplateOpts) -> Value 
             },
         ]),
     );
+    if opts.credential_runtime.is_some() {
+        pod_spec
+            .get_mut("volumes")
+            .and_then(Value::as_array_mut)
+            .expect("gateway volumes")
+            .extend(credentials::gateway_volumes(opts));
+    }
     if !runtime_spec.runtime_class_name.is_empty() {
         pod_spec.insert(
             "runtimeClassName".into(),

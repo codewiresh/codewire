@@ -15,7 +15,8 @@ use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::create::{
     SandboxWorkerCfg, authorize_confidential_runtime_for_environment,
     environment_per_env_template_name, environment_template_opts, ready_timeout_for_isolation,
-    reconcile_confidential_runtime_before_replacement,
+    reconcile_confidential_runtime_before_replacement, reconcile_runtime_identity,
+    requires_running_runtime_identity,
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
@@ -177,7 +178,14 @@ async fn reconcile_running_runtime_identity(
             )
             .await?;
     }
-    Ok(())
+    reconcile_runtime_identity(
+        ctx,
+        environment,
+        &backend,
+        authority,
+        RUNNING_MUTATION_STATES,
+    )
+    .await
 }
 
 fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
@@ -203,13 +211,22 @@ async fn ensure_gateway_stack_for_env(
         &image_ref,
         &template_base,
         &env,
-        env_id,
+        authority.operation_generation(),
         &auth_tokens.coordinate,
         &auth_tokens.daemon,
     );
     let client = sandbox_client(ctx, namespace)?;
     authority
         .run_external_mutation(START_MUTATION_STATES, client.ensure_gateway_stack(&opts))
+        .await?;
+    authority
+        .run_while_authoritative_for_states(
+            START_MUTATION_STATES,
+            client.wait_for_credential_gateway_ready(
+                &opts,
+                super::create::ready_timeout_for_isolation(&env.isolation_tier),
+            ),
+        )
         .await
 }
 
@@ -259,6 +276,11 @@ pub async fn handle_environment_stop(
         ))
         .await?;
     if !proceed {
+        if requires_running_runtime_identity(&env.state, &env.desired_state) {
+            let backend = load_backend_row(&ctx.pool, env_id).await?;
+            reconcile_runtime_identity(ctx, &env, &backend, authority, RUNNING_MUTATION_STATES)
+                .await?;
+        }
         tracing::info!(
             environment_id = env_id,
             state = env.state,
@@ -610,6 +632,8 @@ pub async fn handle_environment_start(
         return Err(e);
     }
 
+    reconcile_runtime_identity(ctx, &env, &backend, authority, START_MUTATION_STATES).await?;
+
     // Persist the current Pod name/IP only after observing a ready claim and
     // a running Pod with a nonempty UID. The backend schema does not persist
     // that UID, so this is a current-runtime check, not an exact UID binding.
@@ -908,8 +932,7 @@ pub async fn handle_environment_reconcile(
                 .await?;
             }
 
-            if env.state == "running"
-                && env.desired_state == "started"
+            if requires_running_runtime_identity(&env.state, &env.desired_state)
                 && let Err(error) = reconcile_running_runtime_identity(ctx, &env, authority).await
             {
                 if is_lifecycle_control_loss(&error) {

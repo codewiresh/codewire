@@ -10,7 +10,8 @@ description = "Isolated provider credential brokerage for Codewire environments"
 [features]
 default = ["local"]
 local = ["dep:codewire-local-credentials", "dep:codewire-protected-store"]
-platform = ["dep:codewire-platform-credentials", "dep:codewire-protected-store"]
+platform = ["dep:codewire-platform-credentials", "dep:codewire-protected-store", "dep:tonic"]
+codex-enrollment = ["dep:rustix"]
 local-broker-synthetic-smoke = []
 
 [dependencies]
@@ -27,12 +28,14 @@ codewire-protected-store = { workspace = true, optional = true }
 futures = { workspace = true }
 http = { workspace = true }
 reqwest = { workspace = true }
+rustix = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
+tonic = { workspace = true, optional = true }
 url = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }

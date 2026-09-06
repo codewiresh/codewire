@@ -22,7 +22,7 @@ use crate::{
     OpenAiBroker,
 };
 
-/// Stable failures for one broker-to-daemon bridge epoch.
+/// Stable, value-blind failures for one authenticated broker bridge epoch.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum BrokerBridgeError {
     #[error("credential broker bridge identity is invalid")]
@@ -33,9 +33,10 @@ pub enum BrokerBridgeError {
     Unavailable,
 }
 
-/// One daemon bridge whose first frame proved the exact environment identity,
-/// generation, and credential-bridge protocol version.
-pub struct AdmittedCredentialBridge(CredentialBridgeConnection);
+/// One transport whose first frame matched the protocol and exact environment
+/// coordinates supplied by its already-authenticated caller. The Ready frame
+/// is not identity proof; peer authentication belongs to the transport owner.
+pub struct AdmittedCredentialBridge<B: CredentialBridgeTransport>(B);
 
 struct ActiveRequest {
     incarnation: u64,
@@ -71,37 +72,62 @@ where
     }
 }
 
+/// Credential-free input and response transport for one authenticated epoch.
+///
+/// Implementations must authenticate the peer before admission, bound encoded
+/// messages and buffering, and terminate on transport loss or expiry of their
+/// authority. `receive` must be cancellation-safe because the managed loop
+/// selects it alongside request completions. Shutdown should end this transport
+/// and await the managed runner, not abort the runner and skip its refresh drain.
 #[async_trait]
-trait GuestBridge: Send {
-    type Sender: GuestResponseSender;
+pub trait CredentialBridgeTransport: Send {
+    type ResponseSink: CredentialBridgeResponseSink;
 
-    fn response_sender(&self) -> Self::Sender;
-    async fn receive(&mut self) -> Result<Option<v1::CredentialBridgeGuestMessage>, ()>;
+    fn response_sink(&self) -> Self::ResponseSink;
+
+    /// Receive the next frame, or EOF when this epoch ends. Discard underlying
+    /// error details; they must not retain credentials or transport diagnostics.
+    async fn receive(
+        &mut self,
+    ) -> Result<Option<v1::CredentialBridgeGuestMessage>, BrokerBridgeError>;
+}
+
+/// Cloneable, bounded output for already-filtered broker response frames.
+///
+/// The managed runner sends only ResponseStart/Body/End/Failure, never Open.
+/// Implementations must reject Open, apply backpressure without unbounded
+/// buffering, and report epoch loss rather than keep a disconnected send alive.
+#[async_trait]
+pub trait CredentialBridgeResponseSink: Clone + Send + Sync + 'static {
+    async fn send(
+        &self,
+        payload: v1::credential_bridge_host_message::Payload,
+    ) -> Result<(), BrokerBridgeError>;
 }
 
 #[async_trait]
-trait GuestResponseSender: Clone + Send + Sync + 'static {
-    async fn send(&self, payload: v1::credential_bridge_host_message::Payload) -> Result<(), ()>;
-}
+impl CredentialBridgeTransport for CredentialBridgeConnection {
+    type ResponseSink = CredentialBridgeResponseSender;
 
-#[async_trait]
-impl GuestBridge for CredentialBridgeConnection {
-    type Sender = CredentialBridgeResponseSender;
-
-    fn response_sender(&self) -> Self::Sender {
+    fn response_sink(&self) -> Self::ResponseSink {
         CredentialBridgeConnection::response_sender(self)
     }
 
-    async fn receive(&mut self) -> Result<Option<v1::CredentialBridgeGuestMessage>, ()> {
+    async fn receive(
+        &mut self,
+    ) -> Result<Option<v1::CredentialBridgeGuestMessage>, BrokerBridgeError> {
         CredentialBridgeConnection::receive(self)
             .await
-            .map_err(|_| ())
+            .map_err(|_| BrokerBridgeError::Unavailable)
     }
 }
 
 #[async_trait]
-impl GuestResponseSender for CredentialBridgeResponseSender {
-    async fn send(&self, payload: v1::credential_bridge_host_message::Payload) -> Result<(), ()> {
+impl CredentialBridgeResponseSink for CredentialBridgeResponseSender {
+    async fn send(
+        &self,
+        payload: v1::credential_bridge_host_message::Payload,
+    ) -> Result<(), BrokerBridgeError> {
         let result: Result<(), SessionClientError> = match payload {
             v1::credential_bridge_host_message::Payload::ResponseStart(response) => {
                 self.send_response_start(response).await
@@ -115,53 +141,61 @@ impl GuestResponseSender for CredentialBridgeResponseSender {
             v1::credential_bridge_host_message::Payload::ResponseFailure(response) => {
                 self.send_response_failure(response).await
             }
-            v1::credential_bridge_host_message::Payload::Open(_) => return Err(()),
+            v1::credential_bridge_host_message::Payload::Open(_) => {
+                return Err(BrokerBridgeError::InvalidProtocol);
+            }
         };
-        result.map_err(|_| ())
+        result.map_err(|_| BrokerBridgeError::Unavailable)
     }
 }
 
-/// Run one exact generation-bound bridge until the daemon disconnects or a
+/// Run one exact generation-bound bridge until its peer disconnects or a
 /// response task loses the authenticated stream. Concurrent operations are
-/// bounded. Guest cancellation ends the daemon-side HTTP request, while the
+/// bounded. Guest cancellation ends the caller-side HTTP request, while the
 /// broker retains the request slot until any started credential refresh and
-/// its filtered response stream finish.
-pub async fn run_credential_bridge<P, U>(
+/// its filtered response stream finish. The caller must authenticate the peer
+/// and supply its authoritative environment coordinates before calling this.
+pub async fn run_credential_bridge<P, U, B>(
     broker: OpenAiBroker<P, U>,
-    bridge: CredentialBridgeConnection,
+    bridge: B,
     environment_id: Uuid,
     environment_generation: u64,
 ) -> Result<(), BrokerBridgeError>
 where
     P: BrokerLeaseProvider + 'static,
     U: BrokerUpstreamTransport + 'static,
+    B: CredentialBridgeTransport,
 {
     let bridge = admit_credential_bridge(bridge, environment_id, environment_generation).await?;
     run_admitted_credential_bridge(broker, bridge).await
 }
 
-/// Consume and validate the guest's first bridge frame before the broker is
-/// reported ready or any provider credential can be leased.
-pub async fn admit_credential_bridge(
-    bridge: CredentialBridgeConnection,
+/// Compare the first frame's coordinates with the caller-authenticated peer
+/// before reporting readiness or leasing provider material. This function does
+/// not authenticate the peer, resolve owners, or authorize request-supplied IDs.
+pub async fn admit_credential_bridge<B: CredentialBridgeTransport>(
+    bridge: B,
     environment_id: Uuid,
     environment_generation: u64,
-) -> Result<AdmittedCredentialBridge, BrokerBridgeError> {
+) -> Result<AdmittedCredentialBridge<B>, BrokerBridgeError> {
     admit_bridge(bridge, environment_id, environment_generation)
         .await
         .map(AdmittedCredentialBridge)
 }
 
-/// Run a bridge only after [`admit_credential_bridge`] authenticated its guest
-/// endpoint. Concurrent operations remain bounded, and a cancelled request
-/// remains counted until its broker operation finishes.
-pub async fn run_admitted_credential_bridge<P, U>(
+/// Run a bridge after [`admit_credential_bridge`] matched its coordinates to
+/// the caller-authenticated endpoint. Concurrent operations remain bounded,
+/// and a cancelled request remains counted until its broker operation finishes.
+/// The owner must await this runner after transport termination so started
+/// refresh operations drain; dropping this future is not graceful shutdown.
+pub async fn run_admitted_credential_bridge<P, U, B>(
     broker: OpenAiBroker<P, U>,
-    bridge: AdmittedCredentialBridge,
+    bridge: AdmittedCredentialBridge<B>,
 ) -> Result<(), BrokerBridgeError>
 where
     P: BrokerLeaseProvider + 'static,
     U: BrokerUpstreamTransport + 'static,
+    B: CredentialBridgeTransport,
 {
     let broker = Arc::new(broker);
     run_managed_bridge(broker, bridge.0).await
@@ -176,16 +210,16 @@ async fn run_bridge<E, B>(
 ) -> Result<(), BrokerBridgeError>
 where
     E: BrokerRequestExecutor + 'static,
-    B: GuestBridge,
+    B: CredentialBridgeTransport,
 {
-    let bridge = admit_bridge(bridge, environment_id, environment_generation).await?;
-    run_managed_bridge(broker, bridge).await
+    let bridge = admit_credential_bridge(bridge, environment_id, environment_generation).await?;
+    run_managed_bridge(broker, bridge.0).await
 }
 
 async fn run_managed_bridge<E, B>(broker: Arc<E>, bridge: B) -> Result<(), BrokerBridgeError>
 where
     E: BrokerRequestExecutor + 'static,
-    B: GuestBridge,
+    B: CredentialBridgeTransport,
 {
     let result = run_admitted_bridge(Arc::clone(&broker), bridge).await;
     // Request futures may be aborted when the whole bridge epoch is lost. Once
@@ -206,7 +240,7 @@ async fn admit_bridge<B>(
     environment_generation: u64,
 ) -> Result<B, BrokerBridgeError>
 where
-    B: GuestBridge,
+    B: CredentialBridgeTransport,
 {
     if environment_id.is_nil() || environment_generation == 0 {
         return Err(BrokerBridgeError::InvalidIdentity);
@@ -234,9 +268,9 @@ where
 async fn run_admitted_bridge<E, B>(broker: Arc<E>, mut bridge: B) -> Result<(), BrokerBridgeError>
 where
     E: BrokerRequestExecutor + 'static,
-    B: GuestBridge,
+    B: CredentialBridgeTransport,
 {
-    let sender = bridge.response_sender();
+    let sender = bridge.response_sink();
     let mut tasks = JoinSet::<(String, u64, Result<(), ()>)>::new();
     let mut active = HashMap::<String, ActiveRequest>::new();
     let mut next_incarnation = 0_u64;
@@ -265,7 +299,7 @@ where
             message = bridge.receive() => {
                 let message = match message {
                     Ok(Some(message)) => message,
-                    Ok(None) | Err(()) => {
+                    Ok(None) | Err(_) => {
                         tasks.shutdown().await;
                         return Err(BrokerBridgeError::Unavailable);
                     }
@@ -316,7 +350,7 @@ where
                             tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
                         }
-                        // The daemon has already cancelled the guest-facing HTTP
+                        // The caller has already cancelled the guest-facing HTTP
                         // request and deliberately drains late host frames. Keep
                         // this operation and its bounded in-flight slot alive so
                         // cancellation cannot strand an OAuth refresh reservation
@@ -353,7 +387,7 @@ async fn serve_request<E, S>(
 ) -> Result<(), ()>
 where
     E: BrokerRequestExecutor,
-    S: GuestResponseSender,
+    S: CredentialBridgeResponseSink,
 {
     let response = match broker.execute_request(request).await {
         Ok(response) => response,
@@ -372,7 +406,8 @@ where
                 headers,
             },
         ))
-        .await?;
+        .await
+        .map_err(|_| ())?;
     while let Some(chunk) = body.next().await {
         let chunk = match chunk {
             Ok(chunk) => chunk,
@@ -391,7 +426,8 @@ where
                         data: chunk.to_vec(),
                     },
                 ))
-                .await?;
+                .await
+                .map_err(|_| ())?;
         }
     }
     sender
@@ -401,9 +437,10 @@ where
             },
         ))
         .await
+        .map_err(|_| ())
 }
 
-async fn finish_with_failure<S: GuestResponseSender>(
+async fn finish_with_failure<S: CredentialBridgeResponseSink>(
     sender: &S,
     request_id: String,
     error: BrokerRequestError,
@@ -450,7 +487,7 @@ fn response_headers_to_proto(
     Ok(result)
 }
 
-async fn send_failure<S: GuestResponseSender>(
+async fn send_failure<S: CredentialBridgeResponseSink>(
     sender: &S,
     request_id: String,
     error: BrokerRequestError,
@@ -473,11 +510,12 @@ async fn send_failure<S: GuestResponseSender>(
             ),
         )
         .await
+        .map_err(|_| ())
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use bytes::Bytes;
     use futures::stream;
@@ -497,27 +535,38 @@ pub(crate) mod tests {
     }
 
     #[async_trait]
-    impl GuestBridge for FakeBridge {
-        type Sender = FakeSender;
+    impl CredentialBridgeTransport for FakeBridge {
+        type ResponseSink = FakeSender;
 
-        fn response_sender(&self) -> Self::Sender {
+        fn response_sink(&self) -> Self::ResponseSink {
             FakeSender {
                 output: self.output.clone(),
             }
         }
 
-        async fn receive(&mut self) -> Result<Option<v1::CredentialBridgeGuestMessage>, ()> {
+        async fn receive(
+            &mut self,
+        ) -> Result<Option<v1::CredentialBridgeGuestMessage>, BrokerBridgeError> {
             Ok(self.input.recv().await)
         }
     }
 
     #[async_trait]
-    impl GuestResponseSender for FakeSender {
+    impl CredentialBridgeResponseSink for FakeSender {
         async fn send(
             &self,
             payload: v1::credential_bridge_host_message::Payload,
-        ) -> Result<(), ()> {
-            self.output.send(payload).await.map_err(|_| ())
+        ) -> Result<(), BrokerBridgeError> {
+            if matches!(
+                payload,
+                v1::credential_bridge_host_message::Payload::Open(_)
+            ) {
+                return Err(BrokerBridgeError::InvalidProtocol);
+            }
+            self.output
+                .send(payload)
+                .await
+                .map_err(|_| BrokerBridgeError::Unavailable)
         }
     }
 
@@ -634,6 +683,132 @@ pub(crate) mod tests {
             environment_generation,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn public_transport_admission_consumes_only_matching_ready_coordinates() {
+        let environment_id = Uuid::new_v4();
+        let (input_tx, input_rx) = mpsc::channel(2);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+        let next = request(Uuid::new_v4(), "/ok");
+        input_tx.send(ready(environment_id, 7)).await.unwrap();
+        input_tx.send(next.clone()).await.unwrap();
+
+        // No daemon connection, default generic type or compatibility wrapper
+        // is needed. These coordinates stand for the caller's prior identity
+        // admission; the Ready frame merely agrees with them.
+        let mut admitted = admit_credential_bridge(
+            FakeBridge {
+                input: input_rx,
+                output: output_tx,
+            },
+            environment_id,
+            7,
+        )
+        .await
+        .unwrap();
+        assert_eq!(admitted.0.receive().await.unwrap(), Some(next));
+        assert!(matches!(
+            output_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        // A request cannot replace the coordinate handshake on an otherwise
+        // authenticated transport, and is never executed during admission.
+        let (input_tx, input_rx) = mpsc::channel(1);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+        input_tx.send(request(Uuid::new_v4(), "/ok")).await.unwrap();
+        let result = admit_credential_bridge(
+            FakeBridge {
+                input: input_rx,
+                output: output_tx,
+            },
+            environment_id,
+            7,
+        )
+        .await;
+        assert!(matches!(result, Err(BrokerBridgeError::InvalidProtocol)));
+        assert!(output_rx.recv().await.is_none());
+    }
+
+    struct DrainExecutor {
+        drain_calls: AtomicUsize,
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl BrokerRequestExecutor for DrainExecutor {
+        async fn execute_request(
+            &self,
+            _request: v1::CredentialBridgeRequest,
+        ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+            Ok(BrokerHttpResponse::new(
+                StatusCode::OK,
+                HeaderMap::new(),
+                Box::pin(stream::empty()),
+            ))
+        }
+
+        async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
+            self.drain_calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_transport_input_and_response_loss_await_one_managed_drain() {
+        for lose_response in [false, true] {
+            let environment_id = Uuid::new_v4();
+            let (input_tx, input_rx) = mpsc::channel(2);
+            let (output_tx, output_rx) = mpsc::channel(1);
+            input_tx.send(ready(environment_id, 8)).await.unwrap();
+            let input_guard = if lose_response {
+                input_tx.send(request(Uuid::new_v4(), "/ok")).await.unwrap();
+                drop(output_rx);
+                Some(input_tx)
+            } else {
+                drop(input_tx);
+                None
+            };
+            let executor = Arc::new(DrainExecutor {
+                drain_calls: AtomicUsize::new(0),
+                entered: Notify::new(),
+                release: Notify::new(),
+            });
+            let task = tokio::spawn(run_bridge(
+                Arc::clone(&executor),
+                FakeBridge {
+                    input: input_rx,
+                    output: output_tx,
+                },
+                environment_id,
+                8,
+            ));
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                executor.entered.notified(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(executor.drain_calls.load(Ordering::SeqCst), 1);
+            assert!(
+                !task.is_finished(),
+                "epoch returned before its operation drain"
+            );
+            executor.release.notify_one();
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Err(BrokerBridgeError::Unavailable)
+            );
+            assert_eq!(executor.drain_calls.load(Ordering::SeqCst), 1);
+            drop(input_guard);
+        }
     }
 
     #[tokio::test]

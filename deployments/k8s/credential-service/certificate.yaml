@@ -1,0 +1,27 @@
+# The namespace-local Issuer and its dedicated CA are provisioned by the
+# infrastructure owner. Never use the gateway or Trustee CA for this purpose.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: codewire-credential-broker
+  namespace: prod
+spec:
+  secretName: codewire-credential-broker-tls
+  issuerRef:
+    name: codewire-credential-broker
+    kind: Issuer
+    group: cert-manager.io
+  dnsNames:
+    - codewire-credential-service.prod.svc.cluster.local
+  duration: 24h
+  renewBefore: 8h
+  isCA: false
+  revisionHistoryLimit: 1
+  usages:
+    - digital signature
+    - server auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always

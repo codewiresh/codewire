@@ -52,6 +52,18 @@ pub enum PlatformProfileError {
 
 type Error = PlatformProfileError;
 
+const PROFILE_STATEMENT_TIMEOUT_MILLIS: i64 = 5_000;
+
+/// Material-free selection and personal-owner confirmation read from one row.
+///
+/// This is inspectable even when confirmation is absent. It is not an access
+/// grant: runtime must use `evaluate_grants` with current authenticated scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformBindingMetadata {
+    pub binding: EnvironmentAccessBinding,
+    pub personal_owner_confirmed_by: Option<OwnerId>,
+}
+
 /// Profile authority with no KEK provider or protected-material read path.
 #[derive(Clone)]
 pub struct PlatformAccessProfileStore {
@@ -62,6 +74,40 @@ pub struct PlatformAccessProfileStore {
 impl PlatformAccessProfileStore {
     pub fn new(pool: PgPool, catalog: ProviderCatalog) -> Self {
         Self { pool, catalog }
+    }
+
+    /// Begin a short profile transaction, including caller-composed binding
+    /// authorization. All profile-owned transactions use this same initializer.
+    ///
+    /// Statement and idle-in-transaction timeouts are transaction-local and
+    /// capped at five seconds without increasing an existing nonzero shorter
+    /// setting. Existing lock_timeout is untouched. These bounds prevent a
+    /// dropped SQLx future from leaving an indefinitely blocked server query or
+    /// idle transaction; callers must still bound overall admission and retain
+    /// every authorization/CAS fence through commit or rollback.
+    ///
+    /// The statement ceiling is not a total transaction-duration promise.
+    /// Network loss can prevent observing cleanup or a COMMIT acknowledgement;
+    /// an unknown publication outcome must never cause a blind CAS retry.
+    pub async fn begin_transaction(&self) -> Result<Transaction<'static, Postgres>, Error> {
+        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        // A separate command installs the server timeout before any domain row
+        // lock. pg_settings exposes these two settings in milliseconds, where
+        // zero means unlimited. SET LOCAL cannot leak through a pooled session.
+        let settings: Vec<String> = sqlx::query_scalar(
+            "SELECT pg_catalog.set_config(name, \
+             LEAST($1::bigint, CASE WHEN setting::bigint=0 THEN $1::bigint ELSE setting::bigint END)::text, true) \
+             FROM pg_catalog.pg_settings \
+             WHERE name IN ('statement_timeout','idle_in_transaction_session_timeout') AND unit='ms'",
+        )
+        .bind(PROFILE_STATEMENT_TIMEOUT_MILLIS)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        if settings.len() != 2 {
+            return Err(Error::DatabaseUnavailable);
+        }
+        Ok(tx)
     }
 
     pub async fn create(
@@ -79,7 +125,7 @@ impl PlatformAccessProfileStore {
             revision: 1,
             entries,
         };
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_transaction().await?;
         lock_owner(&mut tx, owner).await?;
         let credentials = load_credentials(&mut tx, &profile).await?;
         validate_profile_entries(&profile, &credentials, &self.catalog).map_err(access_error)?;
@@ -122,7 +168,7 @@ impl PlatformAccessProfileStore {
         id: &AccessProfileId,
         revision: Option<u64>,
     ) -> Result<AccessProfile, Error> {
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_transaction().await?;
         lock_owner(&mut tx, owner).await?;
         let profile = load_profile(&mut tx, owner, id, revision, false).await?;
         tx.commit().await.map_err(database_error)?;
@@ -134,7 +180,7 @@ impl PlatformAccessProfileStore {
         owner: &Owner,
         name: &AccessProfileName,
     ) -> Result<AccessProfile, Error> {
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_transaction().await?;
         lock_owner(&mut tx, owner).await?;
         let (user_id, organization_id) = owner_columns(owner);
         let id: String = sqlx::query_scalar(
@@ -164,7 +210,7 @@ impl PlatformAccessProfileStore {
         if limit == 0 || limit > 1000 {
             return Err(Error::InvalidInput);
         }
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_transaction().await?;
         lock_owner(&mut tx, owner).await?;
         let (user_id, organization_id) = owner_columns(owner);
         let ids: Vec<String> = sqlx::query_scalar(
@@ -199,7 +245,7 @@ impl PlatformAccessProfileStore {
     ) -> Result<AccessProfile, Error> {
         let expected = generation(expected_revision)?;
         let next = expected.checked_add(1).ok_or(Error::InvalidInput)?;
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_transaction().await?;
         lock_owner(&mut tx, owner).await?;
         let current = load_profile(&mut tx, owner, id, None, true).await?;
         if current.revision != expected_revision {
@@ -237,7 +283,7 @@ impl PlatformAccessProfileStore {
         expected_revision: u64,
     ) -> Result<(), Error> {
         generation(expected_revision)?;
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_transaction().await?;
         lock_owner(&mut tx, owner).await?;
         let current = load_profile(&mut tx, owner, id, None, true).await?;
         if current.revision != expected_revision {
@@ -263,54 +309,103 @@ impl PlatformAccessProfileStore {
 
     /// The context must already authorize this exact environment and selection.
     /// This does not increment or invent an environment operation generation.
+    /// Personal confirmation is an explicit per-call choice attributed to the
+    /// authenticated creator, not identity proof from an unchecked request ID.
+    /// Organization selections supply `None`; personal selections must supply
+    /// the exact profile owner and remain permitted by current context policy.
     pub async fn create_binding(
         &self,
         context: &GrantContext,
         binding: EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
     ) -> Result<EnvironmentAccessBinding, Error> {
-        validate_binding(context, &binding)?;
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
-        lock_environment(&mut tx, context, false, true).await?;
-        self.admit_binding(&mut tx, context, &binding).await?;
-        sqlx::query(
-            "INSERT INTO platform_environment_access_bindings \
-             (environment_id,profile_id,profile_revision) VALUES ($1,$2,$3)",
-        )
-        .bind(binding.environment_id.as_str())
-        .bind(binding.profile_id.as_str())
-        .bind(generation(binding.profile_revision)?)
-        .execute(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        let mut tx = self.begin_transaction().await?;
+        let binding = self
+            .create_binding_in(&mut tx, context, binding, personal_owner_confirmation)
+            .await?;
         tx.commit().await.map_err(database_error)?;
         Ok(binding)
     }
 
+    /// Compose a binding write with the caller's authorization row locks in one
+    /// transaction. The caller owns commit/rollback; all store fences still run.
+    pub async fn create_binding_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+        binding: EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
+    ) -> Result<EnvironmentAccessBinding, Error> {
+        validate_binding(context, &binding)?;
+        lock_environment(tx, context, false, true).await?;
+        self.admit_binding(tx, context, &binding, personal_owner_confirmation)
+            .await?;
+        sqlx::query(
+            "INSERT INTO platform_environment_access_bindings \
+             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) \
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(binding.environment_id.as_str())
+        .bind(binding.profile_id.as_str())
+        .bind(generation(binding.profile_revision)?)
+        .bind(personal_owner_confirmation.map(OwnerId::as_str))
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        Ok(binding)
+    }
+
+    /// Rebinding never inherits prior consent, including rebinding the same
+    /// immutable revision. The caller must explicitly confirm it again.
     pub async fn replace_binding(
         &self,
         context: &GrantContext,
         expected: &EnvironmentAccessBinding,
         replacement: EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
+    ) -> Result<EnvironmentAccessBinding, Error> {
+        let mut tx = self.begin_transaction().await?;
+        let binding = self
+            .replace_binding_in(
+                &mut tx,
+                context,
+                expected,
+                replacement,
+                personal_owner_confirmation,
+            )
+            .await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(binding)
+    }
+
+    /// Transaction-composable exact CAS, retaining every revision/owner fence.
+    pub async fn replace_binding_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+        expected: &EnvironmentAccessBinding,
+        replacement: EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
     ) -> Result<EnvironmentAccessBinding, Error> {
         validate_binding(context, expected)?;
         validate_binding(context, &replacement)?;
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
-        lock_environment(&mut tx, context, false, true).await?;
-        if load_binding(&mut tx, context).await? != *expected {
+        lock_environment(tx, context, false, true).await?;
+        if load_binding(tx, context).await?.binding != *expected {
             return Err(Error::StaleBinding);
         }
-        self.admit_binding(&mut tx, context, &replacement).await?;
+        self.admit_binding(tx, context, &replacement, personal_owner_confirmation)
+            .await?;
         sqlx::query(
             "UPDATE platform_environment_access_bindings SET profile_id=$2,profile_revision=$3, \
-             updated_at=now() WHERE environment_id=$1",
+             personal_owner_confirmed_by=$4,updated_at=now() WHERE environment_id=$1",
         )
         .bind(replacement.environment_id.as_str())
         .bind(replacement.profile_id.as_str())
         .bind(generation(replacement.profile_revision)?)
-        .execute(&mut *tx)
+        .bind(personal_owner_confirmation.map(OwnerId::as_str))
+        .execute(&mut **tx)
         .await
         .map_err(database_error)?;
-        tx.commit().await.map_err(database_error)?;
         Ok(replacement)
     }
 
@@ -318,11 +413,30 @@ impl PlatformAccessProfileStore {
         &self,
         context: &GrantContext,
     ) -> Result<EnvironmentAccessBinding, Error> {
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
-        lock_environment(&mut tx, context, false, false).await?;
-        let binding = load_binding(&mut tx, context).await?;
-        profile_for_context(&mut tx, context, &binding).await?;
+        Ok(self.get_binding_metadata(context).await?.binding)
+    }
+
+    /// Atomically inspect exact binding metadata, including missing consent.
+    /// Neither this result nor an enrollment/membership decision grants use.
+    pub async fn get_binding_metadata(
+        &self,
+        context: &GrantContext,
+    ) -> Result<PlatformBindingMetadata, Error> {
+        let mut tx = self.begin_transaction().await?;
+        let binding = self.get_binding_metadata_in(&mut tx, context).await?;
         tx.commit().await.map_err(database_error)?;
+        Ok(binding)
+    }
+
+    /// Compose a metadata-only read with the caller's current authority locks.
+    pub async fn get_binding_metadata_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+    ) -> Result<PlatformBindingMetadata, Error> {
+        lock_environment(tx, context, false, false).await?;
+        let binding = load_binding(tx, context).await?;
+        profile_for_context(tx, context, &binding.binding).await?;
         Ok(binding)
     }
 
@@ -331,19 +445,30 @@ impl PlatformAccessProfileStore {
         context: &GrantContext,
         expected: &EnvironmentAccessBinding,
     ) -> Result<(), Error> {
+        let mut tx = self.begin_transaction().await?;
+        self.delete_binding_in(&mut tx, context, expected).await?;
+        tx.commit().await.map_err(database_error)
+    }
+
+    /// Compose clearing an exact binding with the caller's authorization locks.
+    pub async fn delete_binding_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+        expected: &EnvironmentAccessBinding,
+    ) -> Result<(), Error> {
         validate_binding(context, expected)?;
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
-        lock_environment(&mut tx, context, false, true).await?;
-        if load_binding(&mut tx, context).await? != *expected {
+        lock_environment(tx, context, false, true).await?;
+        if load_binding(tx, context).await?.binding != *expected {
             return Err(Error::StaleBinding);
         }
-        profile_for_context(&mut tx, context, expected).await?;
+        profile_for_context(tx, context, expected).await?;
         sqlx::query("DELETE FROM platform_environment_access_bindings WHERE environment_id=$1")
             .bind(context.environment_id.as_str())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(database_error)?;
-        tx.commit().await.map_err(database_error)
+        Ok(())
     }
 
     /// One metadata admission point, not an irrevocable lease. The broker must
@@ -353,10 +478,17 @@ impl PlatformAccessProfileStore {
         &self,
         context: &GrantContext,
     ) -> Result<Vec<DerivedGrant>, Error> {
-        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        let mut tx = self.begin_transaction().await?;
         lock_environment(&mut tx, context, true, false).await?;
         let binding = load_binding(&mut tx, context).await?;
-        let grants = self.admit_binding(&mut tx, context, &binding).await?;
+        let grants = self
+            .admit_binding(
+                &mut tx,
+                context,
+                &binding.binding,
+                binding.personal_owner_confirmed_by.as_ref(),
+            )
+            .await?;
         tx.commit().await.map_err(database_error)?;
         Ok(grants)
     }
@@ -366,8 +498,17 @@ impl PlatformAccessProfileStore {
         tx: &mut Transaction<'_, Postgres>,
         context: &GrantContext,
         binding: &EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
     ) -> Result<Vec<DerivedGrant>, Error> {
         let profile = profile_for_context(tx, context, binding).await?;
+        match &profile.owner {
+            Owner::User(owner)
+                if context.allow_personal_credentials
+                    && owner == &context.user_id
+                    && personal_owner_confirmation == Some(owner) => {}
+            Owner::Organization(_) if personal_owner_confirmation.is_none() => {}
+            _ => return Err(Error::UnsupportedEntry),
+        }
         let credentials = load_credentials(tx, &profile).await?;
         derive_grants(
             context,
@@ -486,8 +627,8 @@ async fn load_credentials(
     for id in profile.entries.values().collect::<BTreeSet<_>>() {
         let row = sqlx::query(
             "SELECT provider,authentication_kind,display_name,account_hint,status, \
-             expires_at_unix,revocation_generation FROM platform_credentials \
-             WHERE id=$1 AND (user_id=$2 OR organization_id=$3) FOR SHARE",
+             expires_at_unix,revocation_generation FROM \
+             public.codewire_platform_lock_credential($1::text,$2::text,$3::text)",
         )
         .bind(id.as_str())
         .bind(user_id)
@@ -590,9 +731,9 @@ async fn lock_environment(
 async fn load_binding(
     tx: &mut Transaction<'_, Postgres>,
     context: &GrantContext,
-) -> Result<EnvironmentAccessBinding, Error> {
-    let (id, revision): (String, i64) = sqlx::query_as(
-        "SELECT profile_id,profile_revision FROM platform_environment_access_bindings \
+) -> Result<PlatformBindingMetadata, Error> {
+    let (id, revision, confirmed_by): (String, i64, Option<String>) = sqlx::query_as(
+        "SELECT profile_id,profile_revision,personal_owner_confirmed_by FROM platform_environment_access_bindings \
          WHERE environment_id=$1",
     )
     .bind(context.environment_id.as_str())
@@ -600,10 +741,15 @@ async fn load_binding(
     .await
     .map_err(database_error)?
     .ok_or(Error::NotFound)?;
-    Ok(EnvironmentAccessBinding {
-        environment_id: context.environment_id.clone(),
-        profile_id: AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?,
-        profile_revision: positive(revision)?,
+    Ok(PlatformBindingMetadata {
+        binding: EnvironmentAccessBinding {
+            environment_id: context.environment_id.clone(),
+            profile_id: AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?,
+            profile_revision: positive(revision)?,
+        },
+        personal_owner_confirmed_by: confirmed_by
+            .map(|id| OwnerId::parse(id).map_err(|_| Error::CorruptRecord))
+            .transpose()?,
     })
 }
 

@@ -52,14 +52,16 @@ path = "src/bin/deploy-shape-smoke.rs"
 required-features = ["kind-e2e"]
 
 [dependencies]
+codewire-access = { workspace = true }
 codewire-admin-proto = { workspace = true }
 codewire-daemon-bridge = { workspace = true }
 codewire-gateway-proto = { workspace = true }
+codewire-platform-credentials = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform"] }
 codewire-proto = { workspace = true }
-codewire-server-core = { workspace = true }
+codewire-server-core = { workspace = true, features = ["kubernetes-identity"] }
 codewire-workload-secrets = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

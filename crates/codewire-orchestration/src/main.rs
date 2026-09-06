@@ -317,6 +317,14 @@ async fn main() -> anyhow::Result<()> {
             connect_auth.clone(),
         )
         .with_unary_connect_routes_auth(
+            codewire_orchestration::connect::access_profiles::router(api_state.pool.clone()),
+            connect_auth.clone(),
+        )
+        .with_unary_connect_routes_auth(
+            codewire_orchestration::connect::credentials::router(api_state.pool.clone()),
+            connect_auth.clone(),
+        )
+        .with_unary_connect_routes_auth(
             codewire_orchestration::connect::ports::router(api_state.clone()),
             connect_auth.clone(),
         )

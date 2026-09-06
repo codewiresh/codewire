@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use codewire_gateway_proto::DaemonAuthToken;
 use codewire_tailnet::netstack::TcpListener as TailnetTcpListener;
+use codewire_tls::TlsListener;
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
@@ -14,11 +16,12 @@ use tokio::time::{Duration, Instant, sleep, timeout};
 use crate::binding::{
     BindingPollConfig, BindingPollResult, poll_binding_once, poll_binding_until_ready,
 };
-use crate::config::{DockerProxyConfig, GatewayConfig};
+use crate::config::{CredentialRuntimeConfig, DockerProxyConfig, GatewayConfig};
+use crate::credentials::CredentialIngress;
 use crate::daemon::{DaemonClientError, DaemonSessionClient};
 use crate::docker_proxy::{DockerProxySettings, serve_docker_socket_proxy};
 use crate::host_key;
-use crate::readiness::{ReadinessState, router as readiness_router};
+use crate::readiness::{CredentialReadiness, ReadinessState, router as readiness_router};
 use crate::scp::DaemonScpRunner;
 use crate::sftp::DaemonSftpRunner;
 use crate::ssh::{DaemonBackedSshRunner, GatewaySshHandler, gateway_server_config};
@@ -53,10 +56,72 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(async move {
-        shutdown.await;
-        let _ = shutdown_tx.send(true);
-    });
+    let mut tasks = JoinSet::new();
+    let mut ingress = None;
+    tokio::pin!(shutdown);
+    let result = {
+        let serve = run_gateway_services(
+            config,
+            ssh_listener,
+            readyz_listener,
+            shutdown_rx,
+            &mut tasks,
+            &mut ingress,
+        );
+        tokio::pin!(serve);
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => Ok(()),
+            result = &mut serve => result,
+        }
+    };
+
+    // Every return, including failed startup/listener/task, follows this owner
+    // path. Cancel credential workers BEFORE waiting for graceful HTTP bodies;
+    // otherwise an active streaming response can deadlock shutdown.
+    let _ = shutdown_tx.send(true);
+    if let Some(ingress) = ingress {
+        ingress.shutdown().await;
+    }
+    // Give listeners their normal graceful exit after credential calls drain.
+    // Unresponsive non-credential clients cannot retain the runtime forever.
+    if timeout(Duration::from_secs(5), async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tasks.shutdown().await;
+    }
+    result
+}
+
+async fn run_gateway_services(
+    config: GatewayConfig,
+    ssh_listener: TcpListener,
+    readyz_listener: TcpListener,
+    shutdown_rx: watch::Receiver<bool>,
+    tasks: &mut JoinSet<Result<()>>,
+    ingress_owner: &mut Option<CredentialIngress>,
+) -> Result<()> {
+    let credential_readiness = if let Some(credentials) = config.credentials.as_ref() {
+        let (ingress, listener) = prepare_credentials(credentials).await?;
+        let live = Arc::new(AtomicBool::new(false));
+        *ingress_owner = Some(ingress.clone());
+        tasks.spawn(serve_credentials_listener(
+            listener,
+            ingress,
+            live.clone(),
+            shutdown_rx.clone(),
+        ));
+        Some(CredentialReadiness::new(
+            live,
+            credentials.server_tls()?,
+            credentials.broker_endpoint()?,
+        ))
+    } else {
+        None
+    };
 
     let daemon_client = connect_daemon_with_retry(
         &config.shim_addr,
@@ -81,10 +146,10 @@ where
     ssh_config.keys.push(host_key.key);
     let ssh_config = Arc::new(ssh_config);
 
-    let mut tasks = JoinSet::new();
     tasks.spawn(serve_readiness_listener(
         readyz_listener,
         ssh_addr.to_string(),
+        credential_readiness,
         shutdown_rx.clone(),
     ));
     if let Some(docker_proxy) = config.docker_proxy.clone() {
@@ -184,6 +249,63 @@ where
             }
         }
     }
+}
+
+async fn prepare_credentials(
+    config: &CredentialRuntimeConfig,
+) -> Result<(CredentialIngress, TlsListener)> {
+    let files = config.server_tls()?;
+    let broker = config.broker_endpoint()?;
+    timeout(Duration::from_secs(5), async {
+        files
+            .validate()
+            .await
+            .map_err(|_| anyhow::anyhow!("credential server TLS unavailable"))?;
+        broker
+            .validate()
+            .await
+            .map_err(|_| anyhow::anyhow!("credential broker trust unavailable"))?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("credential TLS startup timed out"))??;
+    let listener = TcpListener::bind(config.listen_addr)
+        .await
+        .map_err(|_| anyhow::anyhow!("credential HTTPS listener unavailable"))?;
+    let listener = TlsListener::new(listener, files)
+        .map_err(|_| anyhow::anyhow!("credential HTTPS configuration invalid"))?;
+    Ok((CredentialIngress::new(config.ingress()?), listener))
+}
+
+struct CredentialListenerReadiness(Arc<AtomicBool>);
+
+impl Drop for CredentialListenerReadiness {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+async fn serve_credentials_listener(
+    listener: TlsListener,
+    ingress: CredentialIngress,
+    live: Arc<AtomicBool>,
+    shutdown_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let _readiness = CredentialListenerReadiness(live.clone());
+    live.store(true, Ordering::Release);
+    let app =
+        axum::Router::new().fallback(move |request: axum::http::Request<axum::body::Body>| {
+            let ingress = ingress.clone();
+            async move { ingress.respond(request).await }
+        });
+    axum::serve(listener, app)
+        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
+        .await
+        .map_err(|_| anyhow::anyhow!("credential HTTPS listener failed"))?;
+    if !*shutdown_rx.borrow() {
+        anyhow::bail!("credential HTTPS listener stopped");
+    }
+    Ok(())
 }
 
 async fn serve_tailnet_after_binding(
@@ -492,9 +614,10 @@ async fn serve_tailnet_ssh_listener(
 async fn serve_readiness_listener(
     listener: TcpListener,
     ssh_listen_addr: String,
+    credentials: Option<CredentialReadiness>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let app = readiness_router(ReadinessState::new(ssh_listen_addr));
+    let app = readiness_router(ReadinessState::new(ssh_listen_addr).with_credentials(credentials));
     axum::serve(listener, app)
         .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
         .await
@@ -549,6 +672,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod credentials;
     use codewire_gateway_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,
     };
@@ -595,6 +719,7 @@ mod tests {
             tailnet: None,
             docker_proxy: None,
             debug_tailnet: false,
+            credentials: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(run_gateway_with_listeners(
@@ -658,6 +783,7 @@ mod tests {
             tailnet: None,
             docker_proxy: None,
             debug_tailnet: false,
+            credentials: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(run_gateway_with_listeners(

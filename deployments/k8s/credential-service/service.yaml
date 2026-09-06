@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-credential-service
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: credential-service
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: credential-service
+  ports:
+    - name: http
+      port: 8086
+      targetPort: http
+    - name: broker-tls
+      port: 9443
+      targetPort: broker-tls

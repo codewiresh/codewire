@@ -832,6 +832,11 @@ impl LifecycleStore for PgLifecycleStore {
                        USING target
                        WHERE backend.environment_id = target.id
                        RETURNING backend.environment_id
+                   ), removed_access_binding AS (
+                       DELETE FROM platform_environment_access_bindings binding
+                       USING target
+                       WHERE binding.environment_id = target.id
+                       RETURNING binding.environment_id
                    )
                    UPDATE environments env
                    SET state = 'destroyed',

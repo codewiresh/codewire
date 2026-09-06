@@ -250,6 +250,82 @@ records are removed while another schema survives. Cluster roles, other
 databases and external OpenBao key material are outside this reset boundary.
 These tests and instructions do not authorize live database access or reset.
 
+### Personal binding consent and material-free profile locks
+
+Migration `0022_platform_binding_consent.sql` adds nullable
+`personal_owner_confirmed_by` to the existing environment binding row. It does
+not populate consent from existing rows, credentials or membership. The profile
+store writes the confirmed actor in the same transaction as the exact
+environment/profile/revision selection. The actor must match the authenticated
+environment creator and personal profile owner; a supplied ID is not identity
+proof. Rebind replaces the choice instead of retaining it, and clear deletes
+the row. Organization selections have no personal confirmation. Runtime checks
+both the saved confirmation and current personal-credential policy. Metadata
+inspection remains possible without confirmation, but does not grant access.
+The existing environment operation generation remains the only lifecycle fence.
+
+The same migration adds
+`codewire_platform_lock_credential(text,text,text)`. This fixed SHARE helper
+returns only credential metadata scoped by exact credential ID and owner.
+Its canonical migration-owner identity, qualified relations, fixed
+`pg_catalog, pg_temp` search path and same-transaction PUBLIC revocation match
+the existing three lock helpers. Restricted profile-management and broker
+logins need its exact EXECUTE grant. Profile management no longer needs any
+credential UPDATE privilege just to fence metadata. Material reads and
+credential lifecycle mutations remain broker/enrollment responsibilities;
+broker roles still cannot edit owner, environment, profile or binding records.
+
+The 21→22 proof pins accepted migration 21 from canonical
+`c0921baf2cfeffbc627991b97fc3fcbb9f254bfb`, retaining the independent pins for
+versions 1–20. It checks the unchanged prior ledger and protected bytes,
+unconfirmed existing bindings, fresh schema, second-startup no-op, and exact
+helper signature/body/definer/search-path/ACL authority. Real restricted-login
+tests cover permitted profile management, forbidden credential lifecycle and
+material access, hostile search paths, personal-policy denial, rebind/clear,
+and atomic metadata observation behind environment locks.
+
+There is no in-place downgrade or old-writer support. After stopping the new
+writers, rollback to version 21 replays that source's history into only the
+disposable application `public` schema. The test discards bindings and their
+consent, removes the new helper, and retains a separate schema. This boundary
+excludes other databases, cluster roles and OpenBao material and does not
+authorize any live reset.
+
+### Original OAuth authority through enrollment publication
+
+Migration `0023_oauth_publication_authority.sql` adds one fixed
+`codewire_lock_oauth_bearer_authority(text,text,text,timestamptz)` function and
+does not change tables, token formats or existing rows. Long-running enrollment
+retains the original OAuth token's digest, user, client and exact expiry. It
+does not keep the raw bearer or substitute a newer token at publication.
+
+The helper locks the exact user, enabled client and access-token rows in that
+order with SHARE, then checks the original expiry using `clock_timestamp()`.
+Transaction-start `NOW()` cannot prove freshness after a lock wait. The token
+must retain its original identity/expiry and current `codewire.api` scope.
+Prepare the protected envelope before taking these locks. Keep the original
+authority fence and credential publication in one transaction; recheck expiry
+after awaited work before commit. A lost commit acknowledgement is an unknown
+outcome, not permission to revoke possibly stored credentials.
+
+The migration owner owns the helper; its qualified queries, fixed
+`pg_catalog, pg_temp` search path and immediate PUBLIC revocation match the
+existing restricted lock boundary. Only the isolated enrollment login needs
+the exact EXECUTE grant. It receives no user/client/token UPDATE authority and
+no sessions, API-key bookkeeping, refresh-token, client-secret or signing-key
+access. Migration creates no login or deployment grant.
+
+The 22→23 fixture pins the previously qualified frozen migration22 bytes and
+retains independent canonical history pins for versions1–21. It checks exact
+prior ledger/credential/binding bytes, unchanged table fingerprint, the helper's
+installed signature/body/owner/search path/ACL, and a second no-op startup.
+Restricted-login tests cover original-token denial and publication/revocation
+ordering. No pre-launch compatibility path or in-place downgrade is added.
+Rollback requires stopping new writers and replaying version22 source into
+only the disposable application `public` schema; its test preserves another
+schema. Cluster roles, other databases and external OpenBao keys remain outside
+this boundary. This is not authority for a live reset.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

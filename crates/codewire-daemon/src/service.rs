@@ -90,7 +90,7 @@ impl DaemonService for DaemonServiceImpl {
     type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
     type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
     type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
-    type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
+    type CredentialBridgeStream = codewire_credential_bridge::CredentialBridgeOutput;
 
     async fn get_capabilities(
         &self,

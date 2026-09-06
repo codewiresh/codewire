@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let opts = ClaimOpts {
         environment_id: "env-crd-smoke".into(),
         org_id: "org-crd-smoke".into(),
+        operation_generation: 1,
         template_ref: "tmpl-crd-smoke".into(),
         cpu_millicores: 1000,
         memory_mib: 2048,
@@ -225,6 +226,8 @@ fn gateway_template_opts(namespace: &str) -> anyhow::Result<TemplateOpts> {
         },
         environment_id: "env-crd-smoke".into(),
         gateway_token,
+        organization_id: "org-crd-smoke".into(),
+        operation_generation: 1,
         daemon_auth_token,
         api_base_url: if local_gateway {
             String::new()

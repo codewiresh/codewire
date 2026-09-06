@@ -1,0 +1,17 @@
+[package]
+name = "codewire-credential-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+description = "Material-free bounded credential HTTP and frame bridge"
+
+[dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+codewire-gateway-proto = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }

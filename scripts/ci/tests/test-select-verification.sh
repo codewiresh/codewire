@@ -113,6 +113,11 @@ assert_contract_field() {
 }
 
 policy=policy
+for enrollment_input in src/provider_enrollment.rs src/codex_enrollment/mod.rs src/codex_enrollment/parser.rs; do
+  run_paths_case shared_codex_enrollment pull_request refs/pull/1/head false \
+    'database policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service' \
+    "crates/codewire-credential-broker/$enrollment_input"
+done
 run_paths_case platform_credential_store pull_request refs/pull/1/head false \
   'database policy rust rust_pkg_codewire_credential_broker rust_pkg_codewire_platform_credentials' \
   crates/codewire-platform-credentials/src/store.rs
@@ -373,7 +378,7 @@ run_paths_case rust_root_toolchain pull_request refs/pull/500/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   rust-toolchain.toml
 run_paths_case curated_gateway_member_manifest pull_request refs/pull/501/head false \
-  'policy rust_curated_locks transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy rust rust_curated_locks rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-daemon/Cargo.toml
 run_paths_case local_vmm_host_source pull_request refs/pull/5011/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
@@ -420,8 +425,29 @@ run_paths_case retired_go_harness_deletion pull_request refs/pull/6010/head fals
   'policy' autoagent/agent.py libs/gatewayauth/token.go \
   libs/gateway-proto/gen/daemon/v1/daemon.pb.go
 run_paths_case gateway_proto_source pull_request refs/pull/6011/head false \
-  'policy rust rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   libs/gateway-proto/proto/daemon/v1/daemon.proto
+run_paths_case private_broker_proto_source pull_request refs/pull/6011/head false \
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  libs/gateway-proto/proto/broker/v1/broker.proto
+run_paths_case private_broker_proto_rust_module pull_request refs/pull/6011/head false \
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto rust_pkg_codewire_server_core transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-gateway-proto/src/lib.rs
+run_paths_case broker_daemon_transport_consumer pull_request refs/pull/6011/head false \
+  'policy rust rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-daemon/src/client.rs
+run_paths_case material_free_credential_bridge pull_request refs/pull/6011/head false \
+  'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  crates/codewire-credential-bridge/src/lib.rs
+run_paths_case concrete_platform_credential_service pull_request refs/pull/6011/head false \
+  'database policy rust rust_pkg_codewire_credential_service' \
+  crates/codewire-credential-service/src/authority.rs
+run_paths_case shared_credential_tls_source pull_request refs/pull/6011/head false \
+  'database policy rust rust_pkg_codewire_credential_service rust_pkg_codewire_tls transport transport_pkg_codewire_gateway' \
+  crates/codewire-tls/src/files.rs
+run_paths_case shared_credential_tls_manifest pull_request refs/pull/6011/head false \
+  'database policy rust rust_curated_locks rust_pkg_codewire_credential_service rust_pkg_codewire_tls transport transport_pkg_codewire_gateway' \
+  crates/codewire-tls/Cargo.toml
 run_paths_case self_contained_go_workspace pull_request refs/pull/6012/head false \
   'go_consumer_interop go_support go_tailnet policy sdk_go security security_go' \
   go.work
@@ -439,6 +465,16 @@ run_paths_case application_schema_fingerprint pull_request refs/pull/60/head fal
 run_paths_case server_core_lifecycle_test pull_request refs/pull/6010/head false \
   'database policy rust rust_pkg_codewire_server_core' \
   crates/codewire-server-core/tests/org_deletion_lifecycle.rs
+for oauth_input in tests/oauth_bearer_auth.rs tests/oauth_bearer_auth/authority.rs; do
+  run_paths_case server_core_oauth_publication_test pull_request refs/pull/6010/head false \
+    'database policy rust rust_pkg_codewire_server_core' \
+    "crates/codewire-server-core/$oauth_input"
+done
+for oauth_input in src/auth.rs src/auth/oauth_authority.rs src/connect.rs; do
+  run_paths_case server_core_oauth_publication_source pull_request refs/pull/6010/head false \
+    'database policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+    "crates/codewire-server-core/$oauth_input"
+done
 run_paths_case server_core_runtime_source pull_request refs/pull/6011/head false \
   'policy rust rust_pkg_codewire_server_core service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   crates/codewire-server-core/src/lib.rs
@@ -448,6 +484,13 @@ run_paths_case rust_migration_database pull_request refs/pull/61/head false \
 run_paths_case orchestration_service pull_request refs/pull/7/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/src/api/environments.rs
+for profile_input in src/access_profiles.rs src/connect/access_profiles.rs tests/access_profiles.rs tests/access_profiles_support/mod.rs tests/access_profiles_timeout/mod.rs tests/access_profiles_destroy/mod.rs src/lifecycle/mod.rs src/credentials.rs src/connect/credentials.rs tests/credentials.rs tests/credentials_support/mod.rs; do
+  run_paths_case public_platform_access_profiles pull_request refs/pull/72/head false \
+    'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
+    "crates/codewire-orchestration/$profile_input"
+done
+run_paths_case credential_kind_fixtures pull_request refs/pull/721/head false \
+  'edge_kind policy' scripts/ci/tests/test-kind-codex-session.py scripts/ci/tests/test-kind-credentials.py
 run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration' \
   crates/codewire-orchestration/tests/wire_contract.rs \
@@ -1120,6 +1163,25 @@ integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 14' "$integration_runner"
+grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 2' "$integration_runner"
+grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runner"
+grep -qF -- '--lib tests::database:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
+grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 3' "$integration_runner"
+grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
+grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 7' "$integration_runner"
+grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
+grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 8' "$integration_runner"
+grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
+grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 4' "$integration_runner"
+grep -qF -- '--lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority' "$integration_runner"
+grep -qF 'assert_passed_count "Kind credential effective ACL matrix" "$logfile" 1' "$integration_runner"
+grep -qF 'cargo test --locked -p codewire-credential-service --features enrollment' "$integration_runner"
+grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
+grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
+grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 28' "$integration_runner"
+grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 13' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \
@@ -2239,6 +2301,10 @@ if [[ "$1" == tree ]]; then
       missing_root) printf 'codewire-proto v0.0.0\n' ;;
       *) exit 87 ;;
     esac
+  elif [[ " $* " == *' -p codewire-credential-service '* ]]; then
+    printf 'codewire-credential-service v0.0.0|\n'
+    printf 'codewire-credential-broker v0.0.0|%s\n' "${PRIMITIVE_SERVICE_FEATURES-platform}"
+    printf 'codewire-protected-store v0.0.0|%s\n' "${PRIMITIVE_SERVICE_FEATURES-platform}"
   else
     printf 'codewire-protected-store v0.0.0|%s\n' "${PRIMITIVE_GRAPH_FEATURES-platform}"
   fi
@@ -2470,8 +2536,8 @@ run_platform_broker_rust_case() {
     [[ "$status" == 0 ]] || { cat "$primitive_probe/broker-$name.out" >&2; exit 1; }
   fi
   graph_count="$(grep -c '^tree --locked -p codewire-credential-broker --no-default-features --features platform --edges normal,build ' "$log" || true)"
-  clippy_count="$(grep -cxF 'clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings' "$log" || true)"
-  test_count="$(grep -cxF 'test --locked -p codewire-credential-broker --no-default-features --features platform --all-targets' "$log" || true)"
+  clippy_count="$(grep -cxF 'clippy --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets -- -D warnings' "$log" || true)"
+  test_count="$(grep -cxF 'test --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets' "$log" || true)"
   [[ "$graph_count" == "$expected" ]] || { echo "$name: missing or duplicate broker graph check" >&2; exit 1; }
   if [[ "$fail" == tree || "$features" != platform ]]; then
     [[ "$clippy_count" == 0 && "$test_count" == 0 ]] || { echo "$name: broker checks followed invalid graph" >&2; exit 1; }
@@ -2490,6 +2556,69 @@ run_platform_broker_rust_case missing_platform rust_pkg_codewire_credential_brok
 run_platform_broker_rust_case forbidden_provider rust_pkg_codewire_credential_broker 1 '' platform,platform-test-support
 run_platform_broker_rust_case clippy_failure rust_pkg_codewire_credential_broker 1 clippy
 run_platform_broker_rust_case test_failure rust_pkg_codewire_credential_broker 1 test
+
+# Projected-Pod identity is opt-in and must be qualified when either its shared
+# implementation or the orchestration consumer is selected, without relying on
+# unrelated workspace feature unification.
+run_pod_identity_rust_case() {
+  local name="$1" token="$2" expected="$3" fail="${4:-}"
+  local log="$primitive_probe/pod-identity-$name.log" status=0 clippy_count test_count
+  : > "$log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$log" \
+    PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" PRIMITIVE_CARGO_FAIL="$fail" \
+    PRIMITIVE_PACKAGE_LOG="$primitive_probe/pod-identity-$name.packages" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" SELECTION="|valid:v3|$token|complete|" \
+    bash "$primitive_probe/dispatch.sh" > "$primitive_probe/pod-identity-$name.out" 2>&1 || status=$?
+  if [[ -n "$fail" ]]; then
+    [[ "$status" == 86 ]] || { echo "$name: lost Pod identity Cargo failure ($status)" >&2; exit 1; }
+  else
+    [[ "$status" == 0 ]] || { cat "$primitive_probe/pod-identity-$name.out" >&2; exit 1; }
+  fi
+  clippy_count="$(grep -cxF 'clippy --locked -p codewire-server-core --features kubernetes-identity --all-targets -- -D warnings' "$log" || true)"
+  test_count="$(grep -cxF 'test --locked -p codewire-server-core --features kubernetes-identity --lib pod_identity::' "$log" || true)"
+  [[ "$clippy_count" == "$expected" ]] || { echo "$name: missing or duplicate Pod identity Clippy" >&2; exit 1; }
+  if [[ "$fail" == clippy ]]; then
+    [[ "$test_count" == 0 ]] || { echo "$name: tests followed failed Pod identity Clippy" >&2; exit 1; }
+  else
+    [[ "$test_count" == "$expected" ]] || { echo "$name: missing or duplicate Pod identity tests" >&2; exit 1; }
+  fi
+}
+run_pod_identity_rust_case shared rust_pkg_codewire_server_core 1
+run_pod_identity_rust_case consumer rust_pkg_codewire_orchestration 1
+run_pod_identity_rust_case workspace rust_workspace 1
+run_pod_identity_rust_case unrelated rust_pkg_codewire_client 0
+run_pod_identity_rust_case clippy_failure rust_pkg_codewire_server_core 1 clippy
+run_pod_identity_rust_case test_failure rust_pkg_codewire_server_core 1 test
+
+# A dedicated service may not accidentally inherit the broker's local default
+# or enable test-only protected material providers through a transitive edge.
+run_credential_service_graph_case() {
+  local name="$1" token="$2" expected="$3" fail="${4:-}" features="${5:-platform}"
+  local log="$primitive_probe/service-$name.log" status=0
+  : > "$log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$log" \
+    PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
+    PRIMITIVE_PACKAGE_LOG="$primitive_probe/service-$name.packages" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" PRIMITIVE_CARGO_FAIL="$fail" \
+    PRIMITIVE_SERVICE_FEATURES="$features" SELECTION="|valid:v3|$token|complete|" \
+    bash "$primitive_probe/dispatch.sh" > "$primitive_probe/service-$name.out" 2>&1 || status=$?
+  if [[ -n "$fail" ]]; then
+    [[ "$status" == 86 ]] || { echo "$name: lost service graph failure" >&2; exit 1; }
+  elif [[ "$features" != platform ]]; then
+    [[ "$status" == 1 ]] || { echo "$name: accepted unsafe service graph" >&2; exit 1; }
+  else
+    [[ "$status" == 0 ]] || { cat "$primitive_probe/service-$name.out" >&2; exit 1; }
+  fi
+  [[ "$(grep -c '^tree --locked -p codewire-credential-service --edges normal,build ' "$log" || true)" == "$expected" ]] || {
+    echo "$name: missing or duplicate service graph proof" >&2; exit 1;
+  }
+}
+run_credential_service_graph_case service rust_pkg_codewire_credential_service 1
+run_credential_service_graph_case workspace rust_workspace 1
+run_credential_service_graph_case unrelated rust_pkg_codewire_client 0
+run_credential_service_graph_case cargo_failure rust_pkg_codewire_credential_service 1 tree
+run_credential_service_graph_case local_default rust_pkg_codewire_credential_service 1 '' default,local,platform
+run_credential_service_graph_case synthetic_provider rust_pkg_codewire_credential_service 1 '' platform,platform-test-support
 
 awk '
   /^rust_package_args\(\) \{/ { capture = 1 }

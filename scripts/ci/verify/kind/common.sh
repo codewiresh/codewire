@@ -41,6 +41,8 @@ KIND_HOST_LOCK_FILE="${KIND_HOST_LOCK_FILE:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/
 KIND_HOST_LOCK_FD=""
 NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
+# shellcheck source=scripts/ci/verify/kind/credentials.sh
+source "$ROOT/scripts/ci/verify/kind/credentials.sh"
 AUTHZ_TMPDIR=""
 GATEWAY_SMOKE_TMPDIR=""
 GATEWAY_PORT_FORWARD_PID=""
@@ -596,7 +598,9 @@ build_images_and_smokes() {
       cargo build --profile ci -p codewire-orchestration --bin crd-smoke --bin environment-setup-smoke --bin exec-smoke --bin exec-stream-smoke --bin file-service-smoke --bin prepare-stream-smoke --bin log-stream-smoke --bin temporal-smoke --bin temporal-fencing-smoke --bin reconciler-ttl-smoke --bin sidecar-smoke --features kind-e2e
       cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke
       cargo build --profile ci -p codewire-client --example coordinator-ingress-smoke --features kind-e2e
-    '
+      cargo build --locked --profile ci -p codewire-cli --bin cw
+      cargo test --locked --profile ci -p codewire-orchestration --lib --no-run --message-format=json >"$1"
+    ' -- "$RUN_DIR/credential-bootstrap-build.jsonl"
   )
   printf 'CODEWIRE_CI_PHASE name=kind-smoke-binary-build seconds=%s\n' \
     "$(( $(date +%s) - smoke_started_at ))"
@@ -823,6 +827,7 @@ prepare_kind_support_images() {
     source="${source%%|*}"
     docker image tag "$source" "$alias"
   done
+  prepare_kind_credential_support_images
 }
 
 load_images_into_kind() {
@@ -843,6 +848,8 @@ load_images_into_kind() {
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
     wait_for_kind_api_after_image_load
   done
+
+  load_kind_credential_support_images
 
   if validate_sealed_kind_images; then
     # The trusted runner boundary pulls these images from Nexus before any
@@ -1051,6 +1058,8 @@ deploy_overlay() {
     --selector=app.kubernetes.io/component=controller \
     --timeout=180s
 
+  deploy_kind_credential_cert_manager
+
   log "ensuring isolated kind sandbox namespace"
   kubectl create namespace "$SANDBOX_NS" --dry-run=client -o yaml |
     kubectl_apply -f -
@@ -1079,6 +1088,7 @@ deploy_overlay() {
     exit 1
   fi
   assert_kind_idp_topology
+  deploy_kind_credential_issuers
   # Staged rollout: the services fail fast (correctly) when Postgres or
   # Temporal is unreachable, so park them at zero replicas until their
   # dependencies are Ready — otherwise a slow runner leaves them in
@@ -1123,6 +1133,8 @@ deploy_overlay() {
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/fixtures/billing/seed.sql"
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/coordinator-seed.sql"
+
+  start_kind_credential_fixture
 
   log "starting billing, IdP, primary authorization, Mesh, and coordinator (dependencies ready)"
   kubectl -n "$NS" scale \
@@ -3172,6 +3184,8 @@ temporal_fencing_smoke() {
 
 deploy_agent_sandbox_and_smoke() {
   deploy_agent_sandbox
+  kind_credential_bootstrap_smoke
+  kind_credential_native_smoke
   workspace_service_smokes
   temporal_workflow_smoke
   mark_retained_cluster_prepared

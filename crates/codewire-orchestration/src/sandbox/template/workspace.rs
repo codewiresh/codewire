@@ -2,6 +2,7 @@
 
 use serde_json::{Map, Value, json};
 
+use super::credentials;
 use super::encoding::kata_policy_init_data_annotation;
 use super::naming::{workspace_daemon_service_name, workspace_selector, workspace_template_labels};
 use super::network::workspace_egress_rules;
@@ -20,6 +21,9 @@ use super::{
 
 /// Mirrors `sandbox.RenderSandboxTemplate`.
 pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
+    if let Some(config) = &opts.credential_runtime {
+        config.assert_namespace(namespace);
+    }
     json!({
         "apiVersion": EXTENSIONS_API_VERSION,
         "kind": "SandboxTemplate",
@@ -265,10 +269,22 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     if opts.disk_gib == 0 {
         volumes.insert(0, json!({ "name": "workspace", "emptyDir": {} }));
     }
+    if opts.credential_runtime.is_some() {
+        volumes.extend(credentials::workspace_volumes(opts));
+        ws["volumeMounts"]
+            .as_array_mut()
+            .expect("workspace mounts")
+            .extend(credentials::workspace_mounts());
+        ws["env"]
+            .as_array_mut()
+            .expect("workspace env")
+            .extend(credentials::workspace_environment());
+    }
 
     let mut spec = Map::new();
     spec.insert("restartPolicy".into(), "Never".into());
     spec.insert("serviceAccountName".into(), SANDBOX_SERVICE_ACCOUNT.into());
+    spec.insert("automountServiceAccountToken".into(), false.into());
     spec.insert(
         "securityContext".into(),
         json!({
@@ -338,10 +354,11 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         containers.push(ws.clone());
     }
 
-    spec.insert(
-        "initContainers".into(),
-        json!([daemon_init_container(support_image)]),
-    );
+    let mut init = daemon_init_container(support_image);
+    if opts.credential_runtime.is_some() {
+        credentials::configure_bootstrap(&mut init);
+    }
+    spec.insert("initContainers".into(), json!([init]));
     spec.insert("containers".into(), Value::Array(containers));
     spec.insert("volumes".into(), Value::Array(volumes));
     Value::Object(spec)

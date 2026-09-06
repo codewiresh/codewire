@@ -88,6 +88,14 @@ pub(super) fn gateway_selector(opts: &TemplateOpts) -> Value {
 pub(super) fn gateway_labels(opts: &TemplateOpts) -> Value {
     let mut labels = gateway_selector(opts);
     let object = labels.as_object_mut().expect("labels object");
+    object.insert(
+        "codewire.sh/org-id".into(),
+        opts.organization_id.clone().into(),
+    );
+    object.insert(
+        super::super::LABEL_OPERATION_GENERATION.into(),
+        opts.operation_generation.to_string().into(),
+    );
     object.insert("app.kubernetes.io/name".into(), "codewire-gateway".into());
     object.insert("app.kubernetes.io/component".into(), "gateway".into());
     object.insert("app.kubernetes.io/managed-by".into(), "codewire".into());

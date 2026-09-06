@@ -1,99 +1,40 @@
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING, UPGRADE};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
+use axum::http::{Request, Response};
 use axum::routing::post;
-use bytes::Bytes as WireBytes;
-use codewire_gateway_proto::daemon::v1;
-use codewire_gateway_proto::{
-    CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_BYTES,
-    CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES,
-    CREDENTIAL_BRIDGE_MAX_HEADERS, CREDENTIAL_BRIDGE_MAX_IN_FLIGHT,
-    CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES, CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES,
-    CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+use codewire_credential_bridge::{
+    CredentialBridge as SharedCredentialBridge, CredentialBridgeOutput,
 };
+use codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
+use codewire_gateway_proto::daemon::v1;
 use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
-use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio_stream::Stream;
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Status, Streaming};
 
 use crate::CredentialBridgeConfig;
 
 const HOST_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
-const HOST_SEND_TIMEOUT: Duration = Duration::from_secs(2);
-const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const HOST_OUTPUT_BUFFER: usize = 32;
-const RESPONSE_BODY_BUFFER: usize = 16;
 
-type GuestOutput = mpsc::Sender<Result<v1::CredentialBridgeGuestMessage, Status>>;
-type ResponseBodyItem = Result<WireBytes, io::Error>;
-
+/// Local transport/configuration adapter. All request/response phases and
+/// connection cancellation belong to the shared material-free bridge.
 #[derive(Clone)]
 pub(crate) struct CredentialBridge {
     config: Option<CredentialBridgeConfig>,
-    inner: Arc<Mutex<BridgeState>>,
-}
-
-struct BridgeState {
-    next_epoch: u64,
-    active: Option<ActiveHost>,
-    pending: BTreeMap<String, PendingResponse>,
-}
-
-struct ActiveHost {
-    epoch: u64,
-    output: GuestOutput,
-    cancel: oneshot::Sender<()>,
-}
-
-struct PendingResponse {
-    epoch: u64,
-    phase: ResponsePhase,
-    received_bytes: usize,
-    start: Option<oneshot::Sender<Result<ResponseStart, BridgeFailure>>>,
-    body: mpsc::Sender<ResponseBodyItem>,
-    completed: Arc<AtomicBool>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResponsePhase {
-    AwaitingStart,
-    Streaming,
-    Cancelled,
-}
-
-struct ResponseStart {
-    status: StatusCode,
-    headers: HeaderMap,
-}
-
-#[derive(Clone, Copy)]
-enum BridgeFailure {
-    Denied,
-    Unavailable,
-    Upstream,
-    TooLarge,
+    inner: Result<Option<SharedCredentialBridge>, Status>,
 }
 
 pub(crate) struct CredentialBridgeConnection {
-    pub output: ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>,
+    pub output: CredentialBridgeOutput,
 }
 
 pub(crate) struct CredentialIngress {
     listener: CredentialIngressListener,
-    bridge: CredentialBridge,
+    bridge: SharedCredentialBridge,
     socket: SocketGuard,
 }
 
@@ -108,33 +49,27 @@ struct SocketGuard {
     inode: u64,
 }
 
-struct BridgeBodyStream {
-    inner: ReceiverStream<ResponseBodyItem>,
-    cancellation: PendingCancellation,
-    completed: Arc<AtomicBool>,
-    failure_emitted: bool,
-}
-
-struct PendingCancellation {
-    bridge: CredentialBridge,
-    request_id: Option<String>,
-    epoch: u64,
-}
-
 impl CredentialBridge {
     pub(crate) fn new(config: Option<CredentialBridgeConfig>) -> Self {
-        Self {
-            config,
-            inner: Arc::new(Mutex::new(BridgeState {
-                next_epoch: 0,
-                active: None,
-                pending: BTreeMap::new(),
-            })),
-        }
+        let inner = config
+            .as_ref()
+            .map(|config| {
+                SharedCredentialBridge::new(config.environment_id, config.environment_generation)
+            })
+            .transpose();
+        Self { config, inner }
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
         self.config.is_some()
+    }
+
+    fn shared(&self) -> Result<&SharedCredentialBridge, Status> {
+        self.inner
+            .as_ref()
+            .map_err(Clone::clone)?
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("credential bridge is unavailable"))
     }
 
     pub(crate) async fn connect(
@@ -163,314 +98,12 @@ impl CredentialBridge {
             ));
         }
 
-        let (output_tx, output_rx) = mpsc::channel(HOST_OUTPUT_BUFFER);
-        output_tx
-            .try_send(Ok(guest_message(
-                v1::credential_bridge_guest_message::Payload::Ready(v1::CredentialBridgeReady {
-                    protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
-                    environment_id: config.environment_id.to_string(),
-                    environment_generation: config.environment_generation,
-                }),
-            )))
-            .map_err(|_| Status::resource_exhausted("credential bridge output is unavailable"))?;
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-
-        let (epoch, replaced, stale) = {
-            let mut state = self.inner.lock().await;
-            state.next_epoch = state
-                .next_epoch
-                .checked_add(1)
-                .ok_or_else(|| Status::resource_exhausted("credential bridge epoch exhausted"))?;
-            let epoch = state.next_epoch;
-            let replaced = state.active.replace(ActiveHost {
-                epoch,
-                output: output_tx.clone(),
-                cancel: cancel_tx,
-            });
-            let stale = take_pending(&mut state, |_| true);
-            (epoch, replaced, stale)
-        };
-        if let Some(replaced) = replaced {
-            let _ = replaced.cancel.send(());
-        }
-        fail_pending(stale, BridgeFailure::Unavailable);
-
-        let bridge = self.clone();
-        tokio::spawn(async move {
-            bridge
-                .read_host_stream(epoch, input, output_tx, cancel_rx)
-                .await;
-        });
-        Ok(CredentialBridgeConnection {
-            output: ReceiverStream::new(output_rx),
-        })
-    }
-
-    async fn read_host_stream(
-        self,
-        epoch: u64,
-        mut input: Streaming<v1::CredentialBridgeHostMessage>,
-        output: GuestOutput,
-        mut cancel: oneshot::Receiver<()>,
-    ) {
-        let result = loop {
-            tokio::select! {
-                _ = &mut cancel => break Ok(()),
-                message = input.message() => match message {
-                    Ok(Some(message)) => {
-                        if let Err(error) = self.apply_host_message(epoch, message).await {
-                            break Err(error);
-                        }
-                    }
-                    Ok(None) => break Ok(()),
-                    Err(_) => break Err(Status::unavailable("credential bridge host stream failed")),
-                }
-            }
-        };
-        if let Err(error) = result {
-            let _ = output.try_send(Err(error));
-        }
-        self.detach(epoch).await;
-    }
-
-    async fn apply_host_message(
-        &self,
-        epoch: u64,
-        message: v1::CredentialBridgeHostMessage,
-    ) -> Result<(), Status> {
-        use v1::credential_bridge_host_message::Payload;
-
-        match message.payload {
-            Some(Payload::ResponseStart(response)) => {
-                let status = StatusCode::from_u16(
-                    u16::try_from(response.status_code).map_err(|_| invalid_host_frame())?,
-                )
-                .map_err(|_| invalid_host_frame())?;
-                if status.is_informational() {
-                    return Err(invalid_host_frame());
-                }
-                let headers = headers_from_proto(&response.headers)?;
-                let sender = {
-                    let mut state = self.inner.lock().await;
-                    require_active_epoch(&state, epoch)?;
-                    let pending = state
-                        .pending
-                        .get_mut(&response.request_id)
-                        .ok_or_else(invalid_host_frame)?;
-                    if pending.epoch != epoch {
-                        return Err(invalid_host_frame());
-                    }
-                    match pending.phase {
-                        ResponsePhase::AwaitingStart => {
-                            pending.phase = ResponsePhase::Streaming;
-                            Some(pending.start.take().ok_or_else(invalid_host_frame)?)
-                        }
-                        ResponsePhase::Cancelled => None,
-                        ResponsePhase::Streaming => return Err(invalid_host_frame()),
-                    }
-                };
-                if let Some(sender) = sender {
-                    sender
-                        .send(Ok(ResponseStart { status, headers }))
-                        .map_err(|_| {
-                            Status::cancelled("credential bridge request was cancelled")
-                        })?;
-                }
-                Ok(())
-            }
-            Some(Payload::ResponseBody(response)) => {
-                if response.data.is_empty()
-                    || response.data.len() > CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES
-                {
-                    return Err(invalid_host_frame());
-                }
-                let sender = {
-                    let mut state = self.inner.lock().await;
-                    require_active_epoch(&state, epoch)?;
-                    let pending = state
-                        .pending
-                        .get_mut(&response.request_id)
-                        .ok_or_else(invalid_host_frame)?;
-                    if pending.epoch != epoch || pending.phase == ResponsePhase::AwaitingStart {
-                        return Err(invalid_host_frame());
-                    }
-                    pending.received_bytes = pending
-                        .received_bytes
-                        .checked_add(response.data.len())
-                        .filter(|bytes| *bytes <= CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES)
-                        .ok_or_else(|| {
-                            Status::resource_exhausted(
-                                "credential bridge response exceeded its byte limit",
-                            )
-                        })?;
-                    (pending.phase == ResponsePhase::Streaming).then(|| pending.body.clone())
-                };
-                if let Some(sender) = sender {
-                    sender
-                        .try_send(Ok(WireBytes::from(response.data)))
-                        .map_err(|error| match error {
-                            mpsc::error::TrySendError::Full(_) => Status::resource_exhausted(
-                                "credential bridge response consumer is too slow",
-                            ),
-                            mpsc::error::TrySendError::Closed(_) => {
-                                Status::cancelled("credential bridge request was cancelled")
-                            }
-                        })?;
-                }
-                Ok(())
-            }
-            Some(Payload::ResponseEnd(response)) => {
-                let pending = {
-                    let mut state = self.inner.lock().await;
-                    require_active_epoch(&state, epoch)?;
-                    let pending = state
-                        .pending
-                        .remove(&response.request_id)
-                        .ok_or_else(invalid_host_frame)?;
-                    if pending.epoch != epoch || pending.phase == ResponsePhase::AwaitingStart {
-                        return Err(invalid_host_frame());
-                    }
-                    pending
-                };
-                pending.completed.store(true, Ordering::Release);
-                drop(pending);
-                Ok(())
-            }
-            Some(Payload::ResponseFailure(response)) => {
-                let reason = match v1::CredentialBridgeFailureReason::try_from(response.reason) {
-                    Ok(v1::CredentialBridgeFailureReason::Denied) => BridgeFailure::Denied,
-                    Ok(v1::CredentialBridgeFailureReason::Unavailable) => {
-                        BridgeFailure::Unavailable
-                    }
-                    Ok(v1::CredentialBridgeFailureReason::UpstreamFailed) => {
-                        BridgeFailure::Upstream
-                    }
-                    Ok(v1::CredentialBridgeFailureReason::ResponseTooLarge) => {
-                        BridgeFailure::TooLarge
-                    }
-                    _ => return Err(invalid_host_frame()),
-                };
-                let pending = {
-                    let mut state = self.inner.lock().await;
-                    require_active_epoch(&state, epoch)?;
-                    let pending = state
-                        .pending
-                        .remove(&response.request_id)
-                        .ok_or_else(invalid_host_frame)?;
-                    if pending.epoch != epoch {
-                        return Err(invalid_host_frame());
-                    }
-                    pending
-                };
-                fail_pending(vec![pending], reason);
-                Ok(())
-            }
-            Some(Payload::Open(_)) | None => Err(invalid_host_frame()),
-        }
-    }
-
-    async fn detach(&self, epoch: u64) {
-        let stale = {
-            let mut state = self.inner.lock().await;
-            if state.active.as_ref().map(|active| active.epoch) != Some(epoch) {
-                return;
-            }
-            state.active = None;
-            take_pending(&mut state, |pending| pending.epoch == epoch)
-        };
-        fail_pending(stale, BridgeFailure::Unavailable);
-    }
-
-    async fn submit(
-        &self,
-        request: v1::CredentialBridgeRequest,
-    ) -> Result<BridgeHttpResponse, BridgeFailure> {
-        let request_id = request.request_id.clone();
-        let (start_tx, start_rx) = oneshot::channel();
-        let (body_tx, body_rx) = mpsc::channel(RESPONSE_BODY_BUFFER);
-        let completed = Arc::new(AtomicBool::new(false));
-        let (epoch, output) = {
-            let mut state = self.inner.lock().await;
-            let active = state.active.as_ref().ok_or(BridgeFailure::Unavailable)?;
-            if state.pending.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
-                return Err(BridgeFailure::Unavailable);
-            }
-            if state.pending.contains_key(&request_id) {
-                return Err(BridgeFailure::Unavailable);
-            }
-            let epoch = active.epoch;
-            let output = active.output.clone();
-            state.pending.insert(
-                request_id.clone(),
-                PendingResponse {
-                    epoch,
-                    phase: ResponsePhase::AwaitingStart,
-                    received_bytes: 0,
-                    start: Some(start_tx),
-                    body: body_tx,
-                    completed: Arc::clone(&completed),
-                },
-            );
-            (epoch, output)
-        };
-        let mut cancellation = PendingCancellation::new(self.clone(), request_id.clone(), epoch);
-
-        let send = output.send(Ok(guest_message(
-            v1::credential_bridge_guest_message::Payload::Request(request),
-        )));
-        if !matches!(
-            tokio::time::timeout(HOST_SEND_TIMEOUT, send).await,
-            Ok(Ok(()))
-        ) {
-            self.detach(epoch).await;
-            cancellation.disarm();
-            return Err(BridgeFailure::Unavailable);
-        }
-
-        let start = match tokio::time::timeout(FIRST_RESPONSE_TIMEOUT, start_rx).await {
-            Ok(Ok(Ok(start))) => start,
-            Ok(Ok(Err(error))) => return Err(error),
-            Ok(Err(_)) | Err(_) => {
-                self.cancel(&request_id, epoch).await;
-                cancellation.disarm();
-                return Err(BridgeFailure::Unavailable);
-            }
-        };
-        Ok(BridgeHttpResponse {
-            start,
-            body: BridgeBodyStream {
-                inner: ReceiverStream::new(body_rx),
-                cancellation,
-                completed,
-                failure_emitted: false,
-            },
-        })
-    }
-
-    async fn cancel(&self, request_id: &str, epoch: u64) {
-        let output = {
-            let mut state = self.inner.lock().await;
-            let Some(pending) = state.pending.get_mut(request_id) else {
-                return;
-            };
-            if pending.epoch != epoch || pending.phase == ResponsePhase::Cancelled {
-                return;
-            }
-            pending.phase = ResponsePhase::Cancelled;
-            drop(pending.start.take());
-            state
-                .active
-                .as_ref()
-                .filter(|active| active.epoch == epoch)
-                .map(|active| active.output.clone())
-        };
-        if let Some(output) = output {
-            let _ = output.try_send(Ok(guest_message(
-                v1::credential_bridge_guest_message::Payload::Cancel(v1::CredentialBridgeCancel {
-                    request_id: request_id.to_owned(),
-                }),
-            )));
-        }
+        // DaemonService has already authenticated the caller, and the first
+        // Open above matched its configured generation. Only now activate.
+        let (prepared, output) = self.shared()?.prepare_connection()?;
+        let connection = prepared.activate(input).await?;
+        tokio::spawn(connection.run());
+        Ok(CredentialBridgeConnection { output })
     }
 
     pub(crate) fn prepare_ingress(&self) -> Result<Option<CredentialIngress>, io::Error> {
@@ -478,6 +111,12 @@ impl CredentialBridge {
             return Ok(None);
         };
         validate_config(config)?;
+        let bridge = self.shared().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "credential bridge configuration is invalid",
+            )
+        })?;
         remove_stale_socket(&config.ingress_socket)?;
         let listener = UnixListener::bind(&config.ingress_socket)?;
         std::fs::set_permissions(
@@ -496,7 +135,7 @@ impl CredentialBridge {
                 inner: listener,
                 uid: config.ingress_uid,
             },
-            bridge: self.clone(),
+            bridge: bridge.clone(),
             socket: SocketGuard {
                 path: config.ingress_socket.clone(),
                 device: metadata.dev(),
@@ -504,11 +143,6 @@ impl CredentialBridge {
             },
         }))
     }
-}
-
-struct BridgeHttpResponse {
-    start: ResponseStart,
-    body: BridgeBodyStream,
 }
 
 impl CredentialIngress {
@@ -528,237 +162,10 @@ impl CredentialIngress {
 }
 
 async fn handle_responses(
-    State(bridge): State<CredentialBridge>,
+    State(bridge): State<SharedCredentialBridge>,
     request: Request<Body>,
 ) -> Response<Body> {
-    match prepare_guest_request(request).await {
-        Ok(request) => match bridge.submit(request).await {
-            Ok(response) => {
-                let mut built = Response::builder().status(response.start.status);
-                if let Some(headers) = built.headers_mut() {
-                    *headers = response.start.headers;
-                }
-                built
-                    .body(Body::from_stream(response.body))
-                    .unwrap_or_else(|_| fixed_response(StatusCode::BAD_GATEWAY))
-            }
-            Err(error) => fixed_response(error.status()),
-        },
-        Err(status) => fixed_response(status),
-    }
-}
-
-async fn prepare_guest_request(
-    request: Request<Body>,
-) -> Result<v1::CredentialBridgeRequest, StatusCode> {
-    if request.method() != Method::POST
-        || request.uri().path() != "/v1/responses"
-        || request.uri().query().is_some()
-        || request.uri().scheme().is_some()
-        || request.uri().authority().is_some()
-    {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let headers = headers_to_proto(request.headers()).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let body = to_bytes(request.into_body(), CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES)
-        .await
-        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
-    Ok(v1::CredentialBridgeRequest {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        method: Method::POST.as_str().to_owned(),
-        path: "/responses".to_owned(),
-        query: String::new(),
-        headers,
-        body: body.to_vec(),
-    })
-}
-
-fn headers_to_proto(headers: &HeaderMap) -> Result<Vec<v1::CredentialHttpHeader>, ()> {
-    if headers.len() > CREDENTIAL_BRIDGE_MAX_HEADERS {
-        return Err(());
-    }
-    let mut total = 0_usize;
-    let mut result = Vec::with_capacity(headers.len());
-    for (name, value) in headers {
-        if prohibited_framing_header(name) {
-            continue;
-        }
-        total = total
-            .checked_add(name.as_str().len())
-            .and_then(|bytes| bytes.checked_add(value.as_bytes().len()))
-            .ok_or(())?;
-        if name.as_str().len() > CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES
-            || value.as_bytes().len() > CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES
-            || total > CREDENTIAL_BRIDGE_MAX_HEADER_BYTES
-        {
-            return Err(());
-        }
-        result.push(v1::CredentialHttpHeader {
-            name: name.as_str().to_owned(),
-            value: value.as_bytes().to_vec(),
-        });
-    }
-    Ok(result)
-}
-
-fn headers_from_proto(headers: &[v1::CredentialHttpHeader]) -> Result<HeaderMap, Status> {
-    if headers.len() > CREDENTIAL_BRIDGE_MAX_HEADERS {
-        return Err(invalid_host_frame());
-    }
-    let mut total = 0_usize;
-    let mut result = HeaderMap::new();
-    for header in headers {
-        if header.name.len() > CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES
-            || header.value.len() > CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES
-        {
-            return Err(invalid_host_frame());
-        }
-        total = total
-            .checked_add(header.name.len())
-            .and_then(|bytes| bytes.checked_add(header.value.len()))
-            .ok_or_else(invalid_host_frame)?;
-        if total > CREDENTIAL_BRIDGE_MAX_HEADER_BYTES {
-            return Err(invalid_host_frame());
-        }
-        let name =
-            HeaderName::from_bytes(header.name.as_bytes()).map_err(|_| invalid_host_frame())?;
-        if name.as_str() != header.name || prohibited_framing_header(&name) {
-            return Err(invalid_host_frame());
-        }
-        let value = HeaderValue::from_bytes(&header.value).map_err(|_| invalid_host_frame())?;
-        result.append(name, value);
-    }
-    Ok(result)
-}
-
-fn prohibited_framing_header(name: &HeaderName) -> bool {
-    *name == CONNECTION
-        || *name == CONTENT_LENGTH
-        || *name == TRANSFER_ENCODING
-        || *name == UPGRADE
-        || name.as_str() == "proxy-connection"
-        || name.as_str() == "keep-alive"
-        || name.as_str() == "trailer"
-}
-
-fn fixed_response(status: StatusCode) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(Body::from("credential route unavailable\n"))
-        .expect("fixed credential response is valid")
-}
-
-fn guest_message(
-    payload: v1::credential_bridge_guest_message::Payload,
-) -> v1::CredentialBridgeGuestMessage {
-    v1::CredentialBridgeGuestMessage {
-        payload: Some(payload),
-    }
-}
-
-fn invalid_host_frame() -> Status {
-    Status::invalid_argument("credential bridge host frame is invalid")
-}
-
-fn require_active_epoch(state: &BridgeState, epoch: u64) -> Result<(), Status> {
-    if state.active.as_ref().map(|active| active.epoch) == Some(epoch) {
-        Ok(())
-    } else {
-        Err(Status::aborted("credential bridge was replaced"))
-    }
-}
-
-fn take_pending(
-    state: &mut BridgeState,
-    predicate: impl Fn(&PendingResponse) -> bool,
-) -> Vec<PendingResponse> {
-    let keys = state
-        .pending
-        .iter()
-        .filter_map(|(key, pending)| predicate(pending).then_some(key.clone()))
-        .collect::<Vec<_>>();
-    keys.into_iter()
-        .filter_map(|key| state.pending.remove(&key))
-        .collect()
-}
-
-fn fail_pending(pending: Vec<PendingResponse>, failure: BridgeFailure) {
-    for mut pending in pending {
-        if let Some(start) = pending.start.take() {
-            let _ = start.send(Err(failure));
-        } else {
-            let _ = pending.body.try_send(Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "credential bridge response failed",
-            )));
-        }
-    }
-}
-
-impl BridgeFailure {
-    fn status(self) -> StatusCode {
-        match self {
-            Self::Denied => StatusCode::FORBIDDEN,
-            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Upstream | Self::TooLarge => StatusCode::BAD_GATEWAY,
-        }
-    }
-}
-
-impl Stream for BridgeBodyStream {
-    type Item = ResponseBodyItem;
-
-    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(context) {
-            Poll::Ready(Some(Err(error))) => {
-                self.cancellation.disarm();
-                self.failure_emitted = true;
-                Poll::Ready(Some(Err(error)))
-            }
-            Poll::Ready(None) => {
-                self.cancellation.disarm();
-                if self.completed.load(Ordering::Acquire) || self.failure_emitted {
-                    Poll::Ready(None)
-                } else {
-                    self.failure_emitted = true;
-                    Poll::Ready(Some(Err(io::Error::new(
-                        io::ErrorKind::ConnectionAborted,
-                        "credential bridge response ended without completion",
-                    ))))
-                }
-            }
-            other => other,
-        }
-    }
-}
-
-impl PendingCancellation {
-    fn new(bridge: CredentialBridge, request_id: String, epoch: u64) -> Self {
-        Self {
-            bridge,
-            request_id: Some(request_id),
-            epoch,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.request_id = None;
-    }
-}
-
-impl Drop for PendingCancellation {
-    fn drop(&mut self) {
-        if let Some(request_id) = self.request_id.take() {
-            let bridge = self.bridge.clone();
-            let epoch = self.epoch;
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    bridge.cancel(&request_id, epoch).await;
-                });
-            }
-        }
-    }
+    bridge.respond(request).await
 }
 
 impl axum::serve::Listener for CredentialIngressListener {
@@ -846,7 +253,6 @@ mod tests {
     use codewire_gateway_proto::daemon::v1::credential_bridge_guest_message::Payload as GuestPayload;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::oneshot;
-    use tokio_stream::StreamExt as _;
     use tokio_stream::wrappers::TcpListenerStream;
 
     use super::*;
@@ -1083,6 +489,19 @@ mod tests {
                 if status.code() == tonic::Code::FailedPrecondition
         ));
 
+        let wrong_generation = match client
+            .open_credential_bridge(harness.environment_id, harness.generation + 1)
+            .await
+        {
+            Ok(_) => panic!("wrong generation must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            wrong_generation,
+            SessionClientError::Status(status)
+                if status.code() == tonic::Code::FailedPrecondition
+        ));
+
         let wrong_token = harness.client("wrong-generation-token").await;
         let error = match wrong_token
             .open_credential_bridge(harness.environment_id, harness.generation)
@@ -1170,185 +589,5 @@ mod tests {
         assert!(response.starts_with(b"HTTP/1.1 503 Service Unavailable"));
 
         harness.stop().await;
-    }
-
-    #[tokio::test]
-    async fn cancelled_guest_request_tolerates_late_host_frames_without_detaching_bridge() {
-        let bridge = CredentialBridge::new(Some(CredentialBridgeConfig {
-            environment_id: uuid::Uuid::new_v4(),
-            environment_generation: 9,
-            ingress_socket: PathBuf::from("/run/codewire/test-credential.sock"),
-            ingress_uid: 1_000,
-            ingress_gid: 1_000,
-        }));
-        let (output, mut requests) = mpsc::channel(HOST_OUTPUT_BUFFER);
-        let (cancel, _cancelled) = oneshot::channel();
-        let epoch = 1;
-        {
-            let mut state = bridge.inner.lock().await;
-            state.next_epoch = epoch;
-            state.active = Some(ActiveHost {
-                epoch,
-                output,
-                cancel,
-            });
-        }
-
-        let request_id = "cancelled-request".to_owned();
-        let submitted = {
-            let bridge = bridge.clone();
-            let request_id = request_id.clone();
-            tokio::spawn(async move {
-                bridge
-                    .submit(v1::CredentialBridgeRequest {
-                        request_id,
-                        method: "POST".to_owned(),
-                        path: "/responses".to_owned(),
-                        query: String::new(),
-                        headers: Vec::new(),
-                        body: b"{}".to_vec(),
-                    })
-                    .await
-            })
-        };
-        assert!(matches!(
-            requests.recv().await.unwrap().unwrap().payload,
-            Some(GuestPayload::Request(_))
-        ));
-        submitted.abort();
-        match submitted.await {
-            Err(error) => assert!(error.is_cancelled()),
-            Ok(_) => panic!("cancelled submission completed"),
-        }
-        let cancelled = tokio::time::timeout(Duration::from_secs(1), requests.recv())
-            .await
-            .expect("cancel frame timeout")
-            .expect("cancel frame")
-            .expect("cancel frame status");
-        assert!(matches!(
-            cancelled.payload,
-            Some(GuestPayload::Cancel(v1::CredentialBridgeCancel { request_id: id }))
-                if id == request_id
-        ));
-
-        for payload in [
-            v1::credential_bridge_host_message::Payload::ResponseStart(
-                v1::CredentialBridgeResponseStart {
-                    request_id: request_id.clone(),
-                    status_code: 200,
-                    headers: Vec::new(),
-                },
-            ),
-            v1::credential_bridge_host_message::Payload::ResponseBody(
-                v1::CredentialBridgeResponseBody {
-                    request_id: request_id.clone(),
-                    data: b"late".to_vec(),
-                },
-            ),
-            v1::credential_bridge_host_message::Payload::ResponseEnd(
-                v1::CredentialBridgeResponseEnd {
-                    request_id: request_id.clone(),
-                },
-            ),
-        ] {
-            bridge
-                .apply_host_message(
-                    epoch,
-                    v1::CredentialBridgeHostMessage {
-                        payload: Some(payload),
-                    },
-                )
-                .await
-                .expect("late host frame after cancellation");
-        }
-
-        let second_id = "second-request".to_owned();
-        let second = {
-            let bridge = bridge.clone();
-            let second_id = second_id.clone();
-            tokio::spawn(async move {
-                bridge
-                    .submit(v1::CredentialBridgeRequest {
-                        request_id: second_id,
-                        method: "POST".to_owned(),
-                        path: "/responses".to_owned(),
-                        query: String::new(),
-                        headers: Vec::new(),
-                        body: b"{}".to_vec(),
-                    })
-                    .await
-            })
-        };
-        assert!(matches!(
-            requests.recv().await.unwrap().unwrap().payload,
-            Some(GuestPayload::Request(_))
-        ));
-        bridge
-            .apply_host_message(
-                epoch,
-                v1::CredentialBridgeHostMessage {
-                    payload: Some(
-                        v1::credential_bridge_host_message::Payload::ResponseFailure(
-                            v1::CredentialBridgeResponseFailure {
-                                request_id: second_id,
-                                reason: v1::CredentialBridgeFailureReason::Denied as i32,
-                            },
-                        ),
-                    ),
-                },
-            )
-            .await
-            .expect("second response failure");
-        assert!(matches!(second.await.unwrap(), Err(BridgeFailure::Denied)));
-        let state = bridge.inner.lock().await;
-        assert_eq!(
-            state.active.as_ref().map(|active| active.epoch),
-            Some(epoch)
-        );
-        assert!(state.pending.is_empty());
-    }
-
-    #[tokio::test]
-    async fn response_stream_requires_an_explicit_end_for_clean_eof() {
-        let (body, receiver) = mpsc::channel(1);
-        body.try_send(Ok(WireBytes::from_static(b"partial")))
-            .expect("buffer partial body");
-        drop(body);
-        let completed = Arc::new(AtomicBool::new(false));
-        let mut stream = BridgeBodyStream {
-            inner: ReceiverStream::new(receiver),
-            cancellation: PendingCancellation {
-                bridge: CredentialBridge::new(None),
-                request_id: None,
-                epoch: 0,
-            },
-            completed: Arc::clone(&completed),
-            failure_emitted: false,
-        };
-
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            WireBytes::from_static(b"partial")
-        );
-        assert_eq!(
-            stream.next().await.unwrap().unwrap_err().kind(),
-            io::ErrorKind::ConnectionAborted
-        );
-        assert!(stream.next().await.is_none());
-
-        let (body, receiver) = mpsc::channel(1);
-        completed.store(true, Ordering::Release);
-        drop(body);
-        let mut stream = BridgeBodyStream {
-            inner: ReceiverStream::new(receiver),
-            cancellation: PendingCancellation {
-                bridge: CredentialBridge::new(None),
-                request_id: None,
-                epoch: 0,
-            },
-            completed,
-            failure_emitted: false,
-        };
-        assert!(stream.next().await.is_none());
     }
 }

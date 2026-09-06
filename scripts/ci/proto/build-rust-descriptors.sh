@@ -23,8 +23,10 @@ cd "$ROOT/proto"
   --path codewire/internal/v1/coordinate.proto \
   --path codewire/internal/v1/gateway_binding.proto \
   --path codewire/internal/v1/mesh_authorization.proto \
+  --path codewire/v1/access_profile.proto \
   --path codewire/v1/api_key.proto \
   --path codewire/v1/common.proto \
+  --path codewire/v1/credential.proto \
   --path codewire/v1/environment.proto \
   --path codewire/v1/environment_session.proto \
   --path codewire/v1/exec.proto \

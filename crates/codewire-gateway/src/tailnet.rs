@@ -795,6 +795,7 @@ mod tests {
             udp_relay_allocator_token: None,
             udp_relay_bind_addrs: Vec::new(),
             tailnet: Some(tailnet),
+            credentials: None,
             docker_proxy: Some(DockerProxyConfig {
                 listen_sock: "/codewire/run/docker.sock".into(),
                 upstream_sock: "/var/run/docker/docker.sock".into(),

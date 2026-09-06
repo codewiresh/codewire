@@ -34,8 +34,8 @@ use super::template::{
     workspace_daemon_service_name,
 };
 use super::{
-    CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_TYPE, SANDBOX_GROUP, claim_name,
-    render_sandbox_claim,
+    CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
+    SANDBOX_GROUP, claim_name, render_sandbox_claim, runtime_identity_labels,
 };
 
 /// Mirrors `sandbox.ProbeResult`.
@@ -57,6 +57,21 @@ pub struct ProbeResult {
 pub struct WorkspacePodIdentity {
     pub name: String,
     pub uid: String,
+}
+
+/// Exact controller-owned objects observed before metadata publication. This
+/// contains no token and confers no credential authority.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RuntimeIdentityObservation {
+    sandbox_uid: String,
+    pod: WorkspacePodIdentity,
+}
+
+struct RuntimeIdentitySnapshot {
+    claim: DynamicObject,
+    sandbox: DynamicObject,
+    pod: Pod,
+    observation: RuntimeIdentityObservation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +145,211 @@ fn legacy_shared_warm_pool_name_matches(name: &str, template_name: &str) -> bool
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
+}
+
+#[path = "client_credentials.rs"]
+mod credentials;
+
+#[cfg(test)]
+#[path = "client_runtime_identity_tests.rs"]
+mod runtime_identity_tests;
+
+fn runtime_object_uid<'a>(
+    metadata: &'a ObjectMeta,
+    namespace: &str,
+    name: &str,
+) -> anyhow::Result<&'a str> {
+    anyhow::ensure!(
+        metadata.namespace.as_deref() == Some(namespace)
+            && metadata.name.as_deref() == Some(name)
+            && metadata.deletion_timestamp.is_none(),
+        "runtime identity object is not current"
+    );
+    metadata
+        .uid
+        .as_deref()
+        .filter(|uid| !uid.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("runtime identity object has no UID"))
+}
+
+fn require_runtime_controller(
+    metadata: &ObjectMeta,
+    api: &str,
+    kind: &str,
+    name: &str,
+    uid: &str,
+) -> anyhow::Result<()> {
+    let owners = metadata.owner_references.as_deref().unwrap_or_default();
+    let mut controllers = owners.iter().filter(|owner| owner.controller == Some(true));
+    anyhow::ensure!(
+        matches!((controllers.next(), controllers.next()), (Some(owner), None)
+        if owner.api_version == api && owner.kind == kind && owner.name == name && owner.uid == uid),
+        "runtime identity controller does not match"
+    );
+    Ok(())
+}
+
+fn require_runtime_claim(
+    claim: &DynamicObject,
+    namespace: &str,
+    opts: &ClaimOpts,
+    name: &str,
+    uid: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !opts.environment_id.is_empty()
+            && !opts.org_id.is_empty()
+            && opts.operation_generation > 0
+            && !uid.is_empty()
+            && name == claim_name(&opts.environment_id),
+        "runtime identity authority is incomplete"
+    );
+    anyhow::ensure!(
+        claim
+            .types
+            .as_ref()
+            .is_some_and(|types| types.api_version == super::EXTENSIONS_API_VERSION
+                && types.kind == "SandboxClaim"),
+        "runtime identity Claim type does not match"
+    );
+    anyhow::ensure!(
+        runtime_object_uid(&claim.metadata, namespace, name)? == uid,
+        "runtime identity Claim was replaced"
+    );
+    let labels = claim
+        .metadata
+        .labels
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("runtime identity Claim owner is missing"))?;
+    for (key, value) in [
+        (LABEL_ENV_ID, opts.environment_id.as_str()),
+        (LABEL_ORG_ID, opts.org_id.as_str()),
+        (LABEL_TYPE, "sandbox"),
+    ] {
+        anyhow::ensure!(
+            labels.get(key).map(String::as_str) == Some(value),
+            "runtime identity Claim owner does not match"
+        );
+    }
+    if let Some(generation) = labels.get(super::LABEL_OPERATION_GENERATION) {
+        let generation = generation
+            .parse::<i64>()
+            .map_err(|_| anyhow::anyhow!("runtime identity Claim generation is invalid"))?;
+        anyhow::ensure!(
+            generation > 0 && generation <= opts.operation_generation,
+            "runtime identity Claim generation is newer than its authority"
+        );
+    }
+    Ok(())
+}
+
+fn json_labels_match(value: Option<&Value>, expected: &BTreeMap<String, String>) -> bool {
+    value.and_then(Value::as_object).is_some_and(|labels| {
+        expected
+            .iter()
+            .all(|(key, value)| labels.get(key).and_then(Value::as_str) == Some(value.as_str()))
+    })
+}
+
+fn runtime_claim_labels_match(claim: &DynamicObject, opts: &ClaimOpts) -> bool {
+    let claim_labels = runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "sandbox",
+    );
+    let pod_labels = runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "workspace",
+    );
+    claim.metadata.labels.as_ref().is_some_and(|labels| {
+        claim_labels
+            .iter()
+            .all(|(key, value)| labels.get(key) == Some(value))
+    }) && json_labels_match(
+        claim.data.pointer("/spec/additionalPodMetadata/labels"),
+        &pod_labels,
+    )
+}
+
+fn runtime_claim_identity_patch(
+    claim: &DynamicObject,
+    opts: &ClaimOpts,
+) -> anyhow::Result<Option<Value>> {
+    if runtime_claim_labels_match(claim, opts) {
+        return Ok(None);
+    }
+    let uid = claim
+        .metadata
+        .uid
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("runtime identity Claim has no UID"))?;
+    let resource_version = claim
+        .metadata
+        .resource_version
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("runtime identity Claim has no resource version"))?;
+    Ok(Some(serde_json::json!({
+        "metadata": {
+            "uid": uid, "resourceVersion": resource_version,
+            "labels": runtime_identity_labels(&opts.environment_id, &opts.org_id, opts.operation_generation, "sandbox"),
+        },
+        "spec": { "additionalPodMetadata": {
+            "labels": runtime_identity_labels(&opts.environment_id, &opts.org_id, opts.operation_generation, "workspace"),
+        } },
+    })))
+}
+
+fn runtime_ready(object: &DynamicObject, observed_generation: Option<i64>) -> bool {
+    let Some(conditions) = object
+        .data
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let mut ready = conditions
+        .iter()
+        .filter(|condition| condition.get("type").and_then(Value::as_str) == Some("Ready"));
+    matches!((ready.next(), ready.next()), (Some(condition), None)
+        if condition.get("status").and_then(Value::as_str) == Some("True")
+            && observed_generation.is_none_or(|generation| generation > 0
+                && condition.get("observedGeneration").and_then(Value::as_i64) == Some(generation)))
+}
+
+fn runtime_identity_converged(
+    claim: &DynamicObject,
+    sandbox: &DynamicObject,
+    pod: &Pod,
+    opts: &ClaimOpts,
+) -> bool {
+    let labels = runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "workspace",
+    );
+    let Some(generation) = sandbox.metadata.generation else {
+        return false;
+    };
+    let Some(status) = &pod.status else {
+        return false;
+    };
+    let conditions = status.conditions.as_deref().unwrap_or_default();
+    let mut ready = conditions
+        .iter()
+        .filter(|condition| condition.type_ == "Ready");
+    runtime_claim_labels_match(claim, opts)
+        && json_labels_match(sandbox.data.pointer("/spec/podTemplate/metadata/labels"), &labels)
+        && pod.metadata.labels.as_ref().is_some_and(|current| labels.iter().all(|(key, value)| current.get(key) == Some(value)))
+        && runtime_ready(claim, None) // Claim Ready forwards the Sandbox generation.
+        && runtime_ready(sandbox, Some(generation))
+        && status.phase.as_deref() == Some("Running")
+        && matches!((ready.next(), ready.next()), (Some(condition), None) if condition.status == "True")
 }
 
 /// Namespaced client for SandboxClaim operations.
@@ -672,6 +892,186 @@ impl SandboxClient {
         }
     }
 
+    /// Publish only the existing operation's association labels onto the exact
+    /// DB-bound Claim. The worker holds its ActivityAuthority row fence while
+    /// this short mutation runs. Controller propagation is a separate wait.
+    pub async fn reconcile_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<()> {
+        let claim = self
+            .claims
+            .get(expected_claim_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Claim is unavailable"))?;
+        require_runtime_claim(
+            &claim,
+            &self.namespace,
+            opts,
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        let Some(patch) = runtime_claim_identity_patch(&claim, opts)? else {
+            return Ok(());
+        };
+        // Both resourceVersion and UID are fixed from the validated read.
+        // Conflicts return to the authority-owning caller; never retry a blind
+        // same-name replacement or copy a newer object's resourceVersion.
+        let updated = self
+            .claims
+            .patch(
+                expected_claim_name,
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Claim update was not admitted"))?;
+        require_runtime_claim(
+            &updated,
+            &self.namespace,
+            opts,
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        anyhow::ensure!(
+            runtime_claim_labels_match(&updated, opts),
+            "runtime identity Claim update did not converge"
+        );
+        Ok(())
+    }
+
+    async fn read_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<RuntimeIdentitySnapshot> {
+        let claim = self
+            .claims
+            .get(expected_claim_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Claim is unavailable"))?;
+        require_runtime_claim(
+            &claim,
+            &self.namespace,
+            opts,
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        let sandbox_name = claim
+            .data
+            .pointer("/status/sandbox/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("runtime identity Sandbox is not bound"))?;
+        let sandbox = self
+            .sandboxes()
+            .get(sandbox_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Sandbox is unavailable"))?;
+        anyhow::ensure!(
+            sandbox
+                .types
+                .as_ref()
+                .is_some_and(|types| types.api_version == "agents.x-k8s.io/v1beta1"
+                    && types.kind == "Sandbox"),
+            "runtime identity Sandbox type does not match"
+        );
+        let sandbox_uid = runtime_object_uid(&sandbox.metadata, &self.namespace, sandbox_name)?;
+        require_runtime_controller(
+            &sandbox.metadata,
+            super::EXTENSIONS_API_VERSION,
+            "SandboxClaim",
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        let pod_name = sandbox
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("agents.x-k8s.io/pod-name"))
+            .map(String::as_str)
+            .unwrap_or(sandbox_name);
+        let pod = self
+            .pods()
+            .get(pod_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Pod is unavailable"))?;
+        let pod_uid = runtime_object_uid(&pod.metadata, &self.namespace, pod_name)?;
+        require_runtime_controller(
+            &pod.metadata,
+            "agents.x-k8s.io/v1beta1",
+            "Sandbox",
+            sandbox_name,
+            sandbox_uid,
+        )?;
+        let observation = RuntimeIdentityObservation {
+            sandbox_uid: sandbox_uid.to_owned(),
+            pod: WorkspacePodIdentity {
+                name: pod_name.to_owned(),
+                uid: pod_uid.to_owned(),
+            },
+        };
+        Ok(RuntimeIdentitySnapshot {
+            claim,
+            sandbox,
+            pod,
+            observation,
+        })
+    }
+
+    /// Capture the currently owned Sandbox/Pod UIDs, including the controller's
+    /// explicit Pod-name annotation. This is a lifecycle observation, not
+    /// authentication or a broker grant.
+    pub async fn observe_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<RuntimeIdentityObservation> {
+        Ok(self
+            .read_claim_runtime_identity(opts, expected_claim_name, expected_claim_uid)
+            .await?
+            .observation)
+    }
+
+    /// Observe propagation through the exact Claim -> Sandbox -> Pod chain.
+    /// This must run outside the SQL mutation lock. Replacing any pinned UID
+    /// requires a fresh lifecycle observation, never relabeling another Pod.
+    pub async fn wait_for_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        expected: &RuntimeIdentityObservation,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let snapshot = self
+                    .read_claim_runtime_identity(opts, expected_claim_name, expected_claim_uid)
+                    .await?;
+                anyhow::ensure!(
+                    &snapshot.observation == expected,
+                    "runtime identity Sandbox or Pod was replaced"
+                );
+                if runtime_identity_converged(
+                    &snapshot.claim,
+                    &snapshot.sandbox,
+                    &snapshot.pod,
+                    opts,
+                ) {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("runtime identity metadata propagation timed out"))?
+    }
+
     /// Mirrors `createSandboxClaimDynamic`: create, or reuse on
     /// AlreadyExists. Returns (name, uid).
     pub async fn create_sandbox_claim(
@@ -1204,6 +1604,7 @@ impl SandboxClient {
             anyhow::bail!("ensure gateway stack: environment_id is required");
         }
         let opts = self.resolve_gateway_direct_udp_service_opts(opts).await?;
+        self.ensure_credential_bootstrap(&opts).await?;
         self.ensure_gateway_host_key_secret(&opts).await?;
         self.ensure_dynamic(
             self.services(),
@@ -1312,6 +1713,7 @@ impl SandboxClient {
         timeout: Duration,
     ) -> anyhow::Result<()> {
         self.delete_gateway_stack(env_id).await?;
+        self.delete_credential_bootstrap(env_id, timeout).await?;
         delete_dynamic_until_absent(
             &self.secrets(),
             &gateway_host_key_secret_name(env_id),
@@ -1504,6 +1906,16 @@ impl SandboxClient {
         }
 
         for (kind, api, name) in [
+            (
+                "Certificate",
+                self.credential_certificates(),
+                super::template::credential_gateway_certificate_name(env_id),
+            ),
+            (
+                "ConfigMap",
+                self.credential_config_maps(),
+                super::template::credential_codex_config_name(env_id),
+            ),
             (
                 "Deployment",
                 self.deployments(),
@@ -1981,6 +2393,7 @@ impl SandboxClient {
     /// otherwise update (3 retries on resource-version conflicts).
     pub async fn ensure_sandbox_template(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         opts.validate_confidential_storage_manifest()?;
+        self.ensure_credential_bootstrap(opts).await?;
         let name = &opts.name;
         let templates = self.templates();
         let rendered = render_sandbox_template(&self.namespace, opts);

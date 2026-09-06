@@ -79,6 +79,12 @@ codewire.localhost {
 	# gets a Connect-shaped answer from a service, never dashboard HTML.
 	# These matchers are drift-checked against proto/ by
 	# scripts/checks/repo_checks.py connect-edge-routing.
+	# OAuth enrollment and lifecycle mutations have their own authority.
+	handle /codewire.v1.CredentialMutationService/* {
+		reverse_proxy localhost:8086 {
+			flush_interval -1
+		}
+	}
 	handle /codewire.* {
 		reverse_proxy localhost:8084
 	}

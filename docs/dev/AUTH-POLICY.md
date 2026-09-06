@@ -62,7 +62,9 @@ to bootstrap gateway binding.
   `codewire-client` OAuth implementation and `TokenProvider`. The CLI uses the
   OAuth device grant; clients with a system browser use PKCE.
 - Public SDKs and non-interactive agents use an organization-scoped `cw_` API
-  key through their generated Connect client wrapper.
+  key through their generated Connect client wrapper for organization APIs.
+  Personal access profiles instead require the existing user OAuth bearer;
+  supplying an organization API key cannot act as its owning user.
 - Gateway binding bootstrap uses an exact-audience, Pod-bound Kubernetes token.
   Coordinator and daemon calls use distinct environment-scoped HMAC
   capabilities; the retired environment bearer is unsupported.
@@ -77,6 +79,58 @@ to bootstrap gateway binding.
   a platform credential.
 
 ## Protocol and error boundaries
+
+### Long-running OAuth-authorized publication
+
+An isolated enrollment mount accepts only the existing OAuth user bearer through
+`ConnectAuthLayer::oauth_bearer_only`. Cookies and organization API keys cannot
+substitute for it. Shared authentication can retain an opaque, process-local
+`OAuthBearerAuthority` containing the original token's digest, user, client and
+expiry, never its raw value. This reference is not a new credential flavor.
+
+Before saving a provider credential, recheck that exact original authority and
+hold its user/client/token locks through the same credential transaction. The
+live token must retain `codewire.api`, its exact identity and original expiry;
+its user/client must still exist and the client must remain enabled. A renewed
+login cannot rescue the original operation. Absolute and monotonic deadlines
+remain pinned to initial authentication and the enrollment's original duration.
+Prepare protected material before taking locks, not during the transaction.
+
+Transaction-local PostgreSQL deadlines bound blocked statements and idle lock
+ownership without extending an already-shorter configured timeout. The Rust
+timer still bounds admission; neither timer guarantees a rollback acknowledgement
+across network loss. Recheck original deadlines before committing. If COMMIT
+may have been issued, a missing reply is an unknown outcome: inspect saved
+metadata before retrying and never automatically revoke possibly stored tokens.
+
+### Kubernetes Pod identity
+
+The optional `codewire-server-core/kubernetes-identity` verifier has three
+fixed purposes: gateway binding, credential gateway, and credential workspace.
+Their audiences are distinct. A caller cannot choose an arbitrary audience or
+substitute a token issued for another purpose. Existing gateway binding retains
+`codewire.internal.gateway-binding.v1`; credential purposes use
+`codewire.internal.credential-gateway.v1` and
+`codewire.internal.credential-workspace.v1`. These are Kubernetes projected Pod
+tokens, not another Codewire user bearer flavor.
+
+The shared verifier requires one bounded canonical bearer, a successful
+exact-audience TokenReview, the expected ServiceAccount and singular reviewed
+Pod coordinates. It then reads a strictly typed, future expiry from those exact
+reviewed JWT bytes. An echoed response token, an unverified payload, or the
+configured projection lifetime cannot supply or extend expiry. Timestamp and
+monotonic-conversion bounds fail closed. Owned token-bearing request/response
+models and decoded payload buffers are cleared on success, error, timeout and
+cancellation; errors retain no token or upstream message.
+
+Verified identity is not a credential grant. Runtime authority must additionally
+check live Pod UIDs/deletion, controller association, current environment
+generation, owner/membership, pinned profile and explicit personal consent.
+The verifier alone installs no listener, TLS, role or deployment and does not
+activate platform credential delivery. Codewire OAuth access tokens remain
+opaque and use the separate canonical OAuth token-store validation path.
+
+### Product protocols
 
 OAuth/OIDC endpoints and the browser login/consent pages are permanent raw IDP
 protocol. `POST /api/oauth/device_verification` is the session-cookie-only

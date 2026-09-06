@@ -10,12 +10,19 @@ use serde_json::{Value, json};
 
 use super::{EXTENSIONS_API_VERSION, LABEL_ENV_ID, LABEL_TYPE};
 
+mod credentials;
 mod encoding;
 mod gateway;
 mod naming;
 mod network;
 mod runtime_policy;
 mod workspace;
+
+pub use credentials::{
+    CREDENTIAL_GATEWAY_HTTPS_PORT, CREDENTIAL_GATEWAY_ISSUER_NAME, CredentialRuntimeTemplateConfig,
+    credential_codex_config_name, credential_gateway_certificate_name,
+    render_credential_codex_config, render_credential_gateway_certificate,
+};
 
 #[cfg(test)]
 use encoding::gzip_base64;
@@ -120,6 +127,10 @@ pub struct TemplateOpts {
     pub runtime_profile: String,
     pub docker_mode: String,
     pub environment_id: String,
+    pub organization_id: String,
+    /// Captured existing environment operation authority, not a new generation.
+    pub operation_generation: i64,
+    pub credential_runtime: Option<CredentialRuntimeTemplateConfig>,
     pub confidential_storage_manifest_uri: String,
     pub gateway_token: String,
     pub daemon_auth_token: String,
@@ -170,6 +181,9 @@ impl fmt::Debug for TemplateOpts {
             .field("runtime_profile", &self.runtime_profile)
             .field("docker_mode", &self.docker_mode)
             .field("environment_id", &self.environment_id)
+            .field("organization_id", &self.organization_id)
+            .field("operation_generation", &self.operation_generation)
+            .field("credential_runtime", &self.credential_runtime)
             .field(
                 "confidential_storage_manifest_uri",
                 &self.confidential_storage_manifest_uri,

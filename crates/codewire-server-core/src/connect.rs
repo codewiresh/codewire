@@ -60,8 +60,9 @@ use http::{HeaderValue, Method, StatusCode, header};
 use sha2::{Digest, Sha256};
 
 use crate::auth::{
-    AuthState, AuthUser, CredentialContext, authenticate_product_credential, bearer_token,
-    require_product_access, resolve_authentication, session_cookie,
+    AuthState, AuthUser, CredentialContext, OAuthBearerAuthority, authenticate_product_credential,
+    bearer_token, require_product_access, resolve_authentication,
+    resolve_oauth_bearer_authentication, session_cookie,
 };
 use crate::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
 use crate::error::AppError;
@@ -386,6 +387,9 @@ async fn unbuffer_streaming_responses(
 ///   `permission_denied` for every method of the mount (`require_admin`
 ///   twin). Admin gating is per-Service: `codewire.admin.v1` services use
 ///   this whole-mount mode (D3).
+/// - [`ConnectAuthLayer::oauth_bearer_only`] — isolated services accept only
+///   an opaque OAuth bearer with product scope. Cookies never supply identity;
+///   API keys never enter their lookup or bookkeeping paths.
 /// - self-authenticating internal services mount without this product-user
 ///   auth layer ([`connect_router`]); their handlers must validate their
 ///   dedicated machine identity before any domain lookup.
@@ -411,10 +415,17 @@ async fn unbuffer_streaming_responses(
 #[derive(Clone)]
 pub struct ConnectAuthLayer {
     state: AuthState,
+    credential_policy: ConnectCredentialPolicy,
     admin_mount: bool,
     public_methods: BTreeSet<String>,
     admin_methods: BTreeSet<String>,
     synthetic_user_ids: BTreeSet<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ConnectCredentialPolicy {
+    Product,
+    OAuthBearerOnly,
 }
 
 impl ConnectAuthLayer {
@@ -422,10 +433,27 @@ impl ConnectAuthLayer {
     pub fn authenticated(state: AuthState) -> Self {
         Self {
             state,
+            credential_policy: ConnectCredentialPolicy::Product,
             admin_mount: false,
             public_methods: BTreeSet::new(),
             admin_methods: BTreeSet::new(),
             synthetic_user_ids: BTreeSet::new(),
+        }
+    }
+
+    /// Accept only the existing opaque Codewire OAuth bearer, with a live
+    /// subject/client, fixed token expiry and exact `codewire.api` scope.
+    ///
+    /// Unlike `authenticated`, this mount ignores cookies entirely and rejects
+    /// API keys before database access. Its pool needs only identity SELECTs:
+    /// `oidc_access_tokens(token_hash,user_id,client_id,scopes,expires_at)`,
+    /// `users(id,is_admin)` and `oidc_clients(id,disabled)`. No session, API-key,
+    /// refresh-token or signing-key authority is needed. Handlers must still
+    /// authorize the authenticated owner and resource; payload IDs confer none.
+    pub fn oauth_bearer_only(state: AuthState) -> Self {
+        Self {
+            credential_policy: ConnectCredentialPolicy::OAuthBearerOnly,
+            ..Self::authenticated(state)
         }
     }
 
@@ -829,12 +857,24 @@ async fn enforce_connect_auth(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let request_headers = req.headers().clone();
-    let session_token = session_cookie(req.headers()).map(str::to_owned);
-    let bearer = bearer_token(req.headers()).map(str::to_owned);
     let auth_timeout = connect_auth_resolution_timeout(req.headers());
     let is_get = req.method() == Method::GET;
     let auth = match bounded_authentication(
-        resolve_authentication(&layer.state, session_token.as_deref(), bearer.as_deref()),
+        async {
+            match layer.credential_policy {
+                ConnectCredentialPolicy::Product => {
+                    resolve_authentication(
+                        &layer.state,
+                        session_cookie(&request_headers),
+                        bearer_token(&request_headers),
+                    )
+                    .await
+                }
+                ConnectCredentialPolicy::OAuthBearerOnly => {
+                    resolve_oauth_bearer_authentication(&layer.state, &request_headers).await
+                }
+            }
+        },
         auth_timeout,
     )
     .await
@@ -874,6 +914,9 @@ async fn enforce_connect_auth(
         return resp;
     }
 
+    if let Some(authority) = auth.oauth_bearer_authority {
+        req.extensions_mut().insert(authority);
+    }
     req.extensions_mut().insert(auth.credential);
     req.extensions_mut().insert(auth.user);
     let mut resp = next.run(req).await;
@@ -989,6 +1032,20 @@ pub fn auth_context(
     ctx.extensions().get::<CredentialContext>().ok_or_else(|| {
         connectrpc::ConnectError::unauthenticated("request has no authenticated credential")
     })
+}
+
+/// Extract the original OAuth authority, with no raw bearer or digest exposed.
+/// Only successfully authorized OAuth requests receive this extension; cookies,
+/// API keys and public methods cannot supply it. Long-running handlers should
+/// clone this value and release their request context, not retain raw headers.
+pub fn oauth_bearer_authority(
+    ctx: &connectrpc::RequestContext,
+) -> Result<&OAuthBearerAuthority, connectrpc::ConnectError> {
+    ctx.extensions()
+        .get::<OAuthBearerAuthority>()
+        .ok_or_else(|| {
+            connectrpc::ConnectError::unauthenticated("request has no original OAuth authority")
+        })
 }
 
 // --- error wire bridge (01 renderer → Connect wire, D4) ----------------------

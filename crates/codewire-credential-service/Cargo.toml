@@ -1,0 +1,64 @@
+[package]
+name = "codewire-credential-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "Concrete private platform credential service authority"
+
+[[bin]]
+name = "codewire-credential-service"
+path = "src/main.rs"
+required-features = ["enrollment"]
+
+[features]
+default = []
+enrollment = [
+    "codewire-credential-broker/codex-enrollment",
+    "dep:codewire-protected-store",
+    "dep:codewire-proto",
+    "dep:connectrpc",
+    "dep:futures",
+    "dep:tokio-util",
+]
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+codewire-access = { workspace = true }
+# The workspace's existing broker edge enables local by default. This isolated
+# service explicitly selects platform without changing any existing consumer.
+codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["platform"] }
+codewire-platform-credentials = { workspace = true }
+codewire-protected-store = { workspace = true, features = ["platform"], optional = true }
+codewire-proto = { workspace = true, optional = true }
+codewire-server-core = { workspace = true, features = ["kubernetes-identity"] }
+codewire-tls = { workspace = true }
+connectrpc = { workspace = true, features = ["axum"], optional = true }
+futures = { workspace = true, optional = true }
+http = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true, optional = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+codewire-gateway-proto = { workspace = true }
+codewire-protected-store = { workspace = true, features = ["platform-test-support"] }
+rcgen = "0.13"
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

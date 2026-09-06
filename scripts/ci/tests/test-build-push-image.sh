@@ -25,6 +25,7 @@ readonly SERVICES_BINARIES=(
   codewire-coordinator
   codewire-db-migrate
   codewire-udp-relay
+  codewire-credential-service
 )
 
 fail() {
@@ -63,7 +64,7 @@ build_invocation_count() {
 mkdir -p "$ROOT/.tmp"
 
 verify_services_dockerfile_contract() {
-  local mount binary
+  local mount binary fixture_block
   local mounts=(
     'id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked'
     'id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked'
@@ -100,6 +101,26 @@ verify_services_dockerfile_contract() {
     fail 'promotable services image can enable test-only orchestration features'
   grep -qF 'CODEWIRE_ORCHESTRATION_FEATURES = "kind-e2e"' "$ROOT/docker-bake.hcl" ||
     fail 'non-promotable Kind services image lacks its test-only feature'
+  [[ "$(head -n 1 "$SERVICES_DOCKERFILE")" == '# syntax=docker/dockerfile:1.20' ]] ||
+    fail 'services checksum ADD requires an active Dockerfile frontend directive'
+  for binary in codex-LICENSE codex-NOTICE; do
+    grep -qxF "!deployments/docker/licenses/$binary" "$SERVICES_DOCKERIGNORE" ||
+      fail "services build context omits official Codex $binary"
+  done
+  fixture_block="$(sed -n '/^    if \[ "\$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e \]; then/,/^    fi$/p' "$SERVICES_DOCKERFILE")"
+  # The existing feature AND CI profile fence the only test-artifact build.
+  # A release image receives an empty directory, never a runtime test switch.
+  # shellcheck disable=SC2016
+  grep -qF 'test "$CODEWIRE_RUST_PROFILE" = ci' <<<"$fixture_block" ||
+    fail 'credential fixture is not bounded to the non-promotable CI profile'
+  grep -qF 'codewire-rust-build cargo test --locked --profile ci' <<<"$fixture_block" ||
+    fail 'credential fixture compilation escaped its test-only branch'
+  [[ "$(grep -cF 'cargo test --locked' "$SERVICES_DOCKERFILE")" -eq 1 ]] ||
+    fail 'services image contains an unexpected test-artifact build'
+  grep -qF 'runtime::kind::serve_kind_credential_fixture: test' <<<"$fixture_block" ||
+    fail 'services image does not validate the exact ignored fixture entrypoint'
+  grep -qF 'COPY --from=builder /out/kind-fixtures/ /codewire-kind-fixtures/' "$SERVICES_DOCKERFILE" ||
+    fail 'services-ci fixture has no explicit image artifact path'
 
   for binary in "${SERVICES_BINARIES[@]}"; do
     [[ "$(grep -cF -- "--bin ${binary}" "$SERVICES_DOCKERFILE")" -eq 1 ]] ||

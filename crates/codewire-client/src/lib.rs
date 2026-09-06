@@ -4,9 +4,11 @@
 //! typed error decoding. Product consumers use it instead of constructing raw
 //! generated clients or formatting platform route strings themselves.
 
+mod access_profiles;
 mod auth;
 mod config;
 mod coordinator;
+mod credentials;
 mod error;
 mod mesh;
 mod tailnet;
@@ -16,7 +18,8 @@ use std::time::Duration;
 
 use codewire_proto::codewire::console::v1::BillingServiceClient;
 use codewire_proto::codewire::v1::{
-    ApiKeyServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
+    AccessProfileServiceClient, ApiKeyServiceClient, CredentialMutationServiceClient,
+    CredentialServiceClient, EnvironmentServiceClient, EnvironmentSessionServiceClient,
     ExecServiceClient, FileServiceClient, MeshInviteServiceClient, MeshNetworkServiceClient,
     MeshNodeServiceClient, OrganizationServiceClient, PortServiceClient, PresetServiceClient,
     SecretServiceClient,
@@ -92,6 +95,22 @@ pub use codewire_proto::codewire::v1::{
     UploadFileResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse,
 };
 pub use codewire_proto::codewire::v1::{
+    AccessProfile, AccessProfileEntry, ClearEnvironmentAccessProfileRequest,
+    ClearEnvironmentAccessProfileResponse, CreateAccessProfileRequest, CreateAccessProfileResponse,
+    DeleteAccessProfileRequest, DeleteAccessProfileResponse, EnvironmentAccessProfileBinding,
+    GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest,
+    GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse,
+    SetEnvironmentAccessProfileRequest, SetEnvironmentAccessProfileResponse,
+    UpdateAccessProfileRequest, UpdateAccessProfileResponse, get_access_profile_request,
+};
+pub use codewire_proto::codewire::v1::{
+    CodexDeviceChallenge, Credential, CredentialAuthenticationKind, CredentialStatus,
+    DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse,
+    GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse,
+    RevokeCredentialRequest, RevokeCredentialResponse, enroll_codex_response,
+    get_credential_request,
+};
+pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
     CreateMeshNetworkResponse, CreateMeshNodeEnrollmentRequest, CreateMeshNodeEnrollmentResponse,
     JoinMeshNetworkRequest, JoinMeshNetworkResponse, ListMeshNetworksRequest,
@@ -144,6 +163,9 @@ pub struct CodewireClient {
     presets: PresetServiceClient<ReqwestConnectTransport>,
     ports: PortServiceClient<ReqwestConnectTransport>,
     secrets: SecretServiceClient<ReqwestConnectTransport>,
+    access_profiles: AccessProfileServiceClient<ReqwestConnectTransport>,
+    credentials: CredentialServiceClient<ReqwestConnectTransport>,
+    credential_mutations: CredentialMutationServiceClient<ReqwestConnectTransport>,
     billing: BillingServiceClient<ReqwestConnectTransport>,
     mesh_networks: MeshNetworkServiceClient<ReqwestConnectTransport>,
     mesh_nodes: MeshNodeServiceClient<ReqwestConnectTransport>,
@@ -327,6 +349,9 @@ impl CodewireClient {
         let preset_config = config.connect_config()?;
         let port_config = config.connect_config()?;
         let secret_config = config.connect_config()?;
+        let access_profile_config = config.connect_config()?;
+        let credential_config = config.connect_config()?;
+        let credential_mutation_config = config.connect_config()?;
         let billing_config = config.connect_config()?;
         let mesh_network_config = config.mesh_connect_config()?;
         let mesh_node_config = config.mesh_connect_config()?;
@@ -356,6 +381,18 @@ impl CodewireClient {
             presets: PresetServiceClient::new(ReqwestConnectTransport(http.clone()), preset_config),
             ports: PortServiceClient::new(ReqwestConnectTransport(http.clone()), port_config),
             secrets: SecretServiceClient::new(ReqwestConnectTransport(http.clone()), secret_config),
+            access_profiles: AccessProfileServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                access_profile_config,
+            ),
+            credentials: CredentialServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                credential_config,
+            ),
+            credential_mutations: CredentialMutationServiceClient::new(
+                ReqwestConnectTransport(http.clone()),
+                credential_mutation_config,
+            ),
             billing: BillingServiceClient::new(
                 ReqwestConnectTransport(http.clone()),
                 billing_config,

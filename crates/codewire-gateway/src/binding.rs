@@ -324,6 +324,7 @@ mod tests {
             udp_relay_allocator_token: None,
             udp_relay_bind_addrs: Vec::new(),
             tailnet: None,
+            credentials: None,
             docker_proxy: None,
             debug_tailnet: false,
         }

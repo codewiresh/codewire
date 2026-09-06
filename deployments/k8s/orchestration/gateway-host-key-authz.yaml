@@ -52,8 +52,10 @@ spec:
     - name: orchestration-service-account
       expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
   validations:
-    - expression: request.name.startsWith('cw-gateway-host-key-')
-      message: codewire-orchestration may only create or delete gateway host-key Secrets
+    - expression: >-
+        request.name.startsWith('cw-gateway-host-key-') ||
+        (request.operation == 'DELETE' && request.name.startsWith('cw-credential-gateway-'))
+      message: codewire-orchestration may only create or delete gateway host-key Secrets, or delete an independently validated credential leaf
     - expression: request.operation != 'CREATE' || object.type == 'Opaque'
       message: gateway host-key Secrets must use type Opaque
     - expression: >-

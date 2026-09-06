@@ -31,12 +31,12 @@ mod refresh;
 mod store;
 
 pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
-pub use profiles::{PlatformAccessProfileStore, PlatformProfileError};
+pub use profiles::{PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError};
 pub use refresh::{
     OAuthRefreshAttemptInfo, OAuthRefreshState, PreparedOAuthRefresh, PreparedOAuthRefreshResult,
     StartedOAuthRefresh,
 };
-pub use store::{CredentialMetadataReader, PlatformCredentialStore};
+pub use store::{CredentialMetadataReader, PlatformCredentialStore, PreparedCredentialCreation};
 
 /// Closed, value-blind errors. SQL/provider errors are deliberately discarded:
 /// neither their messages nor their source chains are safe output contracts.

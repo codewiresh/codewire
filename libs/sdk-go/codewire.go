@@ -26,18 +26,24 @@ type Client struct {
 	APIKeys        *APIKeyService
 	Secrets        *SecretService
 	SecretProjects *SecretProjectService
+	AccessProfiles *AccessProfileService
+	Credentials    *CredentialService
 
-	baseURL      string
-	apiKey       string
-	orgID        string
-	httpClient   *http.Client
-	environments codewirev1connect.EnvironmentServiceClient
-	exec         codewirev1connect.ExecServiceClient
-	files        codewirev1connect.FileServiceClient
-	ports        codewirev1connect.PortServiceClient
-	apiKeys      codewirev1connect.ApiKeyServiceClient
-	presets      codewirev1connect.PresetServiceClient
-	secrets      codewirev1connect.SecretServiceClient
+	baseURL               string
+	apiKey                string
+	orgID                 string
+	httpClient            *http.Client
+	environments          codewirev1connect.EnvironmentServiceClient
+	exec                  codewirev1connect.ExecServiceClient
+	files                 codewirev1connect.FileServiceClient
+	ports                 codewirev1connect.PortServiceClient
+	apiKeys               codewirev1connect.ApiKeyServiceClient
+	presets               codewirev1connect.PresetServiceClient
+	secrets               codewirev1connect.SecretServiceClient
+	accessProfiles        codewirev1connect.AccessProfileServiceClient
+	credentials           codewirev1connect.CredentialServiceClient
+	credentialMutations   codewirev1connect.CredentialMutationServiceClient
+	credentialEnrollments codewirev1connect.CredentialMutationServiceClient
 }
 
 // Option configures a Client.
@@ -87,11 +93,22 @@ func New(apiKey string, opts ...Option) *Client {
 	c.apiKeys = codewirev1connect.NewApiKeyServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.presets = codewirev1connect.NewPresetServiceClient(c.httpClient, c.baseURL, connectOptions)
 	c.secrets = codewirev1connect.NewSecretServiceClient(c.httpClient, c.baseURL, connectOptions)
+	c.accessProfiles = codewirev1connect.NewAccessProfileServiceClient(c.httpClient, c.baseURL, connectOptions)
+	c.credentials = codewirev1connect.NewCredentialServiceClient(c.httpClient, c.baseURL, connectOptions)
+	c.credentialMutations = codewirev1connect.NewCredentialMutationServiceClient(c.httpClient, c.baseURL, connectOptions)
+	// Enrollment owns its explicit per-call context deadline. Preserve the caller's
+	// transport, redirect policy and cookie jar without mutating their HTTP client
+	// or letting an ordinary short client timeout truncate device authorization.
+	enrollmentHTTP := *c.httpClient
+	enrollmentHTTP.Timeout = 0
+	c.credentialEnrollments = codewirev1connect.NewCredentialMutationServiceClient(&enrollmentHTTP, c.baseURL, connectOptions)
 	c.Environments = &EnvironmentService{c}
 	c.Presets = &PresetService{c}
 	c.APIKeys = &APIKeyService{c}
 	c.Secrets = &SecretService{c}
 	c.SecretProjects = &SecretProjectService{c}
+	c.AccessProfiles = &AccessProfileService{c}
+	c.Credentials = &CredentialService{c}
 	return c
 }
 

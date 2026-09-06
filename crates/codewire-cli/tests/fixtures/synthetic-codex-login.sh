@@ -14,15 +14,21 @@ login)
   [ "$(pwd -P)" = "$CODEX_HOME" ] || exit 28
   [ "$PATH" = "/usr/bin:/bin" ] || exit 29
   [ -z "${OPENAI_API_KEY+x}" ] || exit 30
-  [ -f "$CODEX_HOME/synthetic-auth.fixture.json" ] || exit 31
+  fixture_root=${CODEX_HOME%/*}
+  [ -f "$fixture_root/synthetic-auth.fixture.json" ] || exit 31
+  printf '\nWelcome to Codex [v\033[90m0.149.0\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n'
+  printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n\n'
+  printf '1. Open this link in your browser and sign in to your account\n   \033[94mhttps://auth.openai.com/codex/device\033[0m\n\n'
+  printf '2. Enter this one-time code \033[90m(expires in 15 minutes)\033[0m\n   \033[94mSYNTH-ETIC\033[0m\n\n'
+  printf '\033[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\033[0m\n\n'
   umask 077
-  cp "$CODEX_HOME/synthetic-auth.fixture.json" "$CODEX_HOME/auth.json"
-  rm -f "$CODEX_HOME/synthetic-auth.fixture.json"
+  cp "$fixture_root/synthetic-auth.fixture.json" "$CODEX_HOME/auth.json"
   ;;
 logout)
   [ "$#" -eq 3 ] || exit 32
   [ "$2" = "-c" ] || exit 33
   [ "$3" = 'cli_auth_credentials_store="file"' ] || exit 34
+  printf 'logout\n' >> "${CODEX_HOME%/*}/logout.called"
   rm -f "$CODEX_HOME/auth.json"
   ;;
 *) exit 35 ;;

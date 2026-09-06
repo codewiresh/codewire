@@ -52,6 +52,32 @@ impl CredentialMetadataReader {
             .metadata)
     }
 
+    /// Exact case-insensitive name lookup in one active owner namespace,
+    /// matching the existing lower(display_name) unique indexes. No fuzzy,
+    /// cross-owner or material lookup, and no row locks are acquired.
+    pub async fn resolve(&self, owner: &Owner, name: &str) -> Result<CredentialMetadata, Error> {
+        if name.is_empty()
+            || name.len() > 256
+            || name.trim() != name
+            || name.chars().any(char::is_control)
+        {
+            return Err(Error::InvalidInput);
+        }
+        let sql = format!(
+            "SELECT {METADATA_COLUMNS} FROM platform_credentials c \
+             WHERE {OWNER_PREDICATE} AND lower(c.display_name)=lower($3)"
+        );
+        let row: MetadataRow = sqlx::query_as(&sql)
+            .bind(owner_kind(owner))
+            .bind(owner.id().as_str())
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(database_error)?
+            .ok_or(Error::NotFound)?;
+        Ok(row.record(&self.catalog)?.metadata)
+    }
+
     /// Stable ID cursor, bounded independently of the caller. A missing or
     /// deleting owner returns an empty page, without revealing other owners.
     pub async fn list(
@@ -89,6 +115,14 @@ pub struct PlatformCredentialStore {
     provider: Arc<dyn KekProvider>,
 }
 
+/// An owner-bound encrypted creation prepared outside a publication
+/// transaction. No plaintext or public wire representation is retained here.
+/// Consume it once using the same trusted store after authenticating its owner.
+pub struct PreparedCredentialCreation {
+    record: CredentialRecord,
+    material: PreparedMaterial,
+}
+
 impl PlatformCredentialStore {
     pub(crate) fn pool(&self) -> &PgPool {
         &self.reader.pool
@@ -118,17 +152,68 @@ impl PlatformCredentialStore {
         load_record(&self.reader.pool, owner, id, false, &self.reader.catalog).await
     }
 
+    /// Lock the current exact-owner record in an already-authorized caller
+    /// transaction. Internal material versions stay authority-side; a public
+    /// lifecycle command may compare its observed metadata revision here, then
+    /// pass this exact version to a mutation without releasing these locks.
+    pub async fn record_for_update_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: &Owner,
+        id: &CredentialId,
+    ) -> Result<CredentialRecord, Error> {
+        check_owner(&mut **tx, owner, true).await?;
+        load_record(&mut **tx, owner, id, true, &self.reader.catalog).await
+    }
+
     pub async fn create(
         &self,
         owner: &Owner,
         registration: CredentialRegistration,
         material: &ProtectedValue,
     ) -> Result<CredentialRecord, Error> {
+        let prepared = self.prepare_creation(owner, registration, material).await?;
+        let mut tx = self.reader.pool.begin().await.map_err(database_error)?;
+        let record = self.create_prepared_in(&mut tx, owner, prepared).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(record)
+    }
+
+    /// Prepare protected material before taking any publication or identity
+    /// locks. This creates no durable credential or authorization grant.
+    pub async fn prepare_creation(
+        &self,
+        owner: &Owner,
+        registration: CredentialRegistration,
+        material: &ProtectedValue,
+    ) -> Result<PreparedCredentialCreation, Error> {
         let record = CredentialRecord::registered(owner, registration, &self.reader.catalog)?;
         check_owner(&self.reader.pool, owner, false).await?;
         let prepared = self.prepare(&record, material).await?;
-        let mut tx = self.reader.pool.begin().await.map_err(database_error)?;
-        check_owner(&mut *tx, owner, true).await?;
+        Ok(PreparedCredentialCreation {
+            record,
+            material: prepared,
+        })
+    }
+
+    /// Publish in the caller's transaction so original authentication locks
+    /// and credential creation share one commit boundary. The caller must
+    /// authorize this exact owner, retain its fences, recheck deadlines after
+    /// awaited work, then commit or roll back. An uncertain commit ACK must
+    /// never trigger automatic logout/revocation or blind enrollment retry.
+    pub async fn create_prepared_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: &Owner,
+        prepared: PreparedCredentialCreation,
+    ) -> Result<CredentialRecord, Error> {
+        let PreparedCredentialCreation { record, material } = prepared;
+        if record.metadata.owner != *owner {
+            return Err(Error::InvalidInput);
+        }
+        record.validate(&self.reader.catalog)?;
+        validate_wrapper(&material.wrapped, self.provider.kind())?;
+        check_owner(&mut **tx, owner, true).await?;
         let (user_id, organization_id) = owner_columns(owner);
         sqlx::query(
             "INSERT INTO platform_credentials \
@@ -144,11 +229,10 @@ impl PlatformCredentialStore {
         .bind(&record.metadata.display_name)
         .bind(&record.metadata.account_hint)
         .bind(optional_time(record.metadata.expires_at_unix)?)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(database_error)?;
-        insert_material(&mut tx, &record, prepared).await?;
-        tx.commit().await.map_err(database_error)?;
+        insert_material(tx, &record, material).await?;
         Ok(record)
     }
 
@@ -253,26 +337,37 @@ impl PlatformCredentialStore {
     ) -> Result<CredentialRecord, Error> {
         expected.validate()?;
         let mut tx = self.reader.pool.begin().await.map_err(database_error)?;
-        check_owner(&mut *tx, owner, true).await?;
-        let current = load_record(&mut *tx, owner, id, true, &self.reader.catalog).await?;
+        let record = self.revoke_in(&mut tx, owner, id, expected).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(record)
+    }
+
+    /// Revoke within the caller's authentication-fenced transaction. The caller
+    /// owns final deadline checks and commit/rollback, including uncertain ACKs.
+    pub async fn revoke_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: &Owner,
+        id: &CredentialId,
+        expected: CredentialVersion,
+    ) -> Result<CredentialRecord, Error> {
+        expected.validate()?;
+        let current = self.record_for_update_in(tx, owner, id).await?;
         if current.metadata.status == CredentialStatus::Revoked {
             if current.version != expected && Some(current.version) != expected.revoked().ok() {
                 return Err(Error::StaleVersion);
             }
-            crate::refresh::delete_refresh_attempt(&mut tx, id).await?;
-            tx.commit().await.map_err(database_error)?;
+            crate::refresh::delete_refresh_attempt(tx, id).await?;
             return Ok(current);
         }
         compare_version(&current, expected)?;
         let next = expected.revoked()?;
-        crate::refresh::delete_refresh_attempt(&mut tx, id).await?;
-        delete_material(&mut tx, id).await?;
+        crate::refresh::delete_refresh_attempt(tx, id).await?;
+        delete_material(tx, id).await?;
         sqlx::query("UPDATE platform_credentials SET status='revoked', revocation_generation=$2, updated_at=now() WHERE id=$1")
             .bind(id.as_str()).bind(generation(next.revocation_generation)?)
-            .execute(&mut *tx).await.map_err(database_error)?;
-        let revoked = load_record(&mut *tx, owner, id, false, &self.reader.catalog).await?;
-        tx.commit().await.map_err(database_error)?;
-        Ok(revoked)
+            .execute(&mut **tx).await.map_err(database_error)?;
+        load_record(&mut **tx, owner, id, false, &self.reader.catalog).await
     }
 
     /// Forget one already revoked record. This is not a namespace sweep or a
@@ -285,8 +380,22 @@ impl PlatformCredentialStore {
     ) -> Result<(), Error> {
         expected.validate()?;
         let mut tx = self.reader.pool.begin().await.map_err(database_error)?;
-        check_owner(&mut *tx, owner, true).await?;
-        let current = load_record(&mut *tx, owner, id, true, &self.reader.catalog).await?;
+        self.delete_revoked_in(&mut tx, owner, id, expected).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Delete one already-revoked record while retaining the caller's original
+    /// authentication fence through its final commit. Not a provider logout.
+    pub async fn delete_revoked_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: &Owner,
+        id: &CredentialId,
+        expected: CredentialVersion,
+    ) -> Result<(), Error> {
+        expected.validate()?;
+        let current = self.record_for_update_in(tx, owner, id).await?;
         compare_version(&current, expected)?;
         if current.metadata.status != CredentialStatus::Revoked {
             return Err(Error::Inactive);
@@ -303,7 +412,7 @@ impl PlatformCredentialStore {
                           WHERE b.profile_id=e.profile_id AND b.profile_revision=e.revision)))",
         )
         .bind(id.as_str())
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(database_error)?;
         if referenced {
@@ -311,10 +420,9 @@ impl PlatformCredentialStore {
         }
         sqlx::query("DELETE FROM platform_credentials WHERE id=$1")
             .bind(id.as_str())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(database_error)?;
-        tx.commit().await.map_err(database_error)?;
         Ok(())
     }
 

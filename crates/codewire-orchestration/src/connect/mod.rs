@@ -8,9 +8,11 @@ use codewire_server_core::connect::wire_error;
 use codewire_server_core::connect_error::ConnectError as RenderedConnectError;
 use connectrpc::RequestContext;
 
+pub mod access_profiles;
 pub mod account;
 pub mod admin;
 pub mod api_keys;
+pub mod credentials;
 pub mod environment;
 pub mod environment_session;
 pub mod environment_setup;

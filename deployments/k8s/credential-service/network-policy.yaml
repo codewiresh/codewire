@@ -1,0 +1,38 @@
+# Only the public Connect enrollment API crosses the normal ingress edge.
+# Private broker TLS is reachable from managed gateways, not workspaces.
+# Application authentication independently checks exact Pod/environment
+# lineage. This policy makes no claim to restrict provider egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-credential-service
+  namespace: prod
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: credential-service
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rke2-ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8086
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: prod-sandboxes
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: codewire-gateway
+              app.kubernetes.io/managed-by: codewire
+              codewire.sh/type: gateway
+      ports:
+        - protocol: TCP
+          port: 9443

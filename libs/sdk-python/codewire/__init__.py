@@ -8,6 +8,17 @@ from codewire.client import Codewire
 from codewire.environment import Environment
 from codewire.errors import CodewireError
 from codewire.files import Files
+from codewire.credentials import (
+    Credentials, Credential, CodexDeviceChallenge, CodexEnrollmentEvent,
+    EnrollmentOutcomeUnknownError,
+)
+from codewire.access_profiles import (
+    AccessProfiles,
+    AccessProfile,
+    AccessProfileEntry,
+    EnvironmentAccessProfile,
+    EnvironmentAccessProfileBinding,
+)
 from codewire.mesh import (
     MeshClient,
     MeshEnrollment,
@@ -31,6 +42,16 @@ __all__ = [
     "Environment",
     "CodewireError",
     "Files",
+    "Credentials",
+    "Credential",
+    "CodexDeviceChallenge",
+    "CodexEnrollmentEvent",
+    "EnrollmentOutcomeUnknownError",
+    "AccessProfiles",
+    "AccessProfile",
+    "AccessProfileEntry",
+    "EnvironmentAccessProfile",
+    "EnvironmentAccessProfileBinding",
     "MeshClient",
     "MeshEnrollment",
     "MeshGroup",

@@ -93,6 +93,8 @@ fn sha256_hex_prefix(input: &[u8], bytes: usize) -> String {
 pub struct ClaimOpts {
     pub environment_id: String,
     pub org_id: String,
+    /// Existing Temporal operation authority; never a separate runtime counter.
+    pub operation_generation: i64,
     /// Name of the SandboxTemplate CR in k8s.
     pub template_ref: String,
     /// Name of the SandboxWarmPool CR in k8s.
@@ -123,6 +125,25 @@ pub fn environment_pod_selector(env_id: &str) -> BTreeMap<String, String> {
     BTreeMap::from([(LABEL_ENV_ID.to_string(), env_id.to_string())])
 }
 
+pub const LABEL_OPERATION_GENERATION: &str = "codewire.sh/environment-operation-generation";
+
+pub(crate) fn runtime_identity_labels(
+    environment_id: &str,
+    organization_id: &str,
+    generation: i64,
+    role: &str,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (LABEL_ENV_ID.to_owned(), environment_id.to_owned()),
+        (LABEL_ORG_ID.to_owned(), organization_id.to_owned()),
+        (LABEL_TYPE.to_owned(), role.to_owned()),
+        (
+            LABEL_OPERATION_GENERATION.to_owned(),
+            generation.to_string(),
+        ),
+    ])
+}
+
 /// Render the Rust-owned SandboxClaim CR for `opts`.
 pub fn render_sandbox_claim(namespace: &str, opts: &ClaimOpts) -> Value {
     let mut spec = Map::new();
@@ -148,9 +169,15 @@ pub fn render_sandbox_claim(namespace: &str, opts: &ClaimOpts) -> Value {
             .collect();
         spec.insert("env".into(), Value::Array(env));
     }
-    if !opts.additional_pod_labels.is_empty() {
-        let labels: Map<String, Value> = opts
-            .additional_pod_labels
+    let mut additional_pod_labels = opts.additional_pod_labels.clone();
+    additional_pod_labels.extend(runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "workspace",
+    ));
+    if !additional_pod_labels.is_empty() {
+        let labels: Map<String, Value> = additional_pod_labels
             .iter()
             .map(|(k, v)| (k.clone(), Value::String(v.clone())))
             .collect();
@@ -199,6 +226,7 @@ pub fn render_sandbox_claim(namespace: &str, opts: &ClaimOpts) -> Value {
                 LABEL_ENV_ID: opts.environment_id,
                 LABEL_ORG_ID: opts.org_id,
                 LABEL_TYPE: "sandbox",
+                LABEL_OPERATION_GENERATION: opts.operation_generation.to_string(),
             },
             "finalizers": [DELETION_PROTECTION_FINALIZER],
         },
@@ -215,6 +243,7 @@ mod tests {
         ClaimOpts {
             environment_id: "env-golden-fixture-1234".into(),
             org_id: "org-golden-fixture".into(),
+            operation_generation: 7,
             template_ref: "tmpl-golden".into(),
             cpu_millicores: 2000,
             memory_mib: 4096,
@@ -304,8 +333,13 @@ mod tests {
             &ClaimOpts {
                 environment_id: "env-1".into(),
                 org_id: "org-1".into(),
+                operation_generation: 7,
                 template_ref: "tmpl-1".into(),
-                additional_pod_labels: environment_pod_selector("env-1"),
+                additional_pod_labels: BTreeMap::from([
+                    (LABEL_ENV_ID.to_owned(), "spoofed-environment".to_owned()),
+                    (LABEL_TYPE.to_owned(), "sandbox".to_owned()),
+                    ("fixture".to_owned(), "preserve".to_owned()),
+                ]),
                 ..Default::default()
             },
         );
@@ -313,6 +347,24 @@ mod tests {
         assert_eq!(
             got["spec"]["additionalPodMetadata"]["labels"][LABEL_ENV_ID].as_str(),
             Some("env-1")
+        );
+        assert_eq!(got["metadata"]["labels"][LABEL_TYPE], "sandbox");
+        assert_eq!(got["metadata"]["labels"][LABEL_OPERATION_GENERATION], "7");
+        assert_eq!(
+            got["spec"]["additionalPodMetadata"]["labels"][LABEL_TYPE],
+            "workspace"
+        );
+        assert_eq!(
+            got["spec"]["additionalPodMetadata"]["labels"][LABEL_ORG_ID],
+            "org-1"
+        );
+        assert_eq!(
+            got["spec"]["additionalPodMetadata"]["labels"][LABEL_OPERATION_GENERATION],
+            "7"
+        );
+        assert_eq!(
+            got["spec"]["additionalPodMetadata"]["labels"]["fixture"],
+            "preserve"
         );
     }
 }

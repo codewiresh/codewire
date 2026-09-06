@@ -1,4 +1,8 @@
 use std::io;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use axum::Router;
@@ -6,12 +10,45 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
+use codewire_tls::{ClientTlsEndpoint, ServerTlsFiles};
 use tokio::net::TcpStream;
 
 #[derive(Clone, Debug)]
 pub struct ReadinessState {
     ssh_listen_addr: String,
     timeout: Duration,
+    credentials: Option<CredentialReadiness>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CredentialReadiness {
+    live: Arc<AtomicBool>,
+    server: ServerTlsFiles,
+    broker: ClientTlsEndpoint,
+}
+
+impl CredentialReadiness {
+    pub(crate) fn new(
+        live: Arc<AtomicBool>,
+        server: ServerTlsFiles,
+        broker: ClientTlsEndpoint,
+    ) -> Self {
+        Self {
+            live,
+            server,
+            broker,
+        }
+    }
+
+    async fn validate(&self) -> Result<(), ()> {
+        if !self.live.load(Ordering::Acquire) {
+            return Err(());
+        }
+        // Validate the current projection on each probe, not a cached startup
+        // success. This never dials the broker or reads a projected Pod token.
+        tokio::try_join!(self.server.validate(), self.broker.validate()).map_err(|_| ())?;
+        self.live.load(Ordering::Acquire).then_some(()).ok_or(())
+    }
 }
 
 impl ReadinessState {
@@ -19,11 +56,17 @@ impl ReadinessState {
         Self {
             ssh_listen_addr: ssh_listen_addr.into(),
             timeout: Duration::from_secs(1),
+            credentials: None,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub(crate) fn with_credentials(mut self, credentials: Option<CredentialReadiness>) -> Self {
+        self.credentials = credentials;
         self
     }
 }
@@ -61,9 +104,35 @@ pub fn readiness_dial_addr(listen_addr: &str) -> String {
 }
 
 async fn readyz(State(state): State<ReadinessState>) -> impl IntoResponse {
-    match readiness_check_with_timeout(&state.ssh_listen_addr, state.timeout).await {
-        Ok(()) => (StatusCode::OK, "ok\n").into_response(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response(),
+    // One short deadline covers both the existing SSH probe and current TLS
+    // file validation. A slow projection cannot accumulate serial timeouts.
+    let result = tokio::time::timeout(state.timeout, async {
+        tokio::try_join!(
+            async {
+                readiness_check(&state.ssh_listen_addr)
+                    .await
+                    .map_err(|_| ())
+            },
+            async {
+                match &state.credentials {
+                    Some(credentials) => credentials.validate().await,
+                    None => Ok(()),
+                }
+            },
+        )?;
+        if state
+            .credentials
+            .as_ref()
+            .is_some_and(|credentials| !credentials.live.load(Ordering::Acquire))
+        {
+            return Err(());
+        }
+        Ok::<_, ()>(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => (StatusCode::OK, "ok\n").into_response(),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response(),
     }
 }
 
@@ -81,6 +150,95 @@ mod tests {
         assert_eq!(readiness_dial_addr(":2222"), "127.0.0.1:2222");
         assert_eq!(readiness_dial_addr("[::]:2222"), "127.0.0.1:2222");
         assert_eq!(readiness_dial_addr("127.0.0.1:2222"), "127.0.0.1:2222");
+    }
+
+    #[tokio::test]
+    async fn credential_readiness_requires_live_validated_listener() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = Arc::new(AtomicBool::new(false));
+        let identity = crate::credentials::tls_test_support::Identity::new("localhost");
+        let app = router(
+            ReadinessState::new(listener.local_addr().unwrap().to_string()).with_credentials(Some(
+                CredentialReadiness::new(
+                    live.clone(),
+                    identity.files(),
+                    ClientTlsEndpoint::new("https://localhost:1".into(), identity.roots.clone())
+                        .unwrap(),
+                ),
+            )),
+        );
+        for expected in [
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::OK,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/readyz")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            live.store(expected != StatusCode::OK, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_readiness_checks_each_current_tls_projection_without_broker_dial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let identity = crate::credentials::tls_test_support::Identity::new("localhost");
+        let app = router(
+            ReadinessState::new(listener.local_addr().unwrap().to_string()).with_credentials(Some(
+                CredentialReadiness::new(
+                    Arc::new(AtomicBool::new(true)),
+                    identity.files(),
+                    // An unavailable destination proves this is validation only.
+                    ClientTlsEndpoint::new("https://localhost:1".into(), identity.roots.clone())
+                        .unwrap(),
+                ),
+            )),
+        );
+        for path in [&identity.certificate, &identity.key, &identity.roots] {
+            let original = std::fs::read(path).unwrap();
+            for (bytes, expected) in [
+                (original.as_slice(), StatusCode::OK),
+                (
+                    b"synthetic-private-readiness-canary".as_slice(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                ),
+                (original.as_slice(), StatusCode::OK),
+            ] {
+                std::fs::write(path, bytes).unwrap();
+                let response = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    app.clone().oneshot(
+                        Request::builder()
+                            .uri("/readyz")
+                            .body(Body::empty())
+                            .unwrap(),
+                    ),
+                )
+                .await
+                .expect("readiness exceeded its single deadline")
+                .unwrap();
+                assert_eq!(response.status(), expected);
+                let body = axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    &body[..],
+                    if expected == StatusCode::OK {
+                        b"ok\n".as_slice()
+                    } else {
+                        b"not ready\n".as_slice()
+                    }
+                );
+            }
+        }
     }
 
     #[tokio::test]
