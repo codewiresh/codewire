@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::sandbox::template::CredentialRuntimeTemplateConfig;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use serde_json::json;
 
@@ -171,7 +171,8 @@ async fn prove_bootstrap(
                 "only the exact environment gateway leaf under the dedicated Issuer may be requested"
             },
         )
-        .await?;
+        .await
+        .with_context(|| format!("Certificate {field} mutation"))?;
     }
     denied(
         orchestration
@@ -334,12 +335,42 @@ async fn denied<T>(result: Result<T, kube::Error>, action: &str) -> Result<()> {
 }
 
 async fn admission_denied<T>(result: Result<T, kube::Error>, message: &str) -> Result<()> {
+    // These policies omit validation.reason, so Kubernetes returns Invalid
+    // (422), not the independent RBAC Forbidden (403) checked above.
+    let status = match &result {
+        Err(kube::Error::Api(error)) => Some(error.code),
+        _ => None,
+    };
     ensure!(
         matches!(result, Err(kube::Error::Api(ref error))
-        if error.code == 403 && error.message.contains(message)),
-        "expected credential admission denial was not observed: {message}"
+        if error.code == 422 && error.reason == "Invalid" && error.message.contains(message)),
+        "expected credential admission denial was not observed (API status {status:?}): {message}"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn admission_assertion_requires_policy_invalid_not_rbac_or_schema_failure() {
+    const MESSAGE: &str = "exact fixture admission policy denial";
+    let response = |code, reason: &str, message: &str| -> Result<(), kube::Error> {
+        Err(kube::Error::Api(Box::new(
+            kube::core::Status::failure(message, reason).with_code(code),
+        )))
+    };
+    assert!(
+        admission_denied(response(422, "Invalid", MESSAGE), MESSAGE)
+            .await
+            .is_ok()
+    );
+    for result in [
+        response(403, "Forbidden", MESSAGE),
+        response(422, "Forbidden", MESSAGE),
+        response(422, "Invalid", "unrelated schema validation"),
+        response(500, "InternalError", MESSAGE),
+        Ok(()),
+    ] {
+        assert!(admission_denied(result, MESSAGE).await.is_err());
+    }
 }
 
 async fn absent(api: &Api<DynamicObject>, name: &str) -> Result<()> {
