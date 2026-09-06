@@ -114,14 +114,22 @@ assert_contract_field() {
 
 policy=policy
 run_paths_case platform_credential_store pull_request refs/pull/1/head false \
-  'database policy rust rust_pkg_codewire_platform_credentials' \
+  'database policy rust rust_pkg_codewire_credential_broker rust_pkg_codewire_platform_credentials' \
   crates/codewire-platform-credentials/src/store.rs
 run_paths_case platform_credential_store_database_tests pull_request refs/pull/1/head false \
-  'database policy rust rust_pkg_codewire_platform_credentials' \
+  'database policy rust rust_pkg_codewire_credential_broker rust_pkg_codewire_platform_credentials' \
   crates/codewire-platform-credentials/tests/storage.rs
 run_paths_case platform_credential_shared_model pull_request refs/pull/1/head false \
-  'database policy rust rust_pkg_codewire_access rust_pkg_codewire_platform_credentials' \
+  'database policy rust rust_pkg_codewire_access rust_pkg_codewire_credential_broker rust_pkg_codewire_platform_credentials' \
   crates/codewire-access/src/model.rs
+for broker_input in src/platform.rs src/platform/tests.rs src/runtime.rs src/lib.rs Cargo.toml; do
+  run_paths_case platform_broker_authority pull_request refs/pull/1/head false \
+    'database policy rust rust_pkg_codewire_credential_broker' \
+    "crates/codewire-credential-broker/$broker_input"
+done
+run_paths_case local_broker_adapter pull_request refs/pull/1/head false \
+  'policy rust rust_pkg_codewire_credential_broker' \
+  crates/codewire-credential-broker/src/local.rs
 run_paths_case docs pull_request refs/pull/1/head false "$policy" \
   docs/guide.md README.md AGENTS.md crates/README.md
 run_paths_case ios pull_request refs/pull/1/head false 'ios policy' \
@@ -445,11 +453,11 @@ run_paths_case orchestration_wire_contract pull_request refs/pull/71/head false 
   crates/codewire-orchestration/tests/wire_contract.rs \
   crates/codewire-orchestration/tests/wire_contract/environment.rs
 run_paths_case shared_platform_identity pull_request refs/pull/711/head false \
-  'policy rust rust_pkg_codewire_orchestration rust_pkg_codewire_platform_credentials rust_pkg_codewire_protected_store service_integration service_orchestration' \
+  'database policy rust rust_pkg_codewire_credential_broker rust_pkg_codewire_orchestration rust_pkg_codewire_platform_credentials rust_pkg_codewire_protected_store service_integration service_orchestration' \
   crates/codewire-protected-store/src/openbao_workload_identity.rs
 for primitive_input in src/secret_envelope.rs src/lib.rs Cargo.toml; do
   run_paths_case shared_platform_envelope pull_request refs/pull/712/head false \
-    'database policy rust rust_pkg_codewire_orchestration rust_pkg_codewire_platform_credentials rust_pkg_codewire_protected_store service_integration service_orchestration service_temporal' \
+    'database policy rust rust_pkg_codewire_credential_broker rust_pkg_codewire_orchestration rust_pkg_codewire_platform_credentials rust_pkg_codewire_protected_store service_integration service_orchestration service_temporal' \
     "crates/codewire-protected-store/$primitive_input"
 done
 for store_consumer in postgres_secrets.rs tenant_secret_teardown.rs; do
@@ -1109,6 +1117,9 @@ grep -qF 'Contracts selected without contracts_proto' \
   <<<"$missing_mode_output"
 
 integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
+grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
+grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 14' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \
@@ -2229,7 +2240,7 @@ if [[ "$1" == tree ]]; then
       *) exit 87 ;;
     esac
   else
-    printf 'codewire-protected-store v0.0.0|%s\n' "${PRIMITIVE_GRAPH_FEATURES:-platform}"
+    printf 'codewire-protected-store v0.0.0|%s\n' "${PRIMITIVE_GRAPH_FEATURES-platform}"
   fi
 fi
 SH
@@ -2438,6 +2449,47 @@ run_admin_rust_case combined \
 run_admin_rust_case forbidden rust_workspace forbidden 1
 run_admin_rust_case missing_root rust_workspace missing_root 1
 run_admin_rust_case cargo_failure rust_workspace allowed 86 tree
+
+# The broker's optional platform adapter must have a production-only graph and
+# warning-denied tests even when the default local feature is not enabled.
+run_platform_broker_rust_case() {
+  local name="$1" token="$2" expected="$3" fail="${4:-}" features="${5-platform}"
+  local log="$primitive_probe/broker-$name.log" status=0 graph_count clippy_count test_count
+  : > "$log"
+  PATH="$primitive_probe/bin:$PATH" PRIMITIVE_CARGO_LOG="$log" \
+    PRIMITIVE_CARGO_STUB="$primitive_cargo_stub" \
+    PRIMITIVE_PACKAGE_LOG="$primitive_probe/broker-$name.packages" \
+    PRIMITIVE_RUST_BODY="$primitive_rust_body" PRIMITIVE_CARGO_FAIL="$fail" \
+    PRIMITIVE_GRAPH_FEATURES="$features" SELECTION="|valid:v3|$token|complete|" \
+    bash "$primitive_probe/dispatch.sh" > "$primitive_probe/broker-$name.out" 2>&1 || status=$?
+  if [[ -n "$fail" ]]; then
+    [[ "$status" == 86 ]] || { echo "$name: lost broker Cargo failure ($status)" >&2; exit 1; }
+  elif [[ "$features" != platform ]]; then
+    [[ "$status" == 1 ]] || { echo "$name: accepted invalid broker production graph" >&2; exit 1; }
+  else
+    [[ "$status" == 0 ]] || { cat "$primitive_probe/broker-$name.out" >&2; exit 1; }
+  fi
+  graph_count="$(grep -c '^tree --locked -p codewire-credential-broker --no-default-features --features platform --edges normal,build ' "$log" || true)"
+  clippy_count="$(grep -cxF 'clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings' "$log" || true)"
+  test_count="$(grep -cxF 'test --locked -p codewire-credential-broker --no-default-features --features platform --all-targets' "$log" || true)"
+  [[ "$graph_count" == "$expected" ]] || { echo "$name: missing or duplicate broker graph check" >&2; exit 1; }
+  if [[ "$fail" == tree || "$features" != platform ]]; then
+    [[ "$clippy_count" == 0 && "$test_count" == 0 ]] || { echo "$name: broker checks followed invalid graph" >&2; exit 1; }
+  elif [[ "$fail" == clippy ]]; then
+    [[ "$clippy_count" == "$expected" && "$test_count" == 0 ]] || { echo "$name: tests followed failed broker Clippy" >&2; exit 1; }
+  else
+    [[ "$clippy_count" == "$expected" && "$test_count" == "$expected" ]] || { echo "$name: missing or duplicate optional broker checks" >&2; exit 1; }
+  fi
+}
+run_platform_broker_rust_case broker rust_pkg_codewire_credential_broker 1
+run_platform_broker_rust_case workspace rust_workspace 1
+run_platform_broker_rust_case local_dependency rust_pkg_codewire_local_credentials 0
+run_platform_broker_rust_case unrelated rust_pkg_codewire_client 0
+run_platform_broker_rust_case graph_failure rust_pkg_codewire_credential_broker 1 tree
+run_platform_broker_rust_case missing_platform rust_pkg_codewire_credential_broker 1 '' ''
+run_platform_broker_rust_case forbidden_provider rust_pkg_codewire_credential_broker 1 '' platform,platform-test-support
+run_platform_broker_rust_case clippy_failure rust_pkg_codewire_credential_broker 1 clippy
+run_platform_broker_rust_case test_failure rust_pkg_codewire_credential_broker 1 test
 
 awk '
   /^rust_package_args\(\) \{/ { capture = 1 }

@@ -76,6 +76,19 @@ mod tests {
     const OPAQUE_AUTH_CAPABILITIES_VERSION: i64 = 17;
     const PLATFORM_CREDENTIALS_VERSION: i64 = 18;
     const PLATFORM_ACCESS_PROFILES_VERSION: i64 = 19;
+    const PLATFORM_BROKER_LOCK_AUTHORITY_VERSION: i64 = 21;
+    // Frozen dependency 14806fb3acb3566c19c95d2be0a293579cec165c supplies
+    // versions 19 and 20; versions 1..=18 retain their canonical pin above.
+    const APPLIED_ACCESS_MIGRATION_CHECKSUMS: [(i64, &str); 2] = [
+        (
+            19,
+            "1b9716c455570c495b179996178499efedcad4c125b83fac35ddc0219c5fb1dc09dee99f7fb964ab765ce8b2887d1c84",
+        ),
+        (
+            20,
+            "ab76a3ff6a30cd52cfcadcaa3bcc0cc1c200f3d987e132e648f210dde3ce417a05aa55dca0c68123d728407aab63ca07",
+        ),
+    ];
     const LEGACY_USER_CREDENTIAL_SECRET_ERROR: &str =
         "credential product cutover requires legacy user credential secrets to be absent";
 
@@ -96,6 +109,11 @@ mod tests {
     #[test]
     fn embedded_credential_storage_history_matches_the_accepted_release() -> anyhow::Result<()> {
         assert_applied_credential_storage_history()
+    }
+
+    #[test]
+    fn embedded_access_history_matches_the_frozen_dependency() -> anyhow::Result<()> {
+        assert_applied_access_history()
     }
 
     #[tokio::test]
@@ -140,7 +158,7 @@ mod tests {
                 .await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == 20
+                after.len() == MIGRATOR.iter().count()
                     && after[..18] == before
                     && after[18].0 == 19
                     && after[19].0 == 20
@@ -226,6 +244,136 @@ mod tests {
                 "../tests/data/application_schema_fingerprint.sql"
             )).fetch_one(&pool).await?;
             anyhow::ensure!(fingerprint == ACCEPTED_CREDENTIAL_STORAGE_SCHEMA_FINGERPRINT);
+            let retained: i32 = sqlx::query_scalar("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await?;
+            anyhow::ensure!(retained == 1);
+            let credentials: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_credentials").fetch_one(&pool).await?;
+            anyhow::ensure!(credentials == 0);
+            assert_platform_broker_locks_absent(&pool).await?;
+            pool.close().await;
+            anyhow::Ok(())
+        }.await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_broker_lock_upgrade_preserves_history_data_and_function_authority()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, PLATFORM_BROKER_LOCK_AUTHORITY_VERSION).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let before = applied_migrations(&pool).await?;
+            anyhow::ensure!(before.len() == 20 && before[19].0 == 20);
+            assert_platform_broker_locks_absent(&pool).await?;
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_credential(&pool, "retained", Some("credential-user-a"), None, "Work")
+                .await?;
+            seed_platform_credential_material(&pool, "retained", 1).await?;
+            let material_before: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let schema_before: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            ))
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(schema_before == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let after = applied_migrations(&pool).await?;
+            anyhow::ensure!(
+                after.len() == MIGRATOR.iter().count()
+                    && after[..20] == before
+                    && after[20].0 == PLATFORM_BROKER_LOCK_AUTHORITY_VERSION
+            );
+            let definitions = assert_platform_broker_lock_authority(&pool).await?;
+            let schema_after: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            ))
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                schema_after == schema_before,
+                "lock-only migration changed the application table schema"
+            );
+            let material_after: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                material_after == material_before,
+                "lock-only migration changed existing credential records"
+            );
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            anyhow::ensure!(applied_migrations(&pool).await? == after);
+            anyhow::ensure!(assert_platform_broker_lock_authority(&pool).await? == definitions);
+            let material_noop: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(material_noop == material_before);
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_broker_lock_rollback_removes_helpers_only_with_disposable_schema_reset()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            assert_platform_broker_lock_authority(&pool).await?;
+            sqlx::raw_sql("CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep (id integer); \
+                INSERT INTO rollback_boundary.keep VALUES (1);").execute(&pool).await?;
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_credential(&pool, "discarded", Some("credential-user-a"), None, "Work").await?;
+            seed_platform_credential_material(&pool, "discarded", 1).await?;
+            // Only this generated test database's disposable application schema
+            // is reset; no cluster, role, other schema or external key is reset.
+            sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").execute(&pool).await?;
+            pool.close().await;
+            apply_migrations_before(&test_db.url, PLATFORM_BROKER_LOCK_AUTHORITY_VERSION).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            let history = applied_migrations(&pool).await?;
+            anyhow::ensure!(history.len() == 20 && history[19].0 == 20);
+            assert_platform_broker_locks_absent(&pool).await?;
+            let fingerprint: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            )).fetch_one(&pool).await?;
+            anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
             let retained: i32 = sqlx::query_scalar("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await?;
             anyhow::ensure!(retained == 1);
             let credentials: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_credentials").fetch_one(&pool).await?;
@@ -3121,12 +3269,133 @@ mod tests {
         Ok(())
     }
 
+    fn assert_applied_access_history() -> anyhow::Result<()> {
+        assert_applied_credential_storage_history()?;
+        for (version, expected) in APPLIED_ACCESS_MIGRATION_CHECKSUMS {
+            let migration = MIGRATOR
+                .iter()
+                .find(|migration| migration.version == version)
+                .context("frozen access migration is missing")?;
+            anyhow::ensure!(
+                format!("{:x}", Sha384::digest(migration.sql.as_bytes())) == expected,
+                "migration {version} no longer matches the frozen dependency"
+            );
+        }
+        Ok(())
+    }
+
+    async fn assert_platform_broker_locks_absent(pool: &PgPool) -> anyhow::Result<()> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+             WHERE n.nspname='public' AND p.proname LIKE 'codewire_platform_lock_%'",
+        )
+        .fetch_one(pool)
+        .await?;
+        anyhow::ensure!(count == 0, "prior schema contains broker lock helpers");
+        Ok(())
+    }
+
+    // The table-schema fingerprint deliberately excludes functions and ACLs.
+    // Check installed definitions and authority independently, rather than
+    // treating an unchanged table fingerprint as proof of this migration.
+    async fn assert_platform_broker_lock_authority(pool: &PgPool) -> anyhow::Result<Vec<String>> {
+        let rows: Vec<(String, String, String, bool, String, String)> = sqlx::query_as(
+            r#"
+            SELECT p.proname::text,
+                   pg_catalog.oidvectortypes(p.proargtypes),
+                   pg_catalog.pg_get_function_result(p.oid),
+                   p.prosecdef AND NOT p.proleakproof AND NOT p.proisstrict
+                       AND p.provolatile='v' AND p.proparallel='u' AND p.prokind='f'
+                       AND l.lanname=CASE WHEN p.proname='codewire_platform_lock_owner'
+                                         THEN 'plpgsql' ELSE 'sql' END
+                       AND p.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                       AND p.proowner=(SELECT c.relowner FROM pg_catalog.pg_class c
+                                       WHERE c.oid='public._sqlx_migrations'::regclass)
+                       AND NOT EXISTS (
+                           SELECT 1 FROM pg_catalog.aclexplode(
+                               COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))
+                           ) a WHERE a.grantee<>p.proowner
+                       ) AS private_migration_authority,
+                   p.prosrc,
+                   pg_catalog.pg_get_functiondef(p.oid)
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+            JOIN pg_catalog.pg_language l ON l.oid=p.prolang
+            WHERE n.nspname='public' AND p.proname LIKE 'codewire_platform_lock_%'
+            ORDER BY p.proname, p.oid
+            "#,
+        )
+        .fetch_all(pool)
+        .await?;
+        let expected = [
+            (
+                "codewire_platform_lock_environment",
+                "text, text, text",
+                "TABLE(environment_operation_generation bigint, desired_state text, state text)",
+                "SELECT e.environment_operation_generation, e.desired_state, e.state \
+                 FROM public.environments AS e \
+                 WHERE e.id = $1 AND e.created_by = $2 AND e.org_id = $3 FOR SHARE OF e;",
+            ),
+            (
+                "codewire_platform_lock_owner",
+                "text, text",
+                "boolean",
+                "BEGIN IF $1 = 'user' THEN \
+                 PERFORM u.id FROM public.users AS u WHERE u.id = $2 FOR SHARE; RETURN FOUND; \
+                 ELSIF $1 = 'organization' THEN \
+                 PERFORM o.id FROM public.organizations AS o \
+                 WHERE o.id = $2 AND o.deletion_state = 'active' FOR SHARE; RETURN FOUND; \
+                 END IF; RETURN false; END;",
+            ),
+            (
+                "codewire_platform_lock_profile",
+                "text, text, text",
+                "TABLE(user_id text, organization_id text, name text, current_revision bigint)",
+                "SELECT p.user_id, p.organization_id, p.name, p.current_revision \
+                 FROM public.platform_access_profiles AS p \
+                 WHERE p.id = $1 AND (p.user_id = $2 OR p.organization_id = $3) FOR SHARE OF p;",
+            ),
+        ];
+        anyhow::ensure!(
+            rows.len() == expected.len(),
+            "broker lock helper inventory changed"
+        );
+        let normalize = |sql: &str| {
+            sql.lines()
+                .map(|line| line.split_once("--").map_or(line, |(sql, _)| sql))
+                .flat_map(str::split_whitespace)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        for (
+            (name, arguments, result, secure, body, _),
+            (want_name, want_args, want_result, want_body),
+        ) in rows.iter().zip(expected)
+        {
+            anyhow::ensure!(
+                name == want_name && arguments == want_args && result == want_result,
+                "broker lock signature changed: {name}"
+            );
+            anyhow::ensure!(
+                *secure,
+                "broker lock definer/search-path/ACL authority changed: {name}"
+            );
+            anyhow::ensure!(
+                normalize(body) == normalize(want_body),
+                "broker lock fixed query changed: {name}"
+            );
+        }
+        Ok(rows.into_iter().map(|row| row.5).collect())
+    }
+
     async fn apply_migrations_before(database_url: &str, version: i64) -> anyhow::Result<()> {
         // Do not manufacture an apparently valid old ledger from a baseline
         // rewritten by the same branch whose upgrade is being tested.
         assert_applied_baseline_checksum()?;
         assert_applied_pre_platform_history()?;
         assert_applied_credential_storage_history()?;
+        assert_applied_access_history()?;
         anyhow::ensure!(
             MIGRATOR.version_exists(version),
             "embedded migration {version} is missing"

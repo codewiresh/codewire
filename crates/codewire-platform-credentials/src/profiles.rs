@@ -389,18 +389,23 @@ async fn load_profile(
     write: bool,
 ) -> Result<AccessProfile, Error> {
     let (user_id, organization_id) = owner_columns(owner);
-    let lock = if write { "UPDATE" } else { "SHARE" };
-    let row = sqlx::query(&format!(
+    // Profile management retains its ordinary DML authority. Runtime exact
+    // reads use only the fixed metadata-lock helper, not profile UPDATE rights.
+    let sql = if write {
         "SELECT name,current_revision FROM platform_access_profiles \
-         WHERE id=$1 AND (user_id=$2 OR organization_id=$3) FOR {lock}"
-    ))
-    .bind(id.as_str())
-    .bind(user_id)
-    .bind(organization_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?
-    .ok_or(Error::NotFound)?;
+         WHERE id=$1 AND (user_id=$2 OR organization_id=$3) FOR UPDATE"
+    } else {
+        "SELECT name,current_revision FROM \
+         public.codewire_platform_lock_profile($1::text,$2::text,$3::text)"
+    };
+    let row = sqlx::query(sql)
+        .bind(id.as_str())
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+        .ok_or(Error::NotFound)?;
     let current: i64 = row.try_get("current_revision").map_err(database_error)?;
     let revision = revision.unwrap_or(positive(current)?);
     let exists: bool = sqlx::query_scalar(
@@ -525,19 +530,18 @@ async fn load_credentials(
 }
 
 async fn lock_owner(tx: &mut Transaction<'_, Postgres>, owner: &Owner) -> Result<(), Error> {
-    let sql = match owner {
-        Owner::User(_) => "SELECT id FROM users WHERE id=$1 FOR SHARE",
-        Owner::Organization(_) => {
-            "SELECT id FROM organizations WHERE id=$1 AND deletion_state='active' FOR SHARE"
-        }
+    let kind = match owner {
+        Owner::User(_) => "user",
+        Owner::Organization(_) => "organization",
     };
-    sqlx::query_scalar::<_, String>(sql)
-        .bind(owner.id().as_str())
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)?
-        .ok_or(Error::NotFound)?;
-    Ok(())
+    let found: bool =
+        sqlx::query_scalar("SELECT public.codewire_platform_lock_owner($1::text,$2::text)")
+            .bind(kind)
+            .bind(owner.id().as_str())
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    if found { Ok(()) } else { Err(Error::NotFound) }
 }
 
 async fn lock_environment(
@@ -556,17 +560,22 @@ async fn lock_environment(
     }
     lock_owner(tx, &Owner::User(context.user_id.clone())).await?;
     lock_owner(tx, &Owner::Organization(org.clone())).await?;
-    let lock = if write { "UPDATE" } else { "SHARE" };
-    let row: Option<(i64, String, String)> = sqlx::query_as(&format!(
+    // Only orchestration's binding writers need the UPDATE branch. The broker
+    // cannot mutate an environment and needs only the SHARE helper.
+    let sql = if write {
         "SELECT environment_operation_generation,desired_state,state FROM environments \
-         WHERE id=$1 AND created_by=$2 AND org_id=$3 FOR {lock}"
-    ))
-    .bind(context.environment_id.as_str())
-    .bind(context.user_id.as_str())
-    .bind(org.as_str())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?;
+         WHERE id=$1 AND created_by=$2 AND org_id=$3 FOR UPDATE"
+    } else {
+        "SELECT environment_operation_generation,desired_state,state FROM \
+         public.codewire_platform_lock_environment($1::text,$2::text,$3::text)"
+    };
+    let row: Option<(i64, String, String)> = sqlx::query_as(sql)
+        .bind(context.environment_id.as_str())
+        .bind(context.user_id.as_str())
+        .bind(org.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?;
     let (current, desired, state) = row.ok_or(Error::NotFound)?;
     if current != generation(context.environment_generation)?
         || desired == "destroyed"
@@ -604,8 +613,8 @@ async fn profile_for_context(
     binding: &EnvironmentAccessBinding,
 ) -> Result<AccessProfile, Error> {
     let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT user_id,organization_id FROM platform_access_profiles WHERE id=$1 \
-         AND (user_id=$2 OR organization_id=$3) FOR SHARE",
+        "SELECT user_id,organization_id FROM \
+         public.codewire_platform_lock_profile($1::text,$2::text,$3::text)",
     )
     .bind(binding.profile_id.as_str())
     .bind(context.user_id.as_str())

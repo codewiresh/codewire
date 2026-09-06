@@ -453,6 +453,13 @@ run_rust() {
     cargo clippy --locked -p codewire-protected-store --features platform --all-targets -- -D warnings
     cargo test --locked -p codewire-protected-store --features platform --all-targets
   fi
+  if selected rust_workspace || selected rust_pkg_codewire_credential_broker; then
+    # Exercise the isolated platform build explicitly; the default local
+    # feature cannot qualify platform admission or its production graph.
+    scripts/ci/tests/test-openbao-only-secret-authority.sh --production-broker-features
+    cargo clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform --all-targets
+  fi
   if selected rust_pkg_codewire_oidc; then
     cargo check -p codewire-oidc --no-default-features
     cargo test -p codewire-oidc --features axum

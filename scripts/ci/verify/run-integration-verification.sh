@@ -168,7 +168,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 22
+  assert_passed_count "server-core migration matrix" "$logfile" 24
 
   logfile="$RUN_DIR/platform-credential-storage.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -187,6 +187,18 @@ run_database() {
     cargo test --locked -p codewire-platform-credentials --test refresh \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
   assert_passed_count "platform credential refresh matrix" "$logfile" 13
+
+  logfile="$RUN_DIR/platform-credential-authority.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-platform-credentials --test authority \
+      -- --ignored --nocapture --test-threads=4 | tee "$logfile"
+  assert_passed_count "platform credential restricted-role matrix" "$logfile" 8
+
+  logfile="$RUN_DIR/platform-broker-admission.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker admission matrix" "$logfile" 14
 
   logfile="$RUN_DIR/session-hash-only.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
