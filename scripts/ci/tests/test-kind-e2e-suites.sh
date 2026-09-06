@@ -171,6 +171,12 @@ if grep -Fq -- '--post-data="{\"pod\"' "$COMMON"; then
 fi
 
 # Sourcing the dispatcher defines every suite without executing one.
+# The default fixtures model public, initially uncached dependencies. Hosted
+# Edge/Kind exports a sealed tuple for its later real runtime; inheriting that
+# tuple here would turn the deliberate cache miss into a preload rejection.
+# Sealed scenarios below supply all five exact inputs to their own child shell.
+unset KIND_INGRESS_CONTROLLER_IMAGE KIND_INGRESS_CERTGEN_IMAGE \
+  KIND_AGENT_SANDBOX_IMAGE KIND_WORKSPACE_IMAGE KIND_DIND_IMAGE
 # shellcheck source=scripts/ci/verify/kind-e2e.sh
 source "$SCRIPT"
 
@@ -438,6 +444,52 @@ cmp -s "$FIXTURE/want-support-images" "$CALLS" || {
   fail 'Kind support images are not resolved and aliased by exact digest'
 }
 
+# A sealed runtime must still reject each missing credential dependency rather
+# than falling back to a public pull. Exercise the real guard with synthetic
+# Docker state; neither these negative cases nor the positive case below can
+# contact a Docker daemon or load anything into a real cluster.
+missing_credential_index=0
+while IFS='|' read -r missing_credential_source missing_credential_alias; do
+  missing_credential_index=$((missing_credential_index + 1))
+  : >"$CALLS"
+  expect_failure "missing-sealed-credential-$missing_credential_index" env \
+    KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+    KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+    KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
+    KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+    KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
+    MISSING_CREDENTIAL_SOURCE="$missing_credential_source" \
+    ROOT="$ROOT" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
+  fail() { printf '[sealed-credential-test] ERROR: %s\n' "$*" >&2; exit 1; }
+  record() { printf '%s\n' "$1" >>"$CALLS"; }
+  # shellcheck source=scripts/ci/verify/kind/common.sh
+  source "$COMMON"
+  docker() {
+    record "docker:$*"
+    case "${1:-} ${2:-}" in
+      'image inspect') [ "${3:-}" != "$MISSING_CREDENTIAL_SOURCE" ] ;;
+      'image tag') ;;
+      *) fail "unexpected sealed Docker invocation: $*" ;;
+    esac
+  }
+  kind() { record "kind:$*"; fail 'missing dependency reached Kind'; }
+  log() { :; }
+  prepare_kind_credential_support_images
+BASH
+  grep -Fq "exact credential fixture image was not preloaded: $missing_credential_source" \
+    "$FIXTURE/missing-sealed-credential-$missing_credential_index.out" ||
+    fail 'sealed missing-image guard did not identify its exact dependency'
+  [ "$(tail -n 1 "$CALLS")" = "docker:image inspect $missing_credential_source" ] ||
+    fail 'sealed missing-image guard continued after the failed inspection'
+  if grep -Eq '^docker:pull |^kind:' "$CALLS"; then
+    fail 'sealed missing-image guard attempted a public pull or cluster load'
+  fi
+  if grep -Fq " $missing_credential_alias" "$CALLS"; then
+    fail 'sealed missing-image guard assigned an alias to an absent image'
+  fi
+done < <(kind_credential_support_images)
+[ "$missing_credential_index" -eq 3 ] || fail 'credential preload rejection inventory changed'
+
 # Every large image import is separated by an API recovery gate. This keeps a
 # temporarily starved control plane from accumulating four back-to-back imports.
 : >"$CALLS"
@@ -543,6 +595,7 @@ env \
   kind() { record "kind:$*"; }
   wait_for_kind_api_after_image_load() { record wait-api; }
   log() { :; }
+  prepare_kind_credential_support_images
   load_images_into_kind
   rendered="$(render_ingress_manifest)"
   agent_rendered="$(render_agent_sandbox_manifest)"
