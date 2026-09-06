@@ -5,6 +5,12 @@ The caller pipes this file into the actual workspace's python3. There are no
 provider/token/config overrides. Protocol is pinned to Codex 0.149.0 commit
 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0. Never print raw RPC, stderr, trace,
 token bytes or fingerprints: stdout is the closed acceptance event stream.
+
+The harness runs the tracer and Codex in one fresh user namespace, mapping only
+the calling user to namespace root. This is harness-local tracing authority,
+not added host/Pod privilege or product configuration. Network, mount and PID
+namespaces and projected token mounts remain unchanged. Namespace failure is
+fatal; there is no untraced fallback.
 """
 
 import hashlib
@@ -28,6 +34,7 @@ MARKER = "CWCODEX149 kind"
 MAX_LINE = 1024 * 1024
 MAX_OUTPUT = 8 * MAX_LINE
 MAX_TRACE = 1024 * 1024
+MAX_STDERR_DIAGNOSTIC = 4096
 RPC_TIMEOUT = 60.0
 ROTATION_TIMEOUT = 720.0
 CACHE_INTERVAL = 30.0
@@ -95,8 +102,8 @@ def token_fingerprint():
     return hashlib.sha256(value).digest()
 
 
-def auth_calls(trace):
-    """Count only successful exact fixed-command execve calls, never buffers."""
+def successful_exec_calls(trace, prefix):
+    """Read bounded private trace data; return only exact exec timestamps."""
     try:
         with trace.open("rb") as source:
             raw = source.read(MAX_TRACE + 1)
@@ -108,7 +115,6 @@ def auth_calls(trace):
         lines = raw.decode("utf-8").splitlines()
     except UnicodeError:
         raise Failure("invalid_trace") from None
-    prefix = f'execve("/bin/cat", ["/bin/cat", "{TOKEN}"], '
     pending = {}
     calls = []
     for line in lines:
@@ -128,11 +134,29 @@ def auth_calls(trace):
     return sorted(calls)
 
 
+def auth_calls(trace):
+    """Count only successful exact fixed-command execve calls, never buffers."""
+    return successful_exec_calls(
+        trace, f'execve("/bin/cat", ["/bin/cat", "{TOKEN}"], ')
+
+
+def codex_exec_succeeded(trace):
+    # This proves only exec of the pinned launcher, not a working app-server.
+    prefix = f'execve("{CODEX}", ["{CODEX}", "app-server", "--stdio", "--strict-config"], '
+    try:
+        return bool(successful_exec_calls(trace, prefix))
+    except Failure:
+        return None
+
+
 class Server:
     def __init__(self, argv, cwd):
         self.selector = selectors.DefaultSelector()
         self.frames = Frames()
         self.stderr_bytes = 0
+        self.stderr_prefix = bytearray()
+        self.phase = "launch"
+        self.eof_channel = None
         self.responses = {}
         self.response_ids = set()
         self.completed = {}
@@ -148,12 +172,59 @@ class Server:
                 pipe = getattr(self.process, name)
                 os.set_blocking(pipe.fileno(), False)
                 self.selector.register(pipe, selectors.EVENT_READ, name)
-        except BaseException:
+        except BaseException as error:
             if self.process is not None:
                 self.close()
             else:
                 self.selector.close()
+            if isinstance(error, FileNotFoundError):
+                raise Failure("process_start_not_found") from None
+            if isinstance(error, PermissionError):
+                raise Failure("process_start_permission_denied") from None
+            if isinstance(error, OSError):
+                raise Failure("process_start_os_error") from None
             raise
+
+    def observe_stderr(self, data):
+        self.stderr_bytes += len(data)
+        remaining = MAX_STDERR_DIAGNOSTIC - len(self.stderr_prefix)
+        self.stderr_prefix.extend(data[:remaining])
+
+    def failure_diagnostics(self, trace):
+        # Sample status before closing stdin or sending cleanup signals. A null
+        # status is unknown/still running, never the later forced-cleanup exit.
+        status = self.process.poll()
+        # EOF on stdout can be delivered before already-written stderr. Read
+        # at most one nonblocking chunk, without waiting for new child output.
+        try:
+            self.observe_stderr(os.read(self.process.stderr.fileno(), 65536))
+        except (OSError, ValueError):
+            pass
+        stderr_class = "unclassified" if self.stderr_bytes else "none"
+        # A deliberately small diagnostic clue, not a general redactor and not
+        # proof of the effective host policy. No captured bytes leave here.
+        for line in bytes(self.stderr_prefix).split(b"\n")[:-1]:
+            if line in (
+                b"unshare: unshare failed: Operation not permitted",
+                b"/usr/bin/unshare: unshare failed: Operation not permitted",
+            ):
+                stderr_class = "user_namespace_denied_message"
+                break
+            if (line.startswith((b"strace: ", b"/usr/bin/strace: "))
+                    and line.endswith(b": Operation not permitted")
+                    and any(marker in line for marker in (
+                        b"ptrace(PTRACE_TRACEME,", b"ptrace(PTRACE_SEIZE,",
+                        b"PTRACE_TRACEME:", b"PTRACE_SEIZE:",
+                    ))):
+                stderr_class = "ptrace_denied_message"
+                break
+        return {
+            "phase": self.phase,
+            "eof_channel": self.eof_channel,
+            "child_status": status,
+            "stderr_class": stderr_class,
+            "codex_exec_succeeded": codex_exec_succeeded(trace),
+        }
 
     def receive(self, value):
         if "id" in value:
@@ -203,6 +274,7 @@ class Server:
             if not data:
                 self.selector.unregister(key.fileobj)
                 if not closing:
+                    self.eof_channel = key.data
                     raise Failure("server_pipe_closed")
                 continue
             if key.data == "stdout":
@@ -210,7 +282,7 @@ class Server:
                     for value in self.frames.feed(data):
                         self.receive(value)
             else:
-                self.stderr_bytes += len(data)
+                self.observe_stderr(data)
                 if self.stderr_bytes > MAX_OUTPUT and not closing:
                     raise Failure("stderr_output_limit")
         if self.process.poll() is not None and not closing:
@@ -244,6 +316,7 @@ class Server:
         return response["result"]
 
     def initialize(self):
+        self.phase = "initialize"
         result = self.request("initialize", {"clientInfo": {
             "name": "codewire_kind_credentials", "title": "Codewire Kind", "version": "1",
         }})
@@ -252,6 +325,7 @@ class Server:
         self.send({"method": "initialized"})
 
     def thread(self, deadline=None):
+        self.phase = "thread_start"
         result = self.request("thread/start", {
             "model": "codewire-synthetic", "cwd": "/workspace",
             "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": True,
@@ -266,6 +340,7 @@ class Server:
         return thread_id
 
     def turn(self, thread_id, prompt, deadline=None):
+        self.phase = "turn_start"
         deadline = deadline if deadline is not None else time.monotonic() + RPC_TIMEOUT
         result = self.request("turn/start", {
             "threadId": thread_id, "input": [{"type": "text", "text": prompt}],
@@ -274,12 +349,14 @@ class Server:
         if not isinstance(turn, dict):
             raise Failure("invalid_started_turn")
         key = self.turn_key(thread_id, turn.get("id"))
+        self.phase = "turn_completion"
         self.until(lambda: key in self.completed, deadline)
         completed = self.completed[key]
         if completed.get("status") != "completed" or completed.get("error") is not None:
             raise Failure("turn_failed")
         if key not in self.markers:
             raise Failure("missing_synthetic_output")
+        self.phase = "idle"
 
     def close(self):
         try:
@@ -303,6 +380,7 @@ class Server:
 
 
 def observe_rotation(server, initial, baseline_completed):
+    server.phase = "token_rotation"
     deadline = time.monotonic() + ROTATION_TIMEOUT
     while True:
         changed = token_fingerprint() != initial
@@ -363,6 +441,7 @@ def main():
     stage = "startup"
     server = None
     success = False
+    diagnostics = {"phase": "launch"}
     def interrupted(_signum, _frame):
         raise Failure("interrupted")
     signal.signal(signal.SIGTERM, interrupted)
@@ -375,6 +454,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="kind-session-", dir=CODEX_HOME) as scratch:
             trace = Path(scratch) / "execve.trace"
             server = Server([
+                "/usr/bin/unshare", "--user", "--map-root-user", "--",
                 "/usr/bin/strace", "-f", "-ttt", "-e", "trace=execve", "-s", "512",
                 "-o", str(trace), "--", CODEX, "app-server", "--stdio", "--strict-config",
             ], "/workspace")
@@ -387,6 +467,10 @@ def main():
                 # closed failure if cleanup has an independent problem.
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)
                 signal.signal(signal.SIGINT, signal.SIG_IGN)
+                try:
+                    diagnostics = server.failure_diagnostics(trace)
+                except Exception:
+                    diagnostics = {"phase": "diagnostic_unavailable"}
                 try:
                     server.close()
                 except Exception:
@@ -403,9 +487,9 @@ def main():
                 server = None
             success = True
     except Failure as error:
-        emit("failed", stage=stage, reason=str(error))
+        emit("failed", stage=stage, reason=str(error), **diagnostics)
     except Exception:
-        emit("failed", stage=stage, reason="driver_failure")
+        emit("failed", stage=stage, reason="driver_failure", **diagnostics)
     if success:
         emit("complete", turns=4, same_process=True, token_changed=True)
     return 0 if success else 1
