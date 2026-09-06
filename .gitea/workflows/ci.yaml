@@ -284,8 +284,8 @@ jobs:
     name: Container contract verification
     runs-on: ci-heavy
     # A selected workspace verification performs two credential-free cold
-    # image builds. Keep its ceiling below the compatibility runner's
-    # independently enforced 60-minute task budget while allowing the admitted
+    # image builds. Keep its ceiling below the heavy runner's
+    # independently enforced 90-minute task budget while allowing the admitted
     # cold path to exceed 45 minutes.
     timeout-minutes: 55
     needs: [verification-selection]
@@ -938,10 +938,11 @@ jobs:
     name: Edge / Kind verification
     runs-on: ci-heavy
     enable-openid-connect: true
-    # The complete disposable-cluster gate stays below the heavy worker's
-    # independently enforced 60-minute lifetime while retaining enough time
-    # for value-blind cluster diagnostics and cleanup on a cold failure.
-    timeout-minutes: 55
+    # CI5538 needed almost 54 minutes through cold builds, cluster setup and
+    # real credential rotation alone, before the remaining integrated tests.
+    # Keep the complete gate bounded, with five minutes below the heavy
+    # worker's independently enforced 90-minute task budget for cleanup.
+    timeout-minutes: 85
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.edge_kind_expected == 'true' }}
     env:

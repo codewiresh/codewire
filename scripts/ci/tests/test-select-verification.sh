@@ -1473,8 +1473,9 @@ done
 # Heavy jobs share the queue-driven disposable DinD runner pool. Keep ordinary
 # task ceilings at 30 minutes. The selected workspace path performs two cold
 # image builds, while Rust/transport may seed the complete workspace and
-# desktop compiler cache. Those two jobs have bounded 55-minute exceptions
-# beneath the runner's independently managed 60-minute task lifetime.
+# desktop compiler cache. Those two jobs retain 55-minute ceilings. The full
+# Kind gate additionally owns real token rotation and integrated runtime tests;
+# its 85-minute ceiling leaves five minutes below the 90-minute heavy budget.
 for job_id in cw-release-assets standard tooling database services-control services-runtime; do
   block="$TMP/${job_id}.yaml"
   if [ ! -s "$block" ]; then
@@ -1492,15 +1493,39 @@ done
 
 rust_transport_block="$TMP/rust-transport.yaml"
 grep -qF '    timeout-minutes: 55' "$rust_transport_block" || {
-  echo 'rust-transport: cold-cache ceiling must remain below the 60-minute runner lifetime' >&2
+  echo 'rust-transport: cold-cache ceiling must remain 55 minutes' >&2
   exit 1
 }
 
 edge_kind_block="$TMP/edge-kind.yaml"
-grep -qF '    timeout-minutes: 55' "$edge_kind_block" || {
-  echo 'edge-kind: diagnostic ceiling must remain below the 60-minute runner lifetime' >&2
+edge_kind_timeout_valid() {
+  # Exact equality also rejects duplicate, absent and nonnumeric declarations.
+  [ "$(sed -n 's/^    timeout-minutes: //p' "$1")" = 85 ]
+}
+edge_kind_timeout_valid "$edge_kind_block" || {
+  echo 'edge-kind: complete gate must retain 85 minutes and the 90-minute worker cleanup margin' >&2
   exit 1
 }
+# Protect the observed old deadline failure and both missing/unbounded limits.
+# These are mutations of the actual job block, not a second workflow fixture.
+for invalid_timeout in 55 90 120 0 null; do
+  sed "s/^    timeout-minutes: 85$/    timeout-minutes: $invalid_timeout/" \
+    "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
+  if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
+    echo "edge-kind: timeout guard accepted $invalid_timeout" >&2
+    exit 1
+  fi
+done
+sed '/^    timeout-minutes:/d' "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
+if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
+  echo 'edge-kind: timeout guard accepted an absent deadline' >&2
+  exit 1
+fi
+sed '/^    timeout-minutes: 85$/p' "$edge_kind_block" > "$TMP/edge-kind-invalid.yaml"
+if edge_kind_timeout_valid "$TMP/edge-kind-invalid.yaml"; then
+  echo 'edge-kind: timeout guard accepted a duplicate deadline' >&2
+  exit 1
+fi
 
 workspace_block="$TMP/workspace-image.yaml"
 awk '
@@ -1509,7 +1534,7 @@ awk '
   capture { print }
 ' "$WORKFLOW" > "$workspace_block"
 grep -qF '    timeout-minutes: 55' "$workspace_block" || {
-  echo 'workspace-image: cold-build ceiling must remain below the 60-minute runner lifetime' >&2
+  echo 'workspace-image: cold-build ceiling must remain 55 minutes' >&2
   exit 1
 }
 
