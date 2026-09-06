@@ -11,6 +11,7 @@ from pathlib import Path
 import ssl
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -132,6 +133,14 @@ class WorkspaceProbe(unittest.TestCase):
 
 
 class HarnessGuards(unittest.TestCase):
+    def test_host_cli_build_selects_its_actual_binary_package(self):
+        manifest = tomllib.loads((ROOT / "crates/codewire-cli-bin/Cargo.toml").read_text())
+        self.assertIn("cw", [binary["name"] for binary in manifest["bin"]])
+        expected = f'cargo build --locked --profile ci -p {manifest["package"]["name"]} --bin cw'
+        source = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
+        self.assertEqual(source.count(expected), 1)
+        self.assertNotIn("-p codewire-cli --bin cw", source)
+
     def shell(self, body):
         result = subprocess.run(
             ["/bin/bash", "-c", 'set -euo pipefail\nsource "$1"\n' + body,
