@@ -96,6 +96,10 @@ test "$(npm config get allow-scripts)" = @anthropic-ai/claude-code
 # The persistent prefix starts empty: update would silently prove nothing.
 # Plan an explicit pinned user install without installing packages or running
 # lifecycle scripts. This proves neither a completed install nor an upgrade.
+# npm's dry-run cannot create the lib directory that a normal global install
+# creates automatically. Establish that dry-run-only precondition as the same
+# unprivileged user; do not seed an agent or change any runtime startup path.
+mkdir -p /home/codewire/.npm-global/lib
 npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0
 
 if [ "$mode" = mounted-home-agents ]; then

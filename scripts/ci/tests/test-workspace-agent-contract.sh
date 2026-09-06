@@ -43,12 +43,19 @@ fi
 case "$*" in
   'config get prefix') printf '/home/codewire/.npm-global\n' ;;
   'install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0')
+    [ -f "$FAKE_PREFIX_STATE" ] || exit 254
     printf 'npm dry-run OK\n' ;;
   '--version') printf 'npm test-version\n' ;;
   *) exit 97 ;;
 esac
 EOF
-chmod +x "$work/bin/id" "$work/bin/agent" "$work/bin/npm"
+cat >"$work/bin/mkdir" <<'EOF'
+#!/bin/sh
+# The host-side fake must never create a real workspace user's home directory.
+[ "$*" = '-p /home/codewire/.npm-global/lib' ] || exit 99
+printf 'lib-prepared\n' >"$FAKE_PREFIX_STATE"
+EOF
+chmod +x "$work/bin/id" "$work/bin/agent" "$work/bin/npm" "$work/bin/mkdir"
 for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
 done
@@ -64,6 +71,7 @@ run_contract() {
     CODEWIRE_EXPECTED_PIDS_MAX=2048 \
     FAIL_AGENT="${FAIL_AGENT:-}" \
     FAKE_CODEX_VERSION="${FAKE_CODEX_VERSION:-0.149.0}" \
+    FAKE_PREFIX_STATE="$work/prefix-state" \
     bash "$CONTRACT" "$@"
 }
 
