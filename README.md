@@ -31,6 +31,18 @@ docs/          stable docs + planning notes
 
 ## Quick start
 
+### Install this checkout's CLI
+
+```bash
+make dogfood
+```
+
+This aliases `make cli-install-user`: it builds the normal locked release CLI,
+runs the existing help smoke checks, and replaces `cw` in `XDG_BIN_HOME` or
+`~/.local/bin`. Ensure that directory is on `PATH`. It does not boot a VM,
+enable synthetic features, or import credentials; local environment creation
+is a separate step below.
+
 ### Local kind control plane
 
 ```bash
