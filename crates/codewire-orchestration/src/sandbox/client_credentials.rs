@@ -89,7 +89,10 @@ impl SandboxClient {
         anyhow::bail!("credential bootstrap update conflicts exhausted")
     }
 
-    /// Stops issuance before removing the leaf Secret. The dedicated issuer's
+    /// Removes the issuing Certificate before removing its leaf Secret. Do not
+    /// use foreground GC for the Certificate: retaining it while its leaf is
+    /// collected lets cert-manager start issuance again during teardown.
+    /// The dedicated issuer's
     /// cert-manager installation must enable Certificate owner references so
     /// Kubernetes also collects a late in-flight issuance after deletion.
     /// Ordinary stop keeps bootstrap objects for the still-existing workspace;
@@ -105,6 +108,7 @@ impl SandboxClient {
             &name,
             env_id,
             timeout,
+            kube::api::PropagationPolicy::Background,
         )
         .await?;
         // DELETE admission validates the old Secret's management labels and
@@ -116,6 +120,7 @@ impl SandboxClient {
             &credential_codex_config_name(env_id),
             env_id,
             timeout,
+            kube::api::PropagationPolicy::Foreground,
         )
         .await
     }
@@ -126,6 +131,7 @@ impl SandboxClient {
         name: &str,
         env_id: &str,
         timeout: Duration,
+        propagation_policy: kube::api::PropagationPolicy,
     ) -> anyhow::Result<()> {
         tokio::time::timeout(timeout, async {
             loop {
@@ -169,7 +175,7 @@ impl SandboxClient {
                         uid: Some(uid.to_owned()),
                         resource_version: None,
                     }),
-                    propagation_policy: Some(kube::api::PropagationPolicy::Foreground),
+                    propagation_policy: Some(propagation_policy.clone()),
                     ..Default::default()
                 };
                 match api.delete(name, &params).await {

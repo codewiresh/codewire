@@ -138,6 +138,44 @@ class WorkspaceProbe(unittest.TestCase):
 
 
 class HarnessGuards(unittest.TestCase):
+    def test_bootstrap_cleanup_removes_issuer_before_outputs_and_propagates_failures(self):
+        for certificate_status, leaf_status in ((0, 0), (42, 0), (0, 43)):
+            result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+kubectl() {
+  printf '%%s\\n' "$*" >&2
+  case "$*" in
+    '-n dev-sandboxes delete certificate/cw-credential-gateway-%s --ignore-not-found=true --cascade=background --wait=true --timeout=120s') return %s ;;
+    '-n dev-sandboxes delete secret/cw-credential-gateway-%s configmap/cw-credential-codex-%s --ignore-not-found=true --wait=true --timeout=120s') return %s ;;
+    *) return 99 ;;
+  esac
+}
+delete_kind_credential_bootstrap '%s'
+''' % (ENVIRONMENT, certificate_status, ENVIRONMENT, ENVIRONMENT, leaf_status, ENVIRONMENT))
+            self.assertEqual(result.returncode, certificate_status or leaf_status, result.stderr)
+            calls = result.stderr.splitlines()
+            self.assertEqual(len(calls), 1 if certificate_status else 2, result.stderr)
+            self.assertIn("delete certificate/", calls[0])
+            if not certificate_status:
+                self.assertIn("delete secret/", calls[1])
+        common = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
+        cleanup = common.split("cleanup_environment_resize_smoke() {", 1)[1].split(
+            "trap cleanup_environment_resize_smoke EXIT", 1)[0]
+        self.assertNotIn('"certificate/cw-credential-gateway-$environment_id"', cleanup)
+        self.assertLess(cleanup.index("--cascade=foreground --wait=true"),
+                        cleanup.index('delete_kind_credential_bootstrap "$environment_id"'))
+        self.assertIn('exit "$status"', cleanup)
+
+    def test_bootstrap_cleanup_rejects_noncanonical_environment_without_io(self):
+        for environment in ("", "foreign", ENVIRONMENT.upper()):
+            result = self.shell('''
+SANDBOX_NS=dev-sandboxes
+kubectl() { echo unexpected-kubectl >&2; return 99; }
+delete_kind_credential_bootstrap '%s'
+''' % environment)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stderr, "")
+
     def test_native_flow_resolves_the_selected_runtime_image_not_a_contract_only_preset(self):
         source = HELPERS.read_text()
         self.assertIn('workspace_image="$(kind_workspace_runtime_image)" || return $?', source)

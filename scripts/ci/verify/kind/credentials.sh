@@ -110,6 +110,21 @@ deploy_kind_credential_issuers() {
     --from-literal="ca.crt=$broker_roots" --dry-run=client -o yaml | kubectl_apply -f -
 }
 
+delete_kind_credential_bootstrap() {
+  local environment="$1"
+  [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+  # Remove the issuing object first. Foreground GC retains it while deleting
+  # its leaf, which can start cert-manager issuance again. Background removes
+  # that intent while its owner references still collect late controller work.
+  # Both phases must complete; this is not best-effort teardown.
+  kubectl -n "$SANDBOX_NS" delete "certificate/cw-credential-gateway-$environment" \
+    --ignore-not-found=true --cascade=background --wait=true --timeout=120s >/dev/null || return $?
+  kubectl -n "$SANDBOX_NS" delete \
+    "secret/cw-credential-gateway-$environment" \
+    "configmap/cw-credential-codex-$environment" \
+    --ignore-not-found=true --wait=true --timeout=120s >/dev/null
+}
+
 kind_credential_bootstrap_smoke() (
   log "checking credential bootstrap with real Kind admission and certificate issuance"
   local binary kubeconfig

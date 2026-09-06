@@ -283,7 +283,11 @@ async fn prove_bootstrap(
         absent(&admin.secrets(), &name).await?;
     }
     // Exercise the production destroy helper and its idempotent retry, then
-    // re-create and destroy once more with normal foreground issuance cleanup.
+    // Re-create and destroy once more with a real leaf. Hold that leaf's
+    // deletion so the ordering is deterministic: the issuing Certificate must
+    // disappear first, and cleanup must still wait for the leaf to disappear.
+    // Foreground Certificate deletion instead keeps the issuer intent visible
+    // while cert-manager can react to dependent removal by starting issuance.
     orchestration
         .delete_credential_bootstrap(&opts.environment_id, Duration::from_secs(30))
         .await?;
@@ -305,11 +309,63 @@ async fn prove_bootstrap(
                 && owner.name == name
                 && Some(&owner.uid) == reissued.metadata.uid.as_ref()
                 && owner.controller == Some(true))),
-        "foreground cleanup lacks a real newly issued leaf"
+        "cleanup lacks a real newly issued leaf"
     );
-    orchestration
-        .delete_credential_bootstrap(&opts.environment_id, Duration::from_secs(30))
+    admin
+        .secrets()
+        .patch(
+            &name,
+            &PatchParams::default(),
+            &Patch::Merge(json!({"metadata":{"finalizers":["codewire.sh/kind-cleanup-proof"]}})),
+        )
         .await?;
+    let deletion =
+        orchestration.delete_credential_bootstrap(&opts.environment_id, Duration::from_secs(30));
+    tokio::pin!(deletion);
+    let certificates = orchestration.credential_certificates();
+    tokio::select! {
+        result = &mut deletion => {
+            result?;
+            anyhow::bail!("cleanup returned before the held leaf was deleted");
+        }
+        result = tokio::time::timeout(
+            Duration::from_secs(10),
+            absent(&certificates, &name),
+        ) => {
+            result.context("issuing Certificate was retained behind its held leaf")??;
+        }
+    }
+    ensure!(
+        admin.secrets().get(&name).await?.metadata.uid == reissued_leaf.metadata.uid,
+        "held leaf identity changed during cleanup"
+    );
+    // Keep driving the deletion future while the leaf is held: merely pausing
+    // it until after releasing the finalizer would not prove that it waits.
+    ensure!(
+        tokio::time::timeout(Duration::from_secs(1), &mut deletion)
+            .await
+            .is_err(),
+        "cleanup completed while its leaf was still held"
+    );
+    ensure!(
+        admin
+            .secrets()
+            .get(&name)
+            .await?
+            .metadata
+            .deletion_timestamp
+            .is_some(),
+        "cleanup did not request held leaf deletion after removing its Certificate"
+    );
+    admin
+        .secrets()
+        .patch(
+            &name,
+            &PatchParams::default(),
+            &Patch::Merge(json!({"metadata":{"finalizers":null}})),
+        )
+        .await?;
+    deletion.await?;
     orchestration
         .delete_credential_bootstrap(&opts.environment_id, Duration::from_secs(30))
         .await?;

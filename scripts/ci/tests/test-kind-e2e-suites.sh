@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT/scripts/ci/verify/kind-e2e.sh"
 COMMON="$ROOT/scripts/ci/verify/kind/common.sh"
+CREDENTIALS="$ROOT/scripts/ci/verify/kind/credentials.sh"
 INTEGRATED="$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
 DASHBOARD_BROWSER="$ROOT/scripts/ci/verify/kind/suites/dashboard-browser.sh"
 FINAL_FENCING="$ROOT/scripts/ci/verify/kind/suites/final-fencing.sh"
@@ -65,25 +66,38 @@ done
 # Exercise the actual cleanup definition with no Kubernetes or database.
 # A failed foreground drain must never race a still-live issuer/key writer.
 resize_cleanup_definition="$(sed -n '/^  cleanup_environment_resize_smoke() {/,/^  }/p' "$COMMON")"
+credential_cleanup_definition="$(sed -n '/^delete_kind_credential_bootstrap() {/,/^}/p' "$CREDENTIALS")"
+[[ -n "$credential_cleanup_definition" ]] || fail 'credential cleanup helper is missing'
 run_resize_cleanup_fixture() (
   local failure="$1" initial_status="$2"
-  local environment_id=env-resize-fixture preset_id=preset-env-resize-fixture
-  local claim_name=sandbox-env-resize-fixture template_name=resize-template-env-resize-fixture
-  local shadow_pool_name=shadow-pool-resize-template-env-resize-fixture
-  local daemon_service=cw-daemon-env-resize-fixture NS=codewire-e2e SANDBOX_NS=dev-sandboxes
+  local environment_id=00000000-0000-4000-8000-000000000123 preset_id=preset-env-resize-fixture
+  local claim_name="sandbox-$environment_id" template_name="resize-template-$environment_id"
+  local shadow_pool_name="shadow-pool-resize-template-$environment_id"
+  local daemon_service="cw-daemon-$environment_id" NS=codewire-e2e SANDBOX_NS=dev-sandboxes
   kubectl() {
     record "$*"
     if [[ " $* " == *' exec '* ]]; then
       cat >"$FIXTURE/resize-cleanup.sql"
       [[ "$failure" != database ]]
-    elif [[ " $* " == *' certificate/'* ]]; then
+    elif [[ " $* " == *' --cascade=foreground '* ]]; then
+      [[ " $* " != *' certificate/'* && " $* " != *' secret/'* ]] ||
+        fail 'foreground workload drain includes a credential issuer or key'
       [[ "$failure" != foreground ]]
-    elif [[ " $* " == *' secret/'* ]]; then
+    elif [[ " $* " == *" certificate/cw-credential-gateway-$environment_id "* ]]; then
+      [[ " $* " == *' --cascade=background --wait=true --timeout=120s '* ]] ||
+        fail 'issuing Certificate must disappear before its outputs'
+      [[ "$failure" != certificate ]]
+    elif [[ " $* " == *" secret/cw-credential-gateway-$environment_id "* ]]; then
+      [[ " $* " == *" configmap/cw-credential-codex-$environment_id "* ]] ||
+        fail 'credential cleanup omitted its exact configuration'
       [[ "$failure" != leaf ]]
+    elif [[ " $* " == *" secret/cw-gateway-host-key-$environment_id "* ]]; then
+      [[ "$failure" != hostkey ]]
     else
       fail "unexpected resize cleanup command: $*"
     fi
   }
+  eval "$credential_cleanup_definition"
   eval "$resize_cleanup_definition"
   set +e
   (exit "$initial_status")
@@ -91,19 +105,35 @@ run_resize_cleanup_fixture() (
 )
 : >"$CALLS"
 run_resize_cleanup_fixture none 0
-[[ "$(wc -l <"$CALLS")" -eq 3 ]] || fail 'resize cleanup lost a required phase'
+[[ "$(wc -l <"$CALLS")" -eq 5 ]] || fail 'resize cleanup lost a required phase'
+mapfile -t resize_cleanup_calls <"$CALLS"
+[[ "${resize_cleanup_calls[0]}" == *' exec '* &&
+   "${resize_cleanup_calls[1]}" == *' --cascade=foreground '* &&
+   "${resize_cleanup_calls[2]}" == *' delete certificate/'* &&
+   "${resize_cleanup_calls[3]}" == *' delete secret/cw-credential-gateway-'* &&
+   "${resize_cleanup_calls[4]}" == *' delete secret/cw-gateway-host-key-'* ]] ||
+  fail 'resize cleanup does not preserve database, workload, issuer, leaf and host-key order'
 grep -Fq -- '--cascade=foreground --wait=true --timeout=120s' "$CALLS" ||
   fail 'resize cleanup does not wait for exact dependants to stop'
 grep -Fq "DELETE FROM environment_presets WHERE id = 'preset-env-resize-fixture' AND org_id = 'org_contract_1';" \
   "$FIXTURE/resize-cleanup.sql" || fail 'resize cleanup omitted its exact preset'
-for failure in database foreground leaf; do
+for failure in database foreground certificate leaf hostkey; do
   : >"$CALLS"
   expect_failure "resize-cleanup-$failure" run_resize_cleanup_fixture "$failure" 0
-  if [[ "$failure" == foreground ]] && grep -Fq ' secret/' "$CALLS"; then
-    fail 'resize cleanup deletes keys before the foreground drain succeeds'
-  fi
+  case "$failure" in
+    database|hostkey) expected_calls=5 ;;
+    foreground) expected_calls=2 ;;
+    certificate) expected_calls=3 ;;
+    leaf) expected_calls=4 ;;
+  esac
+  [[ "$(wc -l <"$CALLS")" -eq "$expected_calls" ]] ||
+    fail "resize cleanup continued past failed $failure phase or omitted bounded cleanup"
 done
-expect_failure resize-cleanup-original-failure run_resize_cleanup_fixture none 7
+if run_resize_cleanup_fixture none 7 >"$FIXTURE/resize-cleanup-original-failure.out" 2>&1; then
+  fail 'resize cleanup erased the original failure'
+else
+  [[ "$?" -eq 7 ]] || fail 'resize cleanup changed the original failure status'
+fi
 
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
   "$ENVIRONMENT_SESSION" "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"

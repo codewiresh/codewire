@@ -2820,7 +2820,7 @@ COMMIT;
 SQL
     [ "$?" -eq 0 ] || status=1
     # Runtime identity reconciliation creates the ordinary gateway stack.
-    # Stop its Deployment and issuer request before deleting either leaf key;
+    # Stop its Deployment and issuing Certificate before deleting either leaf key;
     # never delete the shared fixture Issuers or public root ConfigMaps.
     if kubectl -n "$SANDBOX_NS" delete \
       "sandboxclaim/$claim_name" "sandboxwarmpool/$shadow_pool_name" \
@@ -2828,13 +2828,14 @@ SQL
       "deployment/cw-gateway-$environment_id" \
       "service/cw-gateway-svc-$environment_id" "service/cw-gateway-udp-$environment_id" \
       "networkpolicy/cw-gw-net-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
-      "certificate/cw-credential-gateway-$environment_id" \
       --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null; then
-      kubectl -n "$SANDBOX_NS" delete \
-        "secret/cw-gateway-host-key-$environment_id" \
-        "secret/cw-credential-gateway-$environment_id" \
-        "configmap/cw-credential-codex-$environment_id" \
-        --ignore-not-found=true --wait=true --timeout=120s >/dev/null || status=1
+      if delete_kind_credential_bootstrap "$environment_id"; then
+        kubectl -n "$SANDBOX_NS" delete \
+          "secret/cw-gateway-host-key-$environment_id" \
+          --ignore-not-found=true --wait=true --timeout=120s >/dev/null || status=1
+      else
+        status=1
+      fi
     else
       status=1
     fi

@@ -275,10 +275,16 @@ async fn bootstrap_cleanup_uses_uid_fence_and_never_reads_secret_material() {
         requests[1].2["preconditions"]["uid"],
         "synthetic-certificate-uid"
     );
-    assert_eq!(requests[1].2["propagationPolicy"], "Foreground");
+    assert_eq!(requests[1].2["propagationPolicy"], "Background");
     assert_eq!(
         requests[3].2["preconditions"]["uid"],
         "synthetic-certificate-uid"
+    );
+    assert_eq!(requests[3].2["propagationPolicy"], "Background");
+    assert!(
+        requests[..5]
+            .iter()
+            .all(|request| !request.1.contains("/secrets/"))
     );
     assert!(requests[5].1.contains("/secrets/cw-credential-gateway-"));
     assert_eq!(requests[5].0, Method::DELETE);
