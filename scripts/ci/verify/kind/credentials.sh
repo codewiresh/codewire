@@ -2,8 +2,6 @@
 # Managed Kind credential fixture mechanics; not a standalone live installer.
 set -euo pipefail
 
-readonly KIND_CREDENTIAL_CERT_MANAGER_MANIFEST_SHA256=c8d451522fbf7db1a4c11d2d8c4c0253f51f4b54fd4396b467c0a582fe834615
-
 kind_credential_support_images() {
   # Image manifests resolved from the signed v1.17.1 release's official
   # registry references; Linux/amd64 only, like this native Kind gate.
@@ -44,10 +42,11 @@ load_kind_credential_support_images() {
 }
 
 deploy_kind_credential_cert_manager() {
+  local -r expected_manifest_sha256=c8d451522fbf7db1a4c11d2d8c4c0253f51f4b54fd4396b467c0a582fe834615
   local manifest actual current_context
   manifest="$ROOT/tests/e2e/kind/vendor/cert-manager-v1.17.1.yaml"
   actual="$(sha256sum "$manifest" | cut -d' ' -f1)"
-  if [ "$actual" != "$KIND_CREDENTIAL_CERT_MANAGER_MANIFEST_SHA256" ]; then
+  if [ "$actual" != "$expected_manifest_sha256" ]; then
     echo "::error::credential fixture cert-manager manifest differs from its reviewed render" >&2
     return 1
   fi

@@ -335,6 +335,12 @@ docker:pull ${KIND_POSTGRES_IMAGE}
 docker:pull ${KIND_TEMPORAL_IMAGE}
 docker:image tag ${KIND_POSTGRES_IMAGE} ${KIND_POSTGRES_LOCAL_IMAGE}
 docker:image tag ${KIND_TEMPORAL_IMAGE} ${KIND_TEMPORAL_LOCAL_IMAGE}
+docker:pull quay.io/jetstack/cert-manager-controller@sha256:8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a
+docker:image tag quay.io/jetstack/cert-manager-controller@sha256:8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a localhost/codewire-ci/cert-manager-controller:verified-8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a
+docker:pull quay.io/jetstack/cert-manager-webhook@sha256:f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246
+docker:image tag quay.io/jetstack/cert-manager-webhook@sha256:f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246 localhost/codewire-ci/cert-manager-webhook:verified-f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246
+docker:pull quay.io/jetstack/cert-manager-cainjector@sha256:da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985
+docker:image tag quay.io/jetstack/cert-manager-cainjector@sha256:da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985 localhost/codewire-ci/cert-manager-cainjector:verified-da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985
 EOF
 cmp -s "$FIXTURE/want-support-images" "$CALLS" || {
   diff -u "$FIXTURE/want-support-images" "$CALLS" >&2 || true
@@ -366,6 +372,12 @@ wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_POSTGRES_LOCAL_IMAGE}
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_TEMPORAL_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} localhost/codewire-ci/cert-manager-controller:verified-8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} localhost/codewire-ci/cert-manager-webhook:verified-f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} localhost/codewire-ci/cert-manager-cainjector:verified-da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985
 wait-api
 EOF
 if [ -n "${KIND_INGRESS_CONTROLLER_IMAGE:-}" ] \
@@ -484,6 +496,12 @@ wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_POSTGRES_LOCAL_IMAGE}
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_TEMPORAL_LOCAL_IMAGE}
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} localhost/codewire-ci/cert-manager-controller:verified-8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} localhost/codewire-ci/cert-manager-webhook:verified-f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246
+wait-api
+kind:load docker-image --name ${KIND_CLUSTER_NAME} localhost/codewire-ci/cert-manager-cainjector:verified-da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985
 wait-api
 kind:load docker-image --name ${KIND_CLUSTER_NAME} ${KIND_INGRESS_CONTROLLER_LOCAL_IMAGE}
 wait-api
@@ -790,10 +808,12 @@ grep -Fq 'did not become ready within 60 seconds after image import' \
   "$FIXTURE/api-unavailable.out" ||
   fail 'Kind API failure did not explain the bounded recovery failure'
 
-# A cluster becomes rerunnable only after controller, workspace/file, and
-# ordinary Temporal prerequisites pass, immediately before final fencing.
+# A cluster becomes rerunnable only after controller, credential, workspace/
+# file, and ordinary Temporal prerequisites pass, before final fencing.
 : >"$CALLS"
 deploy_agent_sandbox() { record deploy-agent; }
+kind_credential_bootstrap_smoke() { record credential-bootstrap; }
+kind_credential_native_smoke() { record credential-native; }
 workspace_service_smokes() { record workspace-services; }
 temporal_workflow_smoke() { record temporal-workflow; }
 mark_retained_cluster_prepared() { record prepared-marker; }
@@ -801,6 +821,8 @@ temporal_fencing_smoke() { record temporal-fencing; }
 deploy_agent_sandbox_and_smoke
 cat >"$FIXTURE/want-prepared-order" <<'EOF'
 deploy-agent
+credential-bootstrap
+credential-native
 workspace-services
 temporal-workflow
 prepared-marker

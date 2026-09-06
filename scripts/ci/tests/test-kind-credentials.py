@@ -162,6 +162,24 @@ kind_credential_native_smoke
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
 
+    def test_repeated_source_preserves_exact_support_image_inventory(self):
+        result = self.shell('''
+expected="$(kind_credential_support_images)"
+source "$1"
+[ "$(kind_credential_support_images)" = "$expected" ]
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_certificate_manifest_drift_fails_before_cluster_access(self):
+        result = self.shell('''
+sha256sum() { printf '%064d  synthetic-manifest\\n' 0; }
+kubectl() { echo unexpected-kubectl; return 98; }
+deploy_kind_credential_cert_manager
+''')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("differs from its reviewed render", result.stderr)
+        self.assertNotIn("unexpected-kubectl", result.stdout)
+
     def test_wrong_image_profile_and_promotability_fail_before_provisioning(self):
         for profile, promotable in (("release", "false"), ("ci", "true"), ("", "false")):
             result = self.shell('''
