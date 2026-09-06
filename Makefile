@@ -1,5 +1,5 @@
 .PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind design-system e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind test-ui-kind-billing test-billing-smoke-kind seed-test-user seed-e2e-users build build-web clean wasm build-gateway build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
-.PHONY: cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets
+.PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system scan-supply-chain verify-dashboard-image sync-local-secrets
 
 # Default target
 help:
@@ -37,6 +37,7 @@ help:
 	@echo "  make build-web    - Build the Rust web binary"
 	@echo ""
 	@echo "CLI:"
+	@echo "  make dogfood            - Build, smoke-test, and install this checkout's CLI for your user"
 	@echo "  make cli-build          - Build the release CLI"
 	@echo "  make cli-smoke          - Build and run CLI help smoke checks"
 	@echo "  make cli-install        - Install CLI for the current user"
@@ -302,6 +303,8 @@ cli-smoke:
 	$(MAKE) -C apps/cli smoke
 
 cli-install: cli-install-user
+
+dogfood: cli-install-user
 
 cli-install-user:
 	$(MAKE) -C apps/cli install-user
