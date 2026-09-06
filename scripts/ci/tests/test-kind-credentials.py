@@ -23,6 +23,11 @@ SPEC = importlib.util.spec_from_file_location(
 PROBE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROBE)
 ENVIRONMENT = "86fb3daa-dde0-4fb4-bf83-6e2399d78a5f"
+CREDENTIAL_IMAGES = (
+    ("controller", "8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a"),
+    ("webhook", "f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246"),
+    ("cainjector", "da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985"),
+)
 
 
 class WorkspaceProbe(unittest.TestCase):
@@ -178,7 +183,8 @@ wait_kind_credential_environment '%s' destroyed
 
     def shell(self, body):
         result = subprocess.run(
-            ["/bin/bash", "-c", 'set -euo pipefail\nsource "$1"\n' + body,
+            ["/bin/bash", "-c", 'set -euo pipefail\nsource "$1"\n'
+             'validate_sealed_kind_images() { return 1; }\n' + body,
              "kind-credential-fixture", str(HELPERS)],
             env={"PATH": "/usr/bin:/bin", "ROOT": str(ROOT)},
             capture_output=True, text=True, timeout=10,
@@ -204,6 +210,93 @@ source "$1"
 [ "$(kind_credential_support_images)" = "$expected" ]
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_support_image_mapping_preserves_exact_digests_and_aliases(self):
+        for status, registry in ((1, "quay.io/jetstack"),
+                                 (0, "nexus.example.invalid/oci-approved/jetstack")):
+            with self.subTest(status=status):
+                result = self.shell('''
+validate_sealed_kind_images() { return %s; }
+kind_credential_support_images
+''' % status)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [
+                    f"{registry}/cert-manager-{name}@sha256:{digest}|"
+                    f"localhost/codewire-ci/cert-manager-{name}:verified-{digest}"
+                    for name, digest in CREDENTIAL_IMAGES
+                ])
+
+    def test_sealed_prepare_and_load_use_only_preloaded_nexus_references(self):
+        result = self.shell('''
+exec 3>&1
+validate_sealed_kind_images() { return 0; }
+KIND_CLUSTER_NAME=synthetic-credential-fixture
+log() { :; }
+docker() {
+  case "$1 $2" in
+    'image inspect'|'image tag')
+      [[ "$3" == nexus.example.invalid/oci-approved/jetstack/cert-manager-*@sha256:* ]] || return 98
+      printf 'docker:%s\\n' "$*" >&3 ;;
+    *) echo unexpected-network; return 99 ;;
+  esac
+}
+kind() { printf 'kind:%s\\n' "$*"; }
+wait_for_kind_api_after_image_load() { echo wait-api; }
+prepare_kind_credential_support_images
+load_kind_credential_support_images
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = []
+        for name, digest in CREDENTIAL_IMAGES:
+            source = f"nexus.example.invalid/oci-approved/jetstack/cert-manager-{name}@sha256:{digest}"
+            alias = f"localhost/codewire-ci/cert-manager-{name}:verified-{digest}"
+            expected += [f"docker:image inspect {source}", f"docker:image tag {source} {alias}"]
+        for name, digest in CREDENTIAL_IMAGES:
+            source = f"nexus.example.invalid/oci-approved/jetstack/cert-manager-{name}@sha256:{digest}"
+            alias = f"localhost/codewire-ci/cert-manager-{name}:verified-{digest}"
+            expected += [f"docker:image inspect {source}",
+                         f"kind:load docker-image --name synthetic-credential-fixture {alias}",
+                         "wait-api"]
+        self.assertEqual(result.stdout.splitlines(), expected)
+
+    def test_invalid_image_tuple_fails_even_when_every_image_is_cached(self):
+        for operation in ("kind_credential_support_images", "prepare_kind_credential_support_images",
+                          "load_kind_credential_support_images"):
+            with self.subTest(operation=operation):
+                result = self.shell('''
+validate_sealed_kind_images() { return 2; }
+docker() { echo unexpected-docker; return 0; }
+kind() { echo unexpected-kind; return 0; }
+log() { :; }
+wait_for_kind_api_after_image_load() { echo unexpected-wait; }
+KIND_CLUSTER_NAME=synthetic-credential-fixture
+status=0
+%s || status=$?
+exit "$status"
+''' % operation)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_failed_image_inventory_never_performs_partial_prepare_or_load(self):
+        for operation in ("prepare_kind_credential_support_images", "load_kind_credential_support_images"):
+            for partial in (False, True):
+                with self.subTest(operation=operation, partial=partial):
+                    result = self.shell('''
+kind_credential_support_images() {
+  %s
+  return 37
+}
+docker() { echo unexpected-docker; return 0; }
+kind() { echo unexpected-kind; return 0; }
+log() { :; }
+wait_for_kind_api_after_image_load() { echo unexpected-wait; }
+KIND_CLUSTER_NAME=synthetic-credential-fixture
+status=0
+%s || status=$?
+exit "$status"
+''' % ("printf '%s\\n' 'synthetic-source|synthetic-alias'" if partial else ":", operation))
+                    self.assertEqual(result.returncode, 37, result.stderr)
+                    self.assertEqual(result.stdout, "")
 
     def test_certificate_manifest_drift_fails_before_cluster_access(self):
         result = self.shell('''

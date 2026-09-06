@@ -5,14 +5,27 @@ set -euo pipefail
 kind_credential_support_images() {
   # Image manifests resolved from the signed v1.17.1 release's official
   # registry references; Linux/amd64 only, like this native Kind gate.
+  # Sealed runners preload the same manifests through their approved Nexus
+  # boundary. Docker digest references include the repository, so an approved
+  # Nexus reference cannot satisfy an inspection of the public Quay name.
+  local registry sealed_status=0
+  validate_sealed_kind_images >&2 || sealed_status=$?
+  case "$sealed_status" in
+    0) registry=nexus.example.invalid/oci-approved/jetstack ;;
+    1) registry=quay.io/jetstack ;;
+    *) return "$sealed_status" ;;
+  esac
   printf '%s\n' \
-    'quay.io/jetstack/cert-manager-controller@sha256:8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a|localhost/codewire-ci/cert-manager-controller:verified-8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a' \
-    'quay.io/jetstack/cert-manager-webhook@sha256:f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246|localhost/codewire-ci/cert-manager-webhook:verified-f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246' \
-    'quay.io/jetstack/cert-manager-cainjector@sha256:da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985|localhost/codewire-ci/cert-manager-cainjector:verified-da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985'
+    "${registry}/cert-manager-controller@sha256:8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a|localhost/codewire-ci/cert-manager-controller:verified-8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a" \
+    "${registry}/cert-manager-webhook@sha256:f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246|localhost/codewire-ci/cert-manager-webhook:verified-f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246" \
+    "${registry}/cert-manager-cainjector@sha256:da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985|localhost/codewire-ci/cert-manager-cainjector:verified-da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985"
 }
 
 prepare_kind_credential_support_images() {
-  local source alias
+  local source alias images
+  # Capture and check the complete inventory before any image operation. A
+  # process substitution would hide an invalid tuple or generator failure.
+  images="$(kind_credential_support_images)" || return $?
   while IFS='|' read -r source alias; do
     if ! docker image inspect "$source" >/dev/null 2>&1; then
       # Sealed CI must preload dependencies at its existing trusted boundary;
@@ -28,17 +41,18 @@ prepare_kind_credential_support_images() {
       docker pull "$source"
     fi
     docker image tag "$source" "$alias"
-  done < <(kind_credential_support_images)
+  done <<<"$images"
 }
 
 load_kind_credential_support_images() {
-  local source alias
+  local source alias images
+  images="$(kind_credential_support_images)" || return $?
   while IFS='|' read -r source alias; do
     docker image inspect "$source" >/dev/null
     log "loading ${alias} into Kind"
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$alias"
     wait_for_kind_api_after_image_load
-  done < <(kind_credential_support_images)
+  done <<<"$images"
 }
 
 deploy_kind_credential_cert_manager() {

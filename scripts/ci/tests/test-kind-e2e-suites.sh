@@ -448,6 +448,17 @@ cmp -s "$FIXTURE/want-support-images" "$CALLS" || {
 # than falling back to a public pull. Exercise the real guard with synthetic
 # Docker state; neither these negative cases nor the positive case below can
 # contact a Docker daemon or load anything into a real cluster.
+public_credential_images="$(kind_credential_support_images)" || fail 'public credential inventory failed'
+sealed_credential_images="$(env \
+  KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+  KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+  KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
+  KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+  KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
+  bash -seuc 'source "$1"; kind_credential_support_images' _ "$COMMON")" ||
+  fail 'sealed credential inventory failed'
+[[ "$sealed_credential_images" == "${public_credential_images//quay.io\/jetstack/nexus.example.invalid\/oci-approved\/jetstack}" ]] ||
+  fail 'sealed credential inventory did not select exactly the approved Nexus references'
 missing_credential_index=0
 while IFS='|' read -r missing_credential_source missing_credential_alias; do
   missing_credential_index=$((missing_credential_index + 1))
@@ -487,8 +498,35 @@ BASH
   if grep -Fq " $missing_credential_alias" "$CALLS"; then
     fail 'sealed missing-image guard assigned an alias to an absent image'
   fi
-done < <(kind_credential_support_images)
+done <<<"$sealed_credential_images"
 [ "$missing_credential_index" -eq 3 ] || fail 'credential preload rejection inventory changed'
+
+# Preparation and loading must propagate the real tuple validator's failure
+# even if every image inspection would succeed. No cached image permits a
+# partial or substituted platform tuple to select an image delivery mode.
+for credential_operation in prepare_kind_credential_support_images load_kind_credential_support_images; do
+  for invalid_agent in '' 'nexus.example.invalid/oci-approved/codewire/agent-sandbox-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; do
+    : >"$CALLS"
+    env \
+      KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
+      KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
+      KIND_AGENT_SANDBOX_IMAGE="$invalid_agent" \
+      KIND_WORKSPACE_IMAGE="$SEALED_WORKSPACE_IMAGE" \
+      KIND_DIND_IMAGE="$SEALED_DIND_IMAGE" \
+      CREDENTIAL_OPERATION="$credential_operation" COMMON="$COMMON" CALLS="$CALLS" bash -seu <<'BASH'
+    # shellcheck source=scripts/ci/verify/kind/common.sh
+    source "$COMMON"
+    docker() { printf 'docker:%s\n' "$*" >>"$CALLS"; }
+    kind() { printf 'kind:%s\n' "$*" >>"$CALLS"; }
+    log() { :; }
+    wait_for_kind_api_after_image_load() { printf 'wait-api\n' >>"$CALLS"; }
+    status=0
+    "$CREDENTIAL_OPERATION" || status=$?
+    [ "$status" -eq 2 ] || exit 98
+BASH
+    [ ! -s "$CALLS" ] || fail 'invalid tuple performed a credential image operation'
+  done
+done
 
 # Every large image import is separated by an API recovery gate. This keeps a
 # temporarily starved control plane from accumulating four back-to-back imports.
@@ -587,7 +625,9 @@ env \
     fail 'sealed DinD input did not resolve to its local alias'
   docker() {
     case "${1:-} ${2:-}" in
-      'image inspect'|'image tag') ;;
+      'image inspect'|'image tag')
+        [[ "$*" != *quay.io/jetstack/* ]] || fail 'sealed image lookup used the public repository'
+        ;;
       *) fail "unexpected sealed Docker invocation: $*" ;;
     esac
     record "docker:$*"
@@ -645,6 +685,15 @@ env \
     fail 'sealed Kind overlay retained the public workspace image'
   fi
 BASH
+
+# The exact approved repository references, not merely matching digests under
+# public names, must be both inspected and assigned their unchanged aliases.
+while IFS='|' read -r credential_source credential_alias; do
+  grep -Fq "docker:image inspect $credential_source" "$CALLS" ||
+    fail 'sealed credential source was not proven in the runner-preloaded store'
+  grep -Fq "docker:image tag $credential_source $credential_alias" "$CALLS" ||
+    fail 'sealed credential source was not assigned its unchanged local alias'
+done <<<"$sealed_credential_images"
 
 grep -E '^kind:load docker-image|^wait-api$' "$CALLS" \
   >"$FIXTURE/sealed-image-load-order"
