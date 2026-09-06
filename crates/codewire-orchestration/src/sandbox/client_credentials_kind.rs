@@ -250,12 +250,17 @@ async fn prove_bootstrap(
         }))?;
         if managed {
             foreign.metadata.labels = leaf.metadata.labels.clone();
-            admission_denied(
+            // Both independent policies forbid CREATE. Kubernetes may report
+            // either first; this proves composed denial, not their ordering.
+            admission_denied_by(
                 orchestration
                     .secrets()
                     .create(&PostParams::default(), &foreign)
                     .await,
-                "only cert-manager may write credential leaf Secrets",
+                &[
+                    "only cert-manager may write credential leaf Secrets",
+                    "codewire-orchestration may only create or delete gateway host-key Secrets, or delete an independently validated credential leaf",
+                ],
             )
             .await?;
         }
@@ -335,6 +340,10 @@ async fn denied<T>(result: Result<T, kube::Error>, action: &str) -> Result<()> {
 }
 
 async fn admission_denied<T>(result: Result<T, kube::Error>, message: &str) -> Result<()> {
+    admission_denied_by(result, &[message]).await
+}
+
+async fn admission_denied_by<T>(result: Result<T, kube::Error>, messages: &[&str]) -> Result<()> {
     // These policies omit validation.reason, so Kubernetes returns Invalid
     // (422), not the independent RBAC Forbidden (403) checked above.
     let status = match &result {
@@ -343,8 +352,9 @@ async fn admission_denied<T>(result: Result<T, kube::Error>, message: &str) -> R
     };
     ensure!(
         matches!(result, Err(kube::Error::Api(ref error))
-        if error.code == 422 && error.reason == "Invalid" && error.message.contains(message)),
-        "expected credential admission denial was not observed (API status {status:?}): {message}"
+        if error.code == 422 && error.reason == "Invalid"
+            && messages.iter().any(|message| error.message.contains(message))),
+        "expected credential admission denial was not observed (API status {status:?}): {messages:?}"
     );
     Ok(())
 }
@@ -371,6 +381,33 @@ async fn admission_assertion_requires_policy_invalid_not_rbac_or_schema_failure(
     ] {
         assert!(admission_denied(result, MESSAGE).await.is_err());
     }
+}
+
+#[tokio::test]
+async fn overlapping_admission_requires_one_of_the_exact_policy_messages() {
+    let response = |message| -> Result<(), kube::Error> {
+        Err(kube::Error::Api(Box::new(
+            kube::core::Status::failure(message, "Invalid").with_code(422),
+        )))
+    };
+    let policies = ["first exact policy denial", "second exact policy denial"];
+    for message in policies {
+        assert!(
+            admission_denied_by(response(message), &policies)
+                .await
+                .is_ok()
+        );
+    }
+    assert!(
+        admission_denied_by(response("unrelated schema error"), &policies)
+            .await
+            .is_err()
+    );
+    assert!(
+        admission_denied_by(response(policies[0]), &[])
+            .await
+            .is_err()
+    );
 }
 
 async fn absent(api: &Api<DynamicObject>, name: &str) -> Result<()> {
