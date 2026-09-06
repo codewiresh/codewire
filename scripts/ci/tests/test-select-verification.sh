@@ -1162,6 +1162,17 @@ grep -qF 'Contracts selected without contracts_proto' \
   <<<"$missing_mode_output"
 
 integration_runner="$ROOT/scripts/ci/verify/run-integration-verification.sh"
+# Database owns the destroy-hint regression. The activity-fencing lane must
+# retain its exact two tests instead of also selecting this ignored worker test.
+activity_fencing_block="$(sed -n '/^run_orchestration() {/,/^  start_orchestration$/p' "$integration_runner")"
+grep -qF "'worker::' -- --ignored" <<<"$activity_fencing_block"
+grep -qF -- "--skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek'" <<<"$activity_fencing_block"
+grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure'" <<<"$activity_fencing_block"
+grep -qF 'assert_passed_count "orchestration activity fencing matrix" "$logfile" 2' <<<"$activity_fencing_block"
+destroy_hint_block="$(sed -n '/logfile="$RUN_DIR\/environment-destroy-template-hint.log"/,/assert_passed_count "environment destroy template hint matrix"/p' "$integration_runner")"
+grep -qF 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' <<<"$destroy_hint_block"
+grep -qF -- '-- --ignored --exact --nocapture' <<<"$destroy_hint_block"
+grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfile" 1' <<<"$destroy_hint_block"
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 14' "$integration_runner"

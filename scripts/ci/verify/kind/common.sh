@@ -2793,8 +2793,10 @@ workspace_service_smokes() {
 
 environment_resize_smoke() (
   log "running public environment resize against the agent-sandbox controller"
-  local environment_id="env-resize-kind-${RANDOM}"
+  local environment_id
+  environment_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   local request_id="kind-resize-${RANDOM}-${RANDOM}"
+  local preset_id="preset-${environment_id}"
   local template_name="resize-template-${environment_id}"
   local shadow_pool_name="shadow-pool-resize-template-${environment_id}"
   local claim_name="sandbox-${environment_id}"
@@ -2805,20 +2807,38 @@ environment_resize_smoke() (
 
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_environment_resize_smoke() {
+    local status=$?
+    trap - EXIT
     set +e
     kubectl -n "$NS" exec -i deploy/postgres -- \
       psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+BEGIN;
 DELETE FROM sandbox_environment_backend WHERE environment_id = '$environment_id';
 DELETE FROM environments WHERE id = '$environment_id';
+DELETE FROM environment_presets WHERE id = '$preset_id' AND org_id = 'org_contract_1';
+COMMIT;
 SQL
-    kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-      --ignore-not-found=true --wait=false >/dev/null
-    kubectl -n "$SANDBOX_NS" delete sandboxwarmpool "$shadow_pool_name" \
-      --ignore-not-found=true --wait=false >/dev/null
-    kubectl -n "$SANDBOX_NS" delete sandboxtemplate "$template_name" \
-      --ignore-not-found=true --wait=false >/dev/null
-    kubectl -n "$SANDBOX_NS" delete service "$daemon_service" \
-      --ignore-not-found=true --wait=false >/dev/null
+    [ "$?" -eq 0 ] || status=1
+    # Runtime identity reconciliation creates the ordinary gateway stack.
+    # Stop its Deployment and issuer request before deleting either leaf key;
+    # never delete the shared fixture Issuers or public root ConfigMaps.
+    if kubectl -n "$SANDBOX_NS" delete \
+      "sandboxclaim/$claim_name" "sandboxwarmpool/$shadow_pool_name" \
+      "sandboxtemplate/$template_name" "service/$daemon_service" \
+      "deployment/cw-gateway-$environment_id" \
+      "service/cw-gateway-svc-$environment_id" "service/cw-gateway-udp-$environment_id" \
+      "networkpolicy/cw-gw-net-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
+      "certificate/cw-credential-gateway-$environment_id" \
+      --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null; then
+      kubectl -n "$SANDBOX_NS" delete \
+        "secret/cw-gateway-host-key-$environment_id" \
+        "secret/cw-credential-gateway-$environment_id" \
+        "configmap/cw-credential-codex-$environment_id" \
+        --ignore-not-found=true --wait=true --timeout=120s >/dev/null || status=1
+    else
+      status=1
+    fi
+    exit "$status"
   }
   trap cleanup_environment_resize_smoke EXIT
 
@@ -2975,6 +2995,14 @@ EOF
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+BEGIN;
+-- A runnable fixture owns its own preset. The shared contract preset is
+-- deliberately missing runtime configuration for the Temporal failure test.
+INSERT INTO environment_presets (id, org_id, name, official, project_spec)
+VALUES ('$preset_id', 'org_contract_1', '$preset_id', false,
+        '{"schema_version":1,"image":"codewire-gateway:e2e","working_directory":"/workspace"}'::jsonb);
+INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name)
+VALUES ('$preset_id', 'codewire-gateway:e2e', 'resize-template');
 INSERT INTO environments (
   id, org_id, created_by, type, name, state, desired_state, preset_id,
   cpu_millicores, memory_mb, disk_gb,
@@ -2982,7 +3010,7 @@ INSERT INTO environments (
 )
 VALUES (
   '$environment_id', 'org_contract_1', 'usr_contract_admin', 'sandbox',
-  'kind-resize-smoke', 'running', 'started', 'preset_contract_1',
+  'kind-resize-smoke', 'running', 'started', '$preset_id',
   250, 256, 1, NOW(),
   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 );
@@ -2994,6 +3022,7 @@ VALUES (
   '$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}')',
   '$pod_name', '$pod_ip'
 );
+COMMIT;
 SQL
 
   curl_settled -X POST \

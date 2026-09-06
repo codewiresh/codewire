@@ -41,6 +41,70 @@ record() {
   printf '%s\n' "$1" >>"$CALLS"
 }
 
+# A runnable resize fixture cannot use the deliberately non-runnable shared
+# contract preset. Keep its image/base mapping and the original runtime proof.
+resize_fixture="$(sed -n '/^environment_resize_smoke() (/,/^temporal_workflow_smoke() {/p' "$COMMON")"
+grep -Fq "environment_id=\"\$(python3 -c 'import uuid; print(uuid.uuid4())')\"" <<<"$resize_fixture" ||
+  fail 'resize fixture does not use the canonical environment identity shape'
+grep -Fq "'kind-resize-smoke', 'running', 'started', '\$preset_id'" <<<"$resize_fixture" ||
+  fail 'resize fixture does not use its own runnable preset'
+grep -Fq "VALUES ('\$preset_id', 'codewire-gateway:e2e', 'resize-template');" <<<"$resize_fixture" ||
+  fail 'resize fixture image/template base does not match its runtime'
+grep -Fq 'INSERT INTO environment_presets (id, org_id, name, official, project_spec)' <<<"$resize_fixture" ||
+  fail 'resize fixture does not own its preset'
+[[ "$(grep -c '^BEGIN;' <<<"$resize_fixture")" -eq 2 && "$(grep -c '^COMMIT;' <<<"$resize_fixture")" -eq 2 ]] ||
+  fail 'resize fixture creation and cleanup must each be atomic'
+for assertion in \
+    'live resize replaced the owned workspace Pod UID' \
+    'live resize changed workspace restart count' \
+    'Sandbox or SandboxClaim did not retain the desired resize' \
+    'explicit restart failed to preserve PVC identity or workspace data'; do
+  grep -Fq "$assertion" <<<"$resize_fixture" || fail "resize assertion missing: $assertion"
+done
+
+# Exercise the actual cleanup definition with no Kubernetes or database.
+# A failed foreground drain must never race a still-live issuer/key writer.
+resize_cleanup_definition="$(sed -n '/^  cleanup_environment_resize_smoke() {/,/^  }/p' "$COMMON")"
+run_resize_cleanup_fixture() (
+  local failure="$1" initial_status="$2"
+  local environment_id=env-resize-fixture preset_id=preset-env-resize-fixture
+  local claim_name=sandbox-env-resize-fixture template_name=resize-template-env-resize-fixture
+  local shadow_pool_name=shadow-pool-resize-template-env-resize-fixture
+  local daemon_service=cw-daemon-env-resize-fixture NS=codewire-e2e SANDBOX_NS=dev-sandboxes
+  kubectl() {
+    record "$*"
+    if [[ " $* " == *' exec '* ]]; then
+      cat >"$FIXTURE/resize-cleanup.sql"
+      [[ "$failure" != database ]]
+    elif [[ " $* " == *' certificate/'* ]]; then
+      [[ "$failure" != foreground ]]
+    elif [[ " $* " == *' secret/'* ]]; then
+      [[ "$failure" != leaf ]]
+    else
+      fail "unexpected resize cleanup command: $*"
+    fi
+  }
+  eval "$resize_cleanup_definition"
+  set +e
+  (exit "$initial_status")
+  cleanup_environment_resize_smoke
+)
+: >"$CALLS"
+run_resize_cleanup_fixture none 0
+[[ "$(wc -l <"$CALLS")" -eq 3 ]] || fail 'resize cleanup lost a required phase'
+grep -Fq -- '--cascade=foreground --wait=true --timeout=120s' "$CALLS" ||
+  fail 'resize cleanup does not wait for exact dependants to stop'
+grep -Fq "DELETE FROM environment_presets WHERE id = 'preset-env-resize-fixture' AND org_id = 'org_contract_1';" \
+  "$FIXTURE/resize-cleanup.sql" || fail 'resize cleanup omitted its exact preset'
+for failure in database foreground leaf; do
+  : >"$CALLS"
+  expect_failure "resize-cleanup-$failure" run_resize_cleanup_fixture "$failure" 0
+  if [[ "$failure" == foreground ]] && grep -Fq ' secret/' "$CALLS"; then
+    fail 'resize cleanup deletes keys before the foreground drain succeeds'
+  fi
+done
+expect_failure resize-cleanup-original-failure run_resize_cleanup_fixture none 7
+
 bash -n "$SCRIPT" "$COMMON" "$INTEGRATED" "$DASHBOARD_BROWSER" "$FINAL_FENCING" \
   "$ENVIRONMENT_SESSION" "$SANDBOX_SUPPLY_CHAIN" "$RUNTIME_ACCEPTANCE" "$0"
 grep -Fq 'CRD_SMOKE_GATEWAY_TOKEN="$gateway_token"' "$COMMON" ||
