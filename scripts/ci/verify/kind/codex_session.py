@@ -20,7 +20,7 @@ import tempfile
 import time
 
 
-CODEX = "/home/codewire/.npm-global/bin/codex"
+CODEX = "/opt/codewire/agents/npm/bin/codex"
 CODEX_HOME = "/run/codewire-codex/home"
 ROOTS = "/run/codewire-credentials/gateway-roots/ca.crt"
 TOKEN = "/run/codewire-credentials/workspace/token"

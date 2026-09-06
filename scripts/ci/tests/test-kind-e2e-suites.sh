@@ -67,9 +67,9 @@ awk '
   END { exit !(ready > 0 && ready < observe && observe < checked && checked < expire) }
 ' "$ROOT/crates/codewire-orchestration/src/bin/reconciler-ttl-smoke.rs" ||
   fail 'TTL smoke must pass the live provenance gate after Ready and before expiry'
-[[ "$(grep -Fc 'SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)"' "$COMMON")" -eq 4 ]] ||
+[[ "$(grep -Fc 'SMOKE_WORKSPACE_IMAGE="$workspace_image"' "$COMMON")" -eq 4 ]] ||
   fail 'Kind smoke callers do not consistently select the sealed workspace alias'
-grep -Fq 'PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)"' "$COMMON" ||
+grep -Fq 'PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$workspace_image"' "$COMMON" ||
   fail 'dashboard lifecycle does not select the sealed workspace alias'
 grep -Fq 'process.env.PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE || workspaceImage' \
   "$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts" ||
@@ -273,6 +273,33 @@ cmp -s "$FIXTURE/want-order" "$CALLS" || {
 # shellcheck source=scripts/ci/verify/kind/common.sh
 source "$COMMON"
 
+# Unchanged sealed/release fixtures below exercise their original runtime
+# selection. Source-build selection has its own closed receipt fixture.
+CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release
+
+# A build-ci workspace is selected only from the canonical verified receipt.
+# Even a valid receipt cannot bypass a partial or substituted sealed tuple.
+(
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
+  source_alias="localhost/codewire-ci/workspace:source-$(printf '%064d' 3)"
+  python3() {
+    [ "$*" = "$ROOT/scripts/ci/verify/workspace-image-artifact.py reuse $ROOT $ROOT/.tmp/codewire-workspace-image-verification.json" ] ||
+      fail 'workspace source selection bypassed the canonical receipt helper'
+    [ "${receipt_valid:-1}" = 1 ] || return 42
+    printf '%s\n' "$source_alias"
+  }
+  [ "$(kind_workspace_runtime_image)" = "$source_alias" ] || fail 'source workspace was not selected'
+  receipt_valid=0
+  expect_failure absent-workspace-receipt kind_workspace_runtime_image
+  receipt_valid=1
+  expect_failure invalid-sealed-source-workspace env \
+    KIND_INGRESS_CONTROLLER_IMAGE=unaccepted CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci \
+    bash -seuc 'source "$1"; python3() { printf "%s\n" "$2"; }; kind_workspace_runtime_image' \
+    _ "$COMMON" "$source_alias"
+  grep -Fq 'sealed Kind inputs must match the five approved Nexus digests' \
+    "$FIXTURE/invalid-sealed-source-workspace.out" || fail 'source receipt bypassed sealed input rejection'
+)
+
 # The integrated transaction lock is host-wide rather than worktree-local and
 # is bounded, so concurrent local suites wait instead of deleting each other.
 : >"$CALLS"
@@ -403,11 +430,31 @@ cmp -s "$FIXTURE/want-image-load-order" "$CALLS" || {
   fail 'Kind image imports are not separated by API recovery gates'
 }
 
+# The source-built image is imported once, with the same API recovery gate.
+(
+  : >"$CALLS"
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
+  source_alias="localhost/codewire-ci/workspace:source-$(printf '%064d' 3)"
+  python3() {
+    [ "$*" = "$ROOT/scripts/ci/verify/workspace-image-artifact.py reuse $ROOT $ROOT/.tmp/codewire-workspace-image-verification.json" ] ||
+      fail 'image loading used a noncanonical source receipt'
+    printf '%s\n' "$source_alias"
+  }
+  load_images_into_kind
+  [ "$(grep -Fc "kind:load docker-image --name $KIND_CLUSTER_NAME $source_alias" "$CALLS")" -eq 1 ] ||
+    fail 'Kind did not import its exact source-built workspace once'
+  awk -v image="$source_alias" '
+    index($0, image) { getline; if ($0 != "wait-api") exit 1; found = 1 }
+    END { if (!found) exit 1 }
+  ' "$CALLS" || fail 'source image import omitted API recovery'
+)
+
 # Forgejo CI names only the five approved Nexus platform manifests. They must
 # already exist in the private DinD store. The two digest-pinned public
 # service dependencies are also side-loaded before the rendered deployment.
 : >"$CALLS"
 env \
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
   KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
@@ -524,6 +571,7 @@ cmp -s "$FIXTURE/want-sealed-image-load-order" "$FIXTURE/sealed-image-load-order
 # the workspace in rendered templates, validates the configured optional DinD
 # input, and rejects pull failures without an unrelated-service allowlist.
 env \
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=prebuilt-release \
   KIND_INGRESS_CONTROLLER_IMAGE="$SEALED_CONTROLLER_IMAGE" \
   KIND_INGRESS_CERTGEN_IMAGE="$SEALED_CERTGEN_IMAGE" \
   KIND_AGENT_SANDBOX_IMAGE="$SEALED_AGENT_IMAGE" \
@@ -845,6 +893,7 @@ FAKE_CLUSTERS=other-cluster
 FAKE_CONTEXT=kind-retained-fixture
 FAKE_MARKER_VERSION="$KIND_E2E_COMPATIBILITY_VERSION"
 FAKE_MARKER_CLUSTER="$KIND_CLUSTER_NAME"
+FAKE_MARKER_WORKSPACE="$(kind_workspace_runtime_image)"
 FAKE_MARKER_MISSING=0
 FAKE_RETAINED_EXPORT_FAIL=0
 FAKE_RETAINED_REACHABLE=1
@@ -881,6 +930,9 @@ kubectl() {
       ;;
     *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"cluster-name"*)
       printf '%s' "$FAKE_MARKER_CLUSTER"
+      ;;
+    *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"workspace-image"*)
+      printf '%s' "$FAKE_MARKER_WORKSPACE"
       ;;
     *'get deployment/'*) printf '1' ;;
     *'get crd/sandboxclaims.extensions.agents.x-k8s.io'*) return 0 ;;
@@ -929,6 +981,16 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE/bin/temporal-fencing-smoke"
 chmod +x "$FIXTURE/bin/temporal-fencing-smoke"
 CARGO_CI_DIR="$FIXTURE/bin"
 FAKE_MARKER_VERSION="$KIND_E2E_COMPATIBILITY_VERSION"
+FAKE_MARKER_WORKSPACE=stale-workspace
+expect_failure stale-workspace-marker validate_retained_cluster
+grep -Fq 'workspace image does not match' "$FIXTURE/stale-workspace-marker.out" ||
+  fail 'stale retained workspace was not decisively rejected'
+FAKE_MARKER_WORKSPACE="$(kind_workspace_runtime_image)"
+(
+  CODEWIRE_KIND_PRODUCT_IMAGE_MODE=build-ci
+  python3() { return 42; }
+  expect_failure missing-retained-workspace-receipt validate_retained_cluster
+)
 validate_retained_cluster >"$FIXTURE/accepted.out"
 grep -Fq 'accepted at compatibility version' "$FIXTURE/accepted.out" ||
   fail 'compatible retained cluster was not accepted'
@@ -1007,6 +1069,9 @@ if (
         ;;
       *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"cluster-name"*)
         printf '%s' "$KIND_CLUSTER_NAME"
+        ;;
+      *"configmap/${KIND_E2E_PREPARED_CONFIGMAP}"*"workspace-image"*)
+        kind_workspace_runtime_image
         ;;
       *'get deployment/'*) printf '1' ;;
       *'get crd/sandboxclaims.extensions.agents.x-k8s.io'*) return 0 ;;

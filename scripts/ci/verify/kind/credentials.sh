@@ -259,7 +259,8 @@ kind_credential_native_smoke() (
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid
-  local certificate certificate_uid config_uid after_certificate_uid after_config_uid
+  local certificate certificate_uid config_uid after_certificate_uid after_config_uid workspace_image
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
   trap 'rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
@@ -285,7 +286,7 @@ kind_credential_native_smoke() (
   # Let the public create path resolve a runnable preset for the exact runtime
   # image. preset_contract_1 is an API contract fixture with no template config.
   environment="$(kind_credential_cli env --platform create --name "$profile_name" \
-    --image "$(kind_workspace_runtime_image)" \
+    --image "$workspace_image" \
     --cpu 500 --memory 2Gi --disk 2Gi --ttl 1h --no-network --yes --output json | jq -er '.id')"
   [[ "$environment" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
   wait_kind_credential_environment "$environment" running

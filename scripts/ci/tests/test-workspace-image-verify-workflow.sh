@@ -122,8 +122,13 @@ done
 grep -qF 'dynamic_bun_runner="bun""x"' "$AGENT_CONTRACT" ||
   fail 'verification omits the installed Bun package runner without invoking it literally'
 grep -qF 'test -O' "$AGENT_CONTRACT" || fail 'verification does not prove user ownership'
-grep -qF 'npm update --global --dry-run @openai/codex' "$AGENT_CONTRACT" ||
-  fail 'verification does not prove the user-scoped Codex update path'
+grep -qF 'npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0' "$AGENT_CONTRACT" ||
+  fail 'verification does not prove the explicit user-scoped Codex install plan'
+grep -qF -- '--tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256m' "$VERIFY" ||
+  fail 'verification omits the fresh persistent-home boundary'
+grep -qF "!contains(needs.verification-selection.outputs.selection, '|kind|')" <<<"$workspace_job" ||
+  fail 'standalone workspace verification duplicates selected Kind ownership'
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py"
 
 # Execute the verifier against a fake Docker client. This catches command-order,
 # digest-handoff, cleanup, and fail-closed regressions without building an image.
@@ -131,6 +136,51 @@ mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/workspace-image-verifier-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/tmp"
+# Execute the actual workflow decision, not a second handwritten selector.
+awk '
+  /- name: Resolve container contract scope/ { scope = 1 }
+  scope && /^        run: \|$/ { run = 1; next }
+  run && /^          / { print substr($0, 11); next }
+  run { exit }
+' "$WORKFLOW" >"$work/container-scope.sh"
+[[ -s "$work/container-scope.sh" ]] || fail 'container scope script was not extracted'
+for fixture in \
+  'true|kind|false' 'false|kind|false' 'true|policy|true' 'false|policy|false' \
+  'false|web|true' 'false|kind,web|false' 'true|kind,web|false' \
+  'false|ios|true' 'true|kind,ios|true'; do
+  IFS='|' read -r workspace_selected selection expected <<<"$fixture"
+  selection="|${selection//,/|}|"
+  : >"$work/scope-output"
+  env WORKSPACE_IMAGE_SELECTED="$workspace_selected" VERIFICATION_SELECTION="$selection" \
+    GITHUB_OUTPUT="$work/scope-output" bash "$work/container-scope.sh"
+  grep -Fxq "selected=$expected" "$work/scope-output" ||
+    fail "container ownership differs for workspace=$workspace_selected selection=$selection"
+done
+# Run the actual verifier and identity helper in a private source fixture. Never
+# write a synthetic acceptance receipt into the developer checkout.
+fixture_root="$work/source"
+for path in images/base/Dockerfile images/workspace/Dockerfile .dockerignore \
+  scripts/ci/verify/workspace-agent-contract.sh \
+  scripts/ci/verify/verify-workspace-image.sh \
+  scripts/ci/verify/workspace-image-artifact.py; do
+  mkdir -p "$fixture_root/$(dirname "$path")"
+  cp "$ROOT/$path" "$fixture_root/$path"
+done
+fixture_receipt="$fixture_root/.tmp/codewire-workspace-image-verification.json"
+cat >"$work/bin/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == -C ]] || exit 99
+shift 2
+case "$*" in
+  'status --porcelain --untracked-files=normal')
+    [[ "${FAKE_DIRTY:-false}" == false ]] || printf ' M tracked-file\n' ;;
+  'rev-parse HEAD') printf '%040d\n' 1 ;;
+  'rev-parse HEAD^{tree}'|'rev-parse 0000000000000000000000000000000000000001^{tree}')
+    printf '%040d\n' 2 ;;
+  *) exit 99 ;;
+esac
+EOF
 cat >"$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -147,13 +197,17 @@ case "${1:-} ${2:-}" in
     ;;
   'buildx build')
     metadata_file=''
+    : >"$FAKE_IMAGE_LABELS.next"
     while [[ $# -gt 0 ]]; do
-      if [[ "$1" == '--metadata-file' ]]; then
-        metadata_file="$2"
-        break
-      fi
+      case "$1" in
+        --metadata-file) metadata_file="$2"; shift ;;
+        --label) printf '%s\n' "$2" >>"$FAKE_IMAGE_LABELS.next"; shift ;;
+      esac
       shift
     done
+    if [[ -s "$FAKE_IMAGE_LABELS.next" ]]; then
+      mv "$FAKE_IMAGE_LABELS.next" "$FAKE_IMAGE_LABELS"
+    fi
     if [[ -n "$metadata_file" ]]; then
       case "${FAKE_METADATA_MODE:-valid}" in
         valid) printf '{"containerimage.digest":"sha256:%064d"}\n' 0 >"$metadata_file" ;;
@@ -163,7 +217,31 @@ case "${1:-} ${2:-}" in
       esac
     fi
     ;;
-  'buildx rm'|'run --rm')
+  'buildx rm')
+    [[ "${FAKE_FAIL:-}" != cleanup ]] || exit 43
+    ;;
+  'image inspect')
+    if [[ "${4:-}" == --format ]]; then
+      printf 'sha256:%064d\n' 3
+    else
+      python3 - "$FAKE_IMAGE_LABELS" <<'PY'
+import json, platform, sys
+from pathlib import Path
+labels = dict(line.split('=', 1) for line in Path(sys.argv[1]).read_text().splitlines())
+print(json.dumps([{'Id': 'sha256:' + '3'.zfill(64), 'Os': 'linux',
+                  'Architecture': {'x86_64': 'amd64', 'aarch64': 'arm64'}[platform.machine()],
+                  'Config': {'Labels': labels}}]))
+PY
+    fi
+    ;;
+  'image tag')
+    ;;
+  'run --rm')
+    if [[ "$*" == *'--mounted-home-agents'* ]]; then
+      [[ "${FAKE_FAIL:-}" != mounted ]] || exit 42
+    else
+      [[ "${FAKE_FAIL:-}" != full ]] || exit 41
+    fi
     ;;
   *)
     printf 'unexpected docker command: %s\n' "$*" >&2
@@ -171,7 +249,7 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 EOF
-chmod +x "$work/bin/docker"
+chmod +x "$work/bin/docker" "$work/bin/git"
 
 run_mock_verifier() {
   env PATH="$work/bin:$PATH" \
@@ -180,15 +258,17 @@ run_mock_verifier() {
     FAKE_BUILDER_SUFFIX="$1" \
     FAKE_METADATA_MODE="${2:-valid}" \
     FAKE_SELECTED_DRIVER="${3:-docker-container}" \
-    GITHUB_SHA=mock-source \
+    FAKE_IMAGE_LABELS="$work/image-labels" \
+    FAKE_FAIL="${4:-}" \
+    FAKE_DIRTY="${5:-false}" \
     TMPDIR="$work/tmp" \
-    "$VERIFY"
+    "$fixture_root/scripts/ci/verify/verify-workspace-image.sh"
 }
 
 : >"$work/docker.log"
 run_mock_verifier success >/dev/null
 mapfile -t docker_calls <"$work/docker.log"
-[[ "${#docker_calls[@]}" -eq 4 ]] ||
+[[ "${#docker_calls[@]}" -eq 9 ]] ||
   fail "verifier issued an unexpected number of Docker calls: ${#docker_calls[@]}"
 [[ "${docker_calls[0]}" == 'buildx inspect ' ]] ||
   fail "verifier selected-builder inspection drifted: ${docker_calls[0]}"
@@ -200,12 +280,26 @@ mapfile -t docker_calls <"$work/docker.log"
   fail 'verifier did not hand the exact base digest to the workspace build'
 [[ "${docker_calls[2]}" == *'--load --build-arg BASE_IMAGE_REF=codewire-verified-base '* ]] ||
   fail 'verifier did not load a workspace built from the named base context'
-[[ "${docker_calls[3]}" == 'run --rm --interactive --pids-limit=2048 --user codewire --entrypoint bash codewire-workspace-verify:mock-source -eu -s ' ]] ||
-  fail "workspace runtime contract invocation drifted: ${docker_calls[3]}"
+image_id="$(printf 'sha256:%064d' 3)"
+[[ "${docker_calls[4]}" == "run --rm --interactive --pids-limit=2048 --user codewire --entrypoint bash $image_id -eu -s " ]] ||
+  fail "workspace runtime contract invocation drifted: ${docker_calls[4]}"
+[[ "${docker_calls[5]}" == *'--tmpfs /home/codewire:rw\,exec\,uid=1000\,gid=1000\,mode=0700\,size=256m --entrypoint bash '*"$image_id -eu -s -- --mounted-home-agents " ]] ||
+  fail 'mounted-home contract did not execute the same immutable image'
+[[ "${docker_calls[6]}" == "image inspect $image_id " ]] || fail 'receipt preceded contract checks'
+[[ -s "$fixture_receipt" ]] || fail 'successful verification emitted no receipt'
+[[ "$(stat -c %a "$fixture_receipt")" == 600 ]] || fail 'receipt permissions are not private'
 if grep -qF 'buildx create' "$work/docker.log" || grep -qF 'buildx rm' "$work/docker.log"; then
   fail 'verifier replaced or removed the caller-selected container builder'
 fi
 
+: >"$work/docker.log"
+run_mock_verifier reuse >/dev/null
+[[ "$(wc -l <"$work/docker.log")" -eq 2 ]] || fail 'exact-tree reuse rebuilt or reran contracts'
+if grep -Eq '^buildx |^run ' "$work/docker.log"; then
+  fail 'verified image reuse performed duplicate qualification'
+fi
+
+rm "$fixture_receipt"
 : >"$work/docker.log"
 set +e
 run_mock_verifier invalid missing docker >/dev/null 2>&1
@@ -216,5 +310,32 @@ set -e
   fail 'verifier continued into workspace build after invalid base metadata'
 grep -Fxq 'buildx rm --force workspace-verifier-invalid ' "$work/docker.log" ||
   fail 'verifier did not clean its Docker-driver fallback after invalid metadata'
+[[ ! -e "$fixture_receipt" ]] || fail 'invalid base emitted a receipt'
+
+for failure in full mounted cleanup; do
+  : >"$work/docker.log"
+  if run_mock_verifier "$failure" valid docker "$failure" >/dev/null 2>&1; then
+    fail "verifier accepted $failure failure"
+  fi
+  [[ ! -e "$fixture_receipt" ]] || fail "$failure failure emitted a receipt"
+  if grep -q '^image tag ' "$work/docker.log"; then
+    fail "$failure failure sealed an image alias"
+  fi
+done
+
+: >"$work/docker.log"
+if run_mock_verifier dirty valid docker-container '' true >/dev/null 2>&1; then
+  fail 'dirty source was accepted'
+fi
+[[ ! -s "$work/docker.log" ]] || fail 'dirty source reached Docker'
+
+: >"$work/docker.log"
+run_mock_verifier fallback valid docker >/dev/null
+grep -Fxq 'buildx rm --force workspace-verifier-fallback ' "$work/docker.log" ||
+  fail 'successful fallback did not remove its owned builder'
+cleanup_line="$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)"
+seal_line="$(grep -n '^image tag ' "$work/docker.log" | cut -d: -f1)"
+[[ "$cleanup_line" -lt "$seal_line" ]] || fail 'receipt preceded owned-builder cleanup'
+[[ -s "$fixture_receipt" ]] || fail 'successful fallback emitted no receipt'
 
 echo 'workspace-image verification workflow contract: OK'

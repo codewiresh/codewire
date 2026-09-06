@@ -135,8 +135,20 @@ class WorkspaceProbe(unittest.TestCase):
 class HarnessGuards(unittest.TestCase):
     def test_native_flow_resolves_the_selected_runtime_image_not_a_contract_only_preset(self):
         source = HELPERS.read_text()
-        self.assertIn('--image "$(kind_workspace_runtime_image)"', source)
+        self.assertIn('workspace_image="$(kind_workspace_runtime_image)" || return $?', source)
+        self.assertIn('--image "$workspace_image"', source)
         self.assertNotIn('--preset-id preset_contract_1', source)
+
+    def test_missing_image_receipt_fails_before_public_enrollment(self):
+        result = self.shell('''
+log() { :; }
+kind_workspace_runtime_image() { return 42; }
+prepare_kind_credential_cli() { echo unexpected-login; return 98; }
+kind_credential_cli() { echo unexpected-enrollment; return 99; }
+kind_credential_native_smoke
+''')
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_terminal_wait_requires_exact_destroyed_state_not_missing_cli_target(self):
         for state, expected in (("destroyed", 0), ("destroying", 1), ("", 1), ("error", 1)):
@@ -228,6 +240,7 @@ start_kind_credential_fixture
             result = self.shell('''
 log() { :; }
 KIND_INGRESS_URL=http://127.0.0.1:8090
+kind_workspace_runtime_image() { printf 'localhost/codewire-ci/workspace:source-synthetic\\n'; }
 kind_credential_cli() {
   case "$*" in
     'org list --output json') printf '%%s\\n' '%s' ;;

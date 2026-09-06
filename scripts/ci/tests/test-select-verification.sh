@@ -704,6 +704,8 @@ run_paths_case local_image_verifiers pull_request refs/pull/1231/head false \
   scripts/ci/images/build-local-image.sh \
   scripts/ci/tests/test-build-local-image.sh \
   scripts/ci/tests/test-workspace-agent-contract.sh \
+  scripts/ci/tests/test-workspace-image-artifact.py \
+  scripts/ci/verify/workspace-image-artifact.py \
   scripts/ci/verify/rehearse-build-local-image.sh \
   scripts/ci/verify/verify-workspace-image.sh \
   scripts/ci/verify/workspace-agent-contract.sh
