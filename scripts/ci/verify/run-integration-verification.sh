@@ -295,6 +295,13 @@ run_database() {
   fi
   assert_passed_count "environment external cleanup matrix" "$logfile" 3
 
+  logfile="$RUN_DIR/environment-destroy-template-hint.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure \
+      -- --ignored --exact --nocapture | tee "$logfile"
+  assert_passed_count "environment destroy template hint matrix" "$logfile" 1
+
   logfile="$RUN_DIR/organization-tenant-secret-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-orchestration --lib \

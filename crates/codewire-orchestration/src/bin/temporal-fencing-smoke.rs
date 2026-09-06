@@ -1856,6 +1856,23 @@ mod enabled {
         )
     }
 
+    pub async fn main() -> anyhow::Result<()> {
+        if std::env::args().nth(1).as_deref() == Some("worker") {
+            return worker_main().await;
+        }
+        tracing_subscriber::fmt::init();
+        let driver = Driver::connect().await?;
+        driver.cross_run_serialization().await?;
+        driver.worker_death_recovery().await?;
+        driver.same_generation_retry().await?;
+        driver.parallel_clone_cleanup().await?;
+        driver.external_cleanup_retry().await?;
+        driver.organization_deletion_retry().await?;
+        let _ = std::fs::remove_dir_all(&driver.run_dir);
+        println!("temporal-fencing-smoke: PASS");
+        Ok(())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -2027,23 +2044,6 @@ mod enabled {
                 CompletionDecision::Complete
             );
         }
-    }
-
-    pub async fn main() -> anyhow::Result<()> {
-        if std::env::args().nth(1).as_deref() == Some("worker") {
-            return worker_main().await;
-        }
-        tracing_subscriber::fmt::init();
-        let driver = Driver::connect().await?;
-        driver.cross_run_serialization().await?;
-        driver.worker_death_recovery().await?;
-        driver.same_generation_retry().await?;
-        driver.parallel_clone_cleanup().await?;
-        driver.external_cleanup_retry().await?;
-        driver.organization_deletion_retry().await?;
-        let _ = std::fs::remove_dir_all(&driver.run_dir);
-        println!("temporal-fencing-smoke: PASS");
-        Ok(())
     }
 }
 

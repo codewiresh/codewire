@@ -27,7 +27,10 @@ pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
     json!({
         "apiVersion": EXTENSIONS_API_VERSION,
         "kind": "SandboxTemplate",
-        "metadata": { "name": opts.name, "namespace": namespace },
+        "metadata": {
+            "name": opts.name, "namespace": namespace,
+            "labels": { super::LABEL_ENV_ID: opts.environment_id },
+        },
         "spec": render_sandbox_blueprint(opts),
     })
 }

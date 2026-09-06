@@ -245,6 +245,27 @@ async fn load_sandbox_template_config(
     Ok(row)
 }
 
+/// Creation may fail before a preset or its runtime configuration exists.
+/// Keep any available deterministic name as a hint, but deletion must still
+/// discover environment-owned resources when that hint is unavailable.
+async fn destroy_template_hint(
+    pool: &PgPool,
+    preset_id: Option<&str>,
+    env_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(preset_id) = preset_id else {
+        return Ok(None);
+    };
+    let config: Option<(String, String)> = sqlx::query_as(
+        "SELECT image_ref, sandbox_template_name FROM sandbox_template_config WHERE preset_id = $1",
+    )
+    .bind(preset_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load destroy template hint: {error}"))?;
+    Ok(config.map(|(image, base)| environment_per_env_template_name(&image, &base, env_id)))
+}
+
 /// Mirrors `HandleEnvironmentStop`.
 pub async fn handle_environment_stop(
     ctx: &WorkerContext,
@@ -804,13 +825,8 @@ pub async fn handle_environment_destroy(
     .map_err(|error| anyhow::anyhow!("load retained runtime namespaces: {error}"))?;
     namespaces.extend(retained_session_namespaces);
 
-    let preset_id = env
-        .preset_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("sandbox environment has no preset id"))?;
-    let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
     let per_environment_template =
-        environment_per_env_template_name(&image_ref, &template_base, env_id);
+        destroy_template_hint(&ctx.pool, env.preset_id.as_deref(), env_id).await?;
 
     for namespace in namespaces {
         if namespace.trim().is_empty() {
@@ -823,7 +839,7 @@ pub async fn handle_environment_destroy(
                 client.delete_environment_resources(
                     env_id,
                     known_sandbox_name,
-                    Some(&per_environment_template),
+                    per_environment_template.as_deref(),
                     env.isolation_tier == "confidential",
                     DELETED_TIMEOUT,
                 ),
@@ -1016,6 +1032,53 @@ pub async fn handle_environment_reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn destroy_template_hint_allows_missing_creation_config_but_not_database_failure()
+    -> anyhow::Result<()> {
+        let pool = PgPool::connect(&std::env::var("TEST_DATABASE_URL")?).await?;
+        let preset = format!("destroy-hint-{}", uuid::Uuid::new_v4());
+        assert_eq!(destroy_template_hint(&pool, None, "env-test").await?, None);
+        assert_eq!(
+            destroy_template_hint(&pool, Some(&preset), "env-test").await?,
+            None
+        );
+        sqlx::query(
+            r#"INSERT INTO environment_presets (id, name, official, project_spec)
+               VALUES ($1, $1, true, '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+        )
+        .bind(&preset).execute(&pool).await?;
+        sqlx::query("INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name) VALUES ($1, 'example.test/workspace:test', 'workspace-test')")
+            .bind(&preset).execute(&pool).await?;
+        assert_eq!(
+            destroy_template_hint(&pool, Some(&preset), "env-test").await?,
+            Some(environment_per_env_template_name(
+                "example.test/workspace:test",
+                "workspace-test",
+                "env-test"
+            ))
+        );
+        sqlx::query("DELETE FROM sandbox_template_config WHERE preset_id = $1")
+            .bind(&preset)
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            destroy_template_hint(&pool, Some(&preset), "env-test").await?,
+            None
+        );
+        sqlx::query("DELETE FROM environment_presets WHERE id = $1")
+            .bind(&preset)
+            .execute(&pool)
+            .await?;
+        pool.close().await;
+        assert!(
+            destroy_template_hint(&pool, Some(&preset), "env-test")
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn authorization_backfill_selects_only_stable_running_confidential_environments() {

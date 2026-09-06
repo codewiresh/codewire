@@ -154,6 +154,10 @@ mod credentials;
 #[path = "client_runtime_identity_tests.rs"]
 mod runtime_identity_tests;
 
+#[cfg(test)]
+#[path = "client_cleanup_tests.rs"]
+mod cleanup_tests;
+
 fn runtime_object_uid<'a>(
     metadata: &'a ObjectMeta,
     namespace: &str,
@@ -1801,10 +1805,27 @@ impl SandboxClient {
             }
         }
 
-        if let Some(template_name) = per_environment_template {
-            let warm_pool_name = super::shadow_warm_pool_name(template_name);
-            self.delete_shadow_pool(&warm_pool_name).await?;
-            self.delete_sandbox_template(template_name).await?;
+        let shadow_hint = per_environment_template.map(super::shadow_warm_pool_name);
+        for (kind, api, hint) in [
+            ("SandboxWarmPool", self.warm_pools(), shadow_hint.as_deref()),
+            (
+                "SandboxTemplate",
+                self.templates(),
+                per_environment_template,
+            ),
+        ] {
+            for (name, uid) in environment_owned_objects(&api, env_id, kind, hint).await? {
+                match api
+                    .delete(&name, &delete_params_for_observed_uid(&uid))
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(kube::Error::Api(error)) if error.code == 404 => {}
+                    Err(error) => {
+                        return Err(anyhow::anyhow!("delete owned {kind} {name}: {error}"));
+                    }
+                }
+            }
         }
 
         let deadline = tokio::time::Instant::now() + timeout;
@@ -1952,13 +1973,17 @@ impl SandboxClient {
             }
         }
 
-        if let Some(template_name) = per_environment_template {
-            let warm_pool_name = super::shadow_warm_pool_name(template_name);
-            if dynamic_exists(&self.warm_pools(), &warm_pool_name).await? {
-                resources.push(format!("SandboxWarmPool/{warm_pool_name}"));
-            }
-            if dynamic_exists(&self.templates(), template_name).await? {
-                resources.push(format!("SandboxTemplate/{template_name}"));
+        let shadow_hint = per_environment_template.map(super::shadow_warm_pool_name);
+        for (kind, api, hint) in [
+            (
+                "SandboxTemplate",
+                self.templates(),
+                per_environment_template,
+            ),
+            ("SandboxWarmPool", self.warm_pools(), shadow_hint.as_deref()),
+        ] {
+            for (name, _) in environment_owned_objects(&api, env_id, kind, hint).await? {
+                resources.push(format!("{kind}/{name}"));
             }
         }
 
@@ -2386,6 +2411,59 @@ async fn dynamic_exists(api: &Api<DynamicObject>, name: &str) -> anyhow::Result<
         Err(kube::Error::Api(error)) if error.code == 404 => Ok(false),
         Err(error) => Err(anyhow::anyhow!("get {name}: {error}")),
     }
+}
+
+async fn environment_owned_objects(
+    api: &Api<DynamicObject>,
+    env_id: &str,
+    kind: &str,
+    name_hint: Option<&str>,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    anyhow::ensure!(
+        !env_id.trim().is_empty(),
+        "environment identity is required for cleanup"
+    );
+    let mut objects = api
+        .list(&ListParams::default().labels(&format!("{LABEL_ENV_ID}={env_id}")))
+        .await
+        .map_err(|error| anyhow::anyhow!("list owned {kind} for {env_id}: {error}"))?
+        .items;
+    if let Some(name) = name_hint
+        && !objects
+            .iter()
+            .any(|object| object.metadata.name.as_deref() == Some(name))
+    {
+        match api.get(name).await {
+            Ok(object) => objects.push(object),
+            Err(kube::Error::Api(error)) if error.code == 404 => {}
+            Err(error) => return Err(anyhow::anyhow!("get hinted {kind}: {error}")),
+        }
+    }
+    objects
+        .into_iter()
+        .map(|object| {
+            anyhow::ensure!(
+                object
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(LABEL_ENV_ID))
+                    .is_some_and(|value| value == env_id),
+                "listed {kind} does not belong to the environment"
+            );
+            let name = object
+                .metadata
+                .name
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("listed {kind} has no name"))?;
+            let uid = object
+                .metadata
+                .uid
+                .filter(|uid| !uid.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("listed {kind} has no UID"))?;
+            Ok((name, uid))
+        })
+        .collect()
 }
 
 impl SandboxClient {

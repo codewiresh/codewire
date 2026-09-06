@@ -9,6 +9,16 @@ mod tests {
     use sha2::{Digest, Sha256};
     const CONTENT_ADDRESSED_MANIFEST_URI: &str = "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    #[test]
+    fn environment_template_has_top_level_cleanup_identity() {
+        let opts = TemplateOpts {
+            environment_id: "env-test".into(),
+            ..commodity_opts()
+        };
+        let rendered = render_sandbox_template("dev-sandboxes", &opts);
+        assert_eq!(rendered["metadata"]["labels"][LABEL_ENV_ID], "env-test");
+    }
+
     fn decode_gzip_base64(encoded: &str) -> String {
         let raw = base64::engine::general_purpose::STANDARD
             .decode(encoded)
