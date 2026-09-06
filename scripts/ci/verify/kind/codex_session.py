@@ -328,11 +328,16 @@ def run(server, trace):
     observe_rotation(server, initial, baseline_completed)
     emit("projected_token_rotated", changed=True,
          elapsed_ms=int((time.monotonic() - baseline_completed) * 1000))
+    # Pinned Codex has separate shared model-catalog and per-thread request
+    # auth caches. Second-turn pre-compaction refreshes the expired catalog
+    # cache before the request refreshes its own. Keep all remaining work in
+    # one cache interval so fresh threads cannot refresh the catalog again.
+    deadline = time.monotonic() + CACHE_INTERVAL
     before = len(auth_calls(trace))
-    server.turn(thread_id, "CW_KIND_ROTATION")
+    server.turn(thread_id, "CW_KIND_ROTATION", deadline)
     calls = len(auth_calls(trace)) - before
-    if calls != 1:
-        raise Failure("rotation_auth_command_count")
+    if calls != 2 or not time.monotonic() < deadline:
+        raise Failure("rotation_auth_command_count_or_deadline")
     emit("rotation_turn_completed", auth_command_calls=calls)
 
     for prompt, event, expected in (
@@ -341,14 +346,13 @@ def run(server, trace):
     ):
         before = len(auth_calls(trace))
         started = time.monotonic()
-        deadline = started + CACHE_INTERVAL
         # Fresh threads avoid interpreting an earlier test marker retained in
         # conversation history as the current synthetic provider scenario.
         thread_id = server.thread(deadline)
         server.turn(thread_id, prompt, deadline)
         observed = auth_calls(trace)[before:]
         elapsed = time.monotonic() - started
-        if len(observed) != expected or not elapsed < CACHE_INTERVAL:
+        if len(observed) != expected or not time.monotonic() < deadline:
             raise Failure("retry_auth_command_count_or_deadline")
         if expected == 2 and not 0 <= observed[1] - observed[0] < CACHE_INTERVAL:
             raise Failure("native_reread_cache_deadline")

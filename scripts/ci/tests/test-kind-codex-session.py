@@ -211,23 +211,37 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertRaisesRegex(driver.Failure, "projected_token_rotation_timeout"):
             driver.observe_rotation(Idle(), b"same", 0.0)
 
-    def workflow(self, native_calls):
+    def workflow(self, native_calls, rotation_calls=2, durations=(0.0, 0.0, 0.0)):
         calls = []
+        clock = [0.0]
+        elapsed_by_prompt = dict(zip(
+            ("CW_KIND_ROTATION", "CW_KIND_BROKER_RETRY_ONCE", "CW_KIND_NATIVE_REREAD"),
+            durations,
+        ))
         class Workflow:
             def __init__(self):
                 self.threads = 0
                 self.inputs = []
+                self.deadlines = []
             def initialize(self):
                 pass
             def thread(self, deadline=None):
                 self.threads += 1
+                if self.threads > 1:
+                    self.deadlines.append(deadline)
                 return str(self.threads)
             def turn(self, thread, prompt, deadline=None):
                 self.inputs.append((thread, prompt))
-                calls.extend([0.0] * (native_calls if prompt == "CW_KIND_NATIVE_REREAD" else 1))
+                if prompt != "CW_KIND_BASELINE":
+                    self.deadlines.append(deadline)
+                count = {"CW_KIND_ROTATION": rotation_calls,
+                         "CW_KIND_NATIVE_REREAD": native_calls}.get(prompt, 1)
+                calls.extend([clock[0]] * count)
+                clock[0] += elapsed_by_prompt.get(prompt, 0.0)
         workflow = Workflow()
         output = io.StringIO()
         with patch.object(driver, "auth_calls", lambda _: list(calls)), \
+                patch.object(driver.time, "monotonic", lambda: clock[0]), \
                 patch.object(driver, "token_fingerprint", lambda: b"synthetic"), \
                 patch.object(driver, "observe_rotation"), \
                 contextlib.redirect_stdout(output):
@@ -235,14 +249,28 @@ class AcceptanceTests(unittest.TestCase):
         return workflow, [json.loads(line) for line in output.getvalue().splitlines()]
 
     def test_exact_retry_counts_and_fresh_thread_markers(self):
-        workflow, events = self.workflow(2)
+        workflow, events = self.workflow(2, durations=(3.0, 4.0, 5.0))
         self.assertEqual([thread for thread, _ in workflow.inputs], ["1", "1", "2", "3"])
         self.assertEqual([event["event"] for event in events], [
             "baseline_completed", "projected_token_rotated", "rotation_turn_completed",
             "broker_retry_completed", "native_reread_completed",
         ])
-        self.assertEqual(events[-2]["auth_command_calls"], 1)
-        self.assertEqual(events[-1]["auth_command_calls"], 2)
+        self.assertEqual([event["auth_command_calls"] for event in events[-3:]], [2, 1, 2])
+        self.assertEqual(workflow.deadlines, [driver.CACHE_INTERVAL] * 5)
+
+    def test_missing_or_extra_rotation_cache_read_does_not_pass(self):
+        for count in (1, 3):
+            with self.subTest(count=count), self.assertRaisesRegex(
+                    driver.Failure, "rotation_auth_command_count"):
+                self.workflow(2, rotation_calls=count)
+
+    def test_individually_short_turns_cannot_exceed_shared_cache_interval(self):
+        with self.assertRaisesRegex(driver.Failure, "retry_auth_command_count_or_deadline"):
+            self.workflow(2, durations=(10.0, 10.0, 10.0))
+
+    def test_rotation_turn_itself_must_finish_inside_shared_cache_interval(self):
+        with self.assertRaisesRegex(driver.Failure, "rotation_auth_command_count_or_deadline"):
+            self.workflow(2, durations=(driver.CACHE_INTERVAL, 0.0, 0.0))
 
     def test_missing_native_reread_does_not_pass(self):
         with self.assertRaisesRegex(driver.Failure, "retry_auth_command_count_or_deadline"):
