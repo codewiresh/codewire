@@ -100,6 +100,18 @@ class SupportPlanAdapterTests(unittest.TestCase):
         self.assertEqual(outputs["build_support_images"], "true")
         self.assertEqual(outputs["reason"], "artifact_unclassified")
 
+    def test_content_verification_does_not_replace_exact_source_publication(self) -> None:
+        document = plan_document(workspace_state="affected")
+        document["artifacts"]["workspace_image_verification"] = {"state": "unaffected"}
+        outputs, _ = self.apply(document)
+        self.assertEqual(outputs["build_support_images"], "true")
+        self.assertEqual(outputs["workspace_image_state"], "affected")
+
+        document = plan_document()
+        document["artifacts"]["workspace_image_verification"] = {"state": "affected"}
+        outputs, _ = self.apply(document)
+        self.assertEqual(outputs["build_support_images"], "false")
+
     def test_invalid_baseline_requires_all_artifacts_unclassified(self) -> None:
         outputs, _ = self.apply(
             plan_document(
