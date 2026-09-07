@@ -28,6 +28,7 @@ def fixture_plan(
     cw_state: str = "unaffected",
     desktop_state: str = "unaffected",
     workspace_state: str = "unaffected",
+    publication_state: str = "unaffected",
 ) -> dict[str, object]:
     return {
         "schema": "codewire.ci-plan/v1",
@@ -46,7 +47,8 @@ def fixture_plan(
         "artifacts": {
             "cw_cli_release_assets": {"state": cw_state},
             "desktop_package": {"state": desktop_state},
-            "workspace_image": {"state": workspace_state},
+            "workspace_image_verification": {"state": workspace_state},
+            "workspace_image": {"state": publication_state},
         },
         "degraded_reasons": [],
     }
@@ -82,6 +84,26 @@ class PlanAdapterTests(unittest.TestCase):
         outputs = self.invoke(fixture_plan(workspace_state="affected"))
         self.assertEqual(outputs["workspace_image_state"], "affected")
         self.assertEqual(outputs["workspace_image_selected"], "true")
+
+    def test_exact_source_publication_does_not_select_content_verification(self) -> None:
+        outputs = self.invoke(fixture_plan(publication_state="affected"))
+        self.assertEqual(outputs["workspace_image_state"], "unaffected")
+        self.assertEqual(outputs["workspace_image_selected"], "false")
+
+    def test_unknown_workspace_verification_is_selected(self) -> None:
+        outputs = self.invoke(fixture_plan(workspace_state="unclassified"))
+        self.assertEqual(outputs["workspace_image_state"], "unclassified")
+        self.assertEqual(outputs["workspace_image_selected"], "true")
+
+    def test_old_plan_cannot_substitute_publication_for_missing_verification(self) -> None:
+        plan = fixture_plan()
+        del plan["artifacts"]["workspace_image_verification"]  # type: ignore[index]
+        with self.assertRaisesRegex(adapter.AdapterError, "omits artifact workspace_image_verification"):
+            self.invoke(plan)
+
+    def test_invalid_workspace_verification_state_fails_closed(self) -> None:
+        with self.assertRaisesRegex(adapter.AdapterError, "invalid state"):
+            self.invoke(fixture_plan(workspace_state="maybe"))
 
     def test_invalid_artifact_state_fails_closed(self) -> None:
         with self.assertRaisesRegex(adapter.AdapterError, "invalid state"):

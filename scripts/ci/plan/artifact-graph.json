@@ -47,6 +47,9 @@
         "aarch64-apple-darwin"
       ],
       "package_inputs": {
+        "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
+        "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
+        "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
         "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
       },
@@ -64,6 +67,9 @@
       "profiles": ["release"],
       "release_targets": ["host"],
       "package_inputs": {
+        "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
+        "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
+        "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"]
       },
       "explicit_inputs": [
@@ -81,6 +87,9 @@
       "profiles": ["release"],
       "release_targets": ["host"],
       "package_inputs": {
+        "codewire-egress-policy": ["crates/codewire-egress-policy/policies/**"],
+        "codewire-local-credentials": ["crates/codewire-local-credentials/proto/**"],
+        "codewire-local-vmm": ["crates/codewire-local-vmm/proto/**"],
         "codewire-proto": ["crates/codewire-proto/codewire_descriptor.bin"],
         "codewire-gateway-proto": ["libs/gateway-proto/proto/**"]
       },
@@ -182,6 +191,25 @@
         "deployments/k8s/runtime-profiles/confidential/**",
         "deployments/k8s/runtime-profiles/confidential-smoke/**",
         "scripts/runtime/confidential/**"
+      ]
+    },
+    "workspace_image_verification": {
+      "kind": "composite",
+      "dependencies": ["base_image", "workspace_cw_binary"],
+      "inputs": [
+        ".dockerignore",
+        "Cargo.toml",
+        "images/workspace/**",
+        "scripts/ci/images/build-local-image.sh",
+        "scripts/ci/images/run-rust-build.sh",
+        "scripts/ci/tests/test-build-local-image.sh",
+        "scripts/ci/tests/test-workspace-agent-contract.sh",
+        "scripts/ci/tests/test-workspace-image-artifact.py",
+        "scripts/ci/tests/test-workspace-image-verify-workflow.sh",
+        "scripts/ci/verify/rehearse-build-local-image.sh",
+        "scripts/ci/verify/verify-workspace-image.sh",
+        "scripts/ci/verify/workspace-agent-contract.sh",
+        "scripts/ci/verify/workspace-image-artifact.py"
       ]
     },
     "workspace_image": {

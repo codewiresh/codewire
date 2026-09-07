@@ -22,6 +22,10 @@ assert SPEC and SPEC.loader
 planner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = planner
 SPEC.loader.exec_module(planner)
+PRODUCTION_GRAPH = json.loads(
+    (PLANNER_PATH.parent / "artifact-graph.json").read_text()
+)
+WORKSPACE_VERIFICATION_SPEC = PRODUCTION_GRAPH["artifacts"]["workspace_image_verification"]
 
 
 def fixture_cargo_metadata(tree: Path, manifest: Path, _cargo_env: dict[str, str]) -> dict:
@@ -332,6 +336,7 @@ class FixtureRepository:
                         "scripts/runtime/confidential/**",
                     ],
                 },
+                "workspace_image_verification": WORKSPACE_VERIFICATION_SPEC,
                 "workspace_image": {
                     "kind": "composite",
                     "dependencies": [
@@ -600,6 +605,9 @@ dependencies = ["core"]
         self.write("images/base/entrypoint.sh", "#!/bin/sh\nexec \"$@\"\n", 0o755)
         self.write("images/confidential-probe/Dockerfile", "FROM fixture-probe@sha256:probe\n")
         self.write("images/workspace/Dockerfile", "FROM ${BASE_IMAGE_REF}\n")
+        for path in WORKSPACE_VERIFICATION_SPEC["inputs"]:
+            if "*" not in path and not (self.root / path).exists():
+                self.write(path, "# Synthetic workspace verification input\n")
 
     def commit(self, message: str) -> str:
         run(["git", "add", "-A"], self.root)
@@ -779,6 +787,7 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.workspace_states(first), ("unaffected", "unaffected", "unaffected"))
         self.assertEqual(self.runtime_states(first), ("unaffected",) * 5)
         self.assertEqual(self.dev_release_state(first), "unaffected")
+        self.assertEqual(first["artifacts"]["workspace_image_verification"]["state"], "unaffected")
 
     def test_confidential_deployment_input_selects_exact_workspace_release(self) -> None:
         self.repo.change(
@@ -796,6 +805,7 @@ class PlannerFixtureTests(unittest.TestCase):
             ("unaffected", "unaffected", "affected"),
         )
         self.assertEqual(self.runtime_states(document), ("unaffected",) * 5)
+        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
 
     def test_any_dev_release_input_selects_exact_workspace_release(self) -> None:
         self.repo.change(
@@ -808,6 +818,7 @@ class PlannerFixtureTests(unittest.TestCase):
             self.workspace_states(document),
             ("unaffected", "unaffected", "affected"),
         )
+        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
 
     def test_confidential_smoke_script_selects_exact_workspace_release(self) -> None:
         self.repo.change(
@@ -824,6 +835,63 @@ class PlannerFixtureTests(unittest.TestCase):
             ("unaffected", "unaffected", "affected"),
         )
         self.assertEqual(self.states(document), ("unaffected", "unaffected"))
+        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
+
+    def test_runtime_source_keeps_exact_publication_without_workspace_verification(self) -> None:
+        self.repo.change("crates/unrelated/src/lib.rs", "pub fn runtime_only() {}\n")
+        document = self.repo.plan()
+        self.assertEqual(self.states(document), ("unaffected", "unaffected"))
+        self.assertEqual(document["artifacts"]["workspace_image"]["state"], "affected")
+        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
+
+    def test_workspace_verification_owns_raw_manifest_even_when_cargo_metadata_is_unchanged(self) -> None:
+        manifest = (self.repo.root / "Cargo.toml").read_text()
+        self.repo.change("Cargo.toml", manifest + "\n# Changed build-context bytes\n")
+        document = self.repo.plan()
+        self.assertEqual(document["artifacts"]["workspace_cw_binary"]["state"], "unaffected")
+        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "affected")
+
+    def test_workspace_verification_build_and_contract_inputs_are_selected(self) -> None:
+        for path in (
+            ".dockerignore",
+            "images/base/entrypoint.sh",
+            "images/workspace/Dockerfile",
+            "scripts/ci/images/build-local-image.sh",
+            "scripts/ci/images/run-rust-build.sh",
+            "scripts/ci/tests/test-build-local-image.sh",
+            "scripts/ci/tests/test-workspace-agent-contract.sh",
+            "scripts/ci/tests/test-workspace-image-artifact.py",
+            "scripts/ci/tests/test-workspace-image-verify-workflow.sh",
+            "scripts/ci/verify/rehearse-build-local-image.sh",
+            "scripts/ci/verify/verify-workspace-image.sh",
+            "scripts/ci/verify/workspace-agent-contract.sh",
+            "scripts/ci/verify/workspace-image-artifact.py",
+        ):
+            with self.subTest(path=path):
+                original = (self.repo.root / path).read_text()
+                head = self.repo.change(path, original + "\n# Changed verification input\n")
+                document = self.repo.plan()
+                self.assertEqual(self.states(document), ("unaffected", "unaffected"))
+                self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "affected")
+                self.repo.base = head
+
+    def test_workspace_verification_missing_contract_fails_closed(self) -> None:
+        (self.repo.root / "scripts/ci/verify/workspace-image-artifact.py").unlink()
+        self.repo.commit("missing workspace identity helper")
+        document = self.repo.plan()
+        artifact = document["artifacts"]["workspace_image_verification"]
+        self.assertEqual(artifact["state"], "unclassified")
+        self.assertIn("matched no files", artifact["explanations"][0])
+
+    def test_candidate_workspace_policy_cannot_reduce_its_own_verification(self) -> None:
+        graph_path = "scripts/ci/plan/artifact-graph.json"
+        graph = json.loads((self.repo.root / graph_path).read_text())
+        graph["artifacts"]["workspace_image_verification"] = {
+            "kind": "file-set", "inputs": ["images/workspace/**"]
+        }
+        self.repo.change(graph_path, json.dumps(graph, sort_keys=True, indent=2) + "\n")
+        document = self.repo.plan()
+        self.assertTrue(all(value["state"] == "unclassified" for value in document["artifacts"].values()))
 
     def test_rust_cache_identity_reuses_dependencies_but_not_changed_source(self) -> None:
         baseline = self.repo.plan(self.repo.base)["artifacts"]["rust_cache_cli"]
@@ -1169,6 +1237,51 @@ class PlannerFixtureTests(unittest.TestCase):
         self.assertEqual(self.states(document), ("affected", "affected"))
         self.assertEqual(self.workspace_states(document), ("affected", "unaffected", "affected"))
 
+    def test_embedded_policy_and_private_protos_affect_every_reachable_package(self) -> None:
+        inputs = {
+            "codewire-egress-policy": "policies/developer-v1.yaml",
+            "codewire-local-credentials": "proto/codewire/local/credentials/v1/authority.proto",
+            "codewire-local-vmm": "proto/codewire/local/v1/control.proto",
+        }
+        graph_path = "scripts/ci/plan/artifact-graph.json"
+        graph = json.loads((self.repo.root / graph_path).read_text())
+        for name in ("cw_cli_release_assets", "desktop_package", "workspace_cw_binary"):
+            # Exercise the real package-input maps, including all three
+            # consumers, against synthetic reachable dependencies.
+            graph["artifacts"][name]["package_inputs"].update(
+                PRODUCTION_GRAPH["artifacts"][name]["package_inputs"]
+            )
+        self.repo.write(graph_path, json.dumps(graph, sort_keys=True, indent=2) + "\n")
+        for package, relative in inputs.items():
+            directory = f"crates/{package}"
+            self.repo.write(
+                f"{directory}/Cargo.toml",
+                f'[package]\nname = "{package}"\nversion = "0.1.0"\nedition = "2021"\n',
+            )
+            self.repo.write(f"{directory}/src/lib.rs", "pub fn embedded_contract() {}\n")
+            self.repo.write(f"{directory}/{relative}", "synthetic embedded input\n")
+            workspace = (self.repo.root / "Cargo.toml").read_text()
+            self.repo.write("Cargo.toml", workspace.replace('members = [', f'members = ["{directory}", '))
+            for manifest_path in ("cli/Cargo.toml", "desktop/Cargo.toml"):
+                manifest = (self.repo.root / manifest_path).read_text()
+                self.repo.write(
+                    manifest_path,
+                    manifest.replace("[dependencies]\n", f'[dependencies]\n{package} = {{ path = "../{directory}" }}\n'),
+                )
+            for lock_path in ("Cargo.lock", "desktop/Cargo.lock"):
+                lock = (self.repo.root / lock_path).read_text()
+                self.repo.write(lock_path, lock + f'\n[[package]]\nname = "{package}"\nversion = "0.1.0"\n')
+        self.repo.base = self.repo.commit("reachable embedded policy and private protocol inputs")
+
+        for package, relative in inputs.items():
+            with self.subTest(package=package):
+                head = self.repo.change(f"crates/{package}/{relative}", "changed embedded input\n")
+                document = self.repo.plan()
+                self.assertEqual(self.states(document), ("affected", "affected"))
+                self.assertEqual(document["artifacts"]["workspace_cw_binary"]["state"], "affected")
+                self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "affected")
+                self.repo.base = head
+
     def test_desktop_detached_manifest_change_is_isolated(self) -> None:
         self.repo.change("desktop/src/main.rs", "fn main() { core::run(); println!(\"desktop\"); }\n")
         self.assertEqual(self.states(self.repo.plan()), ("unaffected", "affected"))
@@ -1199,6 +1312,46 @@ class PlannerFixtureTests(unittest.TestCase):
             self.workspace_states(document),
             ("unclassified", "unaffected", "unclassified"),
         )
+
+    def test_runtime_crates_ownership_does_not_hide_unknown_reachable_input(self) -> None:
+        # Production runtime images own crates/**. An overlapping image input
+        # must not classify an unmodeled embedded CLI asset as unchanged.
+        (self.repo.root / "crates").mkdir(exist_ok=True)
+        (self.repo.root / "cli").rename(self.repo.root / "crates/cli")
+        manifest = (self.repo.root / "crates/cli/Cargo.toml").read_text()
+        self.repo.write("crates/cli/Cargo.toml", manifest.replace('path = "../', 'path = "../../'))
+        workspace = (self.repo.root / "Cargo.toml").read_text()
+        self.repo.write("Cargo.toml", workspace.replace('"cli",', '"crates/cli",'))
+        self.repo.base = self.repo.commit("reachable CLI under runtime image ownership")
+
+        self.repo.change("crates/cli/assets/theme.dat", "new embedded asset\n")
+        document = self.repo.plan()
+        self.assertEqual(self.states(document), ("unclassified", "unaffected"))
+        self.assertEqual(
+            document["artifacts"]["workspace_cw_binary"]["state"], "unclassified"
+        )
+        self.assertIn(
+            "crates/cli/assets/theme.dat",
+            document["artifacts"]["workspace_cw_binary"]["explanations"][0],
+        )
+        self.assertEqual(document["artifacts"]["services_image"]["state"], "affected")
+
+        self.repo.base = run(["git", "rev-parse", "HEAD"], self.repo.root)
+        (self.repo.root / "crates/cli/assets/theme.dat").unlink()
+        self.repo.commit("remove unknown reachable input")
+        self.assertEqual(self.states(self.repo.plan()), ("unclassified", "unaffected"))
+
+        self.repo.base = run(["git", "rev-parse", "HEAD"], self.repo.root)
+        self.repo.change("crates/cli/src/main.rs", "fn main() { println!(\"known source\"); }\n")
+        self.assertEqual(self.states(self.repo.plan()), ("affected", "unaffected"))
+
+    def test_unrelated_runtime_asset_does_not_select_rust_artifacts(self) -> None:
+        self.repo.change("crates/unrelated/assets/theme.dat", "runtime-only asset\n")
+        document = self.repo.plan()
+        self.assertEqual(self.states(document), ("unaffected", "unaffected"))
+        self.assertEqual(document["artifacts"]["workspace_cw_binary"]["state"], "unaffected")
+        self.assertEqual(document["artifacts"]["workspace_image_verification"]["state"], "unaffected")
+        self.assertEqual(document["artifacts"]["services_image"]["state"], "affected")
 
     def test_known_non_artifact_changes_leave_artifacts_unaffected(self) -> None:
         self.repo.change("AGENTS.md", "# Agent policy\n")
