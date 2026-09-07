@@ -278,6 +278,8 @@ case "${1:-} ${2:-}" in
     ;;
   'buildx rm')
     [[ "${FAKE_FAIL:-}" != cleanup ]] || exit 43
+    # Exercise the real timeout boundary, not a fake timeout implementation.
+    [[ "${FAKE_FAIL:-}" != slow-cleanup ]] || sleep 11
     ;;
   'container inspect')
     if [[ "$5" == '{{.Id}}' ]]; then
@@ -395,10 +397,19 @@ grep -q '^buildx rm --force codewire-workspace-' "$work/docker.log" || fail 'fai
 
 for failure in full mounted cleanup cancel; do
   : >"$work/docker.log"
-  if run_mock_verifier "$failure" valid docker "$failure" >/dev/null 2>&1; then fail "accepted $failure failure"; fi
+  if run_mock_verifier "$failure" valid docker "$failure" >"$work/$failure.out" 2>&1; then fail "accepted $failure failure"; fi
   [[ ! -e "$fixture_receipt" ]] || fail "$failure failure emitted a receipt"
   ! grep -q '^image tag ' "$work/docker.log" || fail "$failure failure sealed an alias"
 done
+grep -q 'workspace cache cleanup: phase=builder-removal status=43 elapsed_seconds=' \
+  "$work/cleanup.out" || fail 'builder removal failure omitted its bounded diagnostic'
+
+: >"$work/docker.log"
+MOCK_REUSE=disabled run_mock_verifier slow-cleanup valid docker slow-cleanup >"$work/slow-cleanup.out" 2>&1
+[[ -s "$fixture_receipt" ]] || fail 'bounded slow state deletion failed verification'
+cleanup_line="$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)"
+contract_line="$(grep -n '^run --rm ' "$work/docker.log" | head -n1 | cut -d: -f1)"
+[[ "$cleanup_line" -lt "$contract_line" ]] || fail 'slow cleanup outlived contract execution'
 
 : >"$work/docker.log"
 if run_mock_verifier dirty valid docker-container '' true >/dev/null 2>&1; then fail 'dirty source accepted'; fi
@@ -429,8 +440,10 @@ seal_line="$(grep -n '^image tag ' "$work/docker.log" | cut -d: -f1)"
 if grep -Eq 'synthetic-workspace-(access|secret)' "$work/docker.log" "$fixture_receipt"; then fail 'provider value reached arguments or receipt'; fi
 : >"$work/docker.log"
 if MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" MOCK_REUSE=disabled \
-    run_mock_verifier erase valid docker daemon-erase >/dev/null 2>&1; then fail 'daemon cleanup failure accepted'; fi
+    run_mock_verifier erase valid docker daemon-erase >"$work/erase.out" 2>&1; then fail 'daemon cleanup failure accepted'; fi
 [[ ! -e "$fixture_receipt" && -s "$work/r2.aws" ]] || fail 'failed daemon cleanup left a receipt or erased the borrowed file'
+grep -q 'workspace cache cleanup: phase=credential-erasure status=45 elapsed_seconds=' \
+  "$work/erase.out" || fail 'credential erasure failure omitted its bounded diagnostic'
 
 : >"$work/docker.log"
 MOCK_EXEC=true MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" MOCK_REUSE=disabled \

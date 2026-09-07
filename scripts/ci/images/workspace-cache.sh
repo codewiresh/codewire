@@ -99,19 +99,33 @@ workspace_cache_create_builder() {
 }
 
 workspace_cache_cleanup_builder() {
-  local status=0
+  local status=0 phase_status=0 started
   if [[ -n "$workspace_command_pid" ]]; then
     kill -TERM "$workspace_command_pid" 2>/dev/null || true
     wait "$workspace_command_pid" 2>/dev/null || true
     workspace_command_pid=''
   fi
   if [[ "$daemon_credentials" == true ]]; then
+    started=$SECONDS
     timeout --signal=TERM --kill-after=3s 10s \
-      "$docker_bin" exec "$builder_container" rm -f "$WORKSPACE_DAEMON_CREDENTIALS" >/dev/null 2>&1 || status=$?
+      "$docker_bin" exec "$builder_container" rm -f "$WORKSPACE_DAEMON_CREDENTIALS" >/dev/null 2>&1 || phase_status=$?
+    if [[ "$phase_status" != 0 ]]; then
+      printf 'workspace cache cleanup: phase=credential-erasure status=%s elapsed_seconds=%s\n' \
+        "$phase_status" "$((SECONDS - started))" >&2
+      status=$phase_status
+    fi
   fi
   if [[ "$builder_created" == true ]]; then
-    timeout --signal=TERM --kill-after=3s 10s \
-      "$docker_bin" buildx rm --force "$builder" >/dev/null 2>&1 || status=$?
+    # A stopped daemon can leave substantial state to remove. Keep erasure
+    # prompt while allowing bounded filesystem cleanup within the runner reserve.
+    started=$SECONDS phase_status=0
+    timeout --signal=TERM --kill-after=3s 60s \
+      "$docker_bin" buildx rm --force "$builder" >/dev/null 2>&1 || phase_status=$?
+    if [[ "$phase_status" != 0 ]]; then
+      printf 'workspace cache cleanup: phase=builder-removal status=%s elapsed_seconds=%s\n' \
+        "$phase_status" "$((SECONDS - started))" >&2
+      status=$phase_status
+    fi
   fi
   if [[ "$status" == 0 ]]; then
     daemon_credentials=false builder_created=false

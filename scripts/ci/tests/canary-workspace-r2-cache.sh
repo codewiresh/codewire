@@ -4,7 +4,9 @@
 set -euo pipefail
 [[ $# == 2 ]] || { echo 'usage: canary-workspace-r2-cache.sh AWS_CREDENTIALS_FILE NEW_REPORT_DIRECTORY' >&2; exit 2; }
 if [[ "${CODEWIRE_R2_CANARY_BOUNDED_CHILD:-}" != 1 ]]; then
-  exec timeout --signal=TERM --kill-after=45s 300s \
+  # A signal can arrive during foreground removal (63s), then EXIT retries
+  # erasure (13s) and removal (63s). Reserve 150s for both plus bookkeeping.
+  exec timeout --signal=TERM --kill-after=150s 300s \
     env CODEWIRE_R2_CANARY_BOUNDED_CHILD=1 "$0" "$@"
 fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
