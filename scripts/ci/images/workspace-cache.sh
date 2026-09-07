@@ -184,24 +184,56 @@ workspace_cache_compiler_args() {
   fi
 }
 
+workspace_cache_retryable_read_failure() {
+  local status="$1" log="$2" line diagnostic=''
+  # Buildx uses 1 for an ordinary build error and distinct statuses for its
+  # own failures, resource exhaustion and cancellation. A deadline or signal
+  # must never become a successful second attempt.
+  [[ "$status" == 1 ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ [^[:space:]] ]] && diagnostic="$line"
+  done <"$log"
+  # Only the final Buildx diagnostic identifies why the command failed. Earlier
+  # progress may contain a nonfatal cache warning followed by a Cargo failure.
+  # Unknown/multiline/debug forms fail closed until their rendering is proven.
+  [[ "$diagnostic" =~ ^ERROR:\ (failed\ to\ build:\ )?failed\ to\ solve:\ (failed\ to\ load\ cache(\ key)?|failed\ to\ configure\ s3\ cache\ importer|failed\ to\ import\ cache):\  ]] || return 1
+  [[ "$diagnostic" =~ (S3|GetObject|HeadObject|r2\.cloudflarestorage\.com) ]] || return 1
+  case "${diagnostic,,}" in
+    *cancel*|*deadline*|*'process '*|*frontend*|*export*) return 1 ;;
+  esac
+}
+
+workspace_cache_logged_command() {
+  local log="$1"
+  shift
+  workspace_cache_command bash -c '
+    set +e
+    log=$1; shift
+    "$@" 2>&1 | tee "$log"
+    statuses=("${PIPESTATUS[@]}")
+    if [[ "${statuses[1]}" != 0 ]]; then
+      echo "workspace cache build: log capture failed" >&2
+      exit 74
+    fi
+    exit "${statuses[0]}"
+  ' workspace-build "$log" "$@"
+}
+
 workspace_cache_build() {
   local target="$1" source_tree="$2" architecture="$3" log="$4" status=0 original_mode="$layer_cache_mode"
   shift 4
   workspace_cache_layer_args "$target" "$source_tree" "$architecture" || return
-  workspace_cache_command bash -c 'set -o pipefail; log=$1; shift; "$@" 2>&1 | tee "$log"' \
-    workspace-build "$log" "$docker_bin" buildx build --builder "$builder" --progress plain \
+  workspace_cache_logged_command "$log" "$docker_bin" buildx build --builder "$builder" --progress plain \
     "${layer_args[@]}" "$@" || status=$?
-  if [[ "$status" != 0 && "$original_mode" == r2 ]] \
-      && grep -Eqi '(failed to load cache key|failed to configure s3 cache|failed to import cache)' "$log" \
-      && grep -Eqi '(S3|GetObject|HeadObject|r2.cloudflarestorage.com)' "$log"; then
+  if [[ "$original_mode" == r2 ]] \
+      && workspace_cache_retryable_read_failure "$status" "$log"; then
     echo '::warning::Remote layer read failed; retrying this build once without external cache'
     # shellcheck disable=SC2034 # Consumed by the verifier receipt after this call.
     workspace_cache_fallback=true
     # A broken remote descriptor can remain in the daemon's local metadata.
     # Force computation on retry, preserving fresh floating tools without
     # combining the mutually exclusive no-cache and no-cache-filter flags.
-    workspace_cache_command bash -c 'set -o pipefail; log=$1; shift; "$@" 2>&1 | tee "$log"' \
-      workspace-build "$log.retry" "$docker_bin" buildx build --builder "$builder" --progress plain --no-cache "$@"
+    workspace_cache_logged_command "$log.retry" "$docker_bin" buildx build --builder "$builder" --progress plain --no-cache "$@"
     return
   fi
   return "$status"
