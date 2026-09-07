@@ -475,9 +475,10 @@ if [ "$event_selected" = false ]; then
 
     case "$path" in
       scripts/ci/verify/run-integration-verification.sh)
-        # This file owns every service's executable integration harness. Its
-        # own changes must run the combined family, not policy alone.
+        # This file owns database execution and every service's integration
+        # harness. Its changes must qualify both executable families.
         select_token policy
+        select_token database
         select_services
         recognized=true
         ;;

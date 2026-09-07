@@ -164,11 +164,23 @@ run_database() {
   local logfile
   reset_schema
 
+  # Compile independent harnesses together, but execute the database suites in
+  # their established order against the shared schema. Each batch uses one
+  # package, default features and the default test profile; CI-profile and
+  # restricted-feature checks below remain separate.
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test -p codewire-server-core --lib --test session_auth \
+      --test org_deletion_lifecycle --test oauth_bearer_auth --no-run
+
   logfile="$RUN_DIR/server-core-migrate.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
   assert_passed_count "server-core migration matrix" "$logfile" 28
+
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-platform-credentials --test storage \
+      --test profiles --test refresh --test authority --no-run
 
   logfile="$RUN_DIR/platform-credential-storage.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -181,6 +193,10 @@ run_database() {
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
   assert_passed_count "platform access profile matrix" "$logfile" 10
+
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib --test access_profiles \
+      --test credentials --test environment_external_cleanup --no-run
 
   logfile="$RUN_DIR/public-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
