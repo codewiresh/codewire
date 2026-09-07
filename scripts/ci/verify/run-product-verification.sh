@@ -10,6 +10,10 @@ cd "$ROOT"
 CARGO_TARGET_DIR="$(scripts/ci/verify/resolve-cargo-target-dir.sh "$ROOT")"
 export CARGO_TARGET_DIR
 CARGO_DEBUG_DIR="$CARGO_TARGET_DIR/debug"
+# In-process proof state is never accepted from a caller's environment.
+RUST_COMPOSE_REUSE=false
+RUST_COMPOSE_FORMAT_DONE=false
+RUST_COMPOSE_PROOF=''
 
 selected() {
   [[ "$SELECTION" == *"|$1|"* ]]
@@ -70,12 +74,45 @@ rust_package_args() {
 }
 
 run_rust_packages() {
-  local prefix="$1"
+  local prefix="$1" proof_key
   rust_package_args "$prefix"
-  cargo fmt --all --check
-  cargo build --locked "${RUST_PACKAGE_ARGS[@]}"
-  cargo clippy "${RUST_PACKAGE_ARGS[@]}" --all-targets -- -D warnings
-  cargo test "${RUST_PACKAGE_ARGS[@]}" --all-targets
+  # Reuse is confined to one composition process and one unchanged invocation
+  # context. An explicit package list is never equivalent to --workspace.
+  proof_key="$(printf '%q ' "$PWD" "$CARGO_TARGET_DIR" "${CARGO_HOME:-}" \
+    "${RUSTUP_HOME:-}" "${RUSTUP_TOOLCHAIN:-}" "${CARGO_BUILD_TARGET:-}" \
+    "${RUSTFLAGS:-}" "${CARGO_ENCODED_RUSTFLAGS:-}" "${RUSTC:-}" \
+    "${RUSTC_WRAPPER:-}" "${RUSTC_WORKSPACE_WRAPPER:-}" "$PATH" \
+    "${RUST_PACKAGE_ARGS[@]}")"
+  if [[ "${RUST_COMPOSE_REUSE:-false}" == true && "${RUST_COMPOSE_PROOF:-}" == "$proof_key" ]]; then
+    printf 'Rust generic build/Clippy/test: reused identical completed invocation\n'
+    return
+  fi
+  if [[ "${RUST_COMPOSE_REUSE:-false}" != true || "${RUST_COMPOSE_FORMAT_DONE:-false}" != true ]]; then
+    cargo fmt --all --check || return $?
+    RUST_COMPOSE_FORMAT_DONE=true
+  fi
+  cargo build --locked "${RUST_PACKAGE_ARGS[@]}" || return $?
+  cargo clippy "${RUST_PACKAGE_ARGS[@]}" --all-targets -- -D warnings || return $?
+  cargo test "${RUST_PACKAGE_ARGS[@]}" --all-targets || return $?
+  if [[ "${RUST_COMPOSE_REUSE:-false}" == true ]]; then
+    RUST_COMPOSE_PROOF="$proof_key"
+  fi
+}
+
+run_rust_transport() {
+  if ! selected rust && ! selected transport; then
+    echo '::error::Rust/transport composition selected without either capability' >&2
+    return 1
+  fi
+  RUST_COMPOSE_REUSE=true
+  RUST_COMPOSE_FORMAT_DONE=false
+  RUST_COMPOSE_PROOF=''
+  if selected rust; then
+    run_rust
+  fi
+  if selected transport; then
+    run_transport
+  fi
 }
 
 run_detached_desktop() {
@@ -806,6 +843,7 @@ case "$FAMILY" in
   runtime-confidential) run_runtime_confidential ;;
   runtime-dev-smoke) run_runtime_dev_smoke ;;
   rust) run_rust ;;
+  rust-transport) run_rust_transport ;;
   rust-curated-locks) run_rust_curated_locks ;;
   transport) run_transport ;;
   edge) run_edge ;;
@@ -813,7 +851,7 @@ case "$FAMILY" in
   deploy) run_deploy ;;
   security) run_security ;;
   *)
-    echo "usage: run-product-verification.sh policy|policy-core|policy-shell|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-curated-locks|transport|edge|release|deploy|security" >&2
+    echo "usage: run-product-verification.sh policy|policy-core|policy-shell|contracts|go-support|web|dashboard-image|ios|sdk-go|sdk-ts|sdk-python|service-apikey-smoke|runtime-confidential|runtime-dev-smoke|rust|rust-transport|rust-curated-locks|transport|edge|release|deploy|security" >&2
     exit 2
     ;;
 esac
