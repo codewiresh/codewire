@@ -1145,6 +1145,61 @@ jobs:
       - name: Finalize workspace measurement
         run: python3 scripts/ci/verify/workspace-cache-report.py finalize "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR" "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR/receipt.json"
 
+  workspace-cache-probes:
+    # Cost-only opt-in, after all measured workers stop using the shared cache.
+    name: Workspace cache fault and invalidation probes
+    runs-on: ci-heavy
+    enable-openid-connect: true
+    timeout-minutes: 55
+    needs: [verification-selection, workspace-image, edge-kind, workspace-cache-measurement]
+    if: ${{ always() && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && needs.workspace-cache-measurement.result == 'success' && ((contains(needs.verification-selection.outputs.selection, '|kind|') && needs.edge-kind.result == 'success' && needs.edge-kind.outputs.workspace_cache_seed != '') || (!contains(needs.verification-selection.outputs.selection, '|kind|') && needs.workspace-image.result == 'success' && needs.workspace-image.outputs.workspace_cache_seed != '')) }}
+    env:
+      CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
+      CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.ci_head_commit }}
+          persist-credentials: false
+
+      - name: Verify sealed probe tools
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Bind successful exact-source probe producer
+        env:
+          KIND_SELECTED: ${{ contains(needs.verification-selection.outputs.selection, '|kind|') }}
+          KIND_RESULT: ${{ needs.edge-kind.result }}
+          WORKSPACE_RESULT: ${{ needs.workspace-image.result }}
+          KIND_SEED: ${{ needs.edge-kind.outputs.workspace_cache_seed }}
+          WORKSPACE_SEED: ${{ needs.workspace-image.outputs.workspace_cache_seed }}
+        run: |
+          set -euo pipefail
+          if [[ "$KIND_SELECTED" == true ]]; then
+            [[ "$KIND_RESULT" == success && -z "$WORKSPACE_SEED" ]]
+            seed="$KIND_SEED"
+          else
+            [[ "$WORKSPACE_RESULT" == success && -z "$KIND_SEED" ]]
+            seed="$WORKSPACE_SEED"
+          fi
+          CODEWIRE_WORKSPACE_CACHE_SEED_REPORT="$seed" python3 scripts/ci/verify/workspace-cache-report.py seed-id
+          printf 'CODEWIRE_WORKSPACE_CACHE_SEED_REPORT=%s\n' "$seed" >> "$GITHUB_ENV"
+
+      - name: Select existing probe cache identity once
+        env:
+          CODEWIRE_SCCACHE_REQUEST: auto
+          CODEWIRE_BUILDKIT_CACHE_REQUEST: auto
+        run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Run bounded cache effect probes
+        run: scripts/ci/tests/probe-workspace-r2-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws" "$RUNNER_TEMP/workspace-cache-probes"
+
+      - name: Clean probe cache credential
+        if: ${{ always() }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Finalize separate cache probe report
+        run: python3 scripts/ci/verify/workspace-cache-probes.py finalize "$RUNNER_TEMP/workspace-cache-probes"
+
   required-verification:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this aggregator receives no write-capable integration.
     name: Required verification

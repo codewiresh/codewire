@@ -137,6 +137,7 @@ grep -qF "!contains(needs.verification-selection.outputs.selection, '|kind|')" <
   fail 'standalone workspace verification duplicates selected Kind ownership'
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-cache-experiment.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-cache-probes.py"
 "$ROOT/scripts/ci/tests/test-select-untrusted-workspace-cache.sh"
 "$ROOT/scripts/ci/tests/test-workspace-cache.sh"
 
