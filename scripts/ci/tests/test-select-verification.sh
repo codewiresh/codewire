@@ -536,7 +536,7 @@ run_paths_case retired_connectcore_deletion pull_request refs/pull/83/head false
   'policy service_billing service_connectcore service_integration service_orchestration' \
   tests/contract/connectcore/connectcore_test.go
 run_paths_case integration_service_harness pull_request refs/pull/831/head false \
-  'policy service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'database policy service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/run-integration-verification.sh
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
