@@ -1908,8 +1908,11 @@ grep -qF 'name: Build and inspect the standalone dashboard image' \
   echo 'container contracts: standalone Web changes omit dashboard image verification' >&2
   exit 1
 }
-dashboard_step="$(grep -A2 -F 'name: Build and inspect the standalone dashboard image' \
-  "$workspace_block")"
+dashboard_step="$(awk '
+  $0 == "      - name: Build and inspect the standalone dashboard image" { capture = 1 }
+  capture && $0 ~ /^      - / && $0 != "      - name: Build and inspect the standalone dashboard image" { exit }
+  capture { print }
+' "$workspace_block")"
 for token in web kind; do
   grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
     <<<"$dashboard_step" || {
