@@ -251,6 +251,10 @@ run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head f
 run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
   'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/ci/tests/test-repo-checks-modules.py
+run_paths_case apt_transactions pull_request refs/pull/3/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/tests/test-apt-get-with-retry.sh
+
 run_paths_case release pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
   .gitea/workflows/cli-release.yaml \
