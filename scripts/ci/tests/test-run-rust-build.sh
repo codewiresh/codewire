@@ -67,3 +67,7 @@ env \
   "$RUNNER" "$work/assert-local" >/dev/null
 
 printf '[test-run-rust-build] local fallback is disk-only\n'
+
+CODEWIRE_SCCACHE_MODE=disabled RUSTC_WRAPPER=/must-not-run RUSTC_WORKSPACE_WRAPPER=/must-not-run \
+  "$RUNNER" bash -eu -c '[[ ! -v RUSTC_WRAPPER && ! -v RUSTC_WORKSPACE_WRAPPER ]]' >/dev/null
+printf '[test-run-rust-build] disabled mode clears inherited wrappers\n'

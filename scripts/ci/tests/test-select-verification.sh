@@ -307,6 +307,13 @@ run_paths_case sccache_host_selector pull_request refs/pull/1751/head false \
 run_paths_case sccache_host_selector_fixture pull_request refs/pull/1752/head false \
   'policy security' \
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
+run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false \
+  'policy security' \
+  scripts/ci/setup/select-untrusted-workspace-cache.sh \
+  scripts/ci/images/workspace-cache.sh \
+  scripts/ci/tests/test-select-untrusted-workspace-cache.sh \
+  scripts/ci/tests/test-workspace-cache.sh \
+  scripts/ci/tests/canary-workspace-r2-cache.sh
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
 run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \

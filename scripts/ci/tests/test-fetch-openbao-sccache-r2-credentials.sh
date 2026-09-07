@@ -128,6 +128,7 @@ if grep -q '^enable-openid-connect:' "$WORKFLOW"; then
 fi
 cache_jobs=(
   cw-release-assets
+  workspace-image
   standard
   rust-transport
   database
@@ -136,7 +137,7 @@ cache_jobs=(
   edge-kind
 )
 [[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq "${#cache_jobs[@]}" ]] ||
-  fail 'CI OIDC is not confined to the seven cache-consuming jobs'
+  fail 'CI OIDC is not confined to the eight cache-consuming jobs'
 for index in "${!cache_jobs[@]}"; do
   job="${cache_jobs[$index]}"
   if (( index + 1 < ${#cache_jobs[@]} )); then
@@ -147,7 +148,11 @@ for index in "${!cache_jobs[@]}"; do
   fi
   grep -Fq '    enable-openid-connect: true' <<<"$job_block" ||
     fail "$job cannot request its untrusted cache identity"
-  grep -Fq "scripts/ci/setup/select-untrusted-rust-cache.sh \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \
+  cache_selector=select-untrusted-rust-cache.sh
+  if [[ "$job" == workspace-image || "$job" == edge-kind ]]; then
+    cache_selector=select-untrusted-workspace-cache.sh
+  fi
+  grep -Fq "scripts/ci/setup/$cache_selector \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \
     <<<"$job_block" || fail "$job does not select the shared cache"
   grep -Fq "scripts/ci/setup/finish-untrusted-rust-cache.sh \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \
     <<<"$job_block" || fail "$job does not clean the cache credential"
@@ -161,4 +166,4 @@ if grep -Eq '^      (SCCACHE_BUCKET|SCCACHE_ENDPOINT|CODEWIRE_SCCACHE_PREFIX):' 
   fail 'workflow exposes remote cache configuration outside selected cache steps'
 fi
 
-printf '[test-fetch-openbao-sccache-r2-credentials] exact-claim seven-job private-file contract passed\n'
+printf '[test-fetch-openbao-sccache-r2-credentials] exact-claim eight-job private-file contract passed\n'

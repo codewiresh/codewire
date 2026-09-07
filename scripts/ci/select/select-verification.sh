@@ -1271,6 +1271,17 @@ if [ "$event_selected" = false ]; then
         select_token security
         recognized=true
         ;;
+      scripts/ci/setup/select-untrusted-workspace-cache.sh|\
+      scripts/ci/images/workspace-cache.sh|\
+      scripts/ci/tests/test-select-untrusted-workspace-cache.sh|\
+      scripts/ci/tests/test-workspace-cache.sh|\
+      scripts/ci/tests/canary-workspace-r2-cache.sh)
+        # The artifact graph owns workspace build selection. These exact
+        # credential/cache consumers also run their policy and security guards.
+        select_token policy
+        select_token security
+        recognized=true
+        ;;
       scripts/ci/tests/test-fetch-openbao-sccache-r2-credentials.sh)
         select_token edge_kind
         select_token policy
