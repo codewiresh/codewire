@@ -1087,11 +1087,6 @@ def has_unknown_reachable_path(
             fnmatch.fnmatchcase(path, pattern) for pattern in non_artifact_inputs
         ):
             continue
-        if any(
-            fnmatch.fnmatchcase(path, pattern)
-            for pattern in known_non_rust_artifact_inputs
-        ):
-            continue
         if path in analyzed or path in known_root_inputs or path.endswith("/Cargo.lock"):
             continue
         matching_closure = [directory for directory in closure_dirs if path_under(path, directory)]
@@ -1105,6 +1100,14 @@ def has_unknown_reachable_path(
             }:
                 continue
             return path
+        # Broad image inputs (notably crates/**) own a different artifact.
+        # They cannot prove that an unknown file in this Rust closure is not
+        # consumed by include_bytes!, a build script, or another source input.
+        if any(
+            fnmatch.fnmatchcase(path, pattern)
+            for pattern in known_non_rust_artifact_inputs
+        ):
+            continue
         if any(path_under(path, directory) for directory in all_package_dirs):
             continue
         if any(directory and path_under(path, directory) for directory in known_artifact_directories):
