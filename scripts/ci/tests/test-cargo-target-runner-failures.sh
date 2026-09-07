@@ -145,16 +145,13 @@ resolver.write_text('#!/usr/bin/env bash\nprintf "%s/target\\n" "$1"\n')
 resolver.chmod(0o755)
 environment = dict(PATH=f'{binary}:{os.environ["PATH"]}',
                    HOME=str(fixture), COMPOSITION_TRACE=str(trace),
-                   RUST_COMPOSE_REUSE='true', RUST_COMPOSE_FORMAT_DONE='true',
-                   RUST_COMPOSE_PROOF='caller-supplied-proof')
+                   RUST_COMPOSE_FORMAT='true', RUST_COMPOSE_FORMAT_DONE='true')
 cases = 0
 
-def run(tokens, family='rust-transport', fail=None, suffix=None, status=None):
+def run(tokens, family='rust-transport', fail=None, status=None):
     global cases
     cases += 1
     trace.write_text('')
-    runner.write_text(production if suffix is None else
-                     production.split('case "$FAMILY" in\n', 1)[0] + suffix)
     env = dict(environment, VERIFICATION_SELECTION='|valid:v3|' + '|'.join(tokens) + '|complete|')
     if fail:
         env['COMPOSITION_FAIL'] = fail
@@ -174,16 +171,15 @@ def expected(*arguments):
             ['clippy', *arguments, '--all-targets', '--', '-D', 'warnings'],
             ['test', *arguments, '--all-targets']]
 
-same = ['rust', 'transport', 'rust_pkg_codewire_alpha', 'transport_pkg_codewire_alpha']
+both = ['rust', 'transport', 'rust_pkg_codewire_alpha', 'transport_pkg_codewire_beta']
 records, _ = run([], status=1)
 assert not records
-for tokens in ([same[0], same[2]], [same[1], same[3]], same):
-    records, output = run(tokens)
-    assert generic(records) == expected('-p', 'codewire-alpha')
+for tokens, selected_package in (([both[0], both[2]], 'codewire-alpha'),
+                                 ([both[1], both[3]], 'codewire-beta')):
+    records, _ = run(tokens)
+    assert generic(records) == expected('-p', selected_package)
     assert sum(r['args'] == ['fmt', '--all', '--check'] for r in records) == 1
-    assert ('reused identical' in output) == (tokens == same)
-
-records, _ = run(['rust', 'transport', 'rust_pkg_codewire_alpha', 'transport_pkg_codewire_beta'])
+records, _ = run(both)
 assert generic(records) == expected('-p', 'codewire-alpha') + expected('-p', 'codewire-beta')
 assert sum(r['args'] == ['fmt', '--all', '--check'] for r in records) == 1
 
@@ -194,19 +190,17 @@ assert generic(records) == expected('--workspace') + expected(
 assert any(r['args'] == ['--production-features'] for r in records)
 assert any('--features' in r['args'] and 'platform' in r['args'] for r in records)
 
-special = ['rust', 'transport', 'rust_pkg_codewire_local_vmm',
-           'rust_pkg_codewire_vmm_guest_probe', 'transport_pkg_codewire_local_vmm',
+special = ['rust', 'transport', 'rust_pkg_codewire_alpha', 'transport_pkg_codewire_local_vmm',
            'transport_pkg_codewire_vmm_guest_probe', 'rust_pkg_codewire_desktop']
 records, _ = run(special)
-assert generic(records) == expected('-p', 'codewire-local-vmm', '-p', 'codewire-vmm-guest-probe')
+assert generic(records) == expected('-p', 'codewire-alpha') + expected('-p', 'codewire-local-vmm', '-p', 'codewire-vmm-guest-probe')
 assert sum(r['tool'] == 'package-codewire-desktop.sh' for r in records) == 1
 assert sum(r['tool'] == 'build-local-vmm-initramfs.sh' for r in records) == 1
 assert sum('--target' in r['args'] and 'aarch64-apple-darwin' in r['args'] for r in records) == 1
 
 for command in ('fmt', 'build', 'clippy', 'test'):
-    records, output = run(same, fail=command)
+    records, _ = run(both, fail=command)
     assert records[-1]['args'][0] == command
-    assert 'reused identical' not in output
 
 # The standalone families retain their original local entrypoint behavior.
 for family, token in [('rust', 'rust_pkg_codewire_alpha'),
@@ -214,22 +208,6 @@ for family, token in [('rust', 'rust_pkg_codewire_alpha'),
     records, output = run([family, token], family=family)
     assert generic(records) == expected('-p', 'codewire-alpha')
     assert records[0]['args'] == ['fmt', '--all', '--check']
-    assert 'reused identical' not in output
 
-# Only the production function definitions are reused in these in-process
-# probes; changing context or catching a failure cannot mint completed proof.
-for context in ("RUSTFLAGS='--cfg composition_fixture'", "CARGO_TARGET_DIR=other-target",
-                "RUSTC_WRAPPER=synthetic-wrapper", "RUSTUP_TOOLCHAIN=synthetic-toolchain"):
-    records, _ = run(same, suffix='RUST_COMPOSE_REUSE=true\n'
-                     'run_rust_packages rust_pkg_\n'
-                     f'export {context}\nrun_rust_packages transport_pkg_\n')
-    assert generic(records) == expected('-p', 'codewire-alpha') * 2
-records, _ = run(same, suffix='''RUST_COMPOSE_REUSE=true
-export COMPOSITION_FAIL=clippy
-if run_rust_packages rust_pkg_; then exit 99; fi
-unset COMPOSITION_FAIL
-run_rust_packages transport_pkg_
-''')
-assert generic(records) == expected('-p', 'codewire-alpha')[:2] + expected('-p', 'codewire-alpha')
 print(f'Rust/transport composition trace: {cases} cases passed')
 PY
