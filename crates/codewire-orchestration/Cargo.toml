@@ -70,7 +70,7 @@ schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-kube = { workspace = true }
+kube = { workspace = true, features = ["jsonpatch"] }
 futures = { workspace = true }
 hyper-util = { workspace = true }
 reqwest = { workspace = true }

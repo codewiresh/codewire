@@ -1538,29 +1538,55 @@ impl SandboxClient {
             .await
             .map_err(|e| anyhow::anyhow!("set replicas: {e}"))?;
         let sandboxes = self.sandboxes();
-        let mut sandbox = sandboxes
+        let sandbox = sandboxes
             .get(&name)
             .await
             .map_err(|e| anyhow::anyhow!("get Sandbox {name}: {e}"))?;
+        anyhow::ensure!(
+            sandbox.metadata.name.as_deref() == Some(name.as_str())
+                && sandbox.metadata.namespace.as_deref() == Some(self.namespace.as_str())
+                && sandbox.metadata.deletion_timestamp.is_none(),
+            "set operatingMode: Sandbox {name} identity is unavailable"
+        );
+        let uid = sandbox
+            .metadata
+            .uid
+            .as_deref()
+            .filter(|uid| !uid.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("set operatingMode: Sandbox {name} has no UID"))?;
+        anyhow::ensure!(
+            sandbox.data.get("spec").is_some_and(Value::is_object),
+            "set operatingMode: Sandbox {name} has no spec"
+        );
         let mode = if replicas <= 0 {
             "Suspended"
         } else {
             "Running"
         };
-        if let Some(spec) = sandbox
-            .data
-            .as_object_mut()
-            .and_then(|o| o.get_mut("spec"))
-            .and_then(Value::as_object_mut)
-        {
-            spec.insert("operatingMode".to_string(), Value::from(mode));
-        } else {
-            anyhow::bail!("set operatingMode: Sandbox {name} has no spec");
-        }
-        sandboxes
-            .replace(&name, &PostParams::default(), &sandbox)
+        // Fence the exact incarnation without conditioning this one-field
+        // change on unrelated controller-owned status/annotation updates.
+        let patch = Patch::Json::<()>(serde_json::from_value(serde_json::json!([
+            {"op": "test", "path": "/metadata/uid", "value": uid},
+            {"op": "add", "path": "/spec/operatingMode", "value": mode}
+        ]))?);
+        let updated = sandboxes
+            .patch(&name, &PatchParams::default(), &patch)
             .await
             .map_err(|e| anyhow::anyhow!("update Sandbox {name} operatingMode: {e}"))?;
+        // Deletion may start after the read; do not report a deleting response
+        // as a live runtime. This is not an atomic absence-of-deletion fence.
+        anyhow::ensure!(
+            updated.metadata.name.as_deref() == Some(name.as_str())
+                && updated.metadata.namespace.as_deref() == Some(self.namespace.as_str())
+                && updated.metadata.uid.as_deref() == Some(uid)
+                && updated.metadata.deletion_timestamp.is_none()
+                && updated
+                    .data
+                    .pointer("/spec/operatingMode")
+                    .and_then(Value::as_str)
+                    == Some(mode),
+            "update Sandbox {name} operatingMode did not return the current live target"
+        );
         tracing::info!(name, replicas, mode, "set Sandbox operating mode");
         Ok(())
     }
@@ -3170,6 +3196,264 @@ mod tests {
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+
+    const MODE_CLAIM_PATH: &str = "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims/sandbox-env-test";
+    const MODE_SANDBOX_PATH: &str =
+        "/apis/agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxes/workspace-env-test";
+
+    #[derive(Clone, Copy)]
+    enum ModeInterleave {
+        ControllerUpdate,
+        ReplaceUid,
+        Delete,
+        Reject(StatusCode),
+        InvalidReply(u8),
+    }
+
+    struct ModeFixture {
+        object: Value,
+        writes: Vec<(Method, Value)>,
+    }
+
+    fn mode_sandbox() -> Value {
+        json!({
+            "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+            "metadata": {
+                "name": "workspace-env-test", "namespace": "dev-sandboxes",
+                "uid": "sandbox-incarnation", "resourceVersion": "10",
+                "annotations": {"agents.x-k8s.io/pod-name": "old-pod"}
+            },
+            "spec": {"operatingMode": "Suspended", "podTemplate": {"fixture": "preserve"}},
+            "status": {"fixture": "before-controller-update"}
+        })
+    }
+
+    fn mode_client(
+        object: Value,
+        interleave: ModeInterleave,
+    ) -> (SandboxClient, Arc<Mutex<ModeFixture>>) {
+        let state = Arc::new(Mutex::new(ModeFixture {
+            object,
+            writes: Vec::new(),
+        }));
+        let shared = Arc::clone(&state);
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let shared = Arc::clone(&shared);
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_string();
+                let content_type = request.headers().get(header::CONTENT_TYPE).cloned();
+                let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                let mut state = shared.lock().unwrap();
+                let (status, body) = if method == Method::GET && path == MODE_CLAIM_PATH {
+                    (StatusCode::OK, json!({
+                        "apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+                        "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                        "status": {"sandbox": {"name": "workspace-env-test"}}
+                    }))
+                } else if method == Method::GET && path == MODE_SANDBOX_PATH {
+                    let observed = state.object.clone();
+                    // The response carries RV10, but the controller has already
+                    // changed unrelated fields by the time the caller writes.
+                    state.object["metadata"]["resourceVersion"] = json!("11");
+                    state.object["metadata"]["annotations"].as_object_mut().unwrap()
+                        .remove("agents.x-k8s.io/pod-name");
+                    state.object["status"]["fixture"] = json!("controller-update-survives");
+                    if matches!(interleave, ModeInterleave::ReplaceUid) {
+                        state.object["metadata"]["uid"] = json!("replacement-incarnation");
+                    }
+                    (StatusCode::OK, observed)
+                } else {
+                    assert_eq!(path, MODE_SANDBOX_PATH, "mutation must use the resolved Sandbox, never the Claim or Pod");
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    state.writes.push((method.clone(), body.clone()));
+                    match interleave {
+                        ModeInterleave::Delete => (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+                        ModeInterleave::Reject(status) => (status, kubernetes_status("Rejected", status.as_u16())),
+                        _ if method == Method::PUT => {
+                            // Enforce real optimistic concurrency, not a fixed
+                            // old-implementation rejection: stale PUTs conflict.
+                            if body.pointer("/metadata/uid") != state.object.pointer("/metadata/uid")
+                                || body.pointer("/metadata/resourceVersion") != state.object.pointer("/metadata/resourceVersion")
+                            {
+                                (StatusCode::CONFLICT, kubernetes_status("Conflict", 409))
+                            } else {
+                                state.object = body;
+                                (StatusCode::OK, state.object.clone())
+                            }
+                        }
+                        _ => {
+                            assert_eq!(method, Method::PATCH);
+                            assert_eq!(content_type.as_ref().map(|value| value.to_str().unwrap()), Some("application/json-patch+json"));
+                            let operations = body.as_array().expect("JSON patch operations");
+                            assert_eq!(operations.len(), 2, "only UID fence and mode mutation");
+                            assert_eq!(operations[0]["op"], "test");
+                            assert_eq!(operations[0]["path"], "/metadata/uid");
+                            assert_eq!(operations[1]["op"], "add");
+                            assert_eq!(operations[1]["path"], "/spec/operatingMode");
+                            if operations[0].get("value") != state.object.pointer("/metadata/uid") {
+                                (StatusCode::UNPROCESSABLE_ENTITY, kubernetes_status("Invalid", 422))
+                            } else {
+                                state.object["spec"]["operatingMode"] = operations[1]["value"].clone();
+                                let mut response = state.object.clone();
+                                if let ModeInterleave::InvalidReply(invalid) = interleave {
+                                    match invalid {
+                                        0 => response["metadata"]["uid"] = json!("replacement-incarnation"),
+                                        1 => response["metadata"]["deletionTimestamp"] = json!("2026-09-07T00:00:00Z"),
+                                        2 => response["metadata"]["name"] = json!("wrong-name"),
+                                        3 => response["metadata"]["namespace"] = json!("wrong-namespace"),
+                                        4 => response["spec"]["operatingMode"] = json!("Suspended"),
+                                        _ => unreachable!(),
+                                    }
+                                }
+                                (StatusCode::OK, response)
+                            }
+                        }
+                    }
+                };
+                Response::builder().status(status)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string())).unwrap()
+            }
+        });
+        (
+            SandboxClient::new(Client::new(service, "default"), "dev-sandboxes"),
+            state,
+        )
+    }
+
+    #[tokio::test]
+    async fn operating_mode_preserves_interleaved_controller_updates_for_start_and_stop() {
+        for (replicas, expected) in [(1, "Running"), (0, "Suspended")] {
+            let (client, state) = mode_client(mode_sandbox(), ModeInterleave::ControllerUpdate);
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                client.set_replicas("env-test", replicas),
+            )
+            .await
+            .unwrap()
+            .expect("controller metadata changes must not fail an operating-mode update");
+            let state = state.lock().unwrap();
+            assert_eq!(state.writes.len(), 1);
+            assert_eq!(state.object["spec"]["operatingMode"], expected);
+            assert_eq!(
+                state.object["spec"]["podTemplate"],
+                json!({"fixture": "preserve"})
+            );
+            assert_eq!(state.object["metadata"]["resourceVersion"], "11");
+            assert_eq!(state.object["metadata"]["uid"], "sandbox-incarnation");
+            assert!(
+                state.object["metadata"]["annotations"]
+                    .get("agents.x-k8s.io/pod-name")
+                    .is_none()
+            );
+            assert_eq!(
+                state.object["status"]["fixture"],
+                "controller-update-survives"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operating_mode_rejects_replacement_deletion_and_api_errors_without_retry() {
+        for interleave in [
+            ModeInterleave::ReplaceUid,
+            ModeInterleave::Delete,
+            ModeInterleave::Reject(StatusCode::FORBIDDEN),
+            ModeInterleave::Reject(StatusCode::CONFLICT),
+            ModeInterleave::Reject(StatusCode::UNPROCESSABLE_ENTITY),
+            ModeInterleave::Reject(StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let (client, state) = mode_client(mode_sandbox(), interleave);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            let state = state.lock().unwrap();
+            assert_eq!(
+                state.writes.len(),
+                1,
+                "no blind retry after uncertain or rejected mutation"
+            );
+            assert_eq!(state.object["spec"]["operatingMode"], "Suspended");
+        }
+    }
+
+    #[tokio::test]
+    async fn operating_mode_rejects_incomplete_or_deleting_observations_without_mutation() {
+        for invalid in 0..7 {
+            let mut sandbox = mode_sandbox();
+            match invalid {
+                0 => {
+                    sandbox.as_object_mut().unwrap().remove("spec");
+                }
+                1 => sandbox["spec"] = Value::Null,
+                2 => {
+                    sandbox["metadata"].as_object_mut().unwrap().remove("uid");
+                }
+                3 => sandbox["metadata"]["uid"] = json!(""),
+                4 => sandbox["metadata"]["deletionTimestamp"] = json!("2026-09-07T00:00:00Z"),
+                5 => sandbox["metadata"]["name"] = json!("wrong-name"),
+                6 => sandbox["metadata"]["namespace"] = json!("wrong-namespace"),
+                _ => unreachable!(),
+            }
+            let (client, state) = mode_client(sandbox, ModeInterleave::ControllerUpdate);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
+                    .await
+                    .unwrap()
+                    .is_err(),
+                "case {invalid}"
+            );
+            assert!(
+                state.lock().unwrap().writes.is_empty(),
+                "case {invalid} mutated an invalid target"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operating_mode_rejects_invalid_success_replies_without_replaying_the_write() {
+        for invalid in 0..5 {
+            let (client, state) =
+                mode_client(mode_sandbox(), ModeInterleave::InvalidReply(invalid));
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
+                    .await
+                    .unwrap()
+                    .is_err(),
+                "case {invalid} must not report a current live target"
+            );
+            let state = state.lock().unwrap();
+            assert_eq!(state.writes.len(), 1);
+            // A rejected response is not proof of rollback: the mutation may
+            // already have happened, and must not be blindly replayed.
+            assert_eq!(state.object["spec"]["operatingMode"], "Running");
+        }
+    }
+
+    #[tokio::test]
+    async fn operating_mode_adds_a_missing_mode_without_creating_or_replacing_the_spec() {
+        let mut sandbox = mode_sandbox();
+        sandbox["spec"]
+            .as_object_mut()
+            .unwrap()
+            .remove("operatingMode");
+        let (client, state) = mode_client(sandbox, ModeInterleave::ControllerUpdate);
+        tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
+            .await
+            .unwrap()
+            .unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.writes.len(), 1);
+        assert_eq!(state.object["spec"]["operatingMode"], "Running");
+        assert_eq!(
+            state.object["spec"]["podTemplate"],
+            json!({"fixture": "preserve"})
+        );
+    }
 
     #[test]
     fn recovery_selector_excludes_gateway_and_companion_pods() {
