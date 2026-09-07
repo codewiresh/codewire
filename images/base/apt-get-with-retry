@@ -3,10 +3,13 @@ set -euo pipefail
 
 readonly attempts=4
 readonly delay_seconds=30
+readonly transaction_timeout_seconds=300
 
 status=1
 for ((attempt = 1; attempt <= attempts; attempt++)); do
-  if apt-get "$@"; then
+  # Transport timeouts do not bound a stalled APT acquisition queue. Keep each
+  # transaction finite so the existing retry policy can handle that failure.
+  if timeout --signal=TERM --kill-after=3s "${transaction_timeout_seconds}s" apt-get "$@"; then
     exit 0
   else
     status=$?
