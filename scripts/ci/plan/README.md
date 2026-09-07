@@ -1,8 +1,9 @@
 # Codewire artifact planner
 
 This directory classifies artifact impact for the packaged `cw` CLI, desktop
-package, workspace `cw` binary, atomic base/workspace support-image pair, and
-the dashboard, gateway, DERP, services, and mesh runtime images.
+package, workspace `cw` binary and content verification, atomic base/workspace
+support-image pair, and the dashboard, gateway, DERP, services, and mesh runtime
+images.
 Verification capabilities are owned only by
 `scripts/ci/select/select-verification.sh`; the planner never adds or removes
 capability tokens. Runtime artifact facts remain independent of PR verification
@@ -36,8 +37,34 @@ that does not select Dev and does not affect the support pair remains
 skippable. File-set and composite inputs are explicit ownership rules, so they
 do not make unrelated Rust artifacts unclassified.
 
+PR workspace content qualification uses the separate
+`workspace_image_verification` artifact. It depends on the base image and the
+workspace `cw` binary, and binds workspace image files, the root Docker ignore
+file and raw Cargo manifest, and the verifier, local image helpers, agent
+contract and their assertions. The read-only root build-context mount is used
+by Cargo; the resulting `cw` binary is the only source-built output copied
+into the final image. Reachable Rust fingerprints include embedded policy and
+private protobuf inputs. Unknown files inside a reachable package remain
+unclassified even when a runtime image also owns `crates/**`.
+
+This split does not change capability selection or exact-source publication.
+Selected Kind still builds and verifies its workspace image, then consumes the
+exact local image receipt. The receipt retains its complete committed-tree,
+contract, architecture and immutable image bindings. Only standalone workspace
+verification can be omitted by the narrower artifact fact. An unaffected fact
+means the checked-in build and contract inputs are unchanged; floating tool
+channels can still resolve differently on the next actual image build.
+
 `apply-verification-plan.py` validates the plan and emits only the three
-artifact-job facts used by CI. `emit-verification-receipt.py` binds a successful
+artifact-job facts used by CI. Its established `workspace_image_state` and
+`workspace_image_selected` outputs now describe `workspace_image_verification`;
+the support adapter continues to consume `workspace_image`. A missing new
+artifact is an error, never an implicit unaffected result. PRs on older trusted
+bases continue executing that base's broader planner and adapter. Policy edits
+cannot reduce their own PR work and invalidate post-merge tested-tree reuse.
+No planner artifact fact adds a local capability gate or creates local proof.
+
+`emit-verification-receipt.py` binds a successful
 Required-verification job to its exact base, head, and tree. Post-merge reuse
 validates that identity and falls back whenever receipt-control files changed.
 

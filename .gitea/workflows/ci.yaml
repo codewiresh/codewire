@@ -600,23 +600,17 @@ jobs:
           echo "$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"
           "$HOME/.proto-tools/protoc/bin/protoc" --version
 
-      - name: Run Rust
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|rust|') }}
+      - name: Run selected Rust and transport
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) }}
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-product-verification.sh rust
+        run: scripts/ci/verify/run-product-verification.sh rust-transport
 
       - name: Run artifact-selected desktop package
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.desktop_package_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|rust_pkg_codewire_desktop|') }}
         env:
           VERIFICATION_SELECTION: '|valid:v3|rust_pkg_codewire_desktop|complete|'
         run: scripts/ci/verify/run-product-verification.sh rust
-
-      - name: Run Rust transport
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|transport|') }}
-        env:
-          VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
-        run: scripts/ci/verify/run-product-verification.sh transport
 
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
