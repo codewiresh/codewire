@@ -5,23 +5,36 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-source_id="${GITHUB_SHA:-local}"
-workspace_tag="codewire-workspace-verify:${source_id}"
 docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
 base_context_name="codewire-verified-base"
+artifact_tool="$ROOT/scripts/ci/verify/workspace-image-artifact.py"
+receipt="$ROOT/.tmp/codewire-workspace-image-verification.json"
 
-for tool in "$docker_bin" python3 sed; do
+for tool in "$docker_bin" python3 jq sed; do
   command -v "$tool" >/dev/null 2>&1 || {
     printf 'workspace image verification: missing required tool: %s\n' "$tool" >&2
     exit 1
   }
 done
 
+[[ "$#" -eq 0 ]] || { echo 'workspace image verifier accepts no arguments' >&2; exit 2; }
+identity="$(python3 "$artifact_tool" identity "$ROOT")"
+source_id="$(jq -er '.source_sha' <<<"$identity")"
+source_tree="$(jq -er '.source_tree' <<<"$identity")"
+contract_sha="$(jq -er '.inputs["scripts/ci/verify/workspace-agent-contract.sh"]' <<<"$identity")"
+workspace_tag="codewire-workspace-verify:${source_id}"
+if alias="$(python3 "$artifact_tool" reuse "$ROOT" "$receipt" 2>/dev/null)"; then
+  printf 'workspace image verification: reused exact verified image %s\n' "$alias"
+  exit 0
+fi
+mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-image-verify.XXXXXX")"
 base_layout="$work/base.oci"
 base_metadata="$work/base-metadata.json"
 builder=""
 owns_builder=false
+workspace_id=''
+base_digest=''
 
 cleanup() {
   local status=$? cleanup_status=0
@@ -36,6 +49,10 @@ cleanup() {
     printf 'workspace image verification: failed to remove ephemeral builder %s\n' \
       "$builder" >&2
     status="$cleanup_status"
+  fi
+  if [[ "$status" -eq 0 ]]; then
+    # No acceptance marker may survive a failed contract or builder cleanup.
+    python3 "$artifact_tool" seal "$ROOT" "$receipt" "$workspace_id" "$base_digest" || status=$?
   fi
   exit "$status"
 }
@@ -91,12 +108,22 @@ readonly base_digest
   --pull \
   --build-context "$base_context_name=oci-layout://$base_layout@$base_digest" \
   --tag "$workspace_tag" \
+  --label "org.opencontainers.image.revision=$source_id" \
+  --label "dev.codewire.source-tree=$source_tree" \
+  --label "dev.codewire.workspace-contract=$contract_sha" \
+  --label dev.codewire.build.profile=workspace-verify \
+  --label dev.codewire.promotable=false \
   --load \
   --build-arg "BASE_IMAGE_REF=$base_context_name" \
   --file "$ROOT/images/workspace/Dockerfile" \
   "$ROOT"
 
+workspace_id="$("$docker_bin" image inspect "$workspace_tag" --format '{{.Id}}')"
+[[ "$workspace_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'invalid workspace image ID' >&2; exit 1; }
 "$docker_bin" run --rm --interactive --pids-limit=2048 --user codewire --entrypoint bash \
-  "$workspace_tag" -eu -s <"$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
+  "$workspace_id" -eu -s <"$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
+"$docker_bin" run --rm --interactive --pids-limit=2048 --user codewire \
+  --tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256m --entrypoint bash \
+  "$workspace_id" -eu -s -- --mounted-home-agents <"$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
 
 printf 'workspace image verification: base=%s workspace=%s\n' "$base_digest" "$workspace_tag"

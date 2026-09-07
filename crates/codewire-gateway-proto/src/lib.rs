@@ -9,6 +9,12 @@ pub const DAEMON_AUTH_TOKEN_HEADER: &str = "x-codewire-daemon-token";
 /// and every Codewire HMAC capability scope. A token projected for this
 /// audience can authenticate only the single cluster-local binding exchange.
 pub const GATEWAY_BINDING_TOKEN_AUDIENCE: &str = "codewire.internal.gateway-binding.v1";
+/// Exact projected-token purpose for a gateway authenticating to the isolated
+/// credential broker. This does not authorize workload or binding-bootstrap use.
+pub const CREDENTIAL_GATEWAY_TOKEN_AUDIENCE: &str = "codewire.internal.credential-gateway.v1";
+/// Exact projected-token purpose for a workspace authenticating credential
+/// access through its per-environment gateway, not the Kubernetes API.
+pub const CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE: &str = "codewire.internal.credential-workspace.v1";
 pub const GATEWAY_BINDING_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/gateway-binding";
 pub const GATEWAY_BINDING_TOKEN_PATH: &str = "/var/run/secrets/codewire/gateway-binding/token";
 pub const GATEWAY_BINDING_TOKEN_EXPIRATION_SECONDS: i64 = 600;
@@ -92,6 +98,14 @@ impl std::error::Error for InvalidDaemonAuthToken {}
 pub mod daemon {
     pub mod v1 {
         include!(concat!(env!("OUT_DIR"), "/daemon.v1.rs"));
+    }
+}
+
+/// Private gateway-initiated credential-broker transport. This module shares
+/// material-free frame definitions with `daemon`, not its service authority.
+pub mod broker {
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/broker.v1.rs"));
     }
 }
 

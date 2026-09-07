@@ -135,7 +135,7 @@ async fn run_stream(
             org_id: org_id.into(),
             environment_id: environment_id.into(),
             follow: true,
-            after_log_id: rows.cursor.clone().into(),
+            after_log_id: rows.cursor.clone(),
             ..Default::default()
         })
         .await

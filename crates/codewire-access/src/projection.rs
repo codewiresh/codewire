@@ -6,19 +6,82 @@ const MIN_UNPRIVILEGED_PORT: u16 = 1024;
 /// Relative path for the generated credential-free Codex provider config.
 pub const CODEX_CONFIG_FILE_NAME: &str = "config.toml";
 
+/// Projected, purpose-bound workspace capability, never provider material.
+pub const CODEX_PLATFORM_TOKEN_FILE: &str = "/run/codewire-credentials/workspace/token";
+/// Public gateway CA bundle mounted only as trust, not a private identity.
+pub const CODEX_PLATFORM_ROOTS_FILE: &str = "/run/codewire-credentials/gateway-roots/ca.crt";
+/// Writable per-Pod Codex state, separate from the persisted user workspace.
+pub const CODEX_PLATFORM_HOME: &str = "/run/codewire-codex/home";
+
 /// Deterministic machine-owned Codex configuration for a protected provider
 /// route.
 ///
-/// The projection contains no provider credential, environment-key lookup,
-/// token command, or reusable authorization value. Placement runtimes may
-/// install the same bytes locally or on the platform while keeping provider
-/// material in their own broker boundary.
+/// The projection contains no provider credential or environment-key lookup.
+/// Local delivery uses its guest loopback listener. Platform delivery uses a
+/// fixed command to read a short-lived, purpose-bound Pod capability; it never
+/// reads provider credentials. Both keep material in their broker boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexProviderProjection {
     config_toml: String,
 }
 
 impl CodexProviderProjection {
+    /// Project an exact per-environment Kubernetes gateway on HTTPS port443.
+    /// Codex 0.149.0's supported command-backed bearer mechanism re-reads the
+    /// dedicated projected Pod capability on demand and after one401 retry.
+    /// The caller also mounts public roots and sets CODEX_CA_CERTIFICATE to
+    /// [`CODEX_PLATFORM_ROOTS_FILE`]. This is environment-level capability
+    /// access, not a promise to hide the Pod token from its own workload.
+    pub fn for_platform_gateway(dns_name: &str) -> Result<Self, ProjectionError> {
+        if dns_name.len() > 253
+            || !dns_name.ends_with(".svc.cluster.local")
+            || dns_name.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || !label
+                        .as_bytes()
+                        .first()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+                    || !label
+                        .as_bytes()
+                        .last()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+                    || !label.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            })
+        {
+            return Err(ProjectionError::InvalidGuestEndpoint);
+        }
+        Ok(Self {
+            config_toml: format!(
+                concat!(
+                    "model_provider = \"{provider}\"\n",
+                    "\n",
+                    "[model_providers.{provider}]\n",
+                    "name = \"Codewire OpenAI\"\n",
+                    "base_url = \"https://{dns_name}/v1\"\n",
+                    "wire_api = \"responses\"\n",
+                    "requires_openai_auth = false\n",
+                    "supports_websockets = false\n",
+                    "\n",
+                    "[model_providers.{provider}.auth]\n",
+                    "command = \"/bin/cat\"\n",
+                    "args = [\"{token}\"]\n",
+                    "cwd = \"/\"\n",
+                    "timeout_ms = 2000\n",
+                    "refresh_interval_ms = 30000\n",
+                    "\n",
+                    "[features]\n",
+                    "enable_request_compression = false\n",
+                ),
+                provider = CODEX_PROVIDER_ID,
+                token = CODEX_PLATFORM_TOKEN_FILE,
+                dns_name = dns_name,
+            ),
+        })
+    }
+
     /// Create a Responses-only provider projection for one unprivileged IPv4
     /// loopback port owned by the guest-side Codewire listener.
     pub fn for_loopback_port(port: u16) -> Result<Self, ProjectionError> {
@@ -70,6 +133,62 @@ mod tests {
     use toml::Value;
 
     use super::*;
+
+    #[test]
+    fn platform_projection_reads_only_fixed_pod_capability_over_exact_https() {
+        let host = "cw-gateway-svc-123.dev-sandboxes.svc.cluster.local";
+        let projection = CodexProviderProjection::for_platform_gateway(host).unwrap();
+        let parsed: Value = toml::from_str(projection.config_toml()).unwrap();
+        let provider = &parsed["model_providers"][CODEX_PROVIDER_ID];
+        assert_eq!(
+            provider["base_url"].as_str(),
+            Some(format!("https://{host}/v1").as_str())
+        );
+        assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(provider["supports_websockets"].as_bool(), Some(false));
+        let auth = &provider["auth"];
+        assert_eq!(auth["command"].as_str(), Some("/bin/cat"));
+        assert_eq!(
+            auth["args"].as_array().unwrap(),
+            &[Value::String(CODEX_PLATFORM_TOKEN_FILE.to_owned())]
+        );
+        assert_eq!(auth["cwd"].as_str(), Some("/"));
+        assert_eq!(auth["timeout_ms"].as_integer(), Some(2000));
+        assert_eq!(auth["refresh_interval_ms"].as_integer(), Some(30000));
+        for forbidden in [
+            "env_key",
+            "experimental_bearer_token",
+            "OPENAI_API_KEY",
+            "auth.json",
+            "sh -c",
+            "Bearer ",
+        ] {
+            assert!(!projection.config_toml().contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn platform_projection_rejects_authority_or_toml_injection() {
+        for host in [
+            "",
+            "localhost",
+            "127.0.0.1",
+            "https://gateway.dev.svc.cluster.local",
+            "gateway.dev.svc.cluster.local:8443",
+            "gateway.dev.svc.cluster.local/elsewhere",
+            "gateway.dev.svc.cluster.local\"\n",
+            "Gateway.dev.svc.cluster.local",
+            "gateway..svc.cluster.local",
+            "-gateway.dev.svc.cluster.local",
+            "gateway-.dev.svc.cluster.local",
+            "gateway.dev.svc.cluster.local.",
+        ] {
+            assert_eq!(
+                CodexProviderProjection::for_platform_gateway(host),
+                Err(ProjectionError::InvalidGuestEndpoint)
+            );
+        }
+    }
 
     #[test]
     fn projects_one_credential_free_responses_provider() {

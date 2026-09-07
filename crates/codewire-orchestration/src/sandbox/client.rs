@@ -34,8 +34,8 @@ use super::template::{
     workspace_daemon_service_name,
 };
 use super::{
-    CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_TYPE, SANDBOX_GROUP, claim_name,
-    render_sandbox_claim,
+    CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
+    SANDBOX_GROUP, claim_name, render_sandbox_claim, runtime_identity_labels,
 };
 
 /// Mirrors `sandbox.ProbeResult`.
@@ -57,6 +57,21 @@ pub struct ProbeResult {
 pub struct WorkspacePodIdentity {
     pub name: String,
     pub uid: String,
+}
+
+/// Exact controller-owned objects observed before metadata publication. This
+/// contains no token and confers no credential authority.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RuntimeIdentityObservation {
+    sandbox_uid: String,
+    pod: WorkspacePodIdentity,
+}
+
+struct RuntimeIdentitySnapshot {
+    claim: DynamicObject,
+    sandbox: DynamicObject,
+    pod: Pod,
+    observation: RuntimeIdentityObservation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +145,215 @@ fn legacy_shared_warm_pool_name_matches(name: &str, template_name: &str) -> bool
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
+}
+
+#[path = "client_credentials.rs"]
+mod credentials;
+
+#[cfg(test)]
+#[path = "client_runtime_identity_tests.rs"]
+mod runtime_identity_tests;
+
+#[cfg(test)]
+#[path = "client_cleanup_tests.rs"]
+mod cleanup_tests;
+
+fn runtime_object_uid<'a>(
+    metadata: &'a ObjectMeta,
+    namespace: &str,
+    name: &str,
+) -> anyhow::Result<&'a str> {
+    anyhow::ensure!(
+        metadata.namespace.as_deref() == Some(namespace)
+            && metadata.name.as_deref() == Some(name)
+            && metadata.deletion_timestamp.is_none(),
+        "runtime identity object is not current"
+    );
+    metadata
+        .uid
+        .as_deref()
+        .filter(|uid| !uid.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("runtime identity object has no UID"))
+}
+
+fn require_runtime_controller(
+    metadata: &ObjectMeta,
+    api: &str,
+    kind: &str,
+    name: &str,
+    uid: &str,
+) -> anyhow::Result<()> {
+    let owners = metadata.owner_references.as_deref().unwrap_or_default();
+    let mut controllers = owners.iter().filter(|owner| owner.controller == Some(true));
+    anyhow::ensure!(
+        matches!((controllers.next(), controllers.next()), (Some(owner), None)
+        if owner.api_version == api && owner.kind == kind && owner.name == name && owner.uid == uid),
+        "runtime identity controller does not match"
+    );
+    Ok(())
+}
+
+fn require_runtime_claim(
+    claim: &DynamicObject,
+    namespace: &str,
+    opts: &ClaimOpts,
+    name: &str,
+    uid: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !opts.environment_id.is_empty()
+            && !opts.org_id.is_empty()
+            && opts.operation_generation > 0
+            && !uid.is_empty()
+            && name == claim_name(&opts.environment_id),
+        "runtime identity authority is incomplete"
+    );
+    anyhow::ensure!(
+        claim
+            .types
+            .as_ref()
+            .is_some_and(|types| types.api_version == super::EXTENSIONS_API_VERSION
+                && types.kind == "SandboxClaim"),
+        "runtime identity Claim type does not match"
+    );
+    anyhow::ensure!(
+        runtime_object_uid(&claim.metadata, namespace, name)? == uid,
+        "runtime identity Claim was replaced"
+    );
+    let labels = claim
+        .metadata
+        .labels
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("runtime identity Claim owner is missing"))?;
+    for (key, value) in [
+        (LABEL_ENV_ID, opts.environment_id.as_str()),
+        (LABEL_ORG_ID, opts.org_id.as_str()),
+        (LABEL_TYPE, "sandbox"),
+    ] {
+        anyhow::ensure!(
+            labels.get(key).map(String::as_str) == Some(value),
+            "runtime identity Claim owner does not match"
+        );
+    }
+    if let Some(generation) = labels.get(super::LABEL_OPERATION_GENERATION) {
+        let generation = generation
+            .parse::<i64>()
+            .map_err(|_| anyhow::anyhow!("runtime identity Claim generation is invalid"))?;
+        anyhow::ensure!(
+            generation > 0 && generation <= opts.operation_generation,
+            "runtime identity Claim generation is newer than its authority"
+        );
+    }
+    Ok(())
+}
+
+fn json_labels_match(value: Option<&Value>, expected: &BTreeMap<String, String>) -> bool {
+    value.and_then(Value::as_object).is_some_and(|labels| {
+        expected
+            .iter()
+            .all(|(key, value)| labels.get(key).and_then(Value::as_str) == Some(value.as_str()))
+    })
+}
+
+fn runtime_claim_labels_match(claim: &DynamicObject, opts: &ClaimOpts) -> bool {
+    let claim_labels = runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "sandbox",
+    );
+    let pod_labels = runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "workspace",
+    );
+    claim.metadata.labels.as_ref().is_some_and(|labels| {
+        claim_labels
+            .iter()
+            .all(|(key, value)| labels.get(key) == Some(value))
+    }) && json_labels_match(
+        claim.data.pointer("/spec/additionalPodMetadata/labels"),
+        &pod_labels,
+    )
+}
+
+fn runtime_claim_identity_patch(
+    claim: &DynamicObject,
+    opts: &ClaimOpts,
+) -> anyhow::Result<Option<Value>> {
+    if runtime_claim_labels_match(claim, opts) {
+        return Ok(None);
+    }
+    let uid = claim
+        .metadata
+        .uid
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("runtime identity Claim has no UID"))?;
+    let resource_version = claim
+        .metadata
+        .resource_version
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("runtime identity Claim has no resource version"))?;
+    Ok(Some(serde_json::json!({
+        "metadata": {
+            "uid": uid, "resourceVersion": resource_version,
+            "labels": runtime_identity_labels(&opts.environment_id, &opts.org_id, opts.operation_generation, "sandbox"),
+        },
+        "spec": { "additionalPodMetadata": {
+            "labels": runtime_identity_labels(&opts.environment_id, &opts.org_id, opts.operation_generation, "workspace"),
+        } },
+    })))
+}
+
+fn runtime_ready(object: &DynamicObject, observed_generation: Option<i64>) -> bool {
+    let Some(conditions) = object
+        .data
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let mut ready = conditions
+        .iter()
+        .filter(|condition| condition.get("type").and_then(Value::as_str) == Some("Ready"));
+    matches!((ready.next(), ready.next()), (Some(condition), None)
+        if condition.get("status").and_then(Value::as_str) == Some("True")
+            && observed_generation.is_none_or(|generation| generation > 0
+                && condition.get("observedGeneration").and_then(Value::as_i64) == Some(generation)))
+}
+
+fn runtime_identity_converged(
+    claim: &DynamicObject,
+    sandbox: &DynamicObject,
+    pod: &Pod,
+    opts: &ClaimOpts,
+) -> bool {
+    let labels = runtime_identity_labels(
+        &opts.environment_id,
+        &opts.org_id,
+        opts.operation_generation,
+        "workspace",
+    );
+    let Some(generation) = sandbox.metadata.generation else {
+        return false;
+    };
+    let Some(status) = &pod.status else {
+        return false;
+    };
+    let conditions = status.conditions.as_deref().unwrap_or_default();
+    let mut ready = conditions
+        .iter()
+        .filter(|condition| condition.type_ == "Ready");
+    runtime_claim_labels_match(claim, opts)
+        && json_labels_match(sandbox.data.pointer("/spec/podTemplate/metadata/labels"), &labels)
+        && pod.metadata.labels.as_ref().is_some_and(|current| labels.iter().all(|(key, value)| current.get(key) == Some(value)))
+        && runtime_ready(claim, None) // Claim Ready forwards the Sandbox generation.
+        && runtime_ready(sandbox, Some(generation))
+        && status.phase.as_deref() == Some("Running")
+        && matches!((ready.next(), ready.next()), (Some(condition), None) if condition.status == "True")
 }
 
 /// Namespaced client for SandboxClaim operations.
@@ -672,6 +896,186 @@ impl SandboxClient {
         }
     }
 
+    /// Publish only the existing operation's association labels onto the exact
+    /// DB-bound Claim. The worker holds its ActivityAuthority row fence while
+    /// this short mutation runs. Controller propagation is a separate wait.
+    pub async fn reconcile_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<()> {
+        let claim = self
+            .claims
+            .get(expected_claim_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Claim is unavailable"))?;
+        require_runtime_claim(
+            &claim,
+            &self.namespace,
+            opts,
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        let Some(patch) = runtime_claim_identity_patch(&claim, opts)? else {
+            return Ok(());
+        };
+        // Both resourceVersion and UID are fixed from the validated read.
+        // Conflicts return to the authority-owning caller; never retry a blind
+        // same-name replacement or copy a newer object's resourceVersion.
+        let updated = self
+            .claims
+            .patch(
+                expected_claim_name,
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Claim update was not admitted"))?;
+        require_runtime_claim(
+            &updated,
+            &self.namespace,
+            opts,
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        anyhow::ensure!(
+            runtime_claim_labels_match(&updated, opts),
+            "runtime identity Claim update did not converge"
+        );
+        Ok(())
+    }
+
+    async fn read_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<RuntimeIdentitySnapshot> {
+        let claim = self
+            .claims
+            .get(expected_claim_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Claim is unavailable"))?;
+        require_runtime_claim(
+            &claim,
+            &self.namespace,
+            opts,
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        let sandbox_name = claim
+            .data
+            .pointer("/status/sandbox/name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("runtime identity Sandbox is not bound"))?;
+        let sandbox = self
+            .sandboxes()
+            .get(sandbox_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Sandbox is unavailable"))?;
+        anyhow::ensure!(
+            sandbox
+                .types
+                .as_ref()
+                .is_some_and(|types| types.api_version == "agents.x-k8s.io/v1beta1"
+                    && types.kind == "Sandbox"),
+            "runtime identity Sandbox type does not match"
+        );
+        let sandbox_uid = runtime_object_uid(&sandbox.metadata, &self.namespace, sandbox_name)?;
+        require_runtime_controller(
+            &sandbox.metadata,
+            super::EXTENSIONS_API_VERSION,
+            "SandboxClaim",
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        let pod_name = sandbox
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("agents.x-k8s.io/pod-name"))
+            .map(String::as_str)
+            .unwrap_or(sandbox_name);
+        let pod = self
+            .pods()
+            .get(pod_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("runtime identity Pod is unavailable"))?;
+        let pod_uid = runtime_object_uid(&pod.metadata, &self.namespace, pod_name)?;
+        require_runtime_controller(
+            &pod.metadata,
+            "agents.x-k8s.io/v1beta1",
+            "Sandbox",
+            sandbox_name,
+            sandbox_uid,
+        )?;
+        let observation = RuntimeIdentityObservation {
+            sandbox_uid: sandbox_uid.to_owned(),
+            pod: WorkspacePodIdentity {
+                name: pod_name.to_owned(),
+                uid: pod_uid.to_owned(),
+            },
+        };
+        Ok(RuntimeIdentitySnapshot {
+            claim,
+            sandbox,
+            pod,
+            observation,
+        })
+    }
+
+    /// Capture the currently owned Sandbox/Pod UIDs, including the controller's
+    /// explicit Pod-name annotation. This is a lifecycle observation, not
+    /// authentication or a broker grant.
+    pub async fn observe_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<RuntimeIdentityObservation> {
+        Ok(self
+            .read_claim_runtime_identity(opts, expected_claim_name, expected_claim_uid)
+            .await?
+            .observation)
+    }
+
+    /// Observe propagation through the exact Claim -> Sandbox -> Pod chain.
+    /// This must run outside the SQL mutation lock. Replacing any pinned UID
+    /// requires a fresh lifecycle observation, never relabeling another Pod.
+    pub async fn wait_for_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        expected: &RuntimeIdentityObservation,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let snapshot = self
+                    .read_claim_runtime_identity(opts, expected_claim_name, expected_claim_uid)
+                    .await?;
+                anyhow::ensure!(
+                    &snapshot.observation == expected,
+                    "runtime identity Sandbox or Pod was replaced"
+                );
+                if runtime_identity_converged(
+                    &snapshot.claim,
+                    &snapshot.sandbox,
+                    &snapshot.pod,
+                    opts,
+                ) {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("runtime identity metadata propagation timed out"))?
+    }
+
     /// Mirrors `createSandboxClaimDynamic`: create, or reuse on
     /// AlreadyExists. Returns (name, uid).
     pub async fn create_sandbox_claim(
@@ -1134,29 +1538,55 @@ impl SandboxClient {
             .await
             .map_err(|e| anyhow::anyhow!("set replicas: {e}"))?;
         let sandboxes = self.sandboxes();
-        let mut sandbox = sandboxes
+        let sandbox = sandboxes
             .get(&name)
             .await
             .map_err(|e| anyhow::anyhow!("get Sandbox {name}: {e}"))?;
+        anyhow::ensure!(
+            sandbox.metadata.name.as_deref() == Some(name.as_str())
+                && sandbox.metadata.namespace.as_deref() == Some(self.namespace.as_str())
+                && sandbox.metadata.deletion_timestamp.is_none(),
+            "set operatingMode: Sandbox {name} identity is unavailable"
+        );
+        let uid = sandbox
+            .metadata
+            .uid
+            .as_deref()
+            .filter(|uid| !uid.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("set operatingMode: Sandbox {name} has no UID"))?;
+        anyhow::ensure!(
+            sandbox.data.get("spec").is_some_and(Value::is_object),
+            "set operatingMode: Sandbox {name} has no spec"
+        );
         let mode = if replicas <= 0 {
             "Suspended"
         } else {
             "Running"
         };
-        if let Some(spec) = sandbox
-            .data
-            .as_object_mut()
-            .and_then(|o| o.get_mut("spec"))
-            .and_then(Value::as_object_mut)
-        {
-            spec.insert("operatingMode".to_string(), Value::from(mode));
-        } else {
-            anyhow::bail!("set operatingMode: Sandbox {name} has no spec");
-        }
-        sandboxes
-            .replace(&name, &PostParams::default(), &sandbox)
+        // Fence the exact incarnation without conditioning this one-field
+        // change on unrelated controller-owned status/annotation updates.
+        let patch = Patch::Json::<()>(serde_json::from_value(serde_json::json!([
+            {"op": "test", "path": "/metadata/uid", "value": uid},
+            {"op": "add", "path": "/spec/operatingMode", "value": mode}
+        ]))?);
+        let updated = sandboxes
+            .patch(&name, &PatchParams::default(), &patch)
             .await
             .map_err(|e| anyhow::anyhow!("update Sandbox {name} operatingMode: {e}"))?;
+        // Deletion may start after the read; do not report a deleting response
+        // as a live runtime. This is not an atomic absence-of-deletion fence.
+        anyhow::ensure!(
+            updated.metadata.name.as_deref() == Some(name.as_str())
+                && updated.metadata.namespace.as_deref() == Some(self.namespace.as_str())
+                && updated.metadata.uid.as_deref() == Some(uid)
+                && updated.metadata.deletion_timestamp.is_none()
+                && updated
+                    .data
+                    .pointer("/spec/operatingMode")
+                    .and_then(Value::as_str)
+                    == Some(mode),
+            "update Sandbox {name} operatingMode did not return the current live target"
+        );
         tracing::info!(name, replicas, mode, "set Sandbox operating mode");
         Ok(())
     }
@@ -1204,6 +1634,7 @@ impl SandboxClient {
             anyhow::bail!("ensure gateway stack: environment_id is required");
         }
         let opts = self.resolve_gateway_direct_udp_service_opts(opts).await?;
+        self.ensure_credential_bootstrap(&opts).await?;
         self.ensure_gateway_host_key_secret(&opts).await?;
         self.ensure_dynamic(
             self.services(),
@@ -1312,6 +1743,7 @@ impl SandboxClient {
         timeout: Duration,
     ) -> anyhow::Result<()> {
         self.delete_gateway_stack(env_id).await?;
+        self.delete_credential_bootstrap(env_id, timeout).await?;
         delete_dynamic_until_absent(
             &self.secrets(),
             &gateway_host_key_secret_name(env_id),
@@ -1399,10 +1831,27 @@ impl SandboxClient {
             }
         }
 
-        if let Some(template_name) = per_environment_template {
-            let warm_pool_name = super::shadow_warm_pool_name(template_name);
-            self.delete_shadow_pool(&warm_pool_name).await?;
-            self.delete_sandbox_template(template_name).await?;
+        let shadow_hint = per_environment_template.map(super::shadow_warm_pool_name);
+        for (kind, api, hint) in [
+            ("SandboxWarmPool", self.warm_pools(), shadow_hint.as_deref()),
+            (
+                "SandboxTemplate",
+                self.templates(),
+                per_environment_template,
+            ),
+        ] {
+            for (name, uid) in environment_owned_objects(&api, env_id, kind, hint).await? {
+                match api
+                    .delete(&name, &delete_params_for_observed_uid(&uid))
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(kube::Error::Api(error)) if error.code == 404 => {}
+                    Err(error) => {
+                        return Err(anyhow::anyhow!("delete owned {kind} {name}: {error}"));
+                    }
+                }
+            }
         }
 
         let deadline = tokio::time::Instant::now() + timeout;
@@ -1505,6 +1954,16 @@ impl SandboxClient {
 
         for (kind, api, name) in [
             (
+                "Certificate",
+                self.credential_certificates(),
+                super::template::credential_gateway_certificate_name(env_id),
+            ),
+            (
+                "ConfigMap",
+                self.credential_config_maps(),
+                super::template::credential_codex_config_name(env_id),
+            ),
+            (
                 "Deployment",
                 self.deployments(),
                 gateway_workload_name(env_id),
@@ -1540,13 +1999,17 @@ impl SandboxClient {
             }
         }
 
-        if let Some(template_name) = per_environment_template {
-            let warm_pool_name = super::shadow_warm_pool_name(template_name);
-            if dynamic_exists(&self.warm_pools(), &warm_pool_name).await? {
-                resources.push(format!("SandboxWarmPool/{warm_pool_name}"));
-            }
-            if dynamic_exists(&self.templates(), template_name).await? {
-                resources.push(format!("SandboxTemplate/{template_name}"));
+        let shadow_hint = per_environment_template.map(super::shadow_warm_pool_name);
+        for (kind, api, hint) in [
+            (
+                "SandboxTemplate",
+                self.templates(),
+                per_environment_template,
+            ),
+            ("SandboxWarmPool", self.warm_pools(), shadow_hint.as_deref()),
+        ] {
+            for (name, _) in environment_owned_objects(&api, env_id, kind, hint).await? {
+                resources.push(format!("{kind}/{name}"));
             }
         }
 
@@ -1976,11 +2439,65 @@ async fn dynamic_exists(api: &Api<DynamicObject>, name: &str) -> anyhow::Result<
     }
 }
 
+async fn environment_owned_objects(
+    api: &Api<DynamicObject>,
+    env_id: &str,
+    kind: &str,
+    name_hint: Option<&str>,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    anyhow::ensure!(
+        !env_id.trim().is_empty(),
+        "environment identity is required for cleanup"
+    );
+    let mut objects = api
+        .list(&ListParams::default().labels(&format!("{LABEL_ENV_ID}={env_id}")))
+        .await
+        .map_err(|error| anyhow::anyhow!("list owned {kind} for {env_id}: {error}"))?
+        .items;
+    if let Some(name) = name_hint
+        && !objects
+            .iter()
+            .any(|object| object.metadata.name.as_deref() == Some(name))
+    {
+        match api.get(name).await {
+            Ok(object) => objects.push(object),
+            Err(kube::Error::Api(error)) if error.code == 404 => {}
+            Err(error) => return Err(anyhow::anyhow!("get hinted {kind}: {error}")),
+        }
+    }
+    objects
+        .into_iter()
+        .map(|object| {
+            anyhow::ensure!(
+                object
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(LABEL_ENV_ID))
+                    .is_some_and(|value| value == env_id),
+                "listed {kind} does not belong to the environment"
+            );
+            let name = object
+                .metadata
+                .name
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("listed {kind} has no name"))?;
+            let uid = object
+                .metadata
+                .uid
+                .filter(|uid| !uid.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("listed {kind} has no UID"))?;
+            Ok((name, uid))
+        })
+        .collect()
+}
+
 impl SandboxClient {
     /// Mirrors `ensureSandboxTemplateDynamic`: create when absent,
     /// otherwise update (3 retries on resource-version conflicts).
     pub async fn ensure_sandbox_template(&self, opts: &TemplateOpts) -> anyhow::Result<()> {
         opts.validate_confidential_storage_manifest()?;
+        self.ensure_credential_bootstrap(opts).await?;
         let name = &opts.name;
         let templates = self.templates();
         let rendered = render_sandbox_template(&self.namespace, opts);
@@ -2679,6 +3196,264 @@ mod tests {
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+
+    const MODE_CLAIM_PATH: &str = "/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxclaims/sandbox-env-test";
+    const MODE_SANDBOX_PATH: &str =
+        "/apis/agents.x-k8s.io/v1beta1/namespaces/dev-sandboxes/sandboxes/workspace-env-test";
+
+    #[derive(Clone, Copy)]
+    enum ModeInterleave {
+        ControllerUpdate,
+        ReplaceUid,
+        Delete,
+        Reject(StatusCode),
+        InvalidReply(u8),
+    }
+
+    struct ModeFixture {
+        object: Value,
+        writes: Vec<(Method, Value)>,
+    }
+
+    fn mode_sandbox() -> Value {
+        json!({
+            "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+            "metadata": {
+                "name": "workspace-env-test", "namespace": "dev-sandboxes",
+                "uid": "sandbox-incarnation", "resourceVersion": "10",
+                "annotations": {"agents.x-k8s.io/pod-name": "old-pod"}
+            },
+            "spec": {"operatingMode": "Suspended", "podTemplate": {"fixture": "preserve"}},
+            "status": {"fixture": "before-controller-update"}
+        })
+    }
+
+    fn mode_client(
+        object: Value,
+        interleave: ModeInterleave,
+    ) -> (SandboxClient, Arc<Mutex<ModeFixture>>) {
+        let state = Arc::new(Mutex::new(ModeFixture {
+            object,
+            writes: Vec::new(),
+        }));
+        let shared = Arc::clone(&state);
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let shared = Arc::clone(&shared);
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_string();
+                let content_type = request.headers().get(header::CONTENT_TYPE).cloned();
+                let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+                let mut state = shared.lock().unwrap();
+                let (status, body) = if method == Method::GET && path == MODE_CLAIM_PATH {
+                    (StatusCode::OK, json!({
+                        "apiVersion": "extensions.agents.x-k8s.io/v1beta1", "kind": "SandboxClaim",
+                        "metadata": {"name": "sandbox-env-test", "namespace": "dev-sandboxes"},
+                        "status": {"sandbox": {"name": "workspace-env-test"}}
+                    }))
+                } else if method == Method::GET && path == MODE_SANDBOX_PATH {
+                    let observed = state.object.clone();
+                    // The response carries RV10, but the controller has already
+                    // changed unrelated fields by the time the caller writes.
+                    state.object["metadata"]["resourceVersion"] = json!("11");
+                    state.object["metadata"]["annotations"].as_object_mut().unwrap()
+                        .remove("agents.x-k8s.io/pod-name");
+                    state.object["status"]["fixture"] = json!("controller-update-survives");
+                    if matches!(interleave, ModeInterleave::ReplaceUid) {
+                        state.object["metadata"]["uid"] = json!("replacement-incarnation");
+                    }
+                    (StatusCode::OK, observed)
+                } else {
+                    assert_eq!(path, MODE_SANDBOX_PATH, "mutation must use the resolved Sandbox, never the Claim or Pod");
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    state.writes.push((method.clone(), body.clone()));
+                    match interleave {
+                        ModeInterleave::Delete => (StatusCode::NOT_FOUND, kubernetes_status("NotFound", 404)),
+                        ModeInterleave::Reject(status) => (status, kubernetes_status("Rejected", status.as_u16())),
+                        _ if method == Method::PUT => {
+                            // Enforce real optimistic concurrency, not a fixed
+                            // old-implementation rejection: stale PUTs conflict.
+                            if body.pointer("/metadata/uid") != state.object.pointer("/metadata/uid")
+                                || body.pointer("/metadata/resourceVersion") != state.object.pointer("/metadata/resourceVersion")
+                            {
+                                (StatusCode::CONFLICT, kubernetes_status("Conflict", 409))
+                            } else {
+                                state.object = body;
+                                (StatusCode::OK, state.object.clone())
+                            }
+                        }
+                        _ => {
+                            assert_eq!(method, Method::PATCH);
+                            assert_eq!(content_type.as_ref().map(|value| value.to_str().unwrap()), Some("application/json-patch+json"));
+                            let operations = body.as_array().expect("JSON patch operations");
+                            assert_eq!(operations.len(), 2, "only UID fence and mode mutation");
+                            assert_eq!(operations[0]["op"], "test");
+                            assert_eq!(operations[0]["path"], "/metadata/uid");
+                            assert_eq!(operations[1]["op"], "add");
+                            assert_eq!(operations[1]["path"], "/spec/operatingMode");
+                            if operations[0].get("value") != state.object.pointer("/metadata/uid") {
+                                (StatusCode::UNPROCESSABLE_ENTITY, kubernetes_status("Invalid", 422))
+                            } else {
+                                state.object["spec"]["operatingMode"] = operations[1]["value"].clone();
+                                let mut response = state.object.clone();
+                                if let ModeInterleave::InvalidReply(invalid) = interleave {
+                                    match invalid {
+                                        0 => response["metadata"]["uid"] = json!("replacement-incarnation"),
+                                        1 => response["metadata"]["deletionTimestamp"] = json!("2026-09-07T00:00:00Z"),
+                                        2 => response["metadata"]["name"] = json!("wrong-name"),
+                                        3 => response["metadata"]["namespace"] = json!("wrong-namespace"),
+                                        4 => response["spec"]["operatingMode"] = json!("Suspended"),
+                                        _ => unreachable!(),
+                                    }
+                                }
+                                (StatusCode::OK, response)
+                            }
+                        }
+                    }
+                };
+                Response::builder().status(status)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string())).unwrap()
+            }
+        });
+        (
+            SandboxClient::new(Client::new(service, "default"), "dev-sandboxes"),
+            state,
+        )
+    }
+
+    #[tokio::test]
+    async fn operating_mode_preserves_interleaved_controller_updates_for_start_and_stop() {
+        for (replicas, expected) in [(1, "Running"), (0, "Suspended")] {
+            let (client, state) = mode_client(mode_sandbox(), ModeInterleave::ControllerUpdate);
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                client.set_replicas("env-test", replicas),
+            )
+            .await
+            .unwrap()
+            .expect("controller metadata changes must not fail an operating-mode update");
+            let state = state.lock().unwrap();
+            assert_eq!(state.writes.len(), 1);
+            assert_eq!(state.object["spec"]["operatingMode"], expected);
+            assert_eq!(
+                state.object["spec"]["podTemplate"],
+                json!({"fixture": "preserve"})
+            );
+            assert_eq!(state.object["metadata"]["resourceVersion"], "11");
+            assert_eq!(state.object["metadata"]["uid"], "sandbox-incarnation");
+            assert!(
+                state.object["metadata"]["annotations"]
+                    .get("agents.x-k8s.io/pod-name")
+                    .is_none()
+            );
+            assert_eq!(
+                state.object["status"]["fixture"],
+                "controller-update-survives"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operating_mode_rejects_replacement_deletion_and_api_errors_without_retry() {
+        for interleave in [
+            ModeInterleave::ReplaceUid,
+            ModeInterleave::Delete,
+            ModeInterleave::Reject(StatusCode::FORBIDDEN),
+            ModeInterleave::Reject(StatusCode::CONFLICT),
+            ModeInterleave::Reject(StatusCode::UNPROCESSABLE_ENTITY),
+            ModeInterleave::Reject(StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let (client, state) = mode_client(mode_sandbox(), interleave);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            let state = state.lock().unwrap();
+            assert_eq!(
+                state.writes.len(),
+                1,
+                "no blind retry after uncertain or rejected mutation"
+            );
+            assert_eq!(state.object["spec"]["operatingMode"], "Suspended");
+        }
+    }
+
+    #[tokio::test]
+    async fn operating_mode_rejects_incomplete_or_deleting_observations_without_mutation() {
+        for invalid in 0..7 {
+            let mut sandbox = mode_sandbox();
+            match invalid {
+                0 => {
+                    sandbox.as_object_mut().unwrap().remove("spec");
+                }
+                1 => sandbox["spec"] = Value::Null,
+                2 => {
+                    sandbox["metadata"].as_object_mut().unwrap().remove("uid");
+                }
+                3 => sandbox["metadata"]["uid"] = json!(""),
+                4 => sandbox["metadata"]["deletionTimestamp"] = json!("2026-09-07T00:00:00Z"),
+                5 => sandbox["metadata"]["name"] = json!("wrong-name"),
+                6 => sandbox["metadata"]["namespace"] = json!("wrong-namespace"),
+                _ => unreachable!(),
+            }
+            let (client, state) = mode_client(sandbox, ModeInterleave::ControllerUpdate);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
+                    .await
+                    .unwrap()
+                    .is_err(),
+                "case {invalid}"
+            );
+            assert!(
+                state.lock().unwrap().writes.is_empty(),
+                "case {invalid} mutated an invalid target"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operating_mode_rejects_invalid_success_replies_without_replaying_the_write() {
+        for invalid in 0..5 {
+            let (client, state) =
+                mode_client(mode_sandbox(), ModeInterleave::InvalidReply(invalid));
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
+                    .await
+                    .unwrap()
+                    .is_err(),
+                "case {invalid} must not report a current live target"
+            );
+            let state = state.lock().unwrap();
+            assert_eq!(state.writes.len(), 1);
+            // A rejected response is not proof of rollback: the mutation may
+            // already have happened, and must not be blindly replayed.
+            assert_eq!(state.object["spec"]["operatingMode"], "Running");
+        }
+    }
+
+    #[tokio::test]
+    async fn operating_mode_adds_a_missing_mode_without_creating_or_replacing_the_spec() {
+        let mut sandbox = mode_sandbox();
+        sandbox["spec"]
+            .as_object_mut()
+            .unwrap()
+            .remove("operatingMode");
+        let (client, state) = mode_client(sandbox, ModeInterleave::ControllerUpdate);
+        tokio::time::timeout(Duration::from_secs(2), client.set_replicas("env-test", 1))
+            .await
+            .unwrap()
+            .unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.writes.len(), 1);
+        assert_eq!(state.object["spec"]["operatingMode"], "Running");
+        assert_eq!(
+            state.object["spec"]["podTemplate"],
+            json!({"fixture": "preserve"})
+        );
+    }
 
     #[test]
     fn recovery_selector_excludes_gateway_and_companion_pods() {

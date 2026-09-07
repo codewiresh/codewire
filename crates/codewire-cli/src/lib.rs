@@ -313,7 +313,7 @@ where
         Command::Preset { command } => handle_preset_command(&globals, command).await,
         Command::Secrets(args) => handle_secrets_command(&globals, args).await,
         #[cfg(target_os = "linux")]
-        Command::Credentials(args) => handle_credentials_command(args).await,
+        Command::Credentials(args) => handle_credentials_command(&globals, args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
         Command::HostedDaemon => run_hosted_daemon().await,

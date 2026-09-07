@@ -13,6 +13,8 @@
 //! tracks Start through terminal publication; storage owns the 90-second
 //! abandonment fence. This adapter creates no detached placement work.
 
+pub mod bridge;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

@@ -1,9 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{BufRead as _, IsTerminal as _, Read as _, Write as _};
-use std::os::unix::fs::{
-    DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
-};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -12,6 +8,12 @@ use anyhow::Context as _;
 use codewire_access::{
     AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialStatus, Owner, ProviderId, builtin_provider_catalog,
+};
+use codewire_credential_broker::codex_enrollment::{
+    CodexEnrollmentConfig, CodexEnrollmentOwner, CodexPublicationOutcome, CompletedCodexEnrollment,
+};
+use codewire_credential_broker::provider_enrollment::{
+    PrivateProviderHome, resolve_provider_executable,
 };
 use codewire_local_credentials::{
     AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord, LocalCredentialClient,
@@ -22,7 +24,7 @@ use codewire_protected_store::{
 };
 use serde::Serialize;
 use tokio::io::AsyncReadExt as _;
-use zeroize::{Zeroize as _, Zeroizing};
+use zeroize::Zeroizing;
 
 use super::{
     CredentialAddArgs, CredentialAuthenticationKindArg, CredentialConnectArgs,
@@ -33,9 +35,6 @@ use super::{
     connect_local_credential_authority, prompt_confirm_default_no, trimmed_required,
 };
 
-const CODEX_AUTH_FILE_NAME: &str = "auth.json";
-const TMPFS_MAGIC: rustix::fs::FsWord = 0x0102_1994;
-const CODEX_LOGOUT_TIMEOUT: Duration = Duration::from_secs(30);
 const GITHUB_HOST: &str = "github.com";
 const GITHUB_CHILD_PATH: &str = "/usr/bin:/bin";
 const GITHUB_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,11 +46,15 @@ enum CredentialPlacement {
     Platform,
 }
 
-pub(crate) async fn handle_credentials_command(args: CredentialsArgs) -> anyhow::Result<()> {
+pub(crate) async fn handle_credentials_command(
+    globals: &super::Globals,
+    args: CredentialsArgs,
+) -> anyhow::Result<()> {
     match credential_placement(args.local, args.platform)? {
-        CredentialPlacement::Platform => anyhow::bail!(
-            "platform credential management is not available yet; use --local for local credentials"
-        ),
+        CredentialPlacement::Platform => {
+            return super::platform_profiles::handle_platform_credentials(globals, args.command)
+                .await;
+        }
         CredentialPlacement::Local => {}
     }
 
@@ -85,23 +88,65 @@ async fn connect_codex(
 ) -> anyhow::Result<()> {
     let display_name = trimmed_required(&args.name, "credential name")?.to_owned();
     require_unique_credential_name(client, &display_name, "Codex").await?;
-    let CompletedCodexLogin {
-        imported,
-        login_home,
-        executable,
-        path,
-    } = run_isolated_codex_login().await?;
+    let path = provider_search_path("Codex CLI")?;
+    let executable = resolve_provider_executable("codex", &path)
+        .context("resolve the official Codex CLI executable")?;
+    let config = CodexEnrollmentConfig::new(executable, provider_login_runtime()?, path)
+        .context("configure isolated Codex enrollment")?;
+    // Install handlers before starting a child. The isolated process group
+    // does not share the terminal's signals; its owner is responsible for drain.
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("install Codex enrollment interrupt handler")?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("install Codex enrollment termination handler")?;
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .context("install Codex enrollment hangup handler")?;
+    let owner = CodexEnrollmentOwner::new(config);
+    let result = tokio::select! {
+        biased;
+        _ = interrupt.recv() => Err(anyhow::anyhow!("Codex enrollment cancelled; any acknowledged or possibly stored credential was not revoked")),
+        _ = terminate.recv() => Err(anyhow::anyhow!("Codex enrollment cancelled; any acknowledged or possibly stored credential was not revoked")),
+        _ = hangup.recv() => Err(anyhow::anyhow!("Codex enrollment cancelled; any acknowledged or possibly stored credential was not revoked")),
+        result = connect_codex_with_owner(client, display_name, &owner) => result,
+    };
+    // Even if the public future was cancelled during a placement RPC, the
+    // worker drains and cleans using Unknown, never automatic provider logout.
+    owner.shutdown().await.context(
+        "drain isolated Codex enrollment; stored or possibly stored credentials were not revoked",
+    )?;
+    result
+}
+
+async fn connect_codex_with_owner(
+    client: &mut LocalCredentialClient,
+    display_name: String,
+    owner: &CodexEnrollmentOwner,
+) -> anyhow::Result<()> {
+    let mut completed = run_isolated_codex_login(owner, true).await?;
+    let imported = match completed.take_import() {
+        Ok(imported) => imported,
+        Err(error) => {
+            completed
+                .finish(CodexPublicationOutcome::NotPublished)
+                .await
+                .context("clean up unpublished Codex enrollment")?;
+            return Err(error).context("admit completed Codex enrollment");
+        }
+    };
     let (bundle, account_hint) = imported.into_parts();
     let mut bytes = bundle.into_bytes();
     let material = match ProtectedValue::new(std::mem::take(&mut *bytes)) {
         Ok(material) => material,
         Err(error) => {
-            revoke_isolated_codex_login(&executable, &path, &login_home).await;
+            completed
+                .finish(CodexPublicationOutcome::NotPublished)
+                .await
+                .context("clean up unpublished Codex enrollment")?;
             return Err(error).context("prepare protected Codex credential");
         }
     };
-    let record = match client
-        .add_credential(
+    let publication = completed
+        .wait_for_publication(client.add_credential(
             NewCredential {
                 provider: ProviderId::parse("openai").expect("built-in OpenAI provider ID"),
                 authentication_kind: CredentialAuthKind::OAuth,
@@ -110,21 +155,28 @@ async fn connect_codex(
                 expires_at_unix: None,
             },
             material,
-        )
+        ))
         .await
-    {
+        .map_err(anyhow::Error::from)
+        .and_then(|result| result.map_err(anyhow::Error::from));
+    let record = match publication {
         Ok(record) => record,
         Err(error) => {
-            revoke_isolated_codex_login(&executable, &path, &login_home).await;
-            return Err(error).context("store local Codex credential");
+            // The client also reports post-commit transport/response-decoding
+            // failures as Status. No status code proves publication did not
+            // occur. The original enrollment deadline also bounds this wait,
+            // not the store's commit: an uncertain ACK must never revoke tokens.
+            completed.finish(CodexPublicationOutcome::Unknown).await.context(
+                "clean up Codex enrollment after an unknown storage acknowledgement; any stored credential was not revoked",
+            )?;
+            return Err(error).context(
+                "local Codex storage acknowledgement is unknown; inspect the credential list before retrying; no credential was revoked",
+            );
         }
     };
-    if let Err(error) = login_home.remove_auth_file() {
-        let _ = client.revoke_credential(&record.metadata.id).await;
-        let _ = client.delete_credential(&record.metadata.id).await;
-        revoke_isolated_codex_login(&executable, &path, &login_home).await;
-        return Err(error).context("finish protected Codex credential import");
-    }
+    completed.finish(CodexPublicationOutcome::Published).await.context(
+        "local Codex credential was stored, but transient enrollment cleanup failed; the stored credential was not revoked",
+    )?;
     eprintln!(
         "Local Codex credential {:?} connected ({}).",
         record.metadata.display_name, record.metadata.id
@@ -207,11 +259,12 @@ async fn require_unique_credential_name(
 
 struct CompletedGitHubLogin {
     material: ProtectedValue,
-    login_home: GitHubLoginHome,
+    login_home: PrivateProviderHome,
 }
 
 async fn run_isolated_github_login() -> anyhow::Result<CompletedGitHubLogin> {
-    let login_home = GitHubLoginHome::create()?;
+    let login_home = PrivateProviderHome::create_in(&provider_login_runtime()?)
+        .context("create private GitHub login staging")?;
     let executable = resolve_github_executable()?;
     run_isolated_github_login_with(
         login_home,
@@ -223,7 +276,7 @@ async fn run_isolated_github_login() -> anyhow::Result<CompletedGitHubLogin> {
 }
 
 async fn run_isolated_github_login_with(
-    login_home: GitHubLoginHome,
+    login_home: PrivateProviderHome,
     executable: PathBuf,
     path: std::ffi::OsString,
     interactive: bool,
@@ -291,7 +344,7 @@ async fn run_isolated_github_login_with(
 fn isolated_github_command(
     executable: &Path,
     path: &std::ffi::OsStr,
-    login_home: &GitHubLoginHome,
+    login_home: &PrivateProviderHome,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(executable);
     command
@@ -310,7 +363,7 @@ fn isolated_github_command(
 async fn read_isolated_github_token(
     executable: &Path,
     path: &std::ffi::OsStr,
-    login_home: &GitHubLoginHome,
+    login_home: &PrivateProviderHome,
 ) -> anyhow::Result<ProtectedValue> {
     let mut command = isolated_github_command(executable, path, login_home);
     command
@@ -368,300 +421,45 @@ fn parse_github_token_output(mut output: Zeroizing<Vec<u8>>) -> anyhow::Result<P
 }
 
 fn resolve_github_executable() -> anyhow::Result<PathBuf> {
-    resolve_provider_executable("gh", "GitHub CLI")
+    let path = provider_search_path("GitHub CLI")?;
+    resolve_provider_executable("gh", &path).context("resolve the official GitHub CLI executable")
 }
 
-fn resolve_provider_executable(name: &str, label: &str) -> anyhow::Result<PathBuf> {
-    let path = std::env::var_os("PATH")
-        .ok_or_else(|| anyhow::anyhow!("PATH is unavailable; install the official {label}"))?;
-    for directory in std::env::split_paths(&path) {
-        let candidate = directory.join(name);
-        let Ok(metadata) = std::fs::metadata(&candidate) else {
-            continue;
-        };
-        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-            continue;
-        }
-        let executable = std::fs::canonicalize(&candidate)
-            .with_context(|| format!("resolve the {label} executable"))?;
-        let metadata = std::fs::metadata(&executable)
-            .with_context(|| format!("inspect the {label} executable"))?;
-        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-            return Ok(executable);
-        }
-    }
-    anyhow::bail!("official {label} was not found on PATH; install it and retry")
+fn provider_search_path(label: &str) -> anyhow::Result<std::ffi::OsString> {
+    std::env::var_os("PATH")
+        .ok_or_else(|| anyhow::anyhow!("PATH is unavailable; install the official {label}"))
 }
 
-struct GitHubLoginHome {
-    path: Option<PathBuf>,
+fn provider_login_runtime() -> anyhow::Result<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!("XDG_RUNTIME_DIR is required for private provider login staging")
+        })
 }
 
-impl GitHubLoginHome {
-    fn create() -> anyhow::Result<Self> {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                anyhow::anyhow!("XDG_RUNTIME_DIR is required for protected GitHub login staging")
-            })?;
-        Self::create_in(&runtime)
-    }
-
-    fn create_in(runtime: &Path) -> anyhow::Result<Self> {
-        validate_private_tmpfs_runtime(runtime)?;
-        let path = runtime.join(format!(".codewire-github-login-{}", uuid::Uuid::new_v4()));
-        DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .context("create private GitHub login staging directory")?;
-        validate_private_directory(&path)?;
-        Ok(Self { path: Some(path) })
-    }
-
-    fn path(&self) -> &Path {
-        self.path
-            .as_deref()
-            .expect("GitHub login home is available until removal")
-    }
-
-    fn remove(mut self) -> anyhow::Result<()> {
-        let path = self
-            .path
-            .take()
-            .expect("GitHub login home is removed at most once");
-        validate_private_directory(&path)?;
-        if let Err(error) = std::fs::remove_dir_all(&path) {
-            self.path = Some(path);
-            return Err(error).context("remove private GitHub login staging directory");
-        }
-        Ok(())
-    }
-}
-
-impl Drop for GitHubLoginHome {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
-}
-
-struct CompletedCodexLogin {
-    imported: codewire_credential_broker::CodexOAuthImport,
-    login_home: CodexLoginHome,
-    executable: PathBuf,
-    path: std::ffi::OsString,
-}
-
-async fn run_isolated_codex_login() -> anyhow::Result<CompletedCodexLogin> {
-    let login_home = CodexLoginHome::create()?;
-    let executable = resolve_codex_executable()?;
-    let path = std::env::var_os("PATH").ok_or_else(|| {
-        anyhow::anyhow!("PATH is unavailable; install the official Codex CLI and retry")
-    })?;
-    run_isolated_codex_login_with(login_home, executable, path, true).await
-}
-
-async fn run_isolated_codex_login_with(
-    login_home: CodexLoginHome,
-    executable: PathBuf,
-    path: std::ffi::OsString,
+async fn run_isolated_codex_login(
+    owner: &CodexEnrollmentOwner,
     interactive: bool,
-) -> anyhow::Result<CompletedCodexLogin> {
+) -> anyhow::Result<CompletedCodexEnrollment> {
+    let mut pending = owner.start().context("start isolated Codex enrollment")?;
+    let challenge = pending
+        .challenge()
+        .await
+        .context("read Codex device challenge")?;
     if interactive {
-        eprintln!("Starting an isolated Codex device login. No ambient Codex login will be read.");
+        // Only the fixed provider URL, accepted code and bounded deadline are
+        // displayed. No child stdout/stderr or imported material is forwarded.
+        eprintln!(
+            "Open {} and enter this one-time code: {}\nThe code expires within 15 minutes. Continue only if you started this login in Codewire.",
+            challenge.verification_url(),
+            challenge.user_code(),
+        );
     }
-    let mut command = isolated_codex_command(&executable, &path, &login_home);
-    command
-        .arg("login")
-        .arg("--device-auth")
-        .arg("-c")
-        .arg("cli_auth_credentials_store=\"file\"");
-    if interactive {
-        command
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-    } else {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-    }
-    let status = match command.status().await {
-        Ok(status) => status,
-        Err(error) => {
-            revoke_isolated_codex_login(&executable, &path, &login_home).await;
-            return Err(error).context("run isolated Codex login");
-        }
-    };
-    if !status.success() {
-        revoke_isolated_codex_login(&executable, &path, &login_home).await;
-        anyhow::bail!("Codex device login did not complete; no credential was stored");
-    }
-    let mut source = match read_private_codex_auth_file(login_home.path()) {
-        Ok(source) => source,
-        Err(error) => {
-            revoke_isolated_codex_login(&executable, &path, &login_home).await;
-            return Err(error);
-        }
-    };
-    let imported = match codewire_credential_broker::import_codex_auth_json(&source) {
-        Ok(imported) => imported,
-        Err(error) => {
-            source.zeroize();
-            revoke_isolated_codex_login(&executable, &path, &login_home).await;
-            return Err(error).context("validate isolated Codex login");
-        }
-    };
-    source.zeroize();
-    Ok(CompletedCodexLogin {
-        imported,
-        login_home,
-        executable,
-        path,
-    })
-}
-
-fn isolated_codex_command(
-    executable: &Path,
-    path: &std::ffi::OsStr,
-    login_home: &CodexLoginHome,
-) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(executable);
-    command
-        .env_clear()
-        .env("PATH", path)
-        .env("HOME", login_home.path())
-        .env("CODEX_HOME", login_home.path())
-        .env("XDG_CONFIG_HOME", login_home.path())
-        .env("XDG_CACHE_HOME", login_home.path())
-        .env("TMPDIR", login_home.path())
-        .current_dir(login_home.path())
-        .kill_on_drop(true);
-    command
-}
-
-async fn revoke_isolated_codex_login(
-    executable: &Path,
-    path: &std::ffi::OsStr,
-    login_home: &CodexLoginHome,
-) {
-    if !login_home.path().join(CODEX_AUTH_FILE_NAME).is_file() {
-        return;
-    }
-    let mut command = isolated_codex_command(executable, path, login_home);
-    command
-        .arg("logout")
-        .arg("-c")
-        .arg("cli_auth_credentials_store=\"file\"")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let _ = tokio::time::timeout(CODEX_LOGOUT_TIMEOUT, command.status()).await;
-}
-
-struct CodexLoginHome {
-    path: PathBuf,
-}
-
-impl CodexLoginHome {
-    fn create() -> anyhow::Result<Self> {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                anyhow::anyhow!("XDG_RUNTIME_DIR is required for protected Codex login staging")
-            })?;
-        Self::create_in(&runtime)
-    }
-
-    fn create_in(runtime: &Path) -> anyhow::Result<Self> {
-        validate_private_tmpfs_runtime(runtime)?;
-        let path = runtime.join(format!(".codewire-codex-login-{}", uuid::Uuid::new_v4()));
-        DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .context("create private Codex login staging directory")?;
-        validate_private_directory(&path)?;
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn remove_auth_file(&self) -> anyhow::Result<()> {
-        std::fs::remove_file(self.path.join(CODEX_AUTH_FILE_NAME))
-            .context("remove transient Codex login material")
-    }
-}
-
-impl Drop for CodexLoginHome {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-fn validate_private_tmpfs_runtime(path: &Path) -> anyhow::Result<()> {
-    validate_private_directory(path)?;
-    let directory = File::open(path).context("open private runtime directory")?;
-    let statistics = rustix::fs::fstatfs(&directory).context("inspect runtime filesystem")?;
-    if statistics.f_type != TMPFS_MAGIC {
-        anyhow::bail!("XDG_RUNTIME_DIR must be backed by tmpfs for provider login staging");
-    }
-    Ok(())
-}
-
-fn validate_private_directory(path: &Path) -> anyhow::Result<()> {
-    if !path.is_absolute() {
-        anyhow::bail!("private provider login directory must be absolute");
-    }
-    let metadata =
-        std::fs::symlink_metadata(path).context("inspect private Codex login directory")?;
-    let canonical = std::fs::canonicalize(path).context("resolve private Codex login directory")?;
-    if canonical != path
-        || !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        anyhow::bail!("private provider login directory failed ownership or mode validation");
-    }
-    Ok(())
-}
-
-fn read_private_codex_auth_file(root: &Path) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-    let path = root.join(CODEX_AUTH_FILE_NAME);
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&path)
-        .context("open isolated Codex login result")?;
-    let metadata = file
-        .metadata()
-        .context("inspect isolated Codex login result")?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o7777 != 0o600
-        || metadata.len() == 0
-        || metadata.len() > MAX_PROTECTED_VALUE_BYTES as u64
-    {
-        anyhow::bail!("isolated Codex login result failed ownership, mode, or size validation");
-    }
-    let mut bytes = Zeroizing::new(Vec::with_capacity(
-        usize::try_from(metadata.len()).context("validate Codex login result size")?,
-    ));
-    file.take((MAX_PROTECTED_VALUE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .context("read isolated Codex login result")?;
-    if bytes.len() != metadata.len() as usize || bytes.len() > MAX_PROTECTED_VALUE_BYTES {
-        anyhow::bail!("isolated Codex login result changed while it was read");
-    }
-    Ok(bytes)
-}
-
-fn resolve_codex_executable() -> anyhow::Result<PathBuf> {
-    resolve_provider_executable("codex", "Codex CLI")
+    pending
+        .complete()
+        .await
+        .context("complete isolated Codex enrollment")
 }
 
 fn credential_placement(local: bool, platform: bool) -> anyhow::Result<CredentialPlacement> {
@@ -848,11 +646,24 @@ async fn profile_command(
         }
         CredentialProfileCommand::Get(args) => {
             let record = resolve_profile(client, &args.profile).await?;
-            print_profiles(&[record], args.output)
+            if let Some(revision) = args.revision {
+                let revision = client
+                    .get_profile_revision(&record.profile.id, revision)
+                    .await
+                    .context("get exact local profile revision")?;
+                print_profile_revisions(&[revision], args.output)
+            } else {
+                print_profiles(&[record], args.output)
+            }
         }
         CredentialProfileCommand::Set(args) => set_profile_entry(client, args).await,
         CredentialProfileCommand::Unset(args) => unset_profile_entry(client, args).await,
         CredentialProfileCommand::Revisions(args) => {
+            if args.revision.is_some() {
+                anyhow::bail!(
+                    "use profile get PROFILE --revision REVISION to inspect one revision"
+                );
+            }
             let profile = resolve_profile(client, &args.profile).await?;
             let revisions = client
                 .list_profile_revisions(&profile.profile.id)
@@ -861,6 +672,13 @@ async fn profile_command(
             print_profile_revisions(&revisions, args.output)
         }
         CredentialProfileCommand::Delete(args) => delete_profile(client, args).await,
+        CredentialProfileCommand::Bind(_)
+        | CredentialProfileCommand::Binding(_)
+        | CredentialProfileCommand::Unbind(_) => {
+            anyhow::bail!(
+                "these binding commands require --platform; local profile selection uses cw env create --local --access-profile"
+            )
+        }
     }
 }
 
@@ -980,19 +798,21 @@ async fn resolve_profile(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ParsedCredentialSelector<'a> {
+pub(super) enum ParsedCredentialSelector<'a> {
     Name(&'a str),
     Id(CredentialId),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ParsedProfileSelector {
+pub(super) enum ParsedProfileSelector {
     Name(AccessProfileName),
     Reference(AccessProfileReference),
     Id(AccessProfileId),
 }
 
-fn parse_credential_selector(selector: &str) -> anyhow::Result<ParsedCredentialSelector<'_>> {
+pub(super) fn parse_credential_selector(
+    selector: &str,
+) -> anyhow::Result<ParsedCredentialSelector<'_>> {
     let selector = trimmed_required(selector, "credential selector")?;
     if let Some(name) = selector.strip_prefix("name:") {
         return Ok(ParsedCredentialSelector::Name(explicit_selector_name(
@@ -1010,7 +830,7 @@ fn parse_credential_selector(selector: &str) -> anyhow::Result<ParsedCredentialS
     Ok(ParsedCredentialSelector::Name(selector))
 }
 
-fn parse_profile_selector(selector: &str) -> anyhow::Result<ParsedProfileSelector> {
+pub(super) fn parse_profile_selector(selector: &str) -> anyhow::Result<ParsedProfileSelector> {
     let selector = trimmed_required(selector, "access profile selector")?;
     if let Some(name) = selector.strip_prefix("name:") {
         let name = explicit_selector_name(name, "access profile")?;
@@ -1357,6 +1177,7 @@ fn format_profiles_text(records: &[AccessProfileView]) -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use base64::Engine as _;
     use clap::Parser as _;
@@ -1763,41 +1584,49 @@ mod tests {
         }))
         .unwrap();
         assert!(!auth.contains('\''));
-        let login_home = CodexLoginHome::create_in(root.path()).expect("isolated login home");
-        std::fs::write(login_home.path().join("synthetic-auth.fixture.json"), auth)
+        std::fs::write(root.path().join("synthetic-auth.fixture.json"), auth)
             .expect("write synthetic Codex auth fixture");
-        let completed = run_isolated_codex_login_with(
-            login_home,
-            executable,
-            std::ffi::OsString::from("/usr/bin:/bin"),
-            false,
-        )
-        .await
-        .expect("synthetic isolated login");
-        assert_eq!(
-            completed.imported.account_hint(),
-            Some("developer@example.test")
-        );
-        assert!(
+        for outcome in [
+            CodexPublicationOutcome::Published,
+            CodexPublicationOutcome::Unknown,
+            CodexPublicationOutcome::NotPublished,
+        ] {
+            let owner = CodexEnrollmentOwner::new(
+                CodexEnrollmentConfig::new(
+                    executable.clone(),
+                    root.path().to_owned(),
+                    std::ffi::OsString::from("/usr/bin:/bin"),
+                )
+                .expect("trusted synthetic enrollment configuration"),
+            );
+            let mut completed = run_isolated_codex_login(&owner, false)
+                .await
+                .expect("synthetic isolated login");
+            assert_eq!(
+                completed.take_import().unwrap().account_hint(),
+                Some("developer@example.test")
+            );
+            let homes: Vec<_> = std::fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.is_dir())
+                .collect();
+            assert_eq!(homes.len(), 1);
+            assert!(homes[0].join("auth.json").is_file());
             completed
-                .login_home
-                .path()
-                .join(CODEX_AUTH_FILE_NAME)
-                .is_file()
-        );
-        revoke_isolated_codex_login(
-            &completed.executable,
-            &completed.path,
-            &completed.login_home,
-        )
-        .await;
-        assert!(
-            !completed
-                .login_home
-                .path()
-                .join(CODEX_AUTH_FILE_NAME)
-                .exists()
-        );
+                .finish(outcome)
+                .await
+                .expect("resolve synthetic publication outcome");
+            owner
+                .shutdown()
+                .await
+                .expect("await synthetic enrollment cleanup");
+            assert!(!homes[0].exists());
+            assert_eq!(
+                root.path().join("logout.called").exists(),
+                outcome == CodexPublicationOutcome::NotPublished
+            );
+        }
     }
 
     #[tokio::test]
@@ -1811,7 +1640,7 @@ mod tests {
         // A stable fixture avoids a write-then-execute race with concurrent test tooling.
         let executable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/synthetic-github-login.sh");
-        let login_home = GitHubLoginHome::create_in(root.path()).expect("isolated login home");
+        let login_home = PrivateProviderHome::create_in(root.path()).expect("isolated login home");
         let completed = run_isolated_github_login_with(
             login_home,
             executable,

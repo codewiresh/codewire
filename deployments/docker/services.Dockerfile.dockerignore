@@ -9,4 +9,9 @@
 !libs
 !libs/gateway-proto
 !libs/gateway-proto/**
+!deployments
+!deployments/docker
+!deployments/docker/licenses
+!deployments/docker/licenses/codex-LICENSE
+!deployments/docker/licenses/codex-NOTICE
 crates/**/target

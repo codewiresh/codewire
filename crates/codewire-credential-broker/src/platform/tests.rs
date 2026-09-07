@@ -3,7 +3,7 @@
 
 #[path = "../../../codewire-platform-credentials/tests/support/mod.rs"]
 #[allow(dead_code)]
-mod support;
+pub(super) mod support;
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -70,7 +70,7 @@ impl SessionGate {
     }
 }
 
-struct SyntheticAuthority {
+pub(super) struct SyntheticAuthority {
     session: Mutex<PlatformRuntimeSession>,
     gate: SessionGate,
 }
@@ -91,17 +91,17 @@ impl SyntheticAuthority {
 
 type Adapter = PlatformBrokerLeaseProvider<SyntheticAuthority>;
 
-struct Fixture {
+pub(super) struct Fixture {
     db: TestDatabase,
-    pool: PgPool,
-    provider: Arc<SyntheticKek>,
-    store: Arc<PlatformCredentialStore>,
-    authority: Arc<SyntheticAuthority>,
+    pub(super) pool: PgPool,
+    pub(super) provider: Arc<SyntheticKek>,
+    pub(super) store: Arc<PlatformCredentialStore>,
+    pub(super) authority: Arc<SyntheticAuthority>,
     adapter: Arc<Adapter>,
-    record: CredentialRecord,
+    pub(super) record: CredentialRecord,
     profile: AccessProfile,
-    context: GrantContext,
-    owner: Owner,
+    pub(super) context: GrantContext,
+    pub(super) owner: Owner,
 }
 
 fn pod(name: &str) -> PlatformPodIdentity {
@@ -135,7 +135,7 @@ fn session() -> PlatformRuntimeSession {
     .unwrap()
 }
 
-fn token(claims: serde_json::Value) -> String {
+pub(super) fn token(claims: serde_json::Value) -> String {
     format!(
         "e30.{}.synthetic-signature",
         base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -209,6 +209,16 @@ async fn reserve(
 
 impl Fixture {
     async fn create() -> Result<Self> {
+        Self::create_with_environment_id(context().environment_id).await
+    }
+
+    /// The private bridge uses the existing UUID wire coordinate; retain the
+    /// original adapter fixture's text ID for all existing SQL race tests.
+    pub(super) async fn create_for_bridge() -> Result<Self> {
+        Self::create_with_environment_id(EnvironmentId::parse(Uuid::new_v4().to_string())?).await
+    }
+
+    async fn create_with_environment_id(environment_id: EnvironmentId) -> Result<Self> {
         let db = TestDatabase::create().await?;
         let setup = async {
             let owner = db.user("synthetic-owner").await?;
@@ -222,16 +232,17 @@ impl Fixture {
                 VALUES ('synthetic-preset',$1,'Synthetic','synthetic','{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)")
                 .bind(org.id().as_str()).execute(&db.pool).await?;
             sqlx::query("INSERT INTO environments(id,org_id,created_by,type,preset_id,state,desired_state,environment_operation_generation,project_spec) \
-                VALUES ('synthetic-environment',$1,$2,'sandbox','synthetic-preset','running','started',7,'{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)")
-                .bind(org.id().as_str()).bind(owner.id().as_str()).execute(&db.pool).await?;
+                VALUES ($3,$1,$2,'sandbox','synthetic-preset','running','started',7,'{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)")
+                .bind(org.id().as_str()).bind(owner.id().as_str()).bind(environment_id.as_str()).execute(&db.pool).await?;
             let mut context = context();
+            context.environment_id = environment_id;
             context.authorized_credentials.insert(record.metadata.id.clone());
             let manager = PlatformAccessProfileStore::new(db.pool.clone(), builtin_provider_catalog());
             let profile = manager.create(&owner, AccessProfileName::parse("work")?,
                 BTreeMap::from([(CapabilitySlot::codex(), record.metadata.id.clone())])).await?;
             manager.create_binding(&context, EnvironmentAccessBinding {
                 environment_id: context.environment_id.clone(), profile_id: profile.id.clone(), profile_revision: profile.revision,
-            }).await?;
+            }, Some(&context.user_id)).await?;
             let mut session = session();
             session.context = context.clone();
             let authority = Arc::new(SyntheticAuthority { session: Mutex::new(session), gate: SessionGate::default() });
@@ -277,7 +288,7 @@ impl Fixture {
         Ok((pool, adapter))
     }
 
-    async fn state(&self) -> Result<OAuthRefreshState> {
+    pub(super) async fn state(&self) -> Result<OAuthRefreshState> {
         Ok(self
             .store
             .current_oauth_refresh_attempt(&self.owner, &self.record.metadata.id)
@@ -310,6 +321,7 @@ impl Fixture {
                     profile_id: changed.id,
                     profile_revision: changed.revision,
                 },
+                Some(&self.context.user_id),
             )
             .await?;
         Ok(())
@@ -335,7 +347,7 @@ impl Fixture {
         Ok(())
     }
 
-    async fn finish(self, result: Result<()>) -> Result<()> {
+    pub(super) async fn finish(self, result: Result<()>) -> Result<()> {
         self.pool.close().await;
         self.db.finish(result).await
     }

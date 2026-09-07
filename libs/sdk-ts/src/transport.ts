@@ -12,6 +12,8 @@ import { FileService } from "@codewire/proto-ts/gen/codewire/v1/file_pb";
 import { PortService } from "@codewire/proto-ts/gen/codewire/v1/port_pb";
 import { PresetService } from "@codewire/proto-ts/gen/codewire/v1/preset_pb";
 import { SecretService } from "@codewire/proto-ts/gen/codewire/v1/secret_pb";
+import { AccessProfileService } from "@codewire/proto-ts/gen/codewire/v1/access_profile_pb";
+import { CredentialService, CredentialMutationService } from "@codewire/proto-ts/gen/codewire/v1/credential_pb";
 
 export type ApiKeyClient = Client<typeof ApiKeyService>;
 export type EnvironmentClient = Client<typeof EnvironmentService>;
@@ -20,8 +22,14 @@ export type FileClient = Client<typeof FileService>;
 export type PortClient = Client<typeof PortService>;
 export type PresetClient = Client<typeof PresetService>;
 export type SecretClient = Client<typeof SecretService>;
+export type AccessProfileClient = Client<typeof AccessProfileService>;
+export type CredentialClient = Client<typeof CredentialService>;
+export type CredentialMutationClient = Client<typeof CredentialMutationService>;
 
 export interface CodewireClients {
+  credentials: CredentialClient;
+  credentialMutations: CredentialMutationClient;
+  accessProfiles: AccessProfileClient;
   apiKeys: ApiKeyClient;
   environments: EnvironmentClient;
   exec: ExecClient;
@@ -67,6 +75,9 @@ export function createCodewireClients(
   });
 
   return {
+    credentials: createClient(CredentialService, fetchTransport),
+    credentialMutations: createClient(CredentialMutationService, fetchTransport),
+    accessProfiles: createClient(AccessProfileService, fetchTransport),
     apiKeys: createClient(ApiKeyService, fetchTransport),
     environments: createClient(EnvironmentService, fetchTransport),
     exec: createClient(ExecService, fetchTransport),

@@ -253,10 +253,10 @@ grep -qF 'npm@latest pnpm yarn' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace does not update the Node archive npm together with its package managers'
 grep -qF 'npm cache clean --force' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace retains the root package-manager installer cache'
-grep -qF -- 'allow-scripts=@anthropic-ai/claude-code --location=user' \
+grep -qFx -- 'ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"' \
   "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace does not persist the narrow Claude update policy under current npm'
-[[ "$(grep -Fc -- 'allow-scripts=' "$WORKSPACE_DOCKERFILE")" -eq 1 ]] ||
+[[ "$(grep -Ec -- 'allow-scripts=|NPM_CONFIG_ALLOW_SCRIPTS=' "$WORKSPACE_DOCKERFILE")" -eq 1 ]] ||
   fail 'workspace grants lifecycle-script permission beyond the Claude installer'
 
 echo 'support-image workflow contract: OK'

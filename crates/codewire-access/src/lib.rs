@@ -24,7 +24,10 @@ pub use model::{
     EnvironmentAccessBinding, GrantPermission, Owner, Placement, ProviderCatalog,
     ProviderDefinition,
 };
-pub use projection::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection, ProjectionError};
+pub use projection::{
+    CODEX_CONFIG_FILE_NAME, CODEX_PLATFORM_HOME, CODEX_PLATFORM_ROOTS_FILE,
+    CODEX_PLATFORM_TOKEN_FILE, CodexProviderProjection, ProjectionError,
+};
 
 use thiserror::Error;
 

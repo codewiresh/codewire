@@ -15,7 +15,8 @@ use super::activity_authority::{ActivityAuthority, is_authority_lost};
 use super::create::{
     SandboxWorkerCfg, authorize_confidential_runtime_for_environment,
     environment_per_env_template_name, environment_template_opts, ready_timeout_for_isolation,
-    reconcile_confidential_runtime_before_replacement,
+    reconcile_confidential_runtime_before_replacement, reconcile_runtime_identity,
+    requires_running_runtime_identity,
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
@@ -177,7 +178,14 @@ async fn reconcile_running_runtime_identity(
             )
             .await?;
     }
-    Ok(())
+    reconcile_runtime_identity(
+        ctx,
+        environment,
+        &backend,
+        authority,
+        RUNNING_MUTATION_STATES,
+    )
+    .await
 }
 
 fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
@@ -203,13 +211,22 @@ async fn ensure_gateway_stack_for_env(
         &image_ref,
         &template_base,
         &env,
-        env_id,
+        authority.operation_generation(),
         &auth_tokens.coordinate,
         &auth_tokens.daemon,
     );
     let client = sandbox_client(ctx, namespace)?;
     authority
         .run_external_mutation(START_MUTATION_STATES, client.ensure_gateway_stack(&opts))
+        .await?;
+    authority
+        .run_while_authoritative_for_states(
+            START_MUTATION_STATES,
+            client.wait_for_credential_gateway_ready(
+                &opts,
+                super::create::ready_timeout_for_isolation(&env.isolation_tier),
+            ),
+        )
         .await
 }
 
@@ -226,6 +243,27 @@ async fn load_sandbox_template_config(
     .await
     .map_err(|e| anyhow::anyhow!("load sandbox_template_config for {preset_id}: {e}"))?;
     Ok(row)
+}
+
+/// Creation may fail before a preset or its runtime configuration exists.
+/// Keep any available deterministic name as a hint, but deletion must still
+/// discover environment-owned resources when that hint is unavailable.
+async fn destroy_template_hint(
+    pool: &PgPool,
+    preset_id: Option<&str>,
+    env_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(preset_id) = preset_id else {
+        return Ok(None);
+    };
+    let config: Option<(String, String)> = sqlx::query_as(
+        "SELECT image_ref, sandbox_template_name FROM sandbox_template_config WHERE preset_id = $1",
+    )
+    .bind(preset_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load destroy template hint: {error}"))?;
+    Ok(config.map(|(image, base)| environment_per_env_template_name(&image, &base, env_id)))
 }
 
 /// Mirrors `HandleEnvironmentStop`.
@@ -259,6 +297,11 @@ pub async fn handle_environment_stop(
         ))
         .await?;
     if !proceed {
+        if requires_running_runtime_identity(&env.state, &env.desired_state) {
+            let backend = load_backend_row(&ctx.pool, env_id).await?;
+            reconcile_runtime_identity(ctx, &env, &backend, authority, RUNNING_MUTATION_STATES)
+                .await?;
+        }
         tracing::info!(
             environment_id = env_id,
             state = env.state,
@@ -610,6 +653,8 @@ pub async fn handle_environment_start(
         return Err(e);
     }
 
+    reconcile_runtime_identity(ctx, &env, &backend, authority, START_MUTATION_STATES).await?;
+
     // Persist the current Pod name/IP only after observing a ready claim and
     // a running Pod with a nonempty UID. The backend schema does not persist
     // that UID, so this is a current-runtime check, not an exact UID binding.
@@ -780,13 +825,8 @@ pub async fn handle_environment_destroy(
     .map_err(|error| anyhow::anyhow!("load retained runtime namespaces: {error}"))?;
     namespaces.extend(retained_session_namespaces);
 
-    let preset_id = env
-        .preset_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("sandbox environment has no preset id"))?;
-    let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, preset_id).await?;
     let per_environment_template =
-        environment_per_env_template_name(&image_ref, &template_base, env_id);
+        destroy_template_hint(&ctx.pool, env.preset_id.as_deref(), env_id).await?;
 
     for namespace in namespaces {
         if namespace.trim().is_empty() {
@@ -799,7 +839,7 @@ pub async fn handle_environment_destroy(
                 client.delete_environment_resources(
                     env_id,
                     known_sandbox_name,
-                    Some(&per_environment_template),
+                    per_environment_template.as_deref(),
                     env.isolation_tier == "confidential",
                     DELETED_TIMEOUT,
                 ),
@@ -908,8 +948,7 @@ pub async fn handle_environment_reconcile(
                 .await?;
             }
 
-            if env.state == "running"
-                && env.desired_state == "started"
+            if requires_running_runtime_identity(&env.state, &env.desired_state)
                 && let Err(error) = reconcile_running_runtime_identity(ctx, &env, authority).await
             {
                 if is_lifecycle_control_loss(&error) {
@@ -993,6 +1032,53 @@ pub async fn handle_environment_reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn destroy_template_hint_allows_missing_creation_config_but_not_database_failure()
+    -> anyhow::Result<()> {
+        let pool = PgPool::connect(&std::env::var("TEST_DATABASE_URL")?).await?;
+        let preset = format!("destroy-hint-{}", uuid::Uuid::new_v4());
+        assert_eq!(destroy_template_hint(&pool, None, "env-test").await?, None);
+        assert_eq!(
+            destroy_template_hint(&pool, Some(&preset), "env-test").await?,
+            None
+        );
+        sqlx::query(
+            r#"INSERT INTO environment_presets (id, name, official, project_spec)
+               VALUES ($1, $1, true, '{"schema_version":1,"working_directory":"/workspace"}'::jsonb)"#,
+        )
+        .bind(&preset).execute(&pool).await?;
+        sqlx::query("INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name) VALUES ($1, 'example.test/workspace:test', 'workspace-test')")
+            .bind(&preset).execute(&pool).await?;
+        assert_eq!(
+            destroy_template_hint(&pool, Some(&preset), "env-test").await?,
+            Some(environment_per_env_template_name(
+                "example.test/workspace:test",
+                "workspace-test",
+                "env-test"
+            ))
+        );
+        sqlx::query("DELETE FROM sandbox_template_config WHERE preset_id = $1")
+            .bind(&preset)
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            destroy_template_hint(&pool, Some(&preset), "env-test").await?,
+            None
+        );
+        sqlx::query("DELETE FROM environment_presets WHERE id = $1")
+            .bind(&preset)
+            .execute(&pool)
+            .await?;
+        pool.close().await;
+        assert!(
+            destroy_template_hint(&pool, Some(&preset), "env-test")
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn authorization_backfill_selects_only_stable_running_confidential_environments() {

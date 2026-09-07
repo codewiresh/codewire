@@ -9,6 +9,16 @@ mod tests {
     use sha2::{Digest, Sha256};
     const CONTENT_ADDRESSED_MANIFEST_URI: &str = "kbs:///default/codewire-storage-manifests/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    #[test]
+    fn environment_template_has_top_level_cleanup_identity() {
+        let opts = TemplateOpts {
+            environment_id: "env-test".into(),
+            ..commodity_opts()
+        };
+        let rendered = render_sandbox_template("dev-sandboxes", &opts);
+        assert_eq!(rendered["metadata"]["labels"][LABEL_ENV_ID], "env-test");
+    }
+
     fn decode_gzip_base64(encoded: &str) -> String {
         let raw = base64::engine::general_purpose::STANDARD
             .decode(encoded)
@@ -162,6 +172,48 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn gateway_generation_rolls_only_its_template_and_never_changes_selectors_or_workspace_template()
+     {
+        let mut opts = commodity_opts();
+        let first_gateway = render_gateway_deployment("dev-sandboxes", &opts);
+        let first_workspace = render_sandbox_template("dev-sandboxes", &opts);
+        for labels in [
+            &first_gateway["metadata"]["labels"],
+            &first_gateway["spec"]["template"]["metadata"]["labels"],
+        ] {
+            assert_eq!(labels["codewire.sh/environment-id"], opts.environment_id);
+            assert_eq!(labels["codewire.sh/org-id"], opts.organization_id);
+            assert_eq!(labels["codewire.sh/type"], "gateway");
+            assert_eq!(labels[super::super::LABEL_OPERATION_GENERATION], "7");
+        }
+        opts.operation_generation = 8;
+        let next_gateway = render_gateway_deployment("dev-sandboxes", &opts);
+        assert_eq!(
+            first_gateway["spec"]["selector"],
+            next_gateway["spec"]["selector"]
+        );
+        assert!(
+            next_gateway["spec"]["selector"]["matchLabels"]
+                .get(super::super::LABEL_OPERATION_GENERATION)
+                .is_none()
+        );
+        assert_eq!(
+            next_gateway["spec"]["template"]["metadata"]["labels"]
+                [super::super::LABEL_OPERATION_GENERATION],
+            "8"
+        );
+        assert_eq!(
+            first_workspace,
+            render_sandbox_template("dev-sandboxes", &opts)
+        );
+        assert!(
+            first_workspace["spec"]["podTemplate"]["metadata"]["labels"]
+                .get(super::super::LABEL_OPERATION_GENERATION)
+                .is_none()
+        );
+    }
+
     fn commodity_opts() -> TemplateOpts {
         TemplateOpts {
             name: "tmpl-golden-commodity".into(),
@@ -169,6 +221,8 @@ mod tests {
             support_image: "git.example.invalid/codewire/gateway:golden".into(),
             runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
             environment_id: "env-golden-commodity".into(),
+            organization_id: "org-golden-commodity".into(),
+            operation_generation: 7,
             gateway_token: "gw-token-golden-commodity".into(),
             daemon_auth_token: "daemon-token-golden-commodity".into(),
             api_base_url: "https://codewire-dev.sh".into(),
@@ -183,6 +237,332 @@ mod tests {
             workspace_storage_class: "local-path".into(),
             ..Default::default()
         }
+    }
+
+    fn credential_opts() -> TemplateOpts {
+        TemplateOpts {
+            environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
+            credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic("dev-sandboxes")),
+            ..commodity_opts()
+        }
+    }
+
+    #[test]
+    fn credential_bootstrap_has_exact_tls_intent_and_public_codex_config_only() {
+        let opts = credential_opts();
+        let certificate = render_credential_gateway_certificate("dev-sandboxes", &opts).unwrap();
+        assert_eq!(
+            certificate["spec"]["secretName"],
+            credential_gateway_certificate_name(&opts.environment_id)
+        );
+        assert_eq!(
+            certificate["spec"]["issuerRef"],
+            json!({"name":CREDENTIAL_GATEWAY_ISSUER_NAME,"kind":"Issuer","group":"cert-manager.io"})
+        );
+        let dns = format!(
+            "{}.dev-sandboxes.svc.cluster.local",
+            gateway_service_name(&opts.environment_id)
+        );
+        assert_eq!(certificate["spec"]["dnsNames"], json!([dns]));
+        assert_eq!(certificate["spec"]["isCA"], false);
+        assert_eq!(
+            certificate["spec"]["usages"],
+            json!(["digital signature", "server auth"])
+        );
+        assert_eq!(
+            certificate["spec"]["privateKey"]["rotationPolicy"],
+            "Always"
+        );
+        assert_eq!(
+            certificate["spec"]["secretTemplate"]["labels"],
+            certificate["metadata"]["labels"]
+        );
+        let config = render_credential_codex_config("dev-sandboxes", &opts).unwrap();
+        assert_eq!(config["data"].as_object().unwrap().len(), 1);
+        let text = config["data"]["config.toml"].as_str().unwrap();
+        assert_eq!(
+            text,
+            codewire_access::CodexProviderProjection::for_platform_gateway(&dns)
+                .unwrap()
+                .config_toml()
+        );
+        for forbidden in [
+            "auth.json",
+            "OPENAI_API_KEY",
+            "api.openai.com",
+            "chatgpt.com",
+            "synthetic-trust-3",
+            &opts.gateway_token,
+            &opts.daemon_auth_token,
+        ] {
+            assert!(!text.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn credential_mounts_and_identities_are_separate_for_workspace_gateway_and_init() {
+        use codewire_access::{
+            CODEX_PLATFORM_HOME, CODEX_PLATFORM_ROOTS_FILE, CODEX_PLATFORM_TOKEN_FILE,
+        };
+        use codewire_gateway_proto::{
+            CREDENTIAL_GATEWAY_TOKEN_AUDIENCE, CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
+        };
+        let opts = credential_opts();
+        let template = render_sandbox_template("dev-sandboxes", &opts);
+        let workspace = &template["spec"]["podTemplate"]["spec"];
+        let deployment = render_gateway_deployment("dev-sandboxes", &opts);
+        let gateway = &deployment["spec"]["template"]["spec"];
+        for (spec, volume_name, audience) in [
+            (
+                workspace,
+                "credential-workspace-identity",
+                CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
+            ),
+            (
+                gateway,
+                "credential-gateway-identity",
+                CREDENTIAL_GATEWAY_TOKEN_AUDIENCE,
+            ),
+        ] {
+            assert_eq!(spec["automountServiceAccountToken"], false);
+            let volume = spec["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|volume| volume["name"] == volume_name)
+                .unwrap();
+            assert_eq!(volume["projected"]["defaultMode"], 0o440);
+            assert_eq!(
+                volume["projected"]["sources"],
+                json!([{"serviceAccountToken":{"audience":audience,"expirationSeconds":600,"path":"token"}}])
+            );
+            for collection in ["containers", "initContainers"] {
+                for container in spec[collection].as_array().unwrap() {
+                    for mount in container["volumeMounts"].as_array().unwrap() {
+                        assert!(
+                            mount.get("subPath").is_none(),
+                            "projected rotations need directory mounts"
+                        );
+                    }
+                }
+            }
+        }
+        let init = &workspace["initContainers"][0];
+        let init_mounts = init["volumeMounts"].as_array().unwrap();
+        assert_eq!(init_mounts.len(), 3);
+        for name in [
+            "codewire-bin",
+            "credential-codex-config",
+            "credential-codex-home",
+        ] {
+            assert!(init_mounts.iter().any(|mount| mount["name"] == name));
+        }
+        assert!(
+            init["command"][2]
+                .as_str()
+                .unwrap()
+                .contains(&format!("mkdir -p -m 0700 {CODEX_PLATFORM_HOME}"))
+        );
+        let home = workspace["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|volume| volume["name"] == "credential-codex-home")
+            .unwrap();
+        assert_eq!(
+            home["emptyDir"],
+            json!({"medium":"Memory","sizeLimit":"256Mi"})
+        );
+        let ws = &workspace["containers"][0];
+        for (name, value) in [
+            ("CODEX_HOME", CODEX_PLATFORM_HOME),
+            ("CODEX_CA_CERTIFICATE", CODEX_PLATFORM_ROOTS_FILE),
+        ] {
+            assert!(
+                ws["env"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry == &json!({"name":name,"value":value}))
+            );
+        }
+        assert!(
+            ws["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|mount| mount["mountPath"]
+                    == CODEX_PLATFORM_TOKEN_FILE.rsplit_once('/').unwrap().0
+                    && mount["readOnly"] == true)
+        );
+        assert!(!workspace.to_string().contains("credential-gateway-tls"));
+        assert!(
+            !workspace
+                .to_string()
+                .contains(CREDENTIAL_GATEWAY_TOKEN_AUDIENCE)
+        );
+        assert!(
+            !gateway
+                .to_string()
+                .contains(CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE)
+        );
+        assert!(!gateway.to_string().contains("credential-codex-home"));
+        for container in workspace["containers"].as_array().unwrap().iter().skip(1) {
+            assert!(
+                !container.to_string().contains("credential-"),
+                "sibling Docker has no credential mounts"
+            );
+        }
+        let service = render_gateway_service("dev-sandboxes", &opts);
+        assert!(
+            service["spec"]["ports"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|port| port["port"] == 443
+                    && port["targetPort"] == CREDENTIAL_GATEWAY_HTTPS_PORT)
+        );
+    }
+
+    #[test]
+    fn credential_network_allows_only_same_environment_gateway_and_exact_broker_peer() {
+        let opts = credential_opts();
+        let gateway = render_gateway_network_policy("dev-sandboxes", &opts);
+        let workspace = render_workspace_daemon_network_policy("dev-sandboxes", &opts);
+        let find = |rules: &Value, port: i64| {
+            rules
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|rule| {
+                    rule["ports"]
+                        .as_array()
+                        .is_some_and(|ports| ports.iter().any(|item| item["port"] == port))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            find(&gateway["spec"]["ingress"], 8443),
+            vec![
+                json!({"from":[{"podSelector":{"matchLabels":naming::workspace_selector(&opts)}}],"ports":[{"protocol":"TCP","port":8443}]})
+            ]
+        );
+        assert_eq!(
+            find(&workspace["spec"]["egress"], 8443),
+            vec![
+                json!({"to":[{"podSelector":{"matchLabels":naming::gateway_selector(&opts)}}],"ports":[{"protocol":"TCP","port":8443}]})
+            ]
+        );
+        assert_eq!(
+            find(&gateway["spec"]["egress"], 9443),
+            vec![
+                json!({"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"synthetic-trust-0"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"codewire","app.kubernetes.io/component":"credential-service"}}}],"ports":[{"protocol":"TCP","port":9443}]})
+            ]
+        );
+        assert!(find(&workspace["spec"]["egress"], 9443).is_empty());
+    }
+
+    #[test]
+    fn credential_generation_rolls_gateway_but_not_public_bootstrap_or_workspace() {
+        let mut opts = credential_opts();
+        let before = (
+            render_sandbox_template("dev-sandboxes", &opts),
+            render_credential_codex_config("dev-sandboxes", &opts),
+            render_credential_gateway_certificate("dev-sandboxes", &opts),
+        );
+        let first_gateway = render_gateway_deployment("dev-sandboxes", &opts);
+        opts.operation_generation += 1;
+        let after = (
+            render_sandbox_template("dev-sandboxes", &opts),
+            render_credential_codex_config("dev-sandboxes", &opts),
+            render_credential_gateway_certificate("dev-sandboxes", &opts),
+        );
+        assert_eq!(before, after);
+        let gateway = render_gateway_deployment("dev-sandboxes", &opts);
+        assert_eq!(
+            first_gateway["spec"]["selector"],
+            gateway["spec"]["selector"]
+        );
+        assert!(
+            gateway["spec"]["template"]["spec"]["containers"][0]["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry
+                    == &json!({"name":"CODEWIRE_ENVIRONMENT_OPERATION_GENERATION","value":"8"}))
+        );
+    }
+
+    #[test]
+    fn credential_free_templates_do_not_mount_provider_bootstrap_or_activate_listener() {
+        let opts = commodity_opts();
+        assert!(render_credential_gateway_certificate("dev-sandboxes", &opts).is_none());
+        assert!(render_credential_codex_config("dev-sandboxes", &opts).is_none());
+        for value in [
+            render_sandbox_template("dev-sandboxes", &opts),
+            render_gateway_deployment("dev-sandboxes", &opts),
+        ] {
+            let encoded = value.to_string();
+            for absent in [
+                "credential-workspace-identity",
+                "credential-gateway-identity",
+                "CODEX_HOME",
+                "CODEWIRE_CREDENTIAL_HTTPS_LISTEN_ADDR",
+            ] {
+                assert!(!encoded.contains(absent));
+            }
+        }
+    }
+
+    #[test]
+    fn credential_mounts_preserve_the_measured_confidential_storage_boundary() {
+        let mut opts = credential_opts();
+        opts.runtime_profile = RUNTIME_PROFILE_CONFIDENTIAL.into();
+        opts.kata_coco_init_data_enabled = true;
+        opts.confidential_storage_manifest_uri = CONTENT_ADDRESSED_MANIFEST_URI.into();
+        let authorized = confidential_init_data(&opts).unwrap();
+        let rendered = render_sandbox_template("dev-sandboxes", &opts);
+        assert_eq!(
+            authorized,
+            decode_gzip_base64(
+                rendered["spec"]["podTemplate"]["metadata"]["annotations"]
+                    [KATA_COCO_INIT_DATA_ANNOTATION_KEY]
+                    .as_str()
+                    .unwrap()
+            )
+        );
+        let parsed: toml::Value = toml::from_str(&authorized).unwrap();
+        let policy = parsed["data"]["policy.rego"].as_str().unwrap();
+        let mut workspace =
+            confidential_create_input("workspace", &opts.image, &["/home/codewire", "/workspace"]);
+        for path in [
+            "/run/codewire-credentials/workspace",
+            "/run/codewire-credentials/gateway-roots",
+            "/run/codewire-codex",
+        ] {
+            workspace["OCI"]["Mounts"].as_array_mut().unwrap().push(json!({"destination":path,"source":"/synthetic/public-bootstrap","type_":"bind","options":["rbind","ro"]}));
+        }
+        assert!(kata_policy_allows(policy, &workspace));
+        let mut substituted = workspace.clone();
+        substituted["storages"][0]["confidential_storage"]["manifest_uri"] = "kbs:///default/codewire-storage-manifests/sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+        assert!(!kata_policy_allows(policy, &substituted));
+        let mut init = workspace.clone();
+        init["OCI"]["Annotations"]["io.kubernetes.cri.container-name"] =
+            "codewire-daemon-init".into();
+        assert!(
+            !kata_policy_allows(policy, &init),
+            "bootstrap init must not acquire protected workspace storage"
+        );
+        init["storages"] = json!([]);
+        init["OCI"]["Mounts"] = json!([{"destination":"/codewire/codex-bootstrap","source":"/synthetic/public-bootstrap","type_":"bind","options":["rbind","ro"]}]);
+        assert!(kata_policy_allows(policy, &init));
+        opts.credential_runtime = None;
+        assert_eq!(
+            authorized,
+            confidential_init_data(&opts).unwrap(),
+            "public projections do not rewrite the protected-volume policy"
+        );
     }
 
     #[test]

@@ -51,9 +51,11 @@ mod tests {
 
     use super::*;
 
-    // Computed by the synthetic 18->20 upgrade fixture and shared fresh-schema
-    // gate; accepted applied migration history remains independently pinned.
+    // Measured from the unchanged version-21 migrator plus migration 22 in a
+    // managed disposable PostgreSQL; accepted history stays independently pinned.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "f2bdf1cd4ac385f8f8b1d58dd7fae26a581cf569ea67e723e79c4cf3bbe97bbe";
+    const ACCEPTED_PRE_CONSENT_SCHEMA_FINGERPRINT: &str =
         "7ed7e45a11b90ab2953ef0df92613cee949638a47631fabf490d988fc278c309";
     const ACCEPTED_CREDENTIAL_STORAGE_SCHEMA_FINGERPRINT: &str =
         "ab823697675ec3b378dddda17d3de6bd7f62c2d6070977409158a9d42f97b10b";
@@ -77,6 +79,14 @@ mod tests {
     const PLATFORM_CREDENTIALS_VERSION: i64 = 18;
     const PLATFORM_ACCESS_PROFILES_VERSION: i64 = 19;
     const PLATFORM_BROKER_LOCK_AUTHORITY_VERSION: i64 = 21;
+    const PLATFORM_BINDING_CONSENT_VERSION: i64 = 22;
+    const OAUTH_PUBLICATION_AUTHORITY_VERSION: i64 = 23;
+    // Frozen migration22 after accepted isolated component20566, before adding
+    // the function-only OAuth publication fence; not an already-landed release.
+    const FROZEN_BINDING_CONSENT_CHECKSUM: &str = "0a242f5c9a85afc75a025d678485786e992b523fae7eeccf4f3212f7c7a5c5007e6debfca8ed8d6bf15a71e73d539da2";
+    // Accepted canonical c0921baf2cfeffbc627991b97fc3fcbb9f254bfb,
+    // independently pinned before adding the binding-consent migration.
+    const APPLIED_BROKER_LOCK_CHECKSUM: &str = "a71c8fda91a63a9e9890823fd0bc4a826ce6982336b4e8d6408fc794de88f13c8bb283baaa8080f556669895d345f303";
     // Frozen dependency 14806fb3acb3566c19c95d2be0a293579cec165c supplies
     // versions 19 and 20; versions 1..=18 retain their canonical pin above.
     const APPLIED_ACCESS_MIGRATION_CHECKSUMS: [(i64, &str); 2] = [
@@ -114,6 +124,11 @@ mod tests {
     #[test]
     fn embedded_access_history_matches_the_frozen_dependency() -> anyhow::Result<()> {
         assert_applied_access_history()
+    }
+
+    #[test]
+    fn embedded_broker_lock_history_matches_the_accepted_release() -> anyhow::Result<()> {
+        assert_applied_broker_lock_history()
     }
 
     #[tokio::test]
@@ -287,21 +302,21 @@ mod tests {
             ))
             .fetch_one(&pool)
             .await?;
-            anyhow::ensure!(schema_before == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+            anyhow::ensure!(schema_before == ACCEPTED_PRE_CONSENT_SCHEMA_FINGERPRINT);
             pool.close().await;
 
-            ensure_schema(&test_db.url).await?;
+            apply_migrations_before(&test_db.url, PLATFORM_BINDING_CONSENT_VERSION).await?;
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .connect(&test_db.url)
                 .await?;
             let after = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                after.len() == MIGRATOR.iter().count()
+                after.len() == 21
                     && after[..20] == before
                     && after[20].0 == PLATFORM_BROKER_LOCK_AUTHORITY_VERSION
             );
-            let definitions = assert_platform_broker_lock_authority(&pool).await?;
+            let definitions = assert_platform_broker_lock_authority(&pool, false).await?;
             let schema_after: String = sqlx::query_scalar(include_str!(
                 "../tests/data/application_schema_fingerprint.sql"
             ))
@@ -323,13 +338,15 @@ mod tests {
             );
             pool.close().await;
 
-            ensure_schema(&test_db.url).await?;
+            apply_migrations_before(&test_db.url, PLATFORM_BINDING_CONSENT_VERSION).await?;
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .connect(&test_db.url)
                 .await?;
             anyhow::ensure!(applied_migrations(&pool).await? == after);
-            anyhow::ensure!(assert_platform_broker_lock_authority(&pool).await? == definitions);
+            anyhow::ensure!(
+                assert_platform_broker_lock_authority(&pool, false).await? == definitions
+            );
             let material_noop: (String, String) = sqlx::query_as(
                 "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
@@ -355,7 +372,7 @@ mod tests {
         let result = async {
             ensure_schema(&test_db.url).await?;
             let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
-            assert_platform_broker_lock_authority(&pool).await?;
+            assert_platform_broker_lock_authority(&pool, true).await?;
             sqlx::raw_sql("CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep (id integer); \
                 INSERT INTO rollback_boundary.keep VALUES (1);").execute(&pool).await?;
             seed_platform_credential_owners(&pool).await?;
@@ -373,11 +390,221 @@ mod tests {
             let fingerprint: String = sqlx::query_scalar(include_str!(
                 "../tests/data/application_schema_fingerprint.sql"
             )).fetch_one(&pool).await?;
-            anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+            anyhow::ensure!(fingerprint == ACCEPTED_PRE_CONSENT_SCHEMA_FINGERPRINT);
             let retained: i32 = sqlx::query_scalar("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await?;
             anyhow::ensure!(retained == 1);
             let credentials: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_credentials").fetch_one(&pool).await?;
             anyhow::ensure!(credentials == 0);
+            pool.close().await;
+            anyhow::Ok(())
+        }.await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn oauth_publication_upgrade_preserves_exact_history_rows_and_function_authority()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, OAUTH_PUBLICATION_AUTHORITY_VERSION).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            let before = applied_migrations(&pool).await?;
+            anyhow::ensure!(before.len() == 22 && before[21].0 == 22);
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_binding(&pool).await?;
+            sqlx::query("UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by='credential-user-a' WHERE environment_id='consent-env'")
+                .execute(&pool).await?;
+            seed_platform_credential(&pool, "oauth-retained", Some("credential-user-a"), None, "Work").await?;
+            seed_platform_credential_material(&pool, "oauth-retained", 1).await?;
+            let rows_sql = "SELECT row_to_json(c)::text,row_to_json(m)::text,row_to_json(b)::text \
+                FROM platform_credentials c JOIN platform_credential_material m ON m.credential_id=c.id \
+                CROSS JOIN platform_environment_access_bindings b \
+                WHERE c.id='oauth-retained' AND b.environment_id='consent-env'";
+            let rows_before: (String,String,String) = sqlx::query_as(rows_sql).fetch_one(&pool).await?;
+            let old_helpers = assert_platform_broker_lock_authority(&pool, true).await?;
+            pool.close().await;
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            let after = applied_migrations(&pool).await?;
+            anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..22] == before && after[22].0 == 23);
+            let rows_after: (String,String,String) = sqlx::query_as(rows_sql).fetch_one(&pool).await?;
+            anyhow::ensure!(rows_after == rows_before);
+            anyhow::ensure!(assert_platform_broker_lock_authority(&pool, true).await? == old_helpers);
+            let definition = assert_oauth_publication_authority(&pool).await?;
+            let fingerprint: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
+            anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT, "function-only migration changed tables: {fingerprint}");
+            pool.close().await;
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            anyhow::ensure!(applied_migrations(&pool).await? == after);
+            anyhow::ensure!(assert_oauth_publication_authority(&pool).await? == definition);
+            let rows_again: (String,String,String) = sqlx::query_as(rows_sql).fetch_one(&pool).await?;
+            anyhow::ensure!(rows_again == rows_before);
+            pool.close().await;
+            anyhow::Ok(())
+        }.await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn oauth_publication_rollback_recreates_only_disposable_schema() -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            assert_oauth_publication_authority(&pool).await?;
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_credential(&pool, "discarded", Some("credential-user-a"), None, "Discarded").await?;
+            seed_platform_credential_material(&pool, "discarded", 1).await?;
+            sqlx::raw_sql("CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep(id integer); INSERT INTO rollback_boundary.keep VALUES (1);").execute(&pool).await?;
+            // Exact generated fixture database only; never live data/ledger.
+            sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").execute(&pool).await?;
+            pool.close().await;
+            apply_migrations_before(&test_db.url, OAUTH_PUBLICATION_AUTHORITY_VERSION).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            let history = applied_migrations(&pool).await?;
+            anyhow::ensure!(history.len() == 22 && history[21].0 == 22);
+            let absent: bool = sqlx::query_scalar("SELECT to_regprocedure('public.codewire_lock_oauth_bearer_authority(text,text,text,timestamptz)') IS NULL").fetch_one(&pool).await?;
+            anyhow::ensure!(absent);
+            assert_platform_broker_lock_authority(&pool, true).await?;
+            let fingerprint: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
+            anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+            let empty: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM platform_credentials)").fetch_one(&pool).await?;
+            anyhow::ensure!(empty);
+            let retained: i32 = sqlx::query_scalar("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await?;
+            anyhow::ensure!(retained == 1);
+            pool.close().await;
+            anyhow::Ok(())
+        }.await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_binding_consent_upgrade_preserves_history_and_never_infers_confirmation()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            apply_migrations_before(&test_db.url, PLATFORM_BINDING_CONSENT_VERSION).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            let before = applied_migrations(&pool).await?;
+            anyhow::ensure!(before.len() == 21 && before[20].0 == 21);
+            assert_platform_broker_lock_authority(&pool, false).await?;
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_credential(&pool, "consent-retained", Some("credential-user-a"), None, "Work").await?;
+            seed_platform_credential_material(&pool, "consent-retained", 1).await?;
+            seed_platform_binding(&pool).await?;
+            let bytes_before: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='consent-retained'",
+            ).fetch_one(&pool).await?;
+            let schema_before: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql"))
+                .fetch_one(&pool).await?;
+            anyhow::ensure!(schema_before == ACCEPTED_PRE_CONSENT_SCHEMA_FINGERPRINT);
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            let after = applied_migrations(&pool).await?;
+            anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..21] == before && after[21].0 == 22);
+            let definitions = assert_platform_broker_lock_authority(&pool, true).await?;
+            let binding: (String, i64, Option<String>) = sqlx::query_as(
+                "SELECT profile_id,profile_revision,personal_owner_confirmed_by \
+                 FROM platform_environment_access_bindings WHERE environment_id='consent-env'",
+            ).fetch_one(&pool).await?;
+            anyhow::ensure!(binding == ("consent-profile".into(), 1, None), "migration inferred consent");
+            let bytes_after: (String, String) = sqlx::query_as(
+                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                 JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='consent-retained'",
+            ).fetch_one(&pool).await?;
+            anyhow::ensure!(bytes_before == bytes_after);
+            let fingerprint: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql"))
+                .fetch_one(&pool).await?;
+            anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
+                "application schema fingerprint changed: {fingerprint}");
+            let missing_actor = sqlx::query("UPDATE platform_environment_access_bindings \
+                SET personal_owner_confirmed_by='missing-user' WHERE environment_id='consent-env'")
+                .execute(&pool).await.err().context("consent accepted a nonexistent actor")?;
+            anyhow::ensure!(missing_actor.as_database_error().and_then(|error| error.code()).as_deref() == Some("23503"));
+            // Even a synthetically inserted wrong actor cannot leave stale
+            // confirmation behind when its user is deleted. Runtime separately
+            // rejects this mismatch before any credential admission.
+            sqlx::query("UPDATE platform_environment_access_bindings \
+                SET personal_owner_confirmed_by='credential-user-b' WHERE environment_id='consent-env'")
+                .execute(&pool).await?;
+            sqlx::query("DELETE FROM users WHERE id='credential-user-b'").execute(&pool).await?;
+            let cleared: Option<String> = sqlx::query_scalar("SELECT personal_owner_confirmed_by \
+                FROM platform_environment_access_bindings WHERE environment_id='consent-env'")
+                .fetch_one(&pool).await?;
+            anyhow::ensure!(cleared.is_none());
+            sqlx::query("UPDATE platform_environment_access_bindings \
+                SET personal_owner_confirmed_by='credential-user-a' WHERE environment_id='consent-env'")
+                .execute(&pool).await?;
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            anyhow::ensure!(applied_migrations(&pool).await? == after);
+            anyhow::ensure!(assert_platform_broker_lock_authority(&pool, true).await? == definitions);
+            let confirmed: Option<String> = sqlx::query_scalar("SELECT personal_owner_confirmed_by \
+                FROM platform_environment_access_bindings WHERE environment_id='consent-env'")
+                .fetch_one(&pool).await?;
+            anyhow::ensure!(confirmed.as_deref() == Some("credential-user-a"));
+            let generation: i64 = sqlx::query_scalar("SELECT environment_operation_generation FROM environments WHERE id='consent-env'")
+                .fetch_one(&pool).await?;
+            anyhow::ensure!(generation == 7);
+            pool.close().await;
+            anyhow::Ok(())
+        }.await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn platform_binding_consent_rollback_recreates_only_disposable_schema()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            assert_platform_broker_lock_authority(&pool, true).await?;
+            seed_platform_credential_owners(&pool).await?;
+            seed_platform_binding(&pool).await?;
+            sqlx::query("UPDATE platform_environment_access_bindings \
+                SET personal_owner_confirmed_by='credential-user-a' WHERE environment_id='consent-env'")
+                .execute(&pool).await?;
+            sqlx::raw_sql("CREATE SCHEMA rollback_boundary; CREATE TABLE rollback_boundary.keep(id integer); \
+                INSERT INTO rollback_boundary.keep VALUES (1);").execute(&pool).await?;
+            // Only this test's generated application schema is disposable.
+            sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").execute(&pool).await?;
+            pool.close().await;
+            apply_migrations_before(&test_db.url, PLATFORM_BINDING_CONSENT_VERSION).await?;
+            let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
+            let history = applied_migrations(&pool).await?;
+            anyhow::ensure!(history.len() == 21 && history[20].0 == 21);
+            assert_platform_broker_lock_authority(&pool, false).await?;
+            let fingerprint: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql"))
+                .fetch_one(&pool).await?;
+            anyhow::ensure!(fingerprint == ACCEPTED_PRE_CONSENT_SCHEMA_FINGERPRINT);
+            let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_environment_access_bindings")
+                .fetch_one(&pool).await?;
+            anyhow::ensure!(remaining == 0);
+            let retained: i32 = sqlx::query_scalar("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await?;
+            anyhow::ensure!(retained == 1);
             pool.close().await;
             anyhow::Ok(())
         }.await;
@@ -1952,6 +2179,28 @@ mod tests {
         Ok(())
     }
 
+    async fn seed_platform_binding(pool: &PgPool) -> anyhow::Result<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::raw_sql(r#"
+            INSERT INTO environment_presets(id,org_id,name,slug,project_spec)
+                VALUES ('consent-preset','credential-org-a','Consent','consent',
+                        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
+            INSERT INTO environments(id,org_id,created_by,type,preset_id,state,desired_state,
+                                     environment_operation_generation,project_spec)
+                VALUES ('consent-env','credential-org-a','credential-user-a','sandbox',
+                        'consent-preset','running','started',7,
+                        '{"schema_version":1,"working_directory":"/workspace"}'::jsonb);
+            INSERT INTO platform_access_profiles(id,user_id,name,current_revision)
+                VALUES ('consent-profile','credential-user-a','Consent',1);
+            INSERT INTO platform_access_profile_revisions(profile_id,revision)
+                VALUES ('consent-profile',1);
+            INSERT INTO platform_environment_access_bindings(environment_id,profile_id,profile_revision)
+                VALUES ('consent-env','consent-profile',1);
+        "#).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn seed_platform_credential(
         pool: &PgPool,
         id: &str,
@@ -3284,6 +3533,20 @@ mod tests {
         Ok(())
     }
 
+    fn assert_applied_broker_lock_history() -> anyhow::Result<()> {
+        assert_applied_access_history()?;
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == PLATFORM_BROKER_LOCK_AUTHORITY_VERSION)
+            .context("accepted broker lock migration is missing")?;
+        anyhow::ensure!(
+            format!("{:x}", Sha384::digest(migration.sql.as_bytes()))
+                == APPLIED_BROKER_LOCK_CHECKSUM,
+            "migration 21 no longer matches the accepted release"
+        );
+        Ok(())
+    }
+
     async fn assert_platform_broker_locks_absent(pool: &PgPool) -> anyhow::Result<()> {
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_catalog.pg_proc p \
@@ -3299,7 +3562,10 @@ mod tests {
     // The table-schema fingerprint deliberately excludes functions and ACLs.
     // Check installed definitions and authority independently, rather than
     // treating an unchanged table fingerprint as proof of this migration.
-    async fn assert_platform_broker_lock_authority(pool: &PgPool) -> anyhow::Result<Vec<String>> {
+    async fn assert_platform_broker_lock_authority(
+        pool: &PgPool,
+        credential: bool,
+    ) -> anyhow::Result<Vec<String>> {
         let rows: Vec<(String, String, String, bool, String, String)> = sqlx::query_as(
             r#"
             SELECT p.proname::text,
@@ -3328,7 +3594,7 @@ mod tests {
         )
         .fetch_all(pool)
         .await?;
-        let expected = [
+        let mut expected = vec![
             (
                 "codewire_platform_lock_environment",
                 "text, text, text",
@@ -3357,6 +3623,17 @@ mod tests {
                  WHERE p.id = $1 AND (p.user_id = $2 OR p.organization_id = $3) FOR SHARE OF p;",
             ),
         ];
+        if credential {
+            expected.insert(0, (
+                "codewire_platform_lock_credential",
+                "text, text, text",
+                "TABLE(provider text, authentication_kind text, display_name text, account_hint text, status text, expires_at_unix bigint, revocation_generation bigint)",
+                "SELECT c.provider, c.authentication_kind, c.display_name, c.account_hint, \
+                 c.status, c.expires_at_unix, c.revocation_generation \
+                 FROM public.platform_credentials AS c \
+                 WHERE c.id = $1 AND (c.user_id = $2 OR c.organization_id = $3) FOR SHARE OF c;",
+            ));
+        }
         anyhow::ensure!(
             rows.len() == expected.len(),
             "broker lock helper inventory changed"
@@ -3389,6 +3666,66 @@ mod tests {
         Ok(rows.into_iter().map(|row| row.5).collect())
     }
 
+    async fn assert_oauth_publication_authority(pool: &PgPool) -> anyhow::Result<String> {
+        let rows: Vec<(String, String, bool, String, String)> = sqlx::query_as(
+            r#"SELECT pg_catalog.oidvectortypes(p.proargtypes),
+                      pg_catalog.pg_get_function_result(p.oid),
+                      p.prosecdef AND NOT p.proleakproof AND NOT p.proisstrict
+                          AND p.provolatile='v' AND p.proparallel='u' AND p.prokind='f'
+                          AND l.lanname='plpgsql'
+                          AND p.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                          AND p.proowner=(SELECT c.relowner FROM pg_catalog.pg_class c
+                                          WHERE c.oid='public._sqlx_migrations'::regclass)
+                          AND NOT EXISTS (
+                              SELECT 1 FROM pg_catalog.aclexplode(
+                                  COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))
+                              ) a WHERE a.grantee<>p.proowner
+                          ),
+                      p.prosrc, pg_catalog.pg_get_functiondef(p.oid)
+               FROM pg_catalog.pg_proc p
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+               JOIN pg_catalog.pg_language l ON l.oid=p.prolang
+               WHERE n.nspname='public' AND p.proname='codewire_lock_oauth_bearer_authority'"#,
+        )
+        .fetch_all(pool)
+        .await?;
+        anyhow::ensure!(
+            rows.len() == 1,
+            "OAuth publication helper inventory changed"
+        );
+        let (args, result, private_authority, body, definition) = &rows[0];
+        anyhow::ensure!(
+            args == "text, text, text, timestamp with time zone" && result == "boolean"
+        );
+        anyhow::ensure!(
+            *private_authority,
+            "OAuth publication definer/search-path/ACL changed"
+        );
+        let expected = "BEGIN \
+            PERFORM u.id FROM public.users AS u WHERE u.id = $2 FOR SHARE; \
+            IF NOT FOUND THEN RETURN false; END IF; \
+            PERFORM c.id FROM public.oidc_clients AS c \
+            WHERE c.id = $3 AND NOT c.disabled FOR SHARE; \
+            IF NOT FOUND THEN RETURN false; END IF; \
+            PERFORM t.token_hash FROM public.oidc_access_tokens AS t \
+            WHERE t.token_hash = $1 AND t.user_id = $2 AND t.client_id = $3 \
+              AND t.expires_at = $4 AND 'codewire.api' = ANY(t.scopes) FOR SHARE; \
+            IF NOT FOUND THEN RETURN false; END IF; \
+            RETURN $4 > pg_catalog.clock_timestamp(); END;";
+        let normalize = |sql: &str| {
+            sql.lines()
+                .map(|line| line.split_once("--").map_or(line, |(sql, _)| sql))
+                .flat_map(str::split_whitespace)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        anyhow::ensure!(
+            normalize(body) == normalize(expected),
+            "OAuth publication lock order/query changed"
+        );
+        Ok(definition.clone())
+    }
+
     async fn apply_migrations_before(database_url: &str, version: i64) -> anyhow::Result<()> {
         // Do not manufacture an apparently valid old ledger from a baseline
         // rewritten by the same branch whose upgrade is being tested.
@@ -3396,6 +3733,18 @@ mod tests {
         assert_applied_pre_platform_history()?;
         assert_applied_credential_storage_history()?;
         assert_applied_access_history()?;
+        assert_applied_broker_lock_history()?;
+        if version > PLATFORM_BINDING_CONSENT_VERSION {
+            let consent = MIGRATOR
+                .iter()
+                .find(|migration| migration.version == PLATFORM_BINDING_CONSENT_VERSION)
+                .context("frozen consent migration is missing")?;
+            anyhow::ensure!(
+                format!("{:x}", Sha384::digest(consent.sql.as_bytes()))
+                    == FROZEN_BINDING_CONSENT_CHECKSUM,
+                "migration22 changed after accepted component proof"
+            );
+        }
         anyhow::ensure!(
             MIGRATOR.version_exists(version),
             "embedded migration {version} is missing"

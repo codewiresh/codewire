@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+// AccessProfileService manages the authenticated user's personal platform
+// profiles and exact environment bindings. It never reads provider material.
+// Organization API keys cannot manage this account-scoped resource. Binding
+// also requires current membership and ownership of the exact environment.
+service AccessProfileService {
+  rpc ListAccessProfiles(ListAccessProfilesRequest) returns (ListAccessProfilesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc GetAccessProfile(GetAccessProfileRequest) returns (GetAccessProfileResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc CreateAccessProfile(CreateAccessProfileRequest) returns (CreateAccessProfileResponse);
+  rpc UpdateAccessProfile(UpdateAccessProfileRequest) returns (UpdateAccessProfileResponse);
+  rpc DeleteAccessProfile(DeleteAccessProfileRequest) returns (DeleteAccessProfileResponse);
+
+  rpc GetEnvironmentAccessProfile(GetEnvironmentAccessProfileRequest) returns (GetEnvironmentAccessProfileResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc SetEnvironmentAccessProfile(SetEnvironmentAccessProfileRequest) returns (SetEnvironmentAccessProfileResponse);
+  rpc ClearEnvironmentAccessProfile(ClearEnvironmentAccessProfileRequest) returns (ClearEnvironmentAccessProfileResponse);
+}
+
+// An opaque credential reference for one supported capability. No provider
+// token, protected-store reference, executable or arbitrary adapter is accepted.
+message AccessProfileEntry {
+  string capability_slot = 1;
+  string credential_id = 2;
+}
+
+// An immutable revision. Updating a profile creates a new revision; existing
+// environment bindings keep their explicitly selected revision.
+message AccessProfile {
+  string id = 1;
+  string name = 2;
+  uint64 revision = 3;
+  repeated AccessProfileEntry entries = 4;
+}
+
+message ListAccessProfilesRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListAccessProfilesResponse {
+  repeated AccessProfile access_profiles = 1;
+  string next_page_token = 2;
+}
+
+message GetAccessProfileRequest {
+  oneof selector {
+    string access_profile_id = 1;
+    string name = 2;
+  }
+  // Absent means current. A present revision must be positive.
+  optional uint64 revision = 3;
+}
+
+message GetAccessProfileResponse {
+  AccessProfile access_profile = 1;
+}
+
+message CreateAccessProfileRequest {
+  string name = 1;
+  // Duplicate capability slots are invalid, never last-writer-wins.
+  repeated AccessProfileEntry entries = 2;
+}
+
+message CreateAccessProfileResponse {
+  AccessProfile access_profile = 1;
+}
+
+message UpdateAccessProfileRequest {
+  string access_profile_id = 1;
+  uint64 expected_revision = 2;
+  // Replaces the complete entry set. Empty explicitly removes every slot.
+  repeated AccessProfileEntry entries = 3;
+}
+
+message UpdateAccessProfileResponse {
+  AccessProfile access_profile = 1;
+}
+
+message DeleteAccessProfileRequest {
+  string access_profile_id = 1;
+  uint64 expected_revision = 2;
+}
+
+message DeleteAccessProfileResponse {}
+
+// Exact selection, not an access grant or proof that a runtime is ready.
+message EnvironmentAccessProfileBinding {
+  string environment_id = 1;
+  string access_profile_id = 2;
+  uint64 access_profile_revision = 3;
+}
+
+message GetEnvironmentAccessProfileRequest {
+  string environment_id = 1;
+}
+
+message GetEnvironmentAccessProfileResponse {
+  EnvironmentAccessProfileBinding binding = 1;
+  // Stored consent only; runtime still checks current identity and authority.
+  bool personal_credentials_confirmed = 2;
+}
+
+message SetEnvironmentAccessProfileRequest {
+  EnvironmentAccessProfileBinding binding = 1;
+  // Absent requires no current binding. Present performs an exact CAS.
+  EnvironmentAccessProfileBinding expected_binding = 2;
+  // Explicit consent for this exact environment/profile/revision. The server
+  // derives the confirmer from authentication and independently checks current
+  // ownership and membership. Previous bindings never imply this confirmation.
+  bool confirm_personal_credentials = 3;
+}
+
+message SetEnvironmentAccessProfileResponse {
+  EnvironmentAccessProfileBinding binding = 1;
+}
+
+message ClearEnvironmentAccessProfileRequest {
+  EnvironmentAccessProfileBinding expected_binding = 1;
+}
+
+message ClearEnvironmentAccessProfileResponse {}

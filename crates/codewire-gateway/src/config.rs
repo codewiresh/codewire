@@ -1,6 +1,7 @@
 use crate::docker_proxy::DockerProxySettings;
 use codewire_gateway_proto::DaemonAuthToken;
-use std::{env, fmt, net::SocketAddr, time::Duration};
+use codewire_tls::{ClientTlsEndpoint, ServerTlsFiles};
+use std::{env, fmt, net::SocketAddr, path::PathBuf, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -43,6 +44,140 @@ pub const DEBUG_TAILNET_ENV: &str = "CODEWIRE_DEBUG_TAILNET";
 pub const DOCKER_PROXY_SOCK_ENV: &str = "CODEWIRE_DOCKER_PROXY_SOCK";
 pub const DOCKER_UPSTREAM_SOCK_ENV: &str = "CODEWIRE_DOCKER_UPSTREAM_SOCK";
 
+pub const ENVIRONMENT_OPERATION_GENERATION_ENV: &str = "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION";
+pub const CREDENTIAL_HTTPS_AUTHORITY_ENV: &str = "CODEWIRE_CREDENTIAL_HTTPS_AUTHORITY";
+pub const CREDENTIAL_HTTPS_LISTEN_ADDR_ENV: &str = "CODEWIRE_CREDENTIAL_HTTPS_LISTEN_ADDR";
+pub const CREDENTIAL_GATEWAY_TOKEN_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_GATEWAY_TOKEN_FILE";
+pub const CREDENTIAL_TLS_CERT_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_TLS_CERT_FILE";
+pub const CREDENTIAL_TLS_KEY_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_TLS_KEY_FILE";
+pub const CREDENTIAL_BROKER_HTTPS_ORIGIN_ENV: &str = "CODEWIRE_CREDENTIAL_BROKER_HTTPS_ORIGIN";
+pub const CREDENTIAL_BROKER_TLS_ROOTS_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_BROKER_TLS_ROOTS_FILE";
+pub const CREDENTIAL_HTTPS_PORT: u16 = 8443;
+
+const CREDENTIAL_ENV_GROUP: [&str; 8] = [
+    ENVIRONMENT_OPERATION_GENERATION_ENV,
+    CREDENTIAL_HTTPS_AUTHORITY_ENV,
+    CREDENTIAL_HTTPS_LISTEN_ADDR_ENV,
+    CREDENTIAL_GATEWAY_TOKEN_FILE_ENV,
+    CREDENTIAL_TLS_CERT_FILE_ENV,
+    CREDENTIAL_TLS_KEY_FILE_ENV,
+    CREDENTIAL_BROKER_HTTPS_ORIGIN_ENV,
+    CREDENTIAL_BROKER_TLS_ROOTS_FILE_ENV,
+];
+
+/// All-or-none material-free credential transport configuration. No runtime
+/// authority is inferred from these coordinates: the broker authenticates
+/// the original projected identities on each private call.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialRuntimeConfig {
+    environment_id: Uuid,
+    operation_generation: u64,
+    https_authority: String,
+    pub(crate) listen_addr: SocketAddr,
+    gateway_token_file: PathBuf,
+    tls_cert_file: PathBuf,
+    tls_key_file: PathBuf,
+    broker_https_origin: String,
+    broker_tls_roots_file: PathBuf,
+}
+
+impl fmt::Debug for CredentialRuntimeConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialRuntimeConfig")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CredentialRuntimeConfig {
+    pub(crate) fn server_tls(&self) -> Result<ServerTlsFiles, ConfigError> {
+        ServerTlsFiles::new(self.tls_cert_file.clone(), self.tls_key_file.clone())
+            .map_err(|_| ConfigError::InvalidCredentialRuntime)
+    }
+
+    pub(crate) fn broker_endpoint(&self) -> Result<ClientTlsEndpoint, ConfigError> {
+        ClientTlsEndpoint::new(
+            self.broker_https_origin.clone(),
+            self.broker_tls_roots_file.clone(),
+        )
+        .map_err(|_| ConfigError::InvalidCredentialRuntime)
+    }
+
+    pub(crate) fn ingress(
+        &self,
+    ) -> Result<crate::credentials::CredentialIngressConfig, ConfigError> {
+        crate::credentials::CredentialIngressConfig::new(
+            self.environment_id,
+            self.operation_generation,
+            &self.https_authority,
+            self.gateway_token_file.clone(),
+            self.broker_endpoint()?,
+        )
+        .map_err(|_| ConfigError::InvalidCredentialRuntime)
+    }
+
+    fn from_getenv<F: Fn(&str) -> Option<String>>(getenv: &F) -> Result<Option<Self>, ConfigError> {
+        // ENVIRONMENT_ID is also used by SSH/Mesh. Its presence alone must not
+        // activate credential delivery or require any credential transport.
+        if CREDENTIAL_ENV_GROUP
+            .iter()
+            .all(|name| getenv(name).is_none())
+        {
+            return Ok(None);
+        }
+        let required = |name| -> Result<String, ConfigError> {
+            let value = getenv(name).ok_or(ConfigError::InvalidCredentialRuntime)?;
+            if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+                return Err(ConfigError::InvalidCredentialRuntime);
+            }
+            Ok(value)
+        };
+        let raw_id = required(ENVIRONMENT_ID_ENV)?;
+        let environment_id =
+            Uuid::parse_str(&raw_id).map_err(|_| ConfigError::InvalidCredentialRuntime)?;
+        if environment_id.is_nil() || environment_id.to_string() != raw_id {
+            return Err(ConfigError::InvalidCredentialRuntime);
+        }
+        let raw_generation = required(ENVIRONMENT_OPERATION_GENERATION_ENV)?;
+        let operation_generation: u64 = raw_generation
+            .parse()
+            .map_err(|_| ConfigError::InvalidCredentialRuntime)?;
+        if operation_generation == 0
+            || operation_generation > i64::MAX as u64
+            || operation_generation.to_string() != raw_generation
+        {
+            return Err(ConfigError::InvalidCredentialRuntime);
+        }
+        let listen_addr: SocketAddr = required(CREDENTIAL_HTTPS_LISTEN_ADDR_ENV)?
+            .parse()
+            .map_err(|_| ConfigError::InvalidCredentialRuntime)?;
+        if listen_addr.port() != CREDENTIAL_HTTPS_PORT {
+            return Err(ConfigError::InvalidCredentialRuntime);
+        }
+        let path = |name| -> Result<PathBuf, ConfigError> {
+            let path = PathBuf::from(required(name)?);
+            if !path.is_absolute() || path.file_name().is_none() {
+                return Err(ConfigError::InvalidCredentialRuntime);
+            }
+            Ok(path)
+        };
+        let config = Self {
+            environment_id,
+            operation_generation,
+            https_authority: required(CREDENTIAL_HTTPS_AUTHORITY_ENV)?,
+            listen_addr,
+            gateway_token_file: path(CREDENTIAL_GATEWAY_TOKEN_FILE_ENV)?,
+            tls_cert_file: path(CREDENTIAL_TLS_CERT_FILE_ENV)?,
+            tls_key_file: path(CREDENTIAL_TLS_KEY_FILE_ENV)?,
+            broker_https_origin: required(CREDENTIAL_BROKER_HTTPS_ORIGIN_ENV)?,
+            broker_tls_roots_file: path(CREDENTIAL_BROKER_TLS_ROOTS_FILE_ENV)?,
+        };
+        config.server_tls()?;
+        config.ingress()?;
+        Ok(Some(config))
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct GatewayConfig {
     pub shim_addr: String,
@@ -66,6 +201,7 @@ pub struct GatewayConfig {
     pub tailnet: Option<TailnetConfig>,
     pub docker_proxy: Option<DockerProxyConfig>,
     pub debug_tailnet: bool,
+    pub credentials: Option<CredentialRuntimeConfig>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -93,6 +229,8 @@ pub enum ConfigError {
     MissingDaemonAuthToken,
     #[error("{DAEMON_AUTH_TOKEN_ENV} must be nonblank canonical ASCII metadata")]
     InvalidDaemonAuthToken,
+    #[error("credential runtime configuration is incomplete or invalid")]
+    InvalidCredentialRuntime,
     #[error("{name} must be a UDP port from 1 to 65535")]
     InvalidPort { name: &'static str },
     #[error("{name} contains invalid STUN server {value:?}; expected host[:port]")]
@@ -117,6 +255,11 @@ pub enum ConfigError {
 
 impl GatewayConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
+        for name in CREDENTIAL_ENV_GROUP {
+            if matches!(env::var(name), Err(env::VarError::NotUnicode(_))) {
+                return Err(ConfigError::InvalidCredentialRuntime);
+            }
+        }
         let daemon_auth_token = match env::var(DAEMON_AUTH_TOKEN_ENV) {
             Ok(value) => value,
             Err(env::VarError::NotPresent) => return Err(ConfigError::MissingDaemonAuthToken),
@@ -135,6 +278,7 @@ impl GatewayConfig {
     where
         F: Fn(&str) -> Option<String>,
     {
+        let credentials = CredentialRuntimeConfig::from_getenv(&getenv)?;
         let shim_addr = env_or(&getenv, SHIM_ADDR_ENV, DEFAULT_SHIM_ADDR);
         let daemon_auth_token = getenv(DAEMON_AUTH_TOKEN_ENV)
             .ok_or(ConfigError::MissingDaemonAuthToken)
@@ -194,6 +338,7 @@ impl GatewayConfig {
             tailnet,
             docker_proxy,
             debug_tailnet: trim_env(&getenv, DEBUG_TAILNET_ENV).is_some(),
+            credentials,
         })
     }
 }
@@ -229,6 +374,7 @@ impl fmt::Debug for GatewayConfig {
             .field("tailnet", &self.tailnet)
             .field("docker_proxy", &self.docker_proxy)
             .field("debug_tailnet", &self.debug_tailnet)
+            .field("credentials", &self.credentials)
             .finish()
     }
 }
@@ -509,6 +655,10 @@ where
         })
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+#[path = "config/credential_tests.rs"]
+mod credential_tests;
 
 #[cfg(test)]
 mod tests {

@@ -9,4 +9,4 @@ target:
   group: admissionregistration.k8s.io
   version: v1
   kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-  name: codewire-orchestration-gateway-host-key
+  name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup)

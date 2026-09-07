@@ -284,8 +284,8 @@ jobs:
     name: Container contract verification
     runs-on: ci-heavy
     # A selected workspace verification performs two credential-free cold
-    # image builds. Keep its ceiling below the compatibility runner's
-    # independently enforced 60-minute task budget while allowing the admitted
+    # image builds. Keep its ceiling below the heavy runner's
+    # independently enforced 90-minute task budget while allowing the admitted
     # cold path to exceed 45 minutes.
     timeout-minutes: 55
     needs: [verification-selection]
@@ -303,7 +303,7 @@ jobs:
           WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.workspace_image_selected }}
         run: |
           set -euo pipefail
-          if [ "$WORKSPACE_IMAGE_SELECTED" = true ] \
+          if { [ "$WORKSPACE_IMAGE_SELECTED" = true ] && [[ "$VERIFICATION_SELECTION" != *'|kind|'* ]]; } \
               || [[ "$VERIFICATION_SELECTION" == *'|ios|'* ]] \
               || { [[ "$VERIFICATION_SELECTION" == *'|web|'* ]] \
                 && [[ "$VERIFICATION_SELECTION" != *'|kind|'* ]]; }; then
@@ -314,20 +314,20 @@ jobs:
 
       - name: Container contracts not selected
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected != 'true' }}
-        run: echo 'container artifacts are unaffected; no checkout, download, installation, or build required'
+        run: echo 'standalone container work is unaffected or owned by selected Kind; no checkout, download, installation, or build required'
 
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.container-scope.outputs.selected == 'true' }}
 
       - name: Prove isolated Buildx load contract
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: |
           scripts/ci/tests/test-build-local-image.sh
           scripts/ci/tests/test-workspace-agent-contract.sh
           scripts/ci/verify/rehearse-build-local-image.sh
 
       - name: Build and inspect without publication
-        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' }}
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/verify/verify-workspace-image.sh
 
       - name: Build and inspect the standalone dashboard image
@@ -938,10 +938,11 @@ jobs:
     name: Edge / Kind verification
     runs-on: ci-heavy
     enable-openid-connect: true
-    # The complete disposable-cluster gate stays below the heavy worker's
-    # independently enforced 60-minute lifetime while retaining enough time
-    # for value-blind cluster diagnostics and cleanup on a cold failure.
-    timeout-minutes: 55
+    # CI5538 needed almost 54 minutes through cold builds, cluster setup and
+    # real credential rotation alone, before the remaining integrated tests.
+    # Keep the complete gate bounded, with five minutes below the heavy
+    # worker's independently enforced 90-minute task budget for cleanup.
+    timeout-minutes: 85
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.edge_kind_expected == 'true' }}
     env:

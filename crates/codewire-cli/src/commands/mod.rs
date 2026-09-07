@@ -37,6 +37,10 @@ pub(crate) use credential_repository::*;
 #[cfg(target_os = "linux")]
 mod credentials;
 #[cfg(target_os = "linux")]
+mod platform_credentials;
+#[cfg(target_os = "linux")]
+mod platform_profiles;
+#[cfg(target_os = "linux")]
 pub(crate) use credentials::*;
 
 #[derive(Debug, Args)]
@@ -477,6 +481,12 @@ pub(crate) enum CredentialProfileCommand {
     Revisions(CredentialProfileSelectorArgs),
     #[command(alias = "rm", about = "Delete an access profile")]
     Delete(CredentialProfileDeleteArgs),
+    #[command(about = "Bind a personal platform profile to one existing environment")]
+    Bind(CredentialProfileBindArgs),
+    #[command(about = "Inspect an environment's platform access-profile selection")]
+    Binding(CredentialProfileBindingArgs),
+    #[command(about = "Clear an exact platform environment access-profile selection")]
+    Unbind(CredentialProfileUnbindArgs),
 }
 
 #[cfg(target_os = "linux")]
@@ -494,6 +504,8 @@ pub(crate) struct CredentialProfileSelectorArgs {
         help = "Profile name, name:<name>, id:<canonical-uuid>, or scope/name"
     )]
     pub(crate) profile: String,
+    #[arg(long, help = "Inspect one exact immutable revision")]
+    pub(crate) revision: Option<u64>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
 }
@@ -535,6 +547,43 @@ pub(crate) struct CredentialProfileDeleteArgs {
         help = "Profile name, name:<name>, id:<canonical-uuid>, or scope/name"
     )]
     pub(crate) profile: String,
+    #[arg(long)]
+    pub(crate) yes: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileBindArgs {
+    #[arg(value_name = "PROFILE_SELECTOR")]
+    pub(crate) profile: String,
+    #[arg(long, value_name = "ENVIRONMENT_ID")]
+    pub(crate) environment: String,
+    #[arg(
+        long,
+        help = "Explicitly consent to using this personal profile in this environment"
+    )]
+    pub(crate) confirm_personal_credentials: bool,
+    #[arg(
+        long,
+        help = "Replace the current selection using its exact observed binding"
+    )]
+    pub(crate) replace: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileBindingArgs {
+    #[arg(value_name = "ENVIRONMENT_ID")]
+    pub(crate) environment: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Args)]
+pub(crate) struct CredentialProfileUnbindArgs {
+    #[arg(value_name = "ENVIRONMENT_ID")]
+    pub(crate) environment: String,
     #[arg(long)]
     pub(crate) yes: bool,
 }

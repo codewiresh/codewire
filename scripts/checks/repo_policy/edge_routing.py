@@ -79,6 +79,11 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
                     fail(f"{file}: coordinator-owned {service} has no coordinator-targeted Connect rule")
                 if any(rule["backend"] != "coordinator" for rule in here):
                     fail(f"{file}: coordinator-owned {service} is also routed to another binary")
+            elif owner == "credential-service":
+                if service != "codewire.v1.CredentialMutationService":
+                    fail(f"{file}: isolated credential authority cannot own {service}")
+                if len(here) != 1 or here[0]["backend"] != "credential-service":
+                    fail(f"{file}: credential mutations need one isolated credential-service route")
             elif owner == "testing":
                 is_local = file in local_ingress_files
                 if is_local:
@@ -93,6 +98,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
                 fail(f"unknown owner kind '{owner}' for {service} in connect-edge-ownership.json")
 
     assert_mesh_connect_backend_topology(ownership, owners, per_file, fail)
+    assert_credential_mutation_edges(per_file, fail)
     assert_internal_connect_listener_exemption(unrouted, per_file, fail)
     assert_mesh_primary_origin_rest_edge(fail)
     if getattr(_args, "self_test", False):
@@ -101,6 +107,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
             mesh_connect_backend_topology_self_test(ownership, owners, per_file)
             mesh_coordinator_transport_self_test()
             mesh_primary_origin_rest_edge_self_test()
+            credential_mutation_edges_self_test(per_file)
         except RuntimeError as error:
             fail(f"Connect edge self-test: {error}")
 
@@ -138,6 +145,74 @@ INTERNAL_CONNECT_SERVICES = {
         "codewire_orchestration::connect::mesh_authorization::router"
     ),
 }
+
+
+def assert_credential_mutation_edges(
+    per_file: dict[str, dict[str, Any]],
+    fail: Callable[[str], None],
+    reader: Callable[[str], str] = read_text,
+) -> None:
+    """Enrollment streams use only the isolated public listener, never broker TLS."""
+    service = "codewire.v1.CredentialMutationService"
+    for file, data in per_file.items():
+        rules = [rule for rule in data["rules"] if rule["service"] == service]
+        if len(rules) != 1 or rules[0]["backend"] != "credential-service":
+            fail(f"{file}: credential mutation route must target the isolated public listener")
+        text = reader(file)
+        if "broker.v1.CredentialBrokerService" in text.replace("\\.", "."):
+            fail(f"{file}: private credential broker must not have a public edge matcher")
+        if file.startswith("Caddyfile"):
+            block = caddy_handle_block(text, f"/{service}/*") or ""
+            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8086\b", block):
+                fail(f"{file}: credential mutation edge must use public port 8086")
+            if not re.search(r"flush_interval\s+-1\b", block):
+                fail(f"{file}: credential mutation challenge must stream without buffering")
+        else:
+            document = connect_fallback_ingress_document(text, file, fail) or ""
+            expected = (
+                "path: /codewire\\.v1\\.CredentialMutationService/ "
+                "pathType: ImplementationSpecific backend: service: "
+                "name: codewire-credential-service port: name: http"
+            )
+            if expected not in re.sub(r"\s+", " ", document):
+                fail(f"{file}: credential mutation must share the unbuffered Connect edge on http")
+            if rules and rules[0].get("backend_service") != "codewire-credential-service":
+                fail(f"{file}: credential mutation needs the exact credential-service Service")
+
+
+def credential_mutation_edges_self_test(per_file: dict[str, dict[str, Any]]) -> None:
+    service = "codewire.v1.CredentialMutationService"
+    for file in per_file:
+        broken = copy.deepcopy(per_file)
+        for rule in broken[file]["rules"]:
+            if rule["service"] == service:
+                rule["backend"] = "orchestration"
+        failures: list[str] = []
+        assert_credential_mutation_edges(broken, failures.append)
+        if not any(file in message and "isolated public listener" in message for message in failures):
+            raise RuntimeError(f"{file}: accepted credential mutation via orchestration")
+
+    for file, before, after, wanted in [
+        ("Caddyfile", ":8086", ":9443", "public port 8086"),
+        ("Caddyfile.docker", "flush_interval -1", "flush_interval 1s", "without buffering"),
+        (
+            "tests/e2e/kind/ingress.yaml",
+            "name: codewire-credential-service\n                port:\n                  name: http",
+            "name: codewire-credential-service\n                port:\n                  name: broker-tls",
+            "unbuffered Connect edge on http",
+        ),
+        ("Caddyfile", "/codewire.*", "/broker.v1.CredentialBrokerService/*", "private credential broker"),
+    ]:
+        original = read_text(file)
+        if before not in original:
+            raise RuntimeError(f"{file}: missing credential edge negative fixture")
+        changed = original.replace(before, after, 1)
+        failures = []
+        assert_credential_mutation_edges(
+            per_file, failures.append, lambda path: changed if path == file else read_text(path)
+        )
+        if not any(file in message and wanted in message for message in failures):
+            raise RuntimeError(f"{file}: accepted broken credential edge: {wanted}")
 
 
 MESH_KUBERNETES_BACKENDS = {
@@ -473,6 +548,8 @@ def connect_rules(rel_path: str, fail: Callable[[str], None]) -> dict[str, Any]:
                 backend = "orchestration"
             elif target.group(1) == "8081":
                 backend = "billing"
+            elif target.group(1) == "8086":
+                backend = "credential-service"
             elif target.group(1) == "8090":
                 backend = "coordinator"
             elif target.group(1) == "18090":
@@ -507,7 +584,10 @@ def connect_rules(rel_path: str, fail: Callable[[str], None]) -> dict[str, Any]:
                 )
                 if backend_match:
                     backend_service = backend_match.group(1)
-                    backend = backend_service.removeprefix("codewire-").split("-", 1)[0]
+                    backend = (
+                        "credential-service" if backend_service == "codewire-credential-service"
+                        else backend_service.removeprefix("codewire-").split("-", 1)[0]
+                    )
                     break
             unescaped = path.replace("\\.", ".")
             if unescaped == "/codewire.":

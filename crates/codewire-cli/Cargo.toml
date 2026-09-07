@@ -47,7 +47,7 @@ zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 codewire-access = { workspace = true }
-codewire-credential-broker = { workspace = true }
+codewire-credential-broker = { workspace = true, features = ["codex-enrollment"] }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
 codewire-protected-store = { workspace = true }

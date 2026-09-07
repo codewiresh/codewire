@@ -41,6 +41,8 @@ KIND_HOST_LOCK_FILE="${KIND_HOST_LOCK_FILE:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/
 KIND_HOST_LOCK_FD=""
 NS=codewire-e2e
 SANDBOX_NS=dev-sandboxes
+# shellcheck source=scripts/ci/verify/kind/credentials.sh
+source "$ROOT/scripts/ci/verify/kind/credentials.sh"
 AUTHZ_TMPDIR=""
 GATEWAY_SMOKE_TMPDIR=""
 GATEWAY_PORT_FORWARD_PID=""
@@ -329,7 +331,7 @@ validate_retained_cluster_identity() {
 }
 
 validate_retained_cluster() {
-  local prepared_version prepared_cluster
+  local prepared_version prepared_cluster prepared_workspace expected_workspace
 
   validate_retained_cluster_identity || return $?
   if ! prepared_version="$(kubectl --request-timeout=10s -n "$NS" get \
@@ -346,14 +348,25 @@ validate_retained_cluster() {
     return 1
   fi
 
+  prepared_workspace="$(kubectl --request-timeout=10s -n "$NS" get \
+    "configmap/${KIND_E2E_PREPARED_CONFIGMAP}" -o jsonpath='{.data.workspace-image}')" || return $?
+  expected_workspace="$(kind_workspace_runtime_image)" || return $?
+  if [ "$prepared_workspace" != "$expected_workspace" ]; then
+    echo '::error::retained Kind workspace image does not match its verified source' >&2
+    return 1
+  fi
+
   log "retained Kind cluster ${KIND_CLUSTER_NAME} accepted at compatibility version ${KIND_E2E_COMPATIBILITY_VERSION}"
 }
 
 mark_retained_cluster_prepared() {
+  local workspace_image
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
   log "marking Kind cluster ${KIND_CLUSTER_NAME} prepared for retained suites"
   kubectl -n "$NS" create configmap "$KIND_E2E_PREPARED_CONFIGMAP" \
     --from-literal="compatibility_version=${KIND_E2E_COMPATIBILITY_VERSION}" \
     --from-literal="cluster-name=${KIND_CLUSTER_NAME}" \
+    --from-literal="workspace-image=$workspace_image" \
     --dry-run=client -o yaml | kubectl_apply -f -
 }
 
@@ -568,6 +581,9 @@ ingress_path_drift_check() {
 build_images_and_smokes() {
   case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
     build-ci)
+      log "verifying the canonical source workspace image once for Kind"
+      "$ROOT/scripts/ci/verify/rehearse-build-local-image.sh"
+      "$ROOT/scripts/ci/verify/verify-workspace-image.sh"
       log "building exact candidate product images once through the CI Bake profile"
       CODEWIRE_BAKE_METADATA_FILE="$RUN_DIR/kind-image-build-metadata.json" \
         "$ROOT/scripts/ci/images/build-kind-images.sh"
@@ -596,7 +612,9 @@ build_images_and_smokes() {
       cargo build --profile ci -p codewire-orchestration --bin crd-smoke --bin environment-setup-smoke --bin exec-smoke --bin exec-stream-smoke --bin file-service-smoke --bin prepare-stream-smoke --bin log-stream-smoke --bin temporal-smoke --bin temporal-fencing-smoke --bin reconciler-ttl-smoke --bin sidecar-smoke --features kind-e2e
       cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke
       cargo build --profile ci -p codewire-client --example coordinator-ingress-smoke --features kind-e2e
-    '
+      cargo build --locked --profile ci -p codewire-cli-bin --bin cw
+      cargo test --locked --profile ci -p codewire-orchestration --lib --no-run --message-format=json >"$1"
+    ' -- "$RUN_DIR/credential-bootstrap-build.jsonl"
   )
   printf 'CODEWIRE_CI_PHASE name=kind-smoke-binary-build seconds=%s\n' \
     "$(( $(date +%s) - smoke_started_at ))"
@@ -780,11 +798,17 @@ validate_sealed_kind_images() {
 }
 
 kind_workspace_runtime_image() {
-  if validate_sealed_kind_images; then
+  local sealed_status=0
+  validate_sealed_kind_images || sealed_status=$?
+  [ "$sealed_status" -le 1 ] || return "$sealed_status"
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ]; then
+    python3 "$ROOT/scripts/ci/verify/workspace-image-artifact.py" reuse "$ROOT" \
+      "$ROOT/.tmp/codewire-workspace-image-verification.json"
+    return $?
+  fi
+  if [ "$sealed_status" -eq 0 ]; then
     printf '%s\n' "$KIND_WORKSPACE_LOCAL_IMAGE"
   else
-    local status=$?
-    [ "$status" -eq 1 ] || return "$status"
     printf '%s\n' "$KIND_WORKSPACE_IMAGE"
   fi
 }
@@ -823,6 +847,7 @@ prepare_kind_support_images() {
     source="${source%%|*}"
     docker image tag "$source" "$alias"
   done
+  prepare_kind_credential_support_images
 }
 
 load_images_into_kind() {
@@ -843,6 +868,15 @@ load_images_into_kind() {
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
     wait_for_kind_api_after_image_load
   done
+
+  load_kind_credential_support_images
+
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ]; then
+    image="$(kind_workspace_runtime_image)" || return $?
+    log "loading the exact verified source workspace image into Kind"
+    kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
+    wait_for_kind_api_after_image_load
+  fi
 
   if validate_sealed_kind_images; then
     # The trusted runner boundary pulls these images from Nexus before any
@@ -1051,6 +1085,8 @@ deploy_overlay() {
     --selector=app.kubernetes.io/component=controller \
     --timeout=180s
 
+  deploy_kind_credential_cert_manager
+
   log "ensuring isolated kind sandbox namespace"
   kubectl create namespace "$SANDBOX_NS" --dry-run=client -o yaml |
     kubectl_apply -f -
@@ -1079,6 +1115,7 @@ deploy_overlay() {
     exit 1
   fi
   assert_kind_idp_topology
+  deploy_kind_credential_issuers
   # Staged rollout: the services fail fast (correctly) when Postgres or
   # Temporal is unreachable, so park them at zero replicas until their
   # dependencies are Ready — otherwise a slow runner leaves them in
@@ -1124,6 +1161,8 @@ deploy_overlay() {
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 < "$ROOT/tests/e2e/kind/coordinator-seed.sql"
 
+  start_kind_credential_fixture
+
   log "starting billing, IdP, primary authorization, Mesh, and coordinator (dependencies ready)"
   kubectl -n "$NS" scale \
     deploy/codewire-billing \
@@ -1141,7 +1180,8 @@ deploy_overlay() {
 }
 
 dashboard_browser_e2e() {
-  local playwright chromium
+  local playwright chromium workspace_image
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
   playwright="$ROOT/apps/dashboard/node_modules/.bin/playwright"
   if [ ! -x "$playwright" ]; then
     echo "::error::dashboard Playwright dependencies are missing; run PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts"
@@ -1165,7 +1205,7 @@ dashboard_browser_e2e() {
   DATABASE_URL="${KIND_DATABASE_URL}?sslmode=disable" \
     SERVER_URL="$KIND_INGRESS_URL" \
     PLAYWRIGHT_BASE_URL="$KIND_INGRESS_URL" \
-    PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
+    PLAYWRIGHT_RUNTIME_WORKSPACE_IMAGE="$workspace_image" \
     PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium" \
     CODEWIRE_PLAYWRIGHT_USE_DEV_SHM="$CODEWIRE_PLAYWRIGHT_USE_DEV_SHM" \
     KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
@@ -2402,6 +2442,8 @@ EOF
 )
 
 file_service_smoke() (
+  local workspace_image
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
   log "running daemon-native FileService client/server streaming and Connect contract smoke"
   local environment_id=env-crd-smoke
   local claim_name=sandbox-env-crd-smoke
@@ -2542,7 +2584,7 @@ SQL
   trap - EXIT
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
-    CRD_SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
+    CRD_SMOKE_WORKSPACE_IMAGE="$workspace_image" \
     CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" \
     CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=cleanup \
@@ -2751,8 +2793,10 @@ workspace_service_smokes() {
 
 environment_resize_smoke() (
   log "running public environment resize against the agent-sandbox controller"
-  local environment_id="env-resize-kind-${RANDOM}"
+  local environment_id
+  environment_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   local request_id="kind-resize-${RANDOM}-${RANDOM}"
+  local preset_id="preset-${environment_id}"
   local template_name="resize-template-${environment_id}"
   local shadow_pool_name="shadow-pool-resize-template-${environment_id}"
   local claim_name="sandbox-${environment_id}"
@@ -2763,20 +2807,39 @@ environment_resize_smoke() (
 
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_environment_resize_smoke() {
+    local status=$?
+    trap - EXIT
     set +e
     kubectl -n "$NS" exec -i deploy/postgres -- \
       psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+BEGIN;
 DELETE FROM sandbox_environment_backend WHERE environment_id = '$environment_id';
 DELETE FROM environments WHERE id = '$environment_id';
+DELETE FROM environment_presets WHERE id = '$preset_id' AND org_id = 'org_contract_1';
+COMMIT;
 SQL
-    kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-      --ignore-not-found=true --wait=false >/dev/null
-    kubectl -n "$SANDBOX_NS" delete sandboxwarmpool "$shadow_pool_name" \
-      --ignore-not-found=true --wait=false >/dev/null
-    kubectl -n "$SANDBOX_NS" delete sandboxtemplate "$template_name" \
-      --ignore-not-found=true --wait=false >/dev/null
-    kubectl -n "$SANDBOX_NS" delete service "$daemon_service" \
-      --ignore-not-found=true --wait=false >/dev/null
+    [ "$?" -eq 0 ] || status=1
+    # Runtime identity reconciliation creates the ordinary gateway stack.
+    # Stop its Deployment and issuing Certificate before deleting either leaf key;
+    # never delete the shared fixture Issuers or public root ConfigMaps.
+    if kubectl -n "$SANDBOX_NS" delete \
+      "sandboxclaim/$claim_name" "sandboxwarmpool/$shadow_pool_name" \
+      "sandboxtemplate/$template_name" "service/$daemon_service" \
+      "deployment/cw-gateway-$environment_id" \
+      "service/cw-gateway-svc-$environment_id" "service/cw-gateway-udp-$environment_id" \
+      "networkpolicy/cw-gw-net-$environment_id" "networkpolicy/cw-daemon-net-$environment_id" \
+      --ignore-not-found=true --cascade=foreground --wait=true --timeout=120s >/dev/null; then
+      if delete_kind_credential_bootstrap "$environment_id"; then
+        kubectl -n "$SANDBOX_NS" delete \
+          "secret/cw-gateway-host-key-$environment_id" \
+          --ignore-not-found=true --wait=true --timeout=120s >/dev/null || status=1
+      else
+        status=1
+      fi
+    else
+      status=1
+    fi
+    exit "$status"
   }
   trap cleanup_environment_resize_smoke EXIT
 
@@ -2933,6 +2996,14 @@ EOF
 
   kubectl -n "$NS" exec -i deploy/postgres -- \
     psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
+BEGIN;
+-- A runnable fixture owns its own preset. The shared contract preset is
+-- deliberately missing runtime configuration for the Temporal failure test.
+INSERT INTO environment_presets (id, org_id, name, official, project_spec)
+VALUES ('$preset_id', 'org_contract_1', '$preset_id', false,
+        '{"schema_version":1,"image":"codewire-gateway:e2e","working_directory":"/workspace"}'::jsonb);
+INSERT INTO sandbox_template_config (preset_id, image_ref, sandbox_template_name)
+VALUES ('$preset_id', 'codewire-gateway:e2e', 'resize-template');
 INSERT INTO environments (
   id, org_id, created_by, type, name, state, desired_state, preset_id,
   cpu_millicores, memory_mb, disk_gb,
@@ -2940,7 +3011,7 @@ INSERT INTO environments (
 )
 VALUES (
   '$environment_id', 'org_contract_1', 'usr_contract_admin', 'sandbox',
-  'kind-resize-smoke', 'running', 'started', 'preset_contract_1',
+  'kind-resize-smoke', 'running', 'started', '$preset_id',
   250, 256, 1, NOW(),
   '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
 );
@@ -2952,6 +3023,7 @@ VALUES (
   '$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" -o jsonpath='{.metadata.uid}')',
   '$pod_name', '$pod_ip'
 );
+COMMIT;
 SQL
 
   curl_settled -X POST \
@@ -3162,16 +3234,20 @@ SQL
 }
 
 temporal_fencing_smoke() {
+  local workspace_image
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
   log "running final Temporal activity-fencing smoke"
   DATABASE_URL="$KIND_DATABASE_URL" \
     TEMPORAL_ADDRESS="http://127.0.0.1:7233" \
     SMOKE_ORCHESTRATION_URL="http://127.0.0.1:8084" \
-    SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
+    SMOKE_WORKSPACE_IMAGE="$workspace_image" \
     "$CARGO_CI_DIR/temporal-fencing-smoke"
 }
 
 deploy_agent_sandbox_and_smoke() {
   deploy_agent_sandbox
+  kind_credential_bootstrap_smoke
+  kind_credential_native_smoke
   workspace_service_smokes
   temporal_workflow_smoke
   mark_retained_cluster_prepared
@@ -3189,7 +3265,7 @@ assert_sandbox_supply_chain() {
     return 1
   fi
 
-  workspace_image="$(kind_workspace_runtime_image)"
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
   dind_image="$(kind_dind_runtime_image)"
   configured_dind_image="$(kubectl -n "$NS" get configmap/codewire-config \
     -o jsonpath='{.data.SANDBOX_DIND_IMAGE}')"
@@ -3352,6 +3428,8 @@ capture_gateway_public_fingerprint() {
 }
 
 gateway_host_key_restart_smoke() {
+  local workspace_image
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
   local daemon_pod=crd-smoke-workspace-daemon
   local gateway_deploy=cw-gateway-env-crd-smoke
   local host_key_secret=cw-gateway-host-key-env-crd-smoke
@@ -3364,7 +3442,7 @@ gateway_host_key_restart_smoke() {
   GATEWAY_SMOKE_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/codewire-kind-gateway.XXXXXX")"
   CRD_SMOKE_NAMESPACE="$SANDBOX_NS" \
     CRD_SMOKE_SERVER_NAMESPACE="$NS" \
-    CRD_SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
+    CRD_SMOKE_WORKSPACE_IMAGE="$workspace_image" \
     CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" \
     CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
     CRD_SMOKE_GATEWAY_PHASE=setup \
@@ -3461,6 +3539,8 @@ billing_contract_through_ingress() {
 }
 
 rust_reconciler_ttl_e2e() {
+  local workspace_image
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
   log "running Rust reconciler TTL Kubernetes e2e"
   KIND_CLUSTER_NAME="$KIND_CLUSTER_NAME" \
     DATABASE_URL="$KIND_DATABASE_URL" \
@@ -3468,7 +3548,7 @@ rust_reconciler_ttl_e2e() {
     SMOKE_SANDBOX_NAMESPACE="$SANDBOX_NS" \
     SMOKE_SESSION_TOKEN=contract-admin-session-token \
     SMOKE_ORG_ID=org_contract_1 \
-    SMOKE_WORKSPACE_IMAGE="$(kind_workspace_runtime_image)" \
+    SMOKE_WORKSPACE_IMAGE="$workspace_image" \
     "$CARGO_CI_DIR/reconciler-ttl-smoke"
 }
 

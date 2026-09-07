@@ -19,8 +19,8 @@ use crate::sandbox::template::{
     validate_managed_runtime_profile,
 };
 use crate::sandbox::{
-    ClaimOpts, claim_name, environment_pod_selector, environment_template_name,
-    is_canonical_workspace_runtime_image, shadow_warm_pool_name,
+    ClaimOpts, claim_name, environment_template_name, is_canonical_workspace_runtime_image,
+    shadow_warm_pool_name,
 };
 
 /// Mirrors `sandbox.CanonicalWorkspaceRuntimeTemplateName`.
@@ -104,6 +104,20 @@ fn create_retry_recovery_required(state: &str) -> bool {
     state == "pending"
 }
 
+fn create_action_requires_runtime_identity(action: CreateAction) -> bool {
+    matches!(
+        action,
+        CreateAction::StoreBackend
+            | CreateAction::MarkRunning
+            | CreateAction::PublishSetup
+            | CreateAction::Done
+    )
+}
+
+pub(super) fn requires_running_runtime_identity(state: &str, desired_state: &str) -> bool {
+    state == "running" && desired_state == "started"
+}
+
 // ── Worker sandbox config (the cfg slice the create path reads) ────────
 
 /// Runtime configuration consumed by the environment-create handler.
@@ -111,6 +125,7 @@ fn create_retry_recovery_required(state: &str) -> bool {
 pub struct SandboxWorkerCfg {
     pub session_secret: String,
     pub sandbox_namespace: String,
+    pub credential_runtime: Option<crate::sandbox::template::CredentialRuntimeTemplateConfig>,
     pub gateway_image: String,
     pub dind_image: String,
     pub runtime_profile: String,
@@ -166,6 +181,10 @@ impl SandboxWorkerCfg {
             "SANDBOX_KATA_COCO_KBS_URL",
             &getenv("CONFIDENTIAL_STORAGE_KBS_URL", ""),
         );
+        let sandbox_namespace = getenv("SANDBOX_NAMESPACE", &format!("{env_prefix}-sandboxes"));
+        let credential_runtime =
+            crate::sandbox::template::CredentialRuntimeTemplateConfig::from_env(&sandbox_namespace)
+                .expect("platform credential runtime configuration must be complete and canonical");
         let kbs_ca_path = getenv("CONFIDENTIAL_STORAGE_KBS_CA_PATH", "");
         let kata_coco_kbs_ca_pem = if kbs_ca_path.is_empty() {
             String::new()
@@ -178,7 +197,8 @@ impl SandboxWorkerCfg {
         };
         Self {
             session_secret: getenv("SESSION_SECRET", ""),
-            sandbox_namespace: getenv("SANDBOX_NAMESPACE", &format!("{env_prefix}-sandboxes")),
+            sandbox_namespace,
+            credential_runtime,
             gateway_image: getenv(
                 "SANDBOX_GATEWAY_IMAGE",
                 "ghcr.io/codewiresh/gateway@sha256:686a2437f023fe2a4759e87ba93b8d4a71885eefdc5ec7c3486a95f3d6da2836",
@@ -273,10 +293,15 @@ pub fn environment_template_opts(
     image_ref: &str,
     template_base: &str,
     env: &EnvironmentRow,
-    env_id: &str,
+    operation_generation: i64,
     gateway_token: &str,
     daemon_auth_token: &str,
 ) -> TemplateOpts {
+    let env_id = env.id.as_str();
+    assert!(
+        operation_generation > 0,
+        "operation authority must be captured"
+    );
     assert!(
         gateway_token != daemon_auth_token,
         "hosted coordinate and daemon capabilities must be distinct"
@@ -312,6 +337,9 @@ pub fn environment_template_opts(
         runtime_profile: runtime_spec.profile.clone(),
         docker_mode: runtime_spec.docker_mode.clone(),
         environment_id: env_id.to_string(),
+        organization_id: env.org_id.clone(),
+        operation_generation,
+        credential_runtime: cfg.credential_runtime.clone(),
         confidential_storage_manifest_uri: String::new(),
         gateway_token: gateway_token.to_string(),
         daemon_auth_token: daemon_auth_token.to_string(),
@@ -385,8 +413,13 @@ pub fn environment_claim_opts(
     image_ref: &str,
     template_base: &str,
     env: &EnvironmentRow,
-    env_id: &str,
+    operation_generation: i64,
 ) -> ClaimOpts {
+    let env_id = env.id.as_str();
+    assert!(
+        operation_generation > 0,
+        "operation authority must be captured"
+    );
     let template_base = if is_canonical_workspace_runtime_image(image_ref) {
         CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME
     } else {
@@ -396,9 +429,15 @@ pub fn environment_claim_opts(
     ClaimOpts {
         environment_id: env_id.to_string(),
         org_id: env.org_id.clone(),
+        operation_generation,
         warm_pool_ref: shadow_warm_pool_name(&template_ref),
         template_ref,
-        additional_pod_labels: environment_pod_selector(env_id),
+        additional_pod_labels: crate::sandbox::runtime_identity_labels(
+            env_id,
+            &env.org_id,
+            operation_generation,
+            "workspace",
+        ),
         ..Default::default()
     }
 }
@@ -513,6 +552,7 @@ pub(super) async fn confidential_runtime_template_opts(
     ctx: &WorkerContext,
     env: &EnvironmentRow,
     confidential_storage_manifest_uri: &str,
+    operation_generation: i64,
 ) -> anyhow::Result<TemplateOpts> {
     anyhow::ensure!(
         env.isolation_tier == "confidential",
@@ -532,7 +572,7 @@ pub(super) async fn confidential_runtime_template_opts(
         &image_ref,
         &template_base,
         env,
-        env_id,
+        operation_generation,
         &auth_tokens.coordinate,
         &auth_tokens.daemon,
     );
@@ -558,8 +598,13 @@ pub(super) async fn authorize_confidential_runtime_for_environment(
     if env.isolation_tier != "confidential" {
         return Ok(());
     }
-    let template_opts =
-        confidential_runtime_template_opts(ctx, env, confidential_storage_manifest_uri).await?;
+    let template_opts = confidential_runtime_template_opts(
+        ctx,
+        env,
+        confidential_storage_manifest_uri,
+        authority.operation_generation(),
+    )
+    .await?;
     authorize_confidential_runtime(ctx, &template_opts, authority, authoritative_states).await
 }
 
@@ -576,8 +621,13 @@ pub(super) async fn reconcile_confidential_runtime_before_replacement(
         return Ok(());
     }
     let env_id = env.id.as_str();
-    let template_opts =
-        confidential_runtime_template_opts(ctx, env, confidential_storage_manifest_uri).await?;
+    let template_opts = confidential_runtime_template_opts(
+        ctx,
+        env,
+        confidential_storage_manifest_uri,
+        authority.operation_generation(),
+    )
+    .await?;
     authorize_confidential_runtime(ctx, &template_opts, authority, authoritative_states).await?;
 
     let kernel_params = authority
@@ -662,6 +712,12 @@ async fn run_environment_create(
         let setup_complete = backend.as_ref().is_some_and(|b| b.setup_complete);
         let action = next_create_action(&env.state, backend.as_ref(), setup_complete, &probe);
         tracing::info!(env = env_id, state = env.state, action = %action, "create loop");
+
+        if create_action_requires_runtime_identity(action) {
+            let backend = backend.as_ref().expect("ready runtime requires backend");
+            reconcile_runtime_identity(ctx, &env, backend, authority, &[env.state.as_str()])
+                .await?;
+        }
 
         match action {
             CreateAction::Done => return Ok(()),
@@ -892,7 +948,7 @@ async fn run_environment_create(
                     &image_ref,
                     &template_base,
                     &env,
-                    env_id,
+                    authority.operation_generation(),
                     &auth_tokens.coordinate,
                     &auth_tokens.daemon,
                 );
@@ -938,7 +994,12 @@ async fn run_environment_create(
                     .await?;
                     return Err(e);
                 }
-                let claim_opts = environment_claim_opts(&image_ref, &template_base, &env, env_id);
+                let claim_opts = environment_claim_opts(
+                    &image_ref,
+                    &template_base,
+                    &env,
+                    authority.operation_generation(),
+                );
 
                 let backend = backend
                     .as_ref()
@@ -1030,6 +1091,12 @@ async fn run_environment_create(
                         client.create_sandbox_claim(&backend.namespace, &claim_opts),
                     )
                     .await?;
+                    await_external_mutation(client.reconcile_claim_runtime_identity(
+                        &claim_opts,
+                        &created_claim_name,
+                        &claim_uid,
+                    ))
+                    .await?;
                     #[cfg(feature = "kind-e2e")]
                     super::fencing_evidence::hold_claim_row_lock(
                         env_id,
@@ -1073,12 +1140,24 @@ async fn run_environment_create(
                         return Err(e);
                     }
                 };
-                if let Err(e) = authority
-                    .run_external_mutation(
-                        CREATE_MUTATION_STATES,
-                        client.ensure_gateway_stack(&template_opts),
-                    )
-                    .await
+                if let Err(e) = async {
+                    authority
+                        .run_external_mutation(
+                            CREATE_MUTATION_STATES,
+                            client.ensure_gateway_stack(&template_opts),
+                        )
+                        .await?;
+                    authority
+                        .run_while_authoritative_for_states(
+                            CREATE_MUTATION_STATES,
+                            client.wait_for_credential_gateway_ready(
+                                &template_opts,
+                                ready_timeout_for_isolation(&env.isolation_tier),
+                            ),
+                        )
+                        .await
+                }
+                .await
                 {
                     emit_create_log(
                         authority,
@@ -1102,39 +1181,11 @@ async fn run_environment_create(
             }
 
             CreateAction::StoreBackend => {
-                if let Some(backend) = backend.as_ref()
-                    && let Err(e) = ensure_gateway_stack_for_environment(
-                        ctx,
-                        cfg,
-                        &env,
-                        env_id,
-                        &backend.namespace,
-                        authority,
-                    )
-                    .await
-                {
-                    record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
-                    return Err(e);
-                }
                 update_backend_pod_info(authority, &probe.pod_ip, &probe.pod_name).await?;
                 emit_create_log(authority, "store_backend", "completed", "", None).await?;
             }
 
             CreateAction::MarkRunning => {
-                let backend = backend.as_ref().expect("mark_running requires backend");
-                if let Err(e) = ensure_gateway_stack_for_environment(
-                    ctx,
-                    cfg,
-                    &env,
-                    env_id,
-                    &backend.namespace,
-                    authority,
-                )
-                .await
-                {
-                    record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
-                    return Err(e);
-                }
                 if let Err(e) = svc.transition(env_id, &env.state, "running").await {
                     authority.ensure().await?;
                     tracing::warn!(env = env_id, from = env.state, error = %e, "CAS to running failed");
@@ -1299,6 +1350,7 @@ async fn ensure_gateway_stack_for_environment(
     env_id: &str,
     namespace: &str,
     authority: &ActivityAuthority,
+    states: &[&str],
 ) -> anyhow::Result<()> {
     let preset_id = env.preset_id.clone().unwrap_or_default();
     let (image_ref, template_base) = load_sandbox_template_config(&ctx.pool, &preset_id).await?;
@@ -1308,7 +1360,7 @@ async fn ensure_gateway_stack_for_environment(
         &image_ref,
         &template_base,
         env,
-        env_id,
+        authority.operation_generation(),
         &auth_tokens.coordinate,
         &auth_tokens.daemon,
     );
@@ -1317,11 +1369,93 @@ async fn ensure_gateway_stack_for_environment(
         .map_err(|e| anyhow::anyhow!("runtime profile: {e}"))?;
     let client = require_client(ctx, namespace)?;
     authority
-        .run_external_mutation(
-            CREATE_MUTATION_STATES,
-            client.ensure_gateway_stack(&template_opts),
+        .run_external_mutation(states, client.ensure_gateway_stack(&template_opts))
+        .await?;
+    authority
+        .run_while_authoritative_for_states(
+            states,
+            client.wait_for_credential_gateway_ready(
+                &template_opts,
+                ready_timeout_for_isolation(&env.isolation_tier),
+            ),
         )
         .await
+}
+
+/// Reconcile labels for an already-observed live runtime using only the
+/// activity's existing generation. The Claim write and DB association read
+/// share its row fence; controller convergence never holds that SQL lock.
+pub(super) async fn reconcile_runtime_identity(
+    ctx: &WorkerContext,
+    env: &EnvironmentRow,
+    backend: &BackendRow,
+    authority: &ActivityAuthority,
+    states: &[&str],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        env.id == authority.environment_id(),
+        "runtime identity authority does not match environment"
+    );
+    let client = require_client(ctx, &backend.namespace)?;
+    let opts = ClaimOpts {
+        environment_id: env.id.clone(),
+        org_id: env.org_id.clone(),
+        operation_generation: authority.operation_generation(),
+        ..Default::default()
+    };
+    let mut guard = authority.begin_external_mutation(states).await?;
+    let (namespace, claim_name, claim_uid, organization): (String, String, String, String) =
+        sqlx::query_as(
+            "SELECT b.namespace, b.sandbox_claim_name, b.sandbox_claim_uid, e.org_id
+           FROM sandbox_environment_backend b JOIN environments e ON e.id = b.environment_id
+          WHERE b.environment_id = $1",
+        )
+        .bind(&env.id)
+        .fetch_one(&mut **guard.transaction())
+        .await?;
+    anyhow::ensure!(
+        organization == env.org_id
+            && namespace == backend.namespace
+            && claim_name == backend.claim_name
+            && !namespace.is_empty()
+            && !claim_uid.is_empty(),
+        "runtime identity backend association changed"
+    );
+    let observation = await_external_mutation(async {
+        let observation = client
+            .observe_claim_runtime_identity(&opts, &claim_name, &claim_uid)
+            .await?;
+        client
+            .reconcile_claim_runtime_identity(&opts, &claim_name, &claim_uid)
+            .await?;
+        Ok(observation)
+    })
+    .await?;
+    guard.commit().await?;
+
+    ensure_gateway_stack_for_environment(
+        ctx,
+        &ctx.sandbox_cfg,
+        env,
+        &env.id,
+        &namespace,
+        authority,
+        states,
+    )
+    .await?;
+    authority
+        .run_while_authoritative_for_states(
+            states,
+            client.wait_for_claim_runtime_identity(
+                &opts,
+                &claim_name,
+                &claim_uid,
+                &observation,
+                ready_timeout_for_isolation(&env.isolation_tier),
+            ),
+        )
+        .await?;
+    authority.ensure_for_states(states).await
 }
 
 async fn record_error(
@@ -1474,6 +1608,39 @@ mod tests {
     }
 
     #[test]
+    fn ready_create_actions_including_retry_fast_paths_require_runtime_identity() {
+        for action in [
+            CreateAction::Done,
+            CreateAction::StoreBackend,
+            CreateAction::MarkRunning,
+            CreateAction::PublishSetup,
+        ] {
+            assert!(create_action_requires_runtime_identity(action));
+        }
+        for action in [
+            CreateAction::WaitForReady,
+            CreateAction::EnsureNamespace,
+            CreateAction::CreateClaim,
+        ] {
+            assert!(!create_action_requires_runtime_identity(action));
+        }
+    }
+
+    #[test]
+    fn running_identity_reconciliation_never_resumes_stopped_or_destroying_environments() {
+        assert!(requires_running_runtime_identity("running", "started"));
+        for (state, desired) in [
+            ("running", "stopped"),
+            ("running", "destroyed"),
+            ("stopped", "started"),
+            ("destroying", "started"),
+            ("resizing", "resized"),
+        ] {
+            assert!(!requires_running_runtime_identity(state, desired));
+        }
+    }
+
+    #[test]
     fn stale_create_commands_do_not_resurrect_deleted_environments() {
         assert!(create_command_cancelled("pending", "destroyed"));
         assert!(create_command_cancelled("creating", "destroyed"));
@@ -1529,11 +1696,16 @@ mod tests {
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "tmpl-base",
             &env,
-            "env-1",
+            7,
         );
         assert_eq!(opts.template_ref, "workspace-env-1");
         assert_eq!(opts.warm_pool_ref, "shadow-pool-workspace-env-1");
         assert!(opts.env_overrides.is_empty());
+        assert_eq!(opts.operation_generation, 7);
+        assert_eq!(
+            opts.additional_pod_labels,
+            crate::sandbox::runtime_identity_labels("env-1", "org-1", 7, "workspace")
+        );
 
         // Isolation tier and requested size never select a shared template.
         let mut confidential = env.clone();
@@ -1543,7 +1715,7 @@ mod tests {
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "tmpl-base",
             &confidential,
-            "env-1",
+            7,
         );
         assert_eq!(opts.template_ref, "workspace-env-1");
         assert_eq!(opts.warm_pool_ref, "shadow-pool-workspace-env-1");
@@ -1557,7 +1729,7 @@ mod tests {
         );
 
         // Custom image → per-env template from the preset base name.
-        let opts = environment_claim_opts("ghcr.io/acme/custom:1", "tmpl-base", &env, "env-1");
+        let opts = environment_claim_opts("ghcr.io/acme/custom:1", "tmpl-base", &env, 7);
         assert_eq!(opts.template_ref, "tmpl-base-env-1");
         assert_eq!(opts.warm_pool_ref, "shadow-pool-tmpl-base-env-1");
         assert!(opts.env_overrides.is_empty());
@@ -1584,17 +1756,25 @@ mod tests {
         let first_id = "3d6bb495-efac-419f-bf3a-91696e7c7ca4";
         let second_id = "76169e1f-3bbf-46be-96e0-cac68e0ac910";
 
+        let first_env = EnvironmentRow {
+            id: first_id.to_owned(),
+            ..env.clone()
+        };
+        let second_env = EnvironmentRow {
+            id: second_id.to_owned(),
+            ..env.clone()
+        };
         let first_claim = environment_claim_opts(
             "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
             template_base,
-            &env,
-            first_id,
+            &first_env,
+            7,
         );
         let second_claim = environment_claim_opts(
             "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
             template_base,
-            &env,
-            second_id,
+            &second_env,
+            7,
         );
         let first_cleanup_template = environment_per_env_template_name(
             "ghcr.io/codewiresh/workspace@sha256:2058b7f1fd76f6f77b1dba596a9b54c698c049380e5ace6a0493f10a9d41e1b4",
@@ -1650,12 +1830,14 @@ mod tests {
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "preset-base",
             &env,
-            "env-1",
+            7,
             "tok",
             "daemon-tok",
         );
         assert!(opts.image_command.is_empty());
         assert_eq!(opts.name, "workspace-env-1");
+        assert_eq!(opts.organization_id, "org-1");
+        assert_eq!(opts.operation_generation, 7);
         assert_eq!(opts.derp_port, 443);
         assert_eq!(opts.stun_port, 3478);
         assert!(opts.kata_agent_policy_enabled);
@@ -1678,7 +1860,7 @@ mod tests {
             "ghcr.io/acme/img:1",
             "preset-base",
             &env,
-            "env-1",
+            7,
             "tok",
             "daemon-tok",
         );
@@ -1722,7 +1904,7 @@ mod tests {
             "ghcr.io/codewiresh/workspace:golden",
             "workspace",
             &standard,
-            "env-coexist",
+            7,
             "tok",
             "daemon-tok",
         );
@@ -1759,7 +1941,7 @@ mod tests {
             "ghcr.io/codewiresh/workspace:golden",
             "workspace",
             &confidential,
-            "env-coexist",
+            7,
             "tok",
             "daemon-tok",
         );
@@ -1826,7 +2008,7 @@ mod tests {
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "workspace",
             &env,
-            "env-1",
+            7,
             "tok",
             "daemon-tok",
         );
@@ -1851,7 +2033,7 @@ mod tests {
             "ghcr.io/acme/img:1",
             "workspace",
             &env,
-            "env-1",
+            7,
             "tok",
             "daemon-tok",
         );
@@ -1892,7 +2074,7 @@ mod tests {
             "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467",
             "workspace",
             &env,
-            "env-1",
+            7,
             "tok",
             "daemon-tok",
         );

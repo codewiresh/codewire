@@ -6,9 +6,11 @@
 //! and one workflow per environment id serializes commands. The NATS
 //! consumer plane and the `TENANT_LOCKS` distributed lock are retired.
 
+pub mod access_profiles;
 pub mod api;
 pub mod confidential_storage;
 pub mod connect;
+pub mod credentials;
 pub(crate) mod gateway_binding_identity;
 pub mod lifecycle;
 pub(crate) mod repository_mount;

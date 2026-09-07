@@ -210,7 +210,7 @@ impl TestDatabase {
             "SELECT (id,user_id,organization_id,name,current_revision) ON public.platform_access_profiles",
             "SELECT (profile_id,revision) ON public.platform_access_profile_revisions",
             "SELECT ON public.platform_access_profile_entries",
-            "SELECT (environment_id,profile_id,profile_revision) ON public.platform_environment_access_bindings",
+            "SELECT (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) ON public.platform_environment_access_bindings",
             "SELECT,INSERT,DELETE ON public.platform_credentials",
             "UPDATE (status,expires_at_unix,revocation_generation,material_generation,updated_at) ON public.platform_credentials",
             "SELECT,INSERT,DELETE ON public.platform_credential_material",
@@ -219,6 +219,7 @@ impl TestDatabase {
             "EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text)",
             "EXECUTE ON FUNCTION public.codewire_platform_lock_environment(text,text,text)",
             "EXECUTE ON FUNCTION public.codewire_platform_lock_profile(text,text,text)",
+            "EXECUTE ON FUNCTION public.codewire_platform_lock_credential(text,text,text)",
         ] {
             sqlx::query(&format!("GRANT {grant} TO {role_ident}"))
                 .execute(&self.pool)

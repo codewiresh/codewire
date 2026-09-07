@@ -1,0 +1,27 @@
+# Disposable Kind fixture only. Matches the deployed cert-manager v1.17.1 API;
+# enabling owner references here does not change the external Dev controller.
+crds:
+  enabled: true
+enableCertificateOwnerRef: true
+prometheus:
+  enabled: false
+# The harness proves actual Certificate issuance after all three controllers
+# are Ready. No extra startup-check image or ingress certificate reconciliation.
+startupapicheck:
+  enabled: false
+extraArgs:
+  - --controllers=*,-ingress-shim
+image:
+  repository: localhost/codewire-ci/cert-manager-controller
+  tag: verified-8615625f29f821542fca5351e3791a21121bf869aa63c72607e0a51e4c233a4a
+  pullPolicy: Never
+webhook:
+  image:
+    repository: localhost/codewire-ci/cert-manager-webhook
+    tag: verified-f7ad7d3c6dbe73ead365c2324dbe6575b4fc618ed06f0863f250c5eafb35a246
+    pullPolicy: Never
+cainjector:
+  image:
+    repository: localhost/codewire-ci/cert-manager-cainjector
+    tag: verified-da14ecb33386bd53c86d22a7a996e9783da5a09aa4ce9c55e161128fc2632985
+    pullPolicy: Never

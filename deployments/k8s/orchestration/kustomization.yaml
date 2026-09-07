@@ -8,6 +8,7 @@ resources:
   - service.yaml
   - rbac.yaml
   - gateway-host-key-authz.yaml
+  - credential-bootstrap-authz.yaml
 
 transformers:
   # These run after the package namespace transformer. Parent overlays repeat

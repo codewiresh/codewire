@@ -28,7 +28,11 @@ cat >"$work/bin/agent" <<'EOF'
 if [ "${FAIL_AGENT:-}" = "$(basename "$0")" ]; then
   exit 42
 fi
-printf '%s test-version\n' "$(basename "$0")"
+if [ "$(basename "$0")" = codex ]; then
+  printf 'codex-cli %s\n' "${FAKE_CODEX_VERSION:-0.149.0}"
+else
+  printf '%s test-version\n' "$(basename "$0")"
+fi
 EOF
 cat >"$work/bin/npm" <<'EOF'
 #!/bin/sh
@@ -36,9 +40,22 @@ if [ "$*" = "config get allow-scripts" ]; then
   printf '@anthropic-ai/claude-code\n'
   exit 0
 fi
-printf 'npm dry-run OK\n'
+case "$*" in
+  'config get prefix') printf '/home/codewire/.npm-global\n' ;;
+  'install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0')
+    [ -f "$FAKE_PREFIX_STATE" ] || exit 254
+    printf 'npm dry-run OK\n' ;;
+  '--version') printf 'npm test-version\n' ;;
+  *) exit 97 ;;
+esac
 EOF
-chmod +x "$work/bin/id" "$work/bin/agent" "$work/bin/npm"
+cat >"$work/bin/mkdir" <<'EOF'
+#!/bin/sh
+# The host-side fake must never create a real workspace user's home directory.
+[ "$*" = '-p /home/codewire/.npm-global/lib' ] || exit 99
+printf 'lib-prepared\n' >"$FAKE_PREFIX_STATE"
+EOF
+chmod +x "$work/bin/id" "$work/bin/agent" "$work/bin/npm" "$work/bin/mkdir"
 for agent in codex claude gemini kimi pi aider; do
   ln -s agent "$work/bin/$agent"
 done
@@ -53,7 +70,9 @@ run_contract() {
     CODEWIRE_BIN_ROOT="$work/bin" \
     CODEWIRE_EXPECTED_PIDS_MAX=2048 \
     FAIL_AGENT="${FAIL_AGENT:-}" \
-    bash "$CONTRACT"
+    FAKE_CODEX_VERSION="${FAKE_CODEX_VERSION:-0.149.0}" \
+    FAKE_PREFIX_STATE="$work/prefix-state" \
+    bash "$CONTRACT" "$@"
 }
 
 printf '8\n' >"$work/cgroup/pids.current"
@@ -61,8 +80,20 @@ printf '2048\n' >"$work/cgroup/pids.max"
 printf 'max 0\n' >"$work/cgroup/pids.events"
 run_contract >"$work/success.out" 2>"$work/success.err"
 [[ ! -s "$work/success.err" ]] || fail 'successful contract emitted failure evidence'
-grep -Fxq 'codex test-version' "$work/success.out" || fail 'agent checks did not run'
-grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex update check did not run'
+grep -Fxq 'codex-cli 0.149.0' "$work/success.out" || fail 'agent checks did not run'
+grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex install-plan check did not run'
+
+if FAKE_CODEX_VERSION=0.145.0 run_contract >"$work/stale.out" 2>"$work/stale.err"; then
+  fail 'stale Codex version was accepted'
+fi
+for argument in --unknown '--mounted-home-agents extra'; do
+  set +e
+  # shellcheck disable=SC2086 # Deliberately exercise both one and two arguments.
+  run_contract $argument >"$work/argument.out" 2>"$work/argument.err"
+  status=$?
+  set -e
+  [[ "$status" -eq 2 ]] || fail 'invalid contract arguments were accepted'
+done
 
 printf '1\n' >"$work/cgroup/pids.max"
 : >"$work/cgroup/pids.events"

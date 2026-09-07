@@ -708,6 +708,10 @@ if [ "$event_selected" = false ]; then
         ;;
       libs/gateway-proto/proto/*|libs/gateway-proto/buf.yaml)
         select_token rust
+        # Both daemon-initiated local and gateway-initiated platform brokerage
+        # consume these private frames. Rust owns both broker feature graphs.
+        select_token rust_pkg_codewire_credential_bridge
+        select_token rust_pkg_codewire_credential_broker
         select_token rust_pkg_codewire_gateway_proto
         select_token transport
         select_token transport_pkg_codewire_daemon
@@ -848,7 +852,7 @@ if [ "$event_selected" = false ]; then
       fi
       if [ "$path" = "crates/$crate/Cargo.toml" ]; then
         case "$crate" in
-          codewire-daemon|codewire-gateway|codewire-gateway-proto|\
+          codewire-daemon|codewire-gateway|codewire-gateway-proto|codewire-tls|\
           codewire-local-vmm|codewire-netstack|codewire-proto|codewire-tailnet|codewire-derp|\
           codewire-vmm-guest-probe)
             select_token rust_curated_locks
@@ -872,9 +876,40 @@ if [ "$event_selected" = false ]; then
         select_token transport
         select_token transport_pkg_codewire_tailnet
         ;;
-      crates/codewire-daemon/*|crates/codewire-gateway-proto/*)
+      crates/codewire-tls/*)
+        # Mounted TLS identities serve both the gateway HTTPS boundary and
+        # the isolated credential service's real private gRPC listener.
+        select_token rust
+        select_token rust_pkg_codewire_credential_service
+        select_token database
+        select_token transport
+        select_token transport_pkg_codewire_gateway
+        ;;
+      crates/codewire-credential-bridge/*)
+        # Material-free HTTP/frame handling is shared with daemon and gateway;
+        # prove its reverse consumers as well as the extracted unit tests.
+        select_token rust
+        select_token rust_pkg_codewire_credential_broker
+        select_token transport
+        select_token transport_pkg_codewire_daemon
+        select_token transport_pkg_codewire_gateway
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        ;;
+      crates/codewire-gateway-proto/*)
+        # The extracted state machine has direct private-frame unit coverage.
+        select_token rust
+        select_token rust_pkg_codewire_credential_bridge
+        select_token rust_pkg_codewire_credential_broker
+        select_token transport
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        ;;
+      crates/codewire-daemon/*)
         # The local VMM host and guest link the private daemon contract
         # directly; changes must verify those reverse dependencies too.
+        select_token rust
+        select_token rust_pkg_codewire_credential_broker
         select_token transport
         select_token transport_pkg_codewire_local_vmm
         select_token transport_pkg_codewire_vmm_guest_probe
@@ -924,6 +959,20 @@ if [ "$event_selected" = false ]; then
         select_token database
         select_token rust_pkg_codewire_credential_broker
         ;;
+      crates/codewire-credential-service/*)
+        # Runtime identity and consent admission need the restricted PostgreSQL
+        # matrix in addition to the material-free Kubernetes unit fixtures.
+        select_token database
+        ;;
+      crates/codewire-credential-broker/src/provider_enrollment.rs|\
+      crates/codewire-credential-broker/src/codex_enrollment/*)
+        # Shared by CLI and the isolated platform mutation service;
+        # package-default tests alone do not cover this opt-in feature.
+        select_token rust
+        select_token rust_pkg_codewire_cli
+        select_token rust_pkg_codewire_credential_service
+        select_token database
+        ;;
       crates/codewire-credential-broker/src/platform.rs|\
       crates/codewire-credential-broker/src/platform/*|\
       crates/codewire-credential-broker/src/runtime.rs|\
@@ -940,7 +989,9 @@ if [ "$event_selected" = false ]; then
         select_token rust_pkg_codewire_platform_credentials
         select_token database
         ;;
-      crates/codewire-server-core/tests/org_deletion_lifecycle.rs)
+      crates/codewire-server-core/tests/org_deletion_lifecycle.rs|\
+      crates/codewire-server-core/tests/oauth_bearer_auth.rs|\
+      crates/codewire-server-core/tests/oauth_bearer_auth/*)
         # This PostgreSQL-backed lifecycle test exercises no service process,
         # edge, or deployable runtime input. Its focused database verifier and
         # server-core Rust closure are selected by the exact test path.
@@ -958,6 +1009,11 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      crates/codewire-gateway-proto/src/lib.rs)
+        # Shared fixed Pod-token audiences are consumed by the optional
+        # server-core verifier, not just by the private protocol endpoints.
+        select_token rust_pkg_codewire_server_core
+        ;;
       scripts/ci/verify/build-local-vmm-initramfs.sh|\
       scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh|\
       scripts/ci/verify/smoke-native-local-environment.sh)
@@ -974,14 +1030,28 @@ if [ "$event_selected" = false ]; then
       crates/codewire-server-core/src/bin/codewire-db-migrate.rs|\
       crates/codewire-server-core/tests/data/application_schema_fingerprint.sql|\
       crates/codewire-server-core/tests/session_auth.rs|\
+      crates/codewire-server-core/src/auth.rs|\
+      crates/codewire-server-core/src/auth/*|\
+      crates/codewire-server-core/src/connect.rs|\
       crates/codewire-protected-store/src/secret_envelope.rs|\
       crates/codewire-protected-store/src/lib.rs|\
       crates/codewire-protected-store/Cargo.toml|\
       crates/codewire-orchestration/src/worker/postgres_secrets.rs|\
       crates/codewire-orchestration/src/worker/tenant_secret_teardown.rs|\
+      crates/codewire-orchestration/src/access_profiles.rs|\
+      crates/codewire-orchestration/src/connect/access_profiles.rs|\
+      crates/codewire-orchestration/tests/access_profiles.rs|\
+      crates/codewire-orchestration/tests/access_profiles_support/*|\
+      crates/codewire-orchestration/tests/access_profiles_timeout/*|\
+      crates/codewire-orchestration/tests/access_profiles_destroy/*|\
+      crates/codewire-orchestration/src/lifecycle/mod.rs|\
+      crates/codewire-orchestration/src/credentials.rs|\
+      crates/codewire-orchestration/src/connect/credentials.rs|\
+      crates/codewire-orchestration/tests/credentials.rs|\
+      crates/codewire-orchestration/tests/credentials_support/*|\
       crates/codewire-billing/src/subscription_migration.rs)
-        # Encrypted-store/teardown tests are deliberately database-only; the
-        # ordinary orchestration and Temporal lanes do not execute them.
+        # Store/teardown and restricted public-profile tests need PostgreSQL;
+        # the ordinary orchestration and Temporal lanes do not execute them.
         select_token database
         recognized=true
         ;;
@@ -1169,7 +1239,8 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
-      scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh)
+      scripts/ci/tests/test-kind-e2e-*.sh|scripts/ci/tests/test-kind-forwards.sh|\
+      scripts/ci/tests/test-kind-codex-session.py|scripts/ci/tests/test-kind-credentials.py)
         # These hermetic fixtures exercise the dispatcher and cleanup contract
         # without provisioning a cluster. A real harness/runtime path in the
         # same change still marks the selection Kind-relevant above.
@@ -1379,6 +1450,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/build-local-image.sh|\
       scripts/ci/tests/test-build-local-image.sh|\
       scripts/ci/tests/test-workspace-agent-contract.sh|\
+      scripts/ci/tests/test-workspace-image-artifact.py|\
+      scripts/ci/verify/workspace-image-artifact.py|\
       scripts/ci/verify/rehearse-build-local-image.sh|\
       scripts/ci/verify/verify-workspace-image.sh|\
       scripts/ci/verify/workspace-agent-contract.sh)

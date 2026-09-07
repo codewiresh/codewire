@@ -67,6 +67,17 @@ mod linux {
     const EXEC_TIMEOUT: Duration = Duration::from_secs(90);
     const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
     const MAX_PROC_CMDLINE: usize = 64 * 1024;
+    const GENERAL_EGRESS_MARKER: &[u8] = b"codewire-general-egress-ok\n";
+    // Classify only locally observed socket phases, never upstream error text,
+    // addresses or certificate data. A post-handshake failure still fails the
+    // existing proof; this discriminator does not change socket shutdown.
+    const GENERAL_EGRESS_SCRIPT: &str = r#"const tls=require('tls');
+let phase='unknown';let timedOut=false;
+const socket=tls.connect({host:'ghcr.io',port:443,family:4,servername:'ghcr.io',rejectUnauthorized:true},()=>{phase='post-handshake';process.stdout.write('codewire-general-egress-ok\n');socket.end();});
+socket.on('lookup',(error)=>{phase=error?'dns':'tcp';});
+socket.on('connect',()=>{phase='tls';});
+socket.setTimeout(10000,()=>{timedOut=true;socket.destroy(new Error('timeout'));});
+socket.on('error',()=>{const code=phase==='post-handshake'?75:timedOut?74:phase==='dns'?71:phase==='tcp'?72:phase==='tls'?73:76;process.exit(code);});"#;
 
     const SYNTHETIC_RESPONSE: &[u8] = concat!(
         "event: response.created\n",
@@ -431,22 +442,19 @@ request.setTimeout(10000,()=>request.destroy(new Error('timeout')));request.on('
         client: &SessionClient,
         working_directory: &str,
     ) -> SmokeResult<()> {
-        const SCRIPT: &str = r#"const tls=require('tls');
-const socket=tls.connect({host:'ghcr.io',port:443,family:4,servername:'ghcr.io',rejectUnauthorized:true},()=>{process.stdout.write('codewire-general-egress-ok\n');socket.end();});
-socket.setTimeout(10000,()=>socket.destroy(new Error('timeout')));
-socket.on('error',()=>process.exit(1));"#;
         let output = run_transient(
             client,
-            vec!["node".into(), "-e".into(), SCRIPT.into()],
+            vec!["node".into(), "-e".into(), GENERAL_EGRESS_SCRIPT.into()],
             working_directory,
             smoke_environment(),
         )
         .await?;
+        eprintln!("{}", general_egress_diagnostic(&output));
         if output.exit_code != 0 {
             stage("managed-general-egress-exec-failed");
             return Err(failed());
         }
-        if output.stdout != b"codewire-general-egress-ok\n" {
+        if output.stdout != GENERAL_EGRESS_MARKER {
             stage("managed-general-egress-output-invalid");
             return Err(failed());
         }
@@ -455,6 +463,28 @@ socket.on('error',()=>process.exit(1));"#;
             return Err(failed());
         }
         Ok(())
+    }
+
+    fn general_egress_failure_class(exit_code: i32) -> &'static str {
+        match exit_code {
+            0 => "none",
+            71 => "dns",
+            72 => "tcp",
+            73 => "tls",
+            74 => "timeout",
+            75 => "post-handshake",
+            _ => "unknown",
+        }
+    }
+
+    fn general_egress_diagnostic(output: &ExecOutput) -> String {
+        format!(
+            "codewire-local-codex-bridge-smoke: stage=managed-general-egress-result exit_code={} failure_class={} success_marker={} stderr_present={}",
+            output.exit_code,
+            general_egress_failure_class(output.exit_code),
+            output.stdout == GENERAL_EGRESS_MARKER,
+            !output.stderr.is_empty(),
+        )
     }
 
     fn codex_command() -> Vec<String> {
@@ -1024,6 +1054,144 @@ socket.on('error',()=>process.exit(1));"#;
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        // Execute the production script, but expose only a socket double to its
+        // require('tls'). Neither the fixture nor the VM can open a connection.
+        const EGRESS_EVENT_FIXTURE: &str = r#"const vm=require('vm');
+const handlers=new Map();let secureConnect;let timeout;let options;let timeoutMs;
+let ended=false;let destroyed=false;let stdout='';let exitCode=0;
+const opaque=new Error('CANARY-PRIVATE-CERTIFICATE-ADDRESS-ERROR');
+opaque.code='CANARY-UNKNOWN-UPSTREAM-CODE';
+const socket={on:(name,callback)=>{handlers.set(name,callback);return socket;},
+setTimeout:(duration,callback)=>{timeoutMs=duration;timeout=callback;return socket;},
+end:()=>{ended=true;},destroy:()=>{destroyed=true;handlers.get('error')(opaque);}};
+vm.runInNewContext(process.argv[1],{
+require:(name)=>{if(name!=='tls')throw new Error('unexpected module');return {
+connect:(value,callback)=>{options=value;secureConnect=callback;return socket;}};},
+process:{stdout:{write:(value)=>{stdout+=value;}},exit:(code)=>{exitCode=code;}}
+},{timeout:1000});
+switch(process.argv[2]){
+case 'dns':handlers.get('lookup')(opaque);handlers.get('error')(opaque);break;
+case 'tcp':handlers.get('lookup')(null);handlers.get('error')(opaque);break;
+case 'tls':handlers.get('lookup')(null);handlers.get('connect')();handlers.get('error')(opaque);break;
+case 'timeout':handlers.get('lookup')(null);timeout();break;
+case 'post-handshake':handlers.get('lookup')(null);handlers.get('connect')();secureConnect();handlers.get('error')(opaque);break;
+case 'post-handshake-timeout':handlers.get('lookup')(null);handlers.get('connect')();secureConnect();timeout();break;
+case 'unknown':handlers.get('error')(opaque);break;
+case 'success':handlers.get('lookup')(null);handlers.get('connect')();secureConnect();break;
+default:throw new Error('invalid fixture case');
+}
+process.stdout.write(JSON.stringify({exit_code:exitCode,stdout,ended,destroyed,timeout_ms:timeoutMs,options}));"#;
+
+        async fn general_egress_events(scenario: &str) -> Value {
+            let mut command = tokio::process::Command::new("node");
+            command
+                .env_clear()
+                .env(
+                    "PATH",
+                    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+                )
+                .current_dir("/")
+                .args(["-e", EGRESS_EVENT_FIXTURE, GENERAL_EGRESS_SCRIPT, scenario])
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+                .await
+                .expect("synthetic Node events exceeded their deadline")
+                .expect("Node is required for the native smoke probe fixture");
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty());
+            assert!(output.stdout.len() < 1024);
+            assert!(
+                !output
+                    .stdout
+                    .windows(b"CANARY".len())
+                    .any(|part| part == b"CANARY")
+            );
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(result["timeout_ms"], 10000);
+            assert_eq!(
+                result["options"],
+                serde_json::json!({"host":"ghcr.io","port":443,"family":4,
+                    "servername":"ghcr.io","rejectUnauthorized":true})
+            );
+            result
+        }
+
+        #[tokio::test]
+        async fn general_egress_pre_handshake_failures_are_closed() {
+            for (scenario, code) in [("dns", 71), ("tcp", 72), ("tls", 73)] {
+                let result = general_egress_events(scenario).await;
+                assert_eq!(result["exit_code"], code);
+                assert_eq!(general_egress_failure_class(code), scenario);
+                assert_eq!(result["stdout"], "");
+                assert_eq!(result["ended"], false);
+                assert_eq!(result["destroyed"], false);
+            }
+        }
+
+        #[tokio::test]
+        async fn general_egress_timeout_keeps_existing_destroy_behavior() {
+            let result = general_egress_events("timeout").await;
+            assert_eq!(result["exit_code"], 74);
+            assert_eq!(general_egress_failure_class(74), "timeout");
+            assert_eq!(result["stdout"], "");
+            assert_eq!(result["ended"], false);
+            assert_eq!(result["destroyed"], true);
+        }
+
+        #[tokio::test]
+        async fn general_egress_post_handshake_errors_still_fail_with_success_marker() {
+            for scenario in ["post-handshake", "post-handshake-timeout"] {
+                let result = general_egress_events(scenario).await;
+                assert_eq!(result["exit_code"], 75);
+                assert_eq!(general_egress_failure_class(75), "post-handshake");
+                assert_eq!(result["stdout"], "codewire-general-egress-ok\n");
+                assert_eq!(result["ended"], true);
+                assert_eq!(result["destroyed"], scenario == "post-handshake-timeout");
+            }
+        }
+
+        #[tokio::test]
+        async fn general_egress_unknown_error_does_not_expose_upstream_values() {
+            let result = general_egress_events("unknown").await;
+            assert_eq!(result["exit_code"], 76);
+            assert_eq!(general_egress_failure_class(76), "unknown");
+            assert_eq!(result["stdout"], "");
+            assert_eq!(result["ended"], false);
+            assert_eq!(result["destroyed"], false);
+        }
+
+        #[tokio::test]
+        async fn general_egress_success_keeps_existing_marker_and_socket_end() {
+            let result = general_egress_events("success").await;
+            assert_eq!(result["exit_code"], 0);
+            assert_eq!(general_egress_failure_class(0), "none");
+            assert_eq!(result["stdout"], "codewire-general-egress-ok\n");
+            assert_eq!(result["ended"], true);
+            assert_eq!(result["destroyed"], false);
+        }
+
+        #[test]
+        fn general_egress_diagnostic_only_reports_numeric_exit_and_closed_booleans() {
+            let mut output = ExecOutput {
+                exit_code: 137,
+                stdout: b"CANARY-PRIVATE-STDOUT".to_vec(),
+                stderr: b"CANARY-PRIVATE-STDERR".to_vec(),
+            };
+            assert_eq!(
+                general_egress_diagnostic(&output),
+                "codewire-local-codex-bridge-smoke: stage=managed-general-egress-result exit_code=137 failure_class=unknown success_marker=false stderr_present=true"
+            );
+            output.exit_code = 75;
+            output.stdout = GENERAL_EGRESS_MARKER.to_vec();
+            output.stderr.clear();
+            assert_eq!(
+                general_egress_diagnostic(&output),
+                "codewire-local-codex-bridge-smoke: stage=managed-general-egress-result exit_code=75 failure_class=post-handshake success_marker=true stderr_present=false"
+            );
+            output.stdout.push(b' ');
+            assert!(general_egress_diagnostic(&output).contains("success_marker=false"));
+        }
 
         #[test]
         fn synthetic_response_is_well_formed_sse_with_one_terminal_event() {

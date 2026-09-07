@@ -74,33 +74,38 @@ RUN apt-get-with-retry update && apt-get-with-retry install -y --no-install-reco
       file gdb pipx pkg-config protobuf-compiler python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /home/codewire/go /home/codewire/.npm-global && \
-    chown -R codewire:codewire /home/codewire/go /home/codewire/.npm-global
+RUN mkdir -p /home/codewire/go /home/codewire/.npm-global \
+      /opt/codewire/agents/npm /opt/codewire/agents/pipx /opt/codewire/agents/bin && \
+    chown -R codewire:codewire /home/codewire/go /home/codewire/.npm-global /opt/codewire/agents
 
 USER codewire
 ENV CARGO_HOME="/home/codewire/.cargo"
 ENV RUSTUP_HOME="/home/codewire/.rustup"
-ENV PATH="/home/codewire/.npm-global/bin:${CARGO_HOME}/bin:/home/codewire/.local/bin:${PATH}"
+# User installations persist in the mounted home and take precedence over the
+# shipped agents. Image configuration, not a hidden ~/.npmrc, selects their
+# npm prefix and the sole admitted lifecycle-script package.
+ENV NPM_CONFIG_PREFIX="/home/codewire/.npm-global"
+ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"
+ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:${CARGO_HOME}/bin:${PATH}"
 
 RUN go install golang.org/x/tools/gopls@latest && \
     go install github.com/hetznercloud/cli/cmd/hcloud@latest && \
     pipx install poetry && \
     pipx install uv && \
-    pipx install aider-chat
+    PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pipx install aider-chat
 
 # Seed coding agents from the exact versions accepted by the workspace image
-# contract. Interactive users can still update them without sudo, but a later
-# registry publication cannot silently change or break this image build.
+# contract, outside the persistent home mount. Interactive users can install
+# newer versions into their own prefix without sudo; PATH gives those versions
+# precedence. No startup installer or image-home copy is needed.
 # Lifecycle scripts stay disabled except for Claude's official package, whose
 # native binary is installed by its required postinstall hook.
-RUN npm config set prefix /home/codewire/.npm-global && \
-    npm config set allow-scripts=@anthropic-ai/claude-code --location=user && \
-    npm install -g --ignore-scripts \
+RUN npm install --prefix /opt/codewire/agents/npm -g --ignore-scripts \
       @openai/codex@0.149.0 \
       @google/gemini-cli@0.56.0 \
       @moonshot-ai/kimi-code@0.38.0 \
       @earendil-works/pi-coding-agent@0.84.2 && \
-    npm install -g @anthropic-ai/claude-code@2.1.238
+    npm install --prefix /opt/codewire/agents/npm -g @anthropic-ai/claude-code@2.1.238
 
 # Reuse the exact toolchain and explicitly selected components from the
 # digest-pinned Rust build stage. This removes a second mutable installer

@@ -21,6 +21,149 @@ use support::*;
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn prepared_creation_retains_exact_owner_and_caller_transaction_atomicity() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let owner = db.user("prepared-owner").await?;
+        let other = db.user("prepared-other").await?;
+        let provider = Arc::new(SyntheticKek::default());
+        let (pool, _) = db.broker_pool().await?;
+        let store = codewire_platform_credentials::PlatformCredentialStore::new(
+            pool.clone(),
+            provider.clone(),
+            builtin_provider_catalog(),
+        );
+        let prepared = store
+            .prepare_creation(
+                &owner,
+                registration("Rollback", Kind::OAuth),
+                &value(OLD_VALUE),
+            )
+            .await?;
+        let calls = provider.generate_calls.load(Ordering::SeqCst);
+        let mut tx = pool.begin().await?;
+        let record = store.create_prepared_in(&mut tx, &owner, prepared).await?;
+        ensure!(
+            provider.generate_calls.load(Ordering::SeqCst) == calls,
+            "publication called the KEK provider under locks"
+        );
+        ensure!(
+            store.record(&owner, &record.metadata.id).await == Err(Error::NotFound),
+            "uncommitted metadata became visible"
+        );
+        let material_visible: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM platform_credential_material WHERE credential_id=$1)",
+        )
+        .bind(record.metadata.id.as_str())
+        .fetch_one(&db.pool)
+        .await?;
+        ensure!(!material_visible, "uncommitted material became visible");
+        tx.rollback().await?;
+        ensure!(store.record(&owner, &record.metadata.id).await == Err(Error::NotFound));
+
+        let prepared = store
+            .prepare_creation(
+                &owner,
+                registration("Wrong owner", Kind::OAuth),
+                &value(OLD_VALUE),
+            )
+            .await?;
+        let mut tx = pool.begin().await?;
+        ensure!(
+            store.create_prepared_in(&mut tx, &other, prepared).await == Err(Error::InvalidInput)
+        );
+        tx.rollback().await?;
+        let empty: bool =
+            sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM platform_credentials)")
+                .fetch_one(&db.pool)
+                .await?;
+        ensure!(empty);
+
+        let prepared = store
+            .prepare_creation(
+                &owner,
+                registration("Committed", Kind::OAuth),
+                &value(NEW_VALUE),
+            )
+            .await?;
+        let mut tx = pool.begin().await?;
+        let record = store.create_prepared_in(&mut tx, &owner, prepared).await?;
+        tx.commit().await?;
+        ensure!(store.record(&owner, &record.metadata.id).await? == record);
+        ensure!(
+            store
+                .read_for_broker(&owner, &record.metadata.id, record.version)
+                .await?
+                .expose_secret()
+                == NEW_VALUE
+        );
+        let published: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM platform_credential_material WHERE credential_id=$1)",
+        )
+        .bind(record.metadata.id.as_str())
+        .fetch_one(&db.pool)
+        .await?;
+        ensure!(published);
+
+        let mut tx = pool.begin().await?;
+        let current = store
+            .record_for_update_in(&mut tx, &owner, &record.metadata.id)
+            .await?;
+        ensure!(current == record);
+        store
+            .revoke_in(&mut tx, &owner, &record.metadata.id, current.version)
+            .await?;
+        tx.rollback().await?;
+        ensure!(store.record(&owner, &record.metadata.id).await? == record);
+        ensure!(
+            store
+                .read_for_broker(&owner, &record.metadata.id, record.version)
+                .await?
+                .expose_secret()
+                == NEW_VALUE
+        );
+        let mut tx = pool.begin().await?;
+        let revoked = store
+            .revoke_in(&mut tx, &owner, &record.metadata.id, record.version)
+            .await?;
+        tx.commit().await?;
+        ensure!(revoked.metadata.status == CredentialStatus::Revoked);
+        let mut tx = pool.begin().await?;
+        store
+            .delete_revoked_in(&mut tx, &owner, &record.metadata.id, revoked.version)
+            .await?;
+        tx.rollback().await?;
+        ensure!(store.record(&owner, &record.metadata.id).await? == revoked);
+        let mut tx = pool.begin().await?;
+        store
+            .delete_revoked_in(&mut tx, &owner, &record.metadata.id, revoked.version)
+            .await?;
+        tx.commit().await?;
+        ensure!(store.record(&owner, &record.metadata.id).await == Err(Error::NotFound));
+
+        let prepared = store
+            .prepare_creation(
+                &other,
+                registration("Deleted owner", Kind::OAuth),
+                &value(OLD_VALUE),
+            )
+            .await?;
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(other.id().as_str())
+            .execute(&db.pool)
+            .await?;
+        let mut tx = pool.begin().await?;
+        ensure!(store.create_prepared_in(&mut tx, &other, prepared).await == Err(Error::NotFound));
+        tx.rollback().await?;
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn metadata_reader_works_with_select_only_role_without_material_access() -> Result<()> {
     let db = TestDatabase::create().await?;
     let result = async {

@@ -457,8 +457,20 @@ run_rust() {
     # Exercise the isolated platform build explicitly; the default local
     # feature cannot qualify platform admission or its production graph.
     scripts/ci/tests/test-openbao-only-secret-authority.sh --production-broker-features
-    cargo clippy --locked -p codewire-credential-broker --no-default-features --features platform --all-targets -- -D warnings
-    cargo test --locked -p codewire-credential-broker --no-default-features --features platform --all-targets
+    cargo clippy --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets -- -D warnings
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform,codex-enrollment --all-targets
+  fi
+  if selected rust_workspace || selected rust_pkg_codewire_server_core \
+      || selected rust_pkg_codewire_orchestration; then
+    # The shared projected-Pod verifier is opt-in. Exercise its real feature
+    # and focused identity tests without depending on workspace unification.
+    cargo clippy --locked -p codewire-server-core --features kubernetes-identity --all-targets -- -D warnings
+    cargo test --locked -p codewire-server-core --features kubernetes-identity --lib pod_identity::
+  fi
+  if selected rust_workspace || selected rust_pkg_codewire_credential_service; then
+    scripts/ci/tests/test-openbao-only-secret-authority.sh --production-service-features
+    cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings
+    cargo test --locked -p codewire-credential-service --features enrollment --all-targets
   fi
   if selected rust_pkg_codewire_oidc; then
     cargo check -p codewire-oidc --no-default-features
@@ -579,6 +591,8 @@ run_edge() {
   scripts/ci/tests/test-kind-e2e-ubuntu-snapshot-runner.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
   scripts/ci/tests/test-kind-forwards.sh
+  python3 -B scripts/ci/tests/test-kind-codex-session.py
+  python3 -B scripts/ci/tests/test-kind-credentials.py
 }
 
 run_release() {
@@ -657,7 +671,7 @@ run_deploy() {
   local overlay
   for overlay in \
       deployments/k8s/base deployments/k8s/coordinator deployments/k8s/idp \
-      deployments/k8s/orchestration \
+      deployments/k8s/orchestration deployments/k8s/credential-service \
       deployments/k8s/derp deployments/k8s/flux/mesh-dev \
       deployments/k8s/flux/production deployments/k8s/flux/temporal-dev \
       deployments/k8s/flux/temporal-production \

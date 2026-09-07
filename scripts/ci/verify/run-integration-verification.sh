@@ -168,19 +168,50 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 24
+  assert_passed_count "server-core migration matrix" "$logfile" 28
 
   logfile="$RUN_DIR/platform-credential-storage.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential storage matrix" "$logfile" 12
+  assert_passed_count "platform credential storage matrix" "$logfile" 13
 
   logfile="$RUN_DIR/platform-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 8
+  assert_passed_count "platform access profile matrix" "$logfile" 10
+
+  logfile="$RUN_DIR/public-access-profiles.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --test access_profiles \
+      -- --ignored --nocapture --test-threads=4 | tee "$logfile"
+  assert_passed_count "public access profile restricted API matrix" "$logfile" 7
+
+  logfile="$RUN_DIR/public-credential-metadata.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --test credentials \
+      -- --ignored --nocapture --test-threads=3 | tee "$logfile"
+  assert_passed_count "public credential metadata matrix" "$logfile" 3
+
+  logfile="$RUN_DIR/public-credential-mutations.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib mutation::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "public credential mutation matrix" "$logfile" 8
+
+  logfile="$RUN_DIR/isolated-credential-runtime.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib runtime::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "isolated credential runtime matrix" "$logfile" 4
+
+  logfile="$RUN_DIR/kind-credential-effective-acl.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority \
+      -- --exact --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "Kind credential effective ACL matrix" "$logfile" 1
 
   logfile="$RUN_DIR/platform-credential-refresh.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -192,13 +223,31 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test authority \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential restricted-role matrix" "$logfile" 8
+  assert_passed_count "platform credential restricted-role matrix" "$logfile" 9
 
   logfile="$RUN_DIR/platform-broker-admission.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib platform::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "platform broker admission matrix" "$logfile" 14
+
+  logfile="$RUN_DIR/platform-broker-grpc-rotation.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
+      --lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 2
+
+  logfile="$RUN_DIR/platform-runtime-identity.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-service \
+      --lib tests::database:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform runtime restricted identity matrix" "$logfile" 3
+
+  logfile="$RUN_DIR/oauth-bearer-identity.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-server-core --test oauth_bearer_auth \
+      -- --ignored --nocapture | tee "$logfile"
+  assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6
 
   logfile="$RUN_DIR/session-hash-only.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -245,6 +294,13 @@ run_database() {
     return 1
   fi
   assert_passed_count "environment external cleanup matrix" "$logfile" 3
+
+  logfile="$RUN_DIR/environment-destroy-template-hint.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure \
+      -- --ignored --exact --nocapture | tee "$logfile"
+  assert_passed_count "environment destroy template hint matrix" "$logfile" 1
 
   logfile="$RUN_DIR/organization-tenant-secret-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -853,6 +909,7 @@ run_orchestration() {
     cargo_ci test --profile ci -p codewire-orchestration --lib \
       'worker::' -- --ignored \
       --skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
+      --skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' \
       --nocapture | tee "$logfile"
   assert_passed_count "orchestration activity fencing matrix" "$logfile" 2
 

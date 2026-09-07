@@ -2,6 +2,7 @@
 
 use serde_json::{Value, json};
 
+use super::CREDENTIAL_GATEWAY_HTTPS_PORT;
 use super::gateway::tailnet_udp_listener_enabled;
 use super::naming::{
     gateway_labels, gateway_network_policy_name, gateway_selector,
@@ -43,6 +44,12 @@ pub(super) fn workspace_egress_rules(opts: &TemplateOpts) -> Vec<Value> {
             ],
         }),
     ];
+    if opts.credential_runtime.is_some() {
+        egress.push(json!({
+            "to":[{"podSelector":{"matchLabels":gateway_selector(opts)}}],
+            "ports":[{"protocol":"TCP","port":CREDENTIAL_GATEWAY_HTTPS_PORT}],
+        }));
+    }
     if let Some(rule) = kata_coco_kbs_egress_rule(&opts.kata_coco_kbs_url) {
         egress.push(rule);
     }
@@ -224,6 +231,20 @@ pub fn render_gateway_network_policy(namespace: &str, opts: &TemplateOpts) -> Va
     let mut ingress = vec![json!({
         "ports": [ { "protocol": "TCP", "port": DEFAULT_GATEWAY_READYZ_PORT } ],
     })];
+    if let Some(config) = &opts.credential_runtime {
+        config.assert_namespace(namespace);
+        ingress.push(json!({
+            "from":[{"podSelector":{"matchLabels":workspace_selector(opts)}}],
+            "ports":[{"protocol":"TCP","port":CREDENTIAL_GATEWAY_HTTPS_PORT}],
+        }));
+        egress.push(json!({
+            "to":[{
+                "namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":config.broker_namespace()}},
+                "podSelector":{"matchLabels":{"app.kubernetes.io/name":"codewire","app.kubernetes.io/component":"credential-service"}},
+            }],
+            "ports":[{"protocol":"TCP","port":9443}],
+        }));
+    }
     if !opts.server_namespace.is_empty() {
         ingress.push(json!({
             "from": [

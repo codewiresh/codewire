@@ -7,6 +7,8 @@ import threading
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from unittest.mock import patch
+from test_access_profiles import AccessProfilesTestCase
+from test_credentials import CredentialsTestCase
 
 import httpx
 from connectrpc.code import Code

@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package broker.v1;
+
+import "daemon/v1/daemon.proto";
+
+// Private gateway-initiated transport for the isolated credential broker.
+// Importing the material-free frames does not expose DaemonService or grant
+// any daemon capability. This service must never be routed at the public edge.
+service CredentialBrokerService {
+  // Authenticate the caller before consuming the stream. The first guest
+  // message must be Ready, whose protocol/environment/generation coordinates
+  // must match that already-authenticated caller; Ready is not identity proof.
+  // Return successful stream headers only after this admission. Subsequent
+  // guest messages are Request or Cancel; responses are only the existing
+  // filtered ResponseStart/Body/End/Failure frames, never HostMessage.open.
+  // Protected provider credentials do not appear in either direction.
+  rpc CredentialBridge(stream daemon.v1.CredentialBridgeGuestMessage) returns (stream daemon.v1.CredentialBridgeHostMessage);
+}

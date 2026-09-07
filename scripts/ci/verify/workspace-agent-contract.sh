@@ -3,6 +3,15 @@
 # so PID exhaustion cannot prevent the diagnostic from being emitted.
 set -euo pipefail
 
+mode=full
+if [ "$#" -ne 0 ]; then
+  if [ "$#" -ne 1 ] || [ "$1" != --mounted-home-agents ]; then
+    printf 'usage: workspace-agent-contract.sh [--mounted-home-agents]\n' >&2
+    exit 2
+  fi
+  mode=mounted-home-agents
+fi
+
 cgroup_root="${CODEWIRE_CGROUP_ROOT:-/sys/fs/cgroup}"
 expected_pids_max="${CODEWIRE_EXPECTED_PIDS_MAX:-2048}"
 bin_root="${CODEWIRE_BIN_ROOT:-/usr/local/bin}"
@@ -40,12 +49,63 @@ IFS= read -r actual_pids_max < "$cgroup_root/pids.max"
 
 test "$(id -un)" = codewire
 test "$(id -u)" = 1000
+
+if [ "$mode" = mounted-home-agents ]; then
+  test "${HOME:-}" = /home/codewire
+  test -w /home/codewire
+  # Require the verifier's actual fresh mount, not the image's populated home.
+  # The verifier owns its creation; this contract never repairs permissions or
+  # installs/copies tools into it. Named Docker volumes must use volume-nocopy.
+  awk '$5 == "/home/codewire" { found = 1 } END { exit !found }' /proc/self/mountinfo
+  test ! -e /home/codewire/.npm-global
+  test ! -e /home/codewire/.local
+  test ! -e /home/codewire/.npmrc
+  case "$PATH" in
+    /home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:*) ;;
+    *) printf 'workspace image verification: agent PATH precedence differs\n' >&2; exit 1 ;;
+  esac
+fi
+
 for agent in codex claude gemini kimi pi aider; do
   executable="$(command -v "$agent")"
   test -n "$executable"
-  test -O "$(readlink -f "$executable")"
-  "$agent" --version
+  resolved="$(readlink -f "$executable")"
+  test -O "$resolved"
+  if [ "$mode" = mounted-home-agents ]; then
+    case "$agent:$executable:$resolved" in
+      aider:/opt/codewire/agents/bin/aider:/opt/codewire/agents/pipx/venvs/aider-chat/bin/aider) ;;
+      codex:/opt/codewire/agents/npm/bin/codex:/opt/codewire/agents/npm/lib/node_modules/*) ;;
+      claude:/opt/codewire/agents/npm/bin/claude:/opt/codewire/agents/npm/lib/node_modules/*) ;;
+      gemini:/opt/codewire/agents/npm/bin/gemini:/opt/codewire/agents/npm/lib/node_modules/*) ;;
+      kimi:/opt/codewire/agents/npm/bin/kimi:/opt/codewire/agents/npm/lib/node_modules/*) ;;
+      pi:/opt/codewire/agents/npm/bin/pi:/opt/codewire/agents/npm/lib/node_modules/*) ;;
+      *) printf 'workspace image verification: bundled agent resolved outside its image prefix\n' >&2; exit 1 ;;
+    esac
+  fi
+  if [ "$agent" = codex ]; then
+    version="$("$agent" --version)"
+    printf '%s\n' "$version"
+    test "$version" = 'codex-cli 0.149.0'
+  else
+    "$agent" --version
+  fi
 done
+
+test "$(npm config get prefix)" = /home/codewire/.npm-global
+test "$(npm config get allow-scripts)" = @anthropic-ai/claude-code
+# The persistent prefix starts empty: update would silently prove nothing.
+# Plan an explicit pinned user install without installing packages or running
+# lifecycle scripts. This proves neither a completed install nor an upgrade.
+# npm's dry-run cannot create the lib directory that a normal global install
+# creates automatically. Establish that dry-run-only precondition as the same
+# unprivileged user; do not seed an agent or change any runtime startup path.
+mkdir -p /home/codewire/.npm-global/lib
+npm install --global --dry-run --ignore-scripts --no-audit --no-fund @openai/codex@0.149.0
+
+if [ "$mode" = mounted-home-agents ]; then
+  printf 'workspace image verification: fresh-home six-agent contract passed\n'
+  exit 0
+fi
 
 check_version() {
   executable="$1"
@@ -85,9 +145,3 @@ check_version cargo cargo --version
 check_version rustc rustc --version
 check_version psql psql --version
 check_version protoc protoc --version
-
-# Codex is installed in the interactive-user npm prefix. A dry run proves the
-# real vendor update path without mutating the verification image. Claude is
-# the sole package allowed to run lifecycle scripts on later user updates.
-test "$(npm config get allow-scripts)" = @anthropic-ai/claude-code
-npm update --global --dry-run @openai/codex

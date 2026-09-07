@@ -358,6 +358,13 @@ spec:
                 name: codewire-mesh
                 port:
                   name: http
+          - path: /codewire\.v1\.CredentialMutationService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-credential-service
+                port:
+                  name: http
           - path: /codewire\.
             pathType: ImplementationSpecific
             backend:

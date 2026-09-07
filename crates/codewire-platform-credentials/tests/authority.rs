@@ -1,4 +1,4 @@
-//! Real restricted-login PostgreSQL proof for the three metadata lock helpers.
+//! Real restricted-login PostgreSQL proof for fixed metadata lock helpers.
 //! Explicit --ignored execution requires an isolated TEST_DATABASE_URL; all
 //! credentials, envelopes, roles and databases are generated synthetic fixtures.
 
@@ -175,7 +175,11 @@ async fn restricted_broker_enrolls_refreshes_and_uses_exact_bound_grants() -> Re
             .create(&user, name("work"), entries(&initial.metadata.id))
             .await?;
         manager
-            .create_binding(&context, binding(&context, &profile))
+            .create_binding(
+                &context,
+                binding(&context, &profile),
+                Some(&context.user_id),
+            )
             .await?;
         // Metadata management stays orchestration-owned. A new current revision
         // must not silently replace the environment's exact immutable binding.
@@ -307,6 +311,7 @@ async fn restricted_broker_cannot_mutate_or_lock_unowned_metadata_or_escalate() 
             "DELETE FROM public.environments WHERE false",
             "DELETE FROM public.platform_access_profiles WHERE false",
             "UPDATE public.platform_environment_access_bindings SET profile_revision=1 WHERE false",
+            "UPDATE public.platform_environment_access_bindings SET personal_owner_confirmed_by=NULL WHERE false",
             "SELECT id FROM public.users FOR SHARE",
             "SELECT id FROM public.organizations FOR SHARE",
             "SELECT id FROM public.environments FOR SHARE",
@@ -320,6 +325,7 @@ async fn restricted_broker_cannot_mutate_or_lock_unowned_metadata_or_escalate() 
             "CREATE SCHEMA broker_must_not_create",
             "ALTER TABLE public.platform_credentials ADD COLUMN broker_must_not_create integer",
             "ALTER FUNCTION public.codewire_platform_lock_owner(text,text) SECURITY INVOKER",
+            "ALTER FUNCTION public.codewire_platform_lock_credential(text,text,text) SECURITY INVOKER",
             "CREATE OR REPLACE FUNCTION public.codewire_platform_lock_owner(text,text) RETURNS boolean LANGUAGE sql AS 'SELECT true'",
         ] {
             denied(&pool, sql).await?;
@@ -362,6 +368,7 @@ async fn metadata_reader_and_public_have_no_lock_helper_authority() -> Result<()
             "SELECT public.codewire_platform_lock_owner('user'::text,'metadata-user'::text)",
             "SELECT * FROM public.codewire_platform_lock_environment('missing'::text,'metadata-user'::text,'missing'::text)",
             "SELECT * FROM public.codewire_platform_lock_profile('missing'::text,'metadata-user'::text,NULL::text)",
+            "SELECT * FROM public.codewire_platform_lock_credential('missing'::text,'metadata-user'::text,NULL::text)",
             "SELECT * FROM public.platform_credential_material LIMIT 0",
             "SELECT * FROM public.platform_credential_refresh_material LIMIT 0",
         ] {
@@ -374,7 +381,7 @@ async fn metadata_reader_and_public_have_no_lock_helper_authority() -> Result<()
              JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
              CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) a \
              WHERE n.nspname='public' AND p.proname IN \
-             ('codewire_platform_lock_owner','codewire_platform_lock_environment','codewire_platform_lock_profile') \
+             ('codewire_platform_lock_owner','codewire_platform_lock_environment','codewire_platform_lock_profile','codewire_platform_lock_credential') \
              AND a.grantee=0 AND a.privilege_type='EXECUTE'",
         ).fetch_one(&db.pool).await?;
         ensure!(public_grants == 0);
@@ -419,7 +426,11 @@ async fn lock_helpers_preserve_exact_owner_and_environment_scope() -> Result<()>
             ensure!(runtime.get(&user, &org_profile.id).await == Err(ProfileError::NotFound));
             let context = environment(&db, &user, &org, "scope-env", &personal.metadata.id).await?;
             manager
-                .create_binding(&context, binding(&context, &user_profile))
+                .create_binding(
+                    &context,
+                    binding(&context, &user_profile),
+                    Some(&context.user_id),
+                )
                 .await?;
             ensure!(runtime.evaluate_grants(&context).await?.len() == 1);
             let mut wrong = context.clone();
@@ -480,6 +491,7 @@ async fn lock_helpers_ignore_hostile_search_paths_and_temporary_objects() -> Res
             "CREATE TEMP TABLE organizations(id text,deletion_state text)",
             "CREATE TEMP TABLE environments(id text,created_by text,org_id text,environment_operation_generation bigint,desired_state text,state text)",
             "CREATE TEMP TABLE platform_access_profiles(id text,user_id text,organization_id text,name text,current_revision bigint)",
+            "CREATE TEMP TABLE platform_credentials(id text,user_id text,organization_id text,provider text,authentication_kind text,display_name text,account_hint text,status text,expires_at_unix bigint,revocation_generation bigint)",
             "INSERT INTO pg_temp.users VALUES ('fake-user')",
             "INSERT INTO pg_temp.organizations VALUES ('fake-org','active')",
             "INSERT INTO pg_temp.environments VALUES ('fake-env','real-user','real-org',999,'started','running')",
@@ -489,6 +501,8 @@ async fn lock_helpers_ignore_hostile_search_paths_and_temporary_objects() -> Res
         }
         sqlx::query("INSERT INTO pg_temp.platform_access_profiles VALUES ($1,'real-user',NULL,'forged',999)")
             .bind(profile.id.as_str()).execute(&mut *connection).await?;
+        sqlx::query("INSERT INTO pg_temp.platform_credentials VALUES ($1,'real-user',NULL,'forged','oauth','Forged',NULL,'active',NULL,999)")
+            .bind(record.metadata.id.as_str()).execute(&mut *connection).await?;
         for (kind, id, expected) in [
             ("user", "real-user", true), ("user", "fake-user", false),
             ("organization", "real-org", true), ("organization", "fake-org", false),
@@ -507,6 +521,17 @@ async fn lock_helpers_ignore_hostile_search_paths_and_temporary_objects() -> Res
             "SELECT * FROM public.codewire_platform_lock_profile($1::text,'real-user'::text,NULL::text)",
         ).bind(profile.id.as_str()).fetch_one(&mut *connection).await?;
         ensure!(selected == (Some("real-user".into()), None, "real-profile".into(), 1));
+        let credential: (String, i64) = sqlx::query_as(
+            "SELECT provider,revocation_generation FROM public.codewire_platform_lock_credential($1::text,'real-user'::text,NULL::text)",
+        ).bind(record.metadata.id.as_str()).fetch_one(&mut *connection).await?;
+        ensure!(credential == ("openai".into(), 1));
+        for (user_scope, org_scope) in [(None, None), (Some("other-user"), None), (None, Some("real-user"))] {
+            let denied: Option<String> = sqlx::query_scalar(
+                "SELECT provider FROM public.codewire_platform_lock_credential($1::text,$2::text,$3::text)",
+            ).bind(record.metadata.id.as_str()).bind(user_scope).bind(org_scope)
+                .fetch_optional(&mut *connection).await?;
+            ensure!(denied.is_none());
+        }
         // Function SET must restore, not overwrite, the caller's hostile path.
         let path: String = sqlx::query_scalar("SHOW search_path").fetch_one(&mut *connection).await?;
         ensure!(path == "pg_temp, public, pg_catalog");
@@ -607,7 +632,7 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
         let context = environment(&db, &user, &org, "fenced-env", &record.metadata.id).await?;
         let manager = profiles(&db.pool);
         let profile = manager.create(&user, name("fenced"), entries(&record.metadata.id)).await?;
-        manager.create_binding(&context, binding(&context, &profile)).await?;
+        manager.create_binding(&context, binding(&context, &profile), Some(&context.user_id)).await?;
         let alternate = manager.create(&user, name("alternate"), BTreeMap::new()).await?;
         for change in ["environment", "binding", "profile"] {
             let mut holder = pool.begin().await?;
@@ -645,7 +670,7 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
                     }
                     "binding" => {
                         profiles(&writer).replace_binding(&write_context,
-                            &binding(&write_context, &write_profile), binding(&write_context, &write_alternate)).await?;
+                            &binding(&write_context, &write_profile), binding(&write_context, &write_alternate), Some(&write_context.user_id)).await?;
                     }
                     "profile" => {
                         profiles(&writer).update(&write_owner, &write_profile.id, 1, BTreeMap::new()).await?;
@@ -666,7 +691,7 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
                     .bind(context.environment_id.as_str()).execute(&db.pool).await?;
             } else if change == "binding" {
                 ensure!(profiles(&pool).evaluate_grants(&context).await?.is_empty());
-                manager.replace_binding(&context, &binding(&context, &alternate), binding(&context, &profile)).await?;
+                manager.replace_binding(&context, &binding(&context, &alternate), binding(&context, &profile), Some(&context.user_id)).await?;
             }
         }
         // The still-pinned revision is not replaced by a metadata edit.
@@ -674,6 +699,62 @@ async fn environment_and_profile_helpers_fence_binding_and_revision_changes() ->
         let grants = profiles(&pool).evaluate_grants(&context).await?;
         ensure!(grants.len() == 1 && grants[0].profile_revision == 1);
         pool.close().await;
+        Ok(())
+    }.await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn restricted_binding_metadata_waits_for_atomic_rebind_and_clear() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("atomic-consent-user").await?;
+        let org = db.organization("atomic-consent-org").await?;
+        let credential = db.store(Arc::new(SyntheticKek::default()))
+            .create(&user, registration("Personal", Kind::OAuth), &value(OLD_VALUE)).await?;
+        let context = environment(&db, &user, &org, "atomic-consent-env", &credential.metadata.id).await?;
+        let manager = profiles(&db.pool);
+        let personal = manager.create(&user, name("personal"), entries(&credential.metadata.id)).await?;
+        let shared = manager.create(&org, name("shared"), BTreeMap::new()).await?;
+        manager.create_binding(&context, binding(&context, &personal), Some(user.id())).await?;
+        let (broker, _) = db.broker_pool().await?;
+        let reader = PgPoolOptions::new().max_connections(1)
+            .connect_with(broker.connect_options().as_ref().clone()).await?;
+        for clear in [false, true] {
+            let mut writer = db.pool.begin().await?;
+            let holder: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+                .fetch_one(&mut *writer).await?;
+            sqlx::query("SELECT id FROM public.environments WHERE id=$1 FOR UPDATE")
+                .bind(context.environment_id.as_str()).execute(&mut *writer).await?;
+            if clear {
+                sqlx::query("DELETE FROM public.platform_environment_access_bindings WHERE environment_id=$1")
+                    .bind(context.environment_id.as_str()).execute(&mut *writer).await?;
+            } else {
+                sqlx::query("UPDATE public.platform_environment_access_bindings SET profile_id=$2, \
+                    profile_revision=$3,personal_owner_confirmed_by=NULL WHERE environment_id=$1")
+                    .bind(context.environment_id.as_str()).bind(shared.id.as_str()).bind(1_i64)
+                    .execute(&mut *writer).await?;
+            }
+            let waiter: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+                .fetch_one(&reader).await?;
+            let runtime = profiles(&reader);
+            let reading_context = context.clone();
+            let reading = tokio::spawn(async move { runtime.get_binding_metadata(&reading_context).await });
+            wait_blocked(&db.pool, waiter, holder).await?;
+            writer.commit().await?;
+            let observed = tokio::time::timeout(TIMEOUT, reading).await??;
+            if clear {
+                ensure!(observed == Err(ProfileError::NotFound));
+            } else {
+                let observed = observed?;
+                ensure!(observed.binding == binding(&context, &shared));
+                ensure!(observed.personal_owner_confirmed_by.is_none());
+                ensure!(profiles(&reader).evaluate_grants(&context).await?.is_empty());
+            }
+        }
+        reader.close().await;
+        broker.close().await;
         Ok(())
     }.await;
     db.finish(result).await

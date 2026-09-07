@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::WorkerContext;
 use super::activity_authority::ActivityAuthority;
-use super::env_data::load_backend_row;
+use super::env_data::{load_backend_row, load_environment};
 use crate::api::environment_daemon::{
     list_environment_daemon_sessions_for_worker, stop_environment_daemon_session_for_worker,
 };
@@ -283,6 +283,18 @@ pub async fn handle_environment_resize(
     let backend = load_backend_row(&ctx.pool, environment_id).await?;
     let client = sandbox_client(ctx, &backend.namespace)?;
 
+    if operation.previous_state == "running" {
+        let env = load_environment(&ctx.pool, environment_id).await?;
+        super::create::reconcile_runtime_identity(
+            ctx,
+            &env,
+            &backend,
+            authority,
+            RESIZE_MUTATION_STATES,
+        )
+        .await?;
+    }
+
     let pod_state = if operation.previous_state == "running" {
         Some(client.workspace_pod_resize_state(environment_id).await?)
     } else {
@@ -455,6 +467,15 @@ pub async fn handle_environment_resize(
         checkpoint_storage_applied(authority, &operation).await?;
     }
     let pod_ip = client.get_pod_ip(environment_id).await?;
+    let env = load_environment(&ctx.pool, environment_id).await?;
+    super::create::reconcile_runtime_identity(
+        ctx,
+        &env,
+        &backend,
+        authority,
+        RESIZE_MUTATION_STATES,
+    )
+    .await?;
     complete_resize(
         authority,
         &operation,

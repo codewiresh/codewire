@@ -13,6 +13,7 @@ resources:
   - ../../../deployments/k8s/dashboard
   - ../../../deployments/k8s/billing
   - ../../../deployments/k8s/orchestration
+  - ../../../deployments/k8s/credential-service
   - ../../../deployments/k8s/coordinator
   - ../../../deployments/k8s/idp
   - mesh.yaml
@@ -26,6 +27,24 @@ resources:
   - coordinator-nodeport.yaml
 
 patches:
+  - target:
+      kind: Deployment
+      name: codewire-credential-service
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: codewire-credential-service
+      spec:
+        # The managed fixture provisions restricted SQL, synthetic authority,
+        # and both trust domains before admitting this process.
+        replicas: 0
+        template:
+          spec:
+            containers:
+              - name: credential-service
+                image: codewire-services:e2e
+                imagePullPolicy: Never
   - target:
       kind: Deployment
       name: codewire-dashboard
@@ -178,7 +197,47 @@ patches:
                 image: codewire-services:e2e
                 imagePullPolicy: Never
 
+# Namespace transforms do not rewrite DNS SANs inside custom resources.
+replacements:
+  - source:
+      group: cert-manager.io
+      version: v1
+      kind: Certificate
+      name: codewire-credential-broker
+      fieldPath: metadata.namespace
+    targets:
+      - select:
+          group: cert-manager.io
+          version: v1
+          kind: Certificate
+          name: codewire-credential-broker
+        fieldPaths:
+          - spec.dnsNames.0
+        options:
+          delimiter: "."
+          index: 1
+
 transformers:
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-credential-service-peers
+    patch: |-
+      - op: replace
+        path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: dev-sandboxes
+      - op: replace
+        path: /spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: ingress-nginx
+      - op: replace
+        path: /spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name
+        value: ingress-nginx
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: codewire-credential-service
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -205,7 +264,7 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: Role|RoleBinding
-      name: codewire-orchestration-gateway-host-key
+      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -219,7 +278,7 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: RoleBinding
-      name: codewire-orchestration-gateway-host-key
+      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -232,4 +291,4 @@ transformers:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-      name: codewire-orchestration-gateway-host-key
+      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup)

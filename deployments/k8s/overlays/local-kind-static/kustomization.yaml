@@ -10,6 +10,7 @@ resources:
   - ../../idp
   - ../../billing
   - ../../orchestration
+  - ../../credential-service
   - ingress.yaml
   - local-secret.yaml
   - idp-signing-keks.yaml
@@ -100,7 +101,47 @@ patches:
       kind: Ingress
       name: codewire-billing
 
+# Namespace transforms do not rewrite DNS SANs inside custom resources.
+replacements:
+  - source:
+      group: cert-manager.io
+      version: v1
+      kind: Certificate
+      name: codewire-credential-broker
+      fieldPath: metadata.namespace
+    targets:
+      - select:
+          group: cert-manager.io
+          version: v1
+          kind: Certificate
+          name: codewire-credential-broker
+        fieldPaths:
+          - spec.dnsNames.0
+        options:
+          delimiter: "."
+          index: 1
+
 transformers:
+  - |-
+    apiVersion: builtin
+    kind: PatchTransformer
+    metadata:
+      name: codewire-credential-service-peers
+    patch: |-
+      - op: replace
+        path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: dev-sandboxes
+      - op: replace
+        path: /spec/ingress/0/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: ingress-nginx
+      - op: replace
+        path: /spec/ingress/0/from/0/podSelector/matchLabels/app.kubernetes.io~1name
+        value: ingress-nginx
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: codewire-credential-service
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -114,7 +155,7 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: Role|RoleBinding
-      name: codewire-orchestration-gateway-host-key
+      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -128,7 +169,7 @@ transformers:
       group: rbac.authorization.k8s.io
       version: v1
       kind: RoleBinding
-      name: codewire-orchestration-gateway-host-key
+      name: codewire-(orchestration-(gateway-host-key|credential-bootstrap)|credential-service-runtime)
   - |-
     apiVersion: builtin
     kind: PatchTransformer
@@ -141,4 +182,4 @@ transformers:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding
-      name: codewire-orchestration-gateway-host-key
+      name: codewire-orchestration-(gateway-host-key|credential-bootstrap|credential-leaf-cleanup)

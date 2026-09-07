@@ -23,6 +23,10 @@
 //! [`require_auth`] middleware. Admin-only handlers add [`require_admin`]
 //! after it. Browser-owned account-security routes instead use
 //! [`require_session_auth`] and never accept bearer credentials.
+//! Isolated services can instead mount
+//! [`ConnectAuthLayer::oauth_bearer_only`](crate::connect::ConnectAuthLayer::oauth_bearer_only):
+//! cookies never supply identity and API keys never enter their lookup or
+//! usage-bookkeeping paths.
 
 use axum::extract::{FromRequestParts, State};
 use axum::http::HeaderMap;
@@ -36,6 +40,9 @@ use sqlx::PgPool;
 use std::time::Duration;
 
 use crate::error::AppError;
+
+mod oauth_authority;
+pub use oauth_authority::{OAuthBearerAuthority, OAuthBearerAuthorityError};
 
 /// Published browser session cookie name.
 pub const SESSION_COOKIE_NAME: &str = "codewire.session_token";
@@ -184,6 +191,15 @@ pub struct Authentication {
     pub user: AuthUser,
     /// Credential-specific delegated authority.
     pub credential: CredentialContext,
+    pub(crate) oauth_bearer_authority: Option<OAuthBearerAuthority>,
+}
+
+impl Authentication {
+    /// The original OAuth token's publication authority, never a raw bearer.
+    /// Session and API-key authentication deliberately have no such authority.
+    pub fn oauth_bearer_authority(&self) -> Option<&OAuthBearerAuthority> {
+        self.oauth_bearer_authority.as_ref()
+    }
 }
 
 /// Application state expected by [`require_auth`].
@@ -203,6 +219,9 @@ pub async fn require_auth(
     // holding `&Request` across an await would make this future !Send
     // (axum's Body is !Sync), and axum middleware futures must be Send.
     let auth = authenticate_headers_with_context(&state, req.headers()).await?;
+    if let Some(authority) = auth.oauth_bearer_authority {
+        req.extensions_mut().insert(authority);
+    }
     req.extensions_mut().insert(auth.credential);
     req.extensions_mut().insert(auth.user);
     Ok(next.run(req).await)
@@ -372,6 +391,7 @@ pub(crate) async fn resolve_authentication(
         return Ok(Authentication {
             user,
             credential: CredentialContext::SessionCookie,
+            oauth_bearer_authority: None,
         });
     }
     // Fall through: a stale cookie shouldn't deny a valid bearer.
@@ -391,6 +411,55 @@ pub(crate) async fn resolve_authentication(
     }
 
     Err(AppError::Unauthorized)
+}
+
+/// Resolve only an opaque OAuth bearer. Scope authorization remains the shared
+/// `require_product_access` step, so Connect retains validated principal
+/// evidence even when an identity-only token lacks product authority.
+///
+/// This path has no session/API-key fallback and requires only the existing
+/// identity SELECT columns in `oidc_access_tokens`, `users` and `oidc_clients`.
+/// In particular, an irrelevant cookie never triggers a session lookup/write.
+pub(crate) async fn resolve_oauth_bearer_authentication(
+    state: &AuthState,
+    headers: &HeaderMap,
+) -> Result<Authentication, AppError> {
+    let token = oauth_bearer_token(headers).ok_or(AppError::Unauthorized)?;
+    authenticate_oidc_access_token(&state.pool, token)
+        .await
+        // The isolated boundary does not retain database errors or their source
+        // chains: neither presented credentials nor database details can escape
+        // through Debug, Display, Connect rendering or error telemetry.
+        .map_err(|_| AppError::ServiceUnavailable("OAuth credential lookup unavailable".into()))?
+        .ok_or(AppError::Unauthorized)
+}
+
+fn oauth_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    // Reject ambiguous duplicate credentials rather than choosing an identity
+    // according to header ordering. Cookies are deliberately not consulted.
+    let mut values = headers.get_all(AUTHORIZATION).iter();
+    let raw = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let (scheme, token) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() || is_api_key(token) {
+        return None;
+    }
+    // RFC 6750 bearer syntax, with padding only at the end. This validates
+    // framing, not token authority: even a syntactically valid session token
+    // can authenticate only if its digest is in the live OAuth token store.
+    // Do not reserve every `cw_` prefix: a genuine randomly minted base64url
+    // OAuth token can begin with those bytes without being an API key.
+    let unpadded = token.trim_end_matches('=');
+    if unpadded.is_empty()
+        || !unpadded.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+        })
+    {
+        return None;
+    }
+    Some(token)
 }
 
 /// Applies the shared baseline product policy after credential resolution.
@@ -597,6 +666,7 @@ async fn authenticate_api_key(pool: &PgPool, full_token: &str) -> Result<Authent
             key_id: row.id,
             scopes: row.scopes,
         },
+        oauth_bearer_authority: None,
     })
 }
 
@@ -628,6 +698,14 @@ pub fn touch_api_key_last_used_best_effort(pool: &PgPool, key_id: &str) {
     }));
 }
 
+type OidcAccessTokenRow = (
+    String,
+    bool,
+    String,
+    Vec<String>,
+    chrono::DateTime<chrono::Utc>,
+);
+
 /// Validates an opaque OIDC access token (auth-policy flavor 2) by direct
 /// lookup against the idp's token store: hash the presented token, join
 /// the subject and issuing client, and reject expired tokens and disabled
@@ -638,12 +716,18 @@ async fn authenticate_oidc_access_token(
     pool: &PgPool,
     token: &str,
 ) -> Result<Option<Authentication>, AppError> {
-    let row: Option<(String, bool, String, Vec<String>)> = sqlx::query_as(
+    // Pin both clocks before awaiting identity lookup. A wall-clock rewind
+    // during lookup or a later publication cannot renew elapsed authority.
+    let captured_monotonic = std::time::Instant::now();
+    let captured_wall = chrono::Utc::now();
+    let digest = hash_oauth_token(token);
+    let row: Option<OidcAccessTokenRow> = sqlx::query_as(
         r#"
         SELECT t.user_id,
                u.is_admin,
                t.client_id,
-               t.scopes
+               t.scopes,
+               t.expires_at
           FROM oidc_access_tokens t
           JOIN users u ON u.id = t.user_id
           JOIN oidc_clients c ON c.id = t.client_id
@@ -652,20 +736,31 @@ async fn authenticate_oidc_access_token(
            AND NOT c.disabled
         "#,
     )
-    .bind(hash_oauth_token(token))
+    .bind(&digest)
     .fetch_optional(pool)
     .await
     .map_err(AppError::from)?;
 
     Ok(
-        row.map(|(user_id, is_admin, client_id, scopes)| Authentication {
-            user: AuthUser {
-                user_id,
-                org_id: None,
-                is_admin,
-                via_api_key: false,
-            },
-            credential: CredentialContext::OidcAccessToken { client_id, scopes },
+        row.and_then(|(user_id, is_admin, client_id, scopes, expires_at)| {
+            let authority = OAuthBearerAuthority::new(
+                digest,
+                user_id.clone(),
+                client_id.clone(),
+                expires_at,
+                captured_monotonic,
+                captured_wall,
+            )?;
+            Some(Authentication {
+                oauth_bearer_authority: Some(authority),
+                user: AuthUser {
+                    user_id,
+                    org_id: None,
+                    is_admin,
+                    via_api_key: false,
+                },
+                credential: CredentialContext::OidcAccessToken { client_id, scopes },
+            })
         }),
     )
 }
@@ -702,6 +797,7 @@ mod tests {
                 via_api_key: false,
             },
             credential,
+            oauth_bearer_authority: None,
         }
     }
 
@@ -784,6 +880,26 @@ mod tests {
     #[test]
     fn rejects_requests_without_authorization_header() {
         assert_eq!(bearer_token(&HeaderMap::new()), None);
+    }
+
+    #[tokio::test]
+    async fn oauth_only_errors_do_not_retain_input_or_database_sources() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://synthetic:synthetic@127.0.0.1:1/synthetic")
+            .unwrap();
+        pool.close().await;
+        for value in ["Basic synthetic-invalid", "Bearer synthetic-opaque"] {
+            let headers = headers_with("authorization", value);
+            let error =
+                resolve_oauth_bearer_authentication(&AuthState { pool: pool.clone() }, &headers)
+                    .await
+                    .unwrap_err();
+            let rendered = format!("{error} {error:?}");
+            for forbidden in ["synthetic", "PoolClosed", "postgres", "127.0.0.1"] {
+                assert!(!rendered.contains(forbidden));
+            }
+            assert!(std::error::Error::source(&error).is_none());
+        }
     }
 
     #[test]
