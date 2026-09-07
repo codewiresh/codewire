@@ -168,6 +168,46 @@ for compiler in disabled local r2; do
     ! grep -Eq 'synthetic-workspace-(key|secret)' "$FAKE_LOG" "$work/out" "$work/layer-args" "$work/compiler-args" "$work/buildkitd.toml" || exit 1
   done
 done
+# The measured warm workers import only their successful producer. Their own
+# exports are distinct, so neither parallel replicate can seed the other.
+measurement_args() (
+  source "$ROOT/scripts/ci/images/workspace-cache.sh"
+  CODEWIRE_WORKSPACE_CACHE_CASE="$1" CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2
+  workspace_cache_validate
+  builder_container="$(printf '%064d' "$2")"
+  GITHUB_RUN_ID=2047
+  CODEWIRE_WORKSPACE_CACHE_SEED_ID="run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)"
+  workspace_cache_layer_args workspace 1111111111111111111111111111111111111111 amd64
+  printf '%s\n' "${layer_args[@]}"
+)
+for measurement in seed warm-1 warm-2; do
+  measurement_args "$measurement" 2 >"$work/$measurement.args"
+  grep -q 'ignore-error=false' "$work/$measurement.args"
+  grep -Fxq workspace-floating-tools "$work/$measurement.args"
+done
+for measurement in warm-1 warm-2; do
+  awk 'previous == "--cache-from" { print } { previous = $0 }' "$work/$measurement.args" >"$work/$measurement.imports"
+  [[ "$(wc -l <"$work/$measurement.imports")" == 1 ]]
+  grep -q "name=amd64/workspace/experiments/run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)$" \
+    "$work/$measurement.imports"
+  grep -q "seed-$(printf '%064d' 1)/$measurement-$(printf '%064d' 2),mode=max" "$work/$measurement.args"
+done
+cmp "$work/warm-1.imports" "$work/warm-2.imports"
+if cmp -s "$work/warm-1.args" "$work/warm-2.args"; then echo 'warm exports overlap' >&2; exit 1; fi
+for failure in mode run tree; do
+  if (
+    source "$ROOT/scripts/ci/images/workspace-cache.sh"
+    CODEWIRE_WORKSPACE_CACHE_CASE=warm-1 CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2
+    [[ "$failure" != mode ]] || CODEWIRE_SCCACHE_MODE=local
+    workspace_cache_validate || exit
+    builder_container="$(printf '%064d' 2)" GITHUB_RUN_ID=2047
+    CODEWIRE_WORKSPACE_CACHE_SEED_ID="run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)"
+    [[ "$failure" != run ]] || GITHUB_RUN_ID=2048
+    tree=1111111111111111111111111111111111111111
+    [[ "$failure" != tree ]] || tree=2222222222222222222222222222222222222222
+    workspace_cache_layer_args workspace "$tree" amd64
+  ) >/dev/null 2>&1; then echo "accepted invalid measurement $failure" >&2; exit 1; fi
+done
 for failure in copy pin erase cleanup compile; do
   : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
   set +e

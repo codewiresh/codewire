@@ -136,6 +136,7 @@ grep -qF -- '--tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256
 grep -qF "!contains(needs.verification-selection.outputs.selection, '|kind|')" <<<"$workspace_job" ||
   fail 'standalone workspace verification duplicates selected Kind ownership'
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-cache-experiment.py"
 "$ROOT/scripts/ci/tests/test-select-untrusted-workspace-cache.sh"
 "$ROOT/scripts/ci/tests/test-workspace-cache.sh"
 
@@ -215,7 +216,10 @@ for path in images/base/Dockerfile images/workspace/Dockerfile .dockerignore \
   scripts/ci/verify/workspace-image-artifact.py \
   scripts/ci/images/workspace-cache.sh \
   scripts/ci/images/run-rust-build.sh \
-  scripts/ci/setup/select-untrusted-workspace-cache.sh; do
+  scripts/ci/setup/select-untrusted-workspace-cache.sh \
+  scripts/ci/setup/select-workspace-cache-experiment.py \
+  scripts/ci/setup/prepare-workspace-cache-measurement.sh \
+  scripts/ci/verify/workspace-cache-report.py; do
   mkdir -p "$fixture_root/$(dirname "$path")"
   cp "$ROOT/$path" "$fixture_root/$path"
 done
@@ -229,6 +233,7 @@ case "$*" in
   'status --porcelain --untracked-files=normal')
     [[ "${FAKE_DIRTY:-false}" == false ]] || printf ' M tracked-file\n' ;;
   'rev-parse HEAD') printf '%040d\n' 1 ;;
+  'rev-parse HEAD HEAD^{tree}') printf '%040d\n%040d\n' 1 2 ;;
   'rev-parse HEAD^{tree}'|'rev-parse 0000000000000000000000000000000000000001^{tree}')
     printf '%040d\n' 2 ;;
   *) exit 99 ;;
@@ -241,6 +246,9 @@ printf '%q ' "$@" >>"$FAKE_DOCKER_LOG"
 printf '\n' >>"$FAKE_DOCKER_LOG"
 
 case "${1:-} ${2:-}" in
+  'info --format') printf 'daemon-%s\n' "$FAKE_BUILDER_SUFFIX" ;;
+  'version --format') printf '29.7.1\n' ;;
+  'buildx version') printf 'buildx pinned-fixture\n' ;;
   'buildx inspect')
     printf 'Name: %s\n' "${FAKE_SELECTED_BUILDER:-selected-verifier}"
     printf 'Driver: %s\n' "${FAKE_SELECTED_DRIVER:-docker-container}"
@@ -275,6 +283,18 @@ case "${1:-} ${2:-}" in
         *) exit 98 ;;
       esac
     fi
+    if [[ -n "${CODEWIRE_WORKSPACE_CACHE_CASE:-}" ]]; then
+      sleep 0.1
+      if [[ -z "$metadata_file" ]]; then
+        if [[ "${FAKE_FAIL:-}" == sampler-bookkeeping ]]; then
+          mkdir "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR/sampler-stop-request"
+        fi
+        printf '#1 [workspace-floating-tools 1/2] RUN npm install\n#1 DONE 0.1s\n'
+        printf '#2 [workspace-floating-tools 2/2] RUN go install\n#2 DONE 0.1s\n'
+        printf '#3 [cw-builder 1/1] RUN cargo build\n#3 DONE 0.1s\n#3 0.1 Cache hits 4\n'
+      fi
+      [[ "$CODEWIRE_BUILDKIT_CACHE_MODE" != r2 ]] || printf '#9 exporting cache to Amazon S3\n#9 DONE 0.1s\n'
+    fi
     ;;
   'buildx rm')
     [[ "${FAKE_FAIL:-}" != cleanup ]] || exit 43
@@ -284,6 +304,8 @@ case "${1:-} ${2:-}" in
   'container inspect')
     if [[ "$5" == '{{.Id}}' ]]; then
       printf '%064d\n' 4
+    elif [[ "$5" == '{{.Image}}' ]]; then
+      printf 'sha256:%064d\n' 8
     else
       printf '%s\n' 'docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
     fi
@@ -307,6 +329,13 @@ PY
     ;;
   'rm --force') rm -f "$FAKE_CONTRACT_RUNNING" ;;
   'run --rm')
+    if [[ "$*" == *'--entrypoint python3'* ]]; then
+      python3 - <<'PY'
+import json
+print(json.dumps({key: 'version1' for key in ('npm', 'pnpm', 'yarn', 'bun', 'gopls', 'hcloud', 'poetry', 'uv', 'aider')}))
+PY
+      exit 0
+    fi
     if [[ "${FAKE_FAIL:-}" == hang-contract ]]; then
       printf '%s\n' "$$" >"$FAKE_CONTRACT_PROCESS"
       : >"$FAKE_CONTRACT_RUNNING"
@@ -324,6 +353,14 @@ PY
     fi
     ;;
   *)
+    if [[ "$1" == exec && "${3:-}" == sh ]]; then
+      if tr '\0' ' ' <"/proc/$PPID/cmdline" | grep -q 'workspace-cache-report.py sample '; then
+        printf '%s\n' "$PPID" >"$FAKE_SAMPLER_PROCESS"
+        [[ "${FAKE_FAIL:-}" != sampler-crash ]] || kill -KILL "$PPID"
+      fi
+      printf '1000 10000 2000 8000 3000 4000\n'
+      exit 0
+    fi
     if [[ "$1" == exec && "${3:-}" == rm ]]; then
       [[ "${FAKE_FAIL:-}" != daemon-erase ]] || exit 45
       rm -f "$FAKE_DAEMON_FILE"
@@ -335,6 +372,15 @@ PY
 esac
 EOF
 chmod +x "$work/bin/docker" "$work/bin/git"
+cat >"$work/bin/cp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_FAIL:-}" == report-copy && "$*" == *'/receipt.json'* ]]; then exit 72; fi
+exec /usr/bin/cp "$@"
+EOF
+chmod +x "$work/bin/cp"
+printf '{"repository":{"full_name":"codewire/codewire"},"pull_request":{"number":2047,"base":{"ref":"main","repo":{"full_name":"codewire/codewire"}},"head":{"ref":"experiment/workspace-r2-cache/fixture","sha":"%040d"},"labels":[]}}\n' 1 >"$work/measurement-event.json"
+mkdir "$work/measurement"
 
 run_mock_verifier() {
   local -a invocation=(env PATH="$work/bin:$PATH" \
@@ -342,6 +388,12 @@ run_mock_verifier() {
     CODEWIRE_SCCACHE_MODE="${MOCK_COMPILER:-local}" \
     CODEWIRE_BUILDKIT_CACHE_MODE="${MOCK_LAYERS:-local}" \
     CODEWIRE_WORKSPACE_IMAGE_REUSE="${MOCK_REUSE:-auto}" \
+    CODEWIRE_WORKSPACE_CACHE_CASE="${MOCK_MEASUREMENT_CASE:-}" \
+    CODEWIRE_WORKSPACE_CACHE_REPORT_DIR="$work/measurement/$1" \
+    CODEWIRE_EXPECTED_SOURCE_SHA="$(printf '%040d' 1)" CODEWIRE_EXPECTED_SOURCE_TREE="$(printf '%040d' 2)" \
+    GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$work/measurement-event.json" \
+    GITHUB_REF=refs/pull/2047/head GITHUB_SHA="$(printf '%040d' 1)" GITHUB_REPOSITORY=codewire/codewire \
+    GITHUB_JOB=workspace-fixture GITHUB_RUN_ID=2047 GITHUB_RUN_ATTEMPT=1 RUNNER_TEMP="$work/measurement" \
     CODEWIRE_SCCACHE_CREDENTIALS_FILE="${MOCK_CREDENTIALS:-}" \
     SCCACHE_BUCKET=example-ci-cache-untrusted \
     SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
@@ -355,6 +407,7 @@ run_mock_verifier() {
     FAKE_CONTRACT_PROCESS="$work/contract-process" \
     FAKE_CONTRACT_CHILD="$work/contract-child" \
     FAKE_CONTRACT_RUNNING="$work/contract-running" \
+    FAKE_SAMPLER_PROCESS="$work/sampler-process" \
     FAKE_FAIL="${4:-}" \
     FAKE_DIRTY="${5:-false}" \
     TMPDIR="$work/tmp" \
@@ -465,6 +518,47 @@ for pid_file in "$work/contract-process" "$work/contract-child"; do
   child_pid="$(<"$pid_file")"
   state="$(ps -o stat= -p "$child_pid" || true)"
   [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$child_pid"; fail 'contract left a live child'; }
+done
+
+# Exercise the complete measurement lifecycle against the absolute fake client.
+# Reports are finalized only after the job-owned credential finisher succeeds.
+for measurement in seed sampler-crash sampler-bookkeeping report-copy; do
+  status=0
+  rm -f "$work/sampler-process"
+  : >"$work/docker.log"
+  MOCK_MEASUREMENT_CASE=seed MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" \
+    run_mock_verifier "$measurement" valid docker "$measurement" >"$work/$measurement.log" 2>&1 || status=$?
+  directory="$work/measurement/$measurement"
+  [[ ! -e "$work/daemon.aws" ]] || fail 'measurement retained daemon credentials'
+  grep -q '^buildx rm --force codewire-workspace-' "$work/docker.log" || fail 'measurement retained its owned builder'
+  if [[ -s "$work/sampler-process" ]]; then
+    sampler_process="$(<"$work/sampler-process")"
+    state="$(ps -o stat= -p "$sampler_process" || true)"
+    [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$sampler_process"; fail 'measurement left a live sampler'; }
+  fi
+  if [[ "$measurement" == sampler-* ]]; then
+    [[ "$status" != 0 && ! -e "$fixture_receipt" && ! -e "$directory/result.json" ]] || fail 'sampler failure emitted an acceptance marker'
+    continue
+  fi
+  if [[ "$measurement" == report-copy ]]; then
+    [[ "$status" != 0 && ! -e "$fixture_receipt" ]] || fail 'late report failure left a newly sealed image receipt'
+    continue
+  fi
+  [[ "$status" == 0 && -s "$directory/receipt.json" ]] || {
+    cat "$work/$measurement.log" >&2
+    fail 'measurement verifier did not complete its ordinary contracts'
+  }
+  status=0
+  env RUNNER_TEMP="$work/measurement" GITHUB_OUTPUT="$work/measurement-output" \
+    CODEWIRE_EXPECTED_SOURCE_SHA="$(printf '%040d' 1)" CODEWIRE_EXPECTED_SOURCE_TREE="$(printf '%040d' 2)" \
+    CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 \
+    python3 "$ROOT/scripts/ci/verify/workspace-cache-report.py" finalize "$directory" "$directory/receipt.json" \
+    >"$work/$measurement-report.log" 2>&1 || status=$?
+  [[ "$status" == 0 && -s "$directory/result.json" ]] || {
+    cat "$work/$measurement-report.log" >&2
+    fail 'valid seed measurement failed'
+  }
+  grep -q 'ignore-error=false' "$work/docker.log" || fail 'seed export remains best effort'
 done
 
 echo 'workspace-image verification workflow contract: OK'

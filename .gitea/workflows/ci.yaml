@@ -79,6 +79,8 @@ jobs:
       edge_kind_expected: ${{ steps.dispatch.outputs.edge_kind_expected }}
       cw_release_assets_expected: ${{ steps.dispatch.outputs.cw_release_assets_expected }}
       workspace_image_expected: ${{ steps.dispatch.outputs.workspace_image_expected }}
+      workspace_cache_experiment: ${{ steps.cache-experiment.outputs.workspace_cache_experiment }}
+      workspace_cache_measurement_matrix: ${{ steps.cache-experiment.outputs.workspace_cache_measurement_matrix }}
     steps:
       - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -205,6 +207,14 @@ jobs:
           fi
           "$dispatch_selector"
 
+      - name: Select bounded workspace cache experiment
+        id: cache-experiment
+        env:
+          CODEWIRE_EXPECTED_SOURCE_SHA: ${{ steps.select.outputs.ci_head_commit }}
+          CODEWIRE_EXPECTED_SOURCE_TREE: ${{ steps.select.outputs.ci_head_tree }}
+          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event.inputs.layer_cache }}
+        run: python3 scripts/ci/setup/select-workspace-cache-experiment.py --github-output
+
   cw-release-assets:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: CW release-assets verification
@@ -295,6 +305,11 @@ jobs:
     timeout-minutes: 55
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.workspace_image_expected == 'true' }}
+    outputs:
+      workspace_cache_seed: ${{ steps.cache-seed-report.outputs.workspace_cache_seed }}
+    env:
+      CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
+      CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
@@ -346,6 +361,10 @@ jobs:
           scripts/ci/tests/canary-workspace-r2-cache.sh \
             "$CODEWIRE_SCCACHE_CREDENTIALS_FILE" "$RUNNER_TEMP/workspace-r2-cache-canary"
 
+      - name: Prepare selected workspace cache seed
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        run: scripts/ci/setup/prepare-workspace-cache-measurement.sh seed
+
       - name: Build and inspect without publication
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/verify/verify-workspace-image.sh
@@ -353,6 +372,11 @@ jobs:
       - name: Clean workspace cache credentials
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Finalize selected workspace cache seed
+        id: cache-seed-report
+        if: ${{ success() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        run: python3 scripts/ci/verify/workspace-cache-report.py finalize "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR" "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR/receipt.json"
 
       - name: Build and inspect the standalone dashboard image
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
@@ -966,7 +990,11 @@ jobs:
     timeout-minutes: 85
     needs: [verification-selection]
     if: ${{ needs.verification-selection.outputs.edge_kind_expected == 'true' }}
+    outputs:
+      workspace_cache_seed: ${{ steps.cache-seed-report.outputs.workspace_cache_seed }}
     env:
+      CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
+      CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
       KIND_CLUSTER_NAME: codewire-e2e-ci-${{ github.run_id }}
       CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV: ubuntu24-cft145
       KIND_INGRESS_CONTROLLER_IMAGE: nexus.example.invalid/oci-approved/ingress-nginx/controller@sha256:5c2a1b6c03c4d18ecf14685d21a32bf6763a022f6f8cc07e9578f6cd5eca6180
@@ -1037,6 +1065,10 @@ jobs:
           scripts/ci/tests/canary-workspace-r2-cache.sh \
             "$CODEWIRE_SCCACHE_CREDENTIALS_FILE" "$RUNNER_TEMP/workspace-r2-cache-canary"
 
+      - name: Prepare selected workspace cache seed
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        run: scripts/ci/setup/prepare-workspace-cache-measurement.sh seed
+
       - name: Run Kind
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/verify/kind-e2e.sh
@@ -1044,6 +1076,74 @@ jobs:
       - name: Report and clean Rust cache
         if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Finalize selected workspace cache seed
+        id: cache-seed-report
+        if: ${{ success() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        run: python3 scripts/ci/verify/workspace-cache-report.py finalize "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR" "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR/receipt.json"
+
+  workspace-cache-measurement:
+    # This experiment uses the existing untrusted PR cache identity only.
+    name: Workspace cache measurement (${{ matrix.case }})
+    runs-on: ci-heavy
+    enable-openid-connect: true
+    timeout-minutes: 55
+    needs: [verification-selection, workspace-image, edge-kind]
+    if: ${{ always() && needs.verification-selection.result == 'success' && needs.verification-selection.outputs.workspace_cache_experiment == 'true' && ((contains(needs.verification-selection.outputs.selection, '|kind|') && needs.edge-kind.result == 'success' && needs.edge-kind.outputs.workspace_cache_seed != '') || (!contains(needs.verification-selection.outputs.selection, '|kind|') && needs.workspace-image.result == 'success' && needs.workspace-image.outputs.workspace_cache_seed != '')) }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verification-selection.outputs.workspace_cache_measurement_matrix) }}
+    env:
+      CODEWIRE_EXPECTED_SOURCE_SHA: ${{ needs.verification-selection.outputs.ci_head_commit }}
+      CODEWIRE_EXPECTED_SOURCE_TREE: ${{ needs.verification-selection.outputs.ci_head_tree }}
+    steps:
+      - uses: https://git.example.invalid/noel/actions-checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verification-selection.outputs.ci_head_commit }}
+          persist-credentials: false
+
+      - name: Verify sealed measurement tools
+        run: scripts/ci/setup/assert-ci-runner-image.sh
+
+      - name: Bind successful exact-source producer
+        env:
+          KIND_SELECTED: ${{ contains(needs.verification-selection.outputs.selection, '|kind|') }}
+          KIND_RESULT: ${{ needs.edge-kind.result }}
+          WORKSPACE_RESULT: ${{ needs.workspace-image.result }}
+          KIND_SEED: ${{ needs.edge-kind.outputs.workspace_cache_seed }}
+          WORKSPACE_SEED: ${{ needs.workspace-image.outputs.workspace_cache_seed }}
+        run: |
+          set -euo pipefail
+          if [[ "$KIND_SELECTED" == true ]]; then
+            [[ "$KIND_RESULT" == success && -z "$WORKSPACE_SEED" ]]
+            seed="$KIND_SEED"
+          else
+            [[ "$WORKSPACE_RESULT" == success && -z "$KIND_SEED" ]]
+            seed="$WORKSPACE_SEED"
+          fi
+          CODEWIRE_WORKSPACE_CACHE_SEED_REPORT="$seed" python3 scripts/ci/verify/workspace-cache-report.py seed-id
+          printf 'CODEWIRE_WORKSPACE_CACHE_SEED_REPORT=%s\n' "$seed" >> "$GITHUB_ENV"
+
+      - name: Select independent measurement caches
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ matrix.compiler == 'r2' && 'auto' || 'disabled' }}
+          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ matrix.layers == 'r2' && 'auto' || 'disabled' }}
+        run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Bind measurement modes and source
+        env:
+          MEASUREMENT_CASE: ${{ matrix.case }}
+        run: scripts/ci/setup/prepare-workspace-cache-measurement.sh "$MEASUREMENT_CASE"
+
+      - name: Verify measured workspace
+        run: scripts/ci/verify/verify-workspace-image.sh
+
+      - name: Clean measurement cache credential
+        if: ${{ always() }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Finalize workspace measurement
+        run: python3 scripts/ci/verify/workspace-cache-report.py finalize "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR" "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR/receipt.json"
 
   required-verification:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this aggregator receives no write-capable integration.

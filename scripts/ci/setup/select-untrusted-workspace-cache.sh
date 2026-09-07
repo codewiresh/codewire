@@ -14,18 +14,13 @@ fetcher="${OPENBAO_SCCACHE_FETCHER:-$ROOT/scripts/ci/setup/fetch-openbao-sccache
 : "${GITHUB_WORKSPACE:?Forgejo job workspace is required}"
 : "${RUNNER_TEMP:?Forgejo runner temporary directory is required}"
 
-# A label on an eligible PR event opts into a bounded backend experiment. Read
-# the existing event, never a mutable API lookup or a new credential/role. The
-# label must be present before the synchronize event; old reruns keep old input.
+# The exact experiment branch or label opts into bounded cache measurements.
+# Read the stored event, never a mutable API lookup or a new credential/role.
+# A newly attached label takes effect on the next eligible source update.
 canary=false
 if [[ "${GITHUB_EVENT_NAME:-}" == pull_request && -n "${GITHUB_EVENT_PATH:-}" ]]; then
-  label_canary="$(jq -r '
-    (.pull_request.labels | if . == null then [] else . end) as $labels |
-    if (.pull_request | type) != "object" or ($labels | type) != "array"
-    then error("invalid PR label event")
-    else any($labels[]; .name == "ci/r2-cache-canary") end
-  ' "$GITHUB_EVENT_PATH")"
-  if [[ "$label_canary" == true \
+  experiment="$(python3 "$ROOT/scripts/ci/setup/select-workspace-cache-experiment.py" | jq -er '.selected | tostring')"
+  if [[ "$experiment" == true \
       && ( -z "${CODEWIRE_BUILDKIT_CACHE_REQUEST:-}" || "$layer_request" == auto ) ]]; then
     layer_request=auto
     canary=true
