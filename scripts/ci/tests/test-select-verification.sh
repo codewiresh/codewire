@@ -2060,20 +2060,20 @@ grep -qF \
 }
 
 rust_transport_block="$TMP/rust-transport.yaml"
-for contract in 'Run Rust|rust' 'Run Rust transport|transport'; do
+for contract in 'Run selected Rust and transport|rust' 'Run selected Rust and transport|transport'; do
   step_name="${contract%%|*}"
   token="${contract##*|}"
   step_condition="$(grep -A1 -F -- "- name: ${step_name}" "$rust_transport_block")"
   grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
     <<<"$step_condition" || {
-    echo "rust-transport: ${step_name} is not isolated to ${token}" >&2
+    echo "rust-transport: ${step_name} does not select ${token}" >&2
     exit 1
   }
 done
 rust_transport_protoc_line="$(grep -n -m1 \
   'name: Install pinned protoc for guest initramfs reproduction' \
   "$rust_transport_block" | cut -d: -f1)"
-rust_transport_run_line="$(grep -n -m1 'name: Run Rust transport' \
+rust_transport_run_line="$(grep -n -m1 'name: Run selected Rust and transport' \
   "$rust_transport_block" | cut -d: -f1)"
 if [ -z "$rust_transport_protoc_line" ] \
     || [ "$rust_transport_protoc_line" -ge "$rust_transport_run_line" ]; then
