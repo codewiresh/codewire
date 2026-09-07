@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 mkdir -p "$ROOT/.tmp"
-work="$(mktemp -d "$ROOT/.tmp/workspace-cache-test.XXXXXX")"
+work="$(mktemp -d "$ROOT/.tmp/workspace-cache-test.MixedCase.XXXXXX")"
 credential_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-cache-data.XXXXXX")"
 trap 'rm -rf "$work" "$credential_work"' EXIT
 mkdir "$work/bin"
@@ -15,9 +15,20 @@ cat >"$work/bin/docker" <<'SH'
 set -euo pipefail
 printf '%q ' "$@" >>"$FAKE_LOG"; printf '\n' >>"$FAKE_LOG"
 case "$1 $2" in
-  'buildx create'|'buildx inspect') ;;
+  'buildx create')
+    node=''
+    while (($#)); do
+      if [[ "$1" == --node ]]; then node="$2"; shift; fi
+      shift
+    done
+    [[ -n "$node" ]]
+    # Real Buildx lowercases the node; Docker resolves its exact resulting name.
+    printf '%s\n' "${node,,}" >"$FAKE_NODE" ;;
+  'buildx inspect') ;;
   'container inspect')
-    if [[ "$4" == --format && "$5" == '{{.Id}}' ]]; then printf '%s' "$3" | sha256sum | cut -d ' ' -f 1
+    if [[ "$4" == --format && "$5" == '{{.Id}}' ]]; then
+      [[ "$3" == "buildx_buildkit_$(<"$FAKE_NODE")" ]] || exit 46
+      printf '%s' "$3" | sha256sum | cut -d ' ' -f 1
     elif [[ "${FAKE_FAILURE:-}" == pin ]]; then printf 'wrong-image\n'
     else printf '%s\n' "$FAKE_PIN"; fi ;;
   'exec --interactive')
@@ -61,6 +72,7 @@ esac
 SH
 chmod 0755 "$work/bin/docker"
 export FAKE_LOG="$work/docker.log" FAKE_FILE="$work/daemon.aws" FAKE_BUILDS="$work/builds"
+export FAKE_NODE="$work/node-name"
 export FAKE_PIN='docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
 export CODEWIRE_SCCACHE_CREDENTIALS_FILE="$credential_work/r2.aws"
 export SCCACHE_BUCKET=example-ci-cache-untrusted

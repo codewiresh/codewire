@@ -62,6 +62,8 @@ workspace_cache_create_builder() {
   local scratch_dir="$1" node
   # Use a random private directory basename, never a caller-selected builder.
   builder="codewire-workspace-${scratch_dir##*/}"
+  # Buildx canonicalizes names; Docker container lookup is case-sensitive.
+  builder="${builder,,}"
   [[ "$builder" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]] || return 2
   node="${builder}-node"
   local -a driver_args=(--driver-opt "image=$WORKSPACE_BUILDKIT_IMAGE")
