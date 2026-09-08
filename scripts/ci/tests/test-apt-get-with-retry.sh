@@ -26,6 +26,16 @@ printf '%s\0' "$@" >"$FAKE_APT_ARGV.$count"
 IFS=, read -r -a results <<<"$FAKE_APT_RESULTS"
 result="${results[$((count - 1))]:-unexpected}"
 case "$result" in
+  partial)
+    # Model APT's native transient-index behavior: warning/0 by default,
+    # error/100 with the last effective update error-mode set to any.
+    error_mode=persistent
+    for arg in "$@"; do
+      case "$arg" in APT::Update::Error-Mode=*) error_mode="${arg#*=}" ;; esac
+    done
+    printf 'Some index files failed to download\n' >&2
+    [[ "$error_mode" != any ]] || exit 100
+    exit 0 ;;
   hang)
     child_pid=''
     terminate() {
@@ -73,15 +83,23 @@ exec /usr/bin/timeout --signal=TERM --kill-after=3s 1s "$@"
 SH
 chmod 0755 "$TEST_TMP/bin/timeout"
 
+cat >"$TEST_TMP/update-and-install" <<'SH'
+#!/usr/bin/bash
+set -euo pipefail
+"$APT_HELPER_UNDER_TEST" "$@" && "$APT_HELPER_UNDER_TEST" install -y package-one
+SH
+
 helper_args=(-o Acquire::https::Verify-Peer=false -o 'Acquire::https::User-Agent=codewire fixture' install -y package-one)
-printf '%s\0' "${helper_args[@]}" >"$TEST_TMP/expected-apt-argv"
-printf '%s\0' --signal=TERM --kill-after=3s 300s apt-get "${helper_args[@]}" >"$TEST_TMP/expected-timeout-argv"
 cases=0 timed_out_transactions=0 total_transactions=0
 
 run_case() {
   local name="$1" results="$2" expected_status="$3" expected_calls="$4" expected_waits="$5"
+  local mode="${6:-single}"
   local case_dir="$TEST_TMP/$name" status attempt pid pid_file state
-  local -a expected_results
+  local -a expected_results invocation=("$HELPER") expected_args
+  if [[ "$mode" == chain ]]; then
+    invocation=(/usr/bin/bash "$TEST_TMP/update-and-install")
+  fi
   mkdir "$case_dir"
   printf '0\n' >"$case_dir/apt.state"
   printf '0\n' >"$case_dir/timeout.state"
@@ -92,7 +110,8 @@ run_case() {
     FAKE_APT_STATE="$case_dir/apt.state" FAKE_APT_ARGV="$case_dir/apt.argv" FAKE_APT_RESULTS="$results" \
     FAKE_TIMEOUT_STATE="$case_dir/timeout.state" FAKE_TIMEOUT_ARGV="$case_dir/timeout.argv" \
     FAKE_SLEEP_LOG="$case_dir/sleep.log" \
-    "$HELPER" "${helper_args[@]}" >"$case_dir/output.log" 2>&1
+    APT_HELPER_UNDER_TEST="$HELPER" \
+    "${invocation[@]}" "${helper_args[@]}" >"$case_dir/output.log" 2>&1
   status=$?
   set -e
   [[ "$status" == "$expected_status" ]] || fail "$name returned $status, expected $expected_status"
@@ -103,6 +122,13 @@ run_case() {
     || fail "$name changed the retry reports"
   IFS=, read -r -a expected_results <<<"$results"
   for ((attempt = 1; attempt <= expected_calls; attempt++)); do
+    expected_args=("${helper_args[@]}")
+    if [[ "$mode" == chain && "$expected_status" == 0 && "$attempt" == "$expected_calls" ]]; then
+      expected_args=(install -y package-one)
+    fi
+    expected_args+=(-o APT::Update::Error-Mode=any)
+    printf '%s\0' "${expected_args[@]}" >"$TEST_TMP/expected-apt-argv"
+    printf '%s\0' --signal=TERM --kill-after=3s 300s apt-get "${expected_args[@]}" >"$TEST_TMP/expected-timeout-argv"
     cmp "$TEST_TMP/expected-apt-argv" "$case_dir/apt.argv.$attempt" || fail "$name changed APT argument boundaries"
     cmp "$TEST_TMP/expected-timeout-argv" "$case_dir/timeout.argv.$attempt" || fail "$name changed the 300s/TERM/3s deadline"
     if [[ "${expected_results[$((attempt - 1))]}" == hang ]]; then
@@ -119,6 +145,13 @@ run_case() {
   total_transactions=$((total_transactions + expected_calls))
 }
 
+helper_args=(-o Acquire::https::Verify-Peer=false -o 'Acquire::https::User-Agent=codewire fixture' update)
+run_case partial-update-recovery partial,0,0 0 3 1 chain
+run_case partial-update-exhaustion partial,partial,partial,partial 100 4 3 chain
+helper_args+=(-o APT::Update::Error-Mode=persistent)
+run_case caller-cannot-weaken-update partial,0,0 0 3 1 chain
+
+helper_args=(-o Acquire::https::Verify-Peer=false -o 'Acquire::https::User-Agent=codewire fixture' install -y package-one)
 run_case immediate-success 0 0 1 0
 run_case ordinary-recovery 42,43,0 0 3 2
 run_case ordinary-exhaustion 41,42,43,44 44 4 3
