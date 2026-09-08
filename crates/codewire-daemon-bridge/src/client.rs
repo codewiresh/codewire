@@ -82,15 +82,37 @@ pub enum DaemonRunOutput {
     Exit(i32),
 }
 
-pub enum DaemonRunSession {
-    Exec {
-        input: mpsc::Sender<v1::ExecMessage>,
-        output: Streaming<v1::ExecMessage>,
-    },
-    Pty {
-        input: mpsc::Sender<v1::PtyMessage>,
-        output: Streaming<v1::PtyMessage>,
-    },
+pub struct DaemonRunSession {
+    input: DaemonRunSender,
+    output: DaemonRunReceiver,
+}
+
+/// The sole owner of a run's request stream; intentionally not `Clone`.
+///
+/// Dropping this half closes the real request stream without sending
+/// [`DaemonRunInput::CloseStdin`]. That EOF requests cancellation, whereas
+/// `CloseStdin` is an explicit stdin half-close that permits continued execution.
+pub struct DaemonRunSender {
+    inner: RunInput,
+}
+
+enum RunInput {
+    Exec(mpsc::Sender<v1::ExecMessage>),
+    Pty(mpsc::Sender<v1::PtyMessage>),
+}
+
+/// The owned response stream, retained independently of request cancellation.
+///
+/// A remote error frame is not transport failure or end-of-stream: callers may
+/// continue reading an exit frame and clean EOF. Transport loss cannot prove
+/// remote cleanup. Drop the input half before draining EOF after an exit frame.
+pub struct DaemonRunReceiver {
+    inner: RunOutput,
+}
+
+enum RunOutput {
+    Exec(Streaming<v1::ExecMessage>),
+    Pty(Streaming<v1::PtyMessage>),
 }
 
 impl DaemonClient {
@@ -211,7 +233,14 @@ impl DaemonClient {
                 .pty_session(self.authorized(ReceiverStream::new(rx)))
                 .await?
                 .into_inner();
-            Ok(DaemonRunSession::Pty { input, output })
+            Ok(DaemonRunSession {
+                input: DaemonRunSender {
+                    inner: RunInput::Pty(input),
+                },
+                output: DaemonRunReceiver {
+                    inner: RunOutput::Pty(output),
+                },
+            })
         } else {
             let (input, rx) = mpsc::channel(32);
             input
@@ -228,7 +257,14 @@ impl DaemonClient {
                 .exec_session(self.authorized(ReceiverStream::new(rx)))
                 .await?
                 .into_inner();
-            Ok(DaemonRunSession::Exec { input, output })
+            Ok(DaemonRunSession {
+                input: DaemonRunSender {
+                    inner: RunInput::Exec(input),
+                },
+                output: DaemonRunReceiver {
+                    inner: RunOutput::Exec(output),
+                },
+            })
         }
     }
 
@@ -341,9 +377,24 @@ impl DaemonClient {
 }
 
 impl DaemonRunSession {
+    /// Split without retaining or cloning either underlying stream owner.
+    pub fn into_split(self) -> (DaemonRunSender, DaemonRunReceiver) {
+        (self.input, self.output)
+    }
+
     pub async fn send_input(&self, input: DaemonRunInput) -> Result<(), DaemonClientError> {
-        match self {
-            Self::Exec { input: tx, .. } => {
+        self.input.send_input(input).await
+    }
+
+    pub async fn next_output(&mut self) -> Result<Option<DaemonRunOutput>, DaemonClientError> {
+        self.output.next_output().await
+    }
+}
+
+impl DaemonRunSender {
+    pub async fn send_input(&self, input: DaemonRunInput) -> Result<(), DaemonClientError> {
+        match &self.inner {
+            RunInput::Exec(tx) => {
                 let payload = match input {
                     DaemonRunInput::Stdin(data) => v1::exec_message::Payload::Stdin(data),
                     DaemonRunInput::CloseStdin => v1::exec_message::Payload::CloseStdin(()),
@@ -355,7 +406,7 @@ impl DaemonRunSession {
                 .await
                 .map_err(|_| DaemonClientError::RequestClosed)
             }
-            Self::Pty { input: tx, .. } => {
+            RunInput::Pty(tx) => {
                 let payload = match input {
                     DaemonRunInput::Stdin(data) => v1::pty_message::Payload::Stdin(data),
                     DaemonRunInput::Resize { columns, rows } => {
@@ -374,10 +425,12 @@ impl DaemonRunSession {
             }
         }
     }
+}
 
+impl DaemonRunReceiver {
     pub async fn next_output(&mut self) -> Result<Option<DaemonRunOutput>, DaemonClientError> {
-        match self {
-            Self::Exec { output, .. } => {
+        match &mut self.inner {
+            RunOutput::Exec(output) => {
                 let Some(message) = output.message().await? else {
                     return Ok(None);
                 };
@@ -397,7 +450,7 @@ impl DaemonRunSession {
                     _ => Err(DaemonClientError::InvalidFrame("exec output")),
                 }
             }
-            Self::Pty { output, .. } => {
+            RunOutput::Pty(output) => {
                 let Some(message) = output.message().await? else {
                     return Ok(None);
                 };
@@ -420,6 +473,9 @@ impl DaemonRunSession {
         }
     }
 }
+
+#[cfg(test)]
+mod split_tests;
 
 #[cfg(test)]
 mod tests {

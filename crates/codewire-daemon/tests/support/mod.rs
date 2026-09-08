@@ -164,6 +164,8 @@ impl DaemonHarness {
                         .expect("valid daemon harness token"),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
+                    managed_credential_clients: Default::default(),
+                    launch_projection: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {
@@ -199,6 +201,8 @@ impl DaemonHarness {
                         .expect("valid daemon harness token"),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
+                    managed_credential_clients: Default::default(),
+                    launch_projection: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {
@@ -232,6 +236,8 @@ impl DaemonHarness {
                     .expect("valid daemon harness token"),
                 process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 credential_bridge: None,
+                managed_credential_clients: Default::default(),
+                launch_projection: None,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let server = match transport {

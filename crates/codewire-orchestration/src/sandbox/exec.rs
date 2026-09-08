@@ -12,7 +12,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
 use super::client::SandboxClient;
-use crate::worker::scripts::shell_quote;
 
 const WORKSPACE_EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 
@@ -159,7 +158,7 @@ impl WorkspaceExecHandle {
         completion?;
         out.map_err(|error| anyhow::anyhow!("workspace exec stdout: {error}"))?;
         err.map_err(|error| anyhow::anyhow!("workspace exec stderr: {error}"))?;
-        Ok(status.as_ref().and_then(exit_code_from_status).unwrap_or(0))
+        Ok(classify_workspace_exec_status(status, WorkspaceExecResult::default())?.exit_code)
     }
 }
 
@@ -219,28 +218,23 @@ impl WorkspaceTerminalHandle {
     }
 }
 
-/// Mirrors `buildWorkspaceExecCommand`: source the env file, cd into
-/// the workdir, export sorted env vars, then exec the quoted argv —
-/// all under `sh -lc`.
+/// Use the immutable staged CLI's private daemon adapter. Only explicit inputs
+/// cross Kubernetes exec; the daemon owns ordinary defaults and launch delivery.
 pub fn build_workspace_exec_command(
     command: &[String],
     work_dir: &str,
     env: &BTreeMap<String, String>,
 ) -> Vec<String> {
-    let mut steps: Vec<String> = Vec::with_capacity(env.len() + 3);
-    steps.push(
-        r#"if [ -f "$HOME/.codewire/environment.sh" ]; then . "$HOME/.codewire/environment.sh"; fi"#
-            .to_string(),
-    );
+    let mut argv = vec!["/codewire/bin/cw".into(), "__hosted-exec".into()];
     if !work_dir.is_empty() {
-        steps.push(format!("cd {}", shell_quote(work_dir)));
+        argv.extend(["--work-dir".into(), work_dir.into()]);
     }
     for (key, value) in env {
-        steps.push(format!("export {key}={}", shell_quote(value)));
+        argv.extend(["--env".into(), format!("{key}={value}")]);
     }
-    let quoted: Vec<String> = command.iter().map(|a| shell_quote(a)).collect();
-    steps.push(format!("exec {}", quoted.join(" ")));
-    vec!["sh".to_string(), "-lc".to_string(), steps.join(" && ")]
+    argv.push("--".into());
+    argv.extend_from_slice(command);
+    argv
 }
 
 impl SandboxClient {
@@ -417,12 +411,21 @@ fn classify_workspace_exec_status(
     mut result: WorkspaceExecResult,
 ) -> anyhow::Result<WorkspaceExecResult> {
     let Some(status) = status else {
-        return Ok(result);
+        anyhow::bail!("workspace exec returned no terminal status");
     };
-    if status.status.as_deref() == Some("Success") {
+    if status.status.as_deref() == Some("Success")
+        && status.reason.is_none()
+        && status.details.is_none()
+    {
         return Ok(result);
     }
     if let Some(code) = exit_code_from_status(&status) {
+        // A helper transport failure cannot be mistaken for a child failure:
+        // setup must recycle the exact admitted Pod before reporting completion.
+        // A legitimate child exit 125 is deliberately treated conservatively.
+        if code == codewire_gateway_proto::HOSTED_EXEC_AMBIGUOUS_EXIT_CODE {
+            anyhow::bail!("workspace exec daemon completion is ambiguous");
+        }
         result.exit_code = code;
         return Ok(result);
     }
@@ -436,16 +439,22 @@ fn classify_workspace_exec_status(
 }
 
 fn exit_code_from_status(s: &Status) -> Option<i32> {
-    if s.reason.as_deref() != Some("NonZeroExitCode") {
+    if s.status.as_deref() != Some("Failure") || s.reason.as_deref() != Some("NonZeroExitCode") {
         return None;
     }
     let causes = s.details.as_ref()?.causes.as_ref()?;
-    for cause in causes {
-        if cause.reason.as_deref() == Some("ExitCode") {
-            return cause.message.as_deref()?.parse().ok();
-        }
+    let [cause] = causes.as_slice() else {
+        return None;
+    };
+    if cause.reason.as_deref() != Some("ExitCode") {
+        return None;
     }
-    None
+    cause
+        .message
+        .as_deref()?
+        .parse::<i32>()
+        .ok()
+        .filter(|code| (1..=255).contains(code))
 }
 
 #[cfg(test)]
@@ -533,16 +542,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_optional_status_is_clean_exit_zero() {
+    fn missing_terminal_status_is_ambiguous_and_never_success() {
         let result = WorkspaceExecResult {
             stdout: b"done".to_vec(),
             stderr: Vec::new(),
             exit_code: 0,
         };
 
-        let result = classify_workspace_exec_status(None, result).expect("missing status");
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.stdout, b"done");
+        let error = classify_workspace_exec_status(None, result).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "workspace exec returned no terminal status"
+        );
     }
 
     #[test]
@@ -577,6 +588,48 @@ mod tests {
         let result = classify_workspace_exec_status(Some(status), WorkspaceExecResult::default())
             .expect("nonzero exit status");
         assert_eq!(result.exit_code, 42);
+    }
+
+    #[test]
+    fn ambiguous_and_malformed_exit_statuses_require_recovery_without_opaque_output() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{StatusCause, StatusDetails};
+        let marker = "synthetic-opaque-status-marker";
+        let status = |value: &str| Status {
+            status: Some("Failure".into()),
+            reason: Some("NonZeroExitCode".into()),
+            message: Some(marker.into()),
+            details: Some(StatusDetails {
+                causes: Some(vec![StatusCause {
+                    reason: Some("ExitCode".into()),
+                    message: Some(value.into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for value in ["125", "-1", "0", "256", "not-an-exit"] {
+            let result = WorkspaceExecResult {
+                stdout: marker.as_bytes().to_vec(),
+                stderr: marker.as_bytes().to_vec(),
+                exit_code: 0,
+            };
+            let error = classify_workspace_exec_status(Some(status(value)), result).unwrap_err();
+            assert!(!format!("{error:?}").contains(marker));
+        }
+        let mut contradictory = status("42");
+        contradictory.status = Some("Success".into());
+        assert!(
+            classify_workspace_exec_status(Some(contradictory), WorkspaceExecResult::default())
+                .is_err()
+        );
+        let mut duplicate = status("42");
+        let causes = duplicate.details.as_mut().unwrap().causes.as_mut().unwrap();
+        causes.push(causes[0].clone());
+        assert!(
+            classify_workspace_exec_status(Some(duplicate), WorkspaceExecResult::default())
+                .is_err()
+        );
     }
 
     #[test]

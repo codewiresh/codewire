@@ -13,7 +13,9 @@ mod model;
 mod projection;
 
 pub use catalog::builtin_provider_catalog;
-pub use grant::{DerivedGrant, GrantContext, derive_grants, validate_profile_entries};
+pub use grant::{
+    DerivedGrant, GrantContext, GrantPlacement, derive_grants, validate_profile_entries,
+};
 pub use id::{
     AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialId, EnvironmentId, OwnerId,
@@ -21,12 +23,15 @@ pub use id::{
 };
 pub use model::{
     AccessProfile, CapabilityPolicy, CredentialAuthKind, CredentialMetadata, CredentialStatus,
-    EnvironmentAccessBinding, GrantPermission, Owner, Placement, ProviderCatalog,
-    ProviderDefinition,
+    EnvironmentAccessBinding, GrantPermission, HttpProvider, Owner, Placement, ProviderCatalog,
+    ProviderDefinition, SshPublicKeyMetadata,
 };
 pub use projection::{
-    CODEX_CONFIG_FILE_NAME, CODEX_PLATFORM_HOME, CODEX_PLATFORM_ROOTS_FILE,
-    CODEX_PLATFORM_TOKEN_FILE, CodexProviderProjection, ProjectionError,
+    CODEX_CONFIG_FILE_NAME, CODEX_NATIVE_HOME, CODEX_PLATFORM_HOME, CODEX_PLATFORM_ROOTS_FILE,
+    CODEX_PLATFORM_TOKEN_FILE, CodexProviderProjection, MANAGED_HTTP_PORT,
+    MANAGED_OPENAI_API_PREFIX, ManagedCredentialClient, ManagedCredentialClientPlacement,
+    ManagedCredentialClientProjection, ManagedCredentialClients, ProjectionError,
+    SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
 };
 
 use thiserror::Error;

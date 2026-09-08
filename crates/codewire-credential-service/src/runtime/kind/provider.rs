@@ -22,7 +22,8 @@ const TOKEN_SIGNATURE: &str = "synthetic-kind-signature";
 const MAX_GENERATION: u64 = 10_000;
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const RETRY_MARKER: &[u8] = b"CW_KIND_BROKER_RETRY_ONCE";
-const REREAD_MARKER: &[u8] = b"CW_KIND_NATIVE_REREAD";
+const EXHAUSTED_MARKER: &[u8] = b"CW_KIND_BROKER_RETRY_EXHAUSTED";
+const LEGACY_REREAD_MARKER: &[u8] = b"CW_KIND_NATIVE_REREAD";
 
 // Same minimal stock-Codex-compatible Responses SSE shape as the checked-in
 // local-vmm Codex bridge smoke. All text is fixed, public and synthetic.
@@ -39,7 +40,7 @@ const SSE: &[u8] = concat!(
 enum Scenario {
     Baseline,
     BrokerRetryOnce,
-    NativeReread,
+    BrokerRetryExhausted,
 }
 
 impl Scenario {
@@ -47,7 +48,7 @@ impl Scenario {
         match self {
             Self::Baseline => 0,
             Self::BrokerRetryOnce => 1,
-            Self::NativeReread => 2,
+            Self::BrokerRetryExhausted => 2,
         }
     }
 
@@ -55,15 +56,20 @@ impl Scenario {
         match self {
             Self::Baseline => "baseline",
             Self::BrokerRetryOnce => "broker_retry_once",
-            Self::NativeReread => "native_reread",
+            Self::BrokerRetryExhausted => "broker_retry_exhausted",
         }
     }
 
-    fn rejects(self, attempt: u64) -> bool {
+    fn status(self, attempt: u64) -> StatusCode {
         match self {
-            Self::Baseline => false,
-            Self::BrokerRetryOnce => attempt == 1,
-            Self::NativeReread => attempt <= 2,
+            Self::Baseline => StatusCode::OK,
+            Self::BrokerRetryOnce if attempt == 1 => StatusCode::UNAUTHORIZED,
+            Self::BrokerRetryExhausted if attempt <= 2 => StatusCode::UNAUTHORIZED,
+            // A caller must stop after the second authentication rejection.
+            // Keep any unexpected third request observable in the closed
+            // provider counters/event, but never turn it into success.
+            Self::BrokerRetryExhausted => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::OK,
         }
     }
 
@@ -81,13 +87,19 @@ impl Scenario {
         let retry = input
             .windows(RETRY_MARKER.len())
             .any(|window| window == RETRY_MARKER);
-        let reread = input
-            .windows(REREAD_MARKER.len())
-            .any(|window| window == REREAD_MARKER);
-        match (retry, reread) {
+        if input
+            .windows(LEGACY_REREAD_MARKER.len())
+            .any(|window| window == LEGACY_REREAD_MARKER)
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let exhausted = input
+            .windows(EXHAUSTED_MARKER.len())
+            .any(|window| window == EXHAUSTED_MARKER);
+        match (retry, exhausted) {
             (false, false) => Ok(Self::Baseline),
             (true, false) => Ok(Self::BrokerRetryOnce),
-            (false, true) => Ok(Self::NativeReread),
+            (false, true) => Ok(Self::BrokerRetryExhausted),
             (true, true) => Err(BrokerUpstreamError::Protocol),
         }
     }
@@ -114,7 +126,7 @@ impl SyntheticProvider {
         if let Ok(counters) = self.0.lock() {
             tracing::info!(target: TARGET, event = "provider_totals", response_calls = counters.responses,
                 refresh_calls = counters.refreshes, baseline_calls = counters.attempts[0],
-                broker_retry_once_calls = counters.attempts[1], native_reread_calls = counters.attempts[2],
+                broker_retry_once_calls = counters.attempts[1], broker_retry_exhausted_calls = counters.attempts[2],
                 "provider_totals");
         }
     }
@@ -155,11 +167,7 @@ impl SyntheticProvider {
             }
             counters.responses = increment(counters.responses)?;
             counters.attempts[scenario.index()] = attempt;
-            let status = if scenario.rejects(attempt) {
-                StatusCode::UNAUTHORIZED
-            } else {
-                StatusCode::OK
-            };
+            let status = scenario.status(attempt);
             tracing::info!(target: TARGET, event = "provider_response", scenario = scenario.name(), attempt,
                 status = status.as_u16(), response_calls = counters.responses, refresh_calls = counters.refreshes,
                 "provider_response");
@@ -318,4 +326,58 @@ fn validate_access(token: &str) -> Result<u64, BrokerUpstreamError> {
         return Err(BrokerUpstreamError::Protocol);
     }
     Ok(generation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(marker: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({"input":marker})).unwrap()
+    }
+
+    fn headers(generation: u64) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {}", access_token(generation).unwrap()))
+                .unwrap(),
+        );
+        headers.insert("chatgpt-account-id", HeaderValue::from_static(ACCOUNT));
+        headers
+    }
+
+    #[test]
+    fn provider_scenarios_reject_the_removed_marker_and_close_exhaustion() {
+        assert!(Scenario::from_body(&body("CW_KIND_NATIVE_REREAD")).is_err());
+        let exhausted = Scenario::from_body(&body("CW_KIND_BROKER_RETRY_EXHAUSTED")).unwrap();
+        assert!(matches!(exhausted, Scenario::BrokerRetryExhausted));
+        assert_eq!(exhausted.status(1), StatusCode::UNAUTHORIZED);
+        assert_eq!(exhausted.status(2), StatusCode::UNAUTHORIZED);
+        assert_eq!(exhausted.status(3), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            exhausted.status(u64::MAX),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn exhausted_schedule_counts_an_unexpected_third_request_as_failure() {
+        let provider = SyntheticProvider::new();
+        let exhausted = body("CW_KIND_BROKER_RETRY_EXHAUSTED");
+        provider.responses(headers(1), &exhausted).unwrap();
+        let refresh = serde_json::to_vec(&json!({
+            "grant_type":"refresh_token",
+            "refresh_token":refresh_token(1),
+        }))
+        .unwrap();
+        provider.refresh(HeaderMap::new(), &refresh).unwrap();
+        provider.responses(headers(2), &exhausted).unwrap();
+        provider.responses(headers(2), &exhausted).unwrap();
+
+        let counters = provider.0.lock().unwrap();
+        assert_eq!(counters.responses, 3);
+        assert_eq!(counters.refreshes, 1);
+        assert_eq!(counters.attempts[Scenario::BrokerRetryExhausted.index()], 3);
+    }
 }

@@ -1,0 +1,494 @@
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use codewire_client::{CODEWIRE_CLI_OAUTH_CLIENT_ID, CredentialStore as _, OAuthCredentials};
+use codewire_project::PlatformProjectionSelection;
+use futures::FutureExt as _;
+use tokio::sync::mpsc;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use super::*;
+
+const WAIT: Duration = Duration::from_secs(2);
+
+fn binding(directory: &Path, server: &str) -> PlatformCredentialBinding {
+    PlatformCredentialBinding {
+        config_directory: directory.to_owned(),
+        server_url: server.to_owned(),
+        selection: PlatformProjectionSelection {
+            creator: "synthetic-owner".into(),
+            organization: "pinned-org".into(),
+            organization_selected: true,
+            project_id: Some("f1911149-cfb5-4bcb-bd9c-a33cdeec8da1".into()),
+            user_selected: true,
+            profile: None,
+            ordinary_keys: BTreeSet::from(["ORDINARY".into()]),
+            reserved_keys: BTreeSet::from(["CODEWIRE_ENV_ID".into()]),
+        },
+        selection_sha256: [7; 32],
+    }
+}
+
+fn ready() -> bridge::CredentialBridgeReady {
+    bridge::CredentialBridgeReady {
+        protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+        environment_id: "67edfdf2-61f6-453e-aae3-de09f7793659".into(),
+        environment_generation: 7,
+    }
+}
+
+fn saved(directory: &Path, server: &str, token: &str, fresh: bool) {
+    config::save_platform_config(
+        directory,
+        &config::PlatformConfig {
+            server_url: server.into(),
+            // This unrelated current CLI default must not retarget the saved VM.
+            default_org: "another-current-default".into(),
+        },
+    )
+    .unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    FileCredentialStore::new(directory)
+        .save(
+            &OAuthCredentials::new(
+                server,
+                CODEWIRE_CLI_OAUTH_CLIENT_ID,
+                token,
+                "synthetic-refresh-token",
+                if fresh { now + 3600 } else { now - 1 },
+                "openid codewire.api",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+}
+
+async fn userinfo(server: &MockServer, token: &str, owner: &str) {
+    Mock::given(method("GET"))
+        .and(path("/api/oauth/userinfo"))
+        .and(header("authorization", format!("Bearer {token}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"sub": owner})))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn explicit_saved_oauth_rejects_missing_malformed_api_key_and_origin_mismatch_without_network()
+ {
+    let server = MockServer::start().await;
+    for attack in [
+        "missing",
+        "malformed",
+        "api key",
+        "saved server",
+        "credential issuer",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        saved(directory.path(), &server.uri(), "synthetic-access", true);
+        let selected = binding(directory.path(), &server.uri());
+        let credentials = config::oauth_credentials_path(directory.path());
+        match attack {
+            "missing" => FileCredentialStore::new(directory.path()).delete().unwrap(),
+            "malformed" => std::fs::write(&credentials, b"{}").unwrap(),
+            "api key" => saved(
+                directory.path(),
+                &server.uri(),
+                "cw_synthetic-api-key",
+                true,
+            ),
+            "saved server" => config::save_platform_config(
+                directory.path(),
+                &config::PlatformConfig {
+                    server_url: "https://different.invalid".into(),
+                    default_org: String::new(),
+                },
+            )
+            .unwrap(),
+            "credential issuer" => {
+                let other = tempfile::tempdir().unwrap();
+                saved(
+                    other.path(),
+                    "https://different.invalid",
+                    "synthetic-access",
+                    true,
+                );
+                let other_creds = FileCredentialStore::new(other.path())
+                    .load()
+                    .unwrap()
+                    .unwrap();
+                FileCredentialStore::new(directory.path())
+                    .save(&other_creds)
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let error = authenticated_client(&selected, Instant::now() + WAIT)
+            .await
+            .err()
+            .expect(attack);
+        assert_eq!(error.code(), tonic::Code::PermissionDenied, "{attack}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn explicit_saved_oauth_binds_user_and_ignores_changed_default_organization() {
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    saved(directory.path(), &server.uri(), "synthetic-original", true);
+    userinfo(&server, "synthetic-original", "another-owner").await;
+    let selected = binding(directory.path(), &server.uri());
+    let error = authenticated_client(&selected, Instant::now() + WAIT)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), tonic::Code::PermissionDenied);
+    assert_eq!(opening(&selected, ready()).unwrap().org_id, "pinned-org");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn saved_refresh_is_once_and_userinfo_and_returned_client_share_original_bearer() {
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    saved(directory.path(), &server.uri(), "synthetic-expired", false);
+    Mock::given(method("POST"))
+        .and(path("/api/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "synthetic-refreshed", "refresh_token": "synthetic-rotated",
+            "token_type": "Bearer", "expires_in": 3600, "scope": "openid codewire.api",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    userinfo(&server, "synthetic-refreshed", "synthetic-owner").await;
+    let selected = binding(directory.path(), &server.uri());
+    let client = authenticated_client(&selected, Instant::now() + WAIT)
+        .await
+        .unwrap();
+    // Simulate a subsequent login replacing the normal saved pair. The admitted
+    // client must retain the original UserInfo bearer, not load this new login.
+    saved(
+        directory.path(),
+        &server.uri(),
+        "synthetic-later-login",
+        true,
+    );
+    assert_eq!(
+        client.bearer_token().await.unwrap().expose_secret(),
+        "synthetic-refreshed"
+    );
+    assert_eq!(
+        client.bearer_token().await.unwrap().expose_secret(),
+        "synthetic-refreshed"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn saved_auth_original_deadline_and_noncanonical_or_nonprivate_paths_fail_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    saved(
+        directory.path(),
+        "https://synthetic.invalid",
+        "synthetic-access",
+        true,
+    );
+    let selected = binding(directory.path(), "https://synthetic.invalid");
+    assert_eq!(
+        authenticated_client(&selected, Instant::now())
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        tonic::Code::DeadlineExceeded
+    );
+    let outside = tempfile::tempdir().unwrap();
+    let link = outside.path().join("linked");
+    std::os::unix::fs::symlink(directory.path(), &link).unwrap();
+    assert!(validate_directory(&link).is_err());
+    let credentials = config::oauth_credentials_path(directory.path());
+    std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(validate_file(&credentials).is_err());
+    std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let file_link = outside.path().join("credentials.json");
+    std::os::unix::fs::symlink(&credentials, &file_link).unwrap();
+    assert!(validate_file(&file_link).is_err());
+    let oversized = outside.path().join("large");
+    std::fs::write(&oversized, vec![0; MAX_AUTH_FILE_BYTES as usize + 1]).unwrap();
+    std::fs::set_permissions(&oversized, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(validate_file(&oversized).is_err());
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(validate_directory(directory.path()).is_err());
+}
+
+fn cancel() -> bridge::CredentialBridgeGuestMessage {
+    bridge::CredentialBridgeGuestMessage {
+        payload: Some(bridge::credential_bridge_guest_message::Payload::Cancel(
+            bridge::CredentialBridgeCancel {
+                request_id: "67edfdf2-61f6-453e-aae3-de09f7793659".into(),
+            },
+        )),
+    }
+}
+
+fn response(frame: bridge::CredentialBridgeHostMessage) -> DelegateCredentialsResponse {
+    DelegateCredentialsResponse {
+        output: Some(delegate_credentials_response::Output::Frame(Box::new(
+            public_bridge::CredentialBridgeHostMessage::decode_from_slice(&frame.encode_to_vec())
+                .unwrap(),
+        ))),
+        ..Default::default()
+    }
+}
+
+fn output() -> bridge::CredentialBridgeHostMessage {
+    bridge::CredentialBridgeHostMessage {
+        payload: Some(
+            bridge::credential_bridge_host_message::Payload::EnvironmentProjection(
+                bridge::EnvironmentProjectionResponse {
+                    request_id: "67edfdf2-61f6-453e-aae3-de09f7793659".into(),
+                    result: Some(
+                        bridge::environment_projection_response::Result::SealedProjection(
+                            b"synthetic-recipient-ciphertext".to_vec(),
+                        ),
+                    ),
+                },
+            ),
+        ),
+    }
+}
+
+#[test]
+fn relay_conversion_preserves_exact_operation_bytes_and_rejects_re_admission() {
+    for frame in [
+        cancel(),
+        bridge::CredentialBridgeGuestMessage {
+            payload: Some(
+                bridge::credential_bridge_guest_message::Payload::EnvironmentProjection(
+                    bridge::EnvironmentProjectionRequest {
+                        request_id: "67edfdf2-61f6-453e-aae3-de09f7793659".into(),
+                        selection_sha256: vec![7; 32],
+                        recipient_public_key: vec![8; 32],
+                        deadline_unix_ms: 123456,
+                        local_inventories: Vec::new(),
+                    },
+                ),
+            ),
+        },
+        bridge::CredentialBridgeGuestMessage {
+            payload: Some(bridge::credential_bridge_guest_message::Payload::Ssh(
+                bridge::CredentialSshRequest {
+                    request_id: "67edfdf2-61f6-453e-aae3-de09f7793659".into(),
+                    deadline_unix_ms: 123456,
+                    operation: Some(bridge::credential_ssh_request::Operation::Identities(
+                        bridge::CredentialSshIdentitiesRequest {},
+                    )),
+                },
+            )),
+        },
+    ] {
+        let expected = frame.encode_to_vec();
+        let Some(delegate_credentials_request::Input::Frame(actual)) = encode(frame).unwrap().input
+        else {
+            panic!("frame")
+        };
+        assert_eq!(actual.encode_to_vec(), expected);
+    }
+    assert_eq!(decode(response(output())).unwrap(), output());
+    assert!(encode(bridge::CredentialBridgeGuestMessage::default()).is_err());
+    assert!(
+        encode(bridge::CredentialBridgeGuestMessage {
+            payload: Some(bridge::credential_bridge_guest_message::Payload::Ready(
+                ready()
+            ))
+        })
+        .is_err()
+    );
+    assert!(decode(DelegateCredentialsResponse::default()).is_err());
+    assert!(
+        decode(DelegateCredentialsResponse {
+            output: Some(delegate_credentials_response::Output::Admitted(
+                Box::default()
+            )),
+            ..Default::default()
+        })
+        .is_err()
+    );
+    assert!(
+        decode(response(bridge::CredentialBridgeHostMessage {
+            payload: Some(bridge::credential_bridge_host_message::Payload::Open(
+                bridge::CredentialBridgeOpen::default()
+            ))
+        }))
+        .is_err()
+    );
+    assert!(decode(response(bridge::CredentialBridgeHostMessage::default())).is_err());
+}
+
+#[test]
+fn relay_conversion_rejects_oversized_frames_before_second_encoding() {
+    let mut frame = cancel();
+    frame.payload = Some(bridge::credential_bridge_guest_message::Payload::Request(
+        bridge::CredentialBridgeRequest {
+            body: vec![0; CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES + 1],
+            ..Default::default()
+        },
+    ));
+    assert!(encode(frame).is_err());
+    let mut reply = output();
+    if let Some(bridge::credential_bridge_host_message::Payload::EnvironmentProjection(reply)) =
+        &mut reply.payload
+    {
+        reply.result = Some(
+            bridge::environment_projection_response::Result::SealedProjection(vec![
+                0;
+                CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
+                    + 1
+            ]),
+        );
+    }
+    assert!(decode(response(reply)).is_err());
+}
+
+struct FakeUpstream {
+    responses: mpsc::Receiver<Result<DelegateCredentialsResponse, Status>>,
+    sent: Arc<Mutex<Vec<DelegateCredentialsRequest>>>,
+    dropped: Arc<AtomicUsize>,
+    block_send: bool,
+}
+
+impl Drop for FakeUpstream {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Upstream for FakeUpstream {
+    async fn send(&mut self, request: DelegateCredentialsRequest) -> Result<(), Status> {
+        self.sent.lock().unwrap().push(request);
+        if self.block_send {
+            futures::future::pending().await
+        } else {
+            Ok(())
+        }
+    }
+    async fn receive(&mut self) -> Result<Option<DelegateCredentialsResponse>, Status> {
+        self.responses.recv().await.transpose()
+    }
+}
+
+#[tokio::test]
+async fn relay_observes_input_and_output_then_input_eof_drops_both_owners() {
+    let (requests_tx, requests_rx) = mpsc::channel(1);
+    let (responses_tx, responses_rx) = mpsc::channel(1);
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let input = Box::pin(tokio_stream::wrappers::ReceiverStream::new(requests_rx));
+    let mut relay = relay(
+        FakeUpstream {
+            responses: responses_rx,
+            sent: sent.clone(),
+            dropped: dropped.clone(),
+            block_send: false,
+        },
+        input,
+    );
+    requests_tx.send(Ok(cancel())).await.unwrap();
+    assert!(relay.next().now_or_never().is_none());
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    responses_tx.send(Ok(response(output()))).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(WAIT, relay.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        output()
+    );
+    drop(requests_tx);
+    assert!(
+        tokio::time::timeout(WAIT, relay.next())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tokio::time::timeout(WAIT, responses_tx.closed())
+        .await
+        .unwrap();
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn relay_drop_while_send_pending_closes_input_and_upstream_without_detached_pump() {
+    let (requests_tx, requests_rx) = mpsc::channel(1);
+    let (responses_tx, responses_rx) = mpsc::channel(1);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let input = Box::pin(tokio_stream::wrappers::ReceiverStream::new(requests_rx));
+    let mut output = relay(
+        FakeUpstream {
+            responses: responses_rx,
+            sent: sent.clone(),
+            dropped: dropped.clone(),
+            block_send: true,
+        },
+        input,
+    );
+    requests_tx.send(Ok(cancel())).await.unwrap();
+    assert!(output.next().now_or_never().is_none());
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    drop(output);
+    tokio::time::timeout(WAIT, requests_tx.closed())
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, responses_tx.closed())
+        .await
+        .unwrap();
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn relay_invalid_response_ends_stream_and_closes_both_directions() {
+    let (requests_tx, requests_rx) = mpsc::channel(1);
+    let (responses_tx, responses_rx) = mpsc::channel(1);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let input = Box::pin(tokio_stream::wrappers::ReceiverStream::new(requests_rx));
+    let mut output = relay(
+        FakeUpstream {
+            responses: responses_rx,
+            sent: Arc::new(Mutex::new(Vec::new())),
+            dropped: dropped.clone(),
+            block_send: false,
+        },
+        input,
+    );
+    responses_tx
+        .send(Ok(DelegateCredentialsResponse::default()))
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(WAIT, output.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .code(),
+        tonic::Code::PermissionDenied
+    );
+    assert!(output.next().await.is_none());
+    tokio::time::timeout(WAIT, requests_tx.closed())
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, responses_tx.closed())
+        .await
+        .unwrap();
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}

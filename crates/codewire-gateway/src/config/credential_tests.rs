@@ -39,6 +39,53 @@ fn credential_group_absence_preserves_credential_free_gateway() {
 }
 
 #[test]
+fn hosted_relay_requires_canonical_immutable_selection_without_changing_direct_ingress() {
+    let mut vars = inputs();
+    let config = GatewayConfig::from_getenv(|name| vars.get(name).cloned()).unwrap();
+    assert!(
+        config
+            .credentials
+            .as_ref()
+            .unwrap()
+            .hosted_bridge()
+            .unwrap()
+            .is_none()
+    );
+    assert!(config.credentials.as_ref().unwrap().ingress().is_ok());
+    vars.insert(HOSTED_PROJECTION_SHA256_ENV, "ab".repeat(32));
+    let config = GatewayConfig::from_getenv(|name| vars.get(name).cloned()).unwrap();
+    assert!(
+        config
+            .credentials
+            .as_ref()
+            .unwrap()
+            .hosted_bridge()
+            .unwrap()
+            .is_some()
+    );
+    for digest in [
+        String::new(),
+        "00".repeat(32),
+        "AB".repeat(32),
+        "canary".into(),
+    ] {
+        vars.insert(HOSTED_PROJECTION_SHA256_ENV, digest);
+        assert_eq!(
+            GatewayConfig::from_getenv(|name| vars.get(name).cloned()),
+            Err(ConfigError::InvalidCredentialRuntime)
+        );
+    }
+    vars.insert(HOSTED_PROJECTION_SHA256_ENV, "ab".repeat(32));
+    for field in CREDENTIAL_ENV_GROUP {
+        vars.remove(field);
+    }
+    assert_eq!(
+        GatewayConfig::from_getenv(|name| vars.get(name).cloned()),
+        Err(ConfigError::InvalidCredentialRuntime)
+    );
+}
+
+#[test]
 fn credential_group_requires_every_field_and_exact_existing_identity() {
     let vars = inputs();
     let config = GatewayConfig::from_getenv(|name| vars.get(name).cloned()).unwrap();

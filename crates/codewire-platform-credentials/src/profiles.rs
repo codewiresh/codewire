@@ -2,7 +2,8 @@
 //!
 //! Owners and grant contexts must come from an authenticated, authorized caller,
 //! not unchecked request fields. This store fences their exact database scope;
-//! it does not authenticate a user, decide membership, or authorize credentials.
+//! it does not authenticate a user or establish original OAuth/client authority.
+//! Authorized credential identities still come from that trusted caller.
 //! Only same-owner entries are supported. Profile edits publish a new immutable
 //! revision; an existing environment keeps its explicitly selected revision.
 
@@ -11,13 +12,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use codewire_access::{
     AccessError, AccessProfile, AccessProfileId, AccessProfileName, CapabilitySlot, CredentialId,
-    CredentialMetadata, DerivedGrant, EnvironmentAccessBinding, GrantContext, Owner, OwnerId,
-    Placement, ProviderCatalog, ProviderId, derive_grants, validate_profile_entries,
+    CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, GrantContext,
+    GrantPlacement, Owner, OwnerId, Placement, ProviderCatalog, ProviderId, derive_grants,
+    validate_profile_entries,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::model::{parse_auth_kind, parse_status};
+use crate::model::{parse_auth_kind, parse_ssh_public_key, parse_status};
 
 /// Closed errors: database messages, catalog input and source chains never escape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -148,6 +150,45 @@ impl PlatformAccessProfileStore {
 
     pub async fn get(&self, owner: &Owner, id: &AccessProfileId) -> Result<AccessProfile, Error> {
         self.read_revision(owner, id, None).await
+    }
+
+    /// Resolve metadata without a second pooled connection. The caller retains
+    /// owner/environment authorization locks through publication. A requested
+    /// revision is immutable history, not an assertion that it is still current.
+    pub async fn get_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: &Owner,
+        id: &AccessProfileId,
+        revision: Option<u64>,
+    ) -> Result<AccessProfile, Error> {
+        lock_owner(tx, owner).await?;
+        load_profile(tx, owner, id, revision, false).await
+    }
+
+    /// Transaction-composable exact-owner name resolution; there is no fallback
+    /// to another owner or placement when the requested name is absent.
+    pub async fn resolve_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: &Owner,
+        name: &AccessProfileName,
+    ) -> Result<AccessProfile, Error> {
+        lock_owner(tx, owner).await?;
+        let (user_id, organization_id) = owner_columns(owner);
+        let id: String = sqlx::query_scalar(
+            "SELECT id FROM platform_access_profiles WHERE \
+             (user_id=$1 OR organization_id=$2) AND lower(name)=lower($3) FOR SHARE",
+        )
+        .bind(user_id)
+        .bind(organization_id)
+        .bind(name.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+        .ok_or(Error::NotFound)?;
+        let id = AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?;
+        load_profile(tx, owner, &id, None, false).await
     }
 
     /// Historical entries remain metadata-only references, even after an unbound
@@ -355,6 +396,82 @@ impl PlatformAccessProfileStore {
         Ok(binding)
     }
 
+    /// Admit only metadata for a newly inserted pending environment at operation
+    /// generation zero. This never derives a grant or invents a future operation.
+    /// The caller must authorize creator/membership and compose the new row and
+    /// creator ACL in this same transaction. Runtime APIs still require a
+    /// positive, admitted operation generation and a running environment.
+    pub async fn create_pending_binding_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+        binding: EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
+    ) -> Result<EnvironmentAccessBinding, Error> {
+        validate_binding(context, &binding)?;
+        if context.environment_generation != 0 || context.placement != GrantPlacement::Platform {
+            return Err(Error::InvalidInput);
+        }
+        let organization = context
+            .organization_id
+            .as_ref()
+            .ok_or(Error::InvalidInput)?;
+        lock_owner(tx, &Owner::User(context.user_id.clone())).await?;
+        lock_owner(tx, &Owner::Organization(organization.clone())).await?;
+        let pending: Option<bool> = sqlx::query_scalar(
+            "SELECT environment_operation_generation=0 AND state='pending' AND desired_state='started' \
+             AND deletion_requested_at IS NULL AND type='sandbox' FROM environments \
+             WHERE id=$1 AND created_by=$2 AND org_id=$3 FOR UPDATE",
+        )
+        .bind(context.environment_id.as_str())
+        .bind(context.user_id.as_str())
+        .bind(organization.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        match pending {
+            None => return Err(Error::NotFound),
+            Some(false) => return Err(Error::StaleEnvironment),
+            Some(true) => {}
+        }
+        let profile = profile_for_context(tx, context, &binding).await?;
+        validate_personal_confirmation(context, &profile, personal_owner_confirmation)?;
+        let credentials = load_credentials(tx, &profile).await?;
+        validate_profile_entries(&profile, &credentials, &self.catalog).map_err(access_error)?;
+        let now = unix_now()?;
+        for credential in credentials.values() {
+            if !context.authorized_credentials.contains(&credential.id) {
+                return Err(Error::UnsupportedEntry);
+            }
+            match credential.status {
+                CredentialStatus::Active => {}
+                CredentialStatus::Expired => return Err(Error::ExpiredCredential),
+                CredentialStatus::RefreshFailed | CredentialStatus::Revoked => {
+                    return Err(Error::InactiveCredential);
+                }
+            }
+            if credential
+                .expires_at_unix
+                .is_some_and(|expires| expires <= now)
+            {
+                return Err(Error::ExpiredCredential);
+            }
+        }
+        sqlx::query(
+            "INSERT INTO platform_environment_access_bindings \
+             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) \
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(binding.environment_id.as_str())
+        .bind(binding.profile_id.as_str())
+        .bind(generation(binding.profile_revision)?)
+        .bind(personal_owner_confirmation.map(OwnerId::as_str))
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        Ok(binding)
+    }
+
     /// Rebinding never inherits prior consent, including rebinding the same
     /// immutable revision. The caller must explicitly confirm it again.
     pub async fn replace_binding(
@@ -493,6 +610,55 @@ impl PlatformAccessProfileStore {
         Ok(grants)
     }
 
+    /// Admit an explicit platform credential selection for owner-authenticated
+    /// local execution without reading or creating a platform environment row.
+    /// This is material-free admission, not an irrevocable lease or VM proof.
+    ///
+    /// The caller MUST first retain the ORIGINAL `OAuthBearerAuthority` fence
+    /// through `lock_for_publication` on this same transaction, and bind its
+    /// authenticated user to `context.user_id`. This helper does not authenticate
+    /// caller-supplied IDs. The caller separately owns the exact local environment
+    /// operation, original cancellation/expiry deadline and authorized selection.
+    /// Retain all fences through consumption/publication; recheck current profile,
+    /// credential and runtime authority before releasing a result. Never obtain
+    /// another pooled connection while this transaction is held, and roll back
+    /// on every error. The caller owns commit/rollback and unknown-outcome handling.
+    ///
+    /// The supplied revision remains immutable even when a newer revision exists.
+    /// Personal confirmation is explicit for this selection and must name the
+    /// authenticated personal owner; organization selections require `None`.
+    /// No environment, stored binding or durable delegation is inserted here.
+    pub async fn evaluate_owner_selection_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        context: &GrantContext,
+        binding: &EnvironmentAccessBinding,
+        personal_owner_confirmation: Option<&OwnerId>,
+    ) -> Result<Vec<DerivedGrant>, Error> {
+        if context.placement != GrantPlacement::PlatformToLocal {
+            return Err(Error::InvalidInput);
+        }
+        generation(context.environment_generation)?;
+        validate_binding(context, binding)?;
+        let organization = context
+            .organization_id
+            .as_ref()
+            .ok_or(Error::InvalidInput)?;
+        let found: bool = sqlx::query_scalar(
+            "SELECT public.codewire_platform_lock_owner_source_authority($1::text,$2::text,NULL::text)",
+        )
+        .bind(context.user_id.as_str())
+        .bind(organization.as_str())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        if !found {
+            return Err(Error::NotFound);
+        }
+        self.admit_binding(tx, context, binding, personal_owner_confirmation)
+            .await
+    }
+
     async fn admit_binding(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -501,14 +667,7 @@ impl PlatformAccessProfileStore {
         personal_owner_confirmation: Option<&OwnerId>,
     ) -> Result<Vec<DerivedGrant>, Error> {
         let profile = profile_for_context(tx, context, binding).await?;
-        match &profile.owner {
-            Owner::User(owner)
-                if context.allow_personal_credentials
-                    && owner == &context.user_id
-                    && personal_owner_confirmation == Some(owner) => {}
-            Owner::Organization(_) if personal_owner_confirmation.is_none() => {}
-            _ => return Err(Error::UnsupportedEntry),
-        }
+        validate_personal_confirmation(context, &profile, personal_owner_confirmation)?;
         let credentials = load_credentials(tx, &profile).await?;
         derive_grants(
             context,
@@ -519,6 +678,28 @@ impl PlatformAccessProfileStore {
             unix_now()?,
         )
         .map_err(access_error)
+    }
+}
+
+fn validate_personal_confirmation(
+    context: &GrantContext,
+    profile: &AccessProfile,
+    confirmation: Option<&OwnerId>,
+) -> Result<(), Error> {
+    match &profile.owner {
+        Owner::User(owner)
+            if context.allow_personal_credentials
+                && owner == &context.user_id
+                && confirmation == Some(owner) =>
+        {
+            Ok(())
+        }
+        Owner::Organization(owner)
+            if context.organization_id.as_ref() == Some(owner) && confirmation.is_none() =>
+        {
+            Ok(())
+        }
+        _ => Err(Error::UnsupportedEntry),
     }
 }
 
@@ -637,6 +818,20 @@ async fn load_credentials(
         .await
         .map_err(database_error)?
         .ok_or(Error::NotFound)?;
+        // Retain the applied helper's exact signature and SHARE fence. Only
+        // after it has locked this owner-scoped identity may the existing
+        // metadata SELECT authority read the additive public fields.
+        let (ssh_public_key, ssh_fingerprint): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT ssh_public_key,ssh_fingerprint FROM public.platform_credentials \
+                 WHERE id=$1 AND (user_id=$2 OR organization_id=$3)",
+        )
+        .bind(id.as_str())
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?
+        .ok_or(Error::NotFound)?;
         let expires: Option<i64> = row.try_get("expires_at_unix").map_err(database_error)?;
         let metadata = CredentialMetadata {
             id: id.clone(),
@@ -654,6 +849,8 @@ async fn load_credentials(
             .map_err(|_| Error::CorruptRecord)?,
             display_name: row.try_get("display_name").map_err(database_error)?,
             account_hint: row.try_get("account_hint").map_err(database_error)?,
+            ssh_public_key: parse_ssh_public_key(ssh_public_key, ssh_fingerprint)
+                .map_err(|_| Error::CorruptRecord)?,
             status: parse_status(&row.try_get::<String, _>("status").map_err(database_error)?)
                 .map_err(|_| Error::CorruptRecord)?,
             expires_at_unix: expires
@@ -696,7 +893,7 @@ async fn lock_environment(
         .organization_id
         .as_ref()
         .ok_or(Error::InvalidInput)?;
-    if context.placement != Placement::Platform {
+    if context.placement != GrantPlacement::Platform {
         return Err(Error::InvalidInput);
     }
     lock_owner(tx, &Owner::User(context.user_id.clone())).await?;

@@ -1,6 +1,7 @@
 -- Managed disposable Kind only, after the standard migration owner has
 -- installed the schema. This is a real restricted login, not SET ROLE in an
--- owner connection. It has no generic-secret or owner/profile mutation grant.
+-- owner connection. It has only encrypted application-reader column grants,
+-- never a plaintext getter, full project_spec or owner/profile/secret mutation.
 BEGIN;
 CREATE ROLE codewire_credential_broker LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
     NOREPLICATION NOBYPASSRLS NOINHERIT
@@ -21,7 +22,9 @@ GRANT SELECT ON public.platform_access_profile_entries TO codewire_credential_br
 GRANT SELECT (environment_id,profile_id,profile_revision,personal_owner_confirmed_by)
     ON public.platform_environment_access_bindings TO codewire_credential_broker;
 GRANT SELECT,INSERT,DELETE ON public.platform_credentials TO codewire_credential_broker;
-GRANT UPDATE (status,expires_at_unix,revocation_generation,material_generation,updated_at)
+-- SSH enrollment inserts its derived public key/fingerprint atomically. It
+-- needs no UPDATE on either column; generic replacement remains prohibited.
+GRANT UPDATE (status,expires_at_unix,revocation_generation,material_generation,updated_at,account_hint,display_name)
     ON public.platform_credentials TO codewire_credential_broker;
 GRANT SELECT,INSERT,DELETE ON public.platform_credential_material TO codewire_credential_broker;
 GRANT SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_attempts TO codewire_credential_broker;
@@ -30,9 +33,20 @@ GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text) TO code
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_environment(text,text,text) TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_profile(text,text,text) TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_credential(text,text,text) TO codewire_credential_broker;
+GRANT EXECUTE ON FUNCTION public.codewire_platform_projection_metadata(text) TO codewire_credential_broker;
+GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_projection_authority(text,text,text,text)
+    TO codewire_credential_broker;
+GRANT SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version)
+    ON public.tenant_secrets TO codewire_credential_broker;
+GRANT SELECT (dek_id,scope,scope_id,provider,key_name,key_version,wrapped_dek,format,revision)
+    ON public.tenant_secret_deks TO codewire_credential_broker;
 GRANT SELECT (token_hash,user_id,client_id,scopes,expires_at)
     ON public.oidc_access_tokens TO codewire_credential_broker;
 GRANT SELECT (id,disabled) ON public.oidc_clients TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_lock_oauth_bearer_authority(text,text,text,timestamptz)
-    TO codewire_credential_broker;
+TO codewire_credential_broker;
+GRANT EXECUTE ON FUNCTION public.codewire_authenticate_credential_session(text)
+TO codewire_credential_broker;
+GRANT EXECUTE ON FUNCTION public.codewire_lock_credential_session_authority(text,text,text,timestamptz)
+TO codewire_credential_broker;
 COMMIT;

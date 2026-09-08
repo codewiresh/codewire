@@ -8,6 +8,14 @@ authors.workspace = true
 description = "Codewire-owned host runtime for isolated local microVM environments"
 build = "build.rs"
 
+[features]
+synthetic-oci-input-smoke = []
+
+[[bin]]
+name = "codewire-local-oci-import-smoke"
+path = "src/bin/codewire-local-oci-import-smoke.rs"
+required-features = ["synthetic-oci-input-smoke"]
+
 [dependencies]
 prost = { workspace = true }
 thiserror = { workspace = true }
@@ -25,6 +33,7 @@ codewire-client = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-project = { workspace = true }
+codewire-project-proto = { workspace = true }
 codewire-tailnet = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-daemon-bridge = { workspace = true }

@@ -15,6 +15,10 @@ use crate::daemon::{
 use crate::scp::{ScpProtocolRunner, is_scp_command};
 use crate::sftp::DaemonSftpRunner;
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "ssh/stock_credentials.rs"]
+mod stock_credentials;
+
 const GATEWAY_KEX_ORDER: &[kex::Name] = &[
     kex::CURVE25519,
     kex::ECDH_SHA2_NISTP256,
@@ -900,6 +904,7 @@ mod tests {
     use crate::daemon::DaemonSessionClient;
     use crate::host_key;
     use boringtun::x25519::{PublicKey, StaticSecret};
+    use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
     use codewire_gateway_proto::daemon::v1;
     use codewire_gateway_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,
@@ -2096,11 +2101,18 @@ mod tests {
 
     #[tonic::async_trait]
     impl DaemonService for RecordingTonicDaemon {
+        async fn poweroff_guest(
+            &self,
+            _request: Request<v1::PoweroffGuestRequest>,
+        ) -> Result<Response<v1::PoweroffGuestResponse>, Status> {
+            Err(Status::unimplemented("fixture unused lifecycle RPC"))
+        }
+
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
         type CredentialBridgeStream =
-            ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
+            ReceiverStream<Result<bridge_v1::CredentialBridgeGuestMessage, Status>>;
 
         async fn get_capabilities(
             &self,
@@ -2118,7 +2130,7 @@ mod tests {
 
         async fn credential_bridge(
             &self,
-            _request: Request<tonic::Streaming<v1::CredentialBridgeHostMessage>>,
+            _request: Request<tonic::Streaming<bridge_v1::CredentialBridgeHostMessage>>,
         ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
             Err(Status::unimplemented("credential bridge"))
         }

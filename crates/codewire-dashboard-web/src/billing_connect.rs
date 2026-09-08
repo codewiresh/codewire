@@ -87,6 +87,7 @@ fn client(state: &AppState, cookie: HeaderValue) -> BillingServiceClient<Browser
         BrowserTransport {
             http: state.http.clone(),
             cookie: Some(cookie),
+            origin: None,
         },
         ClientConfig::new(state.billing_origin.clone()).with_default_timeout(CLIENT_TIMEOUT),
     )

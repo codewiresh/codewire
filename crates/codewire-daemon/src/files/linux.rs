@@ -464,6 +464,8 @@ mod tests {
             auth_token: crate::DaemonAuthToken::new("daemon-linux-files-test-token").unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
         };
         (temp, config, workspace)
     }

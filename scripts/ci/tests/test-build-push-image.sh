@@ -64,7 +64,7 @@ build_invocation_count() {
 mkdir -p "$ROOT/.tmp"
 
 verify_services_dockerfile_contract() {
-  local mount binary fixture_block
+  local mount binary fixture_block architecture ssh_hash crypto_hash triplet ssh_block
   local mounts=(
     'id=codewire-services-cargo-registry,target=/usr/local/cargo/registry,sharing=locked'
     'id=codewire-services-cargo-git,target=/usr/local/cargo/git,sharing=locked'
@@ -107,6 +107,51 @@ verify_services_dockerfile_contract() {
     grep -qxF "!deployments/docker/licenses/$binary" "$SERVICES_DOCKERIGNORE" ||
       fail "services build context omits official Codex $binary"
   done
+  # Each architecture supplies exactly its reviewed tools/crypto bytes. The
+  # runtime inherits their minimal closure, never the extracted package tree.
+  for architecture in amd64 arm64; do
+    case "$architecture" in
+      amd64)
+        ssh_hash=42c250b8b9110382488c53c066a960bc564ddac2cb9e449f47b6cdbb5fc1cb60
+        crypto_hash=89be24b41bff568ee6e7caf5680a3d808e80315ed92e407056ce0fa7a5bda025
+        triplet=x86_64-linux-gnu
+        ;;
+      arm64)
+        ssh_hash=72f7cb7eb432038a62cd89e0552b352a514e880fe3907e73dc50ca2ef6d088d7
+        crypto_hash=a256e03cc3abd7243ac5c6ee91a9deb56478221ef0d3c2b0748551e13140c0bf
+        triplet=aarch64-linux-gnu
+        ;;
+    esac
+    ssh_block="$(sed -n "/^FROM .* AS ssh-tools-$architecture\$/,/^FROM /p" "$SERVICES_DOCKERFILE")"
+    grep -Fq "ADD --checksum=sha256:$ssh_hash" <<<"$ssh_block" ||
+      fail "$architecture OpenSSH checksum is absent"
+    grep -Fq "ADD --checksum=sha256:$crypto_hash" <<<"$ssh_block" ||
+      fail "$architecture crypto checksum is absent"
+    grep -Fq "https://deb.debian.org/debian/pool/main/o/openssh/openssh-client_9.2p1-2+deb12u10_$architecture.deb" <<<"$ssh_block" ||
+      fail "$architecture OpenSSH artifact is not the reviewed exact version/origin"
+    grep -Fq "https://deb.debian.org/debian/pool/main/o/openssl/libssl3_3.0.20-1~deb12u2_$architecture.deb" <<<"$ssh_block" ||
+      fail "$architecture crypto artifact is not the reviewed exact version/origin"
+    for binary in ssh-agent ssh-add; do
+      grep -Fq "install -D /payload/usr/bin/$binary /out/usr/bin/$binary" <<<"$ssh_block" ||
+        fail "$architecture omits the selected $binary executable"
+    done
+    grep -Fq "/out/usr/lib/$triplet/libcrypto.so.3" <<<"$ssh_block" ||
+      fail "$architecture crypto closure uses the wrong runtime path"
+    for binary in openssh-client libssl3; do
+      grep -Fq "/out/usr/share/doc/$binary/copyright" <<<"$ssh_block" ||
+        fail "$architecture omits the $binary license notice"
+    done
+  done
+  # shellcheck disable=SC2016 # Assert the literal architecture selector.
+  grep -Fxq 'FROM ssh-tools-${TARGETARCH} AS selected-ssh-tools' "$SERVICES_DOCKERFILE" ||
+    fail 'services image does not select one architecture-specific SSH artifact'
+  grep -Fxq 'COPY --from=selected-ssh-tools /out/ /' "$SERVICES_DOCKERFILE" ||
+    fail 'services image omits the minimal selected SSH closure'
+  grep -Fxq 'COPY --chmod=755 crates/codewire-credential-broker/src/ssh_agent/askpass.sh /usr/local/libexec/codewire/ssh-askpass' "$SERVICES_DOCKERFILE" ||
+    fail 'services image omits the exact checked-in public askpass helper'
+  grep -Fxq 'FROM ssh-runtime' "$SERVICES_DOCKERFILE" ||
+    fail 'final services image does not inherit the qualified SSH runtime stage'
+  # shellcheck disable=SC2016 # Match the Dockerfile's literal shell variable.
   fixture_block="$(sed -n '/^    if \[ "\$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e \]; then/,/^    fi$/p' "$SERVICES_DOCKERFILE")"
   # The existing feature AND CI profile fence the only test-artifact build.
   # A release image receives an empty directory, never a runtime test switch.
@@ -181,9 +226,11 @@ verify_kind_build_cache_contract() {
     "$KIND_BUILDER" || fail 'Kind image builder does not pin BuildKit'
   [[ "$(grep -cF 'buildx bake' "$KIND_BUILDER")" -eq 1 ]] ||
     fail 'Kind must issue exactly one canonical Bake build'
+  # shellcheck disable=SC2016 # Match the build script's literal Bake override.
   grep -qF '$target.secrets+=id=aws_shared_credentials,src=$credentials_file' \
     "$KIND_BUILDER" ||
     fail 'Kind does not append its new secret through supported Bake override syntax'
+  # shellcheck disable=SC2016 # Match the build script's literal Bake override.
   grep -qF '$product_bake_target.secrets+=id=aws_shared_credentials,src=$credentials_file' \
     "$BUILDER" ||
     fail 'protected image builds do not append their new secret through supported Bake override syntax'

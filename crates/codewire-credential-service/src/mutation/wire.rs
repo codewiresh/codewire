@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use codewire_access::{CredentialAuthKind, CredentialMetadata, CredentialStatus};
+use codewire_protected_store::ProtectedValue;
 use codewire_proto::codewire::v1::{self as proto, CredentialMutationService};
-use codewire_server_core::auth::OAuthBearerAuthority;
-use codewire_server_core::connect::{oauth_bearer_authority, wire_error};
+use codewire_server_core::auth::CredentialMutationAuthority;
+use codewire_server_core::connect::{credential_mutation_authority, wire_error};
 use codewire_server_core::connect_error::{ConnectCode, ConnectError};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 
@@ -17,26 +18,185 @@ struct Service {
     owner: Arc<CredentialMutationOwner>,
 }
 
-fn authority(ctx: &RequestContext) -> Result<OAuthBearerAuthority, connectrpc::ConnectError> {
-    Ok(oauth_bearer_authority(ctx)?.clone())
+fn authority(
+    ctx: &RequestContext,
+) -> Result<CredentialMutationAuthority, connectrpc::ConnectError> {
+    Ok(credential_mutation_authority(ctx)?.clone())
 }
 
 #[allow(refining_impl_trait)]
 impl CredentialMutationService for Service {
-    async fn enroll_codex(
+    async fn rename_credential(
         &self,
         ctx: RequestContext,
-        request: ServiceRequest<'_, proto::EnrollCodexRequest>,
-    ) -> ServiceResult<ServiceStream<proto::EnrollCodexResponse>> {
+        request: ServiceRequest<'_, proto::RenameCredentialRequest>,
+    ) -> ServiceResult<proto::RenameCredentialResponse> {
+        let authority = authority(&ctx)?;
+        let request = request.to_owned_message();
+        let metadata = self
+            .owner
+            .update(
+                authority,
+                request.credential_id,
+                request.expected_revocation_generation,
+                super::keys::Update::Rename {
+                    expected_name: request.expected_name,
+                    name: request.name,
+                },
+            )
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::RenameCredentialResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn rotate_api_key_credential(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::RotateApiKeyCredentialRequest>,
+    ) -> ServiceResult<proto::RotateApiKeyCredentialResponse> {
+        let authority = authority(&ctx)?;
+        let mut request = request.to_owned_message();
+        let bytes = zeroize::Zeroizing::new(std::mem::take(&mut request.value));
+        let material =
+            ProtectedValue::from_slice(&bytes).map_err(|_| error(Error::InvalidInput))?;
+        drop(bytes);
+        let metadata = self
+            .owner
+            .update(
+                authority,
+                request.credential_id,
+                request.expected_revocation_generation,
+                super::keys::Update::Rotate {
+                    material,
+                    expires_at_unix: request.expires_at_unix,
+                },
+            )
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::RotateApiKeyCredentialResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn enroll_github(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::EnrollGithubRequest>,
+    ) -> ServiceResult<ServiceStream<proto::EnrollGithubResponse>> {
+        let request = request.to_owned_message();
         let events = self
             .owner
-            .enroll(authority(&ctx)?, request.view().name.to_owned())
+            .enroll_github(
+                authority(&ctx)?,
+                request.name,
+                request.credential_id,
+                request.expected_revocation_generation,
+            )
             .map_err(error)?;
         let stream = futures::stream::unfold(events, |mut events| async {
             let message = events.receiver.recv().await?;
             Some((message.map_err(error), events))
         });
         connectrpc::Response::stream_ok(stream)
+    }
+
+    async fn generate_ssh_credential(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::GenerateSshCredentialRequest>,
+    ) -> ServiceResult<proto::GenerateSshCredentialResponse> {
+        let authority = authority(&ctx)?;
+        let request = request.to_owned_message();
+        let metadata = self
+            .owner
+            .add_ssh(
+                authority,
+                request.name,
+                request.expires_at_unix,
+                super::ssh::Input::Generate,
+            )
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::GenerateSshCredentialResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn add_ssh_credential(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::AddSshCredentialRequest>,
+    ) -> ServiceResult<proto::AddSshCredentialResponse> {
+        let authority = authority(&ctx)?;
+        let mut request = request.to_owned_message();
+        let input = super::ssh::Input::Import {
+            private_key: zeroize::Zeroizing::new(std::mem::take(&mut request.private_key)),
+            passphrase: request.passphrase.take().map(zeroize::Zeroizing::new),
+        };
+        let metadata = self
+            .owner
+            .add_ssh(authority, request.name, request.expires_at_unix, input)
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::AddSshCredentialResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn enroll_codex(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::EnrollCodexRequest>,
+    ) -> ServiceResult<ServiceStream<proto::EnrollCodexResponse>> {
+        let request = request.to_owned_message();
+        let events = self
+            .owner
+            .enroll(
+                authority(&ctx)?,
+                request.name,
+                request.credential_id,
+                request.expected_revocation_generation,
+            )
+            .map_err(error)?;
+        let stream = futures::stream::unfold(events, |mut events| async {
+            let message = events.receiver.recv().await?;
+            Some((message.map_err(error), events))
+        });
+        connectrpc::Response::stream_ok(stream)
+    }
+
+    async fn add_api_key_credential(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::AddApiKeyCredentialRequest>,
+    ) -> ServiceResult<proto::AddApiKeyCredentialResponse> {
+        let authority = authority(&ctx)?;
+        let request = request.to_owned_message();
+        // This typed material-bearing DTO is write-only at the isolated
+        // authority. Never Debug/serialize it into an error or log.
+        let material =
+            ProtectedValue::new(request.value).map_err(|_| error(Error::InvalidInput))?;
+        let metadata = self
+            .owner
+            .add_api_key(
+                authority,
+                request.provider,
+                request.name,
+                material,
+                request.expires_at_unix,
+            )
+            .await
+            .map_err(error)?;
+        connectrpc::Response::ok(proto::AddApiKeyCredentialResponse {
+            credential: Some(credential(metadata)).into(),
+            ..Default::default()
+        })
     }
 
     async fn revoke_credential(
@@ -91,9 +251,18 @@ pub(super) fn credential(metadata: CredentialMetadata) -> proto::Credential {
             CredentialAuthKind::ApiKey => proto::CredentialAuthenticationKind::ApiKey,
             CredentialAuthKind::AccessToken => proto::CredentialAuthenticationKind::AccessToken,
             CredentialAuthKind::GitHubApp => proto::CredentialAuthenticationKind::GithubApp,
+            CredentialAuthKind::SshKey => proto::CredentialAuthenticationKind::SshKey,
         }
         .into(),
         account_hint: metadata.account_hint,
+        ssh_public_key: metadata
+            .ssh_public_key
+            .map(|key| proto::SshPublicKey {
+                openssh: key.openssh,
+                fingerprint: key.fingerprint,
+                ..Default::default()
+            })
+            .into(),
         status: match metadata.status {
             CredentialStatus::Active => proto::CredentialStatus::Active,
             CredentialStatus::Expired => proto::CredentialStatus::Expired,
@@ -115,7 +284,7 @@ fn error(error: Error) -> connectrpc::ConnectError {
         ),
         Error::Denied => (
             ConnectCode::Unauthenticated,
-            "original OAuth authority is no longer valid",
+            "original credential-mutation authority is no longer valid",
         ),
         Error::Unavailable => (ConnectCode::Unavailable, "credential authority unavailable"),
         Error::Cancelled => (
@@ -145,7 +314,7 @@ fn error(error: Error) -> connectrpc::ConnectError {
         ),
         Error::EnrollmentFailed => (
             ConnectCode::FailedPrecondition,
-            "isolated Codex enrollment did not complete",
+            "isolated provider enrollment did not complete",
         ),
         Error::CleanupFailed => (
             ConnectCode::Unavailable,

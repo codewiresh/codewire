@@ -25,6 +25,33 @@ RUN --mount=type=bind,target=/src,readonly \
       -p codewire-cli-bin --bin cw --target-dir /tmp/cargo-target && \
     install -D -m 0755 /tmp/cargo-target/release/cw /out/cw
 
+# Prepare the loopback SSH acceptance target once, at image-build time. Extract
+# signed, version-pinned packages without executing maintainer scripts: this
+# neither enables a system SSH service nor creates image-wide host keys.
+FROM ${BASE_IMAGE_REF} AS stock-ssh-fixture
+USER root
+ARG TARGETARCH
+RUN set -euo pipefail; \
+    test "$(dpkg --print-architecture)" = "$TARGETARCH"; \
+    grep -RqsF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' /etc/apt/sources.list.d; \
+    ! grep -RqsE '(archive|security|ports)\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d; \
+    apt-get-with-retry -o APT::Update::Error-Mode=any update; \
+    install -d -m 0755 /packages /out; \
+    cd /packages; \
+    apt-get-with-retry download openssh-server=1:9.6p1-3ubuntu13.18 libwrap0=7.6.q-33; \
+    packages=(*.deb); test "${#packages[@]}" = 2; \
+    for package in "${packages[@]}"; do \
+      identity="$(dpkg-deb --show --showformat='${Package} ${Version} ${Architecture}' "$package")"; \
+      case "$identity" in \
+        "openssh-server 1:9.6p1-3ubuntu13.18 $TARGETARCH"|"libwrap0 7.6.q-33 $TARGETARCH") ;; \
+        *) echo 'unexpected SSH fixture package identity' >&2; exit 1 ;; \
+      esac; \
+      dpkg-deb --extract "$package" /out; \
+    done; \
+    test -x /out/usr/sbin/sshd; \
+    host_keys="$(find /out -name 'ssh_host_*' -print -quit)"; test -z "$host_keys"; \
+    chown -R root:root /out; chmod -R go-w /out
+
 FROM ${BASE_IMAGE_REF}
 USER root
 ARG TARGETARCH
@@ -119,6 +146,7 @@ RUN cargo --version && rustc --version && rustfmt --version && cargo clippy --ve
 # change then reuses those expensive layers while the final image still proves
 # and exposes the exact binary built from this source tree.
 USER root
+COPY --from=stock-ssh-fixture /out/ /opt/codewire/fixtures/openssh/
 COPY --from=cw-builder /out/cw /usr/local/bin/cw
 RUN /usr/local/bin/cw --version
 

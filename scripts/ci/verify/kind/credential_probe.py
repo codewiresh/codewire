@@ -18,8 +18,20 @@ MODES = {"success": 200, "revoked": 403, "unbound": 403, "missing": 401}
 def probe(environment: str, mode: str) -> None:
     if str(uuid.UUID(environment)) != environment or mode not in {*MODES, "wrong-root"}:
         raise ValueError("selection")
-    if os.environ.get("CODEX_HOME") != str(CODEX_HOME) or os.environ.get("CODEX_CA_CERTIFICATE") != ROOTS:
+    # The current selected client uses daemon loopback, not a Codex CA/auth
+    # override. This separate direct-HTTPS probe still loads its fixed public
+    # ROOTS below; client selection must never weaken that transport proof.
+    selected = mode in {"success", "revoked"}
+    if "CODEX_CA_CERTIFICATE" in os.environ:
         raise ValueError("projection")
+    if selected:
+        if (os.environ.get("CODEX_HOME") != str(CODEX_HOME)
+                or os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS") != "v1:codex"):
+            raise ValueError("projection")
+    elif ("CODEX_HOME" in os.environ or "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS" in os.environ
+          or (CODEX_HOME / "config.toml").exists()):
+        # These modes run before any application source or profile is selected.
+        raise ValueError("unexpected-unselected-client")
     if (CODEX_HOME / "auth.json").exists():
         raise ValueError("unexpected-provider-auth-file")
     # The expected synthetic provider values must not have entered the child

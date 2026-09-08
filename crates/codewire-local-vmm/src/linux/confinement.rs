@@ -77,6 +77,11 @@ const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
 pub(crate) struct PreparedFilesystemDomain(OwnedFd);
 
 impl PreparedFilesystemDomain {
+    #[cfg(test)]
+    pub(crate) fn descriptor_for_test(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+
     pub(crate) fn restrict_self(&self) -> io::Result<()> {
         if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, self.0.as_raw_fd(), 0_u32) }
             != 0

@@ -8,10 +8,16 @@ const PROMPT: &str = "\nWelcome to Codex [v\x1b[90m0.149.0\x1b[0m]\n\x1b[90mOpen
 
 #[test]
 fn pinned_prompt_accepts_every_chunk_boundary_and_only_typed_challenge() {
-    for split in 0..=PROMPT.len() {
+    for version in ["0.149.0", "0.153.4"] {
+        assert_pinned_prompt(&PROMPT.replace("0.149.0", version));
+    }
+}
+
+fn assert_pinned_prompt(prompt: &str) {
+    for split in 0..=prompt.len() {
         let mut parser = ChallengeParser::new(1234);
-        let first = parser.push(&PROMPT.as_bytes()[..split]).unwrap();
-        let second = parser.push(&PROMPT.as_bytes()[split..]).unwrap();
+        let first = parser.push(&prompt.as_bytes()[..split]).unwrap();
+        let second = parser.push(&prompt.as_bytes()[split..]).unwrap();
         let challenge = first.or(second).expect("one challenge");
         parser.finish().unwrap();
         assert_eq!(
@@ -24,7 +30,7 @@ fn pinned_prompt_accepts_every_chunk_boundary_and_only_typed_challenge() {
     }
     let mut parser = ChallengeParser::new(1234);
     let mut count = 0;
-    for byte in PROMPT.bytes() {
+    for byte in prompt.bytes() {
         count += usize::from(parser.push(&[byte]).unwrap().is_some());
     }
     parser.finish().unwrap();
@@ -282,7 +288,20 @@ fn private_result_rejects_file_modes_links_fifo_size_and_removes_all_staging() {
 
 #[tokio::test]
 async fn completed_publication_cleans_private_home_without_logout() {
+    for newer in [false, true] {
+        assert_completed_publication(newer).await;
+    }
+}
+
+async fn assert_completed_publication(newer: bool) {
     let fixture = Fixture::new();
+    if newer {
+        std::fs::write(
+            fixture.root.path().join("codex-0.153.4"),
+            b"synthetic version",
+        )
+        .unwrap();
+    }
     let mut completed = fixture.completed().await;
     assert_eq!(
         completed.take_import().unwrap().account_hint(),

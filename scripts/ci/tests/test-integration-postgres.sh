@@ -179,4 +179,149 @@ grep -Fq 'service integration selected without a service scope' \
 grep -Fq -- '--locked --profile ci -p codewire-server-core --bin codewire-db-migrate' \
   "$FAKE_CARGO_LOG"
 
+
+# Freeze the accepted pre-batching execution contract (main 10233aee3): compile
+# grouping may change, but all 28 suites, environments and 230 assertions stay.
+python3 - "$ROOT" "$TMP" <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root, temporary = map(Path, sys.argv[1:])
+suites = [
+    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 41},
+    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential storage matrix', 'count': 21},
+    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform access profile matrix', 'count': 12},
+    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'owner_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform owner-source authority matrix', 'count': 5},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'access_profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'public access profile restricted API matrix', 'count': 7},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'credentials', '--', '--ignored', '--nocapture', '--test-threads=3'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'public credential metadata matrix', 'count': 3},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'mutation::tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'public credential mutation matrix', 'count': 23},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'runtime::tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'isolated credential runtime matrix', 'count': 4},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority', '--', '--exact', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Kind credential effective ACL matrix', 'count': 1},
+    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'refresh', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential refresh matrix', 'count': 13},
+    {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'authority', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential restricted-role matrix', 'count': 9},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker admission matrix', 'count': 14},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform,ssh-agent', '--lib', 'platform::tests::ssh::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker SSH matrix', 'count': 4},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features', 'platform', '--lib', 'platform::bridge::tests::rotation::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform broker gRPC rotation drain matrix', 'count': 3},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--lib', 'tests::database::', '--', '--ignored', '--skip', 'tests::database::projection::', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform runtime restricted identity matrix', 'count': 3},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--lib', 'tests::database::projection::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform runtime projection matrix', 'count': 10},
+    {'args': ['test', '--locked', '-p', 'codewire-credential-service', '--features', 'enrollment', '--lib', 'delegation::authority::tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'owner-local delegation authority matrix', 'count': 5},
+    {'args': ['test', '--locked', '-p', 'codewire-server-core', '--test', 'oauth_bearer_auth', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'OAuth-only restricted identity matrix', 'count': 6},
+    {'args': ['test', '-p', 'codewire-server-core', '--test', 'session_auth', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'session hash-only matrix', 'count': 4},
+    {'args': ['test', '-p', 'codewire-server-core', '--test', 'org_deletion_lifecycle', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization deletion lifecycle matrix', 'count': 17},
+    {'args': ['test', '-p', 'codewire-billing', '--lib', 'billing_teardown::tests::db_', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization billing teardown matrix', 'count': 5},
+    {'args': ['test', '--profile', 'ci', '-p', 'codewire-orchestration', '--lib', 'connect::mesh_authorization::tests::generated_mesh_authorization_service_enforces_the_canonical_matrix', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': True, 'label': 'Mesh authorization receiver matrix', 'count': 1},
+    {'args': ['test', '-p', 'codewire-orchestration', '--test', 'environment_external_cleanup', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'environment external cleanup matrix', 'count': 3},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment destroy template hint matrix', 'count': 1},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--lib', 'worker::create::projection_database_tests::', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment projection capture matrix', 'count': 3},
+    {'args': ['test', '-p', 'codewire-orchestration', '--lib', 'worker::tenant_secret_teardown::tests::db_', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization tenant secret teardown matrix', 'count': 2},
+    {'args': ['test', '-p', 'codewire-orchestration', '--lib', 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'encrypted tenant secret store matrix', 'count': 1},
+    {'args': ['test', '-p', 'codewire-mesh', '--lib', 'store::migration_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Mesh migration ledger', 'count': 11},
+]
+batches = [
+    ['test', '-p', 'codewire-server-core', '--lib', '--test', 'session_auth',
+     '--test', 'org_deletion_lifecycle', '--test', 'oauth_bearer_auth', '--no-run'],
+    ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage',
+     '--test', 'profiles', '--test', 'refresh', '--test', 'authority', '--test', 'owner_sources', '--no-run'],
+    ['test', '--locked', '-p', 'codewire-orchestration', '--lib', '--test', 'access_profiles',
+     '--test', 'credentials', '--test', 'environment_external_cleanup', '--no-run'],
+]
+trace_root = temporary / 'database-trace'
+trace_root.mkdir()
+(trace_root / 'suites.json').write_text(json.dumps(suites))
+cargo = trace_root / 'cargo'
+cargo.write_text(r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+work = Path(os.environ['DB_TRACE_ROOT'])
+record = dict(args=args, target=os.environ['CARGO_TARGET_DIR'],
+              test_database=os.environ.get('TEST_DATABASE_URL'), database=os.environ.get('DATABASE_URL'))
+with (work / 'trace.jsonl').open('a') as output:
+    output.write(json.dumps(record) + '\n')
+if args[0] == 'build':
+    target = Path(record['target']) / 'ci' / 'codewire-db-migrate'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('#!/bin/sh\nexit 0\n')
+    target.chmod(0o755)
+    sys.exit(0)
+if '--no-run' in args:
+    if os.environ['DB_TRACE_FAILURE'] == 'compile:' + args[args.index('-p') + 1]:
+        sys.exit(42)
+    print('Finished compiling synthetic database harnesses')
+    sys.exit(0)
+suites = json.loads((work / 'suites.json').read_text())
+index = next((i for i, item in enumerate(suites) if item['args'] == args), None)
+if index is None:
+    sys.exit('Unexpected database execution')
+failure = os.environ['DB_TRACE_FAILURE']
+if failure == 'test:' + str(index):
+    sys.exit(43)
+if failure == 'skip:' + str(index):
+    print('DATABASE_URL unset')
+count = suites[index]['count'] - (failure == 'count:' + str(index))
+print(f'test result: ok. {count} passed; 0 failed; 0 ignored')
+''')
+cargo.chmod(0o755)
+for executable in ('psql', 'docker'):
+    path = trace_root / executable
+    path.write_text('#!/bin/sh\nexit 0\n')
+    path.chmod(0o755)
+
+def run_case(failure=''):
+    trace = trace_root / 'trace.jsonl'
+    trace.unlink(missing_ok=True)
+    environment = {
+        'PATH': str(trace_root) + os.pathsep + os.environ['PATH'],
+        'CARGO_TARGET_DIR': str(trace_root / 'debug-target'),
+        'CODEWIRE_CARGO_CI_TARGET_DIR': str(trace_root / 'ci-target'),
+        'RUN_DIR': str(trace_root / 'run'),
+        'DATABASE_URL': 'postgres://synthetic:synthetic@127.0.0.1:60003/sql-client',
+        'DATABASE_URL_RUST': 'postgres://synthetic:synthetic@127.0.0.1:60003/rust-client',
+        'DB_TRACE_ROOT': str(trace_root), 'DB_TRACE_FAILURE': failure,
+    }
+    result = subprocess.run(['bash', str(root / 'scripts/ci/verify/run-integration-verification.sh'),
+                             'database'], env=environment, cwd=root, capture_output=True, text=True)
+    commands = [json.loads(line) for line in trace.read_text().splitlines()]
+    return result, commands, environment
+
+result, commands, environment = run_case()
+assert result.returncode == 0, result.stdout + result.stderr
+assert '[product-integration] green' in result.stdout
+assert commands[0]['args'] == ['build', '--locked', '--profile', 'ci', '-p',
+                               'codewire-server-core', '--bin', 'codewire-db-migrate']
+assert commands[0]['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR']
+actual_batches = [command for command in commands if '--no-run' in command['args']]
+assert [command['args'] for command in actual_batches] == batches
+assert all(command['target'] == environment['CARGO_TARGET_DIR'] and
+           command['test_database'] == environment['DATABASE_URL_RUST'] for command in actual_batches)
+executions = [command for command in commands if command['args'][0] == 'test'
+              and '--no-run' not in command['args']]
+assert len(executions) == len(suites) == 28
+for expected, actual in zip(suites, executions):
+    assert actual['args'] == expected['args'], expected['label']
+    assert actual['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR' if expected['ci']
+                                           else 'CARGO_TARGET_DIR'], expected['label']
+    field = 'test_database' if expected['database_env'] == 'TEST_DATABASE_URL' else 'database'
+    assert actual[field] == environment['DATABASE_URL_RUST'], expected['label']
+for batch in actual_batches:
+    package = batch['args'][batch['args'].index('-p') + 1]
+    first_test = next(command for command in executions if package in command['args'])
+    assert commands.index(batch) < commands.index(first_test)
+# Every retained assertion must fail on an incorrect count. This also catches
+# deleting the assertion while leaving the corresponding test command present.
+for index in range(len(suites)):
+    failed, _, _ = run_case('count:' + str(index))
+    assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, index
+for failure in ['compile:codewire-server-core', 'compile:codewire-platform-credentials',
+                'compile:codewire-orchestration', 'test:0', 'test:21', 'skip:18', 'skip:19', 'skip:22']:
+    failed, trace, _ = run_case(failure)
+    assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, failure
+    if failure.startswith('compile:'):
+        assert '--no-run' in trace[-1]['args'], failure
+print('Database batching: 36 trace/failure cases; all 28 suite contracts and 230 count assertions preserved')
+PYTHON
+
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'

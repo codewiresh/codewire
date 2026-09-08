@@ -4,10 +4,12 @@
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -22,9 +24,37 @@ SOURCE = "1" * 40
 TREE = "2" * 40
 OTHER_SOURCE = "3" * 40
 OTHER_TREE = "4" * 40
-IMAGE_ID = "sha256:" + "5" * 64
+CONFIG_BYTES = json.dumps({"os": "linux", "architecture": "amd64",
+                          "rootfs": {"type": "layers", "diff_ids": []}}, sort_keys=True).encode()
+IMAGE_ID = "sha256:" + hashlib.sha256(CONFIG_BYTES).hexdigest()
 BASE_DIGEST = "sha256:" + "6" * 64
 OTHER_IMAGE_ID = "sha256:" + "7" * 64
+
+
+def write_archive(path, *, config=CONFIG_BYTES, change=None):
+    def descriptor(raw, media_type):
+        return {"mediaType": media_type, "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                "size": len(raw)}
+
+    config_descriptor = descriptor(config, "application/vnd.oci.image.config.v1+json")
+    manifest = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                           "config": config_descriptor, "layers": []}, sort_keys=True).encode()
+    manifest_descriptor = descriptor(manifest, "application/vnd.oci.image.manifest.v1+json")
+    entries = {
+        "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+        "index.json": json.dumps({"schemaVersion": 2, "manifests": [manifest_descriptor]}).encode(),
+        "blobs/sha256/" + manifest_descriptor["digest"][7:]: manifest,
+        "blobs/sha256/" + config_descriptor["digest"][7:]: config,
+    }
+    if change:
+        change(entries)
+    with tarfile.open(path, "w") as archive:
+        for name, contents in entries.items():
+            entry = tarfile.TarInfo(name)
+            entry.size = len(contents)
+            archive.addfile(entry, io.BytesIO(contents))
+    path.chmod(0o400)
+    return manifest_descriptor["digest"]
 
 
 class SyntheticSource(unittest.TestCase):
@@ -144,6 +174,8 @@ class ReceiptTests(SyntheticSource):
         self.inspect = self.start_patch(mock.patch.object(
             artifact, "inspect", side_effect=self.fake_inspect
         ))
+        self.archive = self.root / "export.oci.tar"
+        self.source_digest = write_archive(self.archive)
 
     def fake_inspect(self, image):
         if image not in self.images:
@@ -151,7 +183,9 @@ class ReceiptTests(SyntheticSource):
         return copy.deepcopy(self.images[image])
 
     def seal(self):
-        return artifact.seal(self.root, self.receipt, IMAGE_ID, BASE_DIGEST)
+        if not self.archive.exists():
+            write_archive(self.archive)
+        return artifact.seal(self.root, self.receipt, IMAGE_ID, BASE_DIGEST, self.archive)
 
     def read_receipt(self):
         return json.loads(self.receipt.read_text(encoding="utf-8"))
@@ -161,13 +195,19 @@ class ReceiptTests(SyntheticSource):
 
     def test_successful_seal_and_reuse_bind_exact_identity_and_image(self):
         alias = self.seal()
-        self.assertEqual(alias, "localhost/codewire-ci/workspace:source-" + "5" * 64)
+        self.assertEqual(alias, "localhost/codewire-ci/workspace:source-" + IMAGE_ID[7:])
+        oci = self.read_receipt()["workspace_oci"]
         self.assertEqual(self.read_receipt(), {
             **self.identity,
             "base_manifest_digest": BASE_DIGEST,
             "workspace_image_id": IMAGE_ID,
             "workspace_alias": alias,
+            "workspace_oci": oci,
         })
+        self.assertEqual(oci, artifact.archive_identity(self.root / oci["file"], IMAGE_ID, "amd64"))
+        self.assertEqual(oci["source_digest"], self.source_digest)
+        self.assertEqual(artifact.reuse(self.root, self.receipt, native=True),
+                         {**oci, "path": str(self.root / oci["file"])})
         self.assertEqual(artifact.reuse(self.root, self.receipt), alias)
         self.assertEqual(list(self.root.glob(".workspace-image-*")), [])
         self.command.assert_any_call("synthetic-docker", "image", "tag", IMAGE_ID, alias)
@@ -348,7 +388,7 @@ class ReceiptTests(SyntheticSource):
 
     def test_invalid_base_digest_emits_no_receipt(self):
         with self.assertRaisesRegex(ValueError, "image digest"):
-            artifact.seal(self.root, self.receipt, IMAGE_ID, "latest")
+            artifact.seal(self.root, self.receipt, IMAGE_ID, "latest", self.archive)
         self.assertFalse(self.receipt.exists())
 
     def test_atomic_write_failure_leaves_no_partial_receipt(self):
@@ -357,6 +397,71 @@ class ReceiptTests(SyntheticSource):
                 self.seal()
         self.assertFalse(self.receipt.exists())
         self.assertEqual(list(self.root.glob(".workspace-image-*")), [])
+        self.assertEqual(list(self.root.glob("workspace-image-*.oci.tar")), [])
+
+    def test_failed_receipt_replacement_preserves_previously_verified_archive(self):
+        self.seal()
+        before = self.read_receipt()
+        previous_archive = self.root / before["workspace_oci"]["file"]
+        self.write_distinct_archive()
+        with mock.patch.object(artifact.os, "replace", side_effect=OSError("synthetic write failure")):
+            with self.assertRaises(OSError):
+                self.seal()
+        self.assertEqual(self.read_receipt(), before)
+        self.assertTrue(previous_archive.exists())
+        self.assertEqual(list(self.root.glob("workspace-image-*.oci.tar")), [previous_archive])
+
+    def write_distinct_archive(self):
+        # Different wrapper bytes, same verified runtime image/configuration.
+        self.archive.unlink(missing_ok=True)
+        write_archive(self.archive, change=lambda entries: entries.update({
+            "oci-layout": b'{ "imageLayoutVersion": "1.0.0" }\n',
+        }))
+
+    def test_successful_replacement_removes_only_the_verified_prior_archive(self):
+        self.seal()
+        previous = self.root / self.read_receipt()["workspace_oci"]["file"]
+        unrelated = self.root / ("workspace-image-" + "9" * 64 + ".oci.tar")
+        unrelated.write_bytes(b"not owned by the previous receipt")
+        unrelated.chmod(0o400)
+        self.write_distinct_archive()
+        self.seal()
+        current = self.root / self.read_receipt()["workspace_oci"]["file"]
+        self.assertNotEqual(previous, current)
+        self.assertFalse(previous.exists())
+        self.assertTrue(current.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertEqual(artifact.reuse(self.root, self.receipt), artifact.alias_for(IMAGE_ID))
+
+    def test_replacement_never_prunes_untrusted_prior_artifacts(self):
+        for change in ("writable", "hardlink", "symlink", "wrong-hash", "traversal"):
+            with self.subTest(change=change):
+                self.seal()
+                value = self.read_receipt()
+                previous = self.root / value["workspace_oci"]["file"]
+                extra = self.root / ("preserved-" + change)
+                if change == "writable":
+                    previous.chmod(0o600)
+                elif change == "hardlink":
+                    os.link(previous, extra)
+                elif change == "symlink":
+                    previous.rename(extra)
+                    previous.symlink_to(extra)
+                elif change == "wrong-hash":
+                    value["workspace_oci"]["sha256"] = "0" * 64
+                else:
+                    value["workspace_oci"]["file"] = "../outside.oci.tar"
+                self.write_receipt(value)
+                self.write_distinct_archive()
+                self.seal()
+                self.assertTrue(previous.exists())
+                # Restore this synthetic fixture before the next subcase.
+                if previous.is_symlink():
+                    previous.unlink()
+                    extra.rename(previous)
+                if change == "hardlink":
+                    extra.unlink()
+                previous.chmod(0o400)
 
     def test_receipt_and_direct_parent_symlinks_are_rejected(self):
         self.seal()
@@ -365,11 +470,92 @@ class ReceiptTests(SyntheticSource):
         with self.assertRaisesRegex(ValueError, "receipt file"):
             artifact.reuse(self.root, link)
         with self.assertRaisesRegex(ValueError, "receipt destination"):
-            artifact.seal(self.root, link, IMAGE_ID, BASE_DIGEST)
+            artifact.seal(self.root, link, IMAGE_ID, BASE_DIGEST, self.archive)
         parent_link = self.root / "parent-link"
         parent_link.symlink_to(self.root, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "receipt destination"):
-            artifact.seal(self.root, parent_link / "other.json", IMAGE_ID, BASE_DIGEST)
+            artifact.seal(self.root, parent_link / "other.json", IMAGE_ID, BASE_DIGEST, self.archive)
+
+    def test_native_archive_missing_or_modified_never_reuses_receipt(self):
+        self.seal()
+        value = self.read_receipt()
+        path = self.root / value["workspace_oci"]["file"]
+        path.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "archive file"):
+            artifact.reuse(self.root, self.receipt, native=True)
+        path.unlink()
+        with self.assertRaises(FileNotFoundError):
+            artifact.reuse(self.root, self.receipt, native=True)
+
+    def test_native_archive_receipt_fields_cannot_redirect_input(self):
+        self.seal()
+        original = self.read_receipt()
+        for field, changed in (("file", "../outside.oci.tar"), ("sha256", "../outside"),
+                               ("size", 1), ("source_digest", BASE_DIGEST)):
+            value = copy.deepcopy(original)
+            value["workspace_oci"][field] = changed
+            self.write_receipt(value)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                artifact.reuse(self.root, self.receipt, native=True)
+
+
+class ArchiveTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="workspace-oci-tests-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.archive = self.root / "image.tar"
+        self.source_digest = write_archive(self.archive)
+
+    def test_archive_binds_wrapper_bytes_native_manifest_and_verified_config(self):
+        result = artifact.archive_identity(self.archive, IMAGE_ID, "amd64")
+        self.assertEqual(result["source_digest"], self.source_digest)
+        self.assertEqual(result["sha256"], hashlib.sha256(self.archive.read_bytes()).hexdigest())
+        self.assertEqual(result["size"], self.archive.stat().st_size)
+
+    def test_containerd_manifest_image_id_binds_the_same_verified_archive(self):
+        self.assertEqual(artifact.archive_identity(self.archive, self.source_digest, "amd64"),
+                         artifact.archive_identity(self.archive, IMAGE_ID, "amd64"))
+
+    def test_wrong_docker_image_or_architecture_is_rejected(self):
+        for image_id, arch in ((OTHER_IMAGE_ID, "amd64"), (IMAGE_ID, "arm64")):
+            with self.subTest(image=image_id, architecture=arch), self.assertRaises(ValueError):
+                artifact.archive_identity(self.archive, image_id, arch)
+
+    def test_nonprivate_linked_or_oversized_archives_are_rejected(self):
+        self.archive.chmod(0o600)
+        with self.assertRaises(ValueError):
+            artifact.archive_identity(self.archive, IMAGE_ID, "amd64")
+        self.archive.chmod(0o400)
+        with mock.patch.object(artifact, "MAXIMUM_ARCHIVE_BYTES", 1), self.assertRaises(ValueError):
+            artifact.archive_identity(self.archive, IMAGE_ID, "amd64")
+        link = self.root / "linked"
+        link.symlink_to(self.archive)
+        with self.assertRaises(ValueError):
+            artifact.archive_identity(link, IMAGE_ID, "amd64")
+        link.unlink()
+        os.link(self.archive, link)
+        with self.assertRaises(ValueError):
+            artifact.archive_identity(self.archive, IMAGE_ID, "amd64")
+
+    def test_bad_layout_missing_corrupt_and_traversing_documents_fail_closed(self):
+        for mutation in ("layout", "missing", "corrupt", "traversal", "extra-root"):
+            def change(entries):
+                if mutation == "layout":
+                    entries["oci-layout"] = b'{"imageLayoutVersion":"2.0.0"}'
+                elif mutation == "missing":
+                    del entries["blobs/sha256/" + IMAGE_ID[7:]]
+                elif mutation == "corrupt":
+                    entries["blobs/sha256/" + IMAGE_ID[7:]] = b"{}"
+                elif mutation == "traversal":
+                    entries["../outside"] = b"never extracted"
+                else:
+                    entries["unexpected"] = b"never extracted"
+            self.archive.unlink()
+            write_archive(self.archive, change=change)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                artifact.archive_identity(self.archive, IMAGE_ID, "amd64")
+        self.assertFalse((self.root.parent / "outside").exists())
 
 
 class InspectionTests(SyntheticSource):

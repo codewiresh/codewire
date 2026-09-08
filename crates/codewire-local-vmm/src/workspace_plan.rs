@@ -18,7 +18,9 @@ use codewire_access::AccessProfileId;
 use codewire_local_credentials::{
     AuthorityRuntimeConfig, LocalCredentialControlClient, validate_github_https_source,
 };
-use codewire_project::{ProjectSpec, RepositorySpec};
+use codewire_project::{
+    ProjectSpec, RepositorySpec, canonical_repository_known_hosts, parse_repository_ssh_host,
+};
 use codewire_vmm_guest_probe::{DirectShareMount, DirectSharePlan};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -133,7 +135,7 @@ impl WorkspacePlan {
                     bundle_size,
                     ..
                 } => {
-                    validate_anonymous_https_source(source)?;
+                    validate_retained_repository_source(source)?;
                     if !valid_object_id(commit)
                         || (!branch.is_empty() && !valid_git_selector(branch))
                         || *bundle_size == 0
@@ -363,6 +365,17 @@ pub(crate) async fn prepare_repository_plan(
     if repositories.is_empty() || repositories.len() > codewire_project::MAX_REPOSITORIES {
         return Err(WorkspacePlanError::InvalidPlan);
     }
+    for repository in repositories {
+        validate_repository_trust(repository)?;
+        if parse_repository_ssh_host(&repository.source)
+            .ok()
+            .flatten()
+            .is_some()
+            && credential_access.is_none()
+        {
+            return Err(WorkspacePlanError::MissingRepositoryCredentialProfile);
+        }
+    }
     let root = PrivateRoot::open(engine_state_root)?;
     let content = ContentStore::create(&root)?;
     let mut inputs = Vec::with_capacity(repositories.len());
@@ -386,6 +399,7 @@ pub(crate) struct RepositoryCredentialAccess {
     pub(crate) request_id: Uuid,
     pub(crate) profile_id: AccessProfileId,
     pub(crate) profile_revision: u64,
+    pub(crate) platform: Option<codewire_local_credentials::RepositoryPlatformAccess>,
 }
 
 async fn prepare_repository(
@@ -395,6 +409,19 @@ async fn prepare_repository(
     credential_access: Option<&RepositoryCredentialAccess>,
     credential_authority: &AuthorityRuntimeConfig,
 ) -> Result<WorkspaceInput, WorkspacePlanError> {
+    if parse_repository_ssh_host(&repository.source)
+        .map_err(|_| WorkspacePlanError::UnsupportedRepositorySource)?
+        .is_some()
+    {
+        return prepare_authenticated_repository(
+            root,
+            content,
+            repository,
+            credential_access.ok_or(WorkspacePlanError::MissingRepositoryCredentialProfile)?,
+            credential_authority,
+        )
+        .await;
+    }
     match prepare_anonymous_repository(root, content, repository).await {
         Ok(input) => Ok(input),
         Err(WorkspacePlanError::GitCommandFailed)
@@ -520,8 +547,15 @@ async fn prepare_authenticated_repository(
     access: &RepositoryCredentialAccess,
     credential_authority: &AuthorityRuntimeConfig,
 ) -> Result<WorkspaceInput, WorkspacePlanError> {
-    validate_github_https_source(&repository.source)
-        .map_err(|_| WorkspacePlanError::UnsupportedRepositorySource)?;
+    validate_repository_trust(repository)?;
+    if parse_repository_ssh_host(&repository.source)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        validate_github_https_source(&repository.source)
+            .map_err(|_| WorkspacePlanError::UnsupportedRepositorySource)?;
+    }
     let staging_name = format!("repository-prepare-{}", Uuid::new_v4());
     let staging = root.create_dir(Path::new(&staging_name), 0o700)?;
     let mut cleanup = PreparationCleanup::new(staging.clone());
@@ -547,6 +581,8 @@ async fn prepare_authenticated_repository(
             repository.source.clone(),
             repository.branch.clone(),
             repository.revision.clone(),
+            repository.known_hosts.clone(),
+            access.platform.clone(),
         )
         .await
         .map_err(|_| WorkspacePlanError::CredentialRepositoryUnavailable)?;
@@ -853,6 +889,29 @@ fn digest_bundle(path: &Path) -> Result<(Sha256Digest, u64, File), WorkspacePlan
     Ok((digest, read, file))
 }
 
+fn validate_repository_trust(repository: &RepositorySpec) -> Result<(), WorkspacePlanError> {
+    if canonical_repository_known_hosts(&repository.source, repository.known_hosts.clone())
+        .ok()
+        .as_ref()
+        != Some(&repository.known_hosts)
+    {
+        return Err(WorkspacePlanError::InvalidRepositoryHostTrust);
+    }
+    Ok(())
+}
+
+fn validate_retained_repository_source(source: &str) -> Result<(), WorkspacePlanError> {
+    // Retained plans consume only an already-admitted digest-addressed bundle,
+    // never a network endpoint. Trust remains with the original checkout.
+    if parse_repository_ssh_host(source)
+        .map_err(|_| WorkspacePlanError::UnsupportedRepositorySource)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    validate_anonymous_https_source(source)
+}
+
 fn validate_anonymous_https_source(source: &str) -> Result<(), WorkspacePlanError> {
     if source.starts_with('-') {
         return Err(WorkspacePlanError::UnsupportedRepositorySource);
@@ -962,6 +1021,10 @@ pub enum WorkspacePlanError {
         "native remote repositories currently require anonymous HTTPS; protected repositories are added by #1922/#1912"
     )]
     UnsupportedRepositorySource,
+    #[error("SSH repository checkout requires a selected credential profile")]
+    MissingRepositoryCredentialProfile,
+    #[error("repository host trust is missing or noncanonical")]
+    InvalidRepositoryHostTrust,
     #[error("remote repository has no valid default branch")]
     InvalidRemoteHead,
     #[error("remote repository did not resolve to a valid commit")]
@@ -1007,6 +1070,33 @@ pub enum WorkspacePlanError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_ssh_checkout_trust_is_distinct_from_offline_bundle_metadata() {
+        let mut repository = RepositorySpec {
+            source: "ssh://git@example.test:2222/repo.git".to_owned(),
+            destination: "/workspace".to_owned(),
+            branch: "main".to_owned(),
+            revision: String::new(),
+            known_hosts: vec!["[example.test]:2222 ssh-ed25519 AAAA".to_owned()],
+        };
+        assert!(validate_repository_trust(&repository).is_ok());
+        assert!(validate_retained_repository_source(&repository.source).is_ok());
+        assert!(validate_anonymous_https_source(&repository.source).is_err());
+        repository.known_hosts.clear();
+        assert!(matches!(
+            validate_repository_trust(&repository),
+            Err(WorkspacePlanError::InvalidRepositoryHostTrust)
+        ));
+        repository
+            .known_hosts
+            .push("[other.test]:2222 ssh-ed25519 AAAA".to_owned());
+        assert!(validate_repository_trust(&repository).is_err());
+        repository.source = "https://example.test/repo.git".to_owned();
+        assert!(validate_repository_trust(&repository).is_err());
+        repository.known_hosts.clear();
+        assert!(validate_repository_trust(&repository).is_ok());
+    }
 
     #[test]
     fn plans_reject_non_https_and_overlapping_destinations() {
@@ -1082,6 +1172,7 @@ mod tests {
                 revision: String::new(),
                 branch: "main".to_owned(),
                 destination: "/workspace/app".to_owned(),
+                known_hosts: Vec::new(),
             }],
             working_directory: "/workspace/fixtures/subdir".to_owned(),
             ..ProjectSpec::default()

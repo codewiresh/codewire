@@ -1,0 +1,395 @@
+//! Disposable-PostgreSQL proof for launch-selection capture and publication.
+//! No protected material, provider call, or product database is used here.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::poll_fn;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
+
+use anyhow::{Context, Result, ensure};
+use codewire_project::{CredentialBinding, ProjectSpec, StoragePlacement};
+use serde_json::to_value;
+use tokio::sync::oneshot;
+
+use super::*;
+
+#[allow(dead_code)]
+#[path = "../../../../codewire-platform-credentials/tests/support/mod.rs"]
+mod support;
+
+use support::TestDatabase;
+
+const CREATOR: &str = "projection-capture-creator";
+const ENVIRONMENT: &str = "ba4dde58-6a47-4ae9-aedd-2df7d52062c4";
+const GENERATION: i64 = 7;
+const ORGANIZATION: &str = "projection-capture-organization";
+const PRESET: &str = "projection-capture-preset";
+const PROFILE: &str = "7f27afe8-a869-4d2c-b582-f8406493609a";
+
+async fn seed_environment(db: &TestDatabase) -> Result<()> {
+    db.user(CREATOR).await?;
+    db.organization(ORGANIZATION).await?;
+    sqlx::query(
+        "INSERT INTO environment_presets(id,org_id,name,slug,project_spec) \
+         VALUES ($1,$2,'Projection capture','projection-capture',$3)",
+    )
+    .bind(PRESET)
+    .bind(ORGANIZATION)
+    .bind(to_value(ProjectSpec::default())?)
+    .execute(&db.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO environments(id,org_id,created_by,type,preset_id,state,desired_state, \
+         environment_operation_generation,project_spec) \
+         VALUES ($1,$2,$3,'sandbox',$4,'creating','started',$5,$6)",
+    )
+    .bind(ENVIRONMENT)
+    .bind(ORGANIZATION)
+    .bind(CREATOR)
+    .bind(PRESET)
+    .bind(GENERATION)
+    .bind(to_value(ProjectSpec::default())?)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+async fn store_project(db: &TestDatabase, project: &ProjectSpec) -> Result<()> {
+    project.validate()?;
+    sqlx::query("UPDATE environments SET project_spec=$2 WHERE id=$1")
+        .bind(ENVIRONMENT)
+        .bind(to_value(project)?)
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
+fn app_project() -> ProjectSpec {
+    let mut project = ProjectSpec {
+        environment: BTreeMap::from([
+            (
+                "APP_MODE".to_owned(),
+                "synthetic-app-mode-value-never-captured".to_owned(),
+            ),
+            (
+                "DATABASE_URL".to_owned(),
+                "synthetic-database-value-never-captured".to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    };
+    project.secrets.organization = true;
+    project
+}
+
+fn template_opts(env: &EnvironmentRow) -> Result<TemplateOpts> {
+    let cfg = SandboxWorkerCfg {
+        credential_runtime: Some(
+            crate::sandbox::template::CredentialRuntimeTemplateConfig::synthetic(
+                "projection-capture",
+            ),
+        ),
+        ..Default::default()
+    };
+    environment_template_opts(
+        &cfg,
+        "ghcr.io/codewiresh/workspace:synthetic",
+        "workspace",
+        env,
+        GENERATION,
+        "synthetic-coordinate-capability",
+        "synthetic-daemon-capability",
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn database_capture_distinguishes_no_sources_from_app_only_metadata() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_environment(&db).await?;
+
+        let empty = load_environment(&db.pool, ENVIRONMENT).await?;
+        ensure!(empty.projection_selection == Ok(None));
+
+        let project = app_project();
+        store_project(&db, &project).await?;
+        let mut connection = db.pool.acquire().await?;
+        let selected = load_environment_in(&mut connection, ENVIRONMENT).await?;
+        let selection = selected
+            .projection_selection
+            .as_ref()
+            .map_err(|_| anyhow::anyhow!("app-only selection was rejected"))?
+            .as_ref()
+            .context("app-only sources did not produce launch metadata")?;
+        ensure!(selection.profile.is_none());
+        ensure!(selection.organization_selected);
+        ensure!(
+            selection.ordinary_keys
+                == BTreeSet::from(["APP_MODE".to_owned(), "DATABASE_URL".to_owned()])
+        );
+        let metadata = format!("{selection:?}");
+        for value in project.environment.values() {
+            ensure!(
+                !metadata.contains(value),
+                "selection capture included an application value"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn database_capture_pins_binding_revision_and_keeps_cleanup_rows_loadable() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_environment(&db).await?;
+        let credential_v1 = uuid::Uuid::new_v4().to_string();
+        let credential_v2 = uuid::Uuid::new_v4().to_string();
+        for (credential, display_name, provider) in [
+            (credential_v1.as_str(), "Synthetic Codex", "openai"),
+            (credential_v2.as_str(), "Synthetic GitHub", "github"),
+        ] {
+            sqlx::query(
+                "INSERT INTO platform_credentials \
+                 (id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) \
+                 VALUES ($1,$2,$4,'oauth',$3,'active',1,1)",
+            )
+            .bind(credential)
+            .bind(CREATOR)
+            .bind(display_name)
+            .bind(provider)
+            .execute(&db.pool)
+            .await?;
+        }
+        let mut tx = db.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profiles(id,user_id,name,current_revision) \
+             VALUES ($1,$2,'synthetic',1)",
+        )
+        .bind(PROFILE)
+        .bind(CREATOR)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profile_revisions(profile_id,revision) VALUES ($1,1)",
+        )
+        .bind(PROFILE)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profile_entries \
+             (profile_id,revision,capability_slot,credential_id) VALUES ($1,1,'codex',$2)",
+        )
+        .bind(PROFILE)
+        .bind(credential_v1)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO platform_environment_access_bindings \
+             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) \
+             VALUES ($1,$2,1,$3)",
+        )
+        .bind(ENVIRONMENT)
+        .bind(PROFILE)
+        .bind(CREATOR)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        let project = ProjectSpec {
+            credentials: Some(CredentialBinding {
+                profile: format!("platform:id:{PROFILE}"),
+            }),
+            ..Default::default()
+        };
+        store_project(&db, &project).await?;
+        let pinned = load_environment(&db.pool, ENVIRONMENT).await?;
+        let pinned_selection = pinned
+            .projection_selection
+            .as_ref()
+            .map_err(|_| anyhow::anyhow!("pinned profile selection was rejected"))?
+            .clone()
+            .context("profile binding produced no selection")?;
+        ensure!(pinned_selection.profile == Some((PROFILE.to_owned(), 1)));
+        let pinned_digest = pinned_selection.sha256()?;
+
+        let mut tx = db.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profile_revisions(profile_id,revision) VALUES ($1,2)",
+        )
+        .bind(PROFILE)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO platform_access_profile_entries \
+             (profile_id,revision,capability_slot,credential_id) VALUES ($1,2,'github',$2)",
+        )
+        .bind(PROFILE)
+        .bind(credential_v2)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE platform_access_profiles SET current_revision=2 WHERE id=$1")
+            .bind(PROFILE)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        let after_advance = load_environment(&db.pool, ENVIRONMENT).await?;
+        let after_advance = after_advance
+            .projection_selection
+            .as_ref()
+            .map_err(|_| anyhow::anyhow!("pinned profile was invalidated by current revision"))?
+            .as_ref()
+            .context("pinned profile disappeared after current revision advanced")?;
+        ensure!(after_advance.profile == Some((PROFILE.to_owned(), 1)));
+        ensure!(after_advance.sha256()? == pinned_digest);
+
+        sqlx::query(
+            "DELETE FROM platform_environment_access_bindings WHERE environment_id=$1",
+        )
+        .bind(ENVIRONMENT)
+        .execute(&db.pool)
+        .await?;
+        let removed_binding = load_environment(&db.pool, ENVIRONMENT).await?;
+        ensure!(removed_binding.projection_selection.is_err());
+
+        sqlx::query(
+            "INSERT INTO platform_environment_access_bindings \
+             (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) \
+             VALUES ($1,$2,1,$3)",
+        )
+        .bind(ENVIRONMENT)
+        .bind(PROFILE)
+        .bind(CREATOR)
+        .execute(&db.pool)
+        .await?;
+        sqlx::query("UPDATE environments SET environment_operation_generation=0 WHERE id=$1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        let generation_zero = load_environment(&db.pool, ENVIRONMENT).await?;
+        ensure!(generation_zero.projection_selection.is_err());
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn template_publication_revalidates_capture_before_poll_and_holds_row_lock() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_environment(&db).await?;
+        let original_project = app_project();
+        store_project(&db, &original_project).await?;
+        let captured = load_environment(&db.pool, ENVIRONMENT).await?;
+        let opts = template_opts(&captured)?;
+        let authority = ActivityAuthority::capture(&db.pool, ENVIRONMENT, GENERATION).await?;
+
+        let mut changed_source = original_project.clone();
+        changed_source.secrets.organization = false;
+        changed_source.secrets.user = Some(StoragePlacement::Platform);
+        store_project(&db, &changed_source).await?;
+        let stale_polled = Arc::new(AtomicBool::new(false));
+        let observed = stale_polled.clone();
+        let stale_result = run_template_mutation(
+            &authority,
+            &opts,
+            &["creating"],
+            poll_fn(move |_| {
+                observed.store(true, Ordering::SeqCst);
+                Poll::Ready(Ok(()))
+            }),
+        )
+        .await;
+        let error = match stale_result {
+            Ok(()) => anyhow::bail!("changed source was published"),
+            Err(error) => error,
+        };
+        ensure!(super::super::activity_authority::is_authority_lost(&error));
+        ensure!(
+            !stale_polled.load(Ordering::SeqCst),
+            "stale source capture polled the publication future"
+        );
+
+        store_project(&db, &original_project).await?;
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let current_authority = authority.clone();
+        let current_opts = opts.clone();
+        let task = tokio::spawn(async move {
+            run_template_mutation(
+                &current_authority,
+                &current_opts,
+                &["creating"],
+                async move {
+                    entered_tx
+                        .send(())
+                        .map_err(|_| anyhow::anyhow!("publication observer dropped"))?;
+                    release_rx
+                        .await
+                        .map_err(|_| anyhow::anyhow!("publication release dropped"))?;
+                    Ok(())
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(support::TIMEOUT, entered_rx)
+            .await
+            .context("current publication did not enter mutation future")??;
+        let mut competing = db.pool.begin().await?;
+        let lock_result = sqlx::query("SELECT id FROM environments WHERE id=$1 FOR UPDATE NOWAIT")
+            .bind(ENVIRONMENT)
+            .fetch_one(&mut *competing)
+            .await;
+        let lock_code = lock_result.err().and_then(|error| {
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .map(|code| code.into_owned())
+        });
+        competing.rollback().await?;
+        release_tx
+            .send(())
+            .map_err(|_| anyhow::anyhow!("current publication ended before release"))?;
+        tokio::time::timeout(support::TIMEOUT, task)
+            .await
+            .context("current publication did not finish")???;
+        ensure!(lock_code.as_deref() == Some("55P03"));
+
+        sqlx::query("UPDATE environments SET environment_operation_generation=8 WHERE id=$1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        let generation_polled = Arc::new(AtomicBool::new(false));
+        let observed = generation_polled.clone();
+        let generation_result = run_template_mutation(
+            &authority,
+            &opts,
+            &["creating"],
+            poll_fn(move |_| {
+                observed.store(true, Ordering::SeqCst);
+                Poll::Ready(Ok(()))
+            }),
+        )
+        .await;
+        let error = match generation_result {
+            Ok(()) => anyhow::bail!("lost generation was published"),
+            Err(error) => error,
+        };
+        ensure!(super::super::activity_authority::is_authority_lost(&error));
+        ensure!(
+            !generation_polled.load(Ordering::SeqCst),
+            "lost generation polled the publication future"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

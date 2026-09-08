@@ -130,7 +130,7 @@ run_coco_rest_isolation_classifier_case() {
   (
     set --
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     TMPDIR_SMOKE="$case_dir/runtime"
     SMOKE_ARTIFACT_DIR="$case_dir/artifact"
     mkdir -p "$TMPDIR_SMOKE" "$SMOKE_ARTIFACT_DIR"
@@ -220,7 +220,7 @@ run_gateway_crashloop_fail_fast_case() {
   mkdir -p "$case_dir"
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     TMPDIR_SMOKE="$case_dir"
     SMOKE_SKIP_KUBE=0
     SMOKE_COLLECT_FAILURE_DIAGNOSTICS=1
@@ -269,7 +269,7 @@ run_doctor_outer_timeout_receipt_case() {
   mkdir -p "$case_dir"
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     TMPDIR_SMOKE="$case_dir"
     SMOKE_ARTIFACT_DIR="$artifact_dir"
     SMOKE_DERP_FALLBACK=1
@@ -345,7 +345,7 @@ EOF
 
   (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
     declare SMOKE_SKIP_KUBE=1 SMOKE_SKIP_SSH=0 SMOKE_DERP_FALLBACK=0 \
       SMOKE_PEER_RELAY_MATRIX=0 SMOKE_SSH_CONNECT_TIMEOUT=1
@@ -365,7 +365,7 @@ run_missing_server_namespace_case() {
 
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     export SMOKE_SKIP_KUBE=0
     export CODEWIRE_SERVER_NAMESPACE=""
     run_kube_assertions
@@ -425,14 +425,14 @@ run_docker_socket_contract_cases() {
 
   (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     export EXPECTED_DOCKER_MODE=guest-dind
     assert_docker_socket_contract "$accepted"
   ) || fail "guest-memory Docker socket contract was rejected"
 
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     export EXPECTED_DOCKER_MODE=guest-dind
     assert_docker_socket_contract "$disk_backed"
   ) >/dev/null 2>&1; then
@@ -441,7 +441,7 @@ run_docker_socket_contract_cases() {
 
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     export EXPECTED_DOCKER_MODE=guest-dind
     assert_docker_socket_contract "$missing_probe"
   ) >/dev/null 2>&1; then
@@ -450,7 +450,7 @@ run_docker_socket_contract_cases() {
 
   (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     export EXPECTED_DOCKER_MODE=none
     assert_docker_socket_contract "$disabled"
   ) || fail "Docker-disabled socket contract was rejected"
@@ -463,7 +463,7 @@ run_explicit_isolation_tier_case() {
   mkdir -p "$case_dir"
   (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     # shellcheck disable=SC2034 # Values are consumed by the sourced smoke fixture.
     declare TMPDIR_SMOKE="$case_dir" SMOKE_NAME="isolation-contract" \
       SMOKE_IMAGE="workspace" SMOKE_CPU="2000" SMOKE_MEMORY="4096" \
@@ -498,14 +498,14 @@ run_confidential_preview_response_cases() {
 
   (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     validate_confidential_preview_response 302 "$headers" "$body" "$token"
   ) || fail "valid confidential preview sign-in boundary was rejected"
 
   printf '%s\n' "$token" >"$body"
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     validate_confidential_preview_response 302 "$headers" "$body" "$token"
   ); then
     fail "confidential preview accepted an unauthenticated app-content leak"
@@ -514,7 +514,7 @@ run_confidential_preview_response_cases() {
   printf '%s\n' '<a href="/sign-in">Found</a>.' >"$body"
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     validate_confidential_preview_response 200 "$headers" "$body" "$token"
   ); then
     fail "confidential preview accepted a non-redirect response"
@@ -530,7 +530,7 @@ run_safe_diagnostic_case() {
 
   mkdir -p "$case_dir"
   (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     TMPDIR_SMOKE="$case_dir"
     ENV_ID="test-environment"
     GATEWAY_POD_NAME=""
@@ -634,7 +634,7 @@ run_safe_client_diagnostic_case() {
   }' >"$doctor_json"
 
   (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     SMOKE_ARTIFACT_DIR="$artifact_dir"
     capture_tailnet_client_failure_diagnostics "$doctor_json"
   )
@@ -683,7 +683,7 @@ run_safe_client_diagnostic_case() {
 
   jq '.direct' "$doctor_json" >"$case_dir/inner-only.json"
   if (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     SMOKE_ARTIFACT_DIR="$case_dir/inner-only-artifact"
     capture_tailnet_client_failure_diagnostics "$case_dir/inner-only.json"
   ); then
@@ -694,7 +694,7 @@ run_safe_client_diagnostic_case() {
 
   : >"$case_dir/empty.json"
   if (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     SMOKE_ARTIFACT_DIR="$case_dir/empty-artifact"
     capture_tailnet_client_failure_diagnostics "$case_dir/empty.json"
   ); then
@@ -706,7 +706,7 @@ run_environment_artifact_case() {
   local artifact_dir="$TEST_TMP/environment-artifact"
 
   (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     ENV_ID="test-environment-id"
     SMOKE_NAME="test-environment-name"
     SMOKE_KEEP_ENV=1
@@ -730,7 +730,7 @@ run_kubernetes_failure_artifact_case() {
 
   mkdir -p "$runtime_dir" "$artifact_dir"
   (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     TMPDIR_SMOKE="$runtime_dir"
     SMOKE_ARTIFACT_DIR="$artifact_dir"
     SMOKE_COLLECT_FAILURE_DIAGNOSTICS=1
@@ -872,7 +872,7 @@ run_packet_header_summary_case() {
   }' >"$route"
 
   (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     summarize_peer_relay_packet_headers \
       "$raw" "192.0.2.20" "41641" "$route" "$summary" "$staged"
   )
@@ -913,7 +913,7 @@ run_packet_capture_startup_failure_case() {
   chmod +x "$bin_dir/ip" "$bin_dir/tcpdump"
 
   (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     PATH="$bin_dir:$PATH"
     TMPDIR_SMOKE="$runtime_dir"
     SMOKE_ARTIFACT_DIR="$artifact_dir"
@@ -942,7 +942,7 @@ run_packet_diagnostic_phase_order_case() {
   local output="$TEST_TMP/packet-diagnostic-phase-order"
 
   (
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     SMOKE_ONLY_PHASES=(kube doctor)
     run_kube_assertions() {
       printf 'kube-ready\n'
@@ -1000,7 +1000,7 @@ run_admin_oauth_contract_cases() {
 
   (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     export CODEWIRE_SERVER_URL="https://codewire-dev.example"
     export EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
     export CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$config_dir"
@@ -1019,7 +1019,7 @@ run_admin_oauth_contract_cases() {
 
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     export CODEWIRE_SERVER_URL="https://codewire-dev.example"
     export EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
     export CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$config_dir"
@@ -1037,7 +1037,7 @@ run_admin_oauth_contract_cases() {
   chmod 0644 "$config_dir/credentials.json"
   if (
     # shellcheck disable=SC1090 # Intentional dynamic source fixture.
-    source <(sed '$d' "$SMOKE")
+    source "$SMOKE"
     export CODEWIRE_SERVER_URL="https://codewire-dev.example"
     export EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
     export CODEWIRE_ADMIN_OAUTH_CONFIG_DIR="$config_dir"
@@ -1070,6 +1070,8 @@ run_packet_header_summary_case
 run_packet_capture_startup_failure_case
 run_packet_diagnostic_phase_order_case
 run_admin_oauth_contract_cases
+bash "$ROOT/scripts/runtime/tests/test-smoke-dev-application-secrets.sh"
+bash "$ROOT/scripts/runtime/tests/test-provider-ssh-smoke.sh"
 
 [[ ! -e "$NO_LIVE_LOG" ]] || {
   sed -n '1,20p' "$NO_LIVE_LOG" >&2

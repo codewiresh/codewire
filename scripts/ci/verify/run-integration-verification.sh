@@ -164,23 +164,45 @@ run_database() {
   local logfile
   reset_schema
 
+  # Compile independent harnesses together, but execute the database suites in
+  # their established order against the shared schema. Each batch uses one
+  # package, default features and the default test profile; CI-profile and
+  # restricted-feature checks below remain separate.
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test -p codewire-server-core --lib --test session_auth \
+      --test org_deletion_lifecycle --test oauth_bearer_auth --no-run
+
   logfile="$RUN_DIR/server-core-migrate.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 28
+  assert_passed_count "server-core migration matrix" "$logfile" 41
+
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-platform-credentials --test storage \
+      --test profiles --test refresh --test authority --test owner_sources --no-run
 
   logfile="$RUN_DIR/platform-credential-storage.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform credential storage matrix" "$logfile" 13
+  assert_passed_count "platform credential storage matrix" "$logfile" 21
 
   logfile="$RUN_DIR/platform-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test profiles \
       -- --ignored --nocapture --test-threads=4 | tee "$logfile"
-  assert_passed_count "platform access profile matrix" "$logfile" 10
+  assert_passed_count "platform access profile matrix" "$logfile" 12
+
+  logfile="$RUN_DIR/platform-owner-source-authority.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-platform-credentials --test owner_sources \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform owner-source authority matrix" "$logfile" 5
+
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib --test access_profiles \
+      --test credentials --test environment_external_cleanup --no-run
 
   logfile="$RUN_DIR/public-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -198,7 +220,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib mutation::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "public credential mutation matrix" "$logfile" 8
+  assert_passed_count "public credential mutation matrix" "$logfile" 23
 
   logfile="$RUN_DIR/isolated-credential-runtime.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -231,17 +253,40 @@ run_database() {
       --lib platform::tests:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "platform broker admission matrix" "$logfile" 14
 
+  logfile="$RUN_DIR/platform-broker-ssh.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-broker --no-default-features \
+      --features platform,ssh-agent --lib platform::tests::ssh:: \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform broker SSH matrix" "$logfile" 4
+
   logfile="$RUN_DIR/platform-broker-grpc-rotation.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-broker --no-default-features --features platform \
       --lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 2
+  assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 3
 
   logfile="$RUN_DIR/platform-runtime-identity.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-credential-service \
-      --lib tests::database:: -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+      --lib tests::database:: -- --ignored \
+      --skip tests::database::projection:: \
+      --nocapture --test-threads=1 | tee "$logfile"
   assert_passed_count "platform runtime restricted identity matrix" "$logfile" 3
+
+  logfile="$RUN_DIR/platform-runtime-projection.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-service \
+      --lib tests::database::projection:: \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "platform runtime projection matrix" "$logfile" 10
+
+  logfile="$RUN_DIR/owner-local-delegation-authority.log"
+  TMPDIR="$RUN_DIR" TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-credential-service --features enrollment \
+      --lib delegation::authority::tests:: \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "owner-local delegation authority matrix" "$logfile" 5
 
   logfile="$RUN_DIR/oauth-bearer-identity.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -301,6 +346,13 @@ run_database() {
       worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure \
       -- --ignored --exact --nocapture | tee "$logfile"
   assert_passed_count "environment destroy template hint matrix" "$logfile" 1
+
+  logfile="$RUN_DIR/environment-projection-capture.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::create::projection_database_tests::' \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment projection capture matrix" "$logfile" 3
 
   logfile="$RUN_DIR/organization-tenant-secret-teardown.log"
   DATABASE_URL="$DATABASE_URL_RUST" \
@@ -910,6 +962,7 @@ run_orchestration() {
       'worker::' -- --ignored \
       --skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek' \
       --skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' \
+      --skip 'worker::create::projection_database_tests::' \
       --nocapture | tee "$logfile"
   assert_passed_count "orchestration activity fencing matrix" "$logfile" 2
 

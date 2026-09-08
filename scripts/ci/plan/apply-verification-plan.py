@@ -67,7 +67,9 @@ def trusted_plan_outputs(plan_path: Path) -> dict[str, str]:
 
     cw_state = artifact_state(plan, "cw_cli_release_assets")
     desktop_state = artifact_state(plan, "desktop_package")
-    workspace_state = artifact_state(plan, "workspace_image")
+    # PR content qualification is independent of exact-source support-image
+    # publication. Keep the established workflow output names at this boundary.
+    workspace_state = artifact_state(plan, "workspace_image_verification")
     return {
         "ci_head_commit": require_string(baseline, "head_commit", HEX40_RE),
         "ci_head_tree": require_string(baseline, "head_tree", HEX40_RE),

@@ -251,6 +251,9 @@ run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head f
 run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
   'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/ci/tests/test-repo-checks-modules.py
+run_paths_case service_ssh_image_verifier pull_request refs/pull/1922/head false \
+  'policy' scripts/ci/tests/test-service-ssh-image-verifier.sh \
+  scripts/ci/verify/service-ssh-image-contract.sh scripts/ci/verify/verify-service-ssh-image.sh
 run_paths_case release pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
   .gitea/workflows/cli-release.yaml \
@@ -398,6 +401,13 @@ run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
 run_paths_case native_local_environment_smoke pull_request refs/pull/5015/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-native-local-environment.sh
+run_paths_case shared_stock_ssh_smoke pull_request refs/pull/5016/head false \
+  'policy runtime_dev_smoke transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/ci/verify/stock-ssh-workload.sh
+for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests/test-provider-ssh-smoke.sh; do
+  run_paths_case provider_ssh_dev_smoke pull_request refs/pull/5017/head false \
+    'policy runtime_dev_smoke' "$ssh_input"
+done
 run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head false \
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml
@@ -430,6 +440,9 @@ run_paths_case gateway_proto_source pull_request refs/pull/6011/head false \
 run_paths_case private_broker_proto_source pull_request refs/pull/6011/head false \
   'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   libs/gateway-proto/proto/broker/v1/broker.proto
+run_paths_case neutral_credential_bridge_proto_source pull_request refs/pull/6011/head false \
+  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service rust_pkg_codewire_daemon rust_pkg_codewire_gateway rust_pkg_codewire_gateway_proto rust_pkg_codewire_local_credentials rust_pkg_codewire_local_vmm rust_pkg_codewire_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  proto/codewire/bridge/v1/bridge.proto
 run_paths_case private_broker_proto_rust_module pull_request refs/pull/6011/head false \
   'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto rust_pkg_codewire_server_core transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-gateway-proto/src/lib.rs
@@ -529,7 +542,7 @@ run_paths_case retired_connectcore_deletion pull_request refs/pull/83/head false
   'policy service_billing service_connectcore service_integration service_orchestration' \
   tests/contract/connectcore/connectcore_test.go
 run_paths_case integration_service_harness pull_request refs/pull/831/head false \
-  'policy service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
+  'database policy service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal' \
   scripts/ci/verify/run-integration-verification.sh
 run_paths_case temporal_service pull_request refs/pull/84/head false \
   'policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
@@ -1168,6 +1181,7 @@ activity_fencing_block="$(sed -n '/^run_orchestration() {/,/^  start_orchestrati
 grep -qF "'worker::' -- --ignored" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure'" <<<"$activity_fencing_block"
+grep -qF -- "--skip 'worker::create::projection_database_tests::'" <<<"$activity_fencing_block"
 grep -qF 'assert_passed_count "orchestration activity fencing matrix" "$logfile" 2' <<<"$activity_fencing_block"
 destroy_hint_block="$(sed -n '/logfile="$RUN_DIR\/environment-destroy-template-hint.log"/,/assert_passed_count "environment destroy template hint matrix"/p' "$integration_runner")"
 grep -qF 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' <<<"$destroy_hint_block"
@@ -1176,15 +1190,21 @@ grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfi
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 14' "$integration_runner"
+grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 2' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 3' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runner"
-grep -qF -- '--lib tests::database:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
+grep -qF -- '--skip tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 3' "$integration_runner"
+grep -qF -- '--lib tests::database::projection::' "$integration_runner"
+grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 10' "$integration_runner"
+grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
+grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 5' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
 grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
-grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 8' "$integration_runner"
+grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 22' "$integration_runner"
 grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- '--lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority' "$integration_runner"
@@ -1193,8 +1213,13 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 28' "$integration_runner"
-grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 13' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 40' "$integration_runner"
+grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 21' "$integration_runner"
+grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 12' "$integration_runner"
+grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"
+grep -qF 'assert_passed_count "platform owner-source authority matrix" "$logfile" 5' "$integration_runner"
+grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 3' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \
@@ -2060,20 +2085,20 @@ grep -qF \
 }
 
 rust_transport_block="$TMP/rust-transport.yaml"
-for contract in 'Run Rust|rust' 'Run Rust transport|transport'; do
+for contract in 'Run selected Rust and transport|rust' 'Run selected Rust and transport|transport'; do
   step_name="${contract%%|*}"
   token="${contract##*|}"
   step_condition="$(grep -A1 -F -- "- name: ${step_name}" "$rust_transport_block")"
   grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
     <<<"$step_condition" || {
-    echo "rust-transport: ${step_name} is not isolated to ${token}" >&2
+    echo "rust-transport: ${step_name} does not select ${token}" >&2
     exit 1
   }
 done
 rust_transport_protoc_line="$(grep -n -m1 \
   'name: Install pinned protoc for guest initramfs reproduction' \
   "$rust_transport_block" | cut -d: -f1)"
-rust_transport_run_line="$(grep -n -m1 'name: Run Rust transport' \
+rust_transport_run_line="$(grep -n -m1 'name: Run selected Rust and transport' \
   "$rust_transport_block" | cut -d: -f1)"
 if [ -z "$rust_transport_protoc_line" ] \
     || [ "$rust_transport_protoc_line" -ge "$rust_transport_run_line" ]; then

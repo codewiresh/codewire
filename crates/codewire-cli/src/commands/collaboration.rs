@@ -574,13 +574,6 @@ pub(crate) fn format_secret_metadata_list_text(
     output
 }
 
-pub(crate) fn find_secret_project_by_name<'a>(
-    projects: &'a [SecretProject],
-    name: &str,
-) -> Option<&'a SecretProject> {
-    projects.iter().find(|project| project.name == name)
-}
-
 pub(crate) fn format_preset_list_text(presets: &[Preset]) -> String {
     if presets.is_empty() {
         return "No presets found.\n".to_string();

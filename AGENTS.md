@@ -34,9 +34,9 @@ production actions do not.
 
 ## Method and risk
 
-Use Noel Method v0.9.3, commit
-`93f68ba4abc9f6e222481265b9b759e71d332575`, manifest
-`a005933cd29affc6555731d5921cbad2977e5d932c1f7a413fdd69da4def9d05`.
+Use Noel Method v0.10.0, exact merged commit
+`6d7826aecda20f875bc1f9a29c333d5d5ef4e5e7`, manifest
+`ff68193d531043d0498841fa104cfc1de713307ab80577eabaaae09c05b53151`.
 Direct mode is normal. Use Program only for persistent dependent work across
 sessions, repositories, or operational gates; Experiment for controlled
 comparisons; Secrets when a local process can access secret material. Protocols
@@ -69,9 +69,10 @@ Program mutation except read-only diagnosis and control repair.
 For long-running work, use one staged proof loop: confirm canonical control and
 risk; get an independent design/security read before broad implementation;
 build the smallest coherent slice; run focused checks and review the diff before
-committing a credible candidate. Then run the selected exact-tree local
-qualification once before push, reusing valid evidence. Complete remaining
-exact-head landing gates before merge. Each PR states one bounded
+committing a credible candidate. Then complete the selected exact-tree
+qualification once, locally before push or on self-hosted Forgejo when the
+owner selects CI, reusing valid evidence. Complete remaining exact-head landing
+gates before merge. Each PR states one bounded
 outcome, its dependencies, affected contracts, and acceptance; keep generated
 contracts and their consumers atomic. Update Program control at admissions and
 material transitions, with evidence labeled accurately. Parallelize read-only
@@ -106,14 +107,19 @@ Kind suite only because classification is missing, repair the classifier and
 its fixtures; do not use an expensive unrelated suite as the classifier. An
 unknown result blocks the affected mutation, not unrelated work.
 
-After the repository owner explicitly accepts locally observed frontend
-behavior and asks to land it, do not rebuild integration, Kind, or product
-images locally solely to create a push receipt. For a clean, current,
-single-feature-branch update, use `CODEWIRE_PREFLIGHT_MODE=ci git push ...` to
-defer the selected exact-tree qualification to required Forgejo CI. This mode
-is unavailable for `main`, tags, deletions, multi-ref pushes, Tier 3 effects, or
-work whose acceptance depends on local-only hardware. It is not a waiver: bind
-the pushed head once and do not merge until its required exact-head CI succeeds.
+When the repository owner selects self-hosted Forgejo for full image or
+integration verification, complete focused local checks and diff review before
+committing. The same CI route remains available after the owner explicitly
+accepts locally observed frontend behavior and asks to land it. For a clean,
+current, single-feature-branch update, use
+`CODEWIRE_PREFLIGHT_MODE=ci git push ...` to defer the selected exact-tree
+qualification to required Forgejo CI. Reuse accepted local evidence; do not
+rebuild integration, Kind, or product images locally solely to create or refresh
+a push receipt. This mode is unavailable for `main`, tags, deletions, multi-ref
+pushes, Tier 3 effects, or work whose acceptance depends on local-only hardware.
+It is not a waiver: bind the pushed head once and do not merge until every
+required exact-head gate succeeds. The frontend iteration checkpoint still
+requires an explicit landing instruction.
 
 Bind a hosted run once and use a transition watcher; never spend turns polling
 unchanged CI. Inspect component logs after failure before proposing a mechanism.
@@ -195,13 +201,20 @@ weakening of the required local hardware gate.
   can be reused or restored. Call child-visible values assembled for one
   process launch an `environment projection`. Call saved running-VM execution
   state a `VM checkpoint`.
-- Storing or selecting protected material chooses no delivery mode. A binding
-  may choose a typed proxy, signer, or executor that keeps the value hidden, or
-  may explicitly permit a child-visible environment projection. Never infer
-  that choice from a key name or value, and never create a separate secret
-  generation when the owning environment operation already has an identity.
-- New secret delivery is secret-blind by default. A sandbox may receive a
-  loopback endpoint, public trust material, placeholders, and a bounded runtime
-  capability, but not a provider credential or a general secret-read API. Do
-  not claim brokered or enforced mediation until the placement actually denies
-  credential access and direct provider bypass.
+- Application secrets and provider credentials are separate product concepts.
+  Storing either does not attach it to an environment. Selecting an application
+  secret source authorizes ordinary child-visible environment projection under
+  the original names; selecting a credential profile authorizes its typed
+  proxy, signer, or executor, never raw provider material. Never infer the
+  category from a key name or value. Profiles contain provider identities only,
+  not secret mappings or exposure policies. Reuse the owning environment
+  operation identity; do not create a separate secret generation.
+- Provider credential delivery keeps private material outside the sandbox. A
+  sandbox may receive endpoints, public trust material, placeholders, and a
+  bounded runtime capability, but not a provider credential or general
+  secret-read API. Application secrets are intentionally visible to their
+  receiving workload and root; do not promise secrecy from those processes.
+  Keep resolved launch values out of durable configuration, control events and
+  session metadata. Credential non-disclosure is not enforced egress mediation;
+  claim the latter only where the placement proves direct provider bypass is
+  denied.

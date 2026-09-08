@@ -24,6 +24,21 @@ impl std::fmt::Debug for v1::AddCredentialRequest {
     }
 }
 
+impl std::fmt::Debug for v1::AddSshCredentialRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AddSshCredentialRequest")
+            .field("name", &self.name)
+            .field("private_key", &"[REDACTED]")
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at_unix", &self.expires_at_unix)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for v1::RotateCredentialMaterialRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -38,6 +53,15 @@ impl std::fmt::Debug for v1::RotateCredentialMaterialRequest {
 impl Drop for v1::AddCredentialRequest {
     fn drop(&mut self) {
         self.material.zeroize();
+    }
+}
+
+impl Drop for v1::AddSshCredentialRequest {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+        if let Some(passphrase) = &mut self.passphrase {
+            passphrase.zeroize();
+        }
     }
 }
 

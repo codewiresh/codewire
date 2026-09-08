@@ -21,6 +21,11 @@ use super::{
 
 /// Mirrors `sandbox.RenderSandboxTemplate`.
 pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
+    assert!(
+        opts.managed_credential_clients == Default::default()
+            || (opts.credential_runtime.is_some() && opts.projection_selection_sha256.is_some()),
+        "managed credential clients require selected runtime bootstrap"
+    );
     if let Some(config) = &opts.credential_runtime {
         config.assert_namespace(namespace);
     }
@@ -69,7 +74,12 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
         vec![
             "sh".into(),
             "-c".into(),
-            format!("{ENSURE_USER_CMD} {WAIT_DAEMON_CMD} exec {HOSTED_DAEMON_CMD}").into(),
+            managed_workspace_supervisor_command(
+                ENSURE_USER_CMD,
+                WAIT_DAEMON_CMD,
+                HOSTED_DAEMON_CMD,
+            )
+            .into(),
         ]
     };
 
@@ -106,6 +116,30 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
     });
 
     build_template_spec(opts, &mut ws_container, support_image)
+}
+
+/// Keep an intentional PID-1 owner around the daemon. The launch helper must
+/// authenticate its actual daemon parent, not accept PID 1 as a substitute.
+/// Kubernetes owns restart policy; this owner forwards shutdown and reaps the
+/// daemon before returning its status.
+pub(super) fn managed_workspace_supervisor_command(
+    ensure_user: &str,
+    wait_daemon: &str,
+    daemon_command: &str,
+) -> String {
+    format!(
+        "{ensure_user} {wait_daemon} \
+         {daemon_command} & daemon_pid=$!; \
+         shutdown() {{ \
+           kill -TERM \"$daemon_pid\" 2>/dev/null || true; \
+           wait \"$daemon_pid\" 2>/dev/null || true; \
+         }}; \
+         trap 'shutdown; exit 143' TERM; \
+         trap 'shutdown; exit 130' INT; \
+         wait \"$daemon_pid\"; status=$?; \
+         trap - TERM INT; \
+         exit \"$status\""
+    )
 }
 
 pub(super) fn custom_workspace_supervisor_command(
@@ -277,11 +311,11 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
         ws["volumeMounts"]
             .as_array_mut()
             .expect("workspace mounts")
-            .extend(credentials::workspace_mounts());
+            .extend(credentials::workspace_mounts(opts));
         ws["env"]
             .as_array_mut()
             .expect("workspace env")
-            .extend(credentials::workspace_environment());
+            .extend(credentials::workspace_environment(opts));
     }
 
     let mut spec = Map::new();
@@ -359,7 +393,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
 
     let mut init = daemon_init_container(support_image);
     if opts.credential_runtime.is_some() {
-        credentials::configure_bootstrap(&mut init);
+        credentials::configure_bootstrap(&mut init, opts);
     }
     spec.insert("initContainers".into(), json!([init]));
     spec.insert("containers".into(), Value::Array(containers));
@@ -400,15 +434,30 @@ fn daemon_init_container(support_image: &str) -> Value {
         "image": support_image,
         "command": [
             "sh", "-c",
-            "cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw",
+            "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw",
         ],
         "volumeMounts": [
             { "name": "codewire-bin", "mountPath": "/codewire/bin" },
+            { "name": "codewire-run", "mountPath": "/codewire/run" },
         ],
         "resources": {
             "requests": { "cpu": "25m", "memory": "32Mi" },
             "limits": { "cpu": "100m", "memory": "128Mi" },
         },
+    })
+}
+
+/// Only machine-owned stock-client fields, without rendering confidential
+/// init-data or resolving public trust. Used by suspended recipe refresh and
+/// exact immutable Pod verification; it contains no provider material.
+pub(crate) fn render_workspace_client_bootstrap(opts: &TemplateOpts) -> Value {
+    let mut init = daemon_init_container("");
+    credentials::configure_bootstrap(&mut init, opts);
+    json!({
+        "environment": credentials::workspace_environment(opts),
+        "volumes": credentials::workspace_client_volumes(opts),
+        "volumeMounts": credentials::workspace_client_mounts(opts),
+        "init": init,
     })
 }
 
@@ -493,12 +542,25 @@ fn dind_container(
 fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
     codewire_gateway_proto::DaemonAuthToken::new(opts.daemon_auth_token.clone())
         .expect("hosted workspace requires a canonical daemon auth token");
-    vec![
+    let mut environment = vec![
         json!({ "name": "CODEWIRE_WORKSPACE_SHIM_ADDR", "value": WORKSPACE_DAEMON_LISTEN_ADDR }),
         json!({ "name": "HOME", "value": HOME_ROOT }),
         json!({ "name": "USER", "value": "codewire" }),
         json!({ "name": DAEMON_AUTH_TOKEN_ENV, "value": opts.daemon_auth_token }),
-    ]
+    ];
+    if let Some(projection) = credentials::projection_environment(opts) {
+        assert!(
+            opts.operation_generation > 0,
+            "projection requires operation identity"
+        );
+        environment.extend([
+            json!({"name":"CODEWIRE_ENVIRONMENT_ID","value":opts.environment_id}),
+            json!({"name":"CODEWIRE_ENVIRONMENT_OPERATION_GENERATION","value":opts.operation_generation.to_string()}),
+            json!({"name":credentials::MANAGED_CREDENTIAL_CLIENTS_ENV,"value":opts.managed_credential_clients.encode()}),
+            projection,
+        ]);
+    }
+    environment
 }
 
 fn shell_quote(value: &str) -> String {

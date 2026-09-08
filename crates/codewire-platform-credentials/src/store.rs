@@ -13,7 +13,7 @@ use codewire_protected_store::secret_envelope::{
 };
 use sqlx::{Executor, PgPool, Postgres, Transaction};
 
-use crate::model::{auth_kind, parse_auth_kind, parse_status};
+use crate::model::{auth_kind, parse_auth_kind, parse_ssh_public_key, parse_status};
 use crate::{
     CredentialRecord, CredentialRegistration, CredentialVersion, PlatformCredentialError as Error,
 };
@@ -22,7 +22,8 @@ const PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_METADATA_PAGE: u32 = 1000;
 const METADATA_COLUMNS: &str = "c.id, c.user_id, c.organization_id, c.provider, \
     c.authentication_kind, c.display_name, c.account_hint, c.status, \
-    c.expires_at_unix, c.revocation_generation, c.material_generation";
+    c.expires_at_unix, c.revocation_generation, c.material_generation, \
+    c.ssh_public_key, c.ssh_fingerprint";
 const OWNER_PREDICATE: &str = "((
     $1 = 'user' AND c.user_id = $2
     AND EXISTS (SELECT 1 FROM users u WHERE u.id = c.user_id)
@@ -123,6 +124,15 @@ pub struct PreparedCredentialCreation {
     material: PreparedMaterial,
 }
 
+/// Ciphertext-only replacement bound to one exact authority-side record. No
+/// plaintext, Debug implementation, or public wire representation is retained.
+pub struct PreparedCredentialReplacement {
+    original: CredentialRecord,
+    next: CredentialRecord,
+    material: PreparedMaterial,
+    refresh: bool,
+}
+
 impl PlatformCredentialStore {
     pub(crate) fn pool(&self) -> &PgPool {
         &self.reader.pool
@@ -166,6 +176,39 @@ impl PlatformCredentialStore {
         load_record(&mut **tx, owner, id, true, &self.reader.catalog).await
     }
 
+    /// Rename metadata under the caller's original authentication transaction.
+    /// Names do not advance either credential counter, so the exact previous
+    /// display name is part of this comparison. Material and profile references
+    /// are unchanged; the caller owns final deadline checks and COMMIT/rollback.
+    pub async fn rename_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: &Owner,
+        id: &CredentialId,
+        expected_revocation_generation: u64,
+        expected_display_name: &str,
+        new_display_name: String,
+    ) -> Result<CredentialRecord, Error> {
+        generation(expected_revocation_generation)?;
+        let mut current = self.record_for_update_in(tx, owner, id).await?;
+        if current.metadata.revocation_generation != expected_revocation_generation
+            || current.metadata.display_name != expected_display_name
+        {
+            return Err(Error::StaleVersion);
+        }
+        current.metadata.display_name = new_display_name;
+        current.validate(&self.reader.catalog)?;
+        sqlx::query(
+            "UPDATE platform_credentials SET display_name=$2, updated_at=now() WHERE id=$1",
+        )
+        .bind(id.as_str())
+        .bind(&current.metadata.display_name)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        load_record(&mut **tx, owner, id, false, &self.reader.catalog).await
+    }
+
     pub async fn create(
         &self,
         owner: &Owner,
@@ -196,6 +239,30 @@ impl PlatformCredentialStore {
         })
     }
 
+    /// Create-only SSH admission. The private-field preparation type can only
+    /// come from the pure, cryptographically verified generation/import helpers.
+    /// No caller-supplied public metadata or arbitrary opaque bundle is accepted.
+    /// Crypto must run in an authority-owned blocking worker before this call.
+    pub async fn prepare_ssh_creation(
+        &self,
+        owner: &Owner,
+        name: String,
+        expires_at_unix: Option<u64>,
+        prepared: codewire_protected_store::ssh_material::PreparedSshCredential,
+    ) -> Result<PreparedCredentialCreation, Error> {
+        let (public_key, material) = prepared.into_parts();
+        let record = CredentialRecord::registered_ssh(
+            owner,
+            name,
+            expires_at_unix,
+            &public_key,
+            &self.reader.catalog,
+        )?;
+        check_owner(&self.reader.pool, owner, false).await?;
+        let material = self.prepare(&record, &material).await?;
+        Ok(PreparedCredentialCreation { record, material })
+    }
+
     /// Publish in the caller's transaction so original authentication locks
     /// and credential creation share one commit boundary. The caller must
     /// authorize this exact owner, retain its fences, recheck deadlines after
@@ -218,8 +285,9 @@ impl PlatformCredentialStore {
         sqlx::query(
             "INSERT INTO platform_credentials \
              (id, user_id, organization_id, provider, authentication_kind, display_name, \
-              account_hint, status, expires_at_unix, revocation_generation, material_generation) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,1,1)",
+              account_hint, status, expires_at_unix, revocation_generation, material_generation, \
+              ssh_public_key, ssh_fingerprint) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,1,1,$9,$10)",
         )
         .bind(record.metadata.id.as_str())
         .bind(user_id)
@@ -229,6 +297,20 @@ impl PlatformCredentialStore {
         .bind(&record.metadata.display_name)
         .bind(&record.metadata.account_hint)
         .bind(optional_time(record.metadata.expires_at_unix)?)
+        .bind(
+            record
+                .metadata
+                .ssh_public_key
+                .as_ref()
+                .map(|key| key.openssh.as_str()),
+        )
+        .bind(
+            record
+                .metadata
+                .ssh_public_key
+                .as_ref()
+                .map(|key| key.fingerprint.as_str()),
+        )
         .execute(&mut **tx)
         .await
         .map_err(database_error)?;
@@ -248,6 +330,87 @@ impl PlatformCredentialStore {
     ) -> Result<CredentialRecord, Error> {
         self.replace_inner(owner, id, expected, material, expires_at_unix, false)
             .await
+    }
+
+    /// Prepare an explicitly reconnected identity before publication locks.
+    /// Preserve its canonical name and hard expiry; only the verified account
+    /// hint and protected material change. The captured full version must still
+    /// match after device login and again in the publication transaction.
+    pub async fn prepare_replacement(
+        &self,
+        owner: &Owner,
+        expected: &CredentialRecord,
+        material: &ProtectedValue,
+        account_hint: Option<String>,
+    ) -> Result<PreparedCredentialReplacement, Error> {
+        if expected.metadata.authentication_kind == CredentialAuthKind::SshKey {
+            return Err(Error::UnsupportedCredential);
+        }
+        if expected.metadata.owner != *owner {
+            return Err(Error::InvalidInput);
+        }
+        expected.validate(&self.reader.catalog)?;
+        let current = self.record(owner, &expected.metadata.id).await?;
+        compare_version(&current, expected.version)?;
+        if current != *expected {
+            return Err(Error::CorruptRecord);
+        }
+        let mut next = expected.clone();
+        next.version = expected.version.replaced()?;
+        next.metadata.revocation_generation = next.version.revocation_generation;
+        next.metadata.status = CredentialStatus::Active;
+        next.metadata.account_hint = account_hint;
+        next.validate(&self.reader.catalog)?;
+        let material = self.prepare(&next, material).await?;
+        Ok(PreparedCredentialReplacement {
+            original: expected.clone(),
+            next,
+            material,
+            refresh: false,
+        })
+    }
+
+    /// Prepare an explicit owner-requested API-key rotation, not an automatic
+    /// refresh. Only OpenAI/Anthropic API-key identities are admitted. Like local
+    /// rotation, this may reactivate a revoked/expired identity; an omitted hard
+    /// expiry clears it. The exact original record remains fenced at publication.
+    /// Payload grammar is validated by the isolated provider enrollment adapter.
+    /// No transaction is committed and no old protected value is read here.
+    pub async fn prepare_api_key_replacement(
+        &self,
+        owner: &Owner,
+        expected: &CredentialRecord,
+        value: &ProtectedValue,
+        expires_at_unix: Option<u64>,
+    ) -> Result<PreparedCredentialReplacement, Error> {
+        if expected.metadata.authentication_kind != CredentialAuthKind::ApiKey
+            || !matches!(expected.metadata.provider.as_str(), "openai" | "anthropic")
+        {
+            return Err(Error::UnsupportedCredential);
+        }
+        if expected.metadata.owner != *owner {
+            return Err(Error::InvalidInput);
+        }
+        expected.validate(&self.reader.catalog)?;
+        validate_api_key_replacement_expiry(expires_at_unix)?;
+        let current = self.record(owner, &expected.metadata.id).await?;
+        compare_version(&current, expected.version)?;
+        if current != *expected {
+            return Err(Error::CorruptRecord);
+        }
+        let mut next = expected.clone();
+        next.version = expected.version.replaced()?;
+        next.metadata.revocation_generation = next.version.revocation_generation;
+        next.metadata.status = CredentialStatus::Active;
+        next.metadata.expires_at_unix = expires_at_unix;
+        next.validate(&self.reader.catalog)?;
+        let material = self.prepare(&next, value).await?;
+        Ok(PreparedCredentialReplacement {
+            original: expected.clone(),
+            next,
+            material,
+            refresh: false,
+        })
     }
 
     /// Publish an already obtained OAuth refresh result, not a provider refresh
@@ -277,8 +440,12 @@ impl PlatformCredentialStore {
         refresh: bool,
     ) -> Result<CredentialRecord, Error> {
         expected.validate()?;
-        let mut next = self.record(owner, id).await?;
-        compare_version(&next, expected)?;
+        let original = self.record(owner, id).await?;
+        compare_version(&original, expected)?;
+        if original.metadata.authentication_kind == CredentialAuthKind::SshKey {
+            return Err(Error::UnsupportedCredential);
+        }
+        let mut next = original.clone();
         if refresh {
             require_oauth_refresh(&next)?;
         }
@@ -289,19 +456,64 @@ impl PlatformCredentialStore {
             next.metadata.expires_at_unix = expires_at_unix;
         }
         next.validate(&self.reader.catalog)?;
-        let prepared = self.prepare(&next, material).await?;
-
+        let material = self.prepare(&next, material).await?;
+        let prepared = PreparedCredentialReplacement {
+            original,
+            next,
+            material,
+            refresh,
+        };
         let mut tx = self.reader.pool.begin().await.map_err(database_error)?;
-        check_owner(&mut *tx, owner, true).await?;
-        let current = load_record(&mut *tx, owner, id, true, &self.reader.catalog).await?;
-        compare_version(&current, expected)?;
+        let published = self.replace_prepared_in(&mut tx, owner, prepared).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(published)
+    }
+
+    /// Publish under the caller's original authentication/deadline fences. No
+    /// KEK/provider operation or second connection is acquired under these locks.
+    /// The caller owns rollback/COMMIT and uncertain acknowledgement handling.
+    pub async fn replace_prepared_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: &Owner,
+        prepared: PreparedCredentialReplacement,
+    ) -> Result<CredentialRecord, Error> {
+        let PreparedCredentialReplacement {
+            original,
+            next,
+            material,
+            refresh,
+        } = prepared;
+        if original.metadata.authentication_kind == CredentialAuthKind::SshKey
+            || next.metadata.authentication_kind == CredentialAuthKind::SshKey
+        {
+            return Err(Error::UnsupportedCredential);
+        }
+        if original.metadata.owner != *owner || next.metadata.owner != *owner {
+            return Err(Error::InvalidInput);
+        }
+        original.validate(&self.reader.catalog)?;
+        next.validate(&self.reader.catalog)?;
+        validate_wrapper(&material.wrapped, self.provider.kind())?;
+        let id = &original.metadata.id;
+        let current = self.record_for_update_in(tx, owner, id).await?;
+        compare_version(&current, original.version)?;
+        if current != original {
+            return Err(Error::CorruptRecord);
+        }
         if refresh {
             require_oauth_refresh(&current)?;
+        }
+        if next.metadata.authentication_kind == CredentialAuthKind::ApiKey {
+            // A valid future expiry at preparation may elapse while waiting
+            // for publication locks. Runtime use still rechecks wall expiry;
+            // this does not promise it cannot elapse during COMMIT itself.
+            validate_api_key_replacement_expiry(next.metadata.expires_at_unix)?;
         }
         // Publication CAS alone must not bypass another replica's durable
         // provider operation. Owner replacement can clear only terminal or
         // never-started, expired attempts, within this same transaction.
-        crate::refresh::fence_refresh_mutation(&mut tx, id).await?;
+        crate::refresh::fence_refresh_mutation(tx, id).await?;
         // These coordinates are immutable through this API. Reject corruption
         // or an unexpected writer instead of publishing under a changed key.
         if current.metadata.provider != next.metadata.provider
@@ -309,22 +521,21 @@ impl PlatformCredentialStore {
         {
             return Err(Error::CorruptRecord);
         }
-        delete_material(&mut tx, id).await?;
+        delete_material(tx, id).await?;
         sqlx::query(
             "UPDATE platform_credentials SET status='active', expires_at_unix=$2, \
-             revocation_generation=$3, material_generation=$4, updated_at=now() WHERE id=$1",
+             revocation_generation=$3, material_generation=$4, account_hint=$5, updated_at=now() WHERE id=$1",
         )
         .bind(id.as_str())
         .bind(optional_time(next.metadata.expires_at_unix)?)
         .bind(generation(next.version.revocation_generation)?)
         .bind(generation(next.version.material_generation)?)
-        .execute(&mut *tx)
+        .bind(&next.metadata.account_hint)
+        .execute(&mut **tx)
         .await
         .map_err(database_error)?;
-        insert_material(&mut tx, &next, prepared).await?;
-        let published = load_record(&mut *tx, owner, id, false, &self.reader.catalog).await?;
-        tx.commit().await.map_err(database_error)?;
-        Ok(published)
+        insert_material(tx, &next, material).await?;
+        load_record(&mut **tx, owner, id, false, &self.reader.catalog).await
     }
 
     /// Revoke exactly the observed version and remove its active encrypted
@@ -545,6 +756,8 @@ struct MetadataRow {
     authentication_kind: String,
     display_name: String,
     account_hint: Option<String>,
+    ssh_public_key: Option<String>,
+    ssh_fingerprint: Option<String>,
     status: String,
     expires_at_unix: Option<i64>,
     revocation_generation: i64,
@@ -575,6 +788,7 @@ impl MetadataRow {
                 authentication_kind: parse_auth_kind(&self.authentication_kind)?,
                 display_name: self.display_name,
                 account_hint: self.account_hint,
+                ssh_public_key: parse_ssh_public_key(self.ssh_public_key, self.ssh_fingerprint)?,
                 status: parse_status(&self.status)?,
                 expires_at_unix: self
                     .expires_at_unix
@@ -787,6 +1001,16 @@ fn optional_time(value: Option<u64>) -> Result<Option<i64>, Error> {
         .map(i64::try_from)
         .transpose()
         .map_err(|_| Error::InvalidInput)
+}
+
+fn validate_api_key_replacement_expiry(expiry: Option<u64>) -> Result<(), Error> {
+    optional_time(expiry)?;
+    if let Some(expiry) = expiry
+        && expiry <= unix_now()?
+    {
+        return Err(Error::InvalidInput);
+    }
+    Ok(())
 }
 
 fn unix_now() -> Result<u64, Error> {

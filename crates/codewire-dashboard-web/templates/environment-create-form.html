@@ -59,10 +59,9 @@
         <div class="cw-port-rows" data-app-port-rows>{% if form.app_ports.is_empty() %}<p class="cw-empty-inline" data-empty-app-ports>No ports configured</p>{% endif %}{% for port in form.app_ports %}<div class="cw-app-port-row" data-app-port-row><input class="cw-input cw-mono" name="app_port_{{ port.index }}" type="number" min="1" max="65535" value="{{ port.port }}" placeholder="3000" aria-label="Container port"><input class="cw-input cw-mono" name="app_label_{{ port.index }}" value="{{ port.label }}" placeholder="web" aria-label="Port label"><select class="cw-select" name="app_access_{{ port.index }}" aria-label="Port access"><option value="creator"{% if port.access_selected("creator") %} selected{% endif %}>Creator</option><option value="org_members"{% if port.access_selected("org_members") %} selected{% endif %}>Organization</option><option value="public"{% if port.access_selected("public") %} selected{% endif %}>Public</option></select><button type="button" data-remove-app-port aria-label="Remove port"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-close"/></svg></button></div>{% endfor %}</div>
       </section>
 
-      <section class="cw-create-panel cw-secret-panel" aria-labelledby="secrets-title">
-        <div class="cw-create-panel-heading cw-create-panel-heading--icon"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-key"/></svg><h3 id="secrets-title">Secrets</h3></div>
-        <p class="cw-panel-help">Saved secrets cannot be attached to a Sandbox until protected access is available.</p>
-      </section>
+      {% let source_fields_id = "environment-create" %}
+      {% let sources = form.sources %}
+      {% include "environment-source-fields.html" %}
 
       <section class="cw-create-panel cw-agent-picker" aria-labelledby="agents-title">
         <div class="cw-create-panel-heading cw-create-panel-heading--icon"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-briefcase"/></svg><h3 id="agents-title">Agents</h3></div>

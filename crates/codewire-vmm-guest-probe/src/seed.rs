@@ -1,5 +1,6 @@
 use std::fmt;
 
+use codewire_access::ManagedCredentialClients;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -16,16 +17,10 @@ pub const ROOT_DISK_SERIAL: &str = "CWROOT1";
 pub const DOCKER_DISK_SERIAL: &str = "CWDOCKER1";
 
 const MAGIC: &[u8; 8] = b"CWSEED1\0";
-const FORMAT_VERSION_V1: u16 = 1;
-const FORMAT_VERSION_V2: u16 = 2;
-const FORMAT_VERSION_V3: u16 = 3;
-const FORMAT_VERSION_V4: u16 = 4;
-const FORMAT_VERSION_V5: u16 = 5;
-const HEADER_LEN_V1: usize = 48;
-const HEADER_LEN_V2: usize = 128;
-const HEADER_LEN_V3: usize = 160;
-const HEADER_LEN_V4: usize = 192;
-const HEADER_LEN_V5: usize = HEADER_LEN_V4;
+// One current format. Retired versions, including the unshipped material-
+// bearing v6, are never decoded or selected by a constructor.
+const FORMAT_VERSION: u16 = 8;
+const HEADER_LEN: usize = 256;
 const CHECKSUM_LEN: usize = 32;
 const CHECKSUM_OFFSET: usize = SEED_LEN - CHECKSUM_LEN;
 const TOKEN_MAX_LEN: usize = 512;
@@ -42,20 +37,17 @@ const FLAGS_OFFSET: usize = 46;
 const SETUP_TOTAL_LEN_OFFSET: usize = 48;
 const SETUP_ROOT_GENERATION_OFFSET: usize = 56;
 const SETUP_HEADER_SHA256_OFFSET: usize = 88;
-const V2_RESERVED_OFFSET: usize = 120;
 const DIRECT_SHARES_SHA256_OFFSET: usize = 120;
-const V3_RESERVED_OFFSET: usize = 152;
 const SKILL_SNAPSHOT_SHA256_OFFSET: usize = 152;
-const V4_RESERVED_OFFSET: usize = 184;
-const TOKEN_OFFSET_V1: usize = HEADER_LEN_V1;
-const TOKEN_OFFSET_V2: usize = HEADER_LEN_V2;
-const TOKEN_OFFSET_V3: usize = HEADER_LEN_V3;
-const TOKEN_OFFSET_V4: usize = HEADER_LEN_V4;
-const TOKEN_OFFSET_V5: usize = HEADER_LEN_V5;
+const ENVIRONMENT_PROJECTION_SHA256_OFFSET: usize = 184;
+const MANAGED_CREDENTIAL_CLIENTS_OFFSET: usize = 216;
+const RESERVED_OFFSET: usize = 248;
+const TOKEN_OFFSET: usize = HEADER_LEN;
 const SETUP_PRESENT_FLAG: u16 = 1;
 const DIRECT_SHARES_PRESENT_FLAG: u16 = 1 << 1;
 const SKILL_SNAPSHOT_PRESENT_FLAG: u16 = 1 << 2;
 const DOCKER_DATA_DISK_PRESENT_FLAG: u16 = 1 << 3;
+const ENVIRONMENT_PROJECTION_PRESENT_FLAG: u16 = 1 << 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetupBinding {
@@ -111,6 +103,8 @@ pub struct Seed {
     direct_shares_sha256: Option<Sha256Value>,
     skill_snapshot_sha256: Option<Sha256Value>,
     docker_data_disk: bool,
+    environment_projection_sha256: Option<Sha256Value>,
+    managed_credential_clients: ManagedCredentialClients,
 }
 
 impl Seed {
@@ -129,6 +123,8 @@ impl Seed {
             direct_shares_sha256: None,
             skill_snapshot_sha256: None,
             docker_data_disk: false,
+            environment_projection_sha256: None,
+            managed_credential_clients: ManagedCredentialClients::default(),
         };
         seed.validate()?;
         Ok(seed)
@@ -150,6 +146,8 @@ impl Seed {
             direct_shares_sha256: None,
             skill_snapshot_sha256: None,
             docker_data_disk: false,
+            environment_projection_sha256: None,
+            managed_credential_clients: ManagedCredentialClients::default(),
         };
         seed.validate()?;
         Ok(seed)
@@ -172,6 +170,8 @@ impl Seed {
             direct_shares_sha256,
             skill_snapshot_sha256: None,
             docker_data_disk: false,
+            environment_projection_sha256: None,
+            managed_credential_clients: ManagedCredentialClients::default(),
         };
         seed.validate()?;
         Ok(seed)
@@ -195,6 +195,8 @@ impl Seed {
             direct_shares_sha256,
             skill_snapshot_sha256,
             docker_data_disk: false,
+            environment_projection_sha256: None,
+            managed_credential_clients: ManagedCredentialClients::default(),
         };
         seed.validate()?;
         Ok(seed)
@@ -237,6 +239,28 @@ impl Seed {
         self.docker_data_disk
     }
 
+    /// Bind the already-selected environment operation's projection metadata
+    /// for this boot. This contains no application values or source IDs and
+    /// does not authorize projection delivery by itself.
+    pub fn with_environment_projection_sha256(mut self, hash: Sha256Value) -> Self {
+        self.environment_projection_sha256 = Some(hash);
+        self
+    }
+
+    pub fn environment_projection_sha256(&self) -> Option<Sha256Value> {
+        self.environment_projection_sha256
+    }
+
+    /// Material-free client setup for this boot, not a provider access grant.
+    pub fn with_managed_credential_clients(mut self, clients: ManagedCredentialClients) -> Self {
+        self.managed_credential_clients = clients;
+        self
+    }
+
+    pub fn managed_credential_clients(&self) -> ManagedCredentialClients {
+        self.managed_credential_clients
+    }
+
     pub fn encode(&self) -> [u8; SEED_LEN] {
         // Construction and decoding are the only ways to obtain a Seed, so
         // these invariants have already been checked.
@@ -244,22 +268,8 @@ impl Seed {
 
         let mut bytes = [0_u8; SEED_LEN];
         bytes[..MAGIC.len()].copy_from_slice(MAGIC);
-        let (version, header_len, token_offset) = if self.docker_data_disk {
-            (FORMAT_VERSION_V5, HEADER_LEN_V5, TOKEN_OFFSET_V5)
-        } else {
-            match (
-                self.setup,
-                self.direct_shares_sha256,
-                self.skill_snapshot_sha256,
-            ) {
-                (_, _, Some(_)) => (FORMAT_VERSION_V4, HEADER_LEN_V4, TOKEN_OFFSET_V4),
-                (_, Some(_), None) => (FORMAT_VERSION_V3, HEADER_LEN_V3, TOKEN_OFFSET_V3),
-                (Some(_), None, None) => (FORMAT_VERSION_V2, HEADER_LEN_V2, TOKEN_OFFSET_V2),
-                (None, None, None) => (FORMAT_VERSION_V1, HEADER_LEN_V1, TOKEN_OFFSET_V1),
-            }
-        };
-        put_u16(&mut bytes, VERSION_OFFSET, version);
-        put_u16(&mut bytes, HEADER_LEN_OFFSET, header_len as u16);
+        put_u16(&mut bytes, VERSION_OFFSET, FORMAT_VERSION);
+        put_u16(&mut bytes, HEADER_LEN_OFFSET, HEADER_LEN as u16);
         put_u32(&mut bytes, TOTAL_LEN_OFFSET, SEED_LEN as u32);
         bytes[VM_ID_OFFSET..VM_ID_OFFSET + 16].copy_from_slice(self.vm_id.as_bytes());
         put_u64(&mut bytes, GENERATION_OFFSET, self.generation);
@@ -287,8 +297,16 @@ impl Seed {
         if self.docker_data_disk {
             flags |= DOCKER_DATA_DISK_PRESENT_FLAG;
         }
+        if let Some(hash) = self.environment_projection_sha256 {
+            flags |= ENVIRONMENT_PROJECTION_PRESENT_FLAG;
+            bytes[ENVIRONMENT_PROJECTION_SHA256_OFFSET..ENVIRONMENT_PROJECTION_SHA256_OFFSET + 32]
+                .copy_from_slice(&hash.as_bytes());
+        }
         put_u16(&mut bytes, FLAGS_OFFSET, flags);
-        bytes[token_offset..token_offset + self.auth_token.len()]
+        let clients = self.managed_credential_clients.encode().as_bytes();
+        bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..MANAGED_CREDENTIAL_CLIENTS_OFFSET + clients.len()]
+            .copy_from_slice(clients);
+        bytes[TOKEN_OFFSET..TOKEN_OFFSET + self.auth_token.len()]
             .copy_from_slice(self.auth_token.as_bytes());
 
         let checksum = Sha256::digest(&bytes[..CHECKSUM_OFFSET]);
@@ -314,247 +332,83 @@ impl Seed {
             return Err(SeedError::ChecksumMismatch);
         }
 
-        let decoded_fields = match get_u16(bytes, VERSION_OFFSET) {
-            FORMAT_VERSION_V1 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V1 {
-                    return Err(SeedError::InvalidFraming);
-                }
-                if get_u16(bytes, FLAGS_OFFSET) != 0 {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                (TOKEN_OFFSET_V1, None, None, None, false)
-            }
-            FORMAT_VERSION_V2 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V2 {
-                    return Err(SeedError::InvalidFraming);
-                }
-                if get_u16(bytes, FLAGS_OFFSET) != SETUP_PRESENT_FLAG
-                    || bytes[V2_RESERVED_OFFSET..HEADER_LEN_V2]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                let root_generation = Sha256Value::from_bytes(
+        if get_u16(bytes, VERSION_OFFSET) != FORMAT_VERSION {
+            return Err(SeedError::UnsupportedVersion);
+        }
+        if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN {
+            return Err(SeedError::InvalidFraming);
+        }
+        let flags = get_u16(bytes, FLAGS_OFFSET);
+        if flags
+            & !(SETUP_PRESENT_FLAG
+                | DIRECT_SHARES_PRESENT_FLAG
+                | SKILL_SNAPSHOT_PRESENT_FLAG
+                | DOCKER_DATA_DISK_PRESENT_FLAG
+                | ENVIRONMENT_PROJECTION_PRESENT_FLAG)
+            != 0
+            || bytes[RESERVED_OFFSET..HEADER_LEN]
+                .iter()
+                .any(|byte| *byte != 0)
+        {
+            return Err(SeedError::NonZeroReserved);
+        }
+        let setup = if flags & SETUP_PRESENT_FLAG != 0 {
+            Some(SetupBinding::new(
+                get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
+                Sha256Value::from_bytes(
                     bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
                         .try_into()
                         .expect("fixed seed setup digest"),
-                );
-                let header_sha256 = Sha256Value::from_bytes(
+                ),
+                Sha256Value::from_bytes(
                     bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
                         .try_into()
                         .expect("fixed seed setup digest"),
-                );
-                let setup = SetupBinding::new(
-                    get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
-                    root_generation,
-                    header_sha256,
-                )?;
-                (TOKEN_OFFSET_V2, Some(setup), None, None, false)
+                ),
+            )?)
+        } else {
+            if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
+                .iter()
+                .any(|byte| *byte != 0)
+            {
+                return Err(SeedError::NonZeroReserved);
             }
-            FORMAT_VERSION_V3 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V3 {
-                    return Err(SeedError::InvalidFraming);
-                }
-                let flags = get_u16(bytes, FLAGS_OFFSET);
-                if flags & DIRECT_SHARES_PRESENT_FLAG == 0
-                    || flags & !(SETUP_PRESENT_FLAG | DIRECT_SHARES_PRESENT_FLAG) != 0
-                    || bytes[V3_RESERVED_OFFSET..HEADER_LEN_V3]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                let setup = if flags & SETUP_PRESENT_FLAG != 0 {
-                    Some(SetupBinding::new(
-                        get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                    )?)
-                } else {
-                    if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                let direct_shares_sha256 = Sha256Value::from_bytes(
-                    bytes[DIRECT_SHARES_SHA256_OFFSET..DIRECT_SHARES_SHA256_OFFSET + 32]
-                        .try_into()
-                        .expect("fixed seed direct-share digest"),
-                );
-                (
-                    TOKEN_OFFSET_V3,
-                    setup,
-                    Some(direct_shares_sha256),
-                    None,
-                    false,
-                )
-            }
-            FORMAT_VERSION_V4 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V4 {
-                    return Err(SeedError::InvalidFraming);
-                }
-                let flags = get_u16(bytes, FLAGS_OFFSET);
-                if flags & SKILL_SNAPSHOT_PRESENT_FLAG == 0
-                    || flags
-                        & !(SETUP_PRESENT_FLAG
-                            | DIRECT_SHARES_PRESENT_FLAG
-                            | SKILL_SNAPSHOT_PRESENT_FLAG)
-                        != 0
-                    || bytes[V4_RESERVED_OFFSET..HEADER_LEN_V4]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                let setup = if flags & SETUP_PRESENT_FLAG != 0 {
-                    Some(SetupBinding::new(
-                        get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                    )?)
-                } else {
-                    if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                let direct_shares_sha256 = if flags & DIRECT_SHARES_PRESENT_FLAG != 0 {
-                    Some(Sha256Value::from_bytes(
-                        bytes[DIRECT_SHARES_SHA256_OFFSET..DIRECT_SHARES_SHA256_OFFSET + 32]
-                            .try_into()
-                            .expect("fixed seed direct-share digest"),
-                    ))
-                } else {
-                    if bytes[DIRECT_SHARES_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                let skill_snapshot_sha256 = Sha256Value::from_bytes(
-                    bytes[SKILL_SNAPSHOT_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET + 32]
-                        .try_into()
-                        .expect("fixed seed skill-snapshot digest"),
-                );
-                (
-                    TOKEN_OFFSET_V4,
-                    setup,
-                    direct_shares_sha256,
-                    Some(skill_snapshot_sha256),
-                    false,
-                )
-            }
-            FORMAT_VERSION_V5 => {
-                if usize::from(get_u16(bytes, HEADER_LEN_OFFSET)) != HEADER_LEN_V5 {
-                    return Err(SeedError::InvalidFraming);
-                }
-                let flags = get_u16(bytes, FLAGS_OFFSET);
-                if flags & DOCKER_DATA_DISK_PRESENT_FLAG == 0
-                    || flags
-                        & !(SETUP_PRESENT_FLAG
-                            | DIRECT_SHARES_PRESENT_FLAG
-                            | SKILL_SNAPSHOT_PRESENT_FLAG
-                            | DOCKER_DATA_DISK_PRESENT_FLAG)
-                        != 0
-                    || bytes[V4_RESERVED_OFFSET..HEADER_LEN_V5]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                {
-                    return Err(SeedError::NonZeroReserved);
-                }
-                let setup = if flags & SETUP_PRESENT_FLAG != 0 {
-                    Some(SetupBinding::new(
-                        get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                        Sha256Value::from_bytes(
-                            bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
-                                .try_into()
-                                .expect("fixed seed setup digest"),
-                        ),
-                    )?)
-                } else {
-                    if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                let direct_shares_sha256 = if flags & DIRECT_SHARES_PRESENT_FLAG != 0 {
-                    Some(Sha256Value::from_bytes(
-                        bytes[DIRECT_SHARES_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET]
-                            .try_into()
-                            .expect("fixed seed direct-share digest"),
-                    ))
-                } else {
-                    if bytes[DIRECT_SHARES_SHA256_OFFSET..SKILL_SNAPSHOT_SHA256_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                let skill_snapshot_sha256 = if flags & SKILL_SNAPSHOT_PRESENT_FLAG != 0 {
-                    Some(Sha256Value::from_bytes(
-                        bytes[SKILL_SNAPSHOT_SHA256_OFFSET..V4_RESERVED_OFFSET]
-                            .try_into()
-                            .expect("fixed seed skill-snapshot digest"),
-                    ))
-                } else {
-                    if bytes[SKILL_SNAPSHOT_SHA256_OFFSET..V4_RESERVED_OFFSET]
-                        .iter()
-                        .any(|byte| *byte != 0)
-                    {
-                        return Err(SeedError::NonZeroReserved);
-                    }
-                    None
-                };
-                (
-                    TOKEN_OFFSET_V5,
-                    setup,
-                    direct_shares_sha256,
-                    skill_snapshot_sha256,
-                    true,
-                )
-            }
-            _ => return Err(SeedError::UnsupportedVersion),
+            None
         };
-        let (token_offset, setup, direct_shares_sha256, skill_snapshot_sha256, docker_data_disk) =
-            decoded_fields;
+        let direct_shares_sha256 = decode_optional_hash(
+            bytes,
+            flags,
+            DIRECT_SHARES_PRESENT_FLAG,
+            DIRECT_SHARES_SHA256_OFFSET,
+        )?;
+        let skill_snapshot_sha256 = decode_optional_hash(
+            bytes,
+            flags,
+            SKILL_SNAPSHOT_PRESENT_FLAG,
+            SKILL_SNAPSHOT_SHA256_OFFSET,
+        )?;
+        let environment_projection_sha256 = decode_optional_hash(
+            bytes,
+            flags,
+            ENVIRONMENT_PROJECTION_PRESENT_FLAG,
+            ENVIRONMENT_PROJECTION_SHA256_OFFSET,
+        )?;
+        let docker_data_disk = flags & DOCKER_DATA_DISK_PRESENT_FLAG != 0;
+        let client_bytes = &bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..RESERVED_OFFSET];
+        let client_len = client_bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(SeedError::InvalidManagedCredentialClients)?;
+        if client_bytes[client_len..].iter().any(|byte| *byte != 0) {
+            return Err(SeedError::InvalidManagedCredentialClients);
+        }
+        let clients = std::str::from_utf8(&client_bytes[..client_len])
+            .map_err(|_| SeedError::InvalidManagedCredentialClients)?;
+        let clients = ManagedCredentialClients::decode(clients)
+            .map_err(|_| SeedError::InvalidManagedCredentialClients)?;
 
         let token_len = usize::from(get_u16(bytes, TOKEN_LEN_OFFSET));
-        let token_end = token_offset
+        let token_end = TOKEN_OFFSET
             .checked_add(token_len)
             .filter(|end| *end <= CHECKSUM_OFFSET)
             .ok_or(SeedError::InvalidTokenLength { actual: token_len })?;
@@ -565,7 +419,7 @@ impl Seed {
             return Err(SeedError::NonZeroPadding);
         }
 
-        let token = std::str::from_utf8(&bytes[token_offset..token_end])
+        let token = std::str::from_utf8(&bytes[TOKEN_OFFSET..token_end])
             .map_err(|_| SeedError::InvalidTokenCharacters)?;
         let vm_id = Uuid::from_slice(&bytes[VM_ID_OFFSET..VM_ID_OFFSET + 16])
             .map_err(|_| SeedError::InvalidVmId)?;
@@ -583,7 +437,12 @@ impl Seed {
         } else {
             seed
         };
-        Ok(seed)
+        let seed = if let Some(hash) = environment_projection_sha256 {
+            seed.with_environment_projection_sha256(hash)
+        } else {
+            seed
+        };
+        Ok(seed.with_managed_credential_clients(clients))
     }
 
     fn validate(&self) -> Result<(), SeedError> {
@@ -631,6 +490,14 @@ impl fmt::Debug for Seed {
             .field("direct_shares_sha256", &self.direct_shares_sha256)
             .field("skill_snapshot_sha256", &self.skill_snapshot_sha256)
             .field("docker_data_disk", &self.docker_data_disk)
+            .field(
+                "managed_credential_clients",
+                &self.managed_credential_clients,
+            )
+            .field(
+                "environment_projection_sha256",
+                &self.environment_projection_sha256,
+            )
             .finish()
     }
 }
@@ -669,6 +536,26 @@ pub enum SeedError {
     InvalidTokenCharacters,
     #[error("seed setup binding is invalid")]
     InvalidSetupBinding,
+    #[error("seed managed credential client selection is invalid")]
+    InvalidManagedCredentialClients,
+}
+
+fn decode_optional_hash(
+    bytes: &[u8],
+    flags: u16,
+    present_flag: u16,
+    offset: usize,
+) -> Result<Option<Sha256Value>, SeedError> {
+    let hash = &bytes[offset..offset + 32];
+    if flags & present_flag != 0 {
+        Ok(Some(Sha256Value::from_bytes(
+            hash.try_into().expect("fixed seed metadata digest"),
+        )))
+    } else if hash.iter().any(|byte| *byte != 0) {
+        Err(SeedError::NonZeroReserved)
+    } else {
+        Ok(None)
+    }
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -732,10 +619,81 @@ mod tests {
         assert_eq!(&encoded[..8], MAGIC);
         assert_eq!(
             format!("{:x}", Sha256::digest(encoded)),
-            "8dffc25fb4bc751d7cb62c40da5ad8a4e6d3484f570fee69cfec8e8bc1629736"
+            "80227b8d57794734ca9f230300f55291375eb4a42cf5e46d16f88dea3b86525a"
         );
         assert_eq!(Seed::decode(&encoded).unwrap(), seed);
         assert_eq!(seed.encode(), encoded);
+    }
+
+    #[test]
+    fn managed_clients_are_exact_boot_metadata_not_new_authority_or_identity() {
+        let base = sample_seed();
+        for clients in [
+            "v1:none",
+            "v1:codex",
+            "v1:openai",
+            "v1:codex,openai",
+            "v1:anthropic",
+            "v1:codex,anthropic",
+            "v1:openai,anthropic",
+            "v1:codex,openai,anthropic",
+            "v1:ssh",
+            "v1:codex,ssh",
+            "v1:openai,ssh",
+            "v1:codex,openai,ssh",
+            "v1:anthropic,ssh",
+            "v1:codex,anthropic,ssh",
+            "v1:openai,anthropic,ssh",
+            "v1:codex,openai,anthropic,ssh",
+        ] {
+            let clients = ManagedCredentialClients::decode(clients).unwrap();
+            let seed = base.clone().with_managed_credential_clients(clients);
+            assert_eq!(seed.vm_id(), base.vm_id());
+            assert_eq!(seed.generation(), base.generation());
+            assert_eq!(seed.auth_token(), base.auth_token());
+            assert_eq!(seed.environment_projection_sha256(), None);
+            let decoded = Seed::decode(&seed.encode()).unwrap();
+            assert_eq!(decoded.managed_credential_clients(), clients);
+            assert_eq!(decoded, seed);
+        }
+        for invalid in ["", "codex", "v1:openai,codex", "v1:github", "v1:ssh,codex"] {
+            let mut bytes = base.encode();
+            bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..RESERVED_OFFSET].fill(0);
+            bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET
+                ..MANAGED_CREDENTIAL_CLIENTS_OFFSET + invalid.len()]
+                .copy_from_slice(invalid.as_bytes());
+            refresh_checksum(&mut bytes);
+            assert_eq!(
+                Seed::decode(&bytes),
+                Err(SeedError::InvalidManagedCredentialClients)
+            );
+        }
+        let mut bytes = base.encode();
+        bytes[RESERVED_OFFSET - 1] = 1;
+        refresh_checksum(&mut bytes);
+        assert_eq!(
+            Seed::decode(&bytes),
+            Err(SeedError::InvalidManagedCredentialClients)
+        );
+        let maximum =
+            ManagedCredentialClients::from_profile_slots(["codex", "openai", "anthropic", "ssh"])
+                .unwrap()
+                .encode();
+        assert_eq!(maximum.len(), 29);
+        let encoded = base
+            .clone()
+            .with_managed_credential_clients(ManagedCredentialClients::decode(maximum).unwrap())
+            .encode();
+        assert_eq!(encoded[MANAGED_CREDENTIAL_CLIENTS_OFFSET + 29], 0);
+        assert!(
+            encoded[MANAGED_CREDENTIAL_CLIENTS_OFFSET + 30..RESERVED_OFFSET]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        let mut retired = base.encode();
+        put_u16(&mut retired, VERSION_OFFSET, 7);
+        refresh_checksum(&mut retired);
+        assert_eq!(Seed::decode(&retired), Err(SeedError::UnsupportedVersion));
     }
 
     #[test]
@@ -754,13 +712,13 @@ mod tests {
     #[test]
     fn seed_rejects_bad_framing_and_token_data() {
         let mut encoded = sample_seed().encode();
-        encoded[FLAGS_OFFSET] = 1;
+        put_u16(&mut encoded, FLAGS_OFFSET, 1 << 15);
         let checksum = Sha256::digest(&encoded[..CHECKSUM_OFFSET]);
         encoded[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
         assert_eq!(Seed::decode(&encoded), Err(SeedError::NonZeroReserved));
 
         let mut encoded = sample_seed().encode();
-        encoded[TOKEN_OFFSET_V1] = b' ';
+        encoded[TOKEN_OFFSET] = b' ';
         let checksum = Sha256::digest(&encoded[..CHECKSUM_OFFSET]);
         encoded[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
         assert_eq!(
@@ -776,7 +734,7 @@ mod tests {
         assert!(!rendered.contains(TOKEN));
 
         let mut corrupt = sample_seed().encode();
-        corrupt[TOKEN_OFFSET_V1] = b'!';
+        corrupt[TOKEN_OFFSET] = b'!';
         let error = Seed::decode(&corrupt).unwrap_err().to_string();
         assert!(!error.contains(TOKEN));
         assert!(!error.contains("012345"));
@@ -803,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_v2_binds_one_boot_setup_without_changing_v1() {
+    fn current_seed_binds_one_boot_setup_with_source_compatible_constructor() {
         let setup = SetupBinding::new(
             SETUP_HEADER_LEN as u64 + SETUP_ALIGNMENT,
             Sha256Value::calculate(b"root-generation"),
@@ -821,23 +779,23 @@ mod tests {
         let encoded = seed.encode();
         assert_eq!(
             format!("{:x}", Sha256::digest(encoded)),
-            "93276f73b575a81fbbda6e7ea504173bfb2185668eaa7e5d375c765c22f22d40"
+            "e8e0f945cae4404b931a8333fb2955f54343bbfe555de8ffe7c7ee62586303ee"
         );
-        assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION_V2);
-        assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN_V2 as u16);
+        assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
+        assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
         assert_eq!(Seed::decode(&encoded).unwrap(), seed);
         assert_eq!(seed.setup(), Some(setup));
         assert_eq!(sample_seed().setup(), None);
 
         let mut corrupt = encoded;
-        corrupt[V2_RESERVED_OFFSET] = 1;
+        corrupt[RESERVED_OFFSET] = 1;
         let checksum = Sha256::digest(&corrupt[..CHECKSUM_OFFSET]);
         corrupt[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
         assert_eq!(Seed::decode(&corrupt), Err(SeedError::NonZeroReserved));
     }
 
     #[test]
-    fn seed_v3_binds_direct_share_plan_with_or_without_setup() {
+    fn current_seed_binds_direct_share_plan_with_or_without_setup() {
         let direct_shares = Sha256Value::calculate(b"direct-share-plan");
         for setup in [
             None,
@@ -860,8 +818,8 @@ mod tests {
             )
             .unwrap();
             let encoded = seed.encode();
-            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION_V3);
-            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN_V3 as u16);
+            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
+            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
             assert_eq!(Seed::decode(&encoded).unwrap(), seed);
             assert_eq!(seed.setup(), setup);
             assert_eq!(seed.direct_shares_sha256(), Some(direct_shares));
@@ -869,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_v4_binds_skill_snapshot_with_optional_existing_bindings() {
+    fn current_seed_binds_skill_snapshot_with_optional_existing_bindings() {
         let setup = SetupBinding::new(
             SETUP_HEADER_LEN as u64 + SETUP_ALIGNMENT,
             Sha256Value::calculate(b"root-generation"),
@@ -895,8 +853,8 @@ mod tests {
             )
             .unwrap();
             let encoded = seed.encode();
-            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION_V4);
-            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN_V4 as u16);
+            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
+            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
             assert_eq!(Seed::decode(&encoded).unwrap(), seed);
             assert_eq!(seed.setup(), setup);
             assert_eq!(seed.direct_shares_sha256(), direct_shares);
@@ -905,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_v5_binds_docker_disk_presence_with_every_optional_binding_shape() {
+    fn current_seed_binds_docker_disk_presence_with_optional_bindings() {
         let setup = SetupBinding::new(
             SETUP_HEADER_LEN as u64 + SETUP_ALIGNMENT,
             Sha256Value::calculate(b"root-generation"),
@@ -933,8 +891,8 @@ mod tests {
             .unwrap()
             .with_docker_data_disk();
             let encoded = seed.encode();
-            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION_V5);
-            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN_V5 as u16);
+            assert_eq!(get_u16(&encoded, VERSION_OFFSET), FORMAT_VERSION);
+            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), HEADER_LEN as u16);
             assert_ne!(
                 get_u16(&encoded, FLAGS_OFFSET) & DOCKER_DATA_DISK_PRESENT_FLAG,
                 0
@@ -948,13 +906,13 @@ mod tests {
     }
 
     #[test]
-    fn seed_v5_requires_the_docker_flag_and_rejects_unknown_flags() {
+    fn current_seed_docker_flag_is_explicit_and_unknown_flags_are_rejected() {
         let seed = sample_seed().with_docker_data_disk();
         let mut encoded = seed.encode();
         put_u16(&mut encoded, FLAGS_OFFSET, 0);
         let checksum = Sha256::digest(&encoded[..CHECKSUM_OFFSET]);
         encoded[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
-        assert_eq!(Seed::decode(&encoded), Err(SeedError::NonZeroReserved));
+        assert_eq!(Seed::decode(&encoded).unwrap(), sample_seed());
 
         let mut encoded = seed.encode();
         put_u16(
@@ -980,7 +938,7 @@ mod tests {
         const RETIRED_SECRET_PRESENT_FLAG: u16 = 1 << 4;
 
         let mut encoded = sample_seed().with_docker_data_disk().encode();
-        encoded[V4_RESERVED_OFFSET..RETIRED_HEADER_LEN + TOKEN.len()].fill(0);
+        encoded[RETIRED_SECRET_TOTAL_LEN_OFFSET..RETIRED_HEADER_LEN + TOKEN.len()].fill(0);
         put_u16(&mut encoded, VERSION_OFFSET, RETIRED_V6);
         put_u16(&mut encoded, HEADER_LEN_OFFSET, RETIRED_HEADER_LEN as u16);
         put_u16(
@@ -997,5 +955,142 @@ mod tests {
         encoded[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
 
         assert_eq!(Seed::decode(&encoded), Err(SeedError::UnsupportedVersion));
+    }
+
+    #[test]
+    fn every_optional_binding_combination_uses_only_current_format() {
+        let setup = SetupBinding::new(
+            SETUP_HEADER_LEN as u64 + SETUP_ALIGNMENT,
+            Sha256Value::calculate(b"root-generation"),
+            Sha256Value::calculate(b"setup-header"),
+        )
+        .unwrap();
+        let direct = Sha256Value::calculate(b"direct-share-plan");
+        let skill = Sha256Value::calculate(b"skill-snapshot-plan");
+        let projection = Sha256Value::calculate(b"canonical-project-selection");
+        for flags in 0_u16..32 {
+            let selected_setup = (flags & SETUP_PRESENT_FLAG != 0).then_some(setup);
+            let selected_direct = (flags & DIRECT_SHARES_PRESENT_FLAG != 0).then_some(direct);
+            let selected_skill = (flags & SKILL_SNAPSHOT_PRESENT_FLAG != 0).then_some(skill);
+            let mut seed = Seed::new_with_all_bindings(
+                sample_seed().vm_id(),
+                7,
+                17777,
+                TOKEN,
+                selected_setup,
+                selected_direct,
+                selected_skill,
+            )
+            .unwrap();
+            if flags & DOCKER_DATA_DISK_PRESENT_FLAG != 0 {
+                seed = seed.with_docker_data_disk();
+            }
+            if flags & ENVIRONMENT_PROJECTION_PRESENT_FLAG != 0 {
+                seed = seed.with_environment_projection_sha256(projection);
+            }
+            let encoded = seed.encode();
+            assert_eq!(get_u16(&encoded, VERSION_OFFSET), 8);
+            assert_eq!(get_u16(&encoded, HEADER_LEN_OFFSET), 256);
+            assert_eq!(get_u16(&encoded, FLAGS_OFFSET), flags);
+            assert_eq!(
+                &encoded[TOKEN_OFFSET..TOKEN_OFFSET + TOKEN.len()],
+                TOKEN.as_bytes()
+            );
+            let decoded = Seed::decode(&encoded).unwrap();
+            assert_eq!(decoded, seed);
+            assert_eq!(decoded.encode(), encoded);
+            assert_eq!(decoded.setup(), selected_setup);
+            assert_eq!(decoded.direct_shares_sha256(), selected_direct);
+            assert_eq!(decoded.skill_snapshot_sha256(), selected_skill);
+            assert_eq!(
+                decoded.docker_data_disk(),
+                flags & DOCKER_DATA_DISK_PRESENT_FLAG != 0
+            );
+            assert_eq!(
+                decoded.environment_projection_sha256(),
+                (flags & ENVIRONMENT_PROJECTION_PRESENT_FLAG != 0).then_some(projection)
+            );
+        }
+    }
+
+    #[test]
+    fn projection_binding_is_optional_checksum_bound_and_does_not_change_operation_identity() {
+        let base = sample_seed();
+        assert_eq!(base.environment_projection_sha256(), None);
+        let hash = Sha256Value::calculate(b"canonical-project-selection");
+        let seed = base.clone().with_environment_projection_sha256(hash);
+        assert_eq!(seed.vm_id(), base.vm_id());
+        assert_eq!(seed.generation(), base.generation());
+        assert_eq!(seed.auth_token(), base.auth_token());
+        let mut encoded = seed.encode();
+        assert_eq!(&encoded[184..216], &hash.as_bytes());
+        assert_eq!(&encoded[216..223], b"v1:none");
+        assert!(encoded[223..256].iter().all(|byte| *byte == 0));
+        encoded[184] ^= 1;
+        assert_eq!(Seed::decode(&encoded), Err(SeedError::ChecksumMismatch));
+
+        let mut encoded = seed.encode();
+        put_u16(&mut encoded, FLAGS_OFFSET, 0);
+        refresh_checksum(&mut encoded);
+        assert_eq!(Seed::decode(&encoded), Err(SeedError::NonZeroReserved));
+    }
+
+    #[test]
+    fn absent_binding_storage_and_reserved_bytes_cannot_hide_data() {
+        for offset in [48, 56, 88, 120, 152, 184, 215, 248, 255] {
+            let mut encoded = sample_seed().encode();
+            encoded[offset] = 1;
+            refresh_checksum(&mut encoded);
+            assert_eq!(Seed::decode(&encoded), Err(SeedError::NonZeroReserved));
+        }
+        for header in [0, 48, 192, 223, 224, 225, 240, 255, 257, u16::MAX] {
+            let mut encoded = sample_seed().encode();
+            put_u16(&mut encoded, HEADER_LEN_OFFSET, header);
+            refresh_checksum(&mut encoded);
+            assert_eq!(Seed::decode(&encoded), Err(SeedError::InvalidFraming));
+        }
+    }
+
+    #[test]
+    fn checksum_valid_retired_versions_one_through_five_are_rejected() {
+        // Historical byte shapes are test-only fixtures, not decoder branches.
+        for (version, header, flags) in [
+            (1, 48, 0),
+            (2, 128, 1),
+            (3, 160, 2),
+            (4, 192, 4),
+            (5, 192, 8),
+        ] {
+            let mut encoded = [0; SEED_LEN];
+            encoded[..48].copy_from_slice(&sample_seed().encode()[..48]);
+            put_u16(&mut encoded, VERSION_OFFSET, version);
+            put_u16(&mut encoded, HEADER_LEN_OFFSET, header);
+            put_u16(&mut encoded, FLAGS_OFFSET, flags);
+            match version {
+                2 => {
+                    put_u64(&mut encoded, 48, SETUP_HEADER_LEN as u64 + SETUP_ALIGNMENT);
+                    encoded[56..88].fill(0x11);
+                    encoded[88..120].fill(0x22);
+                }
+                3 => encoded[120..152].fill(0x33),
+                4 => encoded[152..184].fill(0x44),
+                _ => {}
+            }
+            let offset = usize::from(header);
+            encoded[offset..offset + TOKEN.len()].copy_from_slice(TOKEN.as_bytes());
+            refresh_checksum(&mut encoded);
+            assert_eq!(Seed::decode(&encoded), Err(SeedError::UnsupportedVersion));
+        }
+        for version in [0, FORMAT_VERSION + 1, u16::MAX] {
+            let mut encoded = sample_seed().encode();
+            put_u16(&mut encoded, VERSION_OFFSET, version);
+            refresh_checksum(&mut encoded);
+            assert_eq!(Seed::decode(&encoded), Err(SeedError::UnsupportedVersion));
+        }
+    }
+
+    fn refresh_checksum(encoded: &mut [u8; SEED_LEN]) {
+        let checksum = Sha256::digest(&encoded[..CHECKSUM_OFFSET]);
+        encoded[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
     }
 }

@@ -1207,6 +1207,8 @@ mod tests {
                 auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
                 process_execution: codewire_daemon::execution::ProcessExecution::Native,
                 credential_bridge: None,
+                managed_credential_clients: Default::default(),
+                launch_projection: None,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let task = tokio::spawn(async move {

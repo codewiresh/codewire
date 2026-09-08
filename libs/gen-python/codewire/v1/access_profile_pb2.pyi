@@ -123,29 +123,3 @@ class GetEnvironmentAccessProfileResponse(_message.Message):
     binding: EnvironmentAccessProfileBinding
     personal_credentials_confirmed: bool
     def __init__(self, binding: _Optional[_Union[EnvironmentAccessProfileBinding, _Mapping]] = ..., personal_credentials_confirmed: _Optional[bool] = ...) -> None: ...
-
-class SetEnvironmentAccessProfileRequest(_message.Message):
-    __slots__ = ("binding", "expected_binding", "confirm_personal_credentials")
-    BINDING_FIELD_NUMBER: _ClassVar[int]
-    EXPECTED_BINDING_FIELD_NUMBER: _ClassVar[int]
-    CONFIRM_PERSONAL_CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
-    binding: EnvironmentAccessProfileBinding
-    expected_binding: EnvironmentAccessProfileBinding
-    confirm_personal_credentials: bool
-    def __init__(self, binding: _Optional[_Union[EnvironmentAccessProfileBinding, _Mapping]] = ..., expected_binding: _Optional[_Union[EnvironmentAccessProfileBinding, _Mapping]] = ..., confirm_personal_credentials: _Optional[bool] = ...) -> None: ...
-
-class SetEnvironmentAccessProfileResponse(_message.Message):
-    __slots__ = ("binding",)
-    BINDING_FIELD_NUMBER: _ClassVar[int]
-    binding: EnvironmentAccessProfileBinding
-    def __init__(self, binding: _Optional[_Union[EnvironmentAccessProfileBinding, _Mapping]] = ...) -> None: ...
-
-class ClearEnvironmentAccessProfileRequest(_message.Message):
-    __slots__ = ("expected_binding",)
-    EXPECTED_BINDING_FIELD_NUMBER: _ClassVar[int]
-    expected_binding: EnvironmentAccessProfileBinding
-    def __init__(self, expected_binding: _Optional[_Union[EnvironmentAccessProfileBinding, _Mapping]] = ...) -> None: ...
-
-class ClearEnvironmentAccessProfileResponse(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...

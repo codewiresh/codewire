@@ -8,6 +8,7 @@
 mod admin;
 mod authentication;
 mod billing;
+mod credentials;
 mod dashboard;
 mod device;
 mod environments;
@@ -22,7 +23,7 @@ mod terminal;
 
 use axum::{
     Router,
-    extract::{OriginalUri, Path},
+    extract::{DefaultBodyLimit, OriginalUri, Path},
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -233,6 +234,10 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/{slug}/_actions/sandboxes/stop", post(environments::stop))
         .route(
+            "/{slug}/_actions/sandboxes/sources",
+            post(environments::update_sources),
+        )
+        .route(
             "/{slug}/_actions/sandboxes/delete",
             post(environments::delete),
         )
@@ -258,6 +263,52 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/settings", get(slash_redirect))
         .route("/settings/", get(settings::settings))
+        .route("/settings/credentials", get(slash_redirect))
+        .route("/settings/credentials/", get(credentials::page))
+        .route(
+            "/settings/credentials/_actions/credentials/api-key/add",
+            post(credentials::add_api_key_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/api-key/rotate",
+            post(credentials::rotate_api_key_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/ssh/generate",
+            post(credentials::generate_ssh_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/ssh/import",
+            post(credentials::import_ssh_action).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/rename",
+            post(credentials::rename_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/revoke",
+            post(credentials::revoke_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/delete",
+            post(credentials::delete_credential_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/oauth/enroll",
+            post(credentials::enroll_oauth_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/profiles/create",
+            post(credentials::create_profile_action),
+        )
+        .route(
+            "/settings/credentials/_actions/profiles/update",
+            post(credentials::update_profile_action),
+        )
+        .route(
+            "/settings/credentials/_actions/profiles/delete",
+            post(credentials::delete_profile_action),
+        )
         .route(
             "/settings/_actions/git-identity",
             post(settings::update_identity_action),

@@ -14,8 +14,10 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+codewire-access = { workspace = true }
 codewire-credential-bridge = { workspace = true }
 codewire-gateway-proto = { workspace = true }
+codewire-workload-secrets = { workspace = true }
 filetime = { workspace = true }
 portable-pty = { workspace = true }
 prost-types = { workspace = true }
@@ -25,6 +27,7 @@ subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .access_profile_pb2 import ClearEnvironmentAccessProfileRequest, ClearEnvironmentAccessProfileResponse, CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse, GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse, SetEnvironmentAccessProfileRequest, SetEnvironmentAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse
+from .access_profile_pb2 import CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse, GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -51,12 +51,6 @@ class AccessProfileService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment_access_profile(self, request: GetEnvironmentAccessProfileRequest, ctx: RequestContext[GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse]) -> GetEnvironmentAccessProfileResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def set_environment_access_profile(self, request: SetEnvironmentAccessProfileRequest, ctx: RequestContext[SetEnvironmentAccessProfileRequest, SetEnvironmentAccessProfileResponse]) -> SetEnvironmentAccessProfileResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    async def clear_environment_access_profile(self, request: ClearEnvironmentAccessProfileRequest, ctx: RequestContext[ClearEnvironmentAccessProfileRequest, ClearEnvironmentAccessProfileResponse]) -> ClearEnvironmentAccessProfileResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -132,26 +126,6 @@ class AccessProfileServiceASGIApplication(ConnectASGIApplication[AccessProfileSe
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.get_environment_access_profile,
-                ),
-                "/codewire.v1.AccessProfileService/SetEnvironmentAccessProfile": Endpoint.unary(
-                    method=MethodInfo(
-                        name="SetEnvironmentAccessProfile",
-                        service_name="codewire.v1.AccessProfileService",
-                        input=SetEnvironmentAccessProfileRequest,
-                        output=SetEnvironmentAccessProfileResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.set_environment_access_profile,
-                ),
-                "/codewire.v1.AccessProfileService/ClearEnvironmentAccessProfile": Endpoint.unary(
-                    method=MethodInfo(
-                        name="ClearEnvironmentAccessProfile",
-                        service_name="codewire.v1.AccessProfileService",
-                        input=ClearEnvironmentAccessProfileRequest,
-                        output=ClearEnvironmentAccessProfileResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=svc.clear_environment_access_profile,
                 ),
             },
             interceptors=interceptors,
@@ -317,46 +291,6 @@ class AccessProfileServiceClient(ConnectClient):
             use_get=use_get,
         )
 
-    async def set_environment_access_profile(
-        self,
-        request: SetEnvironmentAccessProfileRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> SetEnvironmentAccessProfileResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="SetEnvironmentAccessProfile",
-                service_name="codewire.v1.AccessProfileService",
-                input=SetEnvironmentAccessProfileRequest,
-                output=SetEnvironmentAccessProfileResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
-    async def clear_environment_access_profile(
-        self,
-        request: ClearEnvironmentAccessProfileRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> ClearEnvironmentAccessProfileResponse:
-        return await self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="ClearEnvironmentAccessProfile",
-                service_name="codewire.v1.AccessProfileService",
-                input=ClearEnvironmentAccessProfileRequest,
-                output=ClearEnvironmentAccessProfileResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-
 class AccessProfileServiceSync(Protocol):
     def list_access_profiles(self, request: ListAccessProfilesRequest, ctx: RequestContext[ListAccessProfilesRequest, ListAccessProfilesResponse]) -> ListAccessProfilesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -374,12 +308,6 @@ class AccessProfileServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def get_environment_access_profile(self, request: GetEnvironmentAccessProfileRequest, ctx: RequestContext[GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse]) -> GetEnvironmentAccessProfileResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def set_environment_access_profile(self, request: SetEnvironmentAccessProfileRequest, ctx: RequestContext[SetEnvironmentAccessProfileRequest, SetEnvironmentAccessProfileResponse]) -> SetEnvironmentAccessProfileResponse:
-        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
-
-    def clear_environment_access_profile(self, request: ClearEnvironmentAccessProfileRequest, ctx: RequestContext[ClearEnvironmentAccessProfileRequest, ClearEnvironmentAccessProfileResponse]) -> ClearEnvironmentAccessProfileResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -453,26 +381,6 @@ class AccessProfileServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.get_environment_access_profile,
-                ),
-                "/codewire.v1.AccessProfileService/SetEnvironmentAccessProfile": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="SetEnvironmentAccessProfile",
-                        service_name="codewire.v1.AccessProfileService",
-                        input=SetEnvironmentAccessProfileRequest,
-                        output=SetEnvironmentAccessProfileResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.set_environment_access_profile,
-                ),
-                "/codewire.v1.AccessProfileService/ClearEnvironmentAccessProfile": EndpointSync.unary(
-                    method=MethodInfo(
-                        name="ClearEnvironmentAccessProfile",
-                        service_name="codewire.v1.AccessProfileService",
-                        input=ClearEnvironmentAccessProfileRequest,
-                        output=ClearEnvironmentAccessProfileResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
-                    ),
-                    function=service.clear_environment_access_profile,
                 ),
             },
             interceptors=interceptors,
@@ -631,42 +539,4 @@ class AccessProfileServiceClientSync(ConnectClientSync):
             headers=headers,
             timeout_ms=timeout_ms,
             use_get=use_get,
-        )
-    def set_environment_access_profile(
-        self,
-        request: SetEnvironmentAccessProfileRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> SetEnvironmentAccessProfileResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="SetEnvironmentAccessProfile",
-                service_name="codewire.v1.AccessProfileService",
-                input=SetEnvironmentAccessProfileRequest,
-                output=SetEnvironmentAccessProfileResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
-        )
-    def clear_environment_access_profile(
-        self,
-        request: ClearEnvironmentAccessProfileRequest,
-        *,
-        headers: Headers | Mapping[str, str] | None = None, 
-        timeout_ms: int | None = None,
-    ) -> ClearEnvironmentAccessProfileResponse:
-        return self.execute_unary(
-            request=request,
-            method=MethodInfo(
-                name="ClearEnvironmentAccessProfile",
-                service_name="codewire.v1.AccessProfileService",
-                input=ClearEnvironmentAccessProfileRequest,
-                output=ClearEnvironmentAccessProfileResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
-            ),
-            headers=headers,
-            timeout_ms=timeout_ms,
         )

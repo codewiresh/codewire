@@ -12,9 +12,18 @@ class ProjectSkillSource(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     PROJECT_SKILL_SOURCE_UNSPECIFIED: _ClassVar[ProjectSkillSource]
     PROJECT_SKILL_SOURCE_REPOSITORY: _ClassVar[ProjectSkillSource]
     PROJECT_SKILL_SOURCE_USER: _ClassVar[ProjectSkillSource]
+
+class ProjectStoragePlacement(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    PROJECT_STORAGE_PLACEMENT_UNSPECIFIED: _ClassVar[ProjectStoragePlacement]
+    PROJECT_STORAGE_PLACEMENT_LOCAL: _ClassVar[ProjectStoragePlacement]
+    PROJECT_STORAGE_PLACEMENT_PLATFORM: _ClassVar[ProjectStoragePlacement]
 PROJECT_SKILL_SOURCE_UNSPECIFIED: ProjectSkillSource
 PROJECT_SKILL_SOURCE_REPOSITORY: ProjectSkillSource
 PROJECT_SKILL_SOURCE_USER: ProjectSkillSource
+PROJECT_STORAGE_PLACEMENT_UNSPECIFIED: ProjectStoragePlacement
+PROJECT_STORAGE_PLACEMENT_LOCAL: ProjectStoragePlacement
+PROJECT_STORAGE_PLACEMENT_PLATFORM: ProjectStoragePlacement
 
 class ScaffoldPlaceholder(_message.Message):
     __slots__ = ("note",)
@@ -23,16 +32,18 @@ class ScaffoldPlaceholder(_message.Message):
     def __init__(self, note: _Optional[str] = ...) -> None: ...
 
 class RepositorySpec(_message.Message):
-    __slots__ = ("source", "branch", "destination", "revision")
+    __slots__ = ("source", "branch", "destination", "revision", "known_hosts")
     SOURCE_FIELD_NUMBER: _ClassVar[int]
     BRANCH_FIELD_NUMBER: _ClassVar[int]
     DESTINATION_FIELD_NUMBER: _ClassVar[int]
     REVISION_FIELD_NUMBER: _ClassVar[int]
+    KNOWN_HOSTS_FIELD_NUMBER: _ClassVar[int]
     source: str
     branch: str
     destination: str
     revision: str
-    def __init__(self, source: _Optional[str] = ..., branch: _Optional[str] = ..., destination: _Optional[str] = ..., revision: _Optional[str] = ...) -> None: ...
+    known_hosts: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, source: _Optional[str] = ..., branch: _Optional[str] = ..., destination: _Optional[str] = ..., revision: _Optional[str] = ..., known_hosts: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class ApplicationPort(_message.Message):
     __slots__ = ("port", "label", "access")
@@ -79,17 +90,17 @@ class ProjectSecretBindings(_message.Message):
     USER_FIELD_NUMBER: _ClassVar[int]
     project: str
     organization: bool
-    user: bool
-    def __init__(self, project: _Optional[str] = ..., organization: _Optional[bool] = ..., user: _Optional[bool] = ...) -> None: ...
+    user: ProjectStoragePlacement
+    def __init__(self, project: _Optional[str] = ..., organization: _Optional[bool] = ..., user: _Optional[_Union[ProjectStoragePlacement, str]] = ...) -> None: ...
 
-class ProjectAccessBinding(_message.Message):
+class ProjectCredentialBinding(_message.Message):
     __slots__ = ("profile",)
     PROFILE_FIELD_NUMBER: _ClassVar[int]
     profile: str
     def __init__(self, profile: _Optional[str] = ...) -> None: ...
 
 class ProjectSpec(_message.Message):
-    __slots__ = ("schema_version", "preset", "image", "repositories", "working_directory", "install_command", "startup_script", "environment", "agents", "skills", "application_ports", "resources", "secrets", "access")
+    __slots__ = ("schema_version", "preset", "image", "repositories", "working_directory", "install_command", "startup_script", "environment", "agents", "skills", "application_ports", "resources", "secrets", "credentials")
     class EnvironmentEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -110,7 +121,7 @@ class ProjectSpec(_message.Message):
     APPLICATION_PORTS_FIELD_NUMBER: _ClassVar[int]
     RESOURCES_FIELD_NUMBER: _ClassVar[int]
     SECRETS_FIELD_NUMBER: _ClassVar[int]
-    ACCESS_FIELD_NUMBER: _ClassVar[int]
+    CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
     schema_version: int
     preset: str
     image: str
@@ -124,5 +135,5 @@ class ProjectSpec(_message.Message):
     application_ports: _containers.RepeatedCompositeFieldContainer[ApplicationPort]
     resources: ProjectResources
     secrets: ProjectSecretBindings
-    access: ProjectAccessBinding
-    def __init__(self, schema_version: _Optional[int] = ..., preset: _Optional[str] = ..., image: _Optional[str] = ..., repositories: _Optional[_Iterable[_Union[RepositorySpec, _Mapping]]] = ..., working_directory: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., environment: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Union[ProjectAgents, _Mapping]] = ..., skills: _Optional[_Iterable[_Union[ProjectSkillSelection, _Mapping]]] = ..., application_ports: _Optional[_Iterable[_Union[ApplicationPort, _Mapping]]] = ..., resources: _Optional[_Union[ProjectResources, _Mapping]] = ..., secrets: _Optional[_Union[ProjectSecretBindings, _Mapping]] = ..., access: _Optional[_Union[ProjectAccessBinding, _Mapping]] = ...) -> None: ...
+    credentials: ProjectCredentialBinding
+    def __init__(self, schema_version: _Optional[int] = ..., preset: _Optional[str] = ..., image: _Optional[str] = ..., repositories: _Optional[_Iterable[_Union[RepositorySpec, _Mapping]]] = ..., working_directory: _Optional[str] = ..., install_command: _Optional[str] = ..., startup_script: _Optional[str] = ..., environment: _Optional[_Mapping[str, str]] = ..., agents: _Optional[_Union[ProjectAgents, _Mapping]] = ..., skills: _Optional[_Iterable[_Union[ProjectSkillSelection, _Mapping]]] = ..., application_ports: _Optional[_Iterable[_Union[ApplicationPort, _Mapping]]] = ..., resources: _Optional[_Union[ProjectResources, _Mapping]] = ..., secrets: _Optional[_Union[ProjectSecretBindings, _Mapping]] = ..., credentials: _Optional[_Union[ProjectCredentialBinding, _Mapping]] = ...) -> None: ...

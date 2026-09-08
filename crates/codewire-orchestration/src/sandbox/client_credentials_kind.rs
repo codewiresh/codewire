@@ -47,13 +47,17 @@ async fn credential_bootstrap_kind() -> Result<()> {
         "system:serviceaccounts:codewire-e2e".into(),
     ]);
     let orchestration = SandboxClient::new(Client::try_from(restricted)?, NAMESPACE);
-    let opts = TemplateOpts {
-        environment_id: uuid::Uuid::new_v4().to_string(),
-        organization_id: "kind-credential-bootstrap-synthetic".into(),
-        operation_generation: 7,
-        credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NAMESPACE)),
-        ..Default::default()
-    };
+    let opts =
+        TemplateOpts {
+            environment_id: uuid::Uuid::new_v4().to_string(),
+            organization_id: "kind-credential-bootstrap-synthetic".into(),
+            operation_generation: 7,
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+            projection_selection_sha256: Some([0xab; 32]),
+            credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NAMESPACE)),
+            ..Default::default()
+        };
     let result = prove_bootstrap(&admin, &orchestration, &opts).await;
     // Cleanup uses only exact random names owned by this test, including a
     // finalizer used below to observe DELETE admission after the issuer object

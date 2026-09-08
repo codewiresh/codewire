@@ -9,13 +9,14 @@ use axum::{Router, body::Body};
 use base64::Engine as _;
 use codewire_access::{
     AccessProfile, AccessProfileName, CapabilitySlot, CredentialId, EnvironmentAccessBinding,
-    EnvironmentId, GrantContext, Owner, OwnerId, Placement, builtin_provider_catalog,
+    EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId, builtin_provider_catalog,
 };
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator,
 };
 use codewire_credential_broker::platform::{PlatformRuntimeAuthority, PlatformRuntimeError};
 use codewire_platform_credentials::PlatformAccessProfileStore;
+use codewire_protected_store::secret_envelope::TestKekProvider;
 use codewire_server_core::pod_identity::PodIdentityPurpose;
 use http::{Request, Response, StatusCode};
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
@@ -47,7 +48,7 @@ const SANDBOX_UID: &str = "9a784b09-4c0b-4af7-bc88-275d8f78d5f0";
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const TOKEN_REVIEW_PATH: &str = "/apis/authentication.k8s.io/v1/tokenreviews";
 
-fn scope() -> Scope {
+pub(crate) fn scope() -> Scope {
     Scope {
         environment_id: ENVIRONMENT.into(),
         creator: "synthetic-creator".into(),
@@ -59,9 +60,11 @@ fn scope() -> Scope {
         pod_name: WORKSPACE.into(),
         member_id: "synthetic-membership".into(),
         member_role: "member".into(),
-        profile_id: Uuid::new_v4().to_string(),
-        profile_revision: 1,
-        confirmed_by: "synthetic-creator".into(),
+        profile_id: Some(Uuid::new_v4().to_string()),
+        profile_revision: Some(1),
+        confirmed_by: Some("synthetic-creator".into()),
+        profile_user: Some("synthetic-creator".into()),
+        profile_organization: None,
     }
 }
 
@@ -306,8 +309,11 @@ async fn closed_pool() -> sqlx::PgPool {
 #[tokio::test]
 async fn malformed_private_metadata_never_reaches_kubernetes_or_database() {
     let fixture = KubeFixture::new();
-    let authenticator =
-        KubernetesPlatformBridgeAuthenticator::new(fixture.client(), closed_pool().await);
+    let authenticator = KubernetesPlatformBridgeAuthenticator::new(
+        fixture.client(),
+        closed_pool().await,
+        Arc::new(TestKekProvider),
+    );
     for fault in 0..9 {
         let mut metadata = headers(unix_now().unwrap() + 600);
         match fault {
@@ -366,8 +372,11 @@ async fn malformed_private_metadata_never_reaches_kubernetes_or_database() {
 #[tokio::test]
 async fn real_kube_client_reviews_both_fixed_purposes_before_any_domain_lookup() {
     let fixture = KubeFixture::new();
-    let authenticator =
-        KubernetesPlatformBridgeAuthenticator::new(fixture.client(), closed_pool().await);
+    let authenticator = KubernetesPlatformBridgeAuthenticator::new(
+        fixture.client(),
+        closed_pool().await,
+        Arc::new(TestKekProvider),
+    );
     assert!(matches!(
         authenticator
             .authenticate(&headers(unix_now().unwrap() + 600))
@@ -403,8 +412,11 @@ async fn real_kube_client_reviews_both_fixed_purposes_before_any_domain_lookup()
 async fn whole_authentication_deadline_bounds_pending_token_review() -> Result<()> {
     let fixture = KubeFixture::new();
     fixture.gate.arm(TOKEN_REVIEW_PATH.into());
-    let authenticator =
-        KubernetesPlatformBridgeAuthenticator::new(fixture.client(), closed_pool().await);
+    let authenticator = KubernetesPlatformBridgeAuthenticator::new(
+        fixture.client(),
+        closed_pool().await,
+        Arc::new(TestKekProvider),
+    );
     let metadata = headers(unix_now()? + 600);
     let task = tokio::spawn(async move { authenticator.authenticate(&metadata).await });
     fixture.gate.wait().await?;

@@ -9,7 +9,7 @@ description = "Owner-fenced platform credential metadata and encrypted material 
 
 [dependencies]
 codewire-access = { workspace = true }
-codewire-protected-store = { workspace = true, features = ["platform"] }
+codewire-protected-store = { workspace = true, features = ["platform", "ssh-material"] }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

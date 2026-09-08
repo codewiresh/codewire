@@ -2,9 +2,24 @@
 
 //! Bounded workload-secret metadata resolution and input validation.
 //!
-//! Selecting protected storage is metadata-only. This crate deliberately has
-//! no material-delivery format: child-visible values require a separate,
-//! explicit per-process projection.
+//! Storage inventory is metadata-only. A selected source can additionally
+//! supply a bounded, transient environment projection to an authenticated
+//! launcher. Provider credentials do not use this delivery format.
+
+mod composition_plan;
+mod launch;
+#[cfg(unix)]
+pub mod launcher;
+
+pub use composition_plan::{ProjectionCompositionPlan, ProjectionSourceInventory};
+
+pub use launch::{
+    EnvironmentProjection, MAX_ENVIRONMENT_PROJECTION_BYTES, MAX_PROJECTION_LIFETIME_MS,
+    MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES, ProjectionContext, ProjectionContributor,
+    ProjectionError, ProjectionRecipient, compose_environment_projection,
+    seal_environment_projection, seal_environment_projection_fragment,
+    validate_projection_recipient,
+};
 
 use std::collections::BTreeMap;
 

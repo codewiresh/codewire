@@ -7,6 +7,7 @@
 mod config;
 #[cfg(test)]
 mod kind;
+mod ssh;
 #[cfg(test)]
 mod tests;
 
@@ -15,12 +16,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use codewire_access::{CredentialAuthKind, builtin_provider_catalog};
+use codewire_access::{HttpProvider, builtin_provider_catalog};
 use codewire_credential_broker::codex_enrollment::{CodexEnrollmentConfig, CodexEnrollmentOwner};
+use codewire_credential_broker::github_enrollment::{
+    GitHubEnrollmentConfig, GitHubEnrollmentOwner,
+};
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
-use codewire_credential_broker::{BrokerUpstreamTransport, OpenAiHttpsTransport};
+use codewire_credential_broker::{BrokerUpstreamTransport, ProviderHttpsTransport};
 use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformCredentialStore};
 use codewire_protected_store::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
 use codewire_protected_store::secret_envelope::{KekProvider, OpenBaoTransitProvider};
@@ -121,28 +125,39 @@ async fn run_connected(
         .authority_id()
         .await
         .map_err(|_| RuntimeError::OpenBao)?;
-    let upstream = OpenAiHttpsTransport::resolve(CredentialAuthKind::OAuth)
-        .await
-        .map_err(|_| RuntimeError::Provider)?;
-    let enrollment = enrollment_config(config.codex_executable, config.runtime_directory)?;
+    // The platform process serves many environments. Resolve the finite product
+    // destination families; each operation still requires its exact profile lease.
+    let upstream = ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
+        HttpProvider::OpenAiApiKey,
+        HttpProvider::CodexOAuth,
+        HttpProvider::AnthropicApiKey,
+        HttpProvider::GitHubOAuth,
+    ]))
+    .await
+    .map_err(|_| RuntimeError::Provider)?;
+    let enrollment = enrollment_config(config.codex_executable, config.runtime_directory.clone())?;
+    let github = github_enrollment_config(config.github_executable, &config.runtime_directory)?;
     let store = Arc::new(PlatformCredentialStore::new(
         pool.clone(),
-        provider,
+        provider.clone(),
         builtin_provider_catalog(),
     ));
     let bridge = PlatformCredentialBridgeService::new(
         Arc::new(KubernetesPlatformBridgeAuthenticator::new(
             client,
             pool.clone(),
+            provider.clone(),
         )),
         store.clone(),
         PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
         upstream,
     );
+    let bridge = ssh::configure(bridge, &config.runtime_directory)?;
     let mutation = Arc::new(CredentialMutationOwner::new(
         pool.clone(),
         store,
         CodexEnrollmentOwner::new(enrollment),
+        GitHubEnrollmentOwner::new(github),
     ));
     serve_owned(
         Listeners {
@@ -150,12 +165,37 @@ async fn run_connected(
             private: config.private_listen,
             tls: config.private_tls,
         },
+        config.public_origin,
         pool,
+        provider,
         mutation,
         bridge,
         shutdown,
     )
     .await
+}
+
+fn github_enrollment_config(
+    executable: std::path::PathBuf,
+    runtime_directory: &std::path::Path,
+) -> Result<GitHubEnrollmentConfig, RuntimeError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let private = runtime_directory.join("github-enrollment");
+        match std::fs::DirBuilder::new().mode(0o700).create(&private) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(RuntimeError::Enrollment),
+        }
+        GitHubEnrollmentConfig::new(executable, private, "/usr/bin:/bin".into())
+            .map_err(|_| RuntimeError::Enrollment)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (executable, runtime_directory);
+        Err(RuntimeError::Enrollment)
+    }
 }
 
 fn enrollment_config(
@@ -193,7 +233,9 @@ struct Listeners {
 // these exact listeners/owners without adding production fixture switches.
 async fn serve_owned<A, U>(
     listeners: Listeners,
+    public_origin: http::HeaderValue,
     pool: PgPool,
+    provider: Arc<dyn KekProvider>,
     mutation: Arc<CredentialMutationOwner>,
     bridge: PlatformCredentialBridgeService<A, U>,
     shutdown: impl Future<Output = Result<(), RuntimeError>> + Send,
@@ -219,7 +261,9 @@ where
             .map_err(|_| RuntimeError::Listener)?;
         let incoming =
             TlsIncoming::new(private, listeners.tls.clone()).map_err(|_| RuntimeError::Tls)?;
+        let delegation = crate::delegation::router(pool.clone(), provider, bridge.clone());
         let app = AppBuilder::new("codewire-credential-service")
+            .with_routes(delegation)
             .with_health_and_db_probe(pool.clone(), {
                 let ready = ready.clone();
                 let tls = listeners.tls.clone();
@@ -238,7 +282,7 @@ where
             })
             .with_connect_routes_auth(
                 mutation.router(),
-                ConnectAuthLayer::oauth_bearer_only(AuthState { pool }),
+                ConnectAuthLayer::credential_mutation(AuthState { pool }, public_origin),
             )
             .into_router();
         let grpc = bridge.clone().into_server();
@@ -275,15 +319,18 @@ where
     mutation.start_shutdown();
     bridge.start_shutdown();
     stop.cancel();
-    let (mutation_result, (), ()) = tokio::join!(mutation.shutdown(), bridge.shutdown(), async {
-        if tokio::time::timeout(TRANSPORT_GRACE, async {
-            while servers.join_next().await.is_some() {}
-        })
-        .await
-        .is_err()
-        {
-            servers.shutdown().await;
-        }
-    });
-    result.and(mutation_result.map_err(|_| RuntimeError::Cleanup))
+    let (mutation_result, bridge_result, ()) =
+        tokio::join!(mutation.shutdown(), bridge.shutdown(), async {
+            if tokio::time::timeout(TRANSPORT_GRACE, async {
+                while servers.join_next().await.is_some() {}
+            })
+            .await
+            .is_err()
+            {
+                servers.shutdown().await;
+            }
+        });
+    result
+        .and(mutation_result.map_err(|_| RuntimeError::Cleanup))
+        .and(bridge_result.map_err(|_| RuntimeError::Cleanup))
 }

@@ -15,6 +15,7 @@ use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Notify, watch};
 use tokio::time::timeout;
 use tokio_stream::{Stream, StreamExt};
+use tokio_util::task::AbortOnDropHandle;
 use tonic::transport::Server;
 use tonic::transport::server::Connected;
 
@@ -26,33 +27,33 @@ type DaemonGrpcService = DaemonServiceServer<DaemonServiceImpl>;
 const GRPC_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const GRPC_FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
-struct TransportShutdown {
+pub(super) struct TransportShutdown {
     triggered: AtomicBool,
     notify: Arc<Notify>,
 }
 
 impl TransportShutdown {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             triggered: AtomicBool::new(false),
             notify: Arc::new(Notify::new()),
         })
     }
 
-    fn trigger(&self) {
+    pub(super) fn trigger(&self) {
         self.triggered.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
 }
 
-struct ShutdownIo<IO> {
+pub(super) struct ShutdownIo<IO> {
     inner: IO,
     shutdown: Arc<TransportShutdown>,
     notified: Pin<Box<OwnedNotified>>,
 }
 
 impl<IO> ShutdownIo<IO> {
-    fn new(inner: IO, shutdown: Arc<TransportShutdown>) -> Self {
+    pub(super) fn new(inner: IO, shutdown: Arc<TransportShutdown>) -> Self {
         let notified = Box::pin(shutdown.notify.clone().notified_owned());
         Self {
             inner,
@@ -177,35 +178,91 @@ where
     IE: Into<Box<dyn Error + Send + Sync>>,
     F: Future<Output = ()> + Send + 'static,
 {
+    let selected_ssh = config
+        .managed_credential_clients
+        .contains(codewire_access::ManagedCredentialClient::Ssh);
+    if selected_ssh && (config.credential_bridge.is_none() || config.launch_projection.is_none()) {
+        anyhow::bail!("selected SSH ingress has no launch authority");
+    }
+    let startup_config = config.clone();
     let implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
+    let bridge_owner = implementation.credential_bridge();
+    // Also cancel admission/registered work if this entire server future is
+    // dropped. Normal exits below still await the actual owner drain.
+    let _bridge_cancellation = bridge_owner.cancel_on_drop();
     let ingress = implementation
         .credential_bridge()
-        .prepare_ingress()
+        .prepare_ingress(selected_ssh)
         .context("prepare credential bridge guest ingress")?;
+    let startup = crate::execution::StartupProjectionIngress::prepare(
+        &startup_config,
+        implementation.credential_bridge(),
+    )
+    .context("prepare bootstrap environment launch ingress")?;
+    drop(startup_config);
     let transport_shutdown = TransportShutdown::new();
     let incoming_shutdown = Arc::clone(&transport_shutdown);
     let incoming = incoming
         .map(move |result| result.map(|io| ShutdownIo::new(io, Arc::clone(&incoming_shutdown))));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let observer_tx = shutdown_tx.clone();
-    let shutdown_observer = tokio::spawn(async move {
+    let shutdown_observer = AbortOnDropHandle::new(tokio::spawn(async move {
         shutdown.await;
         let _ = observer_tx.send(true);
-    });
+    }));
     let observed_shutdown = wait_for_shutdown(shutdown_rx.clone());
     let serving = Server::builder()
         .add_service(configure_grpc_service(implementation))
         .serve_with_incoming_shutdown(incoming, observed_shutdown);
     let mut shutdown_started = shutdown_rx.clone();
     let ingress_shutdown = shutdown_rx.clone();
+    let startup_shutdown = shutdown_rx.clone();
+    let combined_shutdown = shutdown_rx.clone();
+    let combined_shutdown_tx = shutdown_tx.clone();
     let ingress_serving = async move {
-        match ingress {
-            Some(ingress) => ingress
-                .serve(wait_for_shutdown(ingress_shutdown))
-                .await
-                .context("serve credential bridge guest ingress"),
-            None => {
-                wait_for_shutdown(ingress_shutdown).await;
+        let http_serving = async move {
+            match ingress {
+                Some(ingress) => ingress
+                    .serve(wait_for_shutdown(ingress_shutdown))
+                    .await
+                    .context("serve credential bridge guest ingress"),
+                None => {
+                    wait_for_shutdown(ingress_shutdown).await;
+                    Ok(())
+                }
+            }
+        };
+        let startup_serving = async move {
+            if let Some(startup) = startup {
+                startup
+                    .serve(wait_for_shutdown(startup_shutdown.clone()))
+                    .await
+                    .context("serve bootstrap environment launch ingress")?;
+            }
+            // Successful bootstrap Finish is expected; it must not stop the
+            // long-lived daemon or its provider HTTP ingress.
+            wait_for_shutdown(startup_shutdown).await;
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::pin!(http_serving);
+        tokio::pin!(startup_serving);
+        tokio::select! {
+            result = &mut http_serving => {
+                let expected = *combined_shutdown.borrow();
+                let _ = combined_shutdown_tx.send(true);
+                timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut startup_serving).await
+                    .context("drain bootstrap environment launch ingress timed out")??;
+                result?;
+                if !expected { return Err(anyhow::anyhow!("credential ingress stopped unexpectedly")); }
+                Ok(())
+            }
+            result = &mut startup_serving => {
+                let expected = *combined_shutdown.borrow();
+                let _ = combined_shutdown_tx.send(true);
+                timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut http_serving).await
+                    .context("stop credential ingress after bootstrap shutdown timed out")??;
+                result?;
+                if !expected { return Err(anyhow::anyhow!("bootstrap environment launch ingress stopped unexpectedly")); }
                 Ok(())
             }
         }
@@ -213,9 +270,10 @@ where
     tokio::pin!(serving);
     tokio::pin!(ingress_serving);
 
-    let result = tokio::select! {
+    let result = async { tokio::select! {
         result = &mut serving => {
             let _ = shutdown_tx.send(true);
+            bridge_owner.shutdown().await;
             timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut ingress_serving)
                 .await
                 .context("stop credential bridge guest ingress timed out")??;
@@ -224,6 +282,7 @@ where
         ingress_result = &mut ingress_serving => {
             let shutting_down = *shutdown_rx.borrow();
             let _ = shutdown_tx.send(true);
+            bridge_owner.shutdown().await;
             match timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut serving).await {
                 Ok(result) => result.context("serve workspace daemon gRPC transport")?,
                 Err(error) => {
@@ -243,6 +302,7 @@ where
             }
         }
         _ = shutdown_started.changed() => {
+            bridge_owner.shutdown().await;
             match timeout(GRPC_GRACEFUL_SHUTDOWN_TIMEOUT, &mut serving).await {
                 Ok(result) => {
                     result.context("serve workspace daemon gRPC transport")?;
@@ -261,7 +321,10 @@ where
                 .context("stop credential bridge guest ingress timed out")??;
             Ok(())
         }
-    };
+    } }.await;
+    // `?` inside a branch must not bypass the owner finalizer. This includes
+    // prepared hosted Open waiters as well as both local/hosted active epochs.
+    bridge_owner.shutdown().await;
     shutdown_observer.abort();
     let _ = shutdown_observer.await;
     result

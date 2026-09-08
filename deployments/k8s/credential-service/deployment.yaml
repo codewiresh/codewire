@@ -63,6 +63,8 @@ spec:
                   key: url
             - name: CREDENTIAL_HTTP_LISTEN_ADDR
               value: "0.0.0.0:8086"
+            - name: CREDENTIAL_PUBLIC_ORIGIN
+              value: https://codewire.sh
             - name: CREDENTIAL_BROKER_TLS_LISTEN_ADDR
               value: "0.0.0.0:9443"
             - name: CREDENTIAL_BROKER_TLS_CERT_FILE
@@ -71,6 +73,8 @@ spec:
               value: /run/codewire-credential-tls/tls.key
             - name: CREDENTIAL_CODEX_EXECUTABLE
               value: /usr/local/bin/codex
+            - name: CREDENTIAL_GITHUB_EXECUTABLE
+              value: /usr/local/bin/gh
             - name: CREDENTIAL_RUNTIME_DIR
               value: /run/codewire-credentials
             - name: CREDENTIAL_BAO_ADDR

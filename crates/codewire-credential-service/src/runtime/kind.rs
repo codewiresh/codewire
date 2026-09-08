@@ -6,6 +6,7 @@
 //! Dev acceptance, and provider counters do not prove native auth-cache rereads
 //! or Kubernetes projected-token rotation.
 
+mod authentication;
 mod config;
 mod enrollment;
 mod provider;
@@ -60,34 +61,48 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
         config::assert_restricted_login(&pool).await?;
         let provider = provider::SyntheticProvider::new();
         // Keep the private tmpfs fixture alive through both owner drains.
-        let (fixture, enrollment) = enrollment::Fixture::create(&config.runtime_directory)?;
+        let (fixture, enrollment, github) = enrollment::Fixture::create(&config.runtime_directory)?;
         let store = Arc::new(PlatformCredentialStore::new(
             pool.clone(),
             Arc::new(TestKekProvider),
             builtin_provider_catalog(),
         ));
+        let authenticator = KubernetesPlatformBridgeAuthenticator::new(
+            client,
+            pool.clone(),
+            Arc::new(TestKekProvider),
+        );
         let bridge = PlatformCredentialBridgeService::new(
-            Arc::new(KubernetesPlatformBridgeAuthenticator::new(
-                client,
-                pool.clone(),
-            )),
+            Arc::new(authentication::KindBridgeAuthenticator::new(authenticator)),
             store.clone(),
             PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
             provider.clone(),
         );
+        // Use the production SSH owner and packaged tools; only provider login,
+        // HTTP and envelope authority are synthetic in this fixture.
+        let bridge = ssh::configure(bridge, &config.runtime_directory)?;
         let mutation = Arc::new(CredentialMutationOwner::new(
             pool.clone(),
             store,
             CodexEnrollmentOwner::new(enrollment),
+            GitHubEnrollmentOwner::new(github),
         ));
         tracing::info!(target: TARGET, event = "fixture_starting", "fixture_starting");
-        let result = serve_owned(config.listeners, pool.clone(), mutation, bridge, async {
-            let signal = tokio::select! {
-                value = terminate.recv() => value,
-                value = interrupt.recv() => value,
-            };
-            signal.ok_or(RuntimeError::Signal)
-        })
+        let result = serve_owned(
+            config.listeners,
+            config.public_origin,
+            pool.clone(),
+            Arc::new(TestKekProvider),
+            mutation,
+            bridge,
+            async {
+                let signal = tokio::select! {
+                    value = terminate.recv() => value,
+                    value = interrupt.recv() => value,
+                };
+                signal.ok_or(RuntimeError::Signal)
+            },
+        )
         .await;
         provider.log_totals();
         match result {

@@ -10,11 +10,12 @@ use codewire_proto::codewire::{
         CreateEnvironmentRequest, CreatePortRequest, DeleteEnvironmentRequest, DeletePortRequest,
         Environment, EnvironmentResizeExecutionMode, EnvironmentResizeOperation,
         EnvironmentResizeOperationState, EnvironmentResizePlan, EnvironmentResources,
-        EnvironmentServiceClient, EnvironmentState, GetEnvironmentRequest,
-        GetEnvironmentResizeOperationRequest, GetEnvironmentTrustReportRequest,
-        ListEnvironmentsRequest, ListPortsRequest, PlanEnvironmentResizeRequest, Port, PortAccess,
-        PortServiceClient, ResizeEnvironmentRequest, StartEnvironmentRequest,
-        StopEnvironmentRequest,
+        EnvironmentServiceClient, EnvironmentSourcesUpdateOutcome, EnvironmentState,
+        GetEnvironmentRequest, GetEnvironmentResizeOperationRequest,
+        GetEnvironmentTrustReportRequest, ListEnvironmentsRequest, ListPortsRequest,
+        PlanEnvironmentResizeRequest, Port, PortAccess, PortServiceClient,
+        ResizeEnvironmentRequest, StartEnvironmentRequest, StopEnvironmentRequest,
+        UpdateEnvironmentSourcesRequest,
     },
 };
 use connectrpc::{ConnectError, client::ClientConfig};
@@ -36,12 +37,14 @@ pub(crate) struct EnvironmentCreateOptions {
     pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) confidential_available: bool,
     pub(crate) confidential_price: String,
+    pub(crate) sources: crate::view::EnvironmentSourceFieldsView,
 }
 
 fn transport(state: &AppState, cookie: HeaderValue) -> BrowserTransport {
     BrowserTransport {
         http: state.http.clone(),
         cookie: Some(cookie),
+        origin: None,
     }
 }
 
@@ -250,11 +253,12 @@ pub(crate) async fn create_options(
         agents: agent_catalog(),
         confidential_available,
         confidential_price,
+        sources: crate::environment_sources::options(state, cookie, org_id).await,
     })
 }
 
 fn project_spec_uses_protected_secret_bindings(spec: &codewire_project::ProjectSpec) -> bool {
-    !spec.secrets.is_empty()
+    !spec.secrets.is_empty() || spec.credentials.is_some()
 }
 
 pub(crate) async fn create_environment(
@@ -262,15 +266,53 @@ pub(crate) async fn create_environment(
     cookie: HeaderValue,
     request: CreateEnvironmentRequest,
 ) -> Result<String, ConnectError> {
+    let expected_org = request.org_id.clone();
+    let expected_selection =
+        crate::environment_source_forms::create_selection(&request).map_err(|()| {
+            ConnectError::invalid_argument(crate::environment_source_forms::INVALID_SELECTION)
+        })?;
     let response = environment_client(state, cookie)
         .create_environment(request)
         .await?
         .into_owned();
-    response
+    let environment = response
         .environment
         .into_option()
-        .map(|environment| environment.id)
-        .ok_or_else(|| ConnectError::internal("environment creation omitted its environment"))
+        .ok_or_else(|| ConnectError::internal("environment creation omitted its environment"))?;
+    verify_created_selection(&environment, &expected_org, &expected_selection)?;
+    Ok(environment.id)
+}
+
+fn verify_created_selection(
+    environment: &Environment,
+    org_id: &str,
+    selection: &codewire_proto::codewire::v1::EnvironmentSourceSelection,
+) -> Result<(), ConnectError> {
+    if crate::environment_source_forms::exact_id(&environment.id).is_err()
+        || environment.org_id != org_id
+        || environment.operation_generation != 0
+        || !same_selection(environment.source_selection.as_option(), Some(selection))
+    {
+        return Err(ConnectError::internal(
+            "environment creation omitted its exact source selection",
+        ));
+    }
+    Ok(())
+}
+
+fn same_selection(
+    actual: Option<&codewire_proto::codewire::v1::EnvironmentSourceSelection>,
+    expected: Option<&codewire_proto::codewire::v1::EnvironmentSourceSelection>,
+) -> bool {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) => {
+            actual.secrets.as_option().cloned().unwrap_or_default()
+                == expected.secrets.as_option().cloned().unwrap_or_default()
+                && actual.credentials == expected.credentials
+                && actual.profile_revision == expected.profile_revision
+        }
+        _ => false,
+    }
 }
 
 pub(crate) async fn start_environment(
@@ -287,6 +329,53 @@ pub(crate) async fn start_environment(
         })
         .await?;
     Ok(())
+}
+
+pub(crate) async fn update_environment_sources(
+    state: &AppState,
+    cookie: HeaderValue,
+    request: UpdateEnvironmentSourcesRequest,
+) -> Result<&'static str, ConnectError> {
+    let expected_environment = request.environment_id.clone();
+    let expected_generation = request.expected_operation_generation;
+    let expected_selection = request.replacement.clone();
+    let response = environment_client(state, cookie)
+        .update_environment_sources(request)
+        .await?
+        .into_owned();
+    source_update_outcome(
+        &response,
+        &expected_environment,
+        expected_generation,
+        expected_selection.as_option(),
+    )
+}
+
+fn source_update_outcome(
+    response: &codewire_proto::codewire::v1::UpdateEnvironmentSourcesResponse,
+    expected_environment: &str,
+    expected_generation: u64,
+    expected_selection: Option<&codewire_proto::codewire::v1::EnvironmentSourceSelection>,
+) -> Result<&'static str, ConnectError> {
+    if response.environment_id != expected_environment
+        || response.operation_generation != expected_generation
+        || expected_generation == 0
+        || !same_selection(response.selection.as_option(), expected_selection)
+    {
+        return Err(ConnectError::internal(
+            "source update omitted its exact environment result",
+        ));
+    }
+    match response.outcome.as_known() {
+        Some(EnvironmentSourcesUpdateOutcome::Unchanged) => Ok("environment-sources-unchanged"),
+        Some(EnvironmentSourcesUpdateOutcome::Stored) => Ok("environment-sources-stored"),
+        Some(EnvironmentSourcesUpdateOutcome::RestartRequired) => {
+            Ok("environment-sources-restarting")
+        }
+        _ => Err(ConnectError::internal(
+            "source update has an unknown outcome",
+        )),
+    }
 }
 
 pub(crate) async fn stop_environment(
@@ -505,6 +594,7 @@ pub(crate) async fn delete_port(
 }
 
 fn environment_row(environment: Environment) -> EnvironmentRow {
+    let sources = source_summary(&environment);
     let state = state_name(environment.state.to_i32());
     let display_name = if environment.name.trim().is_empty() {
         environment.id.chars().take(8).collect()
@@ -557,7 +647,57 @@ fn environment_row(environment: Environment) -> EnvironmentRow {
             environment.id
         ),
         ports: environment.ports.into_iter().map(port_row).collect(),
+        sources,
     }
+}
+
+fn source_summary(environment: &Environment) -> Option<crate::view::EnvironmentSourcesSummaryView> {
+    use codewire_proto::codewire::v1::ProjectStoragePlacement;
+    let selection = environment.source_selection.as_option()?;
+    crate::environment_source_forms::validate_selection(selection).ok()?;
+    if environment.operation_generation == 0 || environment.operation_generation > i64::MAX as u64 {
+        return None;
+    }
+    let secrets = selection.secrets.as_option().cloned().unwrap_or_default();
+    let personal = match secrets.user.and_then(|placement| placement.as_known()) {
+        Some(ProjectStoragePlacement::Platform) => true,
+        None if secrets.user.is_none() => false,
+        _ => return None,
+    };
+    let profile = selection
+        .credentials
+        .as_option()
+        .map(|profile| profile.profile.clone())
+        .unwrap_or_default();
+    for reference in [&secrets.project, &profile]
+        .into_iter()
+        .filter(|reference| !reference.is_empty())
+    {
+        if !reference.starts_with("platform:id:")
+            || codewire_project::StorageReference::project(reference).is_err()
+        {
+            return None;
+        }
+    }
+    if profile.is_empty() != selection.profile_revision.is_none()
+        || selection
+            .profile_revision
+            .is_some_and(|revision| revision == 0)
+    {
+        return None;
+    }
+    Some(crate::view::EnvironmentSourcesSummaryView {
+        selection: selection.clone(),
+        operation_generation: environment.operation_generation,
+        project: secrets.project,
+        organization: secrets.organization,
+        personal,
+        profile,
+        profile_revision: selection
+            .profile_revision
+            .map(|revision| revision.to_string())
+            .unwrap_or_default(),
+    })
 }
 
 fn port_row(port: Port) -> EnvironmentPortRow {
@@ -670,6 +810,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_summary_displays_only_exact_metadata_and_never_infers_missing_selection() {
+        use codewire_proto::codewire::v1::{
+            EnvironmentSourceSelection, ProjectCredentialBinding, ProjectSecretBindings,
+            ProjectStoragePlacement,
+        };
+        assert!(source_summary(&Environment::default()).is_none());
+        let reference = "platform:id:6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let mut environment = Environment {
+            operation_generation: 9,
+            source_selection: Some(EnvironmentSourceSelection {
+                secrets: Some(ProjectSecretBindings {
+                    project: reference.into(),
+                    organization: true,
+                    user: Some(ProjectStoragePlacement::Platform.into()),
+                    ..Default::default()
+                })
+                .into(),
+                credentials: Some(ProjectCredentialBinding {
+                    profile: reference.into(),
+                    ..Default::default()
+                })
+                .into(),
+                profile_revision: Some(7),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        let view = source_summary(&environment).unwrap();
+        assert_eq!(view.operation_generation, 9);
+        assert_eq!(view.profile_revision, "7");
+        assert_eq!(view.project, reference);
+        assert!(view.personal && view.organization);
+        environment
+            .source_selection
+            .as_option_mut()
+            .unwrap()
+            .profile_revision = None;
+        assert!(source_summary(&environment).is_none());
+        environment
+            .source_selection
+            .as_option_mut()
+            .unwrap()
+            .profile_revision = Some(7);
+        environment
+            .source_selection
+            .as_option_mut()
+            .unwrap()
+            .secrets
+            .as_option_mut()
+            .unwrap()
+            .user = Some(ProjectStoragePlacement::Local.into());
+        assert!(source_summary(&environment).is_none());
+    }
+
+    #[test]
     fn agent_catalog_contains_only_selectable_tools() {
         let catalog = agent_catalog();
         assert_eq!(
@@ -700,7 +896,7 @@ mod tests {
                 ..Default::default()
             },
             codewire_project::SecretBindings {
-                user: true,
+                user: Some(codewire_project::StoragePlacement::Platform),
                 ..Default::default()
             },
         ];
@@ -715,6 +911,82 @@ mod tests {
         assert!(!project_spec_uses_protected_secret_bindings(
             &codewire_project::ProjectSpec::default()
         ));
+        assert!(project_spec_uses_protected_secret_bindings(
+            &codewire_project::ProjectSpec {
+                credentials: Some(codewire_project::CredentialBinding {
+                    profile: "platform:work".into()
+                }),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn create_response_requires_exact_admitted_sources_and_pre_lifecycle_generation() {
+        use codewire_proto::codewire::v1::{EnvironmentSourceSelection, ProjectSecretBindings};
+        let requested = EnvironmentSourceSelection {
+            secrets: Some(ProjectSecretBindings::default()).into(),
+            ..Default::default()
+        };
+        let mut response = Environment {
+            id: "6bf8d155-e84c-4fc5-b479-b17022fe41dd".into(),
+            org_id: "org".into(),
+            source_selection: Some(EnvironmentSourceSelection::default()).into(),
+            ..Default::default()
+        };
+        assert!(verify_created_selection(&response, "org", &requested).is_ok());
+        response.operation_generation = 1;
+        assert!(verify_created_selection(&response, "org", &requested).is_err());
+        response.operation_generation = 0;
+        assert!(verify_created_selection(&response, "other-org", &requested).is_err());
+        response.source_selection = None.into();
+        assert!(verify_created_selection(&response, "org", &requested).is_err());
+        let selected = crate::environment_source_forms::SourceSubmission::parse(
+            b"secret_project=6bf8d155-e84c-4fc5-b479-b17022fe41dd&credential_profile=6bf8d155-e84c-4fc5-b479-b17022fe41dd%407"
+        ).unwrap().selection;
+        response.source_selection = Some(selected.clone()).into();
+        assert!(verify_created_selection(&response, "org", &selected).is_ok());
+        response
+            .source_selection
+            .as_option_mut()
+            .unwrap()
+            .profile_revision = Some(8);
+        assert!(verify_created_selection(&response, "org", &selected).is_err());
+    }
+
+    #[test]
+    fn update_response_requires_exact_replacement_without_allocating_a_generation() {
+        use codewire_proto::codewire::v1::{
+            EnvironmentSourceSelection, ProjectSecretBindings, UpdateEnvironmentSourcesResponse,
+        };
+        let expected = EnvironmentSourceSelection {
+            secrets: Some(ProjectSecretBindings::default()).into(),
+            ..Default::default()
+        };
+        let mut response = UpdateEnvironmentSourcesResponse {
+            environment_id: "environment".into(),
+            operation_generation: 9,
+            selection: Some(EnvironmentSourceSelection::default()).into(),
+            ..Default::default()
+        };
+        for outcome in [
+            EnvironmentSourcesUpdateOutcome::Unchanged,
+            EnvironmentSourcesUpdateOutcome::Stored,
+            EnvironmentSourcesUpdateOutcome::RestartRequired,
+        ] {
+            response.outcome = outcome.into();
+            assert!(source_update_outcome(&response, "environment", 9, Some(&expected)).is_ok());
+        }
+        assert!(source_update_outcome(&response, "wrong-environment", 9, Some(&expected)).is_err());
+        assert!(source_update_outcome(&response, "environment", 10, Some(&expected)).is_err());
+        response.selection.as_option_mut().unwrap().secrets = Some(ProjectSecretBindings {
+            organization: true,
+            ..Default::default()
+        })
+        .into();
+        assert!(source_update_outcome(&response, "environment", 9, Some(&expected)).is_err());
+        response.selection = None.into();
+        assert!(source_update_outcome(&response, "environment", 9, Some(&expected)).is_err());
     }
 
     #[test]

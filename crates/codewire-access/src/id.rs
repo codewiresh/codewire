@@ -99,6 +99,14 @@ impl CapabilitySlot {
         Self::parse("github").expect("canonical GitHub capability slot")
     }
 
+    pub fn openai() -> Self {
+        Self::parse("openai").expect("canonical OpenAI capability slot")
+    }
+
+    pub fn anthropic() -> Self {
+        Self::parse("anthropic").expect("canonical Anthropic capability slot")
+    }
+
     pub fn git_ssh() -> Self {
         Self::parse("git_ssh").expect("canonical Git SSH capability slot")
     }

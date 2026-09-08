@@ -8,6 +8,9 @@ use std::path::PathBuf;
 
 use base64::Engine as _;
 use codewire_credential_broker::codex_enrollment::{CodexEnrollmentConfig, CodexEnrollmentOwner};
+use codewire_credential_broker::github_enrollment::{
+    GitHubEnrollmentConfig, GitHubEnrollmentOwner,
+};
 use codewire_server_core::auth::{
     AuthState, SESSION_COOKIE_NAME, hash_api_key, hash_oauth_token, hash_session_token,
 };
@@ -22,9 +25,14 @@ pub const CLIENT: &str = "mutation-client";
 pub const ACCESS: &str = "private-mutation-access-canary";
 pub const REFRESH: &str = "private-mutation-refresh-canary";
 pub const SESSION: &str = "private-mutation-session-canary";
+pub const API_KEY_MATERIAL: &str = "private-api-key-material-canary";
+pub const GITHUB_TOKEN: &str = "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const SERVICE: &str = "codewire.v1.CredentialMutationService";
 const SHELL: &str = include_str!(
     "../../../../codewire-credential-broker/src/codex_enrollment/tests/synthetic-codex.sh"
+);
+const GITHUB_SHELL: &str = include_str!(
+    "../../../../codewire-credential-broker/src/github_enrollment/tests/synthetic-gh.sh"
 );
 
 pub fn oauth(user: &str) -> String {
@@ -40,15 +48,31 @@ pub enum Auth {
     Alice,
     Bob,
     Cookie,
+    CookieWrongOrigin,
     ApiKey,
     Missing,
+}
+
+impl Auth {
+    pub fn denial_code(self) -> &'static str {
+        if matches!(self, Self::CookieWrongOrigin) {
+            "permission_denied"
+        } else {
+            "unauthenticated"
+        }
+    }
 }
 
 fn authenticate(request: reqwest::RequestBuilder, auth: Auth) -> reqwest::RequestBuilder {
     match auth {
         Auth::Alice => request.bearer_auth(oauth(ALICE)),
         Auth::Bob => request.bearer_auth(oauth(BOB)),
-        Auth::Cookie => request.header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}")),
+        Auth::Cookie => request
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}"))
+            .header("origin", "https://codewire.example"),
+        Auth::CookieWrongOrigin => request
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={SESSION}"))
+            .header("origin", "https://attacker.example"),
         Auth::ApiKey => request.bearer_auth(api_key()),
         Auth::Missing => request,
     }
@@ -60,6 +84,8 @@ pub fn blind(value: &Value) -> Result<()> {
         ACCESS,
         REFRESH,
         SESSION,
+        API_KEY_MATERIAL,
+        GITHUB_TOKEN,
         &oauth(ALICE),
         &oauth(BOB),
         &api_key(),
@@ -162,14 +188,55 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    async fn enrollment_response(&self, auth: Auth, name: &str) -> Result<Response> {
-        let body = serde_json::to_vec(&json!({"name": name}))?;
+    pub async fn update(
+        &self,
+        method: &str,
+        auth: Auth,
+        body: Value,
+    ) -> Result<(StatusCode, Value)> {
+        let request = self
+            .client
+            .post(format!("{}/{SERVICE}/{method}", self.url))
+            .header("connect-protocol-version", "1")
+            .json(&body);
+        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let status = response.status();
+        let value: Value = response.json().await?;
+        blind(&value)?;
+        Ok((status, value))
+    }
+
+    pub async fn ssh(&self, method: &str, auth: Auth, body: Value) -> Result<(StatusCode, Value)> {
+        let request = self
+            .client
+            .post(format!("{}/{SERVICE}/{method}", self.url))
+            .header("connect-protocol-version", "1")
+            .json(&body);
+        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let status = response.status();
+        let value: Value = response.json().await?;
+        blind(&value)?;
+        Ok((status, value))
+    }
+
+    async fn enrollment_response(&self, auth: Auth, request: Value) -> Result<Response> {
+        self.enrollment_response_for("EnrollCodex", auth, request)
+            .await
+    }
+
+    async fn enrollment_response_for(
+        &self,
+        method: &str,
+        auth: Auth,
+        request: Value,
+    ) -> Result<Response> {
+        let body = serde_json::to_vec(&request)?;
         let mut frame = vec![0];
         frame.extend_from_slice(&u32::try_from(body.len())?.to_be_bytes());
         frame.extend_from_slice(&body);
         let request = self
             .client
-            .post(format!("{}/{SERVICE}/EnrollCodex", self.url))
+            .post(format!("{}/{SERVICE}/{method}", self.url))
             .header("connect-protocol-version", "1")
             .header("content-type", "application/connect+json")
             .body(frame);
@@ -177,7 +244,22 @@ impl Rpc {
     }
 
     pub async fn enroll(&self, auth: Auth, name: &str) -> Result<ConnectStream> {
-        let response = self.enrollment_response(auth, name).await?;
+        self.enroll_request(auth, json!({"name": name})).await
+    }
+
+    pub async fn enroll_request(&self, auth: Auth, request: Value) -> Result<ConnectStream> {
+        let response = self.enrollment_response(auth, request).await?;
+        self.enrollment_stream(response)
+    }
+
+    pub async fn enroll_github_request(&self, auth: Auth, request: Value) -> Result<ConnectStream> {
+        let response = self
+            .enrollment_response_for("EnrollGithub", auth, request)
+            .await?;
+        self.enrollment_stream(response)
+    }
+
+    fn enrollment_stream(&self, response: Response) -> Result<ConnectStream> {
         ensure!(
             response.status() == StatusCode::OK,
             "enrollment headers denied"
@@ -196,12 +278,37 @@ impl Rpc {
         })
     }
 
+    pub async fn add_api_key(
+        &self,
+        auth: Auth,
+        provider: &str,
+        name: &str,
+        material: &[u8],
+        expiry: Option<u64>,
+    ) -> Result<(StatusCode, Value)> {
+        let mut body = json!({"provider":provider,"name":name,
+            "value":base64::engine::general_purpose::STANDARD.encode(material)});
+        if let Some(expiry) = expiry {
+            body["expiresAtUnix"] = json!(expiry.to_string());
+        }
+        let request = self
+            .client
+            .post(format!("{}/{SERVICE}/AddApiKeyCredential", self.url))
+            .header("connect-protocol-version", "1")
+            .json(&body);
+        let response = tokio::time::timeout(TIMEOUT, authenticate(request, auth).send()).await??;
+        let status = response.status();
+        let value: Value = response.json().await?;
+        blind(&value)?;
+        Ok((status, value))
+    }
+
     pub async fn denied_enrollment(&self, auth: Auth) -> Result<()> {
         // Connect streaming errors retain HTTP 200 and reject in the first
         // END_STREAM envelope. A Challenge before this error must fail.
         self.enroll(auth, "must-not-start")
             .await?
-            .error("unauthenticated")
+            .error(auth.denial_code())
             .await
     }
 
@@ -276,6 +383,8 @@ impl Harness {
                 "SELECT (token_hash,user_id,client_id,scopes,expires_at) ON public.oidc_access_tokens",
                 "SELECT (id,disabled) ON public.oidc_clients",
                 "EXECUTE ON FUNCTION public.codewire_lock_oauth_bearer_authority(text,text,text,timestamptz)",
+                "EXECUTE ON FUNCTION public.codewire_authenticate_credential_session(text)",
+                "EXECUTE ON FUNCTION public.codewire_lock_credential_session_authority(text,text,text,timestamptz)",
             ] {
                 sqlx::query(&format!("GRANT {grant} TO {}", quote_ident(&role))).execute(&db.pool).await?;
             }
@@ -297,12 +406,19 @@ impl Harness {
             std::fs::set_permissions(&script,std::fs::Permissions::from_mode(0o700))?;
             let enrollment = CodexEnrollmentOwner::new(CodexEnrollmentConfig::new(script,root.path().to_owned(),OsString::from("/usr/bin:/bin"))
                 .map_err(|_|anyhow::anyhow!("synthetic enrollment configuration"))?);
+            let github_script = executable.path().join("gh");
+            std::fs::write(&github_script, GITHUB_SHELL)?;
+            std::fs::set_permissions(&github_script,std::fs::Permissions::from_mode(0o700))?;
+            let github_token = GITHUB_TOKEN;
+            std::fs::write(root.path().join("hosts.fixture.yml"), format!("github.com:\n    users:\n        synthetic-user:\n            oauth_token: {github_token}\n    git_protocol: https\n    oauth_token: {github_token}\n    user: synthetic-user\n"))?;
+            let github = GitHubEnrollmentOwner::new(GitHubEnrollmentConfig::new(github_script,root.path().to_owned(),OsString::from("/usr/bin:/bin"))
+                .map_err(|_|anyhow::anyhow!("synthetic GitHub enrollment configuration"))?);
             let provider = Arc::new(SyntheticKek::default());
             let store = Arc::new(PlatformCredentialStore::new(pool.clone(),provider.clone(),builtin_provider_catalog()));
-            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),enrollment));
+            let owner = Arc::new(CredentialMutationOwner::new(pool.clone(),store.clone(),enrollment,github));
             let rpc = Rpc {client:Client::builder().no_proxy().timeout(TIMEOUT).build()?,url:format!("http://{address}")};
             let server = listener.map(|listener| {
-                let app = connect_router_with_auth(owner.router(),ConnectAuthLayer::oauth_bearer_only(AuthState{pool:pool.clone()}));
+                let app = connect_router_with_auth(owner.router(),ConnectAuthLayer::credential_mutation(AuthState{pool:pool.clone()},http::HeaderValue::from_static("https://codewire.example")));
                 let (stop,stopped) = oneshot::channel();
                 let server = tokio::spawn(async move {
                     axum::serve(listener,app).with_graceful_shutdown(async {let _=stopped.await;}).await
@@ -433,12 +549,14 @@ impl Harness {
             &headers,
         )
         .await?;
-        let authority = auth
-            .oauth_bearer_authority()
-            .context("synthetic OAuth authority")?
-            .clone();
+        let authority = CredentialMutationAuthority::from(
+            auth.oauth_bearer_authority()
+                .context("synthetic OAuth authority")?
+                .clone(),
+        );
         ensure!(matches!(
-            self.owner.enroll(authority, "closed-runtime".into()),
+            self.owner
+                .enroll(authority, "closed-runtime".into(), None, None),
             Err(Error::Unavailable)
         ));
         Ok(())

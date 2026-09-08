@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_pb2 import DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, RevokeCredentialRequest, RevokeCredentialResponse
+from .credential_pb2 import AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddSshCredentialRequest, AddSshCredentialResponse, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest, GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse, RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest, RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -280,6 +280,24 @@ class CredentialMutationService(Protocol):
     def enroll_codex(self, request: EnrollCodexRequest, ctx: RequestContext[EnrollCodexRequest, EnrollCodexResponse]) -> AsyncIterator[EnrollCodexResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def enroll_github(self, request: EnrollGithubRequest, ctx: RequestContext[EnrollGithubRequest, EnrollGithubResponse]) -> AsyncIterator[EnrollGithubResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def add_api_key_credential(self, request: AddApiKeyCredentialRequest, ctx: RequestContext[AddApiKeyCredentialRequest, AddApiKeyCredentialResponse]) -> AddApiKeyCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def rename_credential(self, request: RenameCredentialRequest, ctx: RequestContext[RenameCredentialRequest, RenameCredentialResponse]) -> RenameCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def rotate_api_key_credential(self, request: RotateApiKeyCredentialRequest, ctx: RequestContext[RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse]) -> RotateApiKeyCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def generate_ssh_credential(self, request: GenerateSshCredentialRequest, ctx: RequestContext[GenerateSshCredentialRequest, GenerateSshCredentialResponse]) -> GenerateSshCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def add_ssh_credential(self, request: AddSshCredentialRequest, ctx: RequestContext[AddSshCredentialRequest, AddSshCredentialResponse]) -> AddSshCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     async def revoke_credential(self, request: RevokeCredentialRequest, ctx: RequestContext[RevokeCredentialRequest, RevokeCredentialResponse]) -> RevokeCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -309,6 +327,66 @@ class CredentialMutationServiceASGIApplication(ConnectASGIApplication[Credential
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.enroll_codex,
+                ),
+                "/codewire.v1.CredentialMutationService/EnrollGithub": Endpoint.server_stream(
+                    method=MethodInfo(
+                        name="EnrollGithub",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=EnrollGithubRequest,
+                        output=EnrollGithubResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.enroll_github,
+                ),
+                "/codewire.v1.CredentialMutationService/AddApiKeyCredential": Endpoint.unary(
+                    method=MethodInfo(
+                        name="AddApiKeyCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=AddApiKeyCredentialRequest,
+                        output=AddApiKeyCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.add_api_key_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/RenameCredential": Endpoint.unary(
+                    method=MethodInfo(
+                        name="RenameCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=RenameCredentialRequest,
+                        output=RenameCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.rename_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/RotateApiKeyCredential": Endpoint.unary(
+                    method=MethodInfo(
+                        name="RotateApiKeyCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=RotateApiKeyCredentialRequest,
+                        output=RotateApiKeyCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.rotate_api_key_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/GenerateSshCredential": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GenerateSshCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=GenerateSshCredentialRequest,
+                        output=GenerateSshCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.generate_ssh_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/AddSshCredential": Endpoint.unary(
+                    method=MethodInfo(
+                        name="AddSshCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=AddSshCredentialRequest,
+                        output=AddSshCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.add_ssh_credential,
                 ),
                 "/codewire.v1.CredentialMutationService/RevokeCredential": Endpoint.unary(
                     method=MethodInfo(
@@ -388,6 +466,126 @@ class CredentialMutationServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    def enroll_github(
+        self,
+        request: EnrollGithubRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AsyncIterator[EnrollGithubResponse]:
+        return self.execute_server_stream(
+            request=request,
+            method=MethodInfo(
+                name="EnrollGithub",
+                service_name="codewire.v1.CredentialMutationService",
+                input=EnrollGithubRequest,
+                output=EnrollGithubResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def add_api_key_credential(
+        self,
+        request: AddApiKeyCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AddApiKeyCredentialResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AddApiKeyCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=AddApiKeyCredentialRequest,
+                output=AddApiKeyCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def rename_credential(
+        self,
+        request: RenameCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RenameCredentialResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RenameCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=RenameCredentialRequest,
+                output=RenameCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def rotate_api_key_credential(
+        self,
+        request: RotateApiKeyCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RotateApiKeyCredentialResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RotateApiKeyCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=RotateApiKeyCredentialRequest,
+                output=RotateApiKeyCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def generate_ssh_credential(
+        self,
+        request: GenerateSshCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> GenerateSshCredentialResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GenerateSshCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=GenerateSshCredentialRequest,
+                output=GenerateSshCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def add_ssh_credential(
+        self,
+        request: AddSshCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AddSshCredentialResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AddSshCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=AddSshCredentialRequest,
+                output=AddSshCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def revoke_credential(
         self,
         request: RevokeCredentialRequest,
@@ -432,6 +630,24 @@ class CredentialMutationServiceSync(Protocol):
     def enroll_codex(self, request: EnrollCodexRequest, ctx: RequestContext[EnrollCodexRequest, EnrollCodexResponse]) -> Iterator[EnrollCodexResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def enroll_github(self, request: EnrollGithubRequest, ctx: RequestContext[EnrollGithubRequest, EnrollGithubResponse]) -> Iterator[EnrollGithubResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def add_api_key_credential(self, request: AddApiKeyCredentialRequest, ctx: RequestContext[AddApiKeyCredentialRequest, AddApiKeyCredentialResponse]) -> AddApiKeyCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def rename_credential(self, request: RenameCredentialRequest, ctx: RequestContext[RenameCredentialRequest, RenameCredentialResponse]) -> RenameCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def rotate_api_key_credential(self, request: RotateApiKeyCredentialRequest, ctx: RequestContext[RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse]) -> RotateApiKeyCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def generate_ssh_credential(self, request: GenerateSshCredentialRequest, ctx: RequestContext[GenerateSshCredentialRequest, GenerateSshCredentialResponse]) -> GenerateSshCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def add_ssh_credential(self, request: AddSshCredentialRequest, ctx: RequestContext[AddSshCredentialRequest, AddSshCredentialResponse]) -> AddSshCredentialResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def revoke_credential(self, request: RevokeCredentialRequest, ctx: RequestContext[RevokeCredentialRequest, RevokeCredentialResponse]) -> RevokeCredentialResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -459,6 +675,66 @@ class CredentialMutationServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.enroll_codex,
+                ),
+                "/codewire.v1.CredentialMutationService/EnrollGithub": EndpointSync.server_stream(
+                    method=MethodInfo(
+                        name="EnrollGithub",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=EnrollGithubRequest,
+                        output=EnrollGithubResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.enroll_github,
+                ),
+                "/codewire.v1.CredentialMutationService/AddApiKeyCredential": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="AddApiKeyCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=AddApiKeyCredentialRequest,
+                        output=AddApiKeyCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.add_api_key_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/RenameCredential": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="RenameCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=RenameCredentialRequest,
+                        output=RenameCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.rename_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/RotateApiKeyCredential": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="RotateApiKeyCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=RotateApiKeyCredentialRequest,
+                        output=RotateApiKeyCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.rotate_api_key_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/GenerateSshCredential": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GenerateSshCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=GenerateSshCredentialRequest,
+                        output=GenerateSshCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.generate_ssh_credential,
+                ),
+                "/codewire.v1.CredentialMutationService/AddSshCredential": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="AddSshCredential",
+                        service_name="codewire.v1.CredentialMutationService",
+                        input=AddSshCredentialRequest,
+                        output=AddSshCredentialResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.add_ssh_credential,
                 ),
                 "/codewire.v1.CredentialMutationService/RevokeCredential": EndpointSync.unary(
                     method=MethodInfo(
@@ -532,6 +808,120 @@ class CredentialMutationServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.CredentialMutationService",
                 input=EnrollCodexRequest,
                 output=EnrollCodexResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def enroll_github(
+        self,
+        request: EnrollGithubRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> Iterator[EnrollGithubResponse]:
+        return self.execute_server_stream(
+            request=request,
+            method=MethodInfo(
+                name="EnrollGithub",
+                service_name="codewire.v1.CredentialMutationService",
+                input=EnrollGithubRequest,
+                output=EnrollGithubResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def add_api_key_credential(
+        self,
+        request: AddApiKeyCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AddApiKeyCredentialResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AddApiKeyCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=AddApiKeyCredentialRequest,
+                output=AddApiKeyCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def rename_credential(
+        self,
+        request: RenameCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RenameCredentialResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RenameCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=RenameCredentialRequest,
+                output=RenameCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def rotate_api_key_credential(
+        self,
+        request: RotateApiKeyCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RotateApiKeyCredentialResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RotateApiKeyCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=RotateApiKeyCredentialRequest,
+                output=RotateApiKeyCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def generate_ssh_credential(
+        self,
+        request: GenerateSshCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> GenerateSshCredentialResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GenerateSshCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=GenerateSshCredentialRequest,
+                output=GenerateSshCredentialResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def add_ssh_credential(
+        self,
+        request: AddSshCredentialRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AddSshCredentialResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="AddSshCredential",
+                service_name="codewire.v1.CredentialMutationService",
+                input=AddSshCredentialRequest,
+                output=AddSshCredentialResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

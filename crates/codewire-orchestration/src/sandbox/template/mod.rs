@@ -20,8 +20,9 @@ mod workspace;
 
 pub use credentials::{
     CREDENTIAL_GATEWAY_HTTPS_PORT, CREDENTIAL_GATEWAY_ISSUER_NAME, CredentialRuntimeTemplateConfig,
-    credential_codex_config_name, credential_gateway_certificate_name,
-    render_credential_codex_config, render_credential_gateway_certificate,
+    MANAGED_CREDENTIAL_CLIENTS_ENV, credential_codex_config_name,
+    credential_gateway_certificate_name, render_credential_codex_config,
+    render_credential_gateway_certificate,
 };
 
 #[cfg(test)]
@@ -52,6 +53,7 @@ pub use runtime_policy::{
 };
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
+pub(crate) use workspace::render_workspace_client_bootstrap;
 pub use workspace::{render_sandbox_template, render_workspace_daemon_service};
 
 /// Return the exact raw TOML bytes that the hypervisor annotation compresses
@@ -131,6 +133,10 @@ pub struct TemplateOpts {
     /// Captured existing environment operation authority, not a new generation.
     pub operation_generation: i64,
     pub credential_runtime: Option<CredentialRuntimeTemplateConfig>,
+    /// Shared metadata-only selection captured for this operation, never values.
+    pub projection_selection_sha256: Option<[u8; 32]>,
+    /// Exact clients selected by the captured immutable profile revision.
+    pub managed_credential_clients: codewire_access::ManagedCredentialClients,
     pub confidential_storage_manifest_uri: String,
     pub gateway_token: String,
     pub daemon_auth_token: String,
@@ -184,6 +190,14 @@ impl fmt::Debug for TemplateOpts {
             .field("organization_id", &self.organization_id)
             .field("operation_generation", &self.operation_generation)
             .field("credential_runtime", &self.credential_runtime)
+            .field(
+                "managed_credential_clients",
+                &self.managed_credential_clients,
+            )
+            .field(
+                "projection_selection_sha256",
+                &self.projection_selection_sha256,
+            )
             .field(
                 "confidential_storage_manifest_uri",
                 &self.confidential_storage_manifest_uri,

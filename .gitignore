@@ -1,5 +1,5 @@
 # Dependencies
-node_modules/
+node_modules
 
 # Build outputs
 dist/
@@ -74,6 +74,6 @@ apps/ios/CwShellEngine.xcframework/
 apps/ios/.build/
 apps/ios/xtool/
 .dev-stack/
-.venv-proto/
+.venv-proto
 __pycache__/
 .proto-tools/

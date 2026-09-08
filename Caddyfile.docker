@@ -73,6 +73,15 @@ codewire.localhost {
 	# These matchers are drift-checked against proto/ by
 	# scripts/checks/repo_checks.py connect-edge-routing.
 	# OAuth enrollment and lifecycle mutations have their own authority.
+	# Owner delegation is the isolated authority's native bidirectional stream.
+	handle /codewire.v1.CredentialDelegationService/* {
+		reverse_proxy 127.0.0.1:8086 {
+			flush_interval -1
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
 	handle /codewire.v1.CredentialMutationService/* {
 		reverse_proxy 127.0.0.1:8086 {
 			flush_interval -1

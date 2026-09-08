@@ -16,7 +16,6 @@ required-features = ["enrollment"]
 default = []
 enrollment = [
     "codewire-credential-broker/codex-enrollment",
-    "dep:codewire-protected-store",
     "dep:codewire-proto",
     "dep:connectrpc",
     "dep:futures",
@@ -26,22 +25,29 @@ enrollment = [
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
+buffa = { workspace = true }
 codewire-access = { workspace = true }
 # The workspace's existing broker edge enables local by default. This isolated
 # service explicitly selects platform without changing any existing consumer.
-codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["platform"] }
+codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["platform", "ssh-agent"] }
+codewire-gateway-proto = { workspace = true }
 codewire-platform-credentials = { workspace = true }
-codewire-protected-store = { workspace = true, features = ["platform"], optional = true }
+codewire-project = { workspace = true }
+codewire-protected-store = { workspace = true, features = ["platform", "ssh-material"] }
 codewire-proto = { workspace = true, optional = true }
 codewire-server-core = { workspace = true, features = ["kubernetes-identity"] }
 codewire-tls = { workspace = true }
+codewire-workload-secrets = { workspace = true }
 connectrpc = { workspace = true, features = ["axum"], optional = true }
 futures = { workspace = true, optional = true }
 http = { workspace = true }
+http-body = "=1.0.1"
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
+prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -56,6 +62,7 @@ zeroize = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
+codewire-client = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform-test-support"] }
 rcgen = "0.13"

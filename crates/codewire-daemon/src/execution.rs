@@ -9,7 +9,53 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::Zeroize as _;
 
+#[cfg(test)]
 use crate::config::DAEMON_AUTH_TOKEN_ENV;
+use crate::env::is_internal_environment_name;
+
+mod bootstrap;
+mod projection;
+pub(crate) use bootstrap::StartupProjectionIngress;
+pub use bootstrap::{BOOTSTRAP_FINISH, BOOTSTRAP_PROJECTION_SOCKET_NAME, BootstrapPhase};
+#[cfg(target_os = "linux")]
+pub use codewire_workload_secrets::launcher::run_environment_launcher;
+use projection::LaunchRendezvous;
+
+/// Own the PTY child during launch awaits, before its normal monitor exists.
+/// Dropping a request must not strand a helper waiting for projection commit.
+pub(crate) struct PtyLaunchGuard(Option<Box<dyn portable_pty::Child + Send + Sync>>);
+
+impl PtyLaunchGuard {
+    pub(crate) fn new(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
+        Self(Some(child))
+    }
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        self.0.as_ref().and_then(|child| child.process_id())
+    }
+    pub(crate) fn release(mut self) -> Box<dyn portable_pty::Child + Send + Sync> {
+        self.0.take().expect("PTY launch child is owned")
+    }
+    pub(crate) async fn terminate(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+        }
+    }
+}
+impl Drop for PtyLaunchGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            // This drainer owns the exact child even if the requesting future
+            // or Tokio runtime is dropped; it cannot unlink another launch.
+            let _ = std::thread::Builder::new()
+                .name("cw-launch-reap".into())
+                .spawn(move || {
+                    let _ = child.wait();
+                });
+        }
+    }
+}
 
 const MAX_PROCESS_SPEC_BYTES: usize = 1024 * 1024;
 
@@ -64,6 +110,7 @@ pub struct PreparedProcess {
     current_directory: PathBuf,
     environment: Vec<(String, String)>,
     pending_process_spec: Option<PathBuf>,
+    launch: Option<LaunchRendezvous>,
 }
 
 impl std::fmt::Debug for PreparedProcess {
@@ -106,6 +153,7 @@ impl PreparedProcess {
                 current_directory: PathBuf::from(working_directory),
                 environment: split_environment(environment),
                 pending_process_spec: None,
+                launch: None,
             }),
             ProcessExecution::Runc(config) => prepare_runc(
                 config,
@@ -154,11 +202,19 @@ impl PreparedProcess {
         command
     }
 
-    /// Once the helper has been spawned it owns opening and unlinking the
-    /// tmpfs process specification. Before that point Drop removes it on every
-    /// failure path.
-    pub fn spawned(&mut self) {
-        self.pending_process_spec = None;
+    /// The helper opens/unlinks the spec. Retain its unique cleanup path until
+    /// this owner drops, including cancellation before the helper first runs.
+    pub fn spawned(&mut self) {}
+
+    /// Complete the exact-child rendezvous before the caller marks it Running.
+    /// Cancellation drops the relay future and its existing bridge budget guard.
+    pub(crate) async fn project_spawned(&mut self, pid: Option<u32>) -> io::Result<()> {
+        if let Some(launch) = self.launch.take() {
+            launch
+                .deliver(pid.ok_or_else(|| invalid_input("launcher PID unavailable"))?)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -201,7 +257,7 @@ fn prepare_runc(
         args,
         env: environment
             .iter()
-            .filter(|entry| !is_daemon_auth_environment_entry(entry))
+            .filter(|entry| !is_internal_environment_entry(entry))
             .cloned()
             .collect(),
         cwd: working_directory.to_owned(),
@@ -239,6 +295,7 @@ fn prepare_runc(
         current_directory: PathBuf::from("/"),
         environment: Vec::new(),
         pending_process_spec: Some(path),
+        launch: None,
     })
 }
 
@@ -287,7 +344,7 @@ fn split_environment(environment: &[String]) -> Vec<(String, String)> {
         .iter()
         .filter_map(|entry| {
             let (key, value) = entry.split_once('=')?;
-            if key == DAEMON_AUTH_TOKEN_ENV {
+            if is_internal_environment_name(key) {
                 return None;
             }
             Some((key.to_owned(), value.to_owned()))
@@ -295,10 +352,10 @@ fn split_environment(environment: &[String]) -> Vec<(String, String)> {
         .collect()
 }
 
-fn is_daemon_auth_environment_entry(entry: &str) -> bool {
+fn is_internal_environment_entry(entry: &str) -> bool {
     entry
         .split_once('=')
-        .is_some_and(|(key, _)| key == DAEMON_AUTH_TOKEN_ENV)
+        .is_some_and(|(key, _)| is_internal_environment_name(key))
 }
 
 fn invalid_input(message: &'static str) -> io::Error {
@@ -368,11 +425,15 @@ mod tests {
         });
         let secret = "CW_TEST_SECRET=not-on-helper-command";
         let daemon_auth = format!("{DAEMON_AUTH_TOKEN_ENV}=must-not-enter-child");
+        let managed_selection = format!(
+            "{}=must-not-enter-child",
+            crate::config::MANAGED_CREDENTIAL_CLIENTS_ENV
+        );
         let prepared = PreparedProcess::prepare(
             &execution,
             &["/bin/sh".into(), "-lc".into(), "id".into()],
             "/workspace",
-            &[secret.into(), daemon_auth],
+            &[secret.into(), daemon_auth, managed_selection],
             true,
             120,
             40,
@@ -415,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn native_process_drops_daemon_auth_token_from_supplied_environment() {
+    fn native_process_drops_internal_daemon_configuration_from_supplied_environment() {
         let prepared = PreparedProcess::prepare(
             &ProcessExecution::Native,
             &["/usr/bin/env".into()],
@@ -423,6 +484,10 @@ mod tests {
             &[
                 "VISIBLE=value".into(),
                 format!("{DAEMON_AUTH_TOKEN_ENV}=must-not-enter-child"),
+                format!(
+                    "{}=must-not-enter-child",
+                    crate::config::MANAGED_CREDENTIAL_CLIENTS_ENV
+                ),
             ],
             false,
             0,

@@ -1,6 +1,6 @@
 use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, CredentialStatus, Owner, Placement,
-    ProviderCatalog, ProviderId,
+    ProviderCatalog, ProviderId, SshPublicKeyMetadata,
 };
 use codewire_protected_store::secret_envelope::{DekContext, TenantSecretScope};
 
@@ -72,6 +72,42 @@ impl CredentialRecord {
         registration: CredentialRegistration,
         catalog: &ProviderCatalog,
     ) -> Result<Self, Error> {
+        if registration.authentication_kind == CredentialAuthKind::SshKey {
+            return Err(Error::UnsupportedCredential);
+        }
+        Self::registered_with_public_key(owner, registration, None, catalog)
+    }
+
+    pub(crate) fn registered_ssh(
+        owner: &Owner,
+        name: String,
+        expires_at_unix: Option<u64>,
+        public_key: &codewire_protected_store::ssh_material::SshPublicKey,
+        catalog: &ProviderCatalog,
+    ) -> Result<Self, Error> {
+        Self::registered_with_public_key(
+            owner,
+            CredentialRegistration {
+                provider: ProviderId::parse("ssh").expect("built-in provider"),
+                authentication_kind: CredentialAuthKind::SshKey,
+                display_name: name,
+                account_hint: None,
+                expires_at_unix,
+            },
+            Some(SshPublicKeyMetadata {
+                openssh: public_key.openssh().to_owned(),
+                fingerprint: public_key.fingerprint().to_owned(),
+            }),
+            catalog,
+        )
+    }
+
+    fn registered_with_public_key(
+        owner: &Owner,
+        registration: CredentialRegistration,
+        ssh_public_key: Option<SshPublicKeyMetadata>,
+        catalog: &ProviderCatalog,
+    ) -> Result<Self, Error> {
         let version = CredentialVersion {
             revocation_generation: 1,
             material_generation: 1,
@@ -86,6 +122,7 @@ impl CredentialRecord {
                 authentication_kind: registration.authentication_kind,
                 display_name: registration.display_name,
                 account_hint: registration.account_hint,
+                ssh_public_key,
                 status: CredentialStatus::Active,
                 expires_at_unix: registration.expires_at_unix,
                 revocation_generation: version.revocation_generation,
@@ -166,6 +203,7 @@ pub(crate) fn auth_kind(kind: CredentialAuthKind) -> &'static str {
         CredentialAuthKind::ApiKey => "api_key",
         CredentialAuthKind::AccessToken => "access_token",
         CredentialAuthKind::GitHubApp => "github_app",
+        CredentialAuthKind::SshKey => "ssh_key",
     }
 }
 
@@ -175,6 +213,21 @@ pub(crate) fn parse_auth_kind(value: &str) -> Result<CredentialAuthKind, Error> 
         "api_key" => Ok(CredentialAuthKind::ApiKey),
         "access_token" => Ok(CredentialAuthKind::AccessToken),
         "github_app" => Ok(CredentialAuthKind::GitHubApp),
+        "ssh_key" => Ok(CredentialAuthKind::SshKey),
+        _ => Err(Error::CorruptRecord),
+    }
+}
+
+pub(crate) fn parse_ssh_public_key(
+    openssh: Option<String>,
+    fingerprint: Option<String>,
+) -> Result<Option<SshPublicKeyMetadata>, Error> {
+    match (openssh, fingerprint) {
+        (None, None) => Ok(None),
+        (Some(openssh), Some(fingerprint)) => Ok(Some(SshPublicKeyMetadata {
+            openssh,
+            fingerprint,
+        })),
         _ => Err(Error::CorruptRecord),
     }
 }
@@ -196,6 +249,38 @@ mod tests {
     use codewire_protected_store::secret_envelope::{
         SecretCoordinates, decrypt_secret, encrypt_secret,
     };
+
+    #[test]
+    fn ssh_registration_uses_only_the_derived_public_identity() {
+        let owner = Owner::User(OwnerId::parse("ssh-metadata-owner").unwrap());
+        let key = codewire_protected_store::ssh_material::generate_ed25519().unwrap();
+        let catalog = builtin_provider_catalog();
+        let record = CredentialRecord::registered_ssh(
+            &owner,
+            "SSH Work".into(),
+            None,
+            key.public_key(),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(
+            record.metadata.authentication_kind,
+            CredentialAuthKind::SshKey
+        );
+        assert!(record.metadata.account_hint.is_none());
+        let public = record.metadata.ssh_public_key.as_ref().unwrap();
+        assert_eq!(public.openssh, key.public_key().openssh());
+        assert_eq!(public.fingerprint, key.public_key().fingerprint());
+        assert_eq!(record.key(), "ssh/ssh_key/1");
+        assert!(parse_ssh_public_key(Some(public.openssh.clone()), None).is_err());
+        assert!(parse_ssh_public_key(None, Some(public.fingerprint.clone())).is_err());
+        let mut invalid = record.clone();
+        invalid.metadata.ssh_public_key = None;
+        assert_eq!(invalid.validate(&catalog), Err(Error::InvalidInput));
+        let mut invalid = record;
+        invalid.metadata.provider = ProviderId::parse("openai").unwrap();
+        assert_eq!(invalid.validate(&catalog), Err(Error::InvalidInput));
+    }
 
     fn record() -> CredentialRecord {
         CredentialRecord::registered(

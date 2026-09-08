@@ -1180,8 +1180,33 @@ deploy_overlay() {
 }
 
 dashboard_browser_e2e() {
-  local playwright chromium workspace_image
+  local playwright chromium workspace_image credential_fixture
   workspace_image="$(kind_workspace_runtime_image)" || return $?
+  credential_fixture=0
+  case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
+    build-ci)
+      if ! kubectl -n "$NS" get deployment/codewire-credential-service -o json | jq -e '
+        [.spec.template.spec.containers[] | select(.name == "credential-service")] as $containers |
+        ($containers | length) == 1 and
+        $containers[0].command == ["/codewire-kind-fixtures/credential-service"] and
+        $containers[0].args == [
+          "--exact", "runtime::kind::serve_kind_credential_fixture", "--ignored",
+          "--nocapture", "--test-threads=1"
+        ] and
+        ([$containers[0].env[]? |
+          select(.name == "CODEWIRE_KIND_CREDENTIAL_FIXTURE" and .value == "1")] | length) == 1
+      ' >/dev/null; then
+        echo "::error::build-ci dashboard browser gate requires the exact synthetic credential fixture"
+        return 1
+      fi
+      credential_fixture=1
+      ;;
+    prebuilt-release) ;;
+    *)
+      echo "::error::CODEWIRE_KIND_PRODUCT_IMAGE_MODE must be build-ci or prebuilt-release"
+      return 2
+      ;;
+  esac
   playwright="$ROOT/apps/dashboard/node_modules/.bin/playwright"
   if [ ! -x "$playwright" ]; then
     echo "::error::dashboard Playwright dependencies are missing; run PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts"
@@ -1211,6 +1236,7 @@ dashboard_browser_e2e() {
     KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
     PLAYWRIGHT_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}" \
     PLAYWRIGHT_SANDBOX_NAMESPACE="$SANDBOX_NS" \
+    PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture" \
     "$playwright" test --config "$ROOT/apps/dashboard/playwright.config.ts"
 }
 

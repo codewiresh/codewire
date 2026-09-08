@@ -32,13 +32,15 @@ pub fn init(_cfg: &ServiceConfig) -> anyhow::Result<()> {
 
     #[cfg(feature = "otel")]
     {
+        use opentelemetry_otlp::WithExportConfig as _;
+
         if let Some(endpoint) = &_cfg.otlp_endpoint {
             let exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_tonic()
                 .with_endpoint(endpoint)
                 .build()?;
-            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-                .with_batch_exporter(exporter)
+            let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+                .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
                 .build();
             let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, _cfg.name.clone());
             let otel = tracing_opentelemetry::OpenTelemetryLayer::new(tracer);

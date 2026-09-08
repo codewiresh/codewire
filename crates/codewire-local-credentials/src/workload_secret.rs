@@ -5,6 +5,9 @@
 //! entries; public records and resolution previews never contain values or
 //! protected-store references.
 
+mod projection;
+pub use projection::LocalLaunchSecretSelection;
+
 use std::collections::BTreeSet;
 
 use codewire_protected_store::{

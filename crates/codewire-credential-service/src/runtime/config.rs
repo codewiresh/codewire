@@ -48,9 +48,11 @@ const PROXY_ENVIRONMENT: &[&str] = &[
 pub struct CredentialServiceConfig {
     pub(super) database_url: Zeroizing<String>,
     pub(super) public_listen: SocketAddr,
+    pub(super) public_origin: http::HeaderValue,
     pub(super) private_listen: SocketAddr,
     pub(super) private_tls: ServerTlsFiles,
     pub(super) codex_executable: PathBuf,
+    pub(super) github_executable: PathBuf,
     pub(super) runtime_directory: PathBuf,
     pub(super) openbao: OpenBaoTransitConfig,
 }
@@ -94,6 +96,7 @@ impl CredentialServiceConfig {
         if public_listen.port() != 8086 || private_listen.port() != 9443 {
             return Err(RuntimeError::Configuration("credential listener ports"));
         }
+        let public_origin = parse_public_origin(&required("CREDENTIAL_PUBLIC_ORIGIN")?)?;
         let private_tls = ServerTlsFiles::new(
             path("CREDENTIAL_BROKER_TLS_CERT_FILE")?,
             path("CREDENTIAL_BROKER_TLS_KEY_FILE")?,
@@ -115,13 +118,31 @@ impl CredentialServiceConfig {
         Ok(Self {
             database_url,
             public_listen,
+            public_origin,
             private_listen,
             private_tls,
             codex_executable: path("CREDENTIAL_CODEX_EXECUTABLE")?,
+            github_executable: path("CREDENTIAL_GITHUB_EXECUTABLE")?,
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
             openbao,
         })
     }
+}
+
+fn parse_public_origin(input: &str) -> Result<http::HeaderValue, RuntimeError> {
+    let invalid = RuntimeError::Configuration("CREDENTIAL_PUBLIC_ORIGIN");
+    let url = Url::parse(input.trim_end_matches('/')).map_err(|_| invalid)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid);
+    }
+    http::HeaderValue::from_str(url.as_str().trim_end_matches('/')).map_err(|_| invalid)
 }
 
 fn validate_database_url(input: &str) -> Result<(), RuntimeError> {
@@ -177,10 +198,12 @@ mod tests {
                 "postgres://broker:synthetic-password@postgres.test:5432/codewire?sslmode=require",
             ),
             ("CREDENTIAL_HTTP_LISTEN_ADDR", "0.0.0.0:8086"),
+            ("CREDENTIAL_PUBLIC_ORIGIN", "https://codewire.example"),
             ("CREDENTIAL_BROKER_TLS_LISTEN_ADDR", "0.0.0.0:9443"),
             ("CREDENTIAL_BROKER_TLS_CERT_FILE", "/mounted/broker/tls.crt"),
             ("CREDENTIAL_BROKER_TLS_KEY_FILE", "/mounted/broker/tls.key"),
             ("CREDENTIAL_CODEX_EXECUTABLE", "/usr/local/bin/codex"),
+            ("CREDENTIAL_GITHUB_EXECUTABLE", "/usr/local/bin/gh"),
             ("CREDENTIAL_RUNTIME_DIR", "/run/codewire-credentials"),
             (
                 "CREDENTIAL_BAO_ADDR",
@@ -210,6 +233,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(config.public_listen.port(), 8086);
+        assert_eq!(
+            config.public_origin.to_str().unwrap(),
+            "https://codewire.example"
+        );
         assert_eq!(config.private_listen.port(), 9443);
         for name in inputs().keys() {
             let mut partial = inputs();
@@ -217,6 +244,25 @@ mod tests {
             assert!(
                 CredentialServiceConfig::from_lookup(|name| partial.get(name).cloned()).is_err()
             );
+        }
+    }
+
+    #[test]
+    fn public_origin_is_exact_and_path_free() {
+        assert_eq!(
+            parse_public_origin("https://codewire.example/")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "https://codewire.example"
+        );
+        for value in [
+            "http://user@example.test",
+            "https://example.test/path",
+            "https://example.test/?query=1",
+            "file:///tmp/codewire",
+        ] {
+            assert!(parse_public_origin(value).is_err(), "accepted {value}");
         }
     }
 
@@ -292,6 +338,7 @@ mod tests {
             ("CREDENTIAL_BROKER_TLS_LISTEN_ADDR", "0.0.0.0:8086"),
             ("CREDENTIAL_RUNTIME_DIR", "relative"),
             ("CREDENTIAL_CODEX_EXECUTABLE", "codex"),
+            ("CREDENTIAL_GITHUB_EXECUTABLE", "gh"),
         ] {
             let mut values = inputs();
             values.insert(name, value.into());

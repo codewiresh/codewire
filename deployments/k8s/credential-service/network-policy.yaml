@@ -1,4 +1,5 @@
-# Only the public Connect enrollment API crosses the normal ingress edge.
+# The public Connect mutation API is reachable through the normal ingress edge
+# and directly from the same-namespace dashboard BFF.
 # Private broker TLS is reachable from managed gateways, not workspaces.
 # Application authentication independently checks exact Pod/environment
 # lineage. This policy makes no claim to restrict provider egress.
@@ -21,6 +22,10 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: rke2-ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: codewire
+              app.kubernetes.io/component: dashboard
       ports:
         - protocol: TCP
           port: 8086

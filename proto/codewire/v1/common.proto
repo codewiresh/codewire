@@ -20,6 +20,9 @@ message RepositorySpec {
   // User-facing parsers may derive it, but RPC writers always send it.
   string destination = 3;
   string revision = 4;
+  // Canonical direct public host-key lines. Required for SSH sources and
+  // rejected for every non-SSH source; checkout never imports ambient trust.
+  repeated string known_hosts = 5;
 }
 
 // ApplicationPort requests one application port during setup. Access is an
@@ -54,18 +57,26 @@ message ProjectResources {
   optional uint64 disk_gib = 3;
 }
 
+enum ProjectStoragePlacement {
+  PROJECT_STORAGE_PLACEMENT_UNSPECIFIED = 0;
+  PROJECT_STORAGE_PLACEMENT_LOCAL = 1;
+  PROJECT_STORAGE_PLACEMENT_PLATFORM = 2;
+}
+
 message ProjectSecretBindings {
-  reserved 2, 3;
+  reserved 2, 3, 5;
   reserved "include_org", "include_user";
 
   string project = 1;
   bool organization = 4;
-  bool user = 5;
+  // Absence selects no personal values. Presence must specify an origin.
+  optional ProjectStoragePlacement user = 6;
 }
 
-// ProjectAccessBinding selects one scope-qualified access profile. It carries
-// no credential ID, provider material, protected-store reference, or token.
-message ProjectAccessBinding {
+// Selects a named provider-identity profile, optionally origin-qualified.
+// A resolved environment uses an exact platform:id:UUID or local:id:UUID.
+// No provider material, per-key mapping or delivery policy appears here.
+message ProjectCredentialBinding {
   string profile = 1;
 }
 
@@ -74,8 +85,8 @@ message ProjectAccessBinding {
 // paths, secret values, provider tokens, platform credentials, VMM state, and
 // backend sockets are intentionally absent.
 message ProjectSpec {
-  reserved 10, 15, 16;
-  reserved "agent_environment", "credentials", "workspace_mode";
+  reserved 10, 15, 16, 17;
+  reserved "agent_environment", "access", "workspace_mode";
 
   uint32 schema_version = 1;
   string preset = 2;
@@ -90,5 +101,5 @@ message ProjectSpec {
   repeated ApplicationPort application_ports = 12;
   ProjectResources resources = 13;
   ProjectSecretBindings secrets = 14;
-  ProjectAccessBinding access = 17;
+  ProjectCredentialBinding credentials = 18;
 }

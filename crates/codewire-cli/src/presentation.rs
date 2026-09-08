@@ -38,6 +38,48 @@ pub struct Environment {
     pub deletion_requested_at: Option<String>,
     pub deletion_grace_until: Option<String>,
     pub network: Option<String>,
+    pub operation_generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_selection: Option<EnvironmentSourceSelection>,
+}
+
+/// Complete value-free selection, including the immutable credential revision.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentSourceSelection {
+    #[serde(default)]
+    pub secrets: codewire_project::SecretBindings,
+    #[serde(default)]
+    pub credentials: Option<codewire_project::CredentialBinding>,
+    #[serde(default)]
+    pub profile_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateEnvironmentSourcesRequest {
+    pub expected_operation_generation: u64,
+    pub expected: EnvironmentSourceSelection,
+    pub replacement: EnvironmentSourceSelection,
+    pub allow_restart: bool,
+    pub confirm_personal_credentials: bool,
+    pub confirm_personal_secrets: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentSourcesUpdateOutcome {
+    Unchanged,
+    Stored,
+    RestartRequired,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EnvironmentSourcesUpdate {
+    pub environment_id: String,
+    pub operation_generation: u64,
+    pub selection: EnvironmentSourceSelection,
+    pub outcome: EnvironmentSourcesUpdateOutcome,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -231,6 +273,10 @@ pub struct CreateEnvironmentRequest {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub isolation_tier: String,
     pub project_spec: codewire_project::ProjectSpec,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_profile_revision: Option<u64>,
+    pub confirm_personal_credentials: bool,
+    pub confirm_personal_secrets: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]

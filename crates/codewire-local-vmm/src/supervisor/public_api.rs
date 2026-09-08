@@ -242,9 +242,53 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     field(30, "network", ZERO),
     field(31, "ports", ZERO),
     field(32, "isolation_tier", FIXED),
+    field(33, "operation_generation", LOCAL),
+    field(34, "source_selection", LOCAL),
 ];
 
 const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
+    MessageSemantics {
+        full_name: "codewire.v1.ProjectSecretBindings",
+        fields: &[
+            field(1, "project", LOCAL),
+            field(4, "organization", LOCAL),
+            field(6, "user", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.ProjectCredentialBinding",
+        fields: &[field(1, "profile", LOCAL)],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.EnvironmentSourceSelection",
+        fields: &[
+            field(1, "secrets", LOCAL),
+            field(2, "credentials", LOCAL),
+            field(3, "profile_revision", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.UpdateEnvironmentSourcesRequest",
+        fields: &[
+            field(1, "org_id", LOCAL),
+            field(2, "environment_id", LOCAL),
+            field(3, "expected_operation_generation", LOCAL),
+            field(4, "expected", LOCAL),
+            field(5, "replacement", LOCAL),
+            field(6, "allow_restart", LOCAL),
+            field(7, "confirm_personal_credentials", LOCAL),
+            field(8, "confirm_personal_secrets", LOCAL),
+        ],
+    },
+    MessageSemantics {
+        full_name: "codewire.v1.UpdateEnvironmentSourcesResponse",
+        fields: &[
+            field(1, "environment_id", LOCAL),
+            field(2, "operation_generation", LOCAL),
+            field(3, "selection", LOCAL),
+            field(4, "outcome", LOCAL),
+        ],
+    },
     MessageSemantics {
         full_name: "codewire.v1.Environment",
         fields: ENVIRONMENT_FIELDS,
@@ -449,6 +493,10 @@ const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
 ];
 
 const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
+    rpc(
+        proto::ENVIRONMENT_SERVICE_UPDATE_ENVIRONMENT_SOURCES_SPEC,
+        RpcBehavior::Local,
+    ),
     rpc(
         proto::ENVIRONMENT_SERVICE_LIST_ENVIRONMENTS_SPEC,
         RpcBehavior::Local,
@@ -1497,8 +1545,173 @@ fn public_environment(
         memory_mb,
         disk_gb,
         isolation_tier: proto::IsolationTier::Standard.into(),
+        operation_generation: environment.generation,
+        source_selection: public_source_selection(environment)?.into(),
         ..Default::default()
     })
+}
+
+fn source_selection_model(
+    selection: proto::EnvironmentSourceSelection,
+) -> Result<(codewire_project::ProjectSpec, Option<u64>), connectrpc::ConnectError> {
+    let mut wire = codewire_project_proto::to_proto(codewire_project::ProjectSpec::default());
+    wire.secrets = selection.secrets;
+    wire.credentials = selection.credentials;
+    let project = codewire_project_proto::from_proto(wire)
+        .map_err(|_| connectrpc::ConnectError::invalid_argument("invalid source selection"))?;
+    match (&project.credentials, selection.profile_revision) {
+        (None, None) => {}
+        (Some(_), Some(revision)) if revision > 0 => {}
+        _ => {
+            return Err(connectrpc::ConnectError::invalid_argument(
+                "profile selection requires one positive exact revision",
+            ));
+        }
+    }
+    for reference in std::iter::once(project.secrets.project.as_str()).chain(
+        project
+            .credentials
+            .iter()
+            .map(|binding| binding.profile.as_str()),
+    ) {
+        if !reference.is_empty() {
+            exact_source_reference(reference)?;
+        }
+    }
+    Ok((project, selection.profile_revision))
+}
+
+fn exact_source_reference(
+    value: &str,
+) -> Result<(codewire_project::StoragePlacement, Uuid), connectrpc::ConnectError> {
+    let reference = codewire_project::StorageReference::project(value).map_err(|_| {
+        connectrpc::ConnectError::invalid_argument(
+            "source selection requires an exact qualified ID",
+        )
+    })?;
+    let placement = reference.placement.ok_or_else(|| {
+        connectrpc::ConnectError::invalid_argument(
+            "source selection requires an explicit storage origin",
+        )
+    })?;
+    let id = reference.selector.strip_prefix("id:").ok_or_else(|| {
+        connectrpc::ConnectError::invalid_argument("source selection requires an exact ID")
+    })?;
+    let parsed = parse_coordinate(id, "source ID")?;
+    if parsed.to_string() != id {
+        return Err(connectrpc::ConnectError::invalid_argument(
+            "source ID must be canonical",
+        ));
+    }
+    Ok((placement, parsed))
+}
+
+fn source_selection_wire(
+    project: &codewire_project::ProjectSpec,
+    revision: Option<u64>,
+) -> proto::EnvironmentSourceSelection {
+    let wire = codewire_project_proto::to_proto(project.clone());
+    proto::EnvironmentSourceSelection {
+        secrets: wire.secrets,
+        credentials: wire.credentials,
+        profile_revision: revision,
+        ..Default::default()
+    }
+}
+
+fn public_source_selection(
+    environment: &v1::Environment,
+) -> Result<Option<proto::EnvironmentSourceSelection>, connectrpc::ConnectError> {
+    if environment.project_spec_json.is_empty() && environment.project_spec_sha256.is_empty() {
+        // Missing private metadata is an unavailable capability, not an empty
+        // selection which an API client could accidentally use to clear pins.
+        return Ok(None);
+    }
+    validate_project_intent(
+        &environment.project_spec_json,
+        &environment.project_spec_sha256,
+        None,
+    )
+    .map_err(|_| local_internal())?;
+    let project: codewire_project::ProjectSpec =
+        serde_json::from_slice(&environment.project_spec_json).map_err(|_| local_internal())?;
+    sources::validate_source_metadata(
+        &project,
+        &environment.access_profile_id,
+        environment.access_profile_revision,
+        &environment.access_profile,
+        environment.platform_source_authority.as_ref(),
+    )
+    .map_err(|_| local_internal())?;
+    Ok(Some(source_selection_wire(
+        &project,
+        project
+            .credentials
+            .as_ref()
+            .map(|_| environment.access_profile_revision),
+    )))
+}
+
+fn native_source_replacement(
+    request: &proto::UpdateEnvironmentSourcesRequest,
+    environment: &v1::Environment,
+) -> Result<(codewire_project::ProjectSpec, Option<u64>, bool), connectrpc::ConnectError> {
+    if request.expected_operation_generation == 0
+        || request.expected_operation_generation != environment.generation
+    {
+        return Err(connectrpc::ConnectError::failed_precondition(
+            "local environment generation changed; inspect before retrying",
+        ));
+    }
+    let expected = request.expected.as_option().cloned().ok_or_else(|| {
+        connectrpc::ConnectError::invalid_argument("expected source selection is required")
+    })?;
+    let replacement = request.replacement.as_option().cloned().ok_or_else(|| {
+        connectrpc::ConnectError::invalid_argument("replacement source selection is required")
+    })?;
+    let current = public_source_selection(environment)?.ok_or_else(|| {
+        connectrpc::ConnectError::failed_precondition("local source metadata is unavailable")
+    })?;
+    let (expected, expected_revision) = source_selection_model(expected)?;
+    let (current, current_revision) = source_selection_model(current)?;
+    let (replacement, replacement_revision) = source_selection_model(replacement)?;
+    if expected.secrets != current.secrets
+        || expected.credentials != current.credentials
+        || expected_revision != current_revision
+    {
+        return Err(connectrpc::ConnectError::failed_precondition(
+            "local source selection changed; inspect before retrying",
+        ));
+    }
+    let unchanged = replacement.secrets == current.secrets
+        && replacement.credentials == current.credentials
+        && replacement_revision == current_revision;
+    let mut target: codewire_project::ProjectSpec =
+        serde_json::from_slice(&environment.project_spec_json).map_err(|_| local_internal())?;
+    target.secrets = replacement.secrets;
+    target.credentials = replacement.credentials;
+    Ok((target, replacement_revision, unchanged))
+}
+
+fn native_platform_source_authority(
+    project: &codewire_project::ProjectSpec,
+    current: &v1::Environment,
+) -> Result<Option<v1::PlatformSourceAuthority>, connectrpc::ConnectError> {
+    let mut platform = project.secrets.organization
+        || project.secrets.user == Some(codewire_project::StoragePlacement::Platform);
+    if !project.secrets.project.is_empty() {
+        platform |= exact_source_reference(&project.secrets.project)?.0
+            == codewire_project::StoragePlacement::Platform;
+    }
+    if let Some(binding) = &project.credentials {
+        platform |= exact_source_reference(&binding.profile)?.0
+            == codewire_project::StoragePlacement::Platform;
+    }
+    if !platform {
+        return Ok(None);
+    }
+    current.platform_source_authority.clone().map(Some).ok_or_else(|| connectrpc::ConnectError::failed_precondition(
+        "selecting a new platform authority requires the authenticated descriptor-bearing native source resolver"))
 }
 
 fn public_resource_values(
@@ -2079,6 +2292,161 @@ impl proto::EnvironmentService for SupervisorRpc {
         })
     }
 
+    async fn update_environment_sources(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, proto::UpdateEnvironmentSourcesRequest>,
+    ) -> ServiceResult<proto::UpdateEnvironmentSourcesResponse> {
+        let request = request.to_owned_message();
+        let (_, environment) = self
+            .public_environment(&request.org_id, &request.environment_id)
+            .await?;
+        let (project, profile_revision, unchanged) =
+            native_source_replacement(&request, &environment)?;
+        if !matches!(
+            private_environment_state(environment.state)?,
+            v1::EnvironmentState::Running | v1::EnvironmentState::Stopped
+        ) {
+            return Err(connectrpc::ConnectError::failed_precondition(
+                "source updates require a stable running or stopped local environment",
+            ));
+        }
+        let selection = source_selection_wire(&project, profile_revision);
+        if unchanged {
+            return connectrpc::Response::ok(proto::UpdateEnvironmentSourcesResponse {
+                environment_id: environment.id,
+                operation_generation: environment.generation,
+                selection: Some(selection).into(),
+                outcome: proto::EnvironmentSourcesUpdateOutcome::Unchanged.into(),
+                ..Default::default()
+            });
+        }
+        if private_environment_state(environment.state)? == v1::EnvironmentState::Running
+            && !request.allow_restart
+        {
+            return Err(connectrpc::ConnectError::failed_precondition(
+                "running local source updates require allow_restart",
+            ));
+        }
+        if project.secrets.user.is_some() && !request.confirm_personal_secrets {
+            return Err(connectrpc::ConnectError::failed_precondition(
+                "personal secret selection requires explicit confirmation",
+            ));
+        }
+        let platform_source_authority = native_platform_source_authority(&project, &environment)?;
+        let (profile_id, revision, reference) = match &project.credentials {
+            None => (String::new(), 0, String::new()),
+            Some(binding) => {
+                let (placement, id) = exact_source_reference(&binding.profile)?;
+                let revision = profile_revision.ok_or_else(|| {
+                    connectrpc::ConnectError::invalid_argument("profile revision is required")
+                })?;
+                let reference = match placement {
+                    codewire_project::StoragePlacement::Local => {
+                        let config = self.core.lock().await.config.credential_authority_config();
+                        let mut metadata =
+                            codewire_local_credentials::LocalCredentialClient::connect(&config)
+                                .await
+                                .map_err(|_| {
+                                    connectrpc::ConnectError::unavailable(
+                                        "local credential authority is unavailable",
+                                    )
+                                })?;
+                        let exact_id =
+                            AccessProfileId::parse(id.to_string()).map_err(|_| local_internal())?;
+                        let profile = metadata
+                            .get_profile_revision(&exact_id, revision)
+                            .await
+                            .map_err(local_status)?;
+                        if profile.profile.id != exact_id
+                            || profile.profile.revision != revision
+                            || profile.profile.placement != codewire_access::Placement::Local
+                            || !matches!(profile.profile.owner, codewire_access::Owner::User(_))
+                        {
+                            return Err(local_internal());
+                        }
+                        format!("user/{}", profile.profile.name)
+                    }
+                    codewire_project::StoragePlacement::Platform => {
+                        // The public source contract has no authenticated
+                        // origin descriptor/name resolution input. Retain an
+                        // already pinned tuple, never read ambient platform auth.
+                        if environment.access_profile_id != id.to_string()
+                            || environment.access_profile_revision != revision
+                        {
+                            return Err(connectrpc::ConnectError::failed_precondition(
+                                "selecting a new platform profile requires the authenticated descriptor-bearing native source resolver",
+                            ));
+                        }
+                        let current: codewire_project::ProjectSpec =
+                            serde_json::from_slice(&environment.project_spec_json)
+                                .map_err(|_| local_internal())?;
+                        if current.credentials.as_ref() != Some(binding) {
+                            return Err(connectrpc::ConnectError::failed_precondition(
+                                "platform profile origin must match the existing native pin",
+                            ));
+                        }
+                        environment.access_profile.clone()
+                    }
+                };
+                if reference
+                    .parse::<AccessProfileReference>()
+                    .map_err(|_| local_internal())?
+                    .scope()
+                    == AccessProfileScope::User
+                    && !request.confirm_personal_credentials
+                {
+                    return Err(connectrpc::ConnectError::failed_precondition(
+                        "personal credential selection requires explicit confirmation",
+                    ));
+                }
+                (id.to_string(), revision, reference)
+            }
+        };
+        let canonical = project.canonical_json().map_err(|_| {
+            connectrpc::ConnectError::invalid_argument("invalid source replacement")
+        })?;
+        let target_generation = environment
+            .generation
+            .checked_add(1)
+            .ok_or_else(local_internal)?;
+        let operation = LocalSupervisorService::update_environment_sources(
+            self,
+            TonicRequest::new(v1::UpdateEnvironmentSourcesRequest {
+                name: environment.name,
+                request_id: Uuid::new_v4().to_string(),
+                expected_environment_id: environment.id.clone(),
+                expected_generation: request.expected_operation_generation,
+                expected_project_spec_sha256: environment.project_spec_sha256,
+                expected_access_profile_id: environment.access_profile_id,
+                expected_access_profile_revision: environment.access_profile_revision,
+                project_spec_sha256: format!("{:x}", Sha256::digest(&canonical)),
+                project_spec_json: canonical,
+                access_profile_id: profile_id,
+                access_profile_revision: revision,
+                access_profile_reference: reference,
+                allow_restart: request.allow_restart,
+                expected_platform_source_authority: environment.platform_source_authority,
+                platform_source_authority,
+            }),
+        )
+        .await
+        .map(tonic::Response::into_inner)
+        .map_err(local_status)?;
+        let operation_id = parse_coordinate(&operation.operation_id, "operation_id")?;
+        // The durable worker, not this HTTP request, owns stop/CAS/restart.
+        // Timeout/disconnect leaves its existing journal pending for inspection.
+        self.wait_for_terminal_operation(operation_id).await.map_err(|_| connectrpc::ConnectError::unavailable(
+            "local source update has not completed; inspect the environment and its durable operation"))?;
+        connectrpc::Response::ok(proto::UpdateEnvironmentSourcesResponse {
+            environment_id: environment.id,
+            operation_generation: target_generation,
+            selection: Some(selection).into(),
+            outcome: proto::EnvironmentSourcesUpdateOutcome::Stored.into(),
+            ..Default::default()
+        })
+    }
+
     async fn protect_environment(
         &self,
         _ctx: RequestContext,
@@ -2266,7 +2634,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.behavior == RpcBehavior::Local)
                 .count(),
-            11
+            12
         );
     }
 
@@ -2393,6 +2761,231 @@ mod tests {
                 &HeaderValue::from_str(rejected).unwrap()
             ));
         }
+    }
+
+    #[test]
+    fn public_source_metadata_is_exact_and_never_projects_the_rest_of_project_configuration() {
+        let mut environment = super::super::tests::project_environment();
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        project.environment.insert(
+            "PRIVATE_CONFIGURATION".into(),
+            "synthetic-configuration-sentinel".into(),
+        );
+        project.secrets.user = Some(codewire_project::StoragePlacement::Local);
+        let json = project.canonical_json().unwrap();
+        environment.project_spec_sha256 = Some(format!("{:x}", Sha256::digest(&json)));
+        environment.project_spec_json = Some(json);
+        let mut private = environment.proto(false);
+        let public = public_environment(Uuid::new_v4(), &private).unwrap();
+        assert_eq!(public.operation_generation, 1);
+        assert_eq!(
+            public.source_selection.secrets.user.unwrap().as_known(),
+            Some(proto::ProjectStoragePlacement::Local)
+        );
+        assert!(!format!("{public:?}").contains("synthetic-configuration-sentinel"));
+        private.project_spec_json.clear();
+        private.project_spec_sha256.clear();
+        assert!(public_source_selection(&private).unwrap().is_none());
+    }
+
+    #[test]
+    fn public_source_update_requires_complete_sets_and_exact_generation_without_defaults() {
+        let environment = super::super::tests::project_environment().proto(false);
+        let current = public_source_selection(&environment).unwrap().unwrap();
+        let mut request = proto::UpdateEnvironmentSourcesRequest {
+            expected_operation_generation: environment.generation,
+            expected: Some(current.clone()).into(),
+            replacement: Some(current).into(),
+            ..Default::default()
+        };
+        assert!(native_source_replacement(&request, &environment).unwrap().2);
+        request.replacement = None.into();
+        assert!(native_source_replacement(&request, &environment).is_err());
+        request.replacement = Some(proto::EnvironmentSourceSelection {
+            secrets: Some(proto::ProjectSecretBindings {
+                user: Some(proto::ProjectStoragePlacement::Local.into()),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        })
+        .into();
+        let (target, revision, unchanged) =
+            native_source_replacement(&request, &environment).unwrap();
+        assert!(!unchanged);
+        assert!(revision.is_none());
+        assert_eq!(
+            target.secrets.user,
+            Some(codewire_project::StoragePlacement::Local)
+        );
+        request.expected_operation_generation += 1;
+        assert!(native_source_replacement(&request, &environment).is_err());
+        request.expected_operation_generation = environment.generation;
+        request.expected = request.replacement.clone();
+        assert!(native_source_replacement(&request, &environment).is_err());
+        let invalid = proto::EnvironmentSourceSelection {
+            secrets: Some(proto::ProjectSecretBindings {
+                user: Some(proto::ProjectStoragePlacement::Unspecified.into()),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        assert!(source_selection_model(invalid).is_err());
+        let incomplete_profile = proto::EnvironmentSourceSelection {
+            credentials: Some(proto::ProjectCredentialBinding {
+                profile: "local:id:11111111-1111-4111-8111-111111111111".into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        assert!(source_selection_model(incomplete_profile).is_err());
+    }
+
+    #[test]
+    fn public_source_clear_is_complete_and_new_platform_authority_is_never_inferred() {
+        let mut environment = super::super::tests::project_environment().proto(false);
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&environment.project_spec_json).unwrap();
+        project.secrets.user = Some(codewire_project::StoragePlacement::Local);
+        environment.project_spec_json = project.canonical_json().unwrap();
+        environment.project_spec_sha256 =
+            format!("{:x}", Sha256::digest(&environment.project_spec_json));
+        let request = proto::UpdateEnvironmentSourcesRequest {
+            expected_operation_generation: environment.generation,
+            expected: public_source_selection(&environment).unwrap().into(),
+            replacement: Some(proto::EnvironmentSourceSelection::default()).into(),
+            ..Default::default()
+        };
+        let (cleared, revision, unchanged) =
+            native_source_replacement(&request, &environment).unwrap();
+        assert!(cleared.secrets.is_empty());
+        assert!(cleared.credentials.is_none());
+        assert!(revision.is_none());
+        assert!(!unchanged);
+        project.secrets.user = Some(codewire_project::StoragePlacement::Platform);
+        assert!(native_platform_source_authority(&project, &environment).is_err());
+        let authority = v1::PlatformSourceAuthority {
+            server_url: "https://synthetic.invalid".into(),
+            organization_id: "org".into(),
+            user_id: "owner".into(),
+            profile_slots: Vec::new(),
+        };
+        environment.platform_source_authority = Some(authority.clone());
+        assert_eq!(
+            native_platform_source_authority(&project, &environment).unwrap(),
+            Some(authority)
+        );
+        assert!(
+            native_platform_source_authority(&cleared, &environment)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn real_public_uds_source_update_uses_the_durable_native_operation_and_complete_cas() {
+        let (_parent, core) =
+            super::super::tests::test_supervisor_core(super::super::tests::project_environment());
+        let socket = core.config.supervisor_socket();
+        let environment_id = core.environment("dev").unwrap().id.to_string();
+        let service = super::super::tests::test_supervisor_service(core);
+        let namespace = service.public_namespace_id().await.unwrap();
+        let (identity, shutdown, server) =
+            super::super::tests::spawn_test_supervisor_server(&socket, service.clone());
+        let authority: http::Uri = "http://codewire-local-control".parse().unwrap();
+        let transport = Http2Connection::connect_with_connector(
+            owner_only_connector(&socket).unwrap(),
+            authority.clone(),
+        )
+        .await
+        .unwrap()
+        .shared(32);
+        let client = EnvironmentServiceClient::new(transport, ClientConfig::new(authority).proto());
+        let mut request = proto::UpdateEnvironmentSourcesRequest {
+            org_id: namespace.to_string(),
+            environment_id: environment_id.clone(),
+            expected_operation_generation: 1,
+            expected: Some(proto::EnvironmentSourceSelection::default()).into(),
+            replacement: Some(proto::EnvironmentSourceSelection {
+                secrets: Some(proto::ProjectSecretBindings {
+                    user: Some(proto::ProjectStoragePlacement::Local.into()),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        let denied = client
+            .update_environment_sources(request.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, connectrpc::ErrorCode::FailedPrecondition);
+        assert!(
+            service
+                .core
+                .lock()
+                .await
+                .store
+                .pending_operations()
+                .unwrap()
+                .is_empty()
+        );
+        request.confirm_personal_secrets = true;
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.update_environment_sources(request.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .into_owned();
+        assert_eq!(result.operation_generation, 2);
+        assert_eq!(
+            result.outcome.as_known(),
+            Some(proto::EnvironmentSourcesUpdateOutcome::Stored)
+        );
+        assert_eq!(result.selection, request.replacement);
+        let stale = client
+            .update_environment_sources(request.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, connectrpc::ErrorCode::FailedPrecondition);
+        request.expected_operation_generation = 2;
+        request.expected = request.replacement.clone();
+        let unchanged = client
+            .update_environment_sources(request)
+            .await
+            .unwrap()
+            .into_owned();
+        assert_eq!(unchanged.operation_generation, 2);
+        assert_eq!(
+            unchanged.outcome.as_known(),
+            Some(proto::EnvironmentSourcesUpdateOutcome::Unchanged)
+        );
+        let current = client
+            .get_environment(proto::GetEnvironmentRequest {
+                org_id: namespace.to_string(),
+                environment_id,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_owned();
+        assert_eq!(current.environment.operation_generation, 2);
+        assert_eq!(current.environment.source_selection, result.selection);
+        assert_eq!(
+            current.environment.state.as_known(),
+            Some(proto::EnvironmentState::Stopped)
+        );
+        drop(client);
+        shutdown.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &identity).unwrap();
     }
 
     #[test]

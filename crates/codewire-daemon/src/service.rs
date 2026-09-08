@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
 use codewire_gateway_proto::daemon::v1;
 use codewire_gateway_proto::daemon::v1::daemon_service_server::DaemonService;
 use codewire_gateway_proto::{
@@ -57,9 +58,10 @@ impl DaemonServiceImpl {
     }
 
     pub fn with_runtime_state(config: Config, runtime_state: DaemonRuntimeState) -> Self {
+        let credential_bridge = CredentialBridge::new(config.credential_bridge.clone());
         Self {
-            session_engine: SessionEngine::new(&config),
-            credential_bridge: CredentialBridge::new(config.credential_bridge.clone()),
+            session_engine: SessionEngine::new(&config, credential_bridge.clone()),
+            credential_bridge,
             config,
             runtime_state,
         }
@@ -112,13 +114,32 @@ impl DaemonService for DaemonServiceImpl {
         }))
     }
 
+    async fn poweroff_guest(
+        &self,
+        request: Request<v1::PoweroffGuestRequest>,
+    ) -> Result<Response<v1::PoweroffGuestResponse>, Status> {
+        self.authorize(&request)?;
+        crate::lifecycle::poweroff_guest(&self.config).await?;
+        Ok(Response::new(v1::PoweroffGuestResponse {}))
+    }
+
     async fn credential_bridge(
         &self,
-        request: Request<Streaming<v1::CredentialBridgeHostMessage>>,
+        request: Request<Streaming<bridge_v1::CredentialBridgeHostMessage>>,
     ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
         self.authorize(&request)?;
         let connection = self.credential_bridge.connect(request.into_inner()).await?;
-        Ok(Response::new(connection.output))
+        let mut response = Response::new(connection.output);
+        if let Some(value) = connection.workspace_authorization {
+            // This existing private capability-authenticated daemon transport
+            // is plaintext inside the cluster. Sensitive metadata is redaction,
+            // not encryption; the gateway-to-broker leg separately uses TLS.
+            response.metadata_mut().insert_bin(
+                crate::credential_bridge::WORKSPACE_AUTHORIZATION,
+                value.into_metadata(),
+            );
+        }
+        Ok(response)
     }
 
     async fn launch_session(
@@ -263,6 +284,7 @@ impl DaemonService for DaemonServiceImpl {
 
         Ok(Response::new(session::exec_session(
             self.config.clone(),
+            self.credential_bridge.clone(),
             stream,
             start,
         )))
@@ -286,6 +308,7 @@ impl DaemonService for DaemonServiceImpl {
 
         Ok(Response::new(session::pty_session(
             self.config.clone(),
+            self.credential_bridge.clone(),
             stream,
             start,
         )))
@@ -756,6 +779,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_poweroff_requires_auth_and_is_not_available_on_a_native_host_daemon() {
+        let (_temp, addr, shutdown) = spawn_daemon().await;
+        let mut unauthorized = DaemonServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            unauthorized
+                .poweroff_guest(v1::PoweroffGuestRequest {})
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        let mut authorized = authenticated_client(addr).await;
+        assert_eq!(
+            authorized
+                .poweroff_guest(v1::PoweroffGuestRequest {})
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+        shutdown.send(()).unwrap();
+    }
+
+    #[tokio::test]
     async fn exec_session_streams_stdout_stderr_and_exit() {
         let (_temp, addr, shutdown) = spawn_daemon().await;
         let mut client = authenticated_client(addr).await;
@@ -1161,6 +1210,8 @@ mod tests {
             auth_token: DaemonAuthToken::new(auth_token).expect("valid daemon test token"),
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
+            managed_credential_clients: Default::default(),
+            launch_projection: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {

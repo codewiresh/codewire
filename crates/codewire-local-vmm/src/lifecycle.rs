@@ -29,8 +29,9 @@ pub(crate) enum LifecycleEffect {
     StageRollbackGeneration,
     RestoreDesiredPower,
     RecordWorkspaceTransition,
-    ApplyEnvironmentAccess,
-    RecordEnvironmentAccess,
+    ApplySourceAccessBinding,
+    RecordEnvironmentSources,
+    RecordSourceOutcome,
     PrepareDelete,
     MoveToTrash,
     RevokeEnvironmentAccess,
@@ -57,7 +58,8 @@ impl LifecycleEffect {
             | Self::RecordResizeOutcome
             | Self::StageRollbackGeneration
             | Self::RecordWorkspaceTransition
-            | Self::RecordEnvironmentAccess
+            | Self::RecordEnvironmentSources
+            | Self::RecordSourceOutcome
             | Self::RemoveEnvironment
             | Self::RecordObservation => EffectDurability::Transactional,
             Self::ProvisionWorkspace
@@ -69,7 +71,7 @@ impl LifecycleEffect {
             | Self::GrowDisk
             | Self::RestartVm
             | Self::RestoreDesiredPower
-            | Self::ApplyEnvironmentAccess
+            | Self::ApplySourceAccessBinding
             | Self::PrepareDelete
             | Self::MoveToTrash
             | Self::RevokeEnvironmentAccess
@@ -143,9 +145,16 @@ const DELETE: &[LifecycleEffect] = &[
     LifecycleEffect::RemoveEnvironment,
     LifecycleEffect::CleanupTrash,
 ];
-const APPLY_ENVIRONMENT_ACCESS: &[LifecycleEffect] = &[
-    LifecycleEffect::ApplyEnvironmentAccess,
-    LifecycleEffect::RecordEnvironmentAccess,
+const UPDATE_ENVIRONMENT_SOURCES: &[LifecycleEffect] = &[
+    LifecycleEffect::StopVm,
+    LifecycleEffect::RecordStopped,
+    LifecycleEffect::ApplySourceAccessBinding,
+    LifecycleEffect::RecordEnvironmentSources,
+    LifecycleEffect::RequireEnvironmentAccess,
+    LifecycleEffect::RecordStarting,
+    LifecycleEffect::EnsureRunner,
+    LifecycleEffect::StartVm,
+    LifecycleEffect::RecordSourceOutcome,
 ];
 const RECONCILE: &[LifecycleEffect] = &[LifecycleEffect::RecordObservation];
 
@@ -158,7 +167,7 @@ pub(crate) fn effects(kind: OperationKind) -> &'static [LifecycleEffect] {
         OperationKind::GrowDisk => GROW_DISK,
         OperationKind::UpdateWorkspace => UPDATE_WORKSPACE,
         OperationKind::RollbackWorkspace => ROLLBACK_WORKSPACE,
-        OperationKind::ApplyEnvironmentAccess => APPLY_ENVIRONMENT_ACCESS,
+        OperationKind::UpdateEnvironmentSources => UPDATE_ENVIRONMENT_SOURCES,
         OperationKind::Delete => DELETE,
         OperationKind::Reconcile => RECONCILE,
     }
@@ -174,6 +183,22 @@ pub(crate) fn next_effect(
         return Err(LifecyclePlanError);
     }
     Ok(effects.get(checkpoint).copied())
+}
+
+/// Host reboot invalidates only runtime. The source commit boundary is the
+/// effect immediately after the atomic canonical-selection transaction.
+pub(crate) fn source_reboot_checkpoint(checkpoint: u32) -> Result<u32, LifecyclePlanError> {
+    let plan = effects(OperationKind::UpdateEnvironmentSources);
+    if usize::try_from(checkpoint).map_err(|_| LifecyclePlanError)? > plan.len() {
+        return Err(LifecyclePlanError);
+    }
+    let committed = plan
+        .iter()
+        .position(|effect| *effect == LifecycleEffect::RecordEnvironmentSources)
+        .ok_or(LifecyclePlanError)?
+        + 1;
+    let committed = u32::try_from(committed).map_err(|_| LifecyclePlanError)?;
+    Ok(if checkpoint < committed { 0 } else { committed })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -202,7 +227,7 @@ mod tests {
         OperationKind::Restart,
         OperationKind::UpdateWorkspace,
         OperationKind::RollbackWorkspace,
-        OperationKind::ApplyEnvironmentAccess,
+        OperationKind::UpdateEnvironmentSources,
         OperationKind::GrowDisk,
         OperationKind::Delete,
         OperationKind::Reconcile,
@@ -244,6 +269,35 @@ mod tests {
             checkpoint += 1;
         }
         Ok(checkpoint)
+    }
+
+    #[test]
+    fn source_reboot_resumes_before_or_after_the_atomic_commit_and_has_ten_terminal_checkpoints() {
+        let plan = effects(OperationKind::UpdateEnvironmentSources);
+        assert_eq!(plan.len(), 9);
+        assert_eq!(
+            &plan[..4],
+            &[
+                LifecycleEffect::StopVm,
+                LifecycleEffect::RecordStopped,
+                LifecycleEffect::ApplySourceAccessBinding,
+                LifecycleEffect::RecordEnvironmentSources
+            ]
+        );
+        assert_eq!(plan.last(), Some(&LifecycleEffect::RecordSourceOutcome));
+        assert_eq!(plan.len() + 1, 10);
+        for checkpoint in 0..=9 {
+            assert_eq!(
+                source_reboot_checkpoint(checkpoint).unwrap(),
+                if checkpoint < 4 { 0 } else { 4 }
+            );
+        }
+        assert!(source_reboot_checkpoint(10).is_err());
+        assert!(source_reboot_checkpoint(u32::MAX).is_err());
+        assert_eq!(plan[4], LifecycleEffect::RequireEnvironmentAccess);
+        assert_eq!(plan[5], LifecycleEffect::RecordStarting);
+        assert_eq!(plan[6], LifecycleEffect::EnsureRunner);
+        assert_eq!(plan[7], LifecycleEffect::StartVm);
     }
 
     #[test]
@@ -360,7 +414,8 @@ mod tests {
                         | LifecycleEffect::RecordResizeOutcome
                         | LifecycleEffect::StageRollbackGeneration
                         | LifecycleEffect::RecordWorkspaceTransition
-                        | LifecycleEffect::RecordEnvironmentAccess
+                        | LifecycleEffect::RecordEnvironmentSources
+                        | LifecycleEffect::RecordSourceOutcome
                         | LifecycleEffect::RemoveEnvironment
                         | LifecycleEffect::RecordObservation
                 );

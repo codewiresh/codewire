@@ -3,12 +3,13 @@
 //! ignored rotation module uses isolated PostgreSQL and synthetic providers to
 //! prove publication drain through this same generated service and managed loop.
 
+mod authenticated;
 mod rotation;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use codewire_access::{
-    EnvironmentId, GrantContext, Owner, OwnerId, Placement, builtin_provider_catalog,
+    EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId, builtin_provider_catalog,
 };
 use codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
 use codewire_gateway_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
@@ -167,7 +168,7 @@ impl Fixture {
         let context = GrantContext {
             environment_id: EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap(),
             environment_generation: 7,
-            placement: Placement::Platform,
+            placement: GrantPlacement::Platform,
             user_id: owner.clone(),
             organization_id: Some(OwnerId::parse("synthetic-org").unwrap()),
             allow_personal_credentials: true,
@@ -290,7 +291,7 @@ impl Fixture {
     }
 
     async fn finish(self) {
-        self.service.shutdown().await;
+        self.service.shutdown().await.unwrap();
         assert_eq!(self.kek.calls.load(Ordering::SeqCst), 0);
         assert_eq!(self.upstream.calls.load(Ordering::SeqCst), 0);
         self.stop_listener.cancel();
@@ -399,7 +400,7 @@ async fn admission_rechecks_authority_after_waiting_for_ready() {
         .session
         .lock()
         .unwrap()
-        .workspace
+        .workspace_mut()
         .uid = Uuid::new_v4();
     input.send(first).await.unwrap();
     assert_eq!(
@@ -456,6 +457,8 @@ async fn shared_frame_validation_and_server_message_ceiling_remain_active() {
         .send(v1::CredentialBridgeGuestMessage {
             payload: Some(v1::credential_bridge_guest_message::Payload::Request(
                 v1::CredentialBridgeRequest {
+                    capability_slot: "codex".into(),
+                    route: "openai-api".into(),
                     request_id: id.clone(),
                     method: "DELETE".into(),
                     path: "/responses".into(),
@@ -476,6 +479,8 @@ async fn shared_frame_validation_and_server_message_ceiling_remain_active() {
         .send(v1::CredentialBridgeGuestMessage {
             payload: Some(v1::credential_bridge_guest_message::Payload::Request(
                 v1::CredentialBridgeRequest {
+                    capability_slot: "codex".into(),
+                    route: "openai-api".into(),
                     request_id: Uuid::new_v4().to_string(),
                     method: "POST".into(),
                     path: "/responses".into(),
@@ -564,7 +569,7 @@ async fn cloned_services_share_eight_slots_and_shutdown_closes_all_epochs() {
     assert_eq!(rejected.unwrap_err().code(), Code::ResourceExhausted);
     assert_eq!(calls, fixture.authenticator.calls.load(Ordering::SeqCst));
     drop(input);
-    fixture.service.clone().shutdown().await;
+    fixture.service.clone().shutdown().await.unwrap();
     for (input, mut output) in streams {
         assert_eq!(
             output.message().await.unwrap_err().code(),
@@ -598,7 +603,7 @@ async fn shutdown_cancels_pending_authentication_without_admitting_a_worker() {
     tokio::time::timeout(TEST_TIMEOUT, fixture.authenticator.gate.entered.notified())
         .await
         .unwrap();
-    fixture.service.shutdown().await;
+    fixture.service.shutdown().await.unwrap();
     assert_eq!(open.await.unwrap().unwrap_err().code(), Code::Unavailable);
     assert_eq!(
         fixture.authenticator.authority.calls.load(Ordering::SeqCst),
@@ -648,6 +653,7 @@ async fn shutdown_holds_worker_capacity_until_drain_and_rejects_late_spawn() {
     release.notify_one();
     tokio::time::timeout(TEST_TIMEOUT, shutdown)
         .await
+        .unwrap()
         .unwrap()
         .unwrap();
     fixture.slots_released().await;

@@ -3,6 +3,8 @@ use super::*;
 use crate::platform_test_support as support;
 use support::{TestDatabase, quote_ident};
 
+mod projection;
+
 struct Fixture {
     db: TestDatabase,
     pool: sqlx::PgPool,
@@ -42,7 +44,7 @@ impl Fixture {
                 .bind(credential.as_str()).bind(&selected.creator).execute(&db.pool).await?;
             let context=GrantContext {
                 environment_id:EnvironmentId::parse(&selected.environment_id)?,
-                environment_generation:7,placement:Placement::Platform,
+                environment_generation:7,placement:GrantPlacement::Platform,
                 user_id:OwnerId::parse(&selected.creator)?,
                 organization_id:Some(OwnerId::parse(&selected.organization)?),
                 allow_personal_credentials:true,authorized_credentials:[credential.clone()].into_iter().collect(),
@@ -53,12 +55,15 @@ impl Fixture {
             manager.create_binding(&context,EnvironmentAccessBinding {
                 environment_id:context.environment_id.clone(),profile_id:profile.id.clone(),profile_revision:profile.revision,
             },Some(&context.user_id)).await?;
-            selected.profile_id=profile.id.to_string();
+            selected.profile_id=Some(profile.id.to_string());
+            sqlx::query("UPDATE environments SET project_spec=jsonb_set(project_spec,'{credentials}',$2) WHERE id=$1")
+                .bind(&selected.environment_id)
+                .bind(json!({"profile":format!("platform:id:{}",profile.id)})).execute(&db.pool).await?;
             let (pool,role)=db.metadata_pool().await?;
             let role_ident=quote_ident(&role);
             sqlx::query(&format!("REVOKE SELECT ON public.platform_credentials FROM {role_ident}")).execute(&db.pool).await?;
             for grant in [
-                "SELECT (id,user_id,organization_id) ON public.platform_credentials",
+                "SELECT (id,user_id,organization_id,status,expires_at_unix) ON public.platform_credentials",
                 "SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_at,environment_operation_generation) ON public.environments",
                 "SELECT (id,org_id,user_id,role) ON public.org_members",
                 "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name) ON public.sandbox_environment_backend",
@@ -69,6 +74,7 @@ impl Fixture {
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text)",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_environment(text,text,text)",
                 "EXECUTE ON FUNCTION public.codewire_platform_lock_profile(text,text,text)",
+                "EXECUTE ON FUNCTION public.codewire_platform_projection_metadata(text)",
             ] {
                 sqlx::query(&format!("GRANT {grant} TO {role_ident}")).execute(&db.pool).await?;
             }
@@ -92,7 +98,11 @@ impl Fixture {
         }
     }
     fn authenticator(&self) -> KubernetesPlatformBridgeAuthenticator {
-        KubernetesPlatformBridgeAuthenticator::new(self.kube.client(), self.pool.clone())
+        KubernetesPlatformBridgeAuthenticator::new(
+            self.kube.client(),
+            self.pool.clone(),
+            Arc::new(TestKekProvider),
+        )
     }
     async fn admitted(&self) -> Result<Arc<crate::KubernetesPlatformRuntimeAuthority>> {
         Ok(self
@@ -110,8 +120,10 @@ impl Fixture {
                 self.profile.entries.clone(),
             )
             .await?;
+        let mut tx = manager.begin_transaction().await?;
         manager
-            .replace_binding(
+            .replace_binding_in(
+                &mut tx,
                 &self.context,
                 &EnvironmentAccessBinding {
                     environment_id: self.context.environment_id.clone(),
@@ -120,12 +132,17 @@ impl Fixture {
                 },
                 EnvironmentAccessBinding {
                     environment_id: self.context.environment_id.clone(),
-                    profile_id: profile.id,
+                    profile_id: profile.id.clone(),
                     profile_revision: profile.revision,
                 },
                 Some(&self.context.user_id),
             )
             .await?;
+        sqlx::query("UPDATE environments SET project_spec=jsonb_set(project_spec,'{credentials}',$2) WHERE id=$1")
+            .bind(&self.scope.environment_id)
+            .bind(json!({"profile":format!("platform:id:{}",profile.id)}))
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
     async fn restore_membership(&self) -> Result<()> {

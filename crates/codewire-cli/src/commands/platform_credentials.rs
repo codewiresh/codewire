@@ -1,4 +1,4 @@
-//! Personal platform credential commands; protected values never cross this API.
+//! Personal platform credential commands: write-only keys and managed OAuth.
 
 use anyhow::Context as _;
 use codewire_client::{self as rpc, CodewireClient};
@@ -11,27 +11,89 @@ pub(super) async fn handle(
     command: CredentialsCommand,
 ) -> anyhow::Result<()> {
     match command {
+        CredentialsCommand::Generate(args) => {
+            let name = super::credentials::ssh::validate_generation(&args)?;
+            let response = client.generate_ssh_credential(rpc::GenerateSshCredentialRequest {
+                name, expires_at_unix: args.expires_at, ..Default::default()
+            }).await.context("generate platform SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+            print(
+                &[response
+                    .credential
+                    .into_option()
+                    .context("platform omitted SSH metadata")?],
+                OutputFormat::Text,
+            )
+        }
         CredentialsCommand::Connect(args) => {
-            if !matches!(args.provider, CredentialConnectProviderArg::Codex) {
-                anyhow::bail!("platform enrollment currently supports Codex only");
-            }
+            let (provider, label) = match args.provider {
+                CredentialConnectProviderArg::Codex => ("openai", "Codex"),
+                CredentialConnectProviderArg::Github => ("github", "GitHub"),
+            };
             let name = trimmed_required(&args.name, "credential name")?.to_owned();
-            let enrollment = client.enroll_codex(
-                rpc::EnrollCodexRequest {
-                    name,
-                    ..Default::default()
-                },
-                |challenge| {
-                    eprintln!(
-                        "Open {} and enter {}",
-                        challenge.verification_url, challenge.user_code
-                    );
-                    eprintln!("Continue only if you started this Codex login.");
-                    true
-                },
-            );
+            let current = find_named(client, &name).await?;
+            let request = oauth_connection_request(provider, &name, current.as_ref())?;
+            if let Some(current) = &current {
+                anyhow::ensure!(
+                    args.yes || (std::io::stdin().is_terminal() && std::io::stderr().is_terminal()),
+                    "reconnecting an existing platform OAuth credential requires terminal confirmation or --yes"
+                );
+                let message = format!(
+                    "Reconnect platform {label} credential {:?} ({}, revision {})? Its identity, profile bindings and hard expiry will be kept.",
+                    current.name, current.id, current.revocation_generation
+                );
+                if args.yes {
+                    eprintln!("{message}");
+                } else if !prompt_confirm_default_no(&message)? {
+                    eprintln!("Canceled; no credential was changed.");
+                    return Ok(());
+                }
+            }
+            let enrollment = async {
+                match args.provider {
+                    CredentialConnectProviderArg::Codex => {
+                        client
+                            .enroll_codex(
+                                rpc::EnrollCodexRequest {
+                                    name: request.name,
+                                    credential_id: request.credential_id,
+                                    expected_revocation_generation: request
+                                        .expected_revocation_generation,
+                                    ..Default::default()
+                                },
+                                |challenge| {
+                                    display_challenge(
+                                        label,
+                                        &challenge.verification_url,
+                                        &challenge.user_code,
+                                    )
+                                },
+                            )
+                            .await
+                    }
+                    CredentialConnectProviderArg::Github => {
+                        client
+                            .enroll_github(
+                                rpc::EnrollGithubRequest {
+                                    name: request.name,
+                                    credential_id: request.credential_id,
+                                    expected_revocation_generation: request
+                                        .expected_revocation_generation,
+                                    ..Default::default()
+                                },
+                                |challenge| {
+                                    display_challenge(
+                                        label,
+                                        &challenge.verification_url,
+                                        &challenge.user_code,
+                                    )
+                                },
+                            )
+                            .await
+                    }
+                }
+            };
             let credential = tokio::select! {
-                result = enrollment => result.context("enroll platform Codex credential")?,
+                result = enrollment => result.context("enroll platform OAuth credential")?,
                 _ = tokio::signal::ctrl_c() => {
                     anyhow::bail!("enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown");
                 }
@@ -61,9 +123,16 @@ pub(super) async fn handle(
             }
             print(&credentials, args.output)
         }
-        CredentialsCommand::Get(args) => {
-            print(&[resolve(client, &args.credential).await?], args.output)
-        }
+        CredentialsCommand::Get(args) => print(
+            &[resolve(
+                client,
+                args.credential
+                    .as_deref()
+                    .context("get requires a credential selector")?,
+            )
+            .await?],
+            args.output,
+        ),
         CredentialsCommand::Revoke(args) => {
             let current = resolve(client, &args.credential).await?;
             let response = client.revoke_credential(rpc::RevokeCredentialRequest {
@@ -80,7 +149,13 @@ pub(super) async fn handle(
             )
         }
         CredentialsCommand::Delete(args) => {
-            let current = resolve(client, &args.credential).await?;
+            let current = resolve(
+                client,
+                args.credential
+                    .as_deref()
+                    .context("delete requires a credential selector")?,
+            )
+            .await?;
             if current.status != rpc::CredentialStatus::Revoked {
                 anyhow::bail!("revoke the platform credential before deleting its stored record");
             }
@@ -101,14 +176,213 @@ pub(super) async fn handle(
             eprintln!("Platform credential {:?} deleted.", current.name);
             Ok(())
         }
-        CredentialsCommand::Add(_) => anyhow::bail!(
-            "platform credentials cannot be uploaded as raw values; use credentials --platform connect codex --name NAME"
-        ),
-        CredentialsCommand::Rename(_) | CredentialsCommand::Rotate(_) => {
-            anyhow::bail!("platform credential rename and explicit rotation are not supported yet")
+        CredentialsCommand::Add(args) => {
+            if args.provider == "ssh" {
+                let name = super::credentials::ssh::validate_import(&args)?;
+                // Confirm owner-scoped access and name availability before
+                // reading the explicitly selected private file or passphrase.
+                anyhow::ensure!(
+                    find_named(client, &name).await?.is_none(),
+                    "credential name already exists"
+                );
+                let mut input = super::credentials::ssh::read_import(&args)?;
+                let response = client.add_ssh_credential(rpc::AddSshCredentialRequest {
+                    name,
+                    private_key: std::mem::take(&mut *input.private_key),
+                    passphrase: input.passphrase.as_mut().map(|value| std::mem::take(&mut **value)),
+                    expires_at_unix: args.expires_at,
+                    ..Default::default()
+                }).await.context("import platform SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+                return print(
+                    &[response
+                        .credential
+                        .into_option()
+                        .context("platform omitted SSH metadata")?],
+                    OutputFormat::Text,
+                );
+            }
+            validate_key_arguments(&args)?;
+            let material = super::credentials::prompt_credential_material()?;
+            let response = client.add_api_key_credential(rpc::AddApiKeyCredentialRequest {
+                provider: args.provider,
+                name: args.name.trim().to_owned(),
+                value: material.expose_secret().to_vec(),
+                expires_at_unix: args.expires_at,
+                ..Default::default()
+            }).await.context("add platform API key; inspect by name before retrying an uncertain acknowledgement")?;
+            print(
+                &[response
+                    .credential
+                    .into_option()
+                    .context("platform omitted credential metadata")?],
+                OutputFormat::Text,
+            )
         }
-        CredentialsCommand::Profile { .. } => unreachable!("profiles have a separate dispatcher"),
+        CredentialsCommand::Rename(args) => {
+            let name = trimmed_required(&args.name, "credential name")?.to_owned();
+            let current = resolve(client, &args.credential).await?;
+            let response = client.rename_credential(rpc::RenameCredentialRequest {
+                credential_id: current.id.clone(),
+                expected_revocation_generation: current.revocation_generation,
+                expected_name: current.name.clone(), name: name.clone(), ..Default::default()
+            }).await.context("rename exact platform credential; inspect metadata before retrying an uncertain result")?;
+            let renamed = response
+                .credential
+                .into_option()
+                .context("platform omitted renamed metadata")?;
+            let mut expected = current;
+            expected.name = name;
+            validate_update_ack(&expected, &renamed)?;
+            print(&[renamed], OutputFormat::Text)
+        }
+        CredentialsCommand::Rotate(args) => {
+            let current = resolve(client, &args.credential).await?;
+            let expected = rotation_metadata(&current, args.expires_at)?;
+            eprintln!("{}", rotation_notice(&current, args.expires_at));
+            let material = super::credentials::prompt_credential_material()?;
+            let response = client.rotate_api_key_credential(rpc::RotateApiKeyCredentialRequest {
+                credential_id: current.id,
+                expected_revocation_generation: current.revocation_generation,
+                value: material.expose_secret().to_vec(), expires_at_unix: args.expires_at,
+                ..Default::default()
+            }).await.context("rotate exact platform API key; inspect metadata before retrying an uncertain result")?;
+            let rotated = response
+                .credential
+                .into_option()
+                .context("platform omitted rotated metadata")?;
+            validate_update_ack(&expected, &rotated)?;
+            print(&[rotated], OutputFormat::Text)
+        }
+        CredentialsCommand::Set(_)
+        | CredentialsCommand::Unset(_)
+        | CredentialsCommand::Revisions(_)
+        | CredentialsCommand::Profiles { .. } => {
+            unreachable!("profiles have a separate dispatcher")
+        }
     }
+}
+
+fn rotation_metadata(
+    current: &rpc::Credential,
+    expiry: Option<u64>,
+) -> anyhow::Result<rpc::Credential> {
+    anyhow::ensure!(
+        matches!(current.provider.as_str(), "openai" | "anthropic")
+            && current.authentication_kind == rpc::CredentialAuthenticationKind::ApiKey,
+        "rotate supports OpenAI/Anthropic API keys; use connect to reconnect OAuth or generate/add for a new SSH identity"
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    anyhow::ensure!(
+        expiry.is_none_or(|expiry| expiry > now && expiry <= i64::MAX as u64),
+        "--expires-at must be a future Unix timestamp"
+    );
+    anyhow::ensure!(
+        current.revocation_generation > 0 && current.revocation_generation < i64::MAX as u64,
+        "platform returned an invalid credential revision"
+    );
+    let mut expected = current.clone();
+    expected.status = rpc::CredentialStatus::Active.into();
+    expected.expires_at_unix = expiry;
+    expected.revocation_generation += 1;
+    Ok(expected)
+}
+
+fn rotation_notice(current: &rpc::Credential, expiry: Option<u64>) -> String {
+    let deadline = expiry.map_or_else(
+        || "clears the hard expiry".to_owned(),
+        |expiry| format!("sets the hard expiry to Unix timestamp {expiry}"),
+    );
+    format!(
+        "Rotating platform API key {:?} ({}, revision {}) sets its status to Active (including if revoked) and {deadline}. Enter the replacement key to proceed.",
+        current.name, current.id, current.revocation_generation
+    )
+}
+
+fn validate_update_ack(expected: &rpc::Credential, actual: &rpc::Credential) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        expected == actual,
+        "platform returned unexpected credential metadata; inspect the identity before retrying the uncertain result"
+    );
+    Ok(())
+}
+
+async fn find_named(
+    client: &CodewireClient,
+    name: &str,
+) -> anyhow::Result<Option<rpc::Credential>> {
+    match client
+        .get_credential(rpc::GetCredentialRequest {
+            selector: Some(rpc::get_credential_request::Selector::Name(name.to_owned())),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(response) => Ok(Some(
+            response
+                .credential
+                .into_option()
+                .context("platform omitted credential metadata")?,
+        )),
+        Err(error) if error.code() == rpc::ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error).context("inspect existing platform credential before enrollment"),
+    }
+}
+
+fn display_challenge(provider: &str, url: &str, code: &str) -> bool {
+    eprintln!("Open {url} and enter {code}");
+    eprintln!("Continue only if you started this {provider} login.");
+    true
+}
+
+struct OAuthConnectionRequest {
+    name: String,
+    credential_id: Option<String>,
+    expected_revocation_generation: Option<u64>,
+}
+
+fn oauth_connection_request(
+    provider: &str,
+    name: &str,
+    existing: Option<&rpc::Credential>,
+) -> anyhow::Result<OAuthConnectionRequest> {
+    let mut request = OAuthConnectionRequest {
+        name: name.to_owned(),
+        credential_id: None,
+        expected_revocation_generation: None,
+    };
+    if let Some(existing) = existing {
+        anyhow::ensure!(
+            existing.provider == provider
+                && existing.authentication_kind == rpc::CredentialAuthenticationKind::Oauth
+                && existing.name.eq_ignore_ascii_case(name)
+                && !existing.id.is_empty()
+                && existing.revocation_generation > 0,
+            "platform credential belongs to a different provider or authentication kind, or its metadata is invalid; inspect it before reconnecting"
+        );
+        request.name = existing.name.clone();
+        request.credential_id = Some(existing.id.clone());
+        request.expected_revocation_generation = Some(existing.revocation_generation);
+    }
+    Ok(request)
+}
+
+fn validate_key_arguments(args: &CredentialAddArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.key_file.is_none(),
+        "--key-file is only valid for add ssh"
+    );
+    anyhow::ensure!(
+        matches!(args.provider.as_str(), "openai" | "anthropic"),
+        "API-key enrollment supports openai or anthropic; use connect for OAuth"
+    );
+    trimmed_required(&args.name, "credential name")?;
+    anyhow::ensure!(
+        args.account_hint.is_none(),
+        "platform API keys do not use --account-hint"
+    );
+    Ok(())
 }
 
 pub(super) async fn resolve(
@@ -135,6 +409,28 @@ pub(super) async fn resolve(
 }
 
 fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Result<()> {
+    for credential in credentials {
+        if credential.provider == "ssh"
+            || credential.authentication_kind == rpc::CredentialAuthenticationKind::SshKey
+            || credential.ssh_public_key.is_set()
+        {
+            anyhow::ensure!(
+                credential.provider == "ssh"
+                    && credential.authentication_kind == rpc::CredentialAuthenticationKind::SshKey
+                    && credential.account_hint.is_none(),
+                "platform returned inconsistent SSH metadata"
+            );
+            let key = credential
+                .ssh_public_key
+                .as_option()
+                .context("platform omitted SSH public key")?;
+            codewire_access::SshPublicKeyMetadata {
+                openssh: key.openssh.clone(),
+                fingerprint: key.fingerprint.clone(),
+            }
+            .validate()?;
+        }
+    }
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(credentials)?),
         OutputFormat::Text => {
@@ -158,6 +454,9 @@ fn print(credentials: &[rpc::Credential], output: OutputFormat) -> anyhow::Resul
                     status,
                     credential.revocation_generation
                 );
+                if let Some(key) = credential.ssh_public_key.as_option() {
+                    println!("  {}\n  {}", key.openssh, key.fingerprint);
+                }
             }
         }
     }
@@ -173,6 +472,106 @@ mod tests {
 
     const ID: &str = "fdd5612f-12ca-4a21-9557-dc4875f9c1f6";
     const REVISION: u64 = 9_007_199_254_740_993;
+
+    #[tokio::test]
+    async fn platform_rename_binds_exact_name_and_revision_and_checks_acknowledgement() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        for invalid_ack in [false, true] {
+            expect_metadata(
+                &server,
+                rpc::get_credential_request::Selector::Name("work".into()),
+                rpc::CredentialStatus::Active,
+            )
+            .await;
+            let mut expected = metadata(rpc::CredentialStatus::Active);
+            expected.name = "renamed".into();
+            if invalid_ack {
+                expected.revocation_generation += 1;
+            }
+            unary(
+                &server,
+                "CredentialMutationService",
+                "RenameCredential",
+                rpc::RenameCredentialRequest {
+                    credential_id: ID.into(),
+                    expected_revocation_generation: REVISION,
+                    expected_name: "work".into(),
+                    name: "renamed".into(),
+                    ..Default::default()
+                },
+                rpc::RenameCredentialResponse {
+                    credential: Some(expected).into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let result = handle(
+                &client,
+                CredentialsCommand::Rename(CredentialRenameArgs {
+                    credential: "work".into(),
+                    name: "renamed".into(),
+                }),
+            )
+            .await;
+            assert_eq!(result.is_err(), invalid_ack);
+            server.verify().await;
+            server.reset().await;
+        }
+    }
+
+    #[test]
+    fn platform_rotation_discloses_reactivation_and_expiry_and_rejects_wrong_kind_before_input() {
+        let mut current = metadata(rpc::CredentialStatus::Revoked);
+        assert!(rotation_metadata(&current, None).is_err());
+        current.authentication_kind = rpc::CredentialAuthenticationKind::ApiKey.into();
+        current.expires_at_unix = Some(4_000_000_000);
+        let expected = rotation_metadata(&current, None).unwrap();
+        assert_eq!(expected.status, rpc::CredentialStatus::Active);
+        assert_eq!(expected.expires_at_unix, None);
+        assert_eq!(expected.revocation_generation, REVISION + 1);
+        for expiry in [0, 1, u64::MAX] {
+            assert!(rotation_metadata(&current, Some(expiry)).is_err());
+        }
+        assert!(rotation_notice(&current, None).contains("including if revoked"));
+        assert!(rotation_notice(&current, None).contains("clears the hard expiry"));
+        assert!(rotation_notice(&current, Some(4_000_000_000)).contains("4000000000"));
+        let mut wrong = expected.clone();
+        wrong.id = "different-identity".into();
+        assert!(validate_update_ack(&expected, &wrong).is_err());
+        current.provider = "github".into();
+        assert!(rotation_metadata(&current, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn platform_rotation_client_sends_exact_revision_without_retry_or_readback() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let mut current = metadata(rpc::CredentialStatus::Revoked);
+        current.authentication_kind = rpc::CredentialAuthenticationKind::ApiKey.into();
+        let expected = rotation_metadata(&current, None).unwrap();
+        let request = rpc::RotateApiKeyCredentialRequest {
+            credential_id: ID.into(),
+            expected_revocation_generation: REVISION,
+            value: b"synthetic-write-only-replacement".to_vec(),
+            ..Default::default()
+        };
+        unary(
+            &server,
+            "CredentialMutationService",
+            "RotateApiKeyCredential",
+            request.clone(),
+            rpc::RotateApiKeyCredentialResponse {
+                credential: Some(expected.clone()).into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let response = client.rotate_api_key_credential(request).await.unwrap();
+        validate_update_ack(&expected, &response.credential.into_option().unwrap()).unwrap();
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
 
     fn client(server: &MockServer) -> CodewireClient {
         CodewireClient::with_http(
@@ -253,7 +652,7 @@ mod tests {
         let error = handle(
             &client,
             CredentialsCommand::Delete(CredentialDeleteArgs {
-                credential: "name:work".into(),
+                credential: Some("name:work".into()),
                 yes: true,
             }),
         )
@@ -318,7 +717,7 @@ mod tests {
         handle(
             &client,
             CredentialsCommand::Delete(CredentialDeleteArgs {
-                credential: "work".into(),
+                credential: Some("work".into()),
                 yes: true,
             }),
         )
@@ -402,32 +801,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn platform_unsupported_paths_never_read_raw_input_or_contact_server() {
+    async fn platform_unsupported_material_paths_reject_before_raw_input() {
         let server = MockServer::start().await;
         let client = client(&server);
-        for command in [
-            CredentialsCommand::Add(CredentialAddArgs {
-                provider: "openai".into(),
-                kind: CredentialAuthenticationKindArg::Oauth,
-                name: "work".into(),
-                account_hint: None,
-                expires_at: None,
-            }),
-            CredentialsCommand::Connect(CredentialConnectArgs {
-                provider: CredentialConnectProviderArg::Github,
-                name: "work".into(),
-            }),
-            CredentialsCommand::Rename(CredentialRenameArgs {
-                credential: "work".into(),
-                name: "other".into(),
-            }),
+        let command = CredentialsCommand::Add(CredentialAddArgs {
+            provider: "codex".into(),
+            name: "work".into(),
+            account_hint: None,
+            expires_at: None,
+            key_file: None,
+        });
+        assert!(handle(&client, command).await.is_err());
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // Rotation must inspect the stored kind, then reject unsupported
+        // material before prompting or sending any mutation.
+        expect_metadata(
+            &server,
+            rpc::get_credential_request::Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        let error = handle(
+            &client,
             CredentialsCommand::Rotate(CredentialRotateArgs {
                 credential: "work".into(),
                 expires_at: None,
             }),
-        ] {
-            assert!(handle(&client, command).await.is_err());
-        }
-        assert!(server.received_requests().await.unwrap().is_empty());
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("rotate supports OpenAI/Anthropic API keys")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        server.verify().await;
+    }
+
+    #[test]
+    fn reconnect_pins_canonical_identity_and_never_guesses_authentication_kind() {
+        let created = oauth_connection_request("openai", "Work", None).unwrap();
+        assert!(created.credential_id.is_none());
+        assert!(created.expected_revocation_generation.is_none());
+        let mut current = metadata(rpc::CredentialStatus::Revoked);
+        current.name = "Work".into();
+        current.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
+        let reconnect = oauth_connection_request("openai", "work", Some(&current)).unwrap();
+        assert_eq!(reconnect.name, "Work");
+        assert_eq!(reconnect.credential_id.as_deref(), Some(ID));
+        assert_eq!(reconnect.expected_revocation_generation, Some(REVISION));
+        assert!(oauth_connection_request("openai", "other", Some(&current)).is_err());
+        assert!(oauth_connection_request("github", "work", Some(&current)).is_err());
+        current.provider = "github".into();
+        let github = oauth_connection_request("github", "work", Some(&current)).unwrap();
+        assert_eq!(github.credential_id.as_deref(), Some(ID));
+        assert_eq!(github.expected_revocation_generation, Some(REVISION));
+        current.provider = "openai".into();
+        current.authentication_kind = rpc::CredentialAuthenticationKind::ApiKey.into();
+        assert!(oauth_connection_request("openai", "work", Some(&current)).is_err());
+        current.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
+        current.revocation_generation = 0;
+        assert!(oauth_connection_request("openai", "work", Some(&current)).is_err());
+    }
+
+    #[tokio::test]
+    async fn reconnect_metadata_failure_is_not_treated_as_a_missing_credential() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.CredentialService/GetCredential"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(
+                serde_json::json!({"code":"unavailable","message":"synthetic failure"}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(find_named(&client(&server), "work").await.is_err());
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }

@@ -10,6 +10,7 @@ use http_body_util::BodyExt as _;
 pub(crate) struct BrowserTransport {
     pub(crate) http: reqwest::Client,
     pub(crate) cookie: Option<HeaderValue>,
+    pub(crate) origin: Option<HeaderValue>,
 }
 
 impl ClientTransport for BrowserTransport {
@@ -22,9 +23,10 @@ impl ClientTransport for BrowserTransport {
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
         let client = self.http.clone();
         let cookie = self.cookie.clone();
+        let origin = self.origin.clone();
         Box::pin(async move {
             let (mut parts, body) = request.into_parts();
-            parts.headers = browser_headers(parts.headers, cookie);
+            parts.headers = browser_headers(parts.headers, cookie, origin);
             let body = reqwest::Body::wrap_stream(body.into_data_stream());
             let response = client
                 .request(parts.method, parts.uri.to_string())
@@ -40,11 +42,19 @@ impl ClientTransport for BrowserTransport {
     }
 }
 
-pub(crate) fn browser_headers(mut headers: HeaderMap, cookie: Option<HeaderValue>) -> HeaderMap {
+pub(crate) fn browser_headers(
+    mut headers: HeaderMap,
+    cookie: Option<HeaderValue>,
+    origin: Option<HeaderValue>,
+) -> HeaderMap {
     headers.remove(header::AUTHORIZATION);
     headers.remove(header::COOKIE);
+    headers.remove(header::ORIGIN);
     if let Some(cookie) = cookie {
         headers.insert(header::COOKIE, cookie);
+    }
+    if let Some(origin) = origin {
+        headers.insert(header::ORIGIN, origin);
     }
     headers
 }

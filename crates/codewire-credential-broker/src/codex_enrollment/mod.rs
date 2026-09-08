@@ -64,7 +64,7 @@ pub enum CodexEnrollmentError {
     /// The pinned official CLI prompt was not accepted.
     #[error("Codex enrollment output is invalid or unsupported")]
     InvalidOutput,
-    /// This extraction supports the pinned official Codex 0.149.0 prompt only.
+    /// This extraction supports only reviewed Codex 0.149.0/0.153.4 prompts.
     #[error("Codex enrollment executable version is unsupported")]
     UnsupportedVersion,
     /// The isolated process could not finish successfully.
@@ -621,13 +621,15 @@ async fn logout_if_valid(
 
 // A dedicated group is required because the pinned npm executable is a wrapper
 // which spawns the native child. Killing only the direct child is insufficient.
-struct GroupChild {
-    child: Child,
+// Also used by the isolated GitHub enrollment: one implementation owns the
+// unreaped process-group identity, termination and both output EOF barriers.
+pub(crate) struct GroupChild {
+    pub(crate) child: Child,
     pid: Option<Pid>,
 }
 
 impl GroupChild {
-    fn spawn(command: &mut Command) -> Result<Self, CodexEnrollmentError> {
+    pub(crate) fn spawn(command: &mut Command) -> Result<Self, CodexEnrollmentError> {
         let child = command.spawn().map_err(|_| CodexEnrollmentError::Failed)?;
         let pid = child
             .id()
@@ -641,7 +643,7 @@ impl GroupChild {
         })
     }
 
-    async fn wait_without_reaping(&self) -> Result<bool, CodexEnrollmentError> {
+    pub(crate) async fn wait_without_reaping(&self) -> Result<bool, CodexEnrollmentError> {
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())
             .map_err(|_| CodexEnrollmentError::Failed)?;
         loop {
@@ -659,7 +661,7 @@ impl GroupChild {
         }
     }
 
-    async fn stop_and_drain(
+    pub(crate) async fn stop_and_drain(
         &mut self,
         stdout: &mut (impl AsyncRead + Unpin),
         stderr: &mut (impl AsyncRead + Unpin),
@@ -689,7 +691,7 @@ impl GroupChild {
         result.map(|_| ())
     }
 
-    fn terminate(&mut self) -> Result<(), CodexEnrollmentError> {
+    pub(crate) fn terminate(&mut self) -> Result<(), CodexEnrollmentError> {
         if let Some(pid) = self.pid {
             // The unreaped leader reserves the process-group ID until after
             // this signal. Clear the signal authority before any child wait:

@@ -1,6 +1,5 @@
-//! Generated OAuth-only mutation boundary over exact synthetic PostgreSQL.
-//! Seven cases exercise the actual network mount; the last explicitly tests
-//! the owner's bounded event queue using real shared OAuth authentication.
+//! Generated session-or-OAuth mutation boundary over exact synthetic PostgreSQL.
+//! Exercises the actual network mount and the owner's bounded event queue.
 
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,7 +8,9 @@ use std::sync::atomic::Ordering;
 use anyhow::{Context, Result, ensure};
 use codewire_access::{AccessProfileName, CapabilitySlot, builtin_provider_catalog};
 use codewire_platform_credentials::PlatformAccessProfileStore;
-use codewire_server_core::auth::{AuthState, authenticate_headers_with_context, hash_oauth_token};
+use codewire_server_core::auth::{
+    AuthState, authenticate_headers_with_context, hash_oauth_token, hash_session_token,
+};
 use serde_json::{Value, json};
 
 use crate::platform_test_support as platform_support;
@@ -17,6 +18,10 @@ use platform_support::{
     SyntheticKek, TIMEOUT, TestDatabase, envelope_bytes, material_count, quote_ident,
 };
 
+mod additions;
+mod github;
+mod lifecycle;
+mod ssh;
 pub(crate) mod support;
 use support::*;
 
@@ -45,7 +50,7 @@ async fn generated_enrollment_oauth_only_commits_metadata_without_material_leaks
                 .fetch_one(&h.pool)
                 .await?;
         ensure!(identity == (h.role.clone(), h.role.clone()));
-        for auth in [Auth::Missing, Auth::Cookie, Auth::ApiKey] {
+        for auth in [Auth::Missing, Auth::CookieWrongOrigin, Auth::ApiKey] {
             h.rpc.denied_enrollment(auth).await?;
         }
         ensure!(!h.control("before-challenge.pid").exists() && h.count().await? == 0);
@@ -208,6 +213,27 @@ async fn generated_login_cannot_outlive_original_oauth_revocation_or_expiry() ->
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn generated_session_login_requires_origin_and_cannot_outlive_logout() -> Result<()> {
+    let h = Harness::new().await?;
+    let result = async {
+        let mut response = h.rpc.enroll(Auth::Cookie, "session-logout").await?;
+        response.challenge().await?;
+        sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
+            .bind(hash_session_token(SESSION))
+            .execute(&h.db.pool)
+            .await?;
+        h.release()?;
+        response.error("unauthenticated").await?;
+        h.drained().await?;
+        ensure!(h.count().await? == 0 && h.logged_out());
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn generated_duplicate_name_rolls_back_only_new_publication() -> Result<()> {
     let h = Harness::new().await?;
     let result = async {
@@ -247,7 +273,13 @@ async fn generated_lifecycle_requires_owner_current_revision_and_revoked_unrefer
                 .lifecycle_error(method, Auth::Bob, identifier, 1, "not_found")
                 .await?;
             h.rpc
-                .lifecycle_error(method, Auth::Cookie, identifier, 1, "unauthenticated")
+                .lifecycle_error(
+                    method,
+                    Auth::CookieWrongOrigin,
+                    identifier,
+                    1,
+                    Auth::CookieWrongOrigin.denial_code(),
+                )
                 .await?;
             h.rpc
                 .lifecycle_error(method, Auth::ApiKey, identifier, 1, "unauthenticated")
@@ -288,7 +320,7 @@ async fn generated_lifecycle_requires_owner_current_revision_and_revoked_unrefer
             .await?;
         let (status, value) = h
             .rpc
-            .lifecycle("RevokeCredential", Auth::Alice, identifier, 1)
+            .lifecycle("RevokeCredential", Auth::Cookie, identifier, 1)
             .await?;
         ensure!(status.is_success() && value["credential"]["revocationGeneration"] == "2");
         ensure!(value["credential"]["status"] == "CREDENTIAL_STATUS_REVOKED");
@@ -545,13 +577,14 @@ async fn owner_queue_preserves_terminal_failure_behind_unconsumed_challenge() ->
             &headers,
         )
         .await?;
-        let authority = auth
-            .oauth_bearer_authority()
-            .context("original OAuth authority")?
-            .clone();
+        let authority = CredentialMutationAuthority::from(
+            auth.oauth_bearer_authority()
+                .context("original OAuth authority")?
+                .clone(),
+        );
         let mut events = h
             .owner
-            .enroll(authority, "buffered-failure".into())
+            .enroll(authority, "buffered-failure".into(), None, None)
             .map_err(|error| anyhow::anyhow!("closed enrollment error: {error:?}"))?;
         h.wait_file("native.pid").await?;
         tokio::time::timeout(TIMEOUT, async {

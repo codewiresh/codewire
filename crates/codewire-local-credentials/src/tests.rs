@@ -8,7 +8,10 @@ use codewire_access::{
     CapabilityPolicy, CapabilitySlot, CredentialAuthKind, CredentialStatus, GrantPermission,
     ProviderDefinition,
 };
-use codewire_protected_store::{ProtectedEntryId, ProtectedStoreError, ProtectedStorePersistence};
+use codewire_protected_store::{
+    ProtectedEntryId, ProtectedStoreError, ProtectedStorePersistence,
+    ssh_material::{decode_protected_material, generate_ed25519},
+};
 use tempfile::TempDir;
 
 use super::*;
@@ -27,6 +30,8 @@ struct StoreState {
     get_fault: Fault,
     put_fault: Fault,
     delete_fault: Fault,
+    get_calls: usize,
+    put_calls: usize,
     delete_calls: usize,
 }
 
@@ -85,6 +90,11 @@ impl TestProtectedStore {
         self.state.lock().expect("store lock").delete_calls
     }
 
+    fn call_counts(&self) -> (usize, usize, usize) {
+        let state = self.state.lock().expect("store lock");
+        (state.get_calls, state.put_calls, state.delete_calls)
+    }
+
     fn clear_entries(&self) {
         self.state.lock().expect("store lock").entries.clear();
     }
@@ -96,10 +106,11 @@ impl ProtectedStore for TestProtectedStore {
     }
 
     fn get(&self, id: &ProtectedEntryId) -> Result<Option<ProtectedValue>, ProtectedStoreError> {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| ProtectedStoreError::Unavailable)?;
+        state.get_calls += 1;
         if state.get_fault != Fault::None {
             return Err(ProtectedStoreError::Unavailable);
         }
@@ -119,6 +130,7 @@ impl ProtectedStore for TestProtectedStore {
             .state
             .lock()
             .map_err(|_| ProtectedStoreError::Unavailable)?;
+        state.put_calls += 1;
         if state.put_fault == Fault::BeforeEffect {
             return Err(ProtectedStoreError::Unavailable);
         }
@@ -158,22 +170,29 @@ fn environment(value: &str) -> EnvironmentId {
 }
 
 fn catalog() -> ProviderCatalog {
-    ProviderCatalog::from_definitions([ProviderDefinition {
-        id: provider("openai"),
-        authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
-        capabilities: [(
-            CapabilitySlot::codex(),
-            CapabilityPolicy {
-                authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
-                permissions: BTreeSet::from([GrantPermission {
-                    operation: BrokerOperationId::parse("responses").expect("operation ID"),
-                    route: BrokerRouteId::parse("openai-api").expect("route ID"),
-                }]),
-            },
-        )]
-        .into_iter()
-        .collect(),
-    }])
+    ProviderCatalog::from_definitions([
+        ProviderDefinition {
+            id: provider("openai"),
+            authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+            capabilities: [(
+                CapabilitySlot::codex(),
+                CapabilityPolicy {
+                    authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+                    permissions: BTreeSet::from([GrantPermission {
+                        operation: BrokerOperationId::parse("responses").expect("operation ID"),
+                        route: BrokerRouteId::parse("openai-api").expect("route ID"),
+                    }]),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        },
+        ProviderDefinition {
+            id: provider("ssh"),
+            authentication_kinds: BTreeSet::from([CredentialAuthKind::SshKey]),
+            capabilities: BTreeMap::new(),
+        },
+    ])
     .expect("provider catalog")
 }
 
@@ -424,10 +443,14 @@ fn repository_lease_binds_exact_github_profile_revision_and_route() {
         source: "https://github.com/codewire/codewire.git".to_owned(),
         branch: "main".to_owned(),
         revision: String::new(),
+        known_hosts: Vec::new(),
     };
     let admission = authority
         .admit_repository_credential_operation(&request)
         .expect("admit repository lease");
+    let RepositoryCredentialAdmission::GitHubOAuth(admission) = admission else {
+        panic!("expected GitHub OAuth admission");
+    };
     assert_eq!(admission.credential.metadata.id, credential.metadata.id);
     assert_eq!(admission.profile_id, profile.profile.id);
     assert_eq!(admission.profile_revision, 1);
@@ -452,6 +475,87 @@ fn repository_lease_binds_exact_github_profile_revision_and_route() {
     authority
         .revoke_credential(&credential.metadata.id)
         .expect("revoke GitHub credential");
+    assert!(matches!(
+        authority.admit_repository_credential_operation(&request),
+        Err(LocalCredentialError::CredentialInactive)
+    ));
+}
+
+#[test]
+fn repository_ssh_admission_is_metadata_only_exact_and_revocation_aware() {
+    let ssh_slot = CapabilitySlot::parse("ssh").unwrap();
+    let permissions = BTreeSet::from([
+        GrantPermission {
+            operation: BrokerOperationId::parse("ssh-identities").unwrap(),
+            route: BrokerRouteId::parse("ssh-agent").unwrap(),
+        },
+        GrantPermission {
+            operation: BrokerOperationId::parse("ssh-sign").unwrap(),
+            route: BrokerRouteId::parse("ssh-agent").unwrap(),
+        },
+    ]);
+    let catalog = ProviderCatalog::from_definitions([ProviderDefinition {
+        id: provider("ssh"),
+        authentication_kinds: BTreeSet::from([CredentialAuthKind::SshKey]),
+        capabilities: BTreeMap::from([(
+            ssh_slot.clone(),
+            CapabilityPolicy {
+                authentication_kinds: BTreeSet::from([CredentialAuthKind::SshKey]),
+                permissions,
+            },
+        )]),
+    }])
+    .unwrap();
+    let temp = TempDir::new().unwrap();
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog).unwrap();
+    let credential = authority
+        .add_ssh_credential(
+            "repository-ssh".into(),
+            None,
+            generate_ed25519().unwrap(),
+            || Ok(()),
+        )
+        .unwrap();
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("repository-ssh").unwrap(),
+            BTreeMap::from([(ssh_slot, credential.metadata.id.clone())]),
+        )
+        .unwrap();
+    let request = RepositoryCredentialLeaseRequest {
+        request_id: Uuid::new_v4(),
+        profile_id: profile.profile.id,
+        profile_revision: profile.profile.revision,
+        source: "git@example.com:org/app.git".into(),
+        branch: "main".into(),
+        revision: String::new(),
+        known_hosts: vec![
+            "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx"
+                .into(),
+        ],
+    };
+    let before = store.call_counts();
+    let admission = authority
+        .admit_repository_credential_operation(&request)
+        .unwrap();
+    let RepositoryCredentialAdmission::Ssh(admission) = admission else {
+        panic!("expected SSH admission");
+    };
+    assert_eq!(admission.credential.metadata.id, credential.metadata.id);
+    assert_eq!(store.call_counts(), before);
+
+    let mut changed_host = request.clone();
+    changed_host.known_hosts[0] =
+        changed_host.known_hosts[0].replace("example.com", "evil.invalid");
+    assert!(matches!(
+        authority.admit_repository_credential_operation(&changed_host),
+        Err(LocalCredentialError::CredentialOperationLeaseDenied)
+    ));
+    authority
+        .revoke_credential(&credential.metadata.id)
+        .unwrap();
     assert!(matches!(
         authority.admit_repository_credential_operation(&request),
         Err(LocalCredentialError::CredentialInactive)
@@ -560,7 +664,13 @@ fn broker_operation_lease_tracks_rotation_and_fails_closed_on_revocation_or_stor
     assert_eq!(first.with_material(<[u8]>::to_vec), b"first-token");
 
     authority
-        .rotate_credential_material(&credential.metadata.id, material(b"second-token"), None)
+        .rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"second-token"),
+            None,
+            credential.metadata.account_hint.clone(),
+        )
         .expect("rotate credential");
     let rotated = authority
         .lease_environment_credential_operation(&request)
@@ -643,8 +753,10 @@ fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
     assert_eq!(
         authority.rotate_credential_material(
             &credential.metadata.id,
+            credential.metadata.revocation_generation,
             material(b"manual-rotation"),
             None,
+            credential.metadata.account_hint.clone(),
         ),
         Err(LocalCredentialError::CredentialRefreshInProgress)
     );
@@ -669,6 +781,18 @@ fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
         .expect("commit refresh");
     assert_eq!(refreshed.metadata.revocation_generation, 2);
     assert_eq!(committed_material_generation, 2);
+    let calls = store.call_counts();
+    assert_eq!(
+        authority.rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"stale-owner-reconnect"),
+            None,
+            None,
+        ),
+        Err(LocalCredentialError::StaleCredentialRevision),
+    );
+    assert_eq!(store.call_counts(), calls);
     let lease = authority
         .lease_environment_credential_operation(&request)
         .expect("lease refreshed generation");
@@ -1650,14 +1774,20 @@ fn rotation_switches_generations_without_overwriting_the_active_entry() {
     let rotated = authority
         .rotate_credential_material(
             &credential.metadata.id,
+            credential.metadata.revocation_generation,
             material(b"new-synthetic-token"),
             Some(4_102_444_801),
+            Some("new-account@example.test".into()),
         )
         .expect("rotate credential");
 
     assert_eq!(rotated.metadata.id, credential.metadata.id);
     assert_eq!(rotated.metadata.revocation_generation, 2);
     assert_eq!(rotated.metadata.expires_at_unix, Some(4_102_444_801));
+    assert_eq!(
+        rotated.metadata.account_hint.as_deref(),
+        Some("new-account@example.test")
+    );
     assert!(!rotated.protected_store_cleanup_pending);
     assert_eq!(store.entry_count(), 1);
     assert_eq!(
@@ -1676,6 +1806,285 @@ fn rotation_switches_generations_without_overwriting_the_active_entry() {
 }
 
 #[test]
+fn stale_rotation_cannot_touch_material_or_reconcile_pending_cleanup() {
+    let temp = TempDir::new().unwrap();
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"first-synthetic-value"))
+        .unwrap();
+    store.set_delete_fault(Fault::BeforeEffect);
+    let current = authority
+        .rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"second-synthetic-value"),
+            credential.metadata.expires_at_unix,
+            Some("second@example.test".into()),
+        )
+        .unwrap();
+    assert!(current.protected_store_cleanup_pending);
+    store.clear_faults();
+    let calls = store.call_counts();
+    let entries = store.entry_values();
+    for stale_revision in [0, credential.metadata.revocation_generation] {
+        assert_eq!(
+            authority.rotate_credential_material(
+                &credential.metadata.id,
+                stale_revision,
+                material(b"must-not-be-written"),
+                None,
+                None,
+            ),
+            Err(LocalCredentialError::StaleCredentialRevision),
+        );
+        assert_eq!(store.call_counts(), calls);
+        assert_eq!(store.entry_values(), entries);
+        assert_eq!(
+            authority.get_credential(&credential.metadata.id).unwrap(),
+            current
+        );
+    }
+}
+
+#[test]
+fn reconnect_requires_the_revoked_revision_and_preserves_identity_and_bindings() {
+    let temp = TempDir::new().unwrap();
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"first-synthetic-value"))
+        .unwrap();
+    let environment_id = environment("env-reconnect");
+    let profile = bind_credential(&authority, &environment_id, &credential.metadata.id);
+    let binding = authority
+        .get_environment_access_binding(&environment_id)
+        .unwrap();
+    let revoked = authority
+        .revoke_credential(&credential.metadata.id)
+        .unwrap();
+    let calls = store.call_counts();
+    assert_eq!(
+        authority.rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"stale-reconnect"),
+            credential.metadata.expires_at_unix,
+            None,
+        ),
+        Err(LocalCredentialError::StaleCredentialRevision),
+    );
+    assert_eq!(store.call_counts(), calls);
+    assert_eq!(
+        authority.get_credential(&credential.metadata.id).unwrap(),
+        revoked
+    );
+
+    let reconnected = authority
+        .rotate_credential_material(
+            &revoked.metadata.id,
+            revoked.metadata.revocation_generation,
+            material(b"new-synthetic-value"),
+            revoked.metadata.expires_at_unix,
+            None,
+        )
+        .unwrap();
+    let mut expected = credential.metadata;
+    expected.revocation_generation = revoked.metadata.revocation_generation + 1;
+    expected.account_hint = None;
+    assert_eq!(reconnected.metadata, expected);
+    assert_eq!(
+        reconnected.created_at_unix_ms,
+        credential.created_at_unix_ms
+    );
+    assert_eq!(authority.get_profile(&profile.profile.id).unwrap(), profile);
+    assert_eq!(
+        authority
+            .list_profile_revisions(&profile.profile.id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        authority
+            .get_environment_access_binding(&environment_id)
+            .unwrap(),
+        binding
+    );
+    let lease = authority
+        .lease_environment_credential_operation(&operation_lease_request(&environment_id))
+        .unwrap();
+    assert_eq!(
+        lease.grant.credential_revocation_generation,
+        expected.revocation_generation
+    );
+    assert_eq!(lease.with_material(<[u8]>::to_vec), b"new-synthetic-value");
+}
+
+#[test]
+fn invalid_rotation_metadata_is_rejected_before_protected_storage() {
+    let temp = TempDir::new().unwrap();
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"first-synthetic-value"))
+        .unwrap();
+    let calls = store.call_counts();
+    assert!(matches!(
+        authority.rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"invalid-metadata-value"),
+            None,
+            Some(String::new()),
+        ),
+        Err(LocalCredentialError::Access(_)),
+    ));
+    assert_eq!(
+        authority.rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"invalid-deadline-value"),
+            Some(u64::MAX),
+            None,
+        ),
+        Err(LocalCredentialError::InvalidTime),
+    );
+    assert_eq!(store.call_counts(), calls);
+    assert_eq!(
+        authority.get_credential(&credential.metadata.id).unwrap(),
+        credential
+    );
+}
+
+#[test]
+fn rotation_does_not_overwrite_a_revision_advanced_by_journal_recovery() {
+    let temp = TempDir::new().unwrap();
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"first-synthetic-value"))
+        .unwrap();
+    let environment_id = environment("env-recovery-reconnect");
+    bind_credential(&authority, &environment_id, &credential.metadata.id);
+    let request = operation_lease_request(&environment_id);
+    let grant = authority
+        .admit_environment_credential_operation(&request)
+        .unwrap()
+        .grant;
+    let channel_id = Uuid::new_v4();
+    let refresh_id = Uuid::new_v4();
+    let request_id = Uuid::new_v4();
+    authority
+        .begin_environment_credential_refresh(
+            channel_id, refresh_id, request_id, &request, &grant, 1,
+        )
+        .unwrap();
+    authority
+        .start_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .unwrap();
+    store
+        .put(
+            &protected_entry_id(&credential.metadata.id, 2).unwrap(),
+            &material(b"durable-provider-refresh"),
+        )
+        .unwrap();
+    // Model an already-drained owner with a durable, unacknowledged result.
+    // Rotation must honor journal recovery without overwriting its newer CAS.
+    authority.active_refreshes.lock().unwrap().clear();
+    let put_calls = store.call_counts().1;
+    assert_eq!(
+        authority.rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"stale-owner-reconnect"),
+            None,
+            Some("stale-owner@example.test".into()),
+        ),
+        Err(LocalCredentialError::StaleCredentialRevision),
+    );
+    assert_eq!(store.call_counts().1, put_calls);
+    let recovered = authority.get_credential(&credential.metadata.id).unwrap();
+    assert_eq!(recovered.metadata.revocation_generation, 2);
+    assert_eq!(
+        recovered.metadata.account_hint,
+        credential.metadata.account_hint
+    );
+    assert_eq!(
+        recovered.metadata.expires_at_unix,
+        credential.metadata.expires_at_unix
+    );
+    assert_eq!(
+        store.entry_values(),
+        vec![b"durable-provider-refresh".to_vec()]
+    );
+}
+
+#[test]
+fn rotation_sql_failure_cannot_partially_replace_account_status_or_expiry() {
+    let temp = TempDir::new().unwrap();
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let credential = authority
+        .add_credential(new_credential("work"), material(b"first-synthetic-value"))
+        .unwrap();
+    let revoked = authority
+        .revoke_credential(&credential.metadata.id)
+        .unwrap();
+    authority
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_rotation BEFORE UPDATE OF protected_entry_id ON credentials
+         BEGIN SELECT RAISE(ABORT, 'synthetic rotation commit failure'); END;",
+        )
+        .unwrap();
+    assert_eq!(
+        authority.rotate_credential_material(
+            &revoked.metadata.id,
+            revoked.metadata.revocation_generation,
+            material(b"uncommitted-synthetic-value"),
+            None,
+            Some("uncommitted@example.test".into()),
+        ),
+        Err(LocalCredentialError::DatabaseUnavailable),
+    );
+    let after = authority.get_credential(&credential.metadata.id).unwrap();
+    assert_eq!(after.metadata, revoked.metadata);
+    assert_eq!(after.updated_at_unix_ms, revoked.updated_at_unix_ms);
+    assert!(after.protected_store_cleanup_pending);
+    authority
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_rotation;")
+        .unwrap();
+    let committed = authority
+        .rotate_credential_material(
+            &revoked.metadata.id,
+            revoked.metadata.revocation_generation,
+            material(b"committed-synthetic-value"),
+            None,
+            Some("committed@example.test".into()),
+        )
+        .unwrap();
+    assert_eq!(committed.metadata.status, CredentialStatus::Active);
+    assert_eq!(
+        committed.metadata.account_hint.as_deref(),
+        Some("committed@example.test")
+    );
+    assert_eq!(committed.metadata.expires_at_unix, None);
+    assert_eq!(
+        store.entry_values(),
+        vec![b"committed-synthetic-value".to_vec()]
+    );
+}
+
+#[test]
 fn interrupted_rotation_rolls_back_the_uncommitted_generation() {
     let temp = TempDir::new().expect("temporary directory");
     let root = authority_root(&temp);
@@ -1690,14 +2099,23 @@ fn interrupted_rotation_rolls_back_the_uncommitted_generation() {
     assert_eq!(
         authority.rotate_credential_material(
             &credential.metadata.id,
+            credential.metadata.revocation_generation,
             material(b"uncommitted-token"),
-            None
+            None,
+            Some("uncommitted-account@example.test".into()),
         ),
         Err(LocalCredentialError::ProtectedStore(
             ProtectedStoreError::Unavailable
         ))
     );
     assert_eq!(store.entry_count(), 2);
+    assert_eq!(
+        authority
+            .get_credential(&credential.metadata.id)
+            .unwrap()
+            .metadata,
+        credential.metadata,
+    );
     assert!(
         authority
             .get_credential(&credential.metadata.id)
@@ -1717,6 +2135,13 @@ fn interrupted_rotation_rolls_back_the_uncommitted_generation() {
     let recovered =
         LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("recover authority");
     assert_eq!(store.entry_count(), 1);
+    assert_eq!(
+        recovered
+            .get_credential(&credential.metadata.id)
+            .unwrap()
+            .metadata,
+        credential.metadata,
+    );
     assert!(
         !recovered
             .get_credential(&credential.metadata.id)
@@ -1746,7 +2171,9 @@ fn committed_rotation_stays_usable_while_retired_entry_cleanup_is_pending() {
     let rotated = authority
         .rotate_credential_material(
             &credential.metadata.id,
+            credential.metadata.revocation_generation,
             material(b"active-rotated-token"),
+            None,
             None,
         )
         .expect("committed rotation");
@@ -1786,7 +2213,13 @@ fn deleting_a_credential_removes_active_and_retired_entries_exactly() {
         .expect("add credential");
     store.set_delete_fault(Fault::BeforeEffect);
     authority
-        .rotate_credential_material(&credential.metadata.id, material(b"active-token"), None)
+        .rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"active-token"),
+            None,
+            credential.metadata.account_hint.clone(),
+        )
         .expect("commit rotation with pending cleanup");
     assert_eq!(store.entry_count(), 2);
 
@@ -1815,7 +2248,13 @@ fn recovery_never_deletes_a_journal_entry_outside_the_credential_generation() {
         .expect("add credential");
     store.set_delete_fault(Fault::BeforeEffect);
     authority
-        .rotate_credential_material(&credential.metadata.id, material(b"active-token"), None)
+        .rotate_credential_material(
+            &credential.metadata.id,
+            credential.metadata.revocation_generation,
+            material(b"active-token"),
+            None,
+            credential.metadata.account_hint.clone(),
+        )
         .expect("commit rotation with pending cleanup");
     drop(authority);
     store.clear_faults();
@@ -2036,6 +2475,32 @@ fn one_authority_process_owns_the_metadata_and_protected_store_journal() {
 
 #[cfg(unix)]
 #[test]
+fn authority_lock_tolerates_a_transient_inherited_descriptor_without_stealing_ownership() {
+    let temp = TempDir::new().unwrap();
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+    // A fork temporarily shares the same open-file description even with
+    // CLOEXEC. Duplicate that exact kernel lock deterministically rather than
+    // depending on another parallel test landing inside its fork/exec window.
+    let inherited = authority._authority_lock._file.try_clone().unwrap();
+    drop(authority);
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        drop(inherited);
+    });
+    let reopened = LocalCredentialAuthority::open(&root, store.clone(), catalog());
+    releaser.join().unwrap();
+    let reopened = reopened.expect("reacquire after the inherited descriptor closes");
+    assert!(matches!(
+        LocalCredentialAuthority::open(&root, store, catalog()),
+        Err(LocalCredentialError::AlreadyRunning)
+    ));
+    drop(reopened);
+}
+
+#[cfg(unix)]
+#[test]
 fn authority_rejects_non_private_roots_and_database_symlinks() {
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
@@ -2127,6 +2592,260 @@ fn unsupported_database_schema_fails_closed() {
         ),
         Err(LocalCredentialError::UnsupportedSchema)
     ));
+}
+
+#[test]
+fn ssh_enrollment_derives_and_persists_public_identity_atomically() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+    let prepared = generate_ed25519().expect("generate synthetic SSH key");
+    let expected_openssh = prepared.public_key().openssh().to_string();
+    let expected_fingerprint = prepared.public_key().fingerprint().to_string();
+
+    let record = authority
+        .add_ssh_credential("work-ssh".into(), Some(4_102_444_800), prepared, || Ok(()))
+        .expect("enroll SSH credential");
+    assert_eq!(record.metadata.provider, provider("ssh"));
+    assert_eq!(
+        record.metadata.authentication_kind,
+        CredentialAuthKind::SshKey
+    );
+    assert_eq!(record.metadata.account_hint, None);
+    assert_eq!(record.metadata.revocation_generation, 1);
+    let public = record.metadata.ssh_public_key.as_ref().expect("public key");
+    assert_eq!(public.openssh, expected_openssh);
+    assert_eq!(public.fingerprint, expected_fingerprint);
+
+    let values = store.entry_values();
+    assert_eq!(values.len(), 1);
+    let material = decode_protected_material(
+        ProtectedValue::from_slice(&values[0]).expect("protected SSH material"),
+    )
+    .expect("decode protected SSH material");
+    assert_eq!(material.public_key().openssh(), expected_openssh);
+    assert_eq!(material.public_key().fingerprint(), expected_fingerprint);
+
+    drop(authority);
+    let reopened =
+        LocalCredentialAuthority::open(&authority_root(&temp), store, catalog()).unwrap();
+    assert_eq!(
+        reopened
+            .get_credential(&record.metadata.id)
+            .expect("reloaded SSH credential"),
+        record
+    );
+}
+
+#[test]
+fn generic_add_and_rotation_reject_ssh_before_store_writes() {
+    let temp = TempDir::new().expect("temporary directory");
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog()).unwrap();
+
+    let generic = authority.add_credential(
+        NewCredential {
+            provider: provider("ssh"),
+            authentication_kind: CredentialAuthKind::SshKey,
+            display_name: "forged-ssh".into(),
+            account_hint: None,
+            expires_at_unix: None,
+        },
+        material(b"synthetic-not-an-ssh-key"),
+    );
+    assert_eq!(
+        generic,
+        Err(LocalCredentialError::SshCredentialRequiresEnrollment)
+    );
+    assert_eq!(store.call_counts(), (0, 0, 0));
+
+    let expired = authority.add_ssh_credential(
+        "expired-before-publication".into(),
+        None,
+        generate_ed25519().expect("generate synthetic SSH key"),
+        || Err(LocalCredentialError::SshEnrollmentDeadlineElapsed),
+    );
+    assert_eq!(
+        expired,
+        Err(LocalCredentialError::SshEnrollmentDeadlineElapsed)
+    );
+    assert!(authority.list_credentials().unwrap().is_empty());
+    assert_eq!(store.call_counts(), (1, 0, 0));
+
+    let record = authority
+        .add_ssh_credential(
+            "real-ssh".into(),
+            None,
+            generate_ed25519().expect("generate synthetic SSH key"),
+            || Ok(()),
+        )
+        .expect("enroll SSH credential");
+    let before = store.call_counts();
+    let rotated = authority.rotate_credential_material(
+        &record.metadata.id,
+        record.metadata.revocation_generation,
+        material(b"synthetic-not-an-ssh-key"),
+        None,
+        None,
+    );
+    assert_eq!(
+        rotated,
+        Err(LocalCredentialError::SshCredentialRequiresEnrollment)
+    );
+    assert_eq!(store.call_counts(), before);
+}
+
+#[test]
+fn generic_operation_lease_rejects_runnable_ssh_before_store_read() {
+    let ssh_slot = CapabilitySlot::parse("ssh").unwrap();
+    let permission = GrantPermission {
+        operation: BrokerOperationId::parse("ssh-sign").unwrap(),
+        route: BrokerRouteId::parse("ssh-agent").unwrap(),
+    };
+    let catalog = ProviderCatalog::from_definitions([ProviderDefinition {
+        id: provider("ssh"),
+        authentication_kinds: BTreeSet::from([CredentialAuthKind::SshKey]),
+        capabilities: BTreeMap::from([(
+            ssh_slot.clone(),
+            CapabilityPolicy {
+                authentication_kinds: BTreeSet::from([CredentialAuthKind::SshKey]),
+                permissions: BTreeSet::from([permission.clone()]),
+            },
+        )]),
+    }])
+    .unwrap();
+    let temp = TempDir::new().unwrap();
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog).unwrap();
+    let credential = authority
+        .add_ssh_credential(
+            "lease-denied".into(),
+            None,
+            generate_ed25519().unwrap(),
+            || Ok(()),
+        )
+        .unwrap();
+    let environment_id = environment("ssh-generic-denied");
+    let profile = authority
+        .create_profile(
+            AccessProfileName::parse("ssh-generic").unwrap(),
+            BTreeMap::from([(ssh_slot.clone(), credential.metadata.id)]),
+        )
+        .unwrap();
+    authority
+        .create_environment_access_binding(EnvironmentAccessBinding {
+            environment_id: environment_id.clone(),
+            profile_id: profile.profile.id,
+            profile_revision: profile.profile.revision,
+        })
+        .unwrap();
+    let before = store.call_counts();
+    assert!(matches!(
+        authority.lease_environment_credential_operation(&CredentialOperationLeaseRequest {
+            environment_id,
+            environment_generation: 7,
+            capability_slot: ssh_slot,
+            operation: permission.operation,
+            route: permission.route,
+        }),
+        Err(LocalCredentialError::CredentialOperationLeaseDenied)
+    ));
+    assert_eq!(store.call_counts(), before);
+}
+
+#[test]
+fn schema_three_upgrades_once_and_reopens_without_mutation() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog()).unwrap();
+    let existing = authority
+        .add_credential(new_credential("existing"), material(b"synthetic-existing"))
+        .unwrap();
+    drop(authority);
+
+    let connection = Connection::open(root.join(DATABASE_FILE)).expect("open metadata database");
+    connection
+        .execute_batch(
+            "ALTER TABLE credentials DROP COLUMN ssh_public_key_fingerprint;
+             ALTER TABLE credentials DROP COLUMN ssh_public_key_openssh;
+             PRAGMA user_version = 3;",
+        )
+        .expect("construct exact schema-three fixture");
+    drop(connection);
+
+    for _ in 0..2 {
+        let authority = LocalCredentialAuthority::open(&root, store.clone(), catalog())
+            .expect("open upgraded authority");
+        let reloaded = authority
+            .get_credential(&existing.metadata.id)
+            .expect("load pre-upgrade credential");
+        assert_eq!(reloaded.metadata.ssh_public_key, None);
+        drop(authority);
+        let connection = Connection::open(root.join(DATABASE_FILE)).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        let columns: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('credentials')
+                 WHERE name IN ('ssh_public_key_openssh', 'ssh_public_key_fingerprint')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 2);
+    }
+}
+
+#[test]
+fn schema_three_upgrade_rolls_back_all_columns_and_version_on_failure() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let authority = LocalCredentialAuthority::open(
+        &root,
+        TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+        catalog(),
+    )
+    .unwrap();
+    drop(authority);
+    let database = root.join(DATABASE_FILE);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE credentials DROP COLUMN ssh_public_key_fingerprint;
+             PRAGMA user_version = 3;",
+        )
+        .expect("construct interrupted schema-three upgrade");
+    drop(connection);
+
+    assert!(matches!(
+        LocalCredentialAuthority::open(
+            &root,
+            TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem),
+            catalog(),
+        ),
+        Err(LocalCredentialError::DatabaseUnavailable)
+    ));
+    let connection = Connection::open(database).unwrap();
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, PREVIOUS_DATABASE_SCHEMA_VERSION);
+    let columns = ["ssh_public_key_openssh", "ssh_public_key_fingerprint"].map(|name| {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('credentials') WHERE name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    });
+    assert_eq!(columns, [1, 0]);
 }
 
 #[test]

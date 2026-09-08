@@ -1,24 +1,37 @@
-use std::future::Future;
+use std::future::{Future, IntoFuture as _};
 use std::io;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, Response};
-use axum::routing::post;
 use codewire_credential_bridge::{
     CredentialBridge as SharedCredentialBridge, CredentialBridgeOutput,
 };
-use codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
-use codewire_gateway_proto::daemon::v1;
-use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
+use codewire_gateway_proto::codewire::bridge::v1;
+use codewire_gateway_proto::{CREDENTIAL_BRIDGE_LOOPBACK_PORT, CREDENTIAL_BRIDGE_PROTOCOL_VERSION};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UnixListener, UnixStream, unix::SocketAddr};
+use tokio::sync::{Mutex, Semaphore};
+use tokio_stream::{Stream, StreamExt};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tonic::{Status, Streaming};
 
-use crate::CredentialBridgeConfig;
+use crate::server::{ShutdownIo, TransportShutdown};
+use crate::{CredentialBridgeConfig, CredentialBridgeTransport};
+
+mod hosted;
+pub(crate) use hosted::WORKSPACE_AUTHORIZATION;
+mod ssh_ingress;
+use ssh_ingress::SshIngress;
 
 const HOST_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+const HOSTED_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+const HOSTED_EPOCH_MAX_LIFETIME: Duration = Duration::from_secs(600);
+const HOSTED_INGRESS_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Local transport/configuration adapter. All request/response phases and
 /// connection cancellation belong to the shared material-free bridge.
@@ -26,21 +39,73 @@ const HOST_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) struct CredentialBridge {
     config: Option<CredentialBridgeConfig>,
     inner: Result<Option<SharedCredentialBridge>, Status>,
+    owner: Arc<BridgeOwner>,
+}
+
+struct BridgeOwner {
+    accepting: Mutex<bool>,
+    // One active epoch and one prepared replacement; no unbounded Open waiters.
+    permits: Arc<Semaphore>,
+    tasks: TaskTracker,
+    shutdown: CancellationToken,
 }
 
 pub(crate) struct CredentialBridgeConnection {
     pub output: CredentialBridgeOutput,
+    pub workspace_authorization: Option<hosted::WorkspaceAuthorization>,
 }
 
 pub(crate) struct CredentialIngress {
     listener: CredentialIngressListener,
+    loopback: Option<TcpListener>,
+    ssh: Option<SshIngress>,
     bridge: SharedCredentialBridge,
+    owner: CredentialBridge,
     socket: SocketGuard,
 }
 
 struct CredentialIngressListener {
     inner: UnixListener,
     uid: u32,
+    failed: Option<CancellationToken>,
+}
+
+/// Hosted TCP is an environment/Pod-network-namespace boundary, not a UID
+/// boundary. Only the Unix listener authenticates an individual socket UID.
+struct LoopbackIngressListener {
+    inner: TcpListener,
+    failed: CancellationToken,
+}
+
+struct ShutdownIngressListener<L> {
+    inner: L,
+    shutdown: Arc<TransportShutdown>,
+}
+
+struct HostedIngressDrain {
+    stop: CancellationToken,
+    transports: Arc<TransportShutdown>,
+    owner: CredentialBridge,
+}
+
+pub(crate) struct BridgeCancellationGuard(CredentialBridge);
+
+impl Drop for BridgeCancellationGuard {
+    fn drop(&mut self) {
+        // A dropped future cannot acknowledge asynchronous drain. It must
+        // still stop every registered epoch/stream and prevent new admission.
+        self.0.owner.shutdown.cancel();
+    }
+}
+
+impl Drop for HostedIngressDrain {
+    fn drop(&mut self) {
+        // Also fail closed if the containing server cancels its serve future.
+        // The containing daemon still owns/awaits the bridge task tracker.
+        self.stop.cancel();
+        self.owner.owner.shutdown.cancel();
+        self.transports.trigger();
+    }
 }
 
 struct SocketGuard {
@@ -50,6 +115,10 @@ struct SocketGuard {
 }
 
 impl CredentialBridge {
+    pub(crate) fn cancel_on_drop(&self) -> BridgeCancellationGuard {
+        BridgeCancellationGuard(self.clone())
+    }
+
     pub(crate) fn new(config: Option<CredentialBridgeConfig>) -> Self {
         let inner = config
             .as_ref()
@@ -57,7 +126,16 @@ impl CredentialBridge {
                 SharedCredentialBridge::new(config.environment_id, config.environment_generation)
             })
             .transpose();
-        Self { config, inner }
+        Self {
+            config,
+            inner,
+            owner: Arc::new(BridgeOwner {
+                accepting: Mutex::new(true),
+                permits: Arc::new(Semaphore::new(2)),
+                tasks: TaskTracker::new(),
+                shutdown: CancellationToken::new(),
+            }),
+        }
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -72,42 +150,148 @@ impl CredentialBridge {
             .ok_or_else(|| Status::failed_precondition("credential bridge is unavailable"))
     }
 
+    pub(crate) async fn project_environment_for_recipient(
+        &self,
+        context: codewire_workload_secrets::ProjectionContext,
+        recipient: [u8; 32],
+    ) -> Result<codewire_credential_bridge::RelayedEnvironmentProjection, Status> {
+        self.shared()?
+            .project_environment_for_recipient(context, recipient)
+            .await
+    }
+
+    pub(crate) async fn wait_for_initial_host(
+        &self,
+        context: &codewire_workload_secrets::ProjectionContext,
+    ) -> Result<(), Status> {
+        self.shared()?.wait_for_initial_host(context).await
+    }
+
     pub(crate) async fn connect(
         &self,
-        mut input: Streaming<v1::CredentialBridgeHostMessage>,
+        input: Streaming<v1::CredentialBridgeHostMessage>,
     ) -> Result<CredentialBridgeConnection, Status> {
+        self.connect_with_token_file(input, Path::new(codewire_access::CODEX_PLATFORM_TOKEN_FILE))
+            .await
+    }
+
+    async fn connect_with_token_file<S>(
+        &self,
+        mut input: S,
+        token_file: &Path,
+    ) -> Result<CredentialBridgeConnection, Status>
+    where
+        S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Send + Unpin + 'static,
+    {
         let config = self
             .config
             .as_ref()
             .ok_or_else(|| Status::failed_precondition("credential bridge is unavailable"))?;
-        let first = tokio::time::timeout(HOST_OPEN_TIMEOUT, input.message())
-            .await
-            .map_err(|_| Status::deadline_exceeded("credential bridge open timed out"))??
-            .ok_or_else(|| Status::invalid_argument("credential bridge open is missing"))?;
-        let Some(v1::credential_bridge_host_message::Payload::Open(open)) = first.payload else {
-            return Err(Status::invalid_argument(
-                "credential bridge must begin with open",
-            ));
+        let permit = self
+            .owner
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("credential bridge admission is busy"))?;
+        let hosted = config.transport == CredentialBridgeTransport::Hosted;
+        let deadline = tokio::time::Instant::now()
+            + if hosted {
+                HOSTED_OPEN_TIMEOUT
+            } else {
+                HOST_OPEN_TIMEOUT
+            };
+        let workspace_authorization = if hosted {
+            Some(tokio::select! {
+                biased;
+                _ = self.owner.shutdown.cancelled() => return Err(hosted::unavailable()),
+                result = tokio::time::timeout_at(deadline, hosted::read_workspace_authorization(token_file)) => result.map_err(|_| hosted::unavailable())??,
+            })
+        } else {
+            tokio::select! {
+                biased;
+                _ = self.owner.shutdown.cancelled() => return Err(hosted::unavailable()),
+                result = read_open(&mut input, config, deadline) => result?,
+            }
+            None
         };
-        if open.protocol_version != CREDENTIAL_BRIDGE_PROTOCOL_VERSION
-            || open.environment_id != config.environment_id.to_string()
-            || open.environment_generation != config.environment_generation
-        {
-            return Err(Status::failed_precondition(
-                "credential bridge identity is invalid",
-            ));
-        }
-
-        // DaemonService has already authenticated the caller, and the first
-        // Open above matched its configured generation. Only now activate.
         let (prepared, output) = self.shared()?.prepare_connection()?;
-        let connection = prepared.activate(input).await?;
-        tokio::spawn(connection.run());
-        Ok(CredentialBridgeConnection { output })
+        let config = config.clone();
+        let owner = self.owner.clone();
+        let accepting = self.owner.accepting.lock().await;
+        if !*accepting || self.owner.shutdown.is_cancelled() {
+            return Err(hosted::unavailable());
+        }
+        if !hosted {
+            // Keep the local eager-Open contract: RPC headers are sent only
+            // after this already-authenticated host has actually activated.
+            let connection = prepared.activate(input).await?;
+            drop(self.owner.tasks.spawn(async move {
+                let _permit = permit;
+                connection.run_until(owner.shutdown.cancelled()).await;
+            }));
+            drop(accepting);
+            return Ok(CredentialBridgeConnection {
+                output,
+                workspace_authorization,
+            });
+        }
+        // Register under the same admission lock closed by shutdown. Hosted
+        // Ready is emitted while PREPARED: it cannot replace the live epoch.
+        drop(self.owner.tasks.spawn(async move {
+            let _permit = permit;
+            let admitted = tokio::select! {
+                biased;
+                _ = owner.shutdown.cancelled() => return,
+                result = read_open(&mut input, &config, deadline) => result,
+            };
+            if admitted.is_err() {
+                return;
+            }
+            let accepting = owner.accepting.lock().await;
+            if !*accepting || owner.shutdown.is_cancelled() {
+                return;
+            }
+            let Ok(connection) = prepared.activate(input).await else {
+                return;
+            };
+            drop(accepting);
+            connection
+                .run_until(async {
+                    tokio::select! {
+                        _ = owner.shutdown.cancelled() => {},
+                        _ = tokio::time::sleep(HOSTED_EPOCH_MAX_LIFETIME) => {},
+                    }
+                })
+                .await;
+        }));
+        drop(accepting);
+        Ok(CredentialBridgeConnection {
+            output,
+            workspace_authorization,
+        })
     }
 
-    pub(crate) fn prepare_ingress(&self) -> Result<Option<CredentialIngress>, io::Error> {
+    pub(crate) async fn shutdown(&self) {
+        {
+            let mut accepting = self.owner.accepting.lock().await;
+            *accepting = false;
+            self.owner.tasks.close();
+            self.owner.shutdown.cancel();
+        }
+        self.owner.tasks.wait().await;
+    }
+
+    pub(crate) fn prepare_ingress(
+        &self,
+        selected_ssh: bool,
+    ) -> Result<Option<CredentialIngress>, io::Error> {
         let Some(config) = self.config.as_ref() else {
+            if selected_ssh {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "selected SSH ingress has no credential bridge",
+                ));
+            }
             return Ok(None);
         };
         validate_config(config)?;
@@ -117,8 +301,28 @@ impl CredentialBridge {
                 "credential bridge configuration is invalid",
             )
         })?;
+        // Prebind before touching the Unix path. A competing Hosted owner (or
+        // another occupant of the fixed port) must leave the prior UDS intact.
+        // Local VMs already own their loopback forwarder and never bind here.
+        let loopback = if config.transport == CredentialBridgeTransport::Hosted {
+            Some(bind_hosted_loopback()?)
+        } else {
+            None
+        };
+        // Refuse an occupied SSH pathname before the existing HTTP cleanup
+        // can affect another owner. SSH never removes a pre-existing object.
+        let ssh = selected_ssh
+            .then(|| SshIngress::prepare(config))
+            .transpose()?;
         remove_stale_socket(&config.ingress_socket)?;
         let listener = UnixListener::bind(&config.ingress_socket)?;
+        let metadata = std::fs::symlink_metadata(&config.ingress_socket)?;
+        use std::os::unix::fs::MetadataExt as _;
+        let socket = SocketGuard {
+            path: config.ingress_socket.clone(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
         std::fs::set_permissions(
             &config.ingress_socket,
             std::os::unix::fs::PermissionsExt::from_mode(0o600),
@@ -128,21 +332,61 @@ impl CredentialBridge {
             config.ingress_uid,
             config.ingress_gid,
         )?;
-        let metadata = std::fs::symlink_metadata(&config.ingress_socket)?;
-        use std::os::unix::fs::MetadataExt as _;
         Ok(Some(CredentialIngress {
             listener: CredentialIngressListener {
                 inner: listener,
                 uid: config.ingress_uid,
+                failed: None,
             },
+            loopback,
+            ssh,
             bridge: bridge.clone(),
-            socket: SocketGuard {
-                path: config.ingress_socket.clone(),
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            },
+            owner: self.clone(),
+            socket,
         }))
     }
+}
+
+fn bind_hosted_loopback() -> io::Result<TcpListener> {
+    let address = (Ipv4Addr::LOCALHOST, CREDENTIAL_BRIDGE_LOOPBACK_PORT).into();
+    let socket = TcpSocket::new_v4()?;
+    // Permit restart after this owner's connections enter TIME_WAIT. This is
+    // NOT SO_REUSEPORT: a live owner remains exclusive and fails a second bind.
+    socket.set_reuseaddr(true)?;
+    socket.bind(address)?;
+    let listener = socket.listen(128)?;
+    if listener.local_addr()? != address {
+        return Err(io::Error::other("credential loopback address is invalid"));
+    }
+    Ok(listener)
+}
+
+async fn read_open<S>(
+    input: &mut S,
+    config: &CredentialBridgeConfig,
+    deadline: tokio::time::Instant,
+) -> Result<(), Status>
+where
+    S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Unpin,
+{
+    let first = tokio::time::timeout_at(deadline, input.next())
+        .await
+        .map_err(|_| Status::deadline_exceeded("credential bridge open timed out"))?
+        .ok_or_else(|| Status::invalid_argument("credential bridge open is missing"))??;
+    let Some(v1::credential_bridge_host_message::Payload::Open(open)) = first.payload else {
+        return Err(Status::invalid_argument(
+            "credential bridge must begin with open",
+        ));
+    };
+    if open.protocol_version != CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+        || open.environment_id != config.environment_id.to_string()
+        || open.environment_generation != config.environment_generation
+    {
+        return Err(Status::failed_precondition(
+            "credential bridge identity is invalid",
+        ));
+    }
+    Ok(())
 }
 
 impl CredentialIngress {
@@ -152,16 +396,166 @@ impl CredentialIngress {
     {
         let bridge = self.bridge.clone();
         let router = Router::new()
-            .route("/v1/responses", post(handle_responses))
+            // Both endpoints share the same bridge epoch and request budget.
+            // The bridge's closed classifier rejects unknown routes before body reads.
+            .fallback(handle_provider_request)
             .with_state(bridge);
         let _socket = self.socket;
-        axum::serve(self.listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await
+        let _ssh_socket = self.ssh.as_ref().map(|ssh| ssh.socket.clone());
+        let _cancel_on_drop = self.owner.cancel_on_drop();
+        if self.loopback.is_none() && self.ssh.is_none() {
+            return axum::serve(self.listener, router)
+                .with_graceful_shutdown(shutdown)
+                .await;
+        }
+        let drain = HostedIngressDrain {
+            stop: CancellationToken::new(),
+            transports: TransportShutdown::new(),
+            owner: self.owner,
+        };
+        let failed = CancellationToken::new();
+        let unix = CredentialIngressListener {
+            failed: Some(failed.clone()),
+            ..self.listener
+        };
+        let unix = axum::serve(
+            ShutdownIngressListener {
+                inner: unix,
+                shutdown: drain.transports.clone(),
+            },
+            router.clone(),
+        )
+        .with_graceful_shutdown(drain.stop.clone().cancelled_owned())
+        .into_future();
+        let tcp_stop = drain.stop.clone();
+        let tcp_transports = drain.transports.clone();
+        let tcp_failed = failed.clone();
+        let tcp = async move {
+            if let Some(loopback) = self.loopback {
+                axum::serve(
+                    ShutdownIngressListener {
+                        inner: LoopbackIngressListener {
+                            inner: loopback,
+                            failed: tcp_failed,
+                        },
+                        shutdown: tcp_transports,
+                    },
+                    router,
+                )
+                .with_graceful_shutdown(tcp_stop.cancelled_owned())
+                .await
+            } else {
+                tcp_stop.cancelled().await;
+                Ok(())
+            }
+        };
+        let ssh_stop = drain.stop.clone();
+        let ssh_owner = drain.owner.clone();
+        let ssh = async move {
+            if let Some(ssh) = self.ssh {
+                ssh.serve(ssh_owner, ssh_stop.cancelled_owned()).await
+            } else {
+                ssh_stop.cancelled().await;
+                Ok(())
+            }
+        };
+        serve_ingress_listeners(unix, tcp, ssh, shutdown, failed, drain).await
     }
 }
 
-async fn handle_responses(
+#[cfg(test)]
+async fn serve_hosted_listeners<U, T, F>(
+    unix: U,
+    tcp: T,
+    shutdown: F,
+    failed: CancellationToken,
+    drain: HostedIngressDrain,
+) -> io::Result<()>
+where
+    U: Future<Output = io::Result<()>>,
+    T: Future<Output = io::Result<()>>,
+    F: Future<Output = ()>,
+{
+    let stopped = drain.stop.clone();
+    serve_ingress_listeners(
+        unix,
+        tcp,
+        async move {
+            stopped.cancelled().await;
+            Ok(())
+        },
+        shutdown,
+        failed,
+        drain,
+    )
+    .await
+}
+
+async fn serve_ingress_listeners<U, T, S, F>(
+    unix: U,
+    tcp: T,
+    ssh: S,
+    shutdown: F,
+    failed: CancellationToken,
+    drain: HostedIngressDrain,
+) -> io::Result<()>
+where
+    U: Future<Output = io::Result<()>>,
+    T: Future<Output = io::Result<()>>,
+    S: Future<Output = io::Result<()>>,
+    F: Future<Output = ()>,
+{
+    tokio::pin!(unix, tcp, ssh, shutdown);
+    let mut unix_done = false;
+    let mut tcp_done = false;
+    let mut ssh_done = false;
+    let result = tokio::select! {
+        biased;
+        _ = failed.cancelled() => Err(io::Error::other("credential ingress listener failed")),
+        _ = &mut shutdown => Ok(()),
+        _ = drain.owner.owner.shutdown.cancelled() => Ok(()),
+        result = &mut unix => {
+            unix_done = true;
+            result.and(Err(io::Error::other("credential Unix ingress stopped unexpectedly")))
+        }
+        result = &mut tcp => {
+            tcp_done = true;
+            result.and(Err(io::Error::other("credential loopback ingress stopped unexpectedly")))
+        }
+        result = &mut ssh => {
+            ssh_done = true;
+            result.and(Err(io::Error::other("SSH ingress stopped unexpectedly")))
+        }
+    };
+    drain.stop.cancel();
+    drain.owner.owner.shutdown.cancel();
+    // Force-close partial uploads and idle/unread HTTP connections, then await
+    // the actual Axum connection drains. Close the epoch BEFORE waiting for
+    // response completion: the outer daemon finalizer otherwise cannot run.
+    drain.transports.trigger();
+    tokio::time::timeout(HOSTED_INGRESS_DRAIN_TIMEOUT, async {
+        let owner = drain.owner.shutdown();
+        let unix = async { if !unix_done { unix.await } else { Ok(()) } };
+        let tcp = async { if !tcp_done { tcp.await } else { Ok(()) } };
+        let ssh = async { if !ssh_done { ssh.await } else { Ok(()) } };
+        let ((), unix, tcp, ssh) = tokio::join!(owner, unix, tcp, ssh);
+        unix.and(tcp).and(ssh)
+    })
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "credential ingress drain timed out",
+        )
+    })??;
+    // An accept failure concurrent with requested shutdown is still a failure.
+    if failed.is_cancelled() {
+        return Err(io::Error::other("credential ingress listener failed"));
+    }
+    result
+}
+
+async fn handle_provider_request(
     State(bridge): State<SharedCredentialBridge>,
     request: Request<Body>,
 ) -> Response<Body> {
@@ -179,9 +573,64 @@ impl axum::serve::Listener for CredentialIngressListener {
                     Ok(credential) if credential.uid() == self.uid => return (stream, address),
                     Ok(_) | Err(_) => continue,
                 },
-                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => {
+                    if let Some(failed) = self.failed.as_ref() {
+                        stop_failed_listener(&error, failed).await;
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
             }
         }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+impl axum::serve::Listener for LoopbackIngressListener {
+    type Io = TcpStream;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.inner.accept().await {
+                Ok(connection) => return connection,
+                Err(error) => stop_failed_listener(&error, &self.failed).await,
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+async fn stop_failed_listener(error: &io::Error, failed: &CancellationToken) {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    ) {
+        tokio::task::yield_now().await;
+        return;
+    }
+    failed.cancel();
+    // Axum's Listener API cannot return an accept error. Wake the owner and
+    // leave this accept suspended until its graceful-stop branch cancels it.
+    std::future::pending::<()>().await;
+}
+
+impl<L: axum::serve::Listener> axum::serve::Listener for ShutdownIngressListener<L> {
+    type Io = ShutdownIo<L::Io>;
+    type Addr = L::Addr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, address) = self.inner.accept().await;
+        (ShutdownIo::new(stream, self.shutdown.clone()), address)
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
@@ -246,11 +695,15 @@ impl Drop for SocketGuard {
 }
 
 #[cfg(test)]
+#[path = "credential_bridge/ingress_tests.rs"]
+mod ingress_tests;
+
+#[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt as _;
 
     use codewire_gateway_proto::DAEMON_CAPABILITY_CREDENTIAL_BRIDGE;
-    use codewire_gateway_proto::daemon::v1::credential_bridge_guest_message::Payload as GuestPayload;
+    use codewire_gateway_proto::codewire::bridge::v1::credential_bridge_guest_message::Payload as GuestPayload;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::oneshot;
     use tokio_stream::wrappers::TcpListenerStream;
@@ -292,13 +745,16 @@ mod tests {
                 home_root,
                 auth_token: crate::DaemonAuthToken::new(TEST_TOKEN).unwrap(),
                 process_execution: ProcessExecution::Native,
+                launch_projection: None,
                 credential_bridge: Some(CredentialBridgeConfig {
+                    transport: crate::CredentialBridgeTransport::Local,
                     environment_id,
                     environment_generation: generation,
                     ingress_socket: socket.clone(),
                     ingress_uid: unsafe { libc::geteuid() },
                     ingress_gid: unsafe { libc::getegid() },
                 }),
+                managed_credential_clients: Default::default(),
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let server = tokio::spawn(async move {
@@ -344,11 +800,21 @@ mod tests {
     }
 
     async fn raw_request(socket: PathBuf, body: &'static [u8]) -> Vec<u8> {
+        raw_provider_request(socket, "POST", "/v1/responses", "127.0.0.1", body).await
+    }
+
+    async fn raw_provider_request(
+        socket: PathBuf,
+        method: &'static str,
+        path: &'static str,
+        host: &'static str,
+        body: &'static [u8],
+    ) -> Vec<u8> {
         let mut stream = UnixStream::connect(socket)
             .await
             .expect("credential ingress");
         let head = format!(
-            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         stream
@@ -362,6 +828,135 @@ mod tests {
             .await
             .expect("HTTP response");
         response
+    }
+
+    #[tokio::test]
+    async fn authenticated_unix_ingress_routes_stock_clients_and_rejects_unknown_destinations() {
+        let harness = Harness::start().await;
+        let client = harness.client(TEST_TOKEN).await;
+        let mut bridge = client
+            .open_credential_bridge(harness.environment_id, harness.generation)
+            .await
+            .unwrap();
+        assert!(matches!(
+            bridge.receive().await.unwrap().unwrap().payload,
+            Some(GuestPayload::Ready(_))
+        ));
+        for (method, uri, host, slot, route, path, query) in [
+            (
+                "POST",
+                "/v1/responses",
+                "localhost",
+                "codex",
+                "openai-api",
+                "/responses",
+                "",
+            ),
+            (
+                "POST",
+                "/_codewire/openai/v1/responses",
+                "localhost",
+                "openai",
+                "openai-api",
+                "/responses",
+                "",
+            ),
+            (
+                "POST",
+                "/v1/messages?beta=true",
+                "localhost",
+                "anthropic",
+                "anthropic-api",
+                "/messages",
+                "beta=true",
+            ),
+            (
+                "GET",
+                "/_codewire/github/owner/repo.git/info/refs?service=git-upload-pack",
+                "localhost",
+                "github",
+                "github-https",
+                "/owner/repo.git/info/refs",
+                "service=git-upload-pack",
+            ),
+            (
+                "GET",
+                "/repos/owner/repo/issues?state=open",
+                "api.github.com",
+                "github",
+                "github-api",
+                "/repos/owner/repo/issues",
+                "state=open",
+            ),
+        ] {
+            let http = tokio::spawn(raw_provider_request(
+                harness.socket.clone(),
+                method,
+                uri,
+                host,
+                b"{}",
+            ));
+            let request = tokio::time::timeout(Duration::from_secs(5), bridge.receive())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let Some(GuestPayload::Request(request)) = request.payload else {
+                panic!("expected provider request");
+            };
+            assert_eq!(
+                (
+                    request.capability_slot.as_str(),
+                    request.route.as_str(),
+                    request.method.as_str(),
+                    request.path.as_str(),
+                    request.query.as_str()
+                ),
+                (slot, route, method, path, query)
+            );
+            bridge
+                .send_response_start(v1::CredentialBridgeResponseStart {
+                    request_id: request.request_id.clone(),
+                    status_code: 204,
+                    headers: vec![],
+                })
+                .await
+                .unwrap();
+            bridge
+                .send_response_end(v1::CredentialBridgeResponseEnd {
+                    request_id: request.request_id,
+                })
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), http)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .starts_with(b"HTTP/1.1 204 No Content")
+            );
+        }
+        for (uri, host) in [
+            ("/v1/unknown", "localhost"),
+            ("/repos/owner/repo/issues", "foreign.invalid"),
+            ("http://foreign.invalid/v1/responses", "localhost"),
+            ("/v1/responses", "api.github.com"),
+        ] {
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                raw_provider_request(harness.socket.clone(), "POST", uri, host, b"{}"),
+            )
+            .await
+            .unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 403 Forbidden"));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), bridge.receive())
+                .await
+                .is_err()
+        );
+        drop(bridge);
+        harness.stop().await;
     }
 
     #[tokio::test]

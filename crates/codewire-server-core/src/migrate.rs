@@ -44,6 +44,10 @@ pub async fn ensure_schema_logged(database_url: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod owner_sources;
+    mod projection;
+    mod session_mutation;
+    mod ssh;
     use std::{borrow::Cow, time::Duration};
 
     use sha2::{Digest, Sha384};
@@ -51,9 +55,13 @@ mod tests {
 
     use super::*;
 
-    // Measured from the unchanged version-21 migrator plus migration 22 in a
-    // managed disposable PostgreSQL; accepted history stays independently pinned.
+    // Measured against real isolated PostgreSQL after the staged 24 -> 25
+    // upgrade; prior history and authority definitions are checked separately.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
+        "83a79c28d34c5e30f5b0947afc62db046c6413b7327c0b4506b082f35907b37f";
+    // Measured and accepted for versions22..24; keep this historical boundary
+    // independent of the new SSH columns and current-schema fingerprint.
+    const ACCEPTED_PRE_SSH_SCHEMA_FINGERPRINT: &str =
         "f2bdf1cd4ac385f8f8b1d58dd7fae26a581cf569ea67e723e79c4cf3bbe97bbe";
     const ACCEPTED_PRE_CONSENT_SCHEMA_FINGERPRINT: &str =
         "7ed7e45a11b90ab2953ef0df92613cee949638a47631fabf490d988fc278c309";
@@ -160,7 +168,7 @@ mod tests {
                 .await?;
             seed_platform_credential_material(&pool, "retained", 1).await?;
             let material_before: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
             )
             .fetch_one(&pool)
@@ -179,7 +187,7 @@ mod tests {
                     && after[19].0 == 20
             );
             let material_after: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
             )
             .fetch_one(&pool)
@@ -218,7 +226,7 @@ mod tests {
                 .await?;
             anyhow::ensure!(applied_migrations(&pool).await? == after);
             let material_noop: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
             )
             .fetch_one(&pool)
@@ -292,7 +300,7 @@ mod tests {
                 .await?;
             seed_platform_credential_material(&pool, "retained", 1).await?;
             let material_before: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
             )
             .fetch_one(&pool)
@@ -327,7 +335,7 @@ mod tests {
                 "lock-only migration changed the application table schema"
             );
             let material_after: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
             )
             .fetch_one(&pool)
@@ -348,7 +356,7 @@ mod tests {
                 assert_platform_broker_lock_authority(&pool, false).await? == definitions
             );
             let material_noop: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='retained'",
             )
             .fetch_one(&pool)
@@ -420,7 +428,7 @@ mod tests {
                 .execute(&pool).await?;
             seed_platform_credential(&pool, "oauth-retained", Some("credential-user-a"), None, "Work").await?;
             seed_platform_credential_material(&pool, "oauth-retained", 1).await?;
-            let rows_sql = "SELECT row_to_json(c)::text,row_to_json(m)::text,row_to_json(b)::text \
+            let rows_sql = "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text,row_to_json(b)::text \
                 FROM platform_credentials c JOIN platform_credential_material m ON m.credential_id=c.id \
                 CROSS JOIN platform_environment_access_bindings b \
                 WHERE c.id='oauth-retained' AND b.environment_id='consent-env'";
@@ -476,7 +484,7 @@ mod tests {
             anyhow::ensure!(absent);
             assert_platform_broker_lock_authority(&pool, true).await?;
             let fingerprint: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
-            anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT);
+            anyhow::ensure!(fingerprint == ACCEPTED_PRE_SSH_SCHEMA_FINGERPRINT);
             let empty: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM platform_credentials)").fetch_one(&pool).await?;
             anyhow::ensure!(empty);
             let retained: i32 = sqlx::query_scalar("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await?;
@@ -506,7 +514,7 @@ mod tests {
             seed_platform_credential_material(&pool, "consent-retained", 1).await?;
             seed_platform_binding(&pool).await?;
             let bytes_before: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='consent-retained'",
             ).fetch_one(&pool).await?;
             let schema_before: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql"))
@@ -525,7 +533,7 @@ mod tests {
             ).fetch_one(&pool).await?;
             anyhow::ensure!(binding == ("consent-profile".into(), 1, None), "migration inferred consent");
             let bytes_after: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text,row_to_json(m)::text FROM platform_credentials c \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text,row_to_json(m)::text FROM platform_credentials c \
                  JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='consent-retained'",
             ).fetch_one(&pool).await?;
             anyhow::ensure!(bytes_before == bytes_after);
@@ -760,7 +768,7 @@ mod tests {
                 .await?;
             seed_platform_credential_material(&pool, "credential", 1).await?;
             let rows_before: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text, row_to_json(m)::text \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text, row_to_json(m)::text \
                  FROM platform_credentials c JOIN platform_credential_material m \
                  ON m.credential_id = c.id WHERE c.id = 'credential'",
             )
@@ -784,7 +792,7 @@ mod tests {
                 .await?;
             anyhow::ensure!(applied_migrations(&pool).await? == after);
             let rows_after: (String, String) = sqlx::query_as(
-                "SELECT row_to_json(c)::text, row_to_json(m)::text \
+                "SELECT (to_jsonb(c) - 'ssh_public_key' - 'ssh_fingerprint')::text, row_to_json(m)::text \
                  FROM platform_credentials c JOIN platform_credential_material m \
                  ON m.credential_id = c.id WHERE c.id = 'credential'",
             )
@@ -2087,6 +2095,8 @@ mod tests {
                     "material_generation",
                     "created_at",
                     "updated_at",
+                    "ssh_public_key",
+                    "ssh_fingerprint",
                 ][..],
             ),
             (
@@ -3589,6 +3599,8 @@ mod tests {
             JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
             JOIN pg_catalog.pg_language l ON l.oid=p.prolang
             WHERE n.nspname='public' AND p.proname LIKE 'codewire_platform_lock_%'
+              AND p.proname <> 'codewire_platform_lock_projection_authority'
+              AND p.proname <> 'codewire_platform_lock_owner_source_authority'
             ORDER BY p.proname, p.oid
             "#,
         )
@@ -3734,6 +3746,15 @@ mod tests {
         assert_applied_credential_storage_history()?;
         assert_applied_access_history()?;
         assert_applied_broker_lock_history()?;
+        if version > OAUTH_PUBLICATION_AUTHORITY_VERSION {
+            projection::assert_accepted_prior23()?;
+        }
+        if version > 24 {
+            ssh::assert_accepted_staged24()?;
+        }
+        if version > 25 {
+            owner_sources::assert_accepted_staged25()?;
+        }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR
                 .iter()

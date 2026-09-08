@@ -5,21 +5,30 @@ use async_trait::async_trait;
 use codewire_daemon::client::{
     CredentialBridgeConnection, CredentialBridgeResponseSender, SessionClientError,
 };
-use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::codewire::bridge::v1;
 use codewire_gateway_proto::{
     CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_BYTES,
     CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES,
     CREDENTIAL_BRIDGE_MAX_HEADERS, CREDENTIAL_BRIDGE_MAX_IN_FLIGHT,
     CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };
+use codewire_workload_secrets::MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES;
 use futures::StreamExt as _;
 use thiserror::Error;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestError, BrokerUpstreamTransport,
     OpenAiBroker,
+};
+
+mod relay;
+mod ssh;
+
+pub use relay::{
+    CredentialBridgeRelayInput, CredentialBridgeRelayOutput, run_admitted_credential_bridge_relay,
 };
 
 /// Stable, value-blind failures for one authenticated broker bridge epoch.
@@ -36,14 +45,59 @@ pub enum BrokerBridgeError {
 /// One transport whose first frame matched the protocol and exact environment
 /// coordinates supplied by its already-authenticated caller. The Ready frame
 /// is not identity proof; peer authentication belongs to the transport owner.
-pub struct AdmittedCredentialBridge<B: CredentialBridgeTransport>(B);
+pub struct AdmittedCredentialBridge<B: CredentialBridgeTransport> {
+    bridge: B,
+    ready: v1::CredentialBridgeReady,
+}
+
+impl<B: CredentialBridgeTransport> AdmittedCredentialBridge<B> {
+    /// The original Ready from this already-authenticated transport. It is
+    /// public binding metadata, not an independent proof of peer identity.
+    pub fn ready(&self) -> &v1::CredentialBridgeReady {
+        &self.ready
+    }
+}
 
 struct ActiveRequest {
     incarnation: u64,
+    ssh_cancellation: Option<CancellationToken>,
+}
+
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        if let Some(cancellation) = &self.ssh_cancellation {
+            cancellation.cancel();
+        }
+    }
 }
 
 #[async_trait]
 pub(crate) trait BrokerRequestExecutor: Send + Sync {
+    /// The authority owns any started worker until terminal drain, including
+    /// when this waiter is dropped. Cancellation suppresses signatures; it
+    /// must not abandon a key-bearing worker or release its capacity early.
+    async fn execute_ssh(
+        &self,
+        _request: v1::CredentialSshRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<v1::credential_ssh_response::Result, BrokerRequestError> {
+        Err(BrokerRequestError::Denied)
+    }
+
+    async fn project_environment(
+        &self,
+        _request: v1::EnvironmentProjectionRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        Err(BrokerRequestError::Denied)
+    }
+
+    async fn project_environment_fragment(
+        &self,
+        _request: v1::EnvironmentProjectionRequest,
+    ) -> Result<v1::EnvironmentProjectionComposition, BrokerRequestError> {
+        Err(BrokerRequestError::Denied)
+    }
+
     async fn execute_request(
         &self,
         request: v1::CredentialBridgeRequest,
@@ -60,6 +114,28 @@ where
     P: BrokerLeaseProvider + 'static,
     U: BrokerUpstreamTransport + 'static,
 {
+    async fn execute_ssh(
+        &self,
+        request: v1::CredentialSshRequest,
+        cancellation: CancellationToken,
+    ) -> Result<v1::credential_ssh_response::Result, BrokerRequestError> {
+        OpenAiBroker::execute_ssh(self, request, cancellation).await
+    }
+
+    async fn project_environment(
+        &self,
+        request: v1::EnvironmentProjectionRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        OpenAiBroker::project_environment(self, request).await
+    }
+
+    async fn project_environment_fragment(
+        &self,
+        request: v1::EnvironmentProjectionRequest,
+    ) -> Result<v1::EnvironmentProjectionComposition, BrokerRequestError> {
+        OpenAiBroker::project_environment_fragment(self, request).await
+    }
+
     async fn execute_request(
         &self,
         request: v1::CredentialBridgeRequest,
@@ -94,9 +170,10 @@ pub trait CredentialBridgeTransport: Send {
 
 /// Cloneable, bounded output for already-filtered broker response frames.
 ///
-/// The managed runner sends only ResponseStart/Body/End/Failure, never Open.
-/// Implementations must reject Open, apply backpressure without unbounded
-/// buffering, and report epoch loss rather than keep a disconnected send alive.
+/// The managed runner sends bounded HTTP, environment-projection and SSH
+/// terminals, never Open. Implementations must reject Open, apply backpressure
+/// without unbounded buffering, and report epoch loss rather than keep a
+/// disconnected send alive.
 #[async_trait]
 pub trait CredentialBridgeResponseSink: Clone + Send + Sync + 'static {
     async fn send(
@@ -129,6 +206,12 @@ impl CredentialBridgeResponseSink for CredentialBridgeResponseSender {
         payload: v1::credential_bridge_host_message::Payload,
     ) -> Result<(), BrokerBridgeError> {
         let result: Result<(), SessionClientError> = match payload {
+            v1::credential_bridge_host_message::Payload::Ssh(response) => {
+                self.send_ssh(response).await
+            }
+            v1::credential_bridge_host_message::Payload::EnvironmentProjection(response) => {
+                self.send_environment_projection(response).await
+            }
             v1::credential_bridge_host_message::Payload::ResponseStart(response) => {
                 self.send_response_start(response).await
             }
@@ -178,9 +261,8 @@ pub async fn admit_credential_bridge<B: CredentialBridgeTransport>(
     environment_id: Uuid,
     environment_generation: u64,
 ) -> Result<AdmittedCredentialBridge<B>, BrokerBridgeError> {
-    admit_bridge(bridge, environment_id, environment_generation)
-        .await
-        .map(AdmittedCredentialBridge)
+    let (bridge, ready) = admit_bridge(bridge, environment_id, environment_generation).await?;
+    Ok(AdmittedCredentialBridge { bridge, ready })
 }
 
 /// Run a bridge after [`admit_credential_bridge`] matched its coordinates to
@@ -198,7 +280,7 @@ where
     B: CredentialBridgeTransport,
 {
     let broker = Arc::new(broker);
-    run_managed_bridge(broker, bridge.0).await
+    run_managed_bridge(broker, bridge.bridge).await
 }
 
 #[cfg(test)]
@@ -213,7 +295,7 @@ where
     B: CredentialBridgeTransport,
 {
     let bridge = admit_credential_bridge(bridge, environment_id, environment_generation).await?;
-    run_managed_bridge(broker, bridge.0).await
+    run_managed_bridge(broker, bridge.bridge).await
 }
 
 async fn run_managed_bridge<E, B>(broker: Arc<E>, bridge: B) -> Result<(), BrokerBridgeError>
@@ -238,7 +320,7 @@ async fn admit_bridge<B>(
     mut bridge: B,
     environment_id: Uuid,
     environment_generation: u64,
-) -> Result<B, BrokerBridgeError>
+) -> Result<(B, v1::CredentialBridgeReady), BrokerBridgeError>
 where
     B: CredentialBridgeTransport,
 {
@@ -262,7 +344,7 @@ where
         return Err(BrokerBridgeError::InvalidIdentity);
     }
 
-    Ok(bridge)
+    Ok((bridge, ready))
 }
 
 async fn run_admitted_bridge<E, B>(broker: Arc<E>, mut bridge: B) -> Result<(), BrokerBridgeError>
@@ -305,6 +387,75 @@ where
                     }
                 };
                 match message.payload {
+                    Some(v1::credential_bridge_guest_message::Payload::Ssh(request)) => {
+                        let request_id = request.request_id.clone();
+                        if !codewire_gateway_proto::ssh::valid_request_id(&request_id)
+                            || active.contains_key(&request_id)
+                        {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::InvalidProtocol);
+                        }
+                        if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
+                            if ssh::send_failure(&sender, request_id, BrokerRequestError::AuthorityUnavailable).await.is_err() {
+                                tasks.shutdown().await;
+                                return Err(BrokerBridgeError::Unavailable);
+                            }
+                            continue;
+                        }
+                        let Some(incarnation) = next_incarnation.checked_add(1) else {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::Unavailable);
+                        };
+                        next_incarnation = incarnation;
+                        let cancellation = CancellationToken::new();
+                        let operation_cancel = cancellation.clone();
+                        let broker = Arc::clone(&broker);
+                        let sender = sender.clone();
+                        let completed_id = request_id.clone();
+                        tasks.spawn(async move {
+                            let result = ssh::serve(&*broker, &sender, request, operation_cancel).await;
+                            (completed_id, incarnation, result)
+                        });
+                        active.insert(request_id, ActiveRequest {
+                            incarnation,
+                            ssh_cancellation: Some(cancellation),
+                        });
+                    }
+                    Some(v1::credential_bridge_guest_message::Payload::EnvironmentProjection(request)) => {
+                        let request_id = request.request_id.clone();
+                        if !Uuid::parse_str(&request_id).is_ok_and(|id| !id.is_nil() && id.to_string() == request_id)
+                            || active.contains_key(&request_id)
+                        {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::InvalidProtocol);
+                        }
+                        if active.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
+                            if send_projection_response(&sender, request_id, Err(BrokerRequestError::AuthorityUnavailable)).await.is_err() {
+                                tasks.shutdown().await;
+                                return Err(BrokerBridgeError::Unavailable);
+                            }
+                            continue;
+                        }
+                        let Some(incarnation) = next_incarnation.checked_add(1) else {
+                            tasks.shutdown().await;
+                            return Err(BrokerBridgeError::Unavailable);
+                        };
+                        next_incarnation = incarnation;
+                        let broker = Arc::clone(&broker);
+                        let sender = sender.clone();
+                        let completed_id = request_id.clone();
+                        tasks.spawn(async move {
+                            let result = if request.local_inventories.is_empty() {
+                                let response = broker.project_environment(request).await;
+                                send_projection_response(&sender, completed_id.clone(), response).await
+                            } else {
+                                let response = broker.project_environment_fragment(request).await;
+                                send_composition_response(&sender, completed_id.clone(), response).await
+                            };
+                            (completed_id, incarnation, result)
+                        });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None });
+                    }
                     Some(v1::credential_bridge_guest_message::Payload::Request(request)) => {
                         let request_id = request.request_id.clone();
                         let canonical_request_id = Uuid::parse_str(&request_id).is_ok_and(|id| {
@@ -341,7 +492,7 @@ where
                             let result = serve_request(&*broker, &sender, &response_id, request).await;
                             (completed_id, incarnation, result)
                         });
-                        active.insert(request_id, ActiveRequest { incarnation });
+                        active.insert(request_id, ActiveRequest { incarnation, ssh_cancellation: None });
                     }
                     Some(v1::credential_bridge_guest_message::Payload::Cancel(cancel)) => {
                         if !Uuid::parse_str(&cancel.request_id).is_ok_and(|id| {
@@ -349,6 +500,11 @@ where
                         }) {
                             tasks.shutdown().await;
                             return Err(BrokerBridgeError::InvalidProtocol);
+                        }
+                        if let Some(cancellation) = active.get(&cancel.request_id)
+                            .and_then(|request| request.ssh_cancellation.as_ref())
+                        {
+                            cancellation.cancel();
                         }
                         // The caller has already cancelled the guest-facing HTTP
                         // request and deliberately drains late host frames. Keep
@@ -363,6 +519,75 @@ where
                 }
             }
         }
+    }
+}
+
+async fn send_projection_response<S: CredentialBridgeResponseSink>(
+    sender: &S,
+    request_id: String,
+    response: Result<Vec<u8>, BrokerRequestError>,
+) -> Result<(), ()> {
+    use v1::environment_projection_response::Result as ProjectionResult;
+    let result = match response {
+        Ok(sealed)
+            if !sealed.is_empty() && sealed.len() <= MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES =>
+        {
+            ProjectionResult::SealedProjection(sealed)
+        }
+        Ok(_) => {
+            ProjectionResult::Failure(v1::CredentialBridgeFailureReason::ResponseTooLarge as i32)
+        }
+        Err(BrokerRequestError::InvalidRequest | BrokerRequestError::Denied) => {
+            ProjectionResult::Failure(v1::CredentialBridgeFailureReason::Denied as i32)
+        }
+        Err(_) => ProjectionResult::Failure(v1::CredentialBridgeFailureReason::Unavailable as i32),
+    };
+    sender
+        .send(
+            v1::credential_bridge_host_message::Payload::EnvironmentProjection(
+                v1::EnvironmentProjectionResponse {
+                    request_id,
+                    result: Some(result),
+                },
+            ),
+        )
+        .await
+        .map_err(|_| ())
+}
+
+async fn send_composition_response<S: CredentialBridgeResponseSink>(
+    sender: &S,
+    request_id: String,
+    response: Result<v1::EnvironmentProjectionComposition, BrokerRequestError>,
+) -> Result<(), ()> {
+    match response {
+        Ok(response)
+            if !response.sealed_platform_fragment.is_empty()
+                && response.sealed_platform_fragment.len()
+                    <= MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES
+                && codewire_gateway_proto::projection::decode_platform_inventories(
+                    &response.platform_inventories,
+                )
+                .is_ok() =>
+        {
+            sender
+                .send(
+                    v1::credential_bridge_host_message::Payload::EnvironmentProjection(
+                        v1::EnvironmentProjectionResponse {
+                            request_id,
+                            result: Some(v1::environment_projection_response::Result::Composition(
+                                response,
+                            )),
+                        },
+                    ),
+                )
+                .await
+                .map_err(|_| ())
+        }
+        Ok(_) => {
+            send_projection_response(sender, request_id, Err(BrokerRequestError::Denied)).await
+        }
+        Err(error) => send_projection_response(sender, request_id, Err(error)).await,
     }
 }
 
@@ -515,6 +740,9 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod projection;
+    mod ssh;
+
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use bytes::Bytes;
@@ -655,6 +883,8 @@ pub(crate) mod tests {
         v1::CredentialBridgeGuestMessage {
             payload: Some(v1::credential_bridge_guest_message::Payload::Request(
                 v1::CredentialBridgeRequest {
+                    capability_slot: "codex".into(),
+                    route: "openai-api".into(),
                     request_id: id,
                     method: "POST".into(),
                     path: path.into(),
@@ -707,7 +937,7 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(admitted.0.receive().await.unwrap(), Some(next));
+        assert_eq!(admitted.bridge.receive().await.unwrap(), Some(next));
         assert!(matches!(
             output_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -1065,7 +1295,13 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn stale_completion_cannot_remove_a_reused_request_id() {
-        let mut active = HashMap::from([("request".to_owned(), ActiveRequest { incarnation: 2 })]);
+        let mut active = HashMap::from([(
+            "request".to_owned(),
+            ActiveRequest {
+                incarnation: 2,
+                ssh_cancellation: None,
+            },
+        )]);
         remove_completed_request(&mut active, "request", 1);
         assert_eq!(
             active.get("request").map(|entry| entry.incarnation),

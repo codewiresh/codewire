@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use thiserror::Error;
 
 const CODEX_PROVIDER_ID: &str = "codewire_openai";
@@ -12,6 +14,212 @@ pub const CODEX_PLATFORM_TOKEN_FILE: &str = "/run/codewire-credentials/workspace
 pub const CODEX_PLATFORM_ROOTS_FILE: &str = "/run/codewire-credentials/gateway-roots/ca.crt";
 /// Writable per-Pod Codex state, separate from the persisted user workspace.
 pub const CODEX_PLATFORM_HOME: &str = "/run/codewire-codex/home";
+/// Native Codex state mounted at the existing isolated guest path.
+pub const CODEX_NATIVE_HOME: &str = "/run/codewire-agent/codex";
+/// Native workspace path for the distinct selected-key OpenSSH agent ingress.
+pub const SSH_NATIVE_AUTH_SOCK: &str = "/run/codewire-host/ssh-agent.sock";
+/// Hosted workspace path for the distinct selected-key OpenSSH agent ingress.
+pub const SSH_PLATFORM_AUTH_SOCK: &str = "/codewire/run/ssh-agent.sock";
+/// Fixed per-environment HTTP ingress; callers own listener authentication and readiness.
+pub const MANAGED_HTTP_PORT: u16 = 38_081;
+/// Base-URL path for the distinct OpenAI API-key profile slot. Only POST
+/// responses is admitted; ordinary Codex configuration retains its own route.
+pub const MANAGED_OPENAI_API_PREFIX: &str = "/_codewire/openai/v1";
+
+/// Stock clients configured by selected profile slots, not credential auth kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedCredentialClient {
+    Codex,
+    OpenAi,
+    Anthropic,
+    Ssh,
+}
+
+impl ManagedCredentialClient {
+    const fn bit(self) -> u8 {
+        match self {
+            Self::Codex => 1,
+            Self::OpenAi => 2,
+            Self::Anthropic => 4,
+            Self::Ssh => 8,
+        }
+    }
+
+    fn environment_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Codex => &["CODEX_HOME"],
+            Self::OpenAi => &["OPENAI_BASE_URL", "OPENAI_API_KEY"],
+            Self::Anthropic => &[
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ],
+            Self::Ssh => &["SSH_AUTH_SOCK"],
+        }
+    }
+}
+
+/// Closed layouts for the existing native and hosted client bootstrap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedCredentialClientPlacement {
+    Native,
+    Platform,
+}
+
+const MANAGED_CLIENT_ENCODINGS: [&str; 16] = [
+    "v1:none",
+    "v1:codex",
+    "v1:openai",
+    "v1:codex,openai",
+    "v1:anthropic",
+    "v1:codex,anthropic",
+    "v1:openai,anthropic",
+    "v1:codex,openai,anthropic",
+    "v1:ssh",
+    "v1:codex,ssh",
+    "v1:openai,ssh",
+    "v1:codex,openai,ssh",
+    "v1:anthropic,ssh",
+    "v1:codex,anthropic,ssh",
+    "v1:openai,anthropic,ssh",
+    "v1:codex,openai,anthropic,ssh",
+];
+
+/// Material-free stock-client selection. This is not a grant, a credential,
+/// or an upstream transport selection. The caller supplies an authenticated,
+/// exact bound profile revision; neither names nor this encoding prove authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ManagedCredentialClients(u8);
+
+impl ManagedCredentialClients {
+    /// Validate exact closed profile slot names, including duplicates of the
+    /// known GitHub slot that intentionally selects no client in this slice.
+    /// Processing fails by the sixth item at the latest; no unbounded collection
+    /// of caller strings or credential metadata is retained.
+    pub fn from_profile_slots<'a>(
+        slots: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, ProjectionError> {
+        let mut seen = 0_u8;
+        let mut clients = 0_u8;
+        for slot in slots {
+            let bit = match slot {
+                "codex" => 1,
+                "openai" => 2,
+                "anthropic" => 4,
+                "ssh" => 8,
+                "github" => 16,
+                _ => return Err(ProjectionError::InvalidManagedClientSelection),
+            };
+            if seen & bit != 0 {
+                return Err(ProjectionError::InvalidManagedClientSelection);
+            }
+            seen |= bit;
+            clients |= bit & 15;
+        }
+        Ok(Self(clients))
+    }
+
+    /// One of sixteen canonical tokens for private bootstrap metadata. Empty
+    /// selection is explicit; unversioned or reordered forms are not aliases.
+    pub fn encode(self) -> &'static str {
+        MANAGED_CLIENT_ENCODINGS[usize::from(self.0)]
+    }
+
+    /// Accept only the current exact private encoding, without legacy fallback.
+    pub fn decode(value: &str) -> Result<Self, ProjectionError> {
+        MANAGED_CLIENT_ENCODINGS
+            .iter()
+            .position(|candidate| *candidate == value)
+            .map(|bits| Self(bits as u8))
+            .ok_or(ProjectionError::InvalidManagedClientSelection)
+    }
+
+    pub fn contains(self, client: ManagedCredentialClient) -> bool {
+        self.0 & client.bit() != 0
+    }
+
+    /// Provider names owned only while their client is selected. Generic
+    /// runtime and GitHub names remain their adapters' responsibility.
+    pub fn reserved_environment_keys(self) -> BTreeSet<&'static str> {
+        [
+            ManagedCredentialClient::Codex,
+            ManagedCredentialClient::OpenAi,
+            ManagedCredentialClient::Anthropic,
+            ManagedCredentialClient::Ssh,
+        ]
+        .into_iter()
+        .filter(|client| self.contains(*client))
+        .flat_map(|client| client.environment_keys().iter().copied())
+        .collect()
+    }
+
+    /// Reject collisions using names alone, before accepting values or spawning
+    /// a child. Callers retain ordinary environment syntax and size validation.
+    pub fn check_collisions<'a>(
+        self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), ProjectionError> {
+        let reserved = self.reserved_environment_keys();
+        if names.into_iter().any(|name| reserved.contains(name)) {
+            return Err(ProjectionError::ManagedEnvironmentCollision);
+        }
+        Ok(())
+    }
+
+    /// Generate only fixed public routing inputs for the selected clients.
+    /// Placeholder strings are not authentication: the admitted local or hosted
+    /// ingress and broker grants remain responsible for authority. Both layouts
+    /// use the existing loopback ingress; no caller URL, token or path is accepted.
+    pub fn for_placement(
+        self,
+        placement: ManagedCredentialClientPlacement,
+    ) -> ManagedCredentialClientProjection {
+        let mut environment = BTreeMap::new();
+        let origin = format!("http://127.0.0.1:{MANAGED_HTTP_PORT}");
+        let codex = self.contains(ManagedCredentialClient::Codex).then(|| {
+            let home = match placement {
+                ManagedCredentialClientPlacement::Native => CODEX_NATIVE_HOME,
+                ManagedCredentialClientPlacement::Platform => CODEX_PLATFORM_HOME,
+            };
+            environment.insert("CODEX_HOME".into(), home.into());
+            CodexProviderProjection::for_loopback_port(MANAGED_HTTP_PORT)
+                .expect("fixed managed HTTP port is unprivileged")
+        });
+        if self.contains(ManagedCredentialClient::OpenAi) {
+            environment.insert(
+                "OPENAI_BASE_URL".into(),
+                format!("{origin}{MANAGED_OPENAI_API_PREFIX}"),
+            );
+            environment.insert("OPENAI_API_KEY".into(), "codewire-managed".into());
+        }
+        if self.contains(ManagedCredentialClient::Anthropic) {
+            environment.insert("ANTHROPIC_BASE_URL".into(), origin);
+            environment.insert("ANTHROPIC_AUTH_TOKEN".into(), "codewire-managed".into());
+            // Clear competing inherited auth inputs; do not import or read a
+            // saved login. The stock client's exact precedence needs its own
+            // pinned-client proof, not a claim from this pure renderer.
+            environment.insert("ANTHROPIC_API_KEY".into(), String::new());
+            environment.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new());
+        }
+        if self.contains(ManagedCredentialClient::Ssh) {
+            let socket = match placement {
+                ManagedCredentialClientPlacement::Native => SSH_NATIVE_AUTH_SOCK,
+                ManagedCredentialClientPlacement::Platform => SSH_PLATFORM_AUTH_SOCK,
+            };
+            environment.insert("SSH_AUTH_SOCK".into(), socket.into());
+        }
+        ManagedCredentialClientProjection { environment, codex }
+    }
+}
+
+/// Nonsecret generated values only. Publishing these does not prove delivery,
+/// listener readiness, or immunity to a workload changing its own client config.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedCredentialClientProjection {
+    pub environment: BTreeMap<String, String>,
+    pub codex: Option<CodexProviderProjection>,
+}
 
 /// Deterministic machine-owned Codex configuration for a protected provider
 /// route.
@@ -126,7 +334,15 @@ impl CodexProviderProjection {
 pub enum ProjectionError {
     #[error("credential broker guest endpoint is invalid")]
     InvalidGuestEndpoint,
+    #[error("managed credential client selection is invalid")]
+    InvalidManagedClientSelection,
+    #[error("environment configuration collides with selected managed client routing")]
+    ManagedEnvironmentCollision,
 }
+
+#[cfg(test)]
+#[path = "projection/managed_tests.rs"]
+mod managed_tests;
 
 #[cfg(test)]
 mod tests {

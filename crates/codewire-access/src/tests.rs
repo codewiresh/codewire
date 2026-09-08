@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
+mod grant_placement;
+
 fn credential_id(value: &str) -> CredentialId {
     CredentialId::parse(value).expect("credential ID")
 }
@@ -58,9 +60,56 @@ fn credential(id: &str, owner: Owner) -> CredentialMetadata {
         authentication_kind: CredentialAuthKind::OAuth,
         display_name: id.to_string(),
         account_hint: Some(format!("{id}@example.test")),
+        ssh_public_key: None,
         status: CredentialStatus::Active,
         expires_at_unix: Some(4_102_444_800),
         revocation_generation: 1,
+    }
+}
+
+#[test]
+fn ssh_metadata_requires_exact_provider_kind_and_bounded_public_pair() {
+    let mut metadata = credential("ssh-work", Owner::User(owner_id("owner")));
+    metadata.provider = provider_id("ssh");
+    metadata.authentication_kind = CredentialAuthKind::SshKey;
+    metadata.account_hint = None;
+    assert!(metadata.validate().is_err());
+    metadata.ssh_public_key = Some(SshPublicKeyMetadata {
+        openssh: format!("ssh-ed25519 {}", "A".repeat(68)),
+        fingerprint: format!("SHA256:{}", "A".repeat(43)),
+    });
+    metadata.validate().unwrap();
+    let json = serde_json::to_string(&metadata).unwrap();
+    assert_eq!(
+        serde_json::from_str::<CredentialMetadata>(&json).unwrap(),
+        metadata
+    );
+    for corruption in 0..10 {
+        let mut invalid = metadata.clone();
+        match corruption {
+            0 => invalid.provider = provider_id("github"),
+            1 => invalid.authentication_kind = CredentialAuthKind::OAuth,
+            2 => invalid.account_hint = Some("misplaced public identity".into()),
+            3 => invalid
+                .ssh_public_key
+                .as_mut()
+                .unwrap()
+                .openssh
+                .push_str(" comment"),
+            4 => invalid.ssh_public_key.as_mut().unwrap().openssh = "x".repeat(4097),
+            5 => invalid.ssh_public_key.as_mut().unwrap().openssh = "ssh-ed25519 AAAA".into(),
+            6 => invalid.ssh_public_key.as_mut().unwrap().fingerprint = "MD5:unsupported".into(),
+            7 => invalid
+                .ssh_public_key
+                .as_mut()
+                .unwrap()
+                .fingerprint
+                .push('='),
+            8 => invalid.ssh_public_key.as_mut().unwrap().openssh.push('\n'),
+            9 => invalid.ssh_public_key.as_mut().unwrap().fingerprint = "SHA256:".into(),
+            _ => unreachable!(),
+        }
+        assert!(invalid.validate().is_err(), "corruption {corruption}");
     }
 }
 
@@ -89,7 +138,7 @@ fn context(authorized: impl IntoIterator<Item = CredentialId>) -> GrantContext {
     GrantContext {
         environment_id: EnvironmentId::parse("env-one").expect("environment ID"),
         environment_generation: 7,
-        placement: Placement::Local,
+        placement: GrantPlacement::Local,
         user_id: owner_id("user-one"),
         organization_id: None,
         allow_personal_credentials: false,
@@ -426,7 +475,7 @@ fn platform_personal_credential_needs_shared_environment_confirmation() {
     let mut selected_profile = profile("work", user, "codex-user");
     selected_profile.placement = Placement::Platform;
     let mut grant_context = context([selected.id.clone()]);
-    grant_context.placement = Placement::Platform;
+    grant_context.placement = GrantPlacement::Platform;
     grant_context.organization_id = Some(owner_id("org-one"));
 
     let error = derive_grants(
@@ -462,7 +511,7 @@ fn platform_user_profile_can_select_an_authorized_matching_org_credential() {
     let mut selected_profile = profile("work", user, "codex-org");
     selected_profile.placement = Placement::Platform;
     let mut grant_context = context([selected.id.clone()]);
-    grant_context.placement = Placement::Platform;
+    grant_context.placement = GrantPlacement::Platform;
     grant_context.organization_id = Some(owner_id("org-one"));
 
     derive_grants(
@@ -502,7 +551,7 @@ fn organization_profile_cannot_select_a_personal_credential() {
     );
     selected_profile.placement = Placement::Platform;
     let mut grant_context = context([selected.id.clone()]);
-    grant_context.placement = Placement::Platform;
+    grant_context.placement = GrantPlacement::Platform;
     grant_context.organization_id = Some(owner_id("org-one"));
     grant_context.allow_personal_credentials = true;
 

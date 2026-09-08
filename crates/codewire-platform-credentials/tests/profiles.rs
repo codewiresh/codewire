@@ -12,8 +12,8 @@ use std::sync::atomic::Ordering;
 use anyhow::{Context, Result, ensure};
 use codewire_access::{
     AccessProfile, AccessProfileName, CapabilitySlot, CredentialAuthKind as Kind, CredentialId,
-    EnvironmentAccessBinding, EnvironmentId, GrantContext, Owner, Placement, ProviderCatalog,
-    builtin_provider_catalog,
+    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner, Placement,
+    ProviderCatalog, builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
     PlatformAccessProfileStore, PlatformCredentialError as CredentialError,
@@ -32,6 +32,117 @@ fn entries(id: &CredentialId) -> BTreeMap<CapabilitySlot, CredentialId> {
 
 fn profiles(db: &TestDatabase) -> PlatformAccessProfileStore {
     PlatformAccessProfileStore::new(db.pool.clone(), builtin_provider_catalog())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn pending_binding_admission_is_metadata_only_atomic_and_cannot_derive_runtime_grants()
+-> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("pending-user").await?;
+        let org = db.organization("pending-org").await?;
+        let provider = Arc::new(SyntheticKek::default());
+        let record = db.store(provider.clone()).create(&user, registration("Pending", Kind::OAuth), &value(OLD_VALUE)).await?;
+        let mut context = environment(&db, &user, &org, "pending-environment", std::slice::from_ref(&record.metadata.id)).await?;
+        sqlx::query("UPDATE environments SET state='pending', environment_operation_generation=0 WHERE id=$1")
+            .bind(context.environment_id.as_str()).execute(&db.pool).await?;
+        context.environment_generation = 0;
+        let profiles = profiles(&db);
+        let profile = profiles.create(&user, name("pending"), entries(&record.metadata.id)).await?;
+        let selected = binding(&context, &profile);
+
+        let mut tx = profiles.begin_transaction().await?;
+        ensure!(profiles.resolve_in(&mut tx, &user, &name("pending")).await? == profile);
+        ensure!(profiles.get_in(&mut tx, &user, &profile.id, Some(1)).await? == profile);
+        ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), None).await == Err(Error::UnsupportedEntry));
+        tx.rollback().await?;
+
+        // A caller failure after the binding write must roll back every composed
+        // write; the helper neither commits nor creates a separate generation.
+        let mut tx = profiles.begin_transaction().await?;
+        profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await?;
+        sqlx::query("INSERT INTO environment_access(environment_id,user_id,permission,granted_by) VALUES ($1,$2,'owner',$2)")
+            .bind(context.environment_id.as_str()).bind(user.id().as_str()).execute(&mut *tx).await?;
+        tx.rollback().await?;
+        let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM platform_environment_access_bindings), (SELECT count(*) FROM environment_access)")
+            .fetch_one(&db.pool).await?;
+        ensure!(counts == (0,0));
+
+        let mut tx = profiles.begin_transaction().await?;
+        profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await?;
+        tx.commit().await?;
+        ensure!(profiles.evaluate_grants(&context).await == Err(Error::InvalidInput));
+        ensure!(profiles.create_binding(&context, selected.clone(), Some(user.id())).await == Err(Error::InvalidInput));
+        let mut future = context.clone(); future.environment_generation = 1;
+        ensure!(profiles.evaluate_grants(&future).await == Err(Error::StaleEnvironment));
+        let mut tx = profiles.begin_transaction().await?;
+        ensure!(profiles.create_pending_binding_in(&mut tx, &future, selected.clone(), Some(user.id())).await == Err(Error::InvalidInput));
+        tx.rollback().await?;
+        sqlx::query("UPDATE environments SET environment_operation_generation=1 WHERE id=$1")
+            .bind(context.environment_id.as_str()).execute(&db.pool).await?;
+        ensure!(profiles.evaluate_grants(&future).await == Err(Error::StaleEnvironment));
+        sqlx::query("UPDATE environments SET state='running' WHERE id=$1")
+            .bind(context.environment_id.as_str()).execute(&db.pool).await?;
+        ensure!(profiles.evaluate_grants(&future).await?.len() == 1);
+        ensure!(provider.unwrap_calls.load(Ordering::SeqCst) == 0, "metadata admission unwrapped protected material");
+        Ok(())
+    }.await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn pending_binding_rechecks_credential_policy_expiry_owner_and_exact_pending_state()
+-> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("pending-policy-user").await?;
+        let org = db.organization("pending-policy-org").await?;
+        let stranger = db.user("pending-stranger").await?;
+        let record = db.store(Arc::new(SyntheticKek::default())).create(&user, registration("Pending policy", Kind::OAuth), &value(OLD_VALUE)).await?;
+        let mut context = environment(&db, &user, &org, "pending-policy-environment", std::slice::from_ref(&record.metadata.id)).await?;
+        context.environment_generation = 0;
+        sqlx::query("UPDATE environments SET state='pending', environment_operation_generation=0 WHERE id=$1")
+            .bind(context.environment_id.as_str()).execute(&db.pool).await?;
+        let profiles = profiles(&db);
+        let profile = profiles.create(&user, name("policy"), entries(&record.metadata.id)).await?;
+        let selected = binding(&context, &profile);
+        for (status, expires, expected) in [
+            ("revoked", None, Error::InactiveCredential),
+            ("refresh_failed", None, Error::InactiveCredential),
+            ("expired", None, Error::ExpiredCredential),
+            ("active", Some(0_i64), Error::ExpiredCredential),
+        ] {
+            sqlx::query("UPDATE platform_credentials SET status=$2,expires_at_unix=$3 WHERE id=$1")
+                .bind(record.metadata.id.as_str()).bind(status).bind(expires).execute(&db.pool).await?;
+            let mut tx = profiles.begin_transaction().await?;
+            ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await == Err(expected));
+            tx.rollback().await?;
+        }
+        sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=NULL WHERE id=$1")
+            .bind(record.metadata.id.as_str()).execute(&db.pool).await?;
+        for (changed, expected) in [
+            { let mut changed = context.clone(); changed.authorized_credentials.clear(); (changed, Error::UnsupportedEntry) },
+            { let mut changed = context.clone(); changed.allow_personal_credentials = false; (changed, Error::UnsupportedEntry) },
+            { let mut changed = context.clone(); changed.user_id = stranger.id().clone(); (changed, Error::NotFound) },
+        ] {
+            let mut tx = profiles.begin_transaction().await?;
+            ensure!(profiles.create_pending_binding_in(&mut tx, &changed, selected.clone(), Some(user.id())).await == Err(expected));
+            tx.rollback().await?;
+        }
+        for (state, desired) in [("running","started"), ("stopped","stopped"), ("pending","destroyed")] {
+            sqlx::query("UPDATE environments SET state=$2,desired_state=$3 WHERE id=$1")
+                .bind(context.environment_id.as_str()).bind(state).bind(desired).execute(&db.pool).await?;
+            let mut tx = profiles.begin_transaction().await?;
+            ensure!(profiles.create_pending_binding_in(&mut tx, &context, selected.clone(), Some(user.id())).await == Err(Error::StaleEnvironment));
+            tx.rollback().await?;
+        }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_environment_access_bindings").fetch_one(&db.pool).await?;
+        ensure!(count == 0);
+        Ok(())
+    }.await;
+    db.finish(result).await
 }
 
 fn binding(context: &GrantContext, profile: &AccessProfile) -> EnvironmentAccessBinding {
@@ -72,7 +183,7 @@ async fn environment(
     Ok(GrantContext {
         environment_id: EnvironmentId::parse(id)?,
         environment_generation: 7,
-        placement: Placement::Platform,
+        placement: GrantPlacement::Platform,
         user_id: user.id().clone(),
         organization_id: Some(organization.id().clone()),
         allow_personal_credentials: true,
@@ -331,7 +442,7 @@ async fn binding_requires_exact_authorized_scope_operation_and_running_runtime()
         ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::StaleEnvironment));
         bad.environment_generation = 0;
         ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::InvalidInput));
-        bad = context.clone(); bad.placement = Placement::Local;
+        bad = context.clone(); bad.placement = GrantPlacement::Local;
         ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::InvalidInput));
         bad = context.clone(); bad.organization_id = None;
         ensure!(profiles.create_binding(&bad, selected.clone(), Some(&bad.user_id)).await == Err(Error::InvalidInput));

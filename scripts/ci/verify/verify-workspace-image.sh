@@ -29,6 +29,8 @@ if alias="$(python3 "$artifact_tool" reuse "$ROOT" "$receipt" 2>/dev/null)"; the
 fi
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-image-verify.XXXXXX")"
+archive_work="$(mktemp -d "$ROOT/.tmp/.workspace-oci.XXXXXX")"
+workspace_archive="$archive_work/workspace.oci.tar"
 base_layout="$work/base.oci"
 base_metadata="$work/base-metadata.json"
 builder=""
@@ -52,8 +54,9 @@ cleanup() {
   fi
   if [[ "$status" -eq 0 ]]; then
     # No acceptance marker may survive a failed contract or builder cleanup.
-    python3 "$artifact_tool" seal "$ROOT" "$receipt" "$workspace_id" "$base_digest" || status=$?
+    python3 "$artifact_tool" seal "$ROOT" "$receipt" "$workspace_id" "$base_digest" "$workspace_archive" || status=$?
   fi
+  rm -rf "$archive_work"
   exit "$status"
 }
 trap cleanup EXIT
@@ -113,10 +116,13 @@ readonly base_digest
   --label "dev.codewire.workspace-contract=$contract_sha" \
   --label dev.codewire.build.profile=workspace-verify \
   --label dev.codewire.promotable=false \
+  --provenance=false --sbom=false \
+  --output "type=oci,dest=$workspace_archive" \
   --load \
   --build-arg "BASE_IMAGE_REF=$base_context_name" \
   --file "$ROOT/images/workspace/Dockerfile" \
   "$ROOT"
+chmod 0400 "$workspace_archive"
 
 workspace_id="$("$docker_bin" image inspect "$workspace_tag" --format '{{.Id}}')"
 [[ "$workspace_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'invalid workspace image ID' >&2; exit 1; }

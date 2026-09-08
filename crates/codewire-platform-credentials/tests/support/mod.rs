@@ -212,7 +212,7 @@ impl TestDatabase {
             "SELECT ON public.platform_access_profile_entries",
             "SELECT (environment_id,profile_id,profile_revision,personal_owner_confirmed_by) ON public.platform_environment_access_bindings",
             "SELECT,INSERT,DELETE ON public.platform_credentials",
-            "UPDATE (status,expires_at_unix,revocation_generation,material_generation,updated_at) ON public.platform_credentials",
+            "UPDATE (status,expires_at_unix,revocation_generation,material_generation,updated_at,account_hint,display_name) ON public.platform_credentials",
             "SELECT,INSERT,DELETE ON public.platform_credential_material",
             "SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_attempts",
             "SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_material",

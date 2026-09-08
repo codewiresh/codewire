@@ -233,11 +233,44 @@ fn transport_forwards_only_the_canonical_session_cookie() {
         header::COOKIE,
         HeaderValue::from_static("unrelated=discard"),
     );
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://attacker.test"),
+    );
     let headers = browser_headers(
         headers,
         Some(HeaderValue::from_static("codewire.session_token=expected")),
+        None,
     );
     assert!(!headers.contains_key(header::AUTHORIZATION));
+    assert!(!headers.contains_key(header::ORIGIN));
+    assert_eq!(
+        headers.get(header::COOKIE).unwrap(),
+        "codewire.session_token=expected"
+    );
+}
+
+#[test]
+fn mutation_transport_replaces_origin_and_forwards_only_the_canonical_cookie() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://attacker.test"),
+    );
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer never-forward"),
+    );
+    let headers = browser_headers(
+        headers,
+        Some(HeaderValue::from_static("codewire.session_token=expected")),
+        Some(HeaderValue::from_static("https://codewire.test")),
+    );
+    assert!(!headers.contains_key(header::AUTHORIZATION));
+    assert_eq!(
+        headers.get(header::ORIGIN).unwrap(),
+        "https://codewire.test"
+    );
     assert_eq!(
         headers.get(header::COOKIE).unwrap(),
         "codewire.session_token=expected"

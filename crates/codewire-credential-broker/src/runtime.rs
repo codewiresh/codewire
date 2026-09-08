@@ -9,7 +9,7 @@ use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
     DerivedGrant, PROVIDER_REFRESH_TIMEOUT_SECONDS,
 };
-use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::codewire::bridge::v1;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use futures::stream;
 use futures::{Stream, StreamExt as _};
@@ -21,7 +21,9 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::anthropic::{AnthropicApiKeyAdapter, AnthropicStreamingResponse};
 use crate::codex_oauth::{CanonicalCodexOAuthBundle, CodexOAuthCredential};
+use crate::github::GitHubOAuthAdapter;
 use crate::openai::OpenAiChatGptOAuthAdapter;
 use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiApiKeyAdapter, OpenAiStreamingResponse,
@@ -37,6 +39,14 @@ const OAUTH_REFRESH_WAIT_ATTEMPTS: usize = 64;
 const OAUTH_REFRESH_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(feature = "local-broker-synthetic-smoke")]
 const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
+
+#[cfg(test)]
+#[path = "runtime_http_tests.rs"]
+mod http_tests;
+
+#[cfg(all(test, feature = "local-broker-synthetic-smoke"))]
+#[path = "runtime/synthetic_smoke_tests.rs"]
+mod synthetic_smoke_tests;
 
 /// Metadata-only description of one exact OAuth generation to refresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +72,33 @@ pub trait BrokerLeaseProvider: Send + Sync {
     type Lease: BrokerCredentialLease + Send;
     type RefreshReservation: Send;
     type StartedRefresh: Send;
+
+    /// Closed selected-key SSH operation. Provider key material is never
+    /// returned to this dispatcher; an authority retains worker ownership
+    /// through cancellation and terminal drain, then rechecks its exact grant.
+    async fn ssh_operation(
+        &self,
+        _request: v1::CredentialSshRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<v1::credential_ssh_response::Result, BrokerLeaseError> {
+        Err(BrokerLeaseError::Denied)
+    }
+
+    /// Ciphertext for the immutable application sources bound to this runtime
+    /// channel. Not a provider credential lease and not an HTTP operation.
+    async fn project_environment(
+        &self,
+        _request: v1::EnvironmentProjectionRequest,
+    ) -> Result<Vec<u8>, BrokerLeaseError> {
+        Err(BrokerLeaseError::Denied)
+    }
+
+    async fn project_environment_fragment(
+        &self,
+        _request: v1::EnvironmentProjectionRequest,
+    ) -> Result<v1::EnvironmentProjectionComposition, BrokerLeaseError> {
+        Err(BrokerLeaseError::Denied)
+    }
 
     async fn lease_operation(
         &self,
@@ -159,6 +196,78 @@ where
     type Lease = codewire_local_credentials::CredentialOperationLease;
     type RefreshReservation = codewire_local_credentials::BrokerCredentialRefreshReservation;
     type StartedRefresh = codewire_local_credentials::StartedBrokerCredentialRefresh;
+
+    async fn ssh_operation(
+        &self,
+        request: v1::CredentialSshRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<v1::credential_ssh_response::Result, BrokerLeaseError> {
+        if cancellation.is_cancelled() {
+            return Err(BrokerLeaseError::Denied);
+        }
+        // Ordinary guest cancellation does not drop this unary call: retain
+        // the broker slot until the authority finishes the original bounded
+        // operation and its agent drain. The dispatcher suppresses the result.
+        // Transport loss instead ends the epoch and relies on channel drain,
+        // never on a local cancellation acknowledgement as remote proof.
+        let mut client = self.clone();
+        let response = codewire_local_credentials::LocalCredentialBrokerLeaseClient::ssh_operation(
+            &mut client,
+            request,
+        )
+        .await
+        .map_err(|error| match error {
+            codewire_local_credentials::BrokerLeaseChannelError::InvalidRequest => {
+                BrokerLeaseError::InvalidRequest
+            }
+            codewire_local_credentials::BrokerLeaseChannelError::Denied => BrokerLeaseError::Denied,
+            codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
+                BrokerLeaseError::InvalidResponse
+            }
+            _ => BrokerLeaseError::Unavailable,
+        })?;
+        response.result.ok_or(BrokerLeaseError::InvalidResponse)
+    }
+
+    async fn project_environment(
+        &self,
+        request: v1::EnvironmentProjectionRequest,
+    ) -> Result<Vec<u8>, BrokerLeaseError> {
+        let request_id =
+            Uuid::parse_str(&request.request_id).map_err(|_| BrokerLeaseError::InvalidRequest)?;
+        if request_id.is_nil()
+            || request_id.to_string() != request.request_id
+            || !request.local_inventories.is_empty()
+        {
+            return Err(BrokerLeaseError::InvalidRequest);
+        }
+        let recipient = request
+            .recipient_public_key
+            .try_into()
+            .map_err(|_| BrokerLeaseError::InvalidRequest)?;
+        let selection = request
+            .selection_sha256
+            .try_into()
+            .map_err(|_| BrokerLeaseError::InvalidRequest)?;
+        codewire_local_credentials::LocalCredentialBrokerLeaseClient::project_environment(
+            self,
+            request_id,
+            recipient,
+            selection,
+            request.deadline_unix_ms,
+        )
+        .await
+        .map_err(|error| match error {
+            codewire_local_credentials::BrokerLeaseChannelError::InvalidRequest => {
+                BrokerLeaseError::InvalidRequest
+            }
+            codewire_local_credentials::BrokerLeaseChannelError::Denied => BrokerLeaseError::Denied,
+            codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
+                BrokerLeaseError::InvalidResponse
+            }
+            _ => BrokerLeaseError::Unavailable,
+        })
+    }
 
     async fn lease_operation(
         &self,
@@ -324,6 +433,20 @@ pub trait BrokerUpstreamTransport: Send + Sync {
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError>;
 }
 
+/// A runtime with application sources only has no provider DNS/socket setup.
+#[async_trait]
+impl<T: BrokerUpstreamTransport> BrokerUpstreamTransport for Option<T> {
+    async fn execute(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        match self {
+            Some(transport) => transport.execute(request).await,
+            None => Err(BrokerUpstreamError::DestinationDenied),
+        }
+    }
+}
+
 /// Stable upstream failures safe to map back to the guest.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum BrokerUpstreamError {
@@ -393,6 +516,9 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (method, target, headers, body) = request.into_parts();
+        if target.host_str() == Some("api.anthropic.com") {
+            return Self::anthropic(method, target, headers, body);
+        }
         let account_header_is_valid = match target.as_str() {
             "https://api.openai.com/v1/responses" => !headers.contains_key("chatgpt-account-id"),
             "https://chatgpt.com/backend-api/codex/responses" => {
@@ -416,22 +542,32 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .filter(|value| {
-                (16..=256).contains(&value.len())
-                    && value.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-                    })
+                Self::canary(
+                    value,
+                    if target.as_str() == "https://api.openai.com/v1/responses" {
+                        "cwlocalopenai"
+                    } else {
+                        "cwlocalbroker"
+                    },
+                )
             })
             .ok_or(BrokerUpstreamError::Protocol)?;
+        let marker = if target.as_str() == "https://api.openai.com/v1/responses" {
+            "CWOPENAI"
+        } else {
+            "CWCODEX149"
+        };
         let response = format!(
             concat!(
                 "event: response.created\n",
                 "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_codewire_broker_smoke\"}}}}\n\n",
                 "event: response.output_item.done\n",
-                "data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_codewire_broker_smoke\",\"content\":[{{\"type\":\"output_text\",\"text\":\"CWCODEX149 broker {protected_value}\"}}]}}}}\n\n",
+                "data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_codewire_broker_smoke\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{marker} broker {protected_value}\"}}]}}}}\n\n",
                 "event: response.completed\n",
                 "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_codewire_broker_smoke\",\"usage\":{{\"input_tokens\":0,\"input_tokens_details\":null,\"output_tokens\":0,\"output_tokens_details\":null,\"total_tokens\":0}}}}}}\n\n",
             ),
             protected_value = protected_value,
+            marker = marker,
         );
         let reflected_at = response
             .find(protected_value)
@@ -448,10 +584,152 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
             "x-request-id",
             HeaderValue::from_str(protected_value).map_err(|_| BrokerUpstreamError::Protocol)?,
         );
+        response_headers.insert("x-error-json", Self::opaque_reflection(protected_value)?);
         Ok(BrokerUpstreamResponse::new(
             StatusCode::OK,
             response_headers,
             Box::pin(stream::iter([Ok(first), Ok(second)])),
+        ))
+    }
+}
+
+#[cfg(feature = "local-broker-synthetic-smoke")]
+impl SyntheticOpenAiSmokeTransport {
+    fn canary(value: &str, prefix: &str) -> bool {
+        value.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    }
+
+    fn opaque_reflection(value: &str) -> Result<HeaderValue, BrokerUpstreamError> {
+        use base64::Engine as _;
+
+        let opaque =
+            base64::engine::general_purpose::STANDARD.encode(format!("{{\"error\":\"{value}\"}}"));
+        HeaderValue::from_str(&opaque).map_err(|_| BrokerUpstreamError::Protocol)
+    }
+
+    fn anthropic(
+        method: Method,
+        target: Url,
+        headers: HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let messages = match target.as_str() {
+            "https://api.anthropic.com/v1/messages"
+            | "https://api.anthropic.com/v1/messages?beta=true" => true,
+            "https://api.anthropic.com/v1/messages/count_tokens"
+            | "https://api.anthropic.com/v1/messages/count_tokens?beta=true" => false,
+            _ => return Err(BrokerUpstreamError::Protocol),
+        };
+        // These are the adapter's outbound fields, not caller credentials. A
+        // fixture must fail if injection/filtering or the fixed target changes.
+        if method != Method::POST
+            || body.is_empty()
+            || body.len() > 4 * 1024 * 1024
+            || headers.keys().any(|name| {
+                !matches!(
+                    name.as_str(),
+                    "accept"
+                        | "content-type"
+                        | "anthropic-version"
+                        | "anthropic-beta"
+                        | "accept-encoding"
+                        | "x-api-key"
+                )
+            })
+            || headers
+                .keys()
+                .any(|name| headers.get_all(name).iter().count() != 1)
+            || headers.get("anthropic-version").map(HeaderValue::as_bytes) != Some(b"2023-06-01")
+            || headers.get("content-type").map(HeaderValue::as_bytes) != Some(b"application/json")
+            || headers.get("accept-encoding").map(HeaderValue::as_bytes) != Some(b"identity")
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let protected_value = headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| Self::canary(value, "cwlocalanthropic"))
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| BrokerUpstreamError::Protocol)?;
+        if !payload.is_object()
+            || payload.get("model").and_then(serde_json::Value::as_str) != Some("claude-sonnet-4-6")
+            || !payload
+                .get("messages")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|messages| !messages.is_empty())
+            || (messages
+                && (payload.get("stream").and_then(serde_json::Value::as_bool) != Some(true)
+                    || !payload
+                        .get("max_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|maximum| maximum > 0)))
+            || (!messages && payload.get("stream").is_some())
+        {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert(
+            "content-type",
+            HeaderValue::from_static(if messages {
+                "text/event-stream"
+            } else {
+                "application/json"
+            }),
+        );
+        response_headers.insert(
+            "request-id",
+            HeaderValue::from_str(protected_value).map_err(|_| BrokerUpstreamError::Protocol)?,
+        );
+        // Opaque provider diagnostics must be dropped, not mistaken for a
+        // header whose contents can safely be forwarded after raw redaction.
+        response_headers.insert("x-error-json", Self::opaque_reflection(protected_value)?);
+        if !messages {
+            return Ok(BrokerUpstreamResponse::new(
+                StatusCode::OK,
+                response_headers,
+                Box::pin(stream::once(async {
+                    Ok(Bytes::from_static(b"{\"input_tokens\":42}"))
+                })),
+            ));
+        }
+        // A complete text-only Messages stream consumed by the pinned Claude
+        // CLI, including the final usage/stop events. Split inside the reflected
+        // key, not at an SSE boundary, to exercise streaming redaction.
+        let response = format!(
+            concat!(
+                "event: message_start\n",
+                "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_codewire_claude_smoke\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{{\"input_tokens\":42,\"output_tokens\":0}}}}}}\n\n",
+                "event: content_block_start\n",
+                "data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n",
+                "event: content_block_delta\n",
+                "data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"CWCLAUDE21238 broker {protected_value}\"}}}}\n\n",
+                "event: content_block_stop\n",
+                "data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n",
+                "event: message_delta\n",
+                "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}},\"usage\":{{\"output_tokens\":8}}}}\n\n",
+                "event: message_stop\n",
+                "data: {{\"type\":\"message_stop\"}}\n\n",
+            ),
+            protected_value = protected_value
+        );
+        let reflected_at = response
+            .find(protected_value)
+            .ok_or(BrokerUpstreamError::Protocol)?;
+        let split_at = reflected_at + protected_value.len() / 2;
+        let chunks = [
+            Bytes::copy_from_slice(&response.as_bytes()[..split_at]),
+            Bytes::copy_from_slice(&response.as_bytes()[split_at..]),
+        ];
+        Ok(BrokerUpstreamResponse::new(
+            StatusCode::OK,
+            response_headers,
+            Box::pin(stream::iter(chunks.map(Ok))),
         ))
     }
 }
@@ -505,6 +783,8 @@ pub struct OpenAiBroker<P, U> {
     upstream: Arc<U>,
     api_key_adapter: OpenAiApiKeyAdapter,
     oauth_adapter: OpenAiChatGptOAuthAdapter,
+    anthropic_adapter: AnthropicApiKeyAdapter,
+    github_adapter: GitHubOAuthAdapter,
     oauth_refresh: tokio::sync::Mutex<()>,
     oauth_refresh_operations: TaskTracker,
 }
@@ -552,18 +832,59 @@ where
             upstream: Arc::new(upstream),
             api_key_adapter: OpenAiApiKeyAdapter::new().map_err(map_adapter_error)?,
             oauth_adapter: OpenAiChatGptOAuthAdapter::new().map_err(map_adapter_error)?,
+            anthropic_adapter: AnthropicApiKeyAdapter::new().map_err(map_adapter_error)?,
+            github_adapter: GitHubOAuthAdapter::new().map_err(map_adapter_error)?,
             oauth_refresh: tokio::sync::Mutex::new(()),
             oauth_refresh_operations: TaskTracker::new(),
         })
     }
 
-    /// Execute one credential-free guest request through the exact OpenAI
-    /// adapter. The returned bytes are already filtered and redacted.
+    pub(crate) async fn project_environment(
+        &self,
+        request: v1::EnvironmentProjectionRequest,
+    ) -> Result<Vec<u8>, BrokerRequestError> {
+        if !request.local_inventories.is_empty() {
+            return Err(BrokerRequestError::Denied);
+        }
+        self.leases
+            .project_environment(request)
+            .await
+            .map_err(map_lease_error)
+    }
+
+    pub(crate) async fn project_environment_fragment(
+        &self,
+        request: v1::EnvironmentProjectionRequest,
+    ) -> Result<v1::EnvironmentProjectionComposition, BrokerRequestError> {
+        self.leases
+            .project_environment_fragment(request)
+            .await
+            .map_err(map_lease_error)
+    }
+
+    pub(crate) async fn execute_ssh(
+        &self,
+        request: v1::CredentialSshRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<v1::credential_ssh_response::Result, BrokerRequestError> {
+        self.leases
+            .ssh_operation(request, cancellation)
+            .await
+            .map_err(map_lease_error)
+    }
+
+    /// Dispatch a credential-free request to its explicitly selected HTTP slot.
+    /// The request carries no upstream URL, credential ID or owner authority.
     pub async fn execute(
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let request = ValidatedGuestRequest::parse(request)?;
+        match request.slot.as_str() {
+            "anthropic" => return self.execute_anthropic(request).await,
+            "github" => return self.execute_github(request).await,
+            _ => {}
+        }
         let operation = BrokerOperationId::parse(OPENAI_OPERATION)
             .map_err(|_| BrokerRequestError::InvalidRequest)?;
         let route =
@@ -582,12 +903,13 @@ where
             .leases
             .lease_operation(
                 request.request_id,
-                CapabilitySlot::codex(),
+                request.slot.clone(),
                 operation.clone(),
                 route.clone(),
             )
             .await
             .map_err(map_lease_error)?;
+        validate_http_lease_coordinates(&lease, &request.slot, &operation, &route)?;
         let (prepared, oauth_retry) = match lease.credential_metadata().authentication_kind {
             CredentialAuthKind::ApiKey => (
                 self.api_key_adapter
@@ -596,6 +918,9 @@ where
                 None,
             ),
             CredentialAuthKind::OAuth => {
+                if request.slot != CapabilitySlot::codex() {
+                    return Err(BrokerRequestError::Denied);
+                }
                 let admitted_grant = lease.grant().clone();
                 let generation = OAuthCredentialGeneration {
                     credential_id: lease.credential_metadata().id.clone(),
@@ -662,7 +987,124 @@ where
             headers,
             Box::pin(BrokerRedactedBody {
                 upstream: body,
-                redactor: Some(redactor),
+                redactor: Some(ProviderStreamingResponse::OpenAi(redactor)),
+                finished: false,
+            }),
+        ))
+    }
+
+    async fn execute_anthropic(
+        &self,
+        request: ValidatedGuestRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        let validated = self
+            .anthropic_adapter
+            .validate_request(
+                &request.method,
+                &request.path,
+                request.query.as_deref(),
+                request.headers,
+                request.body,
+            )
+            .map_err(map_adapter_error)?;
+        let operation = BrokerOperationId::parse(validated.operation().operation_name())
+            .map_err(|_| BrokerRequestError::InvalidRequest)?;
+        let lease = self
+            .leases
+            .lease_operation(
+                request.request_id,
+                request.slot.clone(),
+                operation.clone(),
+                request.route.clone(),
+            )
+            .await
+            .map_err(map_lease_error)?;
+        validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
+        let (method, target, headers, body, policy) = self
+            .anthropic_adapter
+            .prepare_validated(lease, validated)
+            .map_err(map_adapter_error)?
+            .into_parts();
+        let response = self
+            .upstream
+            .execute(BrokerUpstreamRequest {
+                method,
+                target,
+                headers,
+                body,
+            })
+            .await
+            .map_err(map_upstream_error)?;
+        let (status, headers, body) = response.into_parts();
+        if status.is_informational() {
+            return Err(BrokerRequestError::UpstreamFailed);
+        }
+        let (headers, redactor) = policy.begin(&headers).map_err(map_adapter_error)?;
+        Ok(BrokerHttpResponse::new(
+            status,
+            headers,
+            Box::pin(BrokerRedactedBody {
+                upstream: body,
+                redactor: Some(ProviderStreamingResponse::Anthropic(redactor)),
+                finished: false,
+            }),
+        ))
+    }
+
+    async fn execute_github(
+        &self,
+        request: ValidatedGuestRequest,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        let validated = self
+            .github_adapter
+            .validate_request(
+                request.route.as_str(),
+                &request.method,
+                &request.path,
+                request.query.as_deref(),
+                request.headers,
+                request.body,
+            )
+            .map_err(map_adapter_error)?;
+        let operation = BrokerOperationId::parse(validated.operation().operation_name())
+            .map_err(|_| BrokerRequestError::InvalidRequest)?;
+        let lease = self
+            .leases
+            .lease_operation(
+                request.request_id,
+                request.slot.clone(),
+                operation.clone(),
+                request.route.clone(),
+            )
+            .await
+            .map_err(map_lease_error)?;
+        validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
+        let (method, target, headers, body, policy) = self
+            .github_adapter
+            .prepare_validated(lease, validated)
+            .map_err(map_adapter_error)?
+            .into_parts();
+        let response = self
+            .upstream
+            .execute(BrokerUpstreamRequest {
+                method,
+                target,
+                headers,
+                body,
+            })
+            .await
+            .map_err(map_upstream_error)?;
+        let (status, headers, body) = response.into_parts();
+        if status.is_informational() {
+            return Err(BrokerRequestError::UpstreamFailed);
+        }
+        let (headers, redactor) = policy.begin(status, &headers).map_err(map_adapter_error)?;
+        Ok(BrokerHttpResponse::new(
+            status,
+            headers,
+            Box::pin(BrokerRedactedBody {
+                upstream: body,
+                redactor: Some(ProviderStreamingResponse::OpenAi(redactor)),
                 finished: false,
             }),
         ))
@@ -934,7 +1376,11 @@ where
             })
             .await
             .map_err(|error| OAuthRefreshError::Uncertain(map_upstream_error(error)))?;
-        let (status, _headers, mut response_body) = upstream.into_parts();
+        let (status, headers, mut response_body) = upstream.into_parts();
+        // Refresh bypasses the guest response redactor, but every transport
+        // must still deliver identity bytes before internal token parsing.
+        crate::openai::validate_response_encoding(&headers)
+            .map_err(|_| OAuthRefreshError::Uncertain(BrokerRequestError::UpstreamFailed))?;
         let mut response = Zeroizing::new(Vec::new());
         while let Some(chunk) = response_body.next().await {
             let chunk = chunk.map_err(|error| {
@@ -1042,6 +1488,8 @@ fn oauth_refresh_rejection_is_permanent(status: StatusCode, body: &[u8]) -> bool
 
 struct ValidatedGuestRequest {
     request_id: Uuid,
+    slot: CapabilitySlot,
+    route: BrokerRouteId,
     method: Method,
     path: String,
     query: Option<String>,
@@ -1051,6 +1499,22 @@ struct ValidatedGuestRequest {
 
 impl ValidatedGuestRequest {
     fn parse(request: v1::CredentialBridgeRequest) -> Result<Self, BrokerRequestError> {
+        if !matches!(
+            (request.capability_slot.as_str(), request.route.as_str()),
+            ("codex" | "openai", "openai-api")
+                | ("anthropic", "anthropic-api")
+                | ("github", "github-api" | "github-https")
+        ) || request.body.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
+            || request.headers.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_HEADERS
+            || request.path.len() > 2048
+            || request.query.len() > 4096
+        {
+            return Err(BrokerRequestError::InvalidRequest);
+        }
+        let slot = CapabilitySlot::parse(request.capability_slot)
+            .map_err(|_| BrokerRequestError::InvalidRequest)?;
+        let route =
+            BrokerRouteId::parse(request.route).map_err(|_| BrokerRequestError::InvalidRequest)?;
         let request_id =
             Uuid::parse_str(&request.request_id).map_err(|_| BrokerRequestError::InvalidRequest)?;
         if request_id.is_nil() || request_id.to_string() != request.request_id {
@@ -1063,7 +1527,20 @@ impl ValidatedGuestRequest {
         }
         let query = (!request.query.is_empty()).then_some(request.query);
         let mut headers = HeaderMap::new();
+        let mut header_bytes = 0_usize;
         for header in request.headers {
+            if header.name.len() > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES
+                || header.value.len()
+                    > codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES
+            {
+                return Err(BrokerRequestError::InvalidRequest);
+            }
+            header_bytes = header_bytes
+                .checked_add(header.name.len() + header.value.len())
+                .filter(|bytes| {
+                    *bytes <= codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_HEADER_BYTES
+                })
+                .ok_or(BrokerRequestError::InvalidRequest)?;
             let name = HeaderName::from_bytes(header.name.as_bytes())
                 .map_err(|_| BrokerRequestError::InvalidRequest)?;
             let value = HeaderValue::from_bytes(&header.value)
@@ -1072,6 +1549,8 @@ impl ValidatedGuestRequest {
         }
         Ok(Self {
             request_id,
+            slot,
+            route,
             method,
             path: request.path,
             query,
@@ -1081,9 +1560,43 @@ impl ValidatedGuestRequest {
     }
 }
 
+fn validate_http_lease_coordinates(
+    lease: &impl BrokerCredentialLease,
+    slot: &CapabilitySlot,
+    operation: &BrokerOperationId,
+    route: &BrokerRouteId,
+) -> Result<(), BrokerRequestError> {
+    if &lease.grant().capability_slot != slot
+        || &lease.permission().operation != operation
+        || &lease.permission().route != route
+    {
+        return Err(BrokerRequestError::Denied);
+    }
+    Ok(())
+}
+
+enum ProviderStreamingResponse {
+    OpenAi(OpenAiStreamingResponse),
+    Anthropic(AnthropicStreamingResponse),
+}
+impl ProviderStreamingResponse {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<u8>, CredentialBrokerError> {
+        match self {
+            Self::OpenAi(redactor) => redactor.push(chunk),
+            Self::Anthropic(redactor) => redactor.push(chunk),
+        }
+    }
+    fn finish(self) -> Result<Vec<u8>, CredentialBrokerError> {
+        match self {
+            Self::OpenAi(redactor) => redactor.finish(),
+            Self::Anthropic(redactor) => redactor.finish(),
+        }
+    }
+}
+
 pub struct BrokerRedactedBody {
     upstream: BrokerUpstreamBody,
-    redactor: Option<OpenAiStreamingResponse>,
+    redactor: Option<ProviderStreamingResponse>,
     finished: bool,
 }
 
@@ -1204,6 +1717,7 @@ mod tests {
     use tokio::sync::{Notify, mpsc};
 
     use super::*;
+    use crate::openai::response_admission_test_cases::{accepted_encodings, denied_encodings};
 
     const SYNTHETIC_KEY: &str = "CW_TEST_OPENAI_VALUE_123";
 
@@ -1383,18 +1897,19 @@ mod tests {
         ) -> Result<BrokerRefreshAdmission<Self::RefreshReservation>, BrokerRefreshError> {
             self.begin_count.fetch_add(1, Ordering::Relaxed);
             if let Some(material) = self.recovered_material.lock().unwrap().take() {
-                let hard_deadline = self
+                let observed = self
                     .authority
                     .get_credential(&self.credential_id)
                     .map_err(|_| BrokerRefreshError::Unavailable)?
-                    .metadata
-                    .expires_at_unix;
+                    .metadata;
                 let mut bytes = material.into_bytes();
                 self.authority
                     .rotate_credential_material(
                         &self.credential_id,
+                        observed.revocation_generation,
                         ProtectedValue::new(std::mem::take(&mut *bytes)).unwrap(),
-                        hard_deadline,
+                        observed.expires_at_unix,
+                        observed.account_hint,
                     )
                     .map_err(|_| BrokerRefreshError::Unavailable)?;
                 self.material_generation.fetch_add(1, Ordering::AcqRel);
@@ -1499,15 +2014,20 @@ mod tests {
                 .map_err(|_| BrokerRefreshError::InvalidRequest)?;
             // Refresh rotates provider material, never the owner's hard
             // deadline. The previous fake silently cleared this field.
-            let hard_deadline = self
+            let observed = self
                 .authority
                 .get_credential(&self.credential_id)
                 .map_err(|_| BrokerRefreshError::Unavailable)?
-                .metadata
-                .expires_at_unix;
+                .metadata;
             let result = self
                 .authority
-                .rotate_credential_material(&self.credential_id, value, hard_deadline)
+                .rotate_credential_material(
+                    &self.credential_id,
+                    observed.revocation_generation,
+                    value,
+                    observed.expires_at_unix,
+                    observed.account_hint,
+                )
                 .map_err(|_| BrokerRefreshError::Unavailable);
             if result.is_ok() {
                 self.material_generation.fetch_add(1, Ordering::AcqRel);
@@ -1593,6 +2113,8 @@ mod tests {
     struct OAuthSyntheticUpstream {
         refresh_status: StatusCode,
         refresh_response: Arc<Vec<u8>>,
+        refresh_headers: HeaderMap,
+        refresh_body_started: Arc<AtomicUsize>,
         refresh_delay: Duration,
         refresh_body_delay: Duration,
         refresh_error: Option<BrokerUpstreamError>,
@@ -1603,6 +2125,9 @@ mod tests {
         unauthorized_access_tokens: Arc<BTreeSet<String>>,
         refresh_count: Arc<AtomicUsize>,
         response_count: Arc<AtomicUsize>,
+        response_headers: HeaderMap,
+        response_body_started: Arc<AtomicUsize>,
+        reflect_authorization: bool,
     }
 
     #[derive(Default)]
@@ -1659,11 +2184,13 @@ mod tests {
                         return Err(error);
                     }
                     let refresh_response = Arc::clone(&self.refresh_response);
+                    let body_started = Arc::clone(&self.refresh_body_started);
                     let body_delay = self.refresh_body_delay;
                     Ok(BrokerUpstreamResponse::new(
                         self.refresh_status,
-                        HeaderMap::new(),
+                        self.refresh_headers.clone(),
                         Box::pin(stream::once(async move {
+                            body_started.fetch_add(1, Ordering::Relaxed);
                             if !body_delay.is_zero() {
                                 tokio::time::sleep(body_delay).await;
                             }
@@ -1705,11 +2232,23 @@ mod tests {
                         ));
                     }
                     assert_eq!(access_token, self.expected_access_token.as_str());
+                    let mut response_headers = self.response_headers.clone();
+                    let response_body = if self.reflect_authorization {
+                        let encoded = base64::engine::general_purpose::STANDARD
+                            .encode(headers.get(http::header::AUTHORIZATION).unwrap().as_bytes());
+                        response_headers
+                            .insert("x-request-id", HeaderValue::from_str(&encoded).unwrap());
+                        encoded.into_bytes()
+                    } else {
+                        b"synthetic response".to_vec()
+                    };
+                    let body_started = Arc::clone(&self.response_body_started);
                     Ok(BrokerUpstreamResponse::new(
                         StatusCode::OK,
-                        HeaderMap::new(),
-                        Box::pin(stream::once(async {
-                            Ok(Bytes::from_static(b"synthetic response"))
+                        response_headers,
+                        Box::pin(stream::once(async move {
+                            body_started.fetch_add(1, Ordering::Relaxed);
+                            Ok(Bytes::from(response_body))
                         })),
                     ))
                 }
@@ -2006,6 +2545,8 @@ mod tests {
             OAuthSyntheticUpstream {
                 refresh_status,
                 refresh_response: Arc::new(refresh_response),
+                refresh_headers: HeaderMap::new(),
+                refresh_body_started: Arc::new(AtomicUsize::new(0)),
                 refresh_delay,
                 refresh_body_delay: Duration::ZERO,
                 refresh_error: None,
@@ -2016,6 +2557,9 @@ mod tests {
                 unauthorized_access_tokens: Arc::new(unauthorized_access_tokens),
                 refresh_count,
                 response_count,
+                response_headers: HeaderMap::new(),
+                response_body_started: Arc::new(AtomicUsize::new(0)),
+                reflect_authorization: false,
             },
         )
         .unwrap();
@@ -2083,6 +2627,8 @@ mod tests {
 
     fn request() -> v1::CredentialBridgeRequest {
         v1::CredentialBridgeRequest {
+            capability_slot: "codex".into(),
+            route: "openai-api".into(),
             request_id: Uuid::new_v4().to_string(),
             method: "POST".into(),
             path: "/responses".into(),
@@ -2102,7 +2648,7 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(
                 http::header::AUTHORIZATION,
-                HeaderValue::from_static("Bearer cwlocalbrokersyntheticvalue"),
+                HeaderValue::from_static("Bearer cwlocalbroker0123456789abcdef0123456789abcdef"),
             );
             if let Some(account_id) = account_id {
                 headers.insert("chatgpt-account-id", HeaderValue::from_static(account_id));
@@ -2147,6 +2693,117 @@ mod tests {
             output.extend(chunk.unwrap());
         }
         assert_eq!(output, b"reflected [REDACTED]");
+    }
+
+    #[tokio::test]
+    async fn response_admission_runtime_denies_before_polling_provider_body() {
+        let access_token = jwt(json!({
+            "exp": current_unix_time().unwrap() + 3_600
+        }));
+        for headers in denied_encodings() {
+            let (mut broker, state) = oauth_broker_with_initial_token(
+                access_token.clone(),
+                BTreeSet::new(),
+                StatusCode::OK,
+                Vec::new(),
+                access_token.clone(),
+                Duration::ZERO,
+            );
+            let upstream = Arc::get_mut(&mut broker.upstream).unwrap();
+            upstream.response_headers = headers;
+            upstream.reflect_authorization = true;
+            let body_started = Arc::clone(&upstream.response_body_started);
+            assert!(matches!(
+                broker.execute(request()).await,
+                Err(BrokerRequestError::UpstreamFailed)
+            ));
+            assert_eq!(body_started.load(Ordering::Relaxed), 0);
+            assert_eq!(state.response_count.load(Ordering::Relaxed), 1);
+            assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn response_admission_refresh_denial_fails_once_without_body_poll_or_retry() {
+        let access_token = jwt(json!({
+            "exp": current_unix_time().unwrap() + 3_600
+        }));
+        let refresh_response = serde_json::to_vec(&json!({
+            "access_token": access_token,
+            "refresh_token": "synthetic-new-refresh-token"
+        }))
+        .unwrap();
+        for headers in denied_encodings() {
+            let (mut broker, state) = oauth_broker(
+                StatusCode::OK,
+                refresh_response.clone(),
+                access_token.clone(),
+                Duration::ZERO,
+            );
+            let upstream = Arc::get_mut(&mut broker.upstream).unwrap();
+            upstream.refresh_headers = headers;
+            let body_started = Arc::clone(&upstream.refresh_body_started);
+            assert!(matches!(
+                broker.execute(request()).await,
+                Err(BrokerRequestError::UpstreamFailed)
+            ));
+            broker.wait_for_active_operations().await.unwrap();
+            assert_eq!(body_started.load(Ordering::Relaxed), 0);
+            assert_eq!(state.begin_count.load(Ordering::Relaxed), 1);
+            assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+            assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+            assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+            assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+            assert_eq!(state.response_count.load(Ordering::Relaxed), 0);
+            assert!(matches!(
+                broker.execute(request()).await,
+                Err(BrokerRequestError::Denied)
+            ));
+            assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+            assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn response_admission_identity_refresh_promotes_and_redacts_new_authorization() {
+        let access_token = jwt(json!({
+            "exp": current_unix_time().unwrap() + 3_600
+        }));
+        let refresh_response = serde_json::to_vec(&json!({
+            "access_token": access_token,
+            "refresh_token": "synthetic-new-refresh-token"
+        }))
+        .unwrap();
+        for headers in accepted_encodings() {
+            let (mut broker, state) = oauth_broker(
+                StatusCode::OK,
+                refresh_response.clone(),
+                access_token.clone(),
+                Duration::ZERO,
+            );
+            let upstream = Arc::get_mut(&mut broker.upstream).unwrap();
+            upstream.refresh_headers = headers.clone();
+            upstream.response_headers = headers;
+            upstream.reflect_authorization = true;
+            let body_started = Arc::clone(&upstream.refresh_body_started);
+            let response = broker.execute(request()).await.unwrap();
+            let (status, headers, mut body) = response.into_parts();
+            assert_eq!(status, StatusCode::OK);
+            assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
+            assert_eq!(headers.get("x-request-id").unwrap(), "[REDACTED]");
+            let mut output = Vec::new();
+            while let Some(chunk) = body.next().await {
+                output.extend(chunk.unwrap());
+            }
+            assert_eq!(output, b"[REDACTED]");
+            assert_eq!(body_started.load(Ordering::Relaxed), 1);
+            assert_eq!(state.material_generation.load(Ordering::Relaxed), 2);
+            assert_eq!(state.commit_count.load(Ordering::Relaxed), 1);
+            assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
+            assert_eq!(state.abort_count.load(Ordering::Relaxed), 0);
+            assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+            assert_eq!(state.response_count.load(Ordering::Relaxed), 1);
+        }
     }
 
     #[tokio::test]
@@ -2407,12 +3064,19 @@ mod tests {
         // delayed. The broker must use that authority-admitted value, not the
         // in-memory refresh result or an inferred previous-generation + 1.
         let mut replacement = oauth_material(&replacement_access_token).into_bytes();
+        let observed = state
+            .authority
+            .get_credential(&state.credential_id)
+            .unwrap()
+            .metadata;
         state
             .authority
             .rotate_credential_material(
                 &state.credential_id,
+                observed.revocation_generation,
                 ProtectedValue::new(std::mem::take(&mut *replacement)).unwrap(),
                 Some(state.hard_deadline),
+                observed.account_hint,
             )
             .unwrap();
         state.material_generation.store(3, Ordering::Release);

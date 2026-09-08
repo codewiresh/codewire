@@ -26,7 +26,9 @@
 //! Isolated services can instead mount
 //! [`ConnectAuthLayer::oauth_bearer_only`](crate::connect::ConnectAuthLayer::oauth_bearer_only):
 //! cookies never supply identity and API keys never enter their lookup or
-//! usage-bookkeeping paths.
+//! usage-bookkeeping paths. Credential mutation uses its own narrower
+//! session-or-OAuth mount with an exact browser-Origin requirement; it does not
+//! broaden OAuth-only delegation.
 
 use axum::extract::{FromRequestParts, State};
 use axum::http::HeaderMap;
@@ -43,6 +45,10 @@ use crate::error::AppError;
 
 mod oauth_authority;
 pub use oauth_authority::{OAuthBearerAuthority, OAuthBearerAuthorityError};
+mod session_mutation_authority;
+pub use session_mutation_authority::{
+    CredentialMutationAuthority, CredentialMutationAuthorityError,
+};
 
 /// Published browser session cookie name.
 pub const SESSION_COOKIE_NAME: &str = "codewire.session_token";
@@ -103,7 +109,7 @@ impl AuthUser {
     pub fn require_global_admin(&self) -> Result<(), AppError> {
         self.require_account_credential()?;
         if !self.is_admin {
-            return Err(AppError::Forbidden);
+            return Err(AppError::Unauthorized);
         }
         Ok(())
     }
@@ -432,6 +438,98 @@ pub(crate) async fn resolve_oauth_bearer_authentication(
         // through Debug, Display, Connect rendering or error telemetry.
         .map_err(|_| AppError::ServiceUnavailable("OAuth credential lookup unavailable".into()))?
         .ok_or(AppError::Unauthorized)
+}
+
+/// Resolve the only two original authorities admitted by
+/// `CredentialMutationService`. A presented session must come from the exact
+/// configured browser origin; API keys never enter their lookup path.
+pub(crate) async fn resolve_credential_mutation_authentication(
+    state: &AuthState,
+    headers: &HeaderMap,
+    session_origin: &http::HeaderValue,
+) -> Result<(Authentication, CredentialMutationAuthority), AppError> {
+    if let Some(token) = credential_mutation_session_cookie(headers)? {
+        // A browser session and an Authorization credential are distinct
+        // original authorities. Never choose one by precedence at this mount.
+        if headers.contains_key(AUTHORIZATION) {
+            return Err(AppError::Unauthorized);
+        }
+        let mut origins = headers.get_all(http::header::ORIGIN).iter();
+        if origins.next() != Some(session_origin) || origins.next().is_some() {
+            return Err(AppError::Forbidden);
+        }
+        let captured_monotonic = std::time::Instant::now();
+        let captured_wall = chrono::Utc::now();
+        let digest = hash_session_token(token);
+        let row: Option<(String, String, bool, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT session_id,user_id,is_admin,expires_at FROM public.codewire_authenticate_credential_session($1::text)",
+        )
+        .bind(&digest)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|_| AppError::ServiceUnavailable("session credential lookup unavailable".into()))?;
+        let (session_id, user_id, is_admin, expires_at) = row.ok_or(AppError::Unauthorized)?;
+        let authority = session_mutation_authority::SessionCredentialMutationAuthority::new(
+            session_id,
+            digest,
+            user_id.clone(),
+            expires_at,
+            captured_monotonic,
+            captured_wall,
+        )
+        .ok_or(AppError::Unauthorized)?;
+        return Ok((
+            Authentication {
+                user: AuthUser {
+                    user_id,
+                    org_id: None,
+                    is_admin,
+                    via_api_key: false,
+                },
+                credential: CredentialContext::SessionCookie,
+                oauth_bearer_authority: None,
+            },
+            CredentialMutationAuthority::from_session(authority),
+        ));
+    }
+
+    let auth = resolve_oauth_bearer_authentication(state, headers).await?;
+    let authority = auth
+        .oauth_bearer_authority()
+        .cloned()
+        .ok_or(AppError::Unauthorized)?;
+    Ok((auth, CredentialMutationAuthority::from(authority)))
+}
+
+/// Extract exactly one browser-session cookie for credential mutation.
+///
+/// General product authentication retains its established cookie precedence.
+/// This isolated mutation mount rejects duplicate Cookie fields or duplicate
+/// session-cookie pairs so an intermediary cannot influence which original
+/// authority is selected by field or pair ordering.
+fn credential_mutation_session_cookie(headers: &HeaderMap) -> Result<Option<&str>, AppError> {
+    let mut fields = headers.get_all(COOKIE).iter();
+    let Some(raw) = fields.next() else {
+        return Ok(None);
+    };
+    if fields.next().is_some() {
+        return Err(AppError::Unauthorized);
+    }
+    let raw = raw.to_str().map_err(|_| AppError::Unauthorized)?;
+    let mut token = None;
+    for pair in raw.split(';') {
+        let Some((name, value)) = pair.trim_start().split_once('=') else {
+            continue;
+        };
+        if name.trim_end() != SESSION_COOKIE_NAME {
+            continue;
+        }
+        let value = value.trim_end_matches(|character: char| character.is_whitespace());
+        if value.is_empty() || token.replace(value).is_some() {
+            return Err(AppError::Unauthorized);
+        }
+    }
+    Ok(token)
 }
 
 fn oauth_bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -899,6 +997,73 @@ mod tests {
                 assert!(!rendered.contains(forbidden));
             }
             assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_mutation_rejects_invalid_session_authority_before_database_access() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://synthetic:synthetic@127.0.0.1:1/synthetic")
+            .unwrap();
+        let state = AuthState { pool };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            format!("{SESSION_COOKIE_NAME}=session-canary")
+                .parse()
+                .unwrap(),
+        );
+        headers.insert(
+            http::header::ORIGIN,
+            "https://attacker.example".parse().unwrap(),
+        );
+        let result = resolve_credential_mutation_authentication(
+            &state,
+            &headers,
+            &http::HeaderValue::from_static("https://codewire.example"),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Forbidden)));
+
+        let valid_origin = http::HeaderValue::from_static("https://codewire.example");
+        let mut duplicate_fields = HeaderMap::new();
+        duplicate_fields.append(
+            COOKIE,
+            format!("{SESSION_COOKIE_NAME}=first-canary")
+                .parse()
+                .unwrap(),
+        );
+        duplicate_fields.append(
+            COOKIE,
+            format!("{SESSION_COOKIE_NAME}=second-canary")
+                .parse()
+                .unwrap(),
+        );
+        duplicate_fields.insert(http::header::ORIGIN, valid_origin.clone());
+
+        let mut duplicate_pairs = HeaderMap::new();
+        duplicate_pairs.insert(
+            COOKIE,
+            format!("{SESSION_COOKIE_NAME}=first-canary; {SESSION_COOKIE_NAME}=second-canary")
+                .parse()
+                .unwrap(),
+        );
+        duplicate_pairs.insert(http::header::ORIGIN, valid_origin.clone());
+
+        let mut mixed = HeaderMap::new();
+        mixed.insert(
+            COOKIE,
+            format!("{SESSION_COOKIE_NAME}=session-canary")
+                .parse()
+                .unwrap(),
+        );
+        mixed.insert(AUTHORIZATION, "Bearer oauth-canary".parse().unwrap());
+        mixed.insert(http::header::ORIGIN, valid_origin.clone());
+
+        for ambiguous in [&duplicate_fields, &duplicate_pairs, &mixed] {
+            let result =
+                resolve_credential_mutation_authentication(&state, ambiguous, &valid_origin).await;
+            assert!(matches!(result, Err(AppError::Unauthorized)));
         }
     }
 

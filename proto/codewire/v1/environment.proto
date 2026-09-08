@@ -29,6 +29,10 @@ service EnvironmentService {
   rpc DeleteEnvironment(DeleteEnvironmentRequest) returns (DeleteEnvironmentResponse);
   rpc StopEnvironment(StopEnvironmentRequest) returns (StopEnvironmentResponse);
   rpc StartEnvironment(StartEnvironmentRequest) returns (StartEnvironmentResponse);
+  // Replaces only application-secret sources and provider-profile selection.
+  // Running environments require explicit restart confirmation; workspace data
+  // is preserved. This is not an arbitrary ProjectSpec update operation.
+  rpc UpdateEnvironmentSources(UpdateEnvironmentSourcesRequest) returns (UpdateEnvironmentSourcesResponse);
   rpc ProtectEnvironment(ProtectEnvironmentRequest) returns (ProtectEnvironmentResponse);
   rpc UnprotectEnvironment(UnprotectEnvironmentRequest) returns (UnprotectEnvironmentResponse);
   rpc CancelEnvironmentDeletion(CancelEnvironmentDeletionRequest) returns (CancelEnvironmentDeletionResponse);
@@ -130,6 +134,9 @@ message Environment {
   string network = 30;
   repeated Port ports = 31;
   IsolationTier isolation_tier = 32;
+  uint64 operation_generation = 33;
+  // Exact canonical source IDs and pinned profile revision, never values.
+  EnvironmentSourceSelection source_selection = 34;
 }
 
 message ListEnvironmentsRequest {
@@ -158,6 +165,44 @@ message CreateEnvironmentRequest {
   IsolationTier isolation_tier = 24;
   // Canonical project intent. Workload configuration is accepted only here.
   ProjectSpec project_spec = 25;
+  optional uint64 expected_profile_revision = 26;
+  bool confirm_personal_credentials = 27;
+  bool confirm_personal_secrets = 28;
+}
+
+// Complete selection. Empty means no sources and no provider profile.
+message EnvironmentSourceSelection {
+  ProjectSecretBindings secrets = 1;
+  ProjectCredentialBinding credentials = 2;
+  // Required when credentials is present; absent otherwise.
+  optional uint64 profile_revision = 3;
+}
+
+message UpdateEnvironmentSourcesRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  uint64 expected_operation_generation = 3;
+  // Both objects are required. Exact existing selection plus generation form
+  // the concurrency fence: operation generation alone is not an edit revision.
+  EnvironmentSourceSelection expected = 4;
+  EnvironmentSourceSelection replacement = 5;
+  bool allow_restart = 6;
+  bool confirm_personal_credentials = 7;
+  bool confirm_personal_secrets = 8;
+}
+
+enum EnvironmentSourcesUpdateOutcome {
+  ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNSPECIFIED = 0;
+  ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNCHANGED = 1;
+  ENVIRONMENT_SOURCES_UPDATE_OUTCOME_STORED = 2;
+  ENVIRONMENT_SOURCES_UPDATE_OUTCOME_RESTART_REQUIRED = 3;
+}
+
+message UpdateEnvironmentSourcesResponse {
+  string environment_id = 1;
+  uint64 operation_generation = 2;
+  EnvironmentSourceSelection selection = 3;
+  EnvironmentSourcesUpdateOutcome outcome = 4;
 }
 
 message CreateEnvironmentResponse {

@@ -4,15 +4,22 @@ package daemon.v1;
 
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
+import "codewire/bridge/v1/bridge.proto";
 
 service DaemonService {
   rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
   rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
 
+  // Private native host lifecycle operation, not a workload launch. Enabled
+  // only by the trusted Local+Runc guest configuration. No command, environment,
+  // source selector, or application projection crosses this boundary.
+  rpc PoweroffGuest(PoweroffGuestRequest) returns (PoweroffGuestResponse);
+
   // Private host-initiated channel for material-free guest credential
-  // requests. The host authenticates with the generation daemon capability;
-  // protected provider values never appear in either stream direction.
-  rpc CredentialBridge(stream CredentialBridgeHostMessage) returns (stream CredentialBridgeGuestMessage);
+  // requests and typed recipient-encrypted application projections. The host
+  // authenticates with the generation daemon capability; provider values and
+  // plaintext application values never appear in either stream direction.
+  rpc CredentialBridge(stream codewire.bridge.v1.CredentialBridgeHostMessage) returns (stream codewire.bridge.v1.CredentialBridgeGuestMessage);
 
   rpc LaunchSession(LaunchSessionRequest) returns (LaunchSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
@@ -81,6 +88,10 @@ message GetCapabilitiesResponse {
 
 message GetHealthRequest {}
 
+message PoweroffGuestRequest {}
+
+message PoweroffGuestResponse {}
+
 message HealthDiagnostic {
   string name = 1;
   bool healthy = 2;
@@ -91,82 +102,6 @@ message GetHealthResponse {
   DaemonState state = 1;
   string message = 2;
   repeated HealthDiagnostic diagnostics = 3;
-}
-
-message CredentialBridgeOpen {
-  uint32 protocol_version = 1;
-  string environment_id = 2;
-  uint64 environment_generation = 3;
-}
-
-message CredentialHttpHeader {
-  string name = 1;
-  bytes value = 2;
-}
-
-message CredentialBridgeResponseStart {
-  string request_id = 1;
-  uint32 status_code = 2;
-  repeated CredentialHttpHeader headers = 3;
-}
-
-message CredentialBridgeResponseBody {
-  string request_id = 1;
-  bytes data = 2;
-}
-
-message CredentialBridgeResponseEnd {
-  string request_id = 1;
-}
-
-enum CredentialBridgeFailureReason {
-  CREDENTIAL_BRIDGE_FAILURE_REASON_UNSPECIFIED = 0;
-  CREDENTIAL_BRIDGE_FAILURE_REASON_DENIED = 1;
-  CREDENTIAL_BRIDGE_FAILURE_REASON_UNAVAILABLE = 2;
-  CREDENTIAL_BRIDGE_FAILURE_REASON_UPSTREAM_FAILED = 3;
-  CREDENTIAL_BRIDGE_FAILURE_REASON_RESPONSE_TOO_LARGE = 4;
-}
-
-message CredentialBridgeResponseFailure {
-  string request_id = 1;
-  CredentialBridgeFailureReason reason = 2;
-}
-
-message CredentialBridgeHostMessage {
-  oneof payload {
-    CredentialBridgeOpen open = 1;
-    CredentialBridgeResponseStart response_start = 2;
-    CredentialBridgeResponseBody response_body = 3;
-    CredentialBridgeResponseEnd response_end = 4;
-    CredentialBridgeResponseFailure response_failure = 5;
-  }
-}
-
-message CredentialBridgeReady {
-  uint32 protocol_version = 1;
-  string environment_id = 2;
-  uint64 environment_generation = 3;
-}
-
-message CredentialBridgeRequest {
-  string request_id = 1;
-  string method = 2;
-  string path = 3;
-  string query = 4;
-  repeated CredentialHttpHeader headers = 5;
-  bytes body = 6;
-}
-
-message CredentialBridgeCancel {
-  string request_id = 1;
-}
-
-message CredentialBridgeGuestMessage {
-  oneof payload {
-    CredentialBridgeReady ready = 1;
-    CredentialBridgeRequest request = 2;
-    CredentialBridgeCancel cancel = 3;
-  }
 }
 
 message SessionRecord {
