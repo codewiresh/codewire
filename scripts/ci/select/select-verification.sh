@@ -804,7 +804,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       apps/dashboard/*|apps/docs/*|favicon.svg|logo/*|\
-      scripts/dev/design-system-server.py)
+      scripts/dev/design-system-server.py|scripts/ci/tests/test-dashboard-browser-gate.sh)
         select_token web
         recognized=true
         ;;

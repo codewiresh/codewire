@@ -689,6 +689,8 @@ run_paths_case generic_package pull_request refs/pull/119/head false \
   'policy web' packages/shared/src/index.ts
 run_paths_case dashboard pull_request refs/pull/12/head false \
   'policy web' apps/dashboard/playwright.config.ts
+run_paths_case dashboard_browser_gate pull_request refs/pull/1202/head false \
+  'policy web' scripts/ci/tests/test-dashboard-browser-gate.sh
 run_paths_case dashboard_design_preview pull_request refs/pull/120/head false \
   'policy web' scripts/dev/design-system-server.py
 run_paths_case marketing_brand_assets pull_request refs/pull/1201/head false \
@@ -985,6 +987,13 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1913/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field kind_fixture_mixed "$contract_output" required_local_mode kind
+printf '%s\n' scripts/ci/tests/test-dashboard-browser-gate.sh \
+  scripts/ci/verify/kind/suites/dashboard-browser.sh > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1914/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field dashboard_browser_gate_mixed "$contract_output" classification changed
+assert_contract_field dashboard_browser_gate_mixed "$contract_output" required_local_mode kind
 printf '%s\n' unexplained/new-surface.txt > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/192/head \
@@ -1204,7 +1213,7 @@ grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfil
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
 grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
-grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 22' "$integration_runner"
+grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 23' "$integration_runner"
 grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- '--lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority' "$integration_runner"
@@ -1213,7 +1222,7 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 40' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 41' "$integration_runner"
 grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 21' "$integration_runner"
 grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 12' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"
