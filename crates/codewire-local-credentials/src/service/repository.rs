@@ -577,7 +577,7 @@ impl RepositoryChild {
 
     async fn stop_and_drain(&mut self, already_waited: bool) -> bool {
         match self {
-            Self::GitHub(child) if already_waited => true,
+            Self::GitHub(_) if already_waited => true,
             Self::GitHub(child) => {
                 let _ = child.start_kill();
                 child.wait().await.is_ok()

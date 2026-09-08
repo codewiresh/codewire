@@ -1438,9 +1438,10 @@ fn orphan_inventory_response(
                 .map(|runner| (format!("{}.sock", environment.id), runner.socket.clone()))
         })
         .collect();
-    let mut retained_content = referenced_content_blobs(state)?;
+    let retained_content = referenced_content_blobs(state)?;
     #[cfg(feature = "synthetic-oci-input-smoke")]
-    {
+    let retained_content = {
+        let mut retained_content = retained_content;
         let engine = root.open_private_directory(Path::new("engine"), 0o700)?;
         let content = ContentStore::create(&engine)?;
         if let Some(image) = crate::oci::load_synthetic_image_pin(&engine, &content)
@@ -1448,7 +1449,8 @@ fn orphan_inventory_response(
         {
             retain_image_content(&mut retained_content, &image)?;
         }
-    }
+        retained_content
+    };
     let content_blobs = retained_content
         .into_iter()
         .map(|(digest, size)| (digest.hex().to_owned(), size))
