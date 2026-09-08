@@ -69,9 +69,10 @@ Program mutation except read-only diagnosis and control repair.
 For long-running work, use one staged proof loop: confirm canonical control and
 risk; get an independent design/security read before broad implementation;
 build the smallest coherent slice; run focused checks and review the diff before
-committing a credible candidate. Then run the selected exact-tree local
-qualification once before push, reusing valid evidence. Complete remaining
-exact-head landing gates before merge. Each PR states one bounded
+committing a credible candidate. Then complete the selected exact-tree
+qualification once, locally before push or on self-hosted Forgejo when the
+owner selects CI, reusing valid evidence. Complete remaining exact-head landing
+gates before merge. Each PR states one bounded
 outcome, its dependencies, affected contracts, and acceptance; keep generated
 contracts and their consumers atomic. Update Program control at admissions and
 material transitions, with evidence labeled accurately. Parallelize read-only
@@ -106,14 +107,19 @@ Kind suite only because classification is missing, repair the classifier and
 its fixtures; do not use an expensive unrelated suite as the classifier. An
 unknown result blocks the affected mutation, not unrelated work.
 
-After the repository owner explicitly accepts locally observed frontend
-behavior and asks to land it, do not rebuild integration, Kind, or product
-images locally solely to create a push receipt. For a clean, current,
-single-feature-branch update, use `CODEWIRE_PREFLIGHT_MODE=ci git push ...` to
-defer the selected exact-tree qualification to required Forgejo CI. This mode
-is unavailable for `main`, tags, deletions, multi-ref pushes, Tier 3 effects, or
-work whose acceptance depends on local-only hardware. It is not a waiver: bind
-the pushed head once and do not merge until its required exact-head CI succeeds.
+When the repository owner selects self-hosted Forgejo for full image or
+integration verification, complete focused local checks and diff review before
+committing. The same CI route remains available after the owner explicitly
+accepts locally observed frontend behavior and asks to land it. For a clean,
+current, single-feature-branch update, use
+`CODEWIRE_PREFLIGHT_MODE=ci git push ...` to defer the selected exact-tree
+qualification to required Forgejo CI. Reuse accepted local evidence; do not
+rebuild integration, Kind, or product images locally solely to create or refresh
+a push receipt. This mode is unavailable for `main`, tags, deletions, multi-ref
+pushes, Tier 3 effects, or work whose acceptance depends on local-only hardware.
+It is not a waiver: bind the pushed head once and do not merge until every
+required exact-head gate succeeds. The frontend iteration checkpoint still
+requires an explicit landing instruction.
 
 Bind a hosted run once and use a transition watcher; never spend turns polling
 unchanged CI. Inspect component logs after failure before proposing a mechanism.
