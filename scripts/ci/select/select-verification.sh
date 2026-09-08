@@ -1276,7 +1276,13 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/workspace-cache.sh|\
       scripts/ci/tests/test-select-untrusted-workspace-cache.sh|\
       scripts/ci/tests/test-workspace-cache.sh|\
-      scripts/ci/tests/canary-workspace-r2-cache.sh)
+      scripts/ci/tests/canary-workspace-r2-cache.sh|\
+      scripts/ci/setup/select-workspace-cache-experiment.py|\
+      scripts/ci/tests/probe-workspace-r2-cache.sh|\
+      scripts/ci/tests/test-workspace-cache-experiment.py|\
+      scripts/ci/tests/test-workspace-cache-probes.py|\
+      scripts/ci/verify/workspace-cache-probes.py|\
+      scripts/ci/verify/workspace-cache-report.py)
         # The artifact graph owns workspace build selection. These exact
         # credential/cache consumers also run their policy and security guards.
         select_token policy

@@ -318,6 +318,14 @@ run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false 
   scripts/ci/tests/test-select-untrusted-workspace-cache.sh \
   scripts/ci/tests/test-workspace-cache.sh \
   scripts/ci/tests/canary-workspace-r2-cache.sh
+run_present_paths_case workspace_cache_experiment_consumers pull_request refs/pull/2047/head false \
+  'policy policy_shell security' \
+  scripts/ci/setup/select-workspace-cache-experiment.py \
+  scripts/ci/tests/probe-workspace-r2-cache.sh \
+  scripts/ci/tests/test-workspace-cache-experiment.py \
+  scripts/ci/tests/test-workspace-cache-probes.py \
+  scripts/ci/verify/workspace-cache-probes.py \
+  scripts/ci/verify/workspace-cache-report.py
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
 run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \
