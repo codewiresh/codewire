@@ -64,6 +64,14 @@ done
 # the base runtime or a live package transaction during environment creation.
 workspace_dockerfile="$ROOT/images/workspace/Dockerfile"
 stock_ssh="$ROOT/scripts/ci/verify/stock-ssh-workload.sh"
+# Workspace cw compiles the same schemas as product images, including the
+# standard debug_redact field option unsupported by Bookworm's protoc.
+grep -qF 'https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \
+  "$workspace_dockerfile" || fail 'workspace builder lacks the shared pinned protobuf compiler'
+grep -qF 'ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7' \
+  "$workspace_dockerfile" || fail 'workspace protobuf compiler checksum is not pinned'
+grep -qxF 'ENV PROTOC=/opt/protoc/bin/protoc' "$workspace_dockerfile" ||
+  fail 'workspace cw build does not select the pinned protobuf compiler'
 # shellcheck disable=SC2016 # Match the literal Dockerfile build argument.
 grep -qxF 'FROM ${BASE_IMAGE_REF} AS stock-ssh-fixture' "$workspace_dockerfile" ||
   fail 'workspace SSH fixture does not inherit the exact verified base'

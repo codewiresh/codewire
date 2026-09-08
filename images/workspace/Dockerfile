@@ -4,6 +4,9 @@
 ARG BASE_IMAGE_REF
 
 FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS cw-builder
+ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 \
+  https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
+  /tmp/protoc.zip
 COPY images/workspace/debian.sources /etc/apt/sources.list.d/debian.sources
 COPY images/base/apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
 COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-get-with-retry
@@ -11,8 +14,12 @@ RUN rm -f /etc/apt/sources.list && \
     apt-get-with-retry update && \
     grep -RqsF 'snapshot.debian.org/archive/debian/20251208T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
-    apt-get-with-retry install -y --no-install-recommends libprotobuf-dev protobuf-compiler && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get-with-retry install -y --no-install-recommends unzip && \
+    rm -rf /var/lib/apt/lists/* && \
+    unzip -q /tmp/protoc.zip -d /opt/protoc && \
+    rm /tmp/protoc.zip && \
+    test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1'
+ENV PROTOC=/opt/protoc/bin/protoc
 RUN rustup component add --toolchain 1.91.1-x86_64-unknown-linux-gnu rustfmt clippy
 
 # The source tree stays read-only and is never copied into an image layer. Cargo
