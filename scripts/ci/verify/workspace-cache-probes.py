@@ -18,17 +18,6 @@ PHASES = ("native-cold", "native-warm", "native-malformed", "native-missing-blob
           "native-denied", "cw-control", "cw-edit", "tools", "cancel")
 MAIN = "crates/codewire-cli-bin/src/main.rs"
 DOCKERFILE = "images/workspace/Dockerfile"
-STAGES = """
-FROM cw-toolchain AS cw-cache-probe-check
-RUN --network=none \\
-    --mount=type=bind,from=cw-builder,source=/out/cw,target=/tmp/cw-under-test,readonly \\
-    mkdir -p /probe-result && \\
-    /tmp/cw-under-test --version > /probe-result/version.txt && \\
-    sha256sum /tmp/cw-under-test > /probe-result/cw.sha256
-
-FROM scratch AS cw-cache-probe-result
-COPY --from=cw-cache-probe-check /probe-result/ /
-"""
 GAPS = ["actual expired OIDC rejection", "induced network outage",
         "live production-wrapper/native-fault retry integration"]
 
@@ -120,10 +109,6 @@ def derive(archive, work, report, credential, nonce):
     dockerfile.write_text(original_dockerfile.replace(
         tool_anchor, "    rm -rf /root/.bun && \\\n"
         f"    printf '%s\\n' 'codewire-cache-probe-{nonce}' > /usr/local/share/codewire-cache-probe-token\n"))
-    # BuildKit includes the Dockerfile frontend input name in the LLB cache
-    # identity. Keep the ordinary basename so the unmodified control can reuse
-    # the exact seed vertices before the derived-source miss is asserted.
-    (work / "Dockerfile").write_text(original_dockerfile + STAGES)
     inventories = {"control": original, "cw-edit": inventory(contexts / "cw-edit"),
                    "tools": inventory(contexts / "tools")}
     for name, expected in (("cw-edit", MAIN), ("tools", DOCKERFILE)):
@@ -150,9 +135,55 @@ def derive(archive, work, report, credential, nonce):
     private_key(synthetic, roots)
     write(report / "contexts.json", {
         "inventories": inventories, "archive_sha256": digest(Path(archive).read_bytes()),
-        "probe_dockerfile_sha256": digest((work / "Dockerfile").read_bytes()),
+        "cw_control_dockerfile_sha256": digest((control / DOCKERFILE).read_bytes()),
         "native_payload_sha256": digest((native / "payload").read_bytes()),
         "cw_insert": inserted, "tool_dockerfile_sha256": digest(dockerfile.read_bytes())})
+
+
+def mutate(root, report, backup):
+    """Apply the one tracked source derivative to the exact checked-out context."""
+    root, report, backup = Path(root), Path(report), Path(backup)
+    target = root / MAIN
+    contexts = read(report / "contexts.json")
+    expected_before = contexts["inventories"]["control"][MAIN]
+    expected_after = contexts["inventories"]["cw-edit"][MAIN]
+    current = {"sha256": digest(target.read_bytes()), "mode": stat.S_IMODE(target.stat().st_mode)}
+    if current != expected_before or backup.exists() or backup.is_symlink():
+        raise ValueError("checked-out CW source does not match the bound control")
+    shutil.copy2(target, backup)
+    target.write_text(target.read_text().replace("fn main() {\n", "fn main() {\n" + contexts["cw_insert"], 1))
+    changed = {"sha256": digest(target.read_bytes()), "mode": stat.S_IMODE(target.stat().st_mode)}
+    status = subprocess.check_output(
+        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=normal"], text=True).splitlines()
+    if changed != expected_after or status != [" M " + MAIN]:
+        raise ValueError("checked-out CW derivative changed unexpected source")
+    write(report / "cw-context.json", {
+        "path": MAIN, "before": current, "after": changed,
+        "changed_paths": [MAIN], "restored": False})
+
+
+def restore(root, report, backup):
+    """Restore and revalidate the exact source identity after the derivative build."""
+    root, report, backup = Path(root), Path(report), Path(backup)
+    if not backup.is_file() or backup.is_symlink():
+        raise ValueError("CW source backup is missing or invalid")
+    target = root / MAIN
+    receipt_path = report / "cw-context.json"
+    receipt = read(receipt_path) if receipt_path.is_file() else None
+    expected_after = read(report / "contexts.json")["inventories"]["cw-edit"][MAIN]
+    observed_after = {"sha256": digest(target.read_bytes()), "mode": stat.S_IMODE(target.stat().st_mode)}
+    shutil.copy2(backup, target)
+    identity = artifact.source_identity(root)
+    expected_identity = read(report / "identity.json")
+    if observed_after != expected_after or receipt is None \
+            or identity["source_sha"] != expected_identity["source_sha"] \
+            or identity["source_tree"] != expected_identity["source_tree"]:
+        raise ValueError("CW source derivative could not be restored exactly")
+    backup.unlink()
+    receipt["restored"] = True
+    receipt["restored_source_sha"] = identity["source_sha"]
+    receipt["restored_source_tree"] = identity["source_tree"]
+    write(receipt_path, receipt)
 
 
 def prepare(root, report, pin, credential):
@@ -174,6 +205,8 @@ def prepare(root, report, pin, credential):
     if not re.fullmatch(r"docker.io/moby/buildkit:v0.29.0@sha256:[0-9a-f]{64}", pin) \
             or pin != seed["pins"]["buildkit_image"]:
         raise ValueError("probe BuildKit pin differs from seed")
+    if seed["pins"].get("workspace_dockerfile_sha256") != identity["inputs"][DOCKERFILE]:
+        raise ValueError("probe workspace Dockerfile differs from seed")
     write(report / "identity.json", {
         "source_sha": identity["source_sha"], "source_tree": identity["source_tree"],
         "architecture": identity["architecture"], "seed_cache_id": seed["seed_cache_id"],
@@ -451,8 +484,15 @@ def finalize(report):
             gaps.append("production wrapper did not retry the observed " + phase["phase"] + " error in local replay")
     contexts = read(report / "contexts.json")
     inventories = contexts.pop("inventories")
+    cw_context = read(report / "cw-context.json")
+    if cw_context.get("restored") is not True \
+            or cw_context.get("restored_source_sha") != identity["source_sha"] \
+            or cw_context.get("restored_source_tree") != identity["source_tree"] \
+            or cw_context.get("changed_paths") != [MAIN]:
+        raise ValueError("actual CW source context was not restored")
     derivation = {
-        **contexts, "context_inventory_sha256": {name: digest(compact(value).encode()) for name, value in inventories.items()},
+        **contexts, "actual_cw_context": cw_context,
+        "context_inventory_sha256": {name: digest(compact(value).encode()) for name, value in inventories.items()},
         "changed_inputs": {name: {"path": path, "before": inventories["control"][path], "after": inventories[name][path]}
                            for name, path in (("cw-edit", MAIN), ("tools", DOCKERFILE))}}
     result = {"schema_version": 1, "status": "passed", "kind": "workspace-cache-probes",
@@ -479,6 +519,10 @@ if __name__ == "__main__":
             prepare(*arguments)
         elif command == "derive" and len(arguments) == 5:
             derive(*arguments)
+        elif command == "mutate" and len(arguments) == 3:
+            mutate(*arguments)
+        elif command == "restore" and len(arguments) == 3:
+            restore(*arguments)
         elif command == "key" and len(arguments) >= 2:
             private_key(arguments[0], arguments[1:])
         elif command == "register" and len(arguments) == 4:

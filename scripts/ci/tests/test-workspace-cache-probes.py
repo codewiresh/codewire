@@ -47,8 +47,10 @@ def export_log():
 def write_output(name, value):
     match = re.search(r"(?:^|,)dest=([^,]+)", option("--output"))
     path = Path(match[1])
-    path.mkdir(parents=True, exist_ok=True)
-    (path / name).write_bytes(value)
+    output = path / name
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(value)
+    return output
 if args[:2] == ["buildx", "create"]:
     builder = option("--name")
     container = hashlib.sha256(builder.encode()).hexdigest()
@@ -141,14 +143,16 @@ elif args[:2] == ["buildx", "build"]:
         if "--cache-to" in args:
             print("#8 exporting cache to Amazon S3\n#8 writing layer sha256:" + "f" * 64 + "\n#8 DONE 0.1s")
     elif phase.startswith("cw-"):
-        assert option("--target") == "cw-cache-probe-result"
-        assert Path(option("--file")).name == "Dockerfile"
+        assert option("--target") == "cw-builder"
+        assert Path(option("--file")).resolve() == (Path(args[-1]) / "images/workspace/Dockerfile").resolve()
         assert option("--build-arg") == "CODEWIRE_SCCACHE_MODE=r2"
         print("#2 [cw-builder 1/1] RUN cargo build")
+        if phase == "cw-edit" and failure == "cw-build":
+            raise SystemExit(53)
         print("#2 CACHED" if phase == "cw-control" and failure != "control-miss" else "#2 DONE 0.1s")
-        value = "cw 0.1.0\n" if phase == "cw-control" or failure == "stale-cw" else "codewire-cache-probe-" + nonce() + "\n"
-        write_output("version.txt", value.encode())
-        write_output("cw.sha256", (("a" if phase == "cw-control" else "b") * 64 + "  /tmp/cw-under-test\n").encode())
+        value = "cw 0.1.0" if phase == "cw-control" or failure == "stale-cw" else "codewire-cache-probe-" + nonce()
+        binary = write_output("out/cw", ("#!/bin/sh\nprintf '%s\\n' '" + value + "'\n").encode())
+        binary.chmod(0o755)
         export_log()
     elif phase == "tools":
         if "--metadata-file" in args:
@@ -342,11 +346,14 @@ class ProbeFixture(unittest.TestCase):
         fake.chmod(0o700)
         state = self.work / "state"
         state.mkdir()
+        identity = probes.artifact.source_identity(self.root)
         seed = {"schema_version": 1, "status": "passed", "case": "seed", "source_sha": source,
                 "source_tree": tree, "cache_modes": {"compiler": "r2", "layers": "r2"},
                 "seed_cache_id": "run-2047/tree-" + tree + "/seed-" + "1" * 64,
-                "run_id": "2047", "architecture": probes.artifact.source_identity(self.root)["architecture"],
-                "docker_daemon_id": "daemon-seed-worker", "pins": {"buildkit_image": PIN}}
+                "run_id": "2047", "architecture": identity["architecture"],
+                "docker_daemon_id": "daemon-seed-worker", "pins": {
+                    "buildkit_image": PIN,
+                    "workspace_dockerfile_sha256": identity["inputs"][probes.DOCKERFILE]}}
         return {**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
                 "CODEWIRE_EXPECTED_SOURCE_SHA": source, "CODEWIRE_EXPECTED_SOURCE_TREE": tree,
                 "GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": str(event),
@@ -384,6 +391,8 @@ class ProbeFixture(unittest.TestCase):
         self.assertTrue(states, completed.stdout)
         self.assertTrue(all(state["removed"] and not state["credential"] for state in states), completed.stdout)
         self.assertTrue(self.credential.is_file())
+        self.assertEqual(subprocess.check_output(
+            ["git", "-C", str(self.root), "status", "--porcelain", "--untracked-files=normal"], text=True), "")
         self.assertFalse((self.root / ".tmp/codewire-workspace-image-verification.json").exists())
         return completed, environment
 
@@ -445,6 +454,12 @@ class ProbeFixture(unittest.TestCase):
         completed, _ = self.run_harness("stale-cw")
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("stale/unexpected token", completed.stdout)
+
+    def test_failed_cw_edit_build_restores_exact_checkout(self):
+        completed, _ = self.run_harness("cw-build")
+        self.assertNotEqual(completed.returncode, 0, completed.stdout)
+        self.assertEqual((self.report / "cw-edit/status").read_text(), "53\n")
+        self.assertFalse((self.report / "work-complete").exists())
 
     def test_locally_masked_missing_blob_cannot_pass(self):
         completed, _ = self.run_harness("masked-blob")
@@ -520,6 +535,8 @@ class WorkflowContract(unittest.TestCase):
                           "tooling", "rust-transport", "database", "services-control", "services-runtime", "edge-kind"])
         harness = (ROOT / "scripts/ci/tests/probe-workspace-r2-cache.sh").read_text()
         self.assertIn("--kill-after=150s 2700s", harness)
+        self.assertIn('--file "$context/images/workspace/Dockerfile" --target cw-builder', harness)
+        self.assertNotIn("cw-cache-probe-result", harness)
         self.assertNotIn('artifact_tool" seal', harness)
         self.assertNotIn("--push", harness)
 

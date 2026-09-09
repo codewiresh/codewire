@@ -26,6 +26,7 @@ umask 077
 mkdir -m 0700 "$report"
 work="$(mktemp -d "$RUNNER_TEMP/workspace-cache-probes.XXXXXX")"
 runtime_container='' cancel_pid=''
+source_backup="$work/cw-main.original"
 cleanup() {
   local status=$? cleanup_status=0
   trap - EXIT INT TERM
@@ -37,6 +38,9 @@ cleanup() {
   if [[ -n "$runtime_container" ]]; then
     timeout --signal=TERM --kill-after=3s 10s \
       "$docker_bin" rm --force "$runtime_container" >/dev/null 2>&1 || cleanup_status=$?
+  fi
+  if [[ -f "$source_backup" ]]; then
+    python3 "$probe_tool" restore "$ROOT" "$report" "$source_backup" || cleanup_status=$?
   fi
   rm -rf -- "$work" || cleanup_status=$?
   [[ "$status" != 0 || "$cleanup_status" == 0 ]] || status="$cleanup_status"
@@ -139,19 +143,25 @@ native_phase native-denied "$common,name=$native_name" "$synthetic_credentials"
 for phase in cw-control cw-edit; do
   new_builder "$phase" "$original_credentials"
   workspace_cache_compiler_args
-  context="$work/contexts/cw-edit"
-  [[ "$phase" != cw-control ]] || context="$work/contexts/control"
+  context="$ROOT"
+  if [[ "$phase" == cw-edit ]]; then
+    python3 "$probe_tool" mutate "$ROOT" "$report" "$source_backup"
+  fi
   status=0
   workspace_cache_logged_command "$report/$phase/build.log" \
     "$docker_bin" buildx build --builder "$builder" --progress plain --pull \
     --cache-from "$common,name=$architecture/workspace/experiments/$seed_id" \
     --cache-to "$common,name=$architecture/workspace/experiments/$seed_id/probes/$nonce/$phase-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" \
     "${compiler_args[@]}" --build-arg BASE_IMAGE_REF=scratch \
-    --file "$work/Dockerfile" --target cw-cache-probe-result \
+    --file "$context/images/workspace/Dockerfile" --target cw-builder \
     --output "type=local,dest=$work/$phase-output" "$context" || status=$?
   printf '%s\n' "$status" >"$report/$phase/status"
   [[ "$status" == 0 ]]
-  cp -- "$work/$phase-output/version.txt" "$work/$phase-output/cw.sha256" "$report/$phase/"
+  "$work/$phase-output/out/cw" --version >"$report/$phase/version.txt"
+  sha256sum "$work/$phase-output/out/cw" >"$report/$phase/cw.sha256"
+  if [[ "$phase" == cw-edit ]]; then
+    python3 "$probe_tool" restore "$ROOT" "$report" "$source_backup"
+  fi
   remove_builder "$phase"
   python3 "$probe_tool" check "$report" "$phase"
 done
