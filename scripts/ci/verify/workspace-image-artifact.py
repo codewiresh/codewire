@@ -17,6 +17,9 @@ INPUTS = (
     "scripts/ci/verify/workspace-agent-contract.sh",
     "scripts/ci/verify/verify-workspace-image.sh",
     "scripts/ci/verify/workspace-image-artifact.py",
+    "scripts/ci/images/workspace-cache.sh",
+    "scripts/ci/images/run-rust-build.sh",
+    "scripts/ci/setup/select-untrusted-workspace-cache.sh",
 )
 
 
@@ -35,7 +38,7 @@ def source_identity(root):
     if platform.system() != "Linux" or architecture is None:
         raise ValueError("workspace verification requires a supported native Linux host")
     return {
-        "schema_version": 1, "source_sha": source, "source_tree": tree,
+        "schema_version": 2, "source_sha": source, "source_tree": tree,
         "inputs": {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in INPUTS},
         "os": "linux", "architecture": architecture,
     }
@@ -82,7 +85,15 @@ def validate_image(identity, image_id):
         raise ValueError("image architecture mismatch")
 
 
-def reuse(root, receipt):
+def cache_modes():
+    values = {"compiler": os.environ.get("CODEWIRE_SCCACHE_MODE", "local"),
+              "layers": os.environ.get("CODEWIRE_BUILDKIT_CACHE_MODE", "local")}
+    if any(mode not in ("disabled", "local", "r2") for mode in values.values()):
+        raise ValueError("invalid workspace cache mode")
+    return values
+
+
+def reuse(root, receipt, for_build=False):
     current = source_identity(root)
     if receipt.is_symlink() or not receipt.is_file():
         raise ValueError("invalid receipt file")
@@ -91,8 +102,16 @@ def reuse(root, receipt):
     if len(raw) > 64 * 1024:
         raise ValueError("receipt exceeds its bound")
     value = json.loads(raw)
-    if set(value) != set(current) | {"base_manifest_digest", "workspace_image_id", "workspace_alias"}:
+    if set(value) != set(current) | {"base_manifest_digest", "workspace_image_id", "workspace_alias", "cache_modes", "layer_cache_fallback"}:
         raise ValueError("invalid receipt fields")
+    modes = value["cache_modes"]
+    if not isinstance(modes, dict) or set(modes) != {"compiler", "layers"} \
+            or any(mode not in ("disabled", "local", "r2") for mode in modes.values()) \
+            or type(value["layer_cache_fallback"]) is not bool \
+            or (value["layer_cache_fallback"] and modes["layers"] != "r2"):
+        raise ValueError("invalid receipt cache modes")
+    if for_build and modes != cache_modes():
+        raise ValueError("receipt cache mode mismatch")
     if not isinstance(value["source_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["source_sha"]):
         raise ValueError("invalid receipt source")
     # Identical committed content can retain proof across a merge commit.
@@ -115,12 +134,19 @@ def reuse(root, receipt):
 
 def seal(root, receipt, image_id, base_digest):
     value = source_identity(root)
+    modes = cache_modes()
+    fallback = os.environ.get("CODEWIRE_BUILDKIT_CACHE_FALLBACK", "false")
+    if fallback not in ("true", "false"):
+        raise ValueError("invalid layer cache fallback")
+    if fallback == "true" and modes["layers"] != "r2":
+        raise ValueError("local layer cache cannot report remote fallback")
     validate_image(value, image_id)
     alias = alias_for(image_id)
     command(os.environ.get("CODEWIRE_DOCKER_BIN", "docker"), "image", "tag", image_id, alias)
     if inspect(alias).get("Id") != image_id:
         raise ValueError("image alias mismatch")
     value.update(base_manifest_digest=digest(base_digest), workspace_image_id=image_id, workspace_alias=alias)
+    value.update(cache_modes=modes, layer_cache_fallback=fallback == "true")
     if receipt.is_symlink() or receipt.parent.is_symlink() or not receipt.parent.is_dir():
         raise ValueError("invalid receipt destination")
     descriptor, temporary = tempfile.mkstemp(prefix=".workspace-image-", dir=receipt.parent)
@@ -146,6 +172,8 @@ def main(argv):
         print(json.dumps(source_identity(root), sort_keys=True))
     elif mode == "reuse" and len(args) == 1:
         print(reuse(root, Path(args[0])))
+    elif mode == "reuse-for-build" and len(args) == 1:
+        print(reuse(root, Path(args[0]), for_build=True))
     elif mode == "seal" and len(args) == 3:
         print(seal(root, Path(args[0]), args[1], args[2]))
     else:

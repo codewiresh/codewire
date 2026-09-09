@@ -3,7 +3,16 @@
 # supply the exact base image built from the same source tree.
 ARG BASE_IMAGE_REF
 
-FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS cw-builder
+# Checksum-pinned compiler-cache tools; neither archive enters the runtime.
+FROM scratch AS sccache-amd64
+ADD --checksum=sha256:67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006 \
+  https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz /sccache.tar.gz
+FROM scratch AS sccache-arm64
+ADD --checksum=sha256:821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae84193c1c77 \
+  https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-aarch64-unknown-linux-musl.tar.gz /sccache.tar.gz
+FROM sccache-${TARGETARCH} AS sccache-archive
+
+FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS cw-toolchain
 COPY images/workspace/debian.sources /etc/apt/sources.list.d/debian.sources
 COPY images/base/apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
 COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-get-with-retry
@@ -13,7 +22,20 @@ RUN rm -f /etc/apt/sources.list && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
     apt-get-with-retry install -y --no-install-recommends libprotobuf-dev protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
-RUN rustup component add --toolchain 1.91.1-x86_64-unknown-linux-gnu rustfmt clippy
+RUN rustup component add --toolchain 1.91.1 rustfmt clippy
+COPY --from=sccache-archive /sccache.tar.gz /tmp/sccache.tar.gz
+RUN mkdir /tmp/sccache && \
+    tar -xzf /tmp/sccache.tar.gz --strip-components=1 -C /tmp/sccache && \
+    install -m 0755 /tmp/sccache/sccache /usr/local/bin/sccache && \
+    rm -rf /tmp/sccache /tmp/sccache.tar.gz && \
+    test "$(sccache --version)" = 'sccache 0.17.0'
+COPY --chmod=0755 scripts/ci/images/run-rust-build.sh /usr/local/bin/codewire-rust-build
+
+FROM cw-toolchain AS cw-builder
+ARG CODEWIRE_SCCACHE_MODE=disabled
+ARG SCCACHE_BUCKET
+ARG SCCACHE_ENDPOINT
+ARG CODEWIRE_SCCACHE_PREFIX
 
 # The source tree stays read-only and is never copied into an image layer. Cargo
 # owns normal/build dependency closure; only the resulting cw binary crosses
@@ -21,11 +43,14 @@ RUN rustup component add --toolchain 1.91.1-x86_64-unknown-linux-gnu rustfmt cli
 RUN --mount=type=bind,target=/src,readonly \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --manifest-path /src/Cargo.toml --locked --release \
+    --mount=type=cache,id=codewire-workspace-sccache-v1,target=/var/cache/sccache,sharing=shared \
+    --mount=type=secret,id=aws_shared_credentials \
+    SCCACHE_BASEDIRS=/src codewire-rust-build cargo build --manifest-path /src/Cargo.toml --locked --release \
       -p codewire-cli-bin --bin cw --target-dir /tmp/cargo-target && \
-    install -D -m 0755 /tmp/cargo-target/release/cw /out/cw
+    install -D -m 0755 /tmp/cargo-target/release/cw /out/cw && \
+    rm -rf /tmp/cargo-target
 
-FROM ${BASE_IMAGE_REF}
+FROM ${BASE_IMAGE_REF} AS workspace-foundation
 USER root
 ARG TARGETARCH
 ARG NODE_VERSION=22.23.2
@@ -60,16 +85,6 @@ RUN set -euo pipefail; \
 ENV PATH="/usr/local/go/bin:/home/codewire/go/bin:${PATH}"
 ENV GOPATH="/home/codewire/go"
 
-# Moving convenience channels intentionally resolve at image-build time. Their
-# result remains visible to the SBOM and is identified by the immutable output
-# image digest.
-RUN npm install -g --ignore-scripts npm@latest pnpm yarn && \
-    npm cache clean --force && \
-    curl --proto '=https' --tlsv1.2 -fsSL https://bun.sh/install | bash && \
-    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
-    ln -s bun /usr/local/bin/bunx && \
-    rm -rf /root/.bun
-
 RUN apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
       file gdb pipx pkg-config protobuf-compiler python3-full python3-venv strace && \
     rm -rf /var/lib/apt/lists/*
@@ -88,12 +103,36 @@ ENV NPM_CONFIG_PREFIX="/home/codewire/.npm-global"
 ENV NPM_CONFIG_ALLOW_SCRIPTS="@anthropic-ai/claude-code"
 ENV PATH="/home/codewire/.npm-global/bin:/home/codewire/.local/bin:/opt/codewire/agents/npm/bin:/opt/codewire/agents/bin:${CARGO_HOME}/bin:${PATH}"
 
+# Reuse the exact toolchain and explicitly selected components from the
+# digest-pinned Rust build stage. This removes a second mutable installer
+# transaction and keeps the interactive user's Cargo and Rustup homes writable
+# for normal development.
+COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/
+COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/
+RUN cargo --version && rustc --version && rustfmt --version && cargo clippy --version
+
+# Every actual workspace builder bypasses this named stage. Floating developer
+# tools refresh even when the compiler and foundation layers came from R2.
+FROM workspace-foundation AS workspace-floating-tools
+USER root
+# Moving convenience channels intentionally resolve at image-build time. Their
+# result remains visible to the SBOM and is identified by the immutable output
+# image digest.
+RUN NPM_CONFIG_PREFIX=/usr/local npm install -g --ignore-scripts npm@latest pnpm yarn && \
+    npm cache clean --force && \
+    curl --proto '=https' --tlsv1.2 -fsSL https://bun.sh/install | bash && \
+    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
+    ln -s bun /usr/local/bin/bunx && \
+    rm -rf /root/.bun
+
+USER codewire
 RUN go install golang.org/x/tools/gopls@latest && \
     go install github.com/hetznercloud/cli/cmd/hcloud@latest && \
     pipx install poetry && \
     pipx install uv && \
     PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pipx install aider-chat
 
+FROM workspace-floating-tools AS workspace
 # Seed coding agents from the exact versions accepted by the workspace image
 # contract, outside the persistent home mount. Interactive users can install
 # newer versions into their own prefix without sudo; PATH gives those versions
@@ -107,16 +146,7 @@ RUN npm install --prefix /opt/codewire/agents/npm -g --ignore-scripts \
       @earendil-works/pi-coding-agent@0.84.2 && \
     npm install --prefix /opt/codewire/agents/npm -g @anthropic-ai/claude-code@2.1.238
 
-# Reuse the exact toolchain and explicitly selected components from the
-# digest-pinned Rust build stage. This removes a second mutable installer
-# transaction and keeps the interactive user's Cargo and Rustup homes writable
-# for normal development.
-COPY --from=cw-builder --chown=codewire:codewire /usr/local/cargo/ /home/codewire/.cargo/
-COPY --from=cw-builder --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/
-RUN cargo --version && rustc --version && rustfmt --version && cargo clippy --version
-
-# Keep the source-built CLI after the moving developer tools. A cw-only source
-# change then reuses those expensive layers while the final image still proves
+# Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.
 USER root
 COPY --from=cw-builder /out/cw /usr/local/bin/cw

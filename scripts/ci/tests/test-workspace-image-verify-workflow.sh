@@ -68,17 +68,24 @@ guard_count="$(grep -Ec '^        if:' <<<"$workspace_job")"
 [[ "$step_count" == "$guard_count" ]] ||
   fail 'every workspace job step must have a receipt/artifact selection guard'
 if grep -Eiq 'docker push|--push|contents: write|secrets\.' <<<"$workspace_job"; then
-  fail 'workspace verification must remain credential-free and non-publishing'
+  fail 'workspace verification must have no publishing or protected credential'
 fi
 if grep -qE '^[[:space:]]*permissions:' "$WORKFLOW"; then
   fail 'workflow declares GitHub-only permissions that Forgejo ignores'
 fi
 grep -qF 'scripts/ci/verify/verify-workspace-image.sh' <<<"$workspace_job" ||
   fail 'workflow does not invoke the image verifier'
+dashboard_step="$(awk '
+  /- name: Build and inspect the standalone dashboard image/ { capture = 1 }
+  capture && /^      - name:/ && !/- name: Build and inspect the standalone dashboard image/ { exit }
+  capture { print }
+' <<<"$workspace_job")"
+grep -qF 'CODEWIRE_SCCACHE_MODE: disabled' <<<"$dashboard_step" ||
+  fail 'standalone dashboard bake inherits workspace R2 mode without a secret mount'
 if grep -Eq 'docker (buildx )?build.*--push|docker push' "$VERIFY"; then
   fail 'verification must not publish an image'
 fi
-[[ "$(grep -Fc '"$docker_bin" buildx build' "$VERIFY")" -eq 2 ]] ||
+[[ "$(grep -Ec '^workspace_cache_build (base|workspace) ' "$VERIFY")" -eq 2 ]] ||
   fail 'verification does not build the exact local base/workspace pair'
 grep -qF -- '--output "type=oci,dest=$base_layout,tar=false"' "$VERIFY" ||
   fail 'base verification does not export a local OCI layout'
@@ -129,6 +136,8 @@ grep -qF -- '--tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256
 grep -qF "!contains(needs.verification-selection.outputs.selection, '|kind|')" <<<"$workspace_job" ||
   fail 'standalone workspace verification duplicates selected Kind ownership'
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/ci/tests/test-workspace-image-artifact.py"
+"$ROOT/scripts/ci/tests/test-select-untrusted-workspace-cache.sh"
+"$ROOT/scripts/ci/tests/test-workspace-cache.sh"
 
 # Execute the verifier against a fake Docker client. This catches command-order,
 # digest-handoff, cleanup, and fail-closed regressions without building an image.
@@ -156,13 +165,57 @@ for fixture in \
   grep -Fxq "selected=$expected" "$work/scope-output" ||
     fail "container ownership differs for workspace=$workspace_selected selection=$selection"
 done
+# Both workflow owners execute the same fail-closed canary entrypoint. Execute
+# that checked-in shell in an isolated mock tree; unavailable identity must fail
+# before the harness, and a failed harness must stop the selected job.
+awk '
+  /- name: Prove labeled R2 backend compatibility/ { scope = 1; next }
+  scope && /^        run: \|$/ { run = 1; next }
+  run && /^          / { print substr($0, 11); next }
+  run { exit }
+' "$WORKFLOW" >"$work/canary-step.sh"
+[[ -s "$work/canary-step.sh" ]] || fail 'labeled canary script was not extracted'
+[[ "$(grep -Fc "env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true'" "$WORKFLOW")" -eq 2 ]] ||
+  fail 'both workspace owners must explicitly select the labeled canary'
+mkdir -p "$work/scripts/ci/tests"
+cat >"$work/scripts/ci/tests/canary-workspace-r2-cache.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >"$CANARY_CALL"
+exit "${CANARY_STATUS:-0}"
+EOF
+chmod +x "$work/scripts/ci/tests/canary-workspace-r2-cache.sh"
+for mode in local disabled r2; do
+  rm -f "$work/canary-call"
+  status=0
+  (cd "$work" && env CODEWIRE_BUILDKIT_CACHE_MODE="$mode" \
+    CODEWIRE_SCCACHE_CREDENTIALS_FILE='/mock/private-cache.aws' RUNNER_TEMP='/mock/temp' \
+    CANARY_CALL="$work/canary-call" bash "$work/canary-step.sh") >"$work/canary-step.log" 2>&1 || status=$?
+  if [[ "$mode" == r2 ]]; then
+    [[ "$status" == 0 && -s "$work/canary-call" ]] || fail 'R2 canary was not executed'
+    [[ "$(cat "$work/canary-call")" == $'/mock/private-cache.aws\n/mock/temp/workspace-r2-cache-canary' ]] ||
+      fail 'canary did not receive only the existing credential path and bounded report path'
+  else
+    [[ "$status" != 0 && ! -e "$work/canary-call" ]] || fail 'canary accepted unavailable R2 identity'
+    grep -qF 'could not obtain its existing cache identity' "$work/canary-step.log" ||
+      fail 'identity failure was not distinguished from backend failure'
+  fi
+done
+if (cd "$work" && env CODEWIRE_BUILDKIT_CACHE_MODE=r2 \
+    CODEWIRE_SCCACHE_CREDENTIALS_FILE='/mock/private-cache.aws' RUNNER_TEMP='/mock/temp' \
+    CANARY_CALL="$work/canary-call" CANARY_STATUS=71 bash "$work/canary-step.sh"); then
+  fail 'workflow accepted a failed R2 compatibility canary'
+fi
 # Run the actual verifier and identity helper in a private source fixture. Never
 # write a synthetic acceptance receipt into the developer checkout.
 fixture_root="$work/source"
 for path in images/base/Dockerfile images/workspace/Dockerfile .dockerignore \
   scripts/ci/verify/workspace-agent-contract.sh \
   scripts/ci/verify/verify-workspace-image.sh \
-  scripts/ci/verify/workspace-image-artifact.py; do
+  scripts/ci/verify/workspace-image-artifact.py \
+  scripts/ci/images/workspace-cache.sh \
+  scripts/ci/images/run-rust-build.sh \
+  scripts/ci/setup/select-untrusted-workspace-cache.sh; do
   mkdir -p "$fixture_root/$(dirname "$path")"
   cp "$ROOT/$path" "$fixture_root/$path"
 done
@@ -196,6 +249,12 @@ case "${1:-} ${2:-}" in
     printf 'workspace-verifier-%s\n' "$FAKE_BUILDER_SUFFIX"
     ;;
   'buildx build')
+    if [[ "${FAKE_FAIL:-}" == cancel ]]; then
+      # The actual verifier owns this pipeline. Deliver TERM to that process,
+      # exercising its signal trap while an owned builder exists.
+      kill -TERM "$PPID"
+      exit 143
+    fi
     metadata_file=''
     : >"$FAKE_IMAGE_LABELS.next"
     while [[ $# -gt 0 ]]; do
@@ -219,7 +278,17 @@ case "${1:-} ${2:-}" in
     ;;
   'buildx rm')
     [[ "${FAKE_FAIL:-}" != cleanup ]] || exit 43
+    # Exercise the real timeout boundary, not a fake timeout implementation.
+    [[ "${FAKE_FAIL:-}" != slow-cleanup ]] || sleep 11
     ;;
+  'container inspect')
+    if [[ "$5" == '{{.Id}}' ]]; then
+      printf '%064d\n' 4
+    else
+      printf '%s\n' 'docker.io/moby/buildkit:v0.29.0@sha256:0039c1d47e8748b5afea56f4e85f14febaf34452bd99d9552d2daa82262b5cc5'
+    fi
+    ;;
+  'exec --interactive') cat >"$FAKE_DAEMON_FILE" ;;
   'image inspect')
     if [[ "${4:-}" == --format ]]; then
       printf 'sha256:%064d\n' 3
@@ -236,7 +305,18 @@ PY
     ;;
   'image tag')
     ;;
+  'rm --force') rm -f "$FAKE_CONTRACT_RUNNING" ;;
   'run --rm')
+    if [[ "${FAKE_FAIL:-}" == hang-contract ]]; then
+      printf '%s\n' "$$" >"$FAKE_CONTRACT_PROCESS"
+      : >"$FAKE_CONTRACT_RUNNING"
+      sleep 30 &
+      child_pid=$!
+      printf '%s\n' "$child_pid" >"$FAKE_CONTRACT_CHILD"
+      trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; exit 143' TERM INT
+      wait "$child_pid"
+      exit 0
+    fi
     if [[ "$*" == *'--mounted-home-agents'* ]]; then
       [[ "${FAKE_FAIL:-}" != mounted ]] || exit 42
     else
@@ -244,6 +324,11 @@ PY
     fi
     ;;
   *)
+    if [[ "$1" == exec && "${3:-}" == rm ]]; then
+      [[ "${FAKE_FAIL:-}" != daemon-erase ]] || exit 45
+      rm -f "$FAKE_DAEMON_FILE"
+      exit 0
+    fi
     printf 'unexpected docker command: %s\n' "$*" >&2
     exit 99
     ;;
@@ -252,90 +337,134 @@ EOF
 chmod +x "$work/bin/docker" "$work/bin/git"
 
 run_mock_verifier() {
-  env PATH="$work/bin:$PATH" \
-    CODEWIRE_DOCKER_BIN=docker \
+  local -a invocation=(env PATH="$work/bin:$PATH" \
+    CODEWIRE_DOCKER_BIN="$work/bin/docker" \
+    CODEWIRE_SCCACHE_MODE="${MOCK_COMPILER:-local}" \
+    CODEWIRE_BUILDKIT_CACHE_MODE="${MOCK_LAYERS:-local}" \
+    CODEWIRE_WORKSPACE_IMAGE_REUSE="${MOCK_REUSE:-auto}" \
+    CODEWIRE_SCCACHE_CREDENTIALS_FILE="${MOCK_CREDENTIALS:-}" \
+    SCCACHE_BUCKET=example-ci-cache-untrusted \
+    SCCACHE_ENDPOINT=https://00000000000000000000000000000000.r2.cloudflarestorage.com \
+    CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1 \
     FAKE_DOCKER_LOG="$work/docker.log" \
     FAKE_BUILDER_SUFFIX="$1" \
     FAKE_METADATA_MODE="${2:-valid}" \
     FAKE_SELECTED_DRIVER="${3:-docker-container}" \
     FAKE_IMAGE_LABELS="$work/image-labels" \
+    FAKE_DAEMON_FILE="$work/daemon.aws" \
+    FAKE_CONTRACT_PROCESS="$work/contract-process" \
+    FAKE_CONTRACT_CHILD="$work/contract-child" \
+    FAKE_CONTRACT_RUNNING="$work/contract-running" \
     FAKE_FAIL="${4:-}" \
     FAKE_DIRTY="${5:-false}" \
     TMPDIR="$work/tmp" \
-    "$fixture_root/scripts/ci/verify/verify-workspace-image.sh"
+    "$fixture_root/scripts/ci/verify/verify-workspace-image.sh")
+  if [[ "${MOCK_EXEC:-false}" == true ]]; then exec "${invocation[@]}"; fi
+  "${invocation[@]}"
 }
 
+# Assert behavior and ordering rather than incidental inspection call counts.
 : >"$work/docker.log"
 run_mock_verifier success >/dev/null
-mapfile -t docker_calls <"$work/docker.log"
-[[ "${#docker_calls[@]}" -eq 9 ]] ||
-  fail "verifier issued an unexpected number of Docker calls: ${#docker_calls[@]}"
-[[ "${docker_calls[0]}" == 'buildx inspect ' ]] ||
-  fail "verifier selected-builder inspection drifted: ${docker_calls[0]}"
-[[ "${docker_calls[1]}" == *'buildx build --builder selected-verifier --pull --metadata-file '* ]] ||
-  fail 'verifier did not build base metadata with the selected container builder'
-[[ "${docker_calls[1]}" == *'--output type=oci\,dest='*'/base.oci\,tar=false '* ]] ||
-  fail 'verifier did not export the base OCI layout'
-[[ "${docker_calls[2]}" == *'--build-context codewire-verified-base=oci-layout://'*'/base.oci@sha256:'* ]] ||
-  fail 'verifier did not hand the exact base digest to the workspace build'
-[[ "${docker_calls[2]}" == *'--load --build-arg BASE_IMAGE_REF=codewire-verified-base '* ]] ||
-  fail 'verifier did not load a workspace built from the named base context'
+grep -q '^buildx create --name codewire-workspace-' "$work/docker.log" || fail 'owned builder was not created'
+grep -q -- '--driver-opt image=docker.io/moby/buildkit:v0.29.0@sha256:' "$work/docker.log" || fail 'daemon is not pinned'
+[[ "$(grep -c '^buildx build ' "$work/docker.log")" == 2 ]] || fail 'base/workspace pair was not built once'
+grep -q -- '--output type=oci\\,dest=.*base.oci\\,tar=false' "$work/docker.log" || fail 'exact base OCI export missing'
+grep -q -- '--build-context codewire-verified-base=oci-layout://.*base.oci@sha256:' "$work/docker.log" || fail 'exact base handoff missing'
+grep -q -- '--no-cache-filter workspace-floating-tools' "$work/docker.log" || fail 'floating tools could be reused'
+grep -q -- '--build-arg CODEWIRE_SCCACHE_MODE=local' "$work/docker.log" || fail 'compiler policy missing'
 image_id="$(printf 'sha256:%064d' 3)"
-[[ "${docker_calls[4]}" == "run --rm --interactive --pids-limit=2048 --user codewire --entrypoint bash $image_id -eu -s " ]] ||
-  fail "workspace runtime contract invocation drifted: ${docker_calls[4]}"
-[[ "${docker_calls[5]}" == *'--tmpfs /home/codewire:rw\,exec\,uid=1000\,gid=1000\,mode=0700\,size=256m --entrypoint bash '*"$image_id -eu -s -- --mounted-home-agents " ]] ||
-  fail 'mounted-home contract did not execute the same immutable image'
-[[ "${docker_calls[6]}" == "image inspect $image_id " ]] || fail 'receipt preceded contract checks'
-[[ -s "$fixture_receipt" ]] || fail 'successful verification emitted no receipt'
-[[ "$(stat -c %a "$fixture_receipt")" == 600 ]] || fail 'receipt permissions are not private'
-if grep -qF 'buildx create' "$work/docker.log" || grep -qF 'buildx rm' "$work/docker.log"; then
-  fail 'verifier replaced or removed the caller-selected container builder'
-fi
+grep -Eq "run --rm --interactive --pids-limit=2048 --name codewire-workspace-[^ ]+-full --user codewire --entrypoint bash $image_id -eu -s " "$work/docker.log" || fail 'full image contract omitted'
+grep -q -- '--tmpfs /home/codewire:rw.* --entrypoint bash .* --mounted-home-agents' "$work/docker.log" || fail 'mounted-home contract omitted'
+cleanup_line="$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)"
+seal_line="$(grep -n '^image tag ' "$work/docker.log" | cut -d: -f1)"
+contract_line="$(grep -n -- '--mounted-home-agents' "$work/docker.log" | cut -d: -f1)"
+[[ "$cleanup_line" -lt "$contract_line" && "$contract_line" -lt "$seal_line" ]] || fail 'builder outlived contracts or seal preceded acceptance'
+[[ -s "$fixture_receipt" && "$(stat -c %a "$fixture_receipt")" == 600 ]] || fail 'private receipt missing'
 
 : >"$work/docker.log"
 run_mock_verifier reuse >/dev/null
-[[ "$(wc -l <"$work/docker.log")" -eq 2 ]] || fail 'exact-tree reuse rebuilt or reran contracts'
-if grep -Eq '^buildx |^run ' "$work/docker.log"; then
-  fail 'verified image reuse performed duplicate qualification'
-fi
+[[ "$(wc -l <"$work/docker.log")" == 2 ]] || fail 'exact-tree reuse rebuilt or reran contracts'
+! grep -Eq '^buildx |^run ' "$work/docker.log" || fail 'verified image reuse performed duplicate qualification'
 
-rm "$fixture_receipt"
+# Explicit experiments must build even when an identical receipt exists. A
+# failed fresh attempt invalidates the old receipt before it can be consumed.
 : >"$work/docker.log"
-set +e
-run_mock_verifier invalid missing docker >/dev/null 2>&1
-mock_status=$?
-set -e
-[[ "$mock_status" -ne 0 ]] || fail 'verifier accepted missing base digest metadata'
-[[ "$(grep -Fc 'buildx build' "$work/docker.log")" -eq 1 ]] ||
-  fail 'verifier continued into workspace build after invalid base metadata'
-grep -Fxq 'buildx rm --force workspace-verifier-invalid ' "$work/docker.log" ||
-  fail 'verifier did not clean its Docker-driver fallback after invalid metadata'
-[[ ! -e "$fixture_receipt" ]] || fail 'invalid base emitted a receipt'
+if MOCK_REUSE=disabled run_mock_verifier invalid missing docker >/dev/null 2>&1; then fail 'accepted missing base digest'; fi
+[[ "$(grep -c '^buildx build ' "$work/docker.log")" == 1 ]] || fail 'invalid base reached workspace build'
+grep -q '^buildx rm --force codewire-workspace-' "$work/docker.log" || fail 'failed build retained its builder'
+[[ ! -e "$fixture_receipt" ]] || fail 'failed fresh attempt retained old receipt'
 
-for failure in full mounted cleanup; do
+for failure in full mounted cleanup cancel; do
   : >"$work/docker.log"
-  if run_mock_verifier "$failure" valid docker "$failure" >/dev/null 2>&1; then
-    fail "verifier accepted $failure failure"
-  fi
+  if run_mock_verifier "$failure" valid docker "$failure" >"$work/$failure.out" 2>&1; then fail "accepted $failure failure"; fi
   [[ ! -e "$fixture_receipt" ]] || fail "$failure failure emitted a receipt"
-  if grep -q '^image tag ' "$work/docker.log"; then
-    fail "$failure failure sealed an image alias"
-  fi
+  ! grep -q '^image tag ' "$work/docker.log" || fail "$failure failure sealed an alias"
 done
+grep -q 'workspace cache cleanup: phase=builder-removal status=43 elapsed_seconds=' \
+  "$work/cleanup.out" || fail 'builder removal failure omitted its bounded diagnostic'
 
 : >"$work/docker.log"
-if run_mock_verifier dirty valid docker-container '' true >/dev/null 2>&1; then
-  fail 'dirty source was accepted'
-fi
+MOCK_REUSE=disabled run_mock_verifier slow-cleanup valid docker slow-cleanup >"$work/slow-cleanup.out" 2>&1
+[[ -s "$fixture_receipt" ]] || fail 'bounded slow state deletion failed verification'
+cleanup_line="$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)"
+contract_line="$(grep -n '^run --rm ' "$work/docker.log" | head -n1 | cut -d: -f1)"
+[[ "$cleanup_line" -lt "$contract_line" ]] || fail 'slow cleanup outlived contract execution'
+
+: >"$work/docker.log"
+if run_mock_verifier dirty valid docker-container '' true >/dev/null 2>&1; then fail 'dirty source accepted'; fi
 [[ ! -s "$work/docker.log" ]] || fail 'dirty source reached Docker'
 
 : >"$work/docker.log"
-run_mock_verifier fallback valid docker >/dev/null
-grep -Fxq 'buildx rm --force workspace-verifier-fallback ' "$work/docker.log" ||
-  fail 'successful fallback did not remove its owned builder'
-cleanup_line="$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)"
+MOCK_COMPILER=disabled MOCK_LAYERS=disabled run_mock_verifier cold >/dev/null
+[[ "$(grep -c -- '--no-cache ' "$work/docker.log")" == 2 ]] || fail 'disabled layer cache did not bypass both builds'
+! grep -q -- '--no-cache-filter' "$work/docker.log" || fail 'mutually exclusive cache flags were combined'
+[[ "$(jq -r '.cache_modes.compiler + "/" + .cache_modes.layers' "$fixture_receipt")" == disabled/disabled ]] || fail 'receipt omitted cache modes'
+: >"$work/docker.log"
+run_mock_verifier changed-mode >/dev/null
+[[ "$(grep -c '^buildx build ' "$work/docker.log")" == 2 ]] || fail 'mode change reused incompatible evidence'
+: >"$work/docker.log"
+if MOCK_LAYERS=invalid run_mock_verifier invalid-mode >/dev/null 2>&1; then fail 'invalid mode accepted'; fi
+[[ ! -s "$work/docker.log" ]] || fail 'invalid mode reached receipt reuse or Docker'
+
+umask 077
+printf '%s\n' '[default]' 'aws_access_key_id = synthetic-workspace-access' \
+  'aws_secret_access_key = synthetic-workspace-secret' >"$work/r2.aws"
+: >"$work/docker.log"
+MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" run_mock_verifier remote >/dev/null
+[[ -s "$work/r2.aws" && ! -e "$work/daemon.aws" ]] || fail 'workspace changed borrowed credential lifetime'
+grep -q -- '--secret id=aws_shared_credentials' "$work/docker.log" || fail 'compiler did not get its secret mount'
+erase_line="$(grep -n 'exec .* rm -f /run/codewire-cache/aws-credentials' "$work/docker.log" | cut -d: -f1)"
 seal_line="$(grep -n '^image tag ' "$work/docker.log" | cut -d: -f1)"
-[[ "$cleanup_line" -lt "$seal_line" ]] || fail 'receipt preceded owned-builder cleanup'
-[[ -s "$fixture_receipt" ]] || fail 'successful fallback emitted no receipt'
+[[ "$erase_line" -lt "$seal_line" ]] || fail 'receipt preceded daemon credential cleanup'
+if grep -Eq 'synthetic-workspace-(access|secret)' "$work/docker.log" "$fixture_receipt"; then fail 'provider value reached arguments or receipt'; fi
+: >"$work/docker.log"
+if MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" MOCK_REUSE=disabled \
+    run_mock_verifier erase valid docker daemon-erase >"$work/erase.out" 2>&1; then fail 'daemon cleanup failure accepted'; fi
+[[ ! -e "$fixture_receipt" && -s "$work/r2.aws" ]] || fail 'failed daemon cleanup left a receipt or erased the borrowed file'
+grep -q 'workspace cache cleanup: phase=credential-erasure status=45 elapsed_seconds=' \
+  "$work/erase.out" || fail 'credential erasure failure omitted its bounded diagnostic'
+
+: >"$work/docker.log"
+MOCK_EXEC=true MOCK_COMPILER=r2 MOCK_LAYERS=r2 MOCK_CREDENTIALS="$work/r2.aws" MOCK_REUSE=disabled \
+  run_mock_verifier hanging-contract valid docker hang-contract >"$work/hanging-contract.out" 2>&1 &
+verifier_pid=$!
+for ((attempt=0; attempt<100; attempt++)); do
+  [[ ! -s "$work/contract-child" ]] || break
+  sleep 0.02
+done
+[[ -s "$work/contract-child" && ! -e "$work/daemon.aws" ]] || { kill -TERM "$verifier_pid"; fail 'contract did not start after daemon cleanup'; }
+kill -TERM "$verifier_pid"
+set +e
+wait "$verifier_pid"
+status=$?
+set -e
+[[ "$status" != 0 && ! -e "$fixture_receipt" && ! -e "$work/contract-running" ]] || fail 'hanging contract survived cancellation or sealed a receipt'
+grep -q '^rm --force codewire-workspace-.*-full ' "$work/docker.log" || fail 'cancellation did not remove the owned runtime container'
+for pid_file in "$work/contract-process" "$work/contract-child"; do
+  child_pid="$(<"$pid_file")"
+  state="$(ps -o stat= -p "$child_pid" || true)"
+  [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$child_pid"; fail 'contract left a live child'; }
+done
 
 echo 'workspace-image verification workflow contract: OK'
