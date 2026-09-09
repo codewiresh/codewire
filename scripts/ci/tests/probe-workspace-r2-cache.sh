@@ -100,6 +100,7 @@ native_phase() {
   new_builder "$phase" "$key"
   [[ "$phase" != native-cold ]] || export_args=(--cache-to "$common,name=$native_name,mode=max,ignore-error=false")
   workspace_cache_logged_command "$report/$phase/build.log" \
+    env AWS_SHARED_CREDENTIALS_FILE="$key" AWS_PROFILE=default AWS_EC2_METADATA_DISABLED=true \
     timeout --signal=TERM --kill-after=5s 120s "$docker_bin" buildx build --builder "$builder" --progress plain \
     --cache-from "$importer" "${export_args[@]}" \
     --output "type=local,dest=$work/$phase-output" "$work/contexts/native" || status=$?

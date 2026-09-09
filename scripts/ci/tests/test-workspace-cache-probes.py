@@ -68,8 +68,9 @@ elif args[:2] == ["container", "inspect"]:
                           "Name":"buildx_buildkit_" + state["builder"].lower() + "-node_state"}]))
 elif args[:2] == ["exec", "--interactive"]:
     state = selected(args[2])
-    sys.stdin.buffer.read()
-    state["credential"] = True
+    projected = sys.stdin.buffer.read()
+    original = Path(os.environ["FAKE_ORIGINAL_CREDENTIAL"]).read_bytes()
+    state["credential"] = "original" if projected == original else "synthetic"
     save(state)
 elif args[0] == "exec" and args[2:4] == ["rm", "-f"]:
     state = selected(args[1])
@@ -104,6 +105,11 @@ elif args[:2] == ["buildx", "build"]:
     if phase.startswith("native-"):
         cached = phase == "native-warm"
         if "--no-cache" not in args:
+            client_key = Path(os.environ["AWS_SHARED_CREDENTIALS_FILE"])
+            expected_key = "synthetic" if phase == "native-denied" else "original"
+            assert state["credential"] == expected_key
+            assert (client_key.read_bytes() == Path(os.environ["FAKE_ORIGINAL_CREDENTIAL"]).read_bytes()) \
+                == (expected_key == "original")
             importer = option("--cache-from")
             print("#1 importing cache manifest from " + importer)
             if phase == "native-malformed":
@@ -346,11 +352,14 @@ class ProbeFixture(unittest.TestCase):
                 "GITHUB_SHA": source, "GITHUB_RUN_ID": "2047", "GITHUB_JOB": "workspace-cache-probes",
                 "HOSTNAME": "fixture-job", "RUNNER_TEMP": str(self.work),
                 "CODEWIRE_DOCKER_BIN": str(fake), "FAKE_STATE": str(state), "FAKE_REPORT": str(self.report),
+                "FAKE_ORIGINAL_CREDENTIAL": str(self.credential),
                 "FAKE_CONTRACT": str(self.root / "scripts/ci/verify/workspace-agent-contract.sh"),
                 "FAKE_PIN": PIN, "CODEWIRE_SCCACHE_MODE": "r2", "CODEWIRE_BUILDKIT_CACHE_MODE": "r2",
                 "SCCACHE_BUCKET": "example-ci-cache-untrusted",
                 "SCCACHE_ENDPOINT": "https://00000000000000000000000000000000.r2.cloudflarestorage.com",
                 "CODEWIRE_SCCACHE_PREFIX": "untrusted/codewire/v1",
+                "AWS_SHARED_CREDENTIALS_FILE": str(self.credential), "AWS_PROFILE": "default",
+                "AWS_EC2_METADATA_DISABLED": "true",
                 "CODEWIRE_WORKSPACE_CACHE_SEED_REPORT": json.dumps(seed)}
 
     def run_harness(self, failure=""):
