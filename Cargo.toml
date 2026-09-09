@@ -95,7 +95,6 @@ codewire-workload-secrets = { path = "crates/codewire-workload-secrets" }
 av-credential-proxy = { git = "https://github.com/noeljackson/av.git", rev = "32ef60cbbe58dfb00a3ffda76f7b2e3b8900baaa", default-features = false }
 oci-spec = { version = "=0.10.0", default-features = false, features = ["image"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "stream", "rustls-tls"] }
-aws-config = { version = "=1.8.18", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
 aws-credential-types = { version = "=1.2.14", default-features = false }
 aws-sdk-sesv2 = { version = "=1.123.0", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
 tokio = { version = "1", features = ["full"] }

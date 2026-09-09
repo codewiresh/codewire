@@ -11,10 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use aws_config::{BehaviorVersion, Region, retry::RetryConfig, timeout::TimeoutConfig};
 use aws_credential_types::Credentials;
-use aws_sdk_sesv2::Client;
 use aws_sdk_sesv2::types::{Body, Content, Destination, EmailContent, Message};
+use aws_sdk_sesv2::{
+    Client,
+    config::{BehaviorVersion, Region, retry::RetryConfig, timeout::TimeoutConfig},
+};
 
 /// Environment variable holding the exact SES From address approved for this
 /// workload. It must be a single mailbox, without a display name.
@@ -79,7 +81,11 @@ impl EmailClient {
         let credentials = EmailCredentials::from_env()?;
         assert_sdk_transport_boundary()?;
 
-        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+        // Construct the SES service configuration directly. Loading aws-config
+        // would enable its ambient profile and credential-provider machinery;
+        // this client has exactly one allowed credential source instead.
+        let sdk_config = aws_sdk_sesv2::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
             .region(Region::new(config.region))
             .credentials_provider(Credentials::new(
                 credentials.access_key_id,
@@ -90,12 +96,11 @@ impl EmailClient {
             ))
             .retry_config(ses_retry_config())
             .timeout_config(ses_timeout_config())
-            .load()
-            .await;
+            .build();
         Ok(Self {
             delivery: Arc::new(Delivery::Ses {
                 from: config.from,
-                client: Client::new(&sdk_config),
+                client: Client::from_conf(sdk_config),
             }),
         })
     }
