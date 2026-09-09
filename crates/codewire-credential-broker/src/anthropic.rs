@@ -459,8 +459,8 @@ fn supported_content_type(headers: &HeaderMap, allow_sse: bool) -> bool {
     let Some(media) = parts.next() else {
         return false;
     };
-    if !media.eq_ignore_ascii_case("application/json")
-        && !(allow_sse && media.eq_ignore_ascii_case("text/event-stream"))
+    if !(media.eq_ignore_ascii_case("application/json")
+        || allow_sse && media.eq_ignore_ascii_case("text/event-stream"))
     {
         return false;
     }

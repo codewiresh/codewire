@@ -445,7 +445,7 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
         response("broker_retry_once", 2, 200)
         response("broker_retry_exhausted", 1, 401)
         refresh()
-        response("broker_retry_exhausted", 2, 401)
+        response("broker_retry_exhausted", 2, 400)
         if baseline == 3:
             response("baseline", 3, 200)
         return events
@@ -489,6 +489,7 @@ assert_kind_credential_provider_counts %d
         mutations.append([event for event in correct if event["event"] != "provider_refresh"])
         mutations.append(correct + [dict(correct[-1], attempt=3, response_calls=7, status=200)])
         mutations.append(correct + [dict(correct[-1], attempt=3, response_calls=7, status=401)])
+        mutations.append(correct + [dict(correct[-1], attempt=3, response_calls=7, status=400)])
         mutations.append(correct[:3] + [dict(correct[3], refresh_calls=2)] + correct[4:])
         mutations.append(correct[:3] + [correct[4], correct[3]] + correct[5:])
         for events in mutations:

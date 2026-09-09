@@ -269,6 +269,8 @@ assert_kind_credential_provider_counts() {
   jq -e --argjson baseline "$baseline" '
     # Keep response and refresh events interleaved. Final totals alone can
     # hide a refresh before rejection, replay, or the retired third request.
+    # The failed replay is a nonretryable 400 for the stock client. Double-401
+    # forwarding and the broker-only retry bound have separate runtime proof.
     [.[] | select(.event == "provider_response" or .event == "provider_refresh") |
       [.event, .scenario, .attempt, .status, .response_calls, .refresh_calls]] as $observed |
     ($baseline == 2 or $baseline == 3) and
@@ -280,7 +282,7 @@ assert_kind_credential_provider_counts() {
       ["provider_response", "broker_retry_once", 2, 200, 4, 1],
       ["provider_response", "broker_retry_exhausted", 1, 401, 5, 1],
       ["provider_refresh", null, null, null, 5, 2],
-      ["provider_response", "broker_retry_exhausted", 2, 401, 6, 2]
+      ["provider_response", "broker_retry_exhausted", 2, 400, 6, 2]
     ] + if $baseline == 3 then [["provider_response", "baseline", 3, 200, 7, 2]] else [] end))
   ' <<<"$counts" >/dev/null || {
     echo '::error::synthetic provider retry/refresh counts differ from the exact hosted scenarios' >&2

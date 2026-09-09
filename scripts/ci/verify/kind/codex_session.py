@@ -368,8 +368,9 @@ class Server:
         self.until(lambda: key in self.completed, deadline)
         completed = self.completed[key]
         if expected_failure:
-            # The host independently verifies the exact provider [401,401]
-            # transcript. Here require a real failed terminal, not an RPC
+            # The host verifies the exact 401 -> refresh -> 400 transcript;
+            # double-401 forwarding is separate broker unit proof. Require a
+            # real failed terminal here, not an RPC
             # timeout, interrupted turn, or successful third request.
             if (completed.get("status") != "failed"
                     or not isinstance(completed.get("error"), dict)

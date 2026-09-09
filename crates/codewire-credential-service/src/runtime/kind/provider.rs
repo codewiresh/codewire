@@ -64,11 +64,13 @@ impl Scenario {
         match self {
             Self::Baseline => StatusCode::OK,
             Self::BrokerRetryOnce if attempt == 1 => StatusCode::UNAUTHORIZED,
-            Self::BrokerRetryExhausted if attempt <= 2 => StatusCode::UNAUTHORIZED,
-            // A caller must stop after the second authentication rejection.
-            // Keep any unexpected third request observable in the closed
-            // provider counters/event, but never turn it into success.
-            Self::BrokerRetryExhausted => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BrokerRetryExhausted if attempt == 1 => StatusCode::UNAUTHORIZED,
+            // Exercise a failed broker replay without also selecting stock
+            // Codex's outer retry policy for 401/5xx. The broker unit test
+            // retries_an_oauth_unauthorized_response_only_once separately
+            // proves 401 -> refresh -> 401 with exactly two upstream calls.
+            // Unexpected extra calls remain counted and fail the exact audit.
+            Self::BrokerRetryExhausted => StatusCode::BAD_REQUEST,
             _ => StatusCode::OK,
         }
     }
@@ -175,10 +177,11 @@ impl SyntheticProvider {
         };
         let (content_type, body) = if status == StatusCode::OK {
             ("text/event-stream", SSE)
-        } else {
-            // Stock Codex recognizes this as an authentication failure. It is
-            // synthetic fixed text, never a reflected credential or request.
+        } else if status == StatusCode::UNAUTHORIZED {
+            // Fixed synthetic text, never a reflected credential or request.
             ("application/json", br#"{"error":{"message":"Synthetic Kind authentication rejection","type":"invalid_request_error","code":"invalid_api_key"}}"#.as_slice())
+        } else {
+            ("application/json", br#"{"error":{"message":"Synthetic Kind terminal request rejection","type":"invalid_request_error","code":"invalid_request_error"}}"#.as_slice())
         };
         let mut headers = HeaderMap::new();
         headers.insert("content-type", HeaderValue::from_static(content_type));
@@ -353,12 +356,9 @@ mod tests {
         let exhausted = Scenario::from_body(&body("CW_KIND_BROKER_RETRY_EXHAUSTED")).unwrap();
         assert!(matches!(exhausted, Scenario::BrokerRetryExhausted));
         assert_eq!(exhausted.status(1), StatusCode::UNAUTHORIZED);
-        assert_eq!(exhausted.status(2), StatusCode::UNAUTHORIZED);
-        assert_eq!(exhausted.status(3), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            exhausted.status(u64::MAX),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
+        assert_eq!(exhausted.status(2), StatusCode::BAD_REQUEST);
+        assert_eq!(exhausted.status(3), StatusCode::BAD_REQUEST);
+        assert_eq!(exhausted.status(u64::MAX), StatusCode::BAD_REQUEST);
     }
 
     #[test]
