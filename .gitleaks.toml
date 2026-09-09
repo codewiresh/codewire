@@ -72,3 +72,23 @@ condition = "AND"
 paths = ['''(^|/)tests/e2e/kind/support\.yaml$''']
 regexTarget = "match"
 regexes = ['''BEGIN[[:space:]]+EC[[:space:]]+PRIVATE[[:space:]]+KEY''']
+
+[[allowlists]]
+description = "Explicit disposable stock OpenSSH fixtures for bounded SSH import; never account keys"
+targetRules = ["private-key"]
+condition = "AND"
+paths = [
+  '''(^|/)crates/codewire-protected-store/src/ssh_material/fixtures/ed25519-aes(128|192|256)-ctr\.openssh$''',
+  '''(^|/)crates/codewire-protected-store/src/ssh_material/fixtures/rsa-(2048|3072|4096|8192)(-encrypted)?\.openssh$''',
+  '''(^|/)crates/codewire-protected-store/src/ssh_material/fixtures/(rsa-1024|ecdsa)\.openssh$''',
+]
+regexTarget = "match"
+regexes = ['''BEGIN[[:space:]]+OPENSSH[[:space:]]+PRIVATE[[:space:]]+KEY''']
+
+[[allowlists]]
+description = "SSH import test asserts literal OpenSSH armor markers, without private key bytes"
+targetRules = ["private-key"]
+condition = "AND"
+paths = ['''(^|/)crates/codewire-protected-store/src/ssh_material/tests\.rs$''']
+regexTarget = "match"
+regexes = ['''BEGIN OPENSSH PRIVATE KEY-----\\n"\)\);[[:space:]]+assert!\(actual\.ends_with\(b"\\n-----END OPENSSH PRIVATE KEY''']
