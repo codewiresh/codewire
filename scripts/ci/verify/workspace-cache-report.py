@@ -12,7 +12,11 @@ import time
 
 MODES = {"seed": ("r2", "r2"), "cold": ("disabled", "disabled"),
          "compiler": ("r2", "disabled"), "warm-1": ("r2", "r2"), "warm-2": ("r2", "r2")}
-VERSION_COMMANDS = {"npm": ["npm", "--version"], "pnpm": ["pnpm", "--version"],
+VERSION_COMMANDS = {"npm": ["npm", "--version"],
+                    # pnpm's npm-installed launcher currently relies on the
+                    # interactive shell's ENOEXEC fallback. Measure the same
+                    # supported workspace command path without profiles.
+                    "pnpm": ["/bin/bash", "--noprofile", "--norc", "-c", "pnpm --version"],
                     "yarn": ["yarn", "--version"], "bun": ["bun", "--version"],
                     "gopls": ["gopls", "version"], "hcloud": ["hcloud", "version"],
                     "poetry": ["poetry", "--version"], "uv": ["uv", "--version"],

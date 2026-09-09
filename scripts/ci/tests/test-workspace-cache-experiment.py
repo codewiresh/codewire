@@ -118,6 +118,24 @@ class EventTests(unittest.TestCase):
                 selector.requested(value)
 
 
+class VersionTests(unittest.TestCase):
+    def test_pnpm_inventory_matches_shell_supported_no_shebang_launcher(self):
+        temporary_parent = ROOT / ".tmp"
+        temporary_parent.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="workspace-pnpm-launcher-", dir=temporary_parent) as temporary:
+            binary = Path(temporary) / "pnpm"
+            binary.write_text("printf '12.3.4\\n'\n")
+            binary.chmod(0o755)
+            self.assertNotEqual(binary.read_bytes()[:2], b"#!")
+            path = temporary + os.pathsep + os.environ["PATH"]
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, {"PATH": path}), \
+                    mock.patch.object(report, "VERSION_COMMANDS", {"pnpm": report.VERSION_COMMANDS["pnpm"]}), \
+                    contextlib.redirect_stdout(output):
+                report.versions()
+            self.assertEqual(json.loads(output.getvalue()), {"pnpm": "12.3.4"})
+
+
 class ReportTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="workspace-experiment-report-")
