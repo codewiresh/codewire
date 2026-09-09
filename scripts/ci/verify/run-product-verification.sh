@@ -453,6 +453,7 @@ run_runtime_confidential() {
 run_runtime_dev_smoke() {
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
   scripts/runtime/tests/test-smoke-dev-commodity.sh
+  scripts/runtime/tests/test-local-platform-sources-smoke.sh
 }
 
 run_rust() {

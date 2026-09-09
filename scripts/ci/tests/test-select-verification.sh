@@ -404,7 +404,9 @@ run_paths_case native_local_environment_smoke pull_request refs/pull/5015/head f
 run_paths_case shared_stock_ssh_smoke pull_request refs/pull/5016/head false \
   'policy runtime_dev_smoke transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/stock-ssh-workload.sh
-for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests/test-provider-ssh-smoke.sh; do
+for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests/test-provider-ssh-smoke.sh \
+    scripts/runtime/dev/smoke-local-platform-sources.sh scripts/runtime/tests/test-local-platform-sources-smoke.sh \
+    scripts/runtime/tests/fixtures/local-platform/__local-credential-authority; do
   run_paths_case provider_ssh_dev_smoke pull_request refs/pull/5017/head false \
     'policy runtime_dev_smoke' "$ssh_input"
 done

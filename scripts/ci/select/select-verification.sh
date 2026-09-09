@@ -1192,9 +1192,12 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
       scripts/runtime/dev/smoke-dev-commodity.sh|\
       scripts/runtime/dev/provider-ssh-smoke.sh|\
+      scripts/runtime/dev/smoke-local-platform-sources.sh|\
       scripts/runtime/dev/with-dev-smoke-auth.sh|\
       scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
       scripts/runtime/tests/test-provider-ssh-smoke.sh|\
+      scripts/runtime/tests/test-local-platform-sources-smoke.sh|\
+      scripts/runtime/tests/fixtures/local-platform/__local-credential-authority|\
       scripts/runtime/tests/test-smoke-dev-commodity.sh|\
       scripts/runtime/tests/test-with-dev-smoke-auth.sh)
         select_token runtime_dev_smoke
