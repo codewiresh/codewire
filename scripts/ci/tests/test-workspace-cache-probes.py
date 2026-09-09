@@ -123,7 +123,13 @@ elif args[:2] == ["buildx", "build"]:
         else:
             assert "--cache-from" not in args and "--cache-to" not in args
         print("#2 [1/1] COPY payload /payload")
-        print("#2 CACHED" if cached else "#2 DONE 0.1s")
+        if cached and failure in ("lazy-native-hit", "wrong-lazy-native-hit"):
+            observed = ("f" if failure == "lazy-native-hit" else "e") * 64
+            print("#2 sha256:" + observed + " 0B / 8.39MB")
+            print("#2 extracting sha256:" + observed + " 0.1s done")
+            print("#2 DONE 0.2s")
+        else:
+            print("#2 CACHED" if cached else "#2 DONE 0.1s")
         write_output("payload", (Path(args[-1]) / "payload").read_bytes())
         if "--cache-to" in args:
             print("#8 exporting cache to Amazon S3\n#8 writing layer sha256:" + "f" * 64 + "\n#8 DONE 0.1s")
@@ -405,6 +411,21 @@ class ProbeFixture(unittest.TestCase):
 
     def test_control_miss_is_inconclusive(self):
         completed, _ = self.run_harness("control-miss")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse((self.report / "work-complete").exists())
+        self.assertIn("expected executed/cached", completed.stdout)
+
+    def test_exact_cold_blob_digest_is_accepted_as_native_warm_hit(self):
+        completed, environment = self.run_harness("lazy-native-hit")
+        self.assertEqual(completed.returncode, 0, completed.stdout)
+        self.credential.unlink()
+        with mock.patch.dict(os.environ, environment, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            probes.finalize(self.report)
+        phases = {phase["phase"]: phase for phase in probes.read(self.report / "result.json")["phases"]}
+        self.assertEqual(phases["native-warm"]["cache_observation"], "lazy-digest")
+
+    def test_unrelated_lazy_digest_cannot_pass_as_native_warm_hit(self):
+        completed, _ = self.run_harness("wrong-lazy-native-hit")
         self.assertNotEqual(completed.returncode, 0)
         self.assertFalse((self.report / "work-complete").exists())
         self.assertIn("expected executed/cached", completed.stdout)

@@ -226,11 +226,22 @@ def vertices(text):
     return list(result.values())
 
 
-def vertex(text, expression, cached):
+def vertex(text, expression, cached, lazy_digest=None):
     found = [lines for lines in vertices(text) if any(re.search(expression, line) for line in lines)]
-    if len(found) != 1 or ("CACHED" in found[0]) != cached \
-            or (not cached and not any(re.fullmatch(r"DONE [0-9.]+s", line) for line in found[0])):
+    if len(found) != 1:
         raise ValueError("expected executed/cached probe vertex was not observed")
+    lines = found[0]
+    literal_hit = "CACHED" in lines
+    lazy_hit = lazy_digest is not None and any(
+        line.split(maxsplit=1)[0] == lazy_digest for line in lines if line)
+    completed = any(re.fullmatch(r"DONE [0-9.]+s", line) for line in lines)
+    if cached:
+        if not literal_hit and not (lazy_hit and completed):
+            raise ValueError("expected executed/cached probe vertex was not observed")
+        return "cached" if literal_hit else "lazy-digest"
+    if literal_hit or not completed:
+        raise ValueError("expected executed/cached probe vertex was not observed")
+    return "executed"
 
 
 def ready(log, nonce):
@@ -355,7 +366,13 @@ def check_phase(report, phase):
         else:
             if status != 0:
                 raise ValueError("native positive control failed")
-            vertex(text, r"^\[.*\] COPY payload /payload$", phase == "native-warm")
+            lazy_digest = None
+            if phase == "native-warm":
+                lazy_digest = read(report / "native-cold" / "result.json").get("blob_digest")
+                if not isinstance(lazy_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", lazy_digest):
+                    raise ValueError("native cold control has no exact exported blob digest")
+            outcome["cache_observation"] = vertex(
+                text, r"^\[.*\] COPY payload /payload$", phase == "native-warm", lazy_digest)
             if phase == "native-cold":
                 measurement.logs(directory / "build.log", "r2")
                 blobs = set(re.findall(r"\bwriting layer (sha256:[0-9a-f]{64})\b", text))
