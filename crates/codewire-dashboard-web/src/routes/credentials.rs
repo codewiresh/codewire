@@ -827,6 +827,7 @@ mod tests {
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store, no-cache, must-revalidate"
         );
+        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
         drop(response);
         tokio::time::timeout(std::time::Duration::from_secs(1), sender.closed())
             .await

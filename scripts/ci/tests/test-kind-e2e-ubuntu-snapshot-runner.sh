@@ -42,6 +42,29 @@ ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-mobile-dash
 ssr-dashboard.read.ssr.ts-snapshots/dashboard-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
 EOF
 )" ] || die 'expected snapshot allowlist changed without updating its contract'
+[ "$(expected_snapshots prepared-kind-management-secrets-mobile)" = "$(cat <<'EOF'
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-secrets-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+)" ] || die 'prepared Kind snapshot profile does not select exactly the two mobile Secrets surfaces'
+if expected_snapshots unknown-profile >/dev/null 2>&1; then
+  die 'unknown snapshot profile was accepted'
+fi
+[ "$(snapshot_profile_context default)" = kind-codewire ] &&
+  [ "$(snapshot_profile_namespace default)" = default ] &&
+  [ "$(snapshot_profile_origin default)" = http://127.0.0.1:8080 ] &&
+  [ "$(snapshot_profile_database_url default)" = \
+    'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
+  die 'default snapshot topology changed'
+[ "$(snapshot_profile_context prepared-kind-management-secrets-mobile)" = \
+    kind-codewire-e2e-ci ] &&
+  [ "$(snapshot_profile_namespace prepared-kind-management-secrets-mobile)" = \
+    codewire-e2e ] &&
+  [ "$(snapshot_profile_origin prepared-kind-management-secrets-mobile)" = \
+    http://127.0.0.1:8090 ] &&
+  [ "$(snapshot_profile_database_url prepared-kind-management-secrets-mobile)" = \
+    'postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable' ] ||
+  die 'prepared Kind snapshot topology changed'
 [ "$(retired_snapshots)" = "$(cat <<'EOF'
 ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-linux.png
 ssr-dashboard.environments.ssr.ts-snapshots/environments-prepared-image-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
@@ -95,6 +118,7 @@ for required in \
     '--env HTTP_PROXY= --env HTTPS_PROXY= --env ALL_PROXY=' \
     '--env NO_PROXY=localhost,127.0.0.1' \
     '--env CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID="$FIXTURE_RUN_ID"' \
+    '--env CODEWIRE_PLAYWRIGHT_SNAPSHOT_PROFILE="$snapshot_profile"' \
     'validate_snapshot_worktree "$ROOT" "$SNAPSHOT_RELATIVE_DIR"' \
     'existing_tracked_paths "$ROOT" >"$tracked_paths"' \
     'rm -f -- "$snapshot_stage/$relative"' \
@@ -104,6 +128,20 @@ for required in \
     '--update-snapshots=changed --retries=0 --workers=1 --reporter=line'; do
   grep -Fq -- "$required" "$RUNNER" || die "runner is missing contract: $required"
 done
+
+for prepared_contract in \
+    '--prepared-kind-management-secrets-mobile' \
+    '--project=dashboard-ssr-mobile' \
+    'renders every organization management surface without page overflow' \
+    'deployment/codewire-credential-service' \
+    'codewire-dashboard:e2e'; do
+  grep -Fq -- "$prepared_contract" "$RUNNER" ||
+    die "prepared Kind profile is missing contract: $prepared_contract"
+done
+if grep -Fq -- '--project=dashboard-ssr-desktop' \
+    <(sed -n '/prepared-kind-management-secrets-mobile)/,/;;/p' "$RUNNER"); then
+  die 'prepared Kind profile unexpectedly selects the desktop renderer'
+fi
 # shellcheck disable=SC2016
 for fixture_id_contract in \
     'process.env.CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID' \
@@ -305,6 +343,88 @@ cidfile="$fixture/renderer.cid"
 if read_container_id "$cidfile" >/dev/null 2>&1; then
   die 'missing Docker container ID file was accepted'
 fi
+
+topology_calls="$fixture/topology-calls"
+(
+  isolated_docker_client() {
+    printf '%s\n' codewire-e2e-ci
+  }
+  kubectl() {
+    printf '%s\n' "$*" >>"$topology_calls"
+    case "$*" in
+      *'rollout status '*) return 0 ;;
+      *'jsonpath={.spec.template.spec.containers[0].image}'*)
+        printf '%s\n' codewire-dashboard:e2e
+        ;;
+      *'CODEWIRE_PUBLIC_ORIGIN'*) printf '%s\n' http://127.0.0.1:8090 ;;
+      *) return 91 ;;
+    esac
+  }
+  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+) || die 'exact prepared Kind topology was rejected'
+[ "$(grep -c 'rollout status deployment/' "$topology_calls")" = 4 ] ||
+  die 'prepared Kind topology did not require all four UI dependencies to be Ready'
+grep -Fq -- '--context kind-codewire-e2e-ci -n codewire-e2e' "$topology_calls" ||
+  die 'prepared Kind topology did not use its exact context and namespace'
+if (
+  isolated_docker_client() {
+    printf '%s\n' codewire-e2e-ci
+  }
+  kubectl() {
+    case "$*" in
+      *'rollout status '*) return 0 ;;
+      *'jsonpath={.spec.template.spec.containers[0].image}'*)
+        printf '%s\n' codewire-dashboard:e2e
+        ;;
+      *'CODEWIRE_PUBLIC_ORIGIN'*) printf '%s\n' http://127.0.0.1:8080 ;;
+      *) return 91 ;;
+    esac
+  }
+  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+) >/dev/null 2>&1; then
+  die 'prepared Kind topology accepted the wrong public origin'
+fi
+if (
+  isolated_docker_client() {
+    printf '%s\n' another-cluster
+  }
+  kubectl() { return 0; }
+  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+) >/dev/null 2>&1; then
+  die 'prepared Kind topology accepted a missing exact cluster'
+fi
+if (
+  isolated_docker_client() {
+    printf '%s\n' codewire-e2e-ci
+  }
+  kubectl() {
+    case "$*" in
+      *'rollout status deployment/codewire-idp '*) return 44 ;;
+      *'rollout status '*) return 0 ;;
+      *) return 91 ;;
+    esac
+  }
+  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+) >/dev/null 2>&1; then
+  die 'prepared Kind topology accepted a dependency that was not Ready'
+fi
+if (
+  isolated_docker_client() {
+    printf '%s\n' codewire-e2e-ci
+  }
+  kubectl() {
+    case "$*" in
+      *'rollout status '*) return 0 ;;
+      *'jsonpath={.spec.template.spec.containers[0].image}'*)
+        printf '%s\n' codewire-dashboard:local
+        ;;
+      *) return 91 ;;
+    esac
+  }
+  validate_snapshot_topology prepared-kind-management-secrets-mobile ignored
+) >/dev/null 2>&1; then
+  die 'prepared Kind topology accepted the wrong dashboard image reference'
+fi
 printf 'not-a-container-id\n' >"$cidfile"
 if read_container_id "$cidfile" >/dev/null 2>&1; then
   die 'malformed Docker container ID was accepted'
@@ -433,6 +553,34 @@ printf '\x89PNG\r\n\x1a\nunapproved\n' >"$stage/$unapproved_stage_snapshot"
 if validate_snapshot_stage "$baseline" "$stage" >/dev/null 2>&1; then
   die 'an unexpected snapshot mutation was accepted'
 fi
+
+prepared_baseline="$fixture/prepared-baseline"
+prepared_stage="$fixture/prepared-stage"
+prepared_target="$fixture/prepared-target"
+mkdir -p "$prepared_target"
+while IFS= read -r prepared_snapshot; do
+  mkdir -p "$prepared_baseline/$(dirname "$prepared_snapshot")"
+  printf '\x89PNG\r\n\x1a\nprepared baseline\n' >"$prepared_baseline/$prepared_snapshot"
+done < <(expected_snapshots prepared-kind-management-secrets-mobile)
+cp -a "$prepared_baseline/." "$prepared_stage/"
+while IFS= read -r prepared_snapshot; do
+  printf 'changed\n' >>"$prepared_stage/$prepared_snapshot"
+done < <(expected_snapshots prepared-kind-management-secrets-mobile)
+validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
+  prepared-kind-management-secrets-mobile ||
+  die 'prepared Kind management-secrets-mobile update was rejected'
+promote_snapshots "$prepared_stage" "$prepared_target" \
+  prepared-kind-management-secrets-mobile
+while IFS= read -r prepared_snapshot; do
+  cmp -s "$prepared_stage/$prepared_snapshot" "$prepared_target/$prepared_snapshot" ||
+    die 'prepared Kind profile did not promote both allowlisted snapshots'
+done < <(expected_snapshots prepared-kind-management-secrets-mobile)
+mkdir -p "$prepared_stage/$(dirname "$current_snapshot")"
+printf '\x89PNG\r\n\x1a\nunapproved\n' >"$prepared_stage/$current_snapshot"
+if validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
+    prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
+  die 'prepared Kind profile accepted a mutation outside its two targets'
+fi
 rm -f "$stage/$unapproved_stage_snapshot"
 unapproved_stage_link='ssr-dashboard.management-visual.ssr.ts-snapshots/unapproved-link.png'
 ln -s "$stage/$current_snapshot" "$stage/$unapproved_stage_link"
@@ -452,6 +600,10 @@ fi
 "$RUNNER" --help >/dev/null || die 'runner help failed'
 if "$RUNNER" --unknown >/dev/null 2>&1; then
   die 'unknown runner argument was accepted'
+fi
+if "$RUNNER" --prepared-kind-management-secrets-mobile \
+    --prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
+  die 'duplicate prepared Kind profile flag was accepted'
 fi
 grep -Fq 'scripts/ci/tests/test-kind-e2e-ubuntu-snapshot-runner.sh' "$PRODUCT_VERIFY" ||
   die 'snapshot runner contract test is not wired into edge verification'

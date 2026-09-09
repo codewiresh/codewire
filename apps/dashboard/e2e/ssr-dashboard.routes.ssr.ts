@@ -10,6 +10,85 @@ const authState = path.join(dashboardDir, "playwright/.auth/user.json");
 const ssrUrl = (process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:5173").replace(/\/$/, "");
 const cleanRoutesOrgSlug = "e2e-clean-routes";
 
+test.describe("homepage", () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test("story assets and sign-in stay on the Rust origin", async ({ page }) => {
+    const requests: string[] = [];
+    const errors: string[] = [];
+    page.on("request", (request) => requests.push(request.url()));
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    const response = await page.goto("/");
+    expect(response?.status()).toBe(200);
+    expect(response?.headers()["content-security-policy"]).not.toContain("unsafe-inline");
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Cloud environments for agents and their humans.");
+    await expect(page.locator(".cw-brand img")).toHaveAttribute("alt", "Codewire");
+    await expect(page.locator("script:not([src]), style")).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Read the docs" })).toHaveAttribute("href", "/docs");
+    await expect(page.getByRole("link", { name: "See pricing →" })).toHaveAttribute("href", "/docs/reference/subscription-plans");
+    await expect(page.getByRole("link", { name: "Request access" }).last()).toHaveAttribute("href", "/signup");
+    expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.waitForLoadState("networkidle");
+    expect(errors).toEqual([]);
+    await page.getByRole("link", { name: "Sign in", exact: true }).click();
+    await expect(page).toHaveURL(`${ssrUrl}/login`);
+    await expect(page.getByRole("heading", { name: "Log in to Codewire", exact: true })).toBeVisible();
+    expect(requests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
+  });
+
+  test("network modes support keyboard interaction", async ({ page }) => {
+    await page.goto("/");
+    const mesh = page.getByRole("button", { name: "Encrypted meshes" });
+    await mesh.focus();
+    await mesh.press("Enter");
+    await expect(mesh).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator(".cw-parallel-state--mesh")).toHaveAttribute("aria-hidden", "false");
+    await expect(page.locator("#parallel-operator-meta")).toHaveText("4 sessions");
+    await page.getByRole("button", { name: "Independent sessions" }).click();
+    await expect(mesh).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator(".cw-parallel-state--independent")).toHaveAttribute("aria-hidden", "false");
+  });
+
+  test("reduced motion shows the complete workflow", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/");
+    const steps = page.locator(".cw-workflow-list > li");
+    await expect(steps).toHaveCount(9);
+    for (const step of await steps.all()) {
+      await expect(step).toBeVisible();
+      await expect(step).toHaveCSS("opacity", "1");
+    }
+    await expect(page.locator(".cw-workflow-terminal-column")).toBeHidden();
+    await expect(page.locator(".cw-flow-packet").first()).toBeHidden();
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await expect(page.locator(".cw-workflow-stage")).toHaveClass(/is-enhanced/);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(page.locator(".cw-workflow-stage")).not.toHaveClass(/is-enhanced/);
+    for (const step of await steps.all()) await expect(step).toHaveCSS("opacity", "1");
+  });
+
+  test("without JavaScript the workflow and access link remain usable", async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: ssrUrl, javaScriptEnabled: false, storageState: { cookies: [], origins: [] } });
+    const page = await context.newPage();
+    try {
+      await page.goto("/");
+      const steps = page.locator(".cw-workflow-list > li");
+      await expect(steps).toHaveCount(9);
+      for (const step of await steps.all()) {
+        await expect(step).toBeVisible();
+        await expect(step).toHaveCSS("opacity", "1");
+      }
+      await expect(page.getByRole("link", { name: "Request access" }).last()).toHaveAttribute("href", "/signup");
+      await expect(page.locator(".cw-parallel-mode-switch")).toBeHidden();
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 test.describe("server-rendered public, auth, and account routes", () => {
   test.beforeAll(async ({}, testInfo) => {
     if (testInfo.project.use.isMobile) return;
@@ -20,52 +99,6 @@ test.describe("server-rendered public, auth, and account routes", () => {
 
   test.afterAll(async ({}, testInfo) => {
     if (!testInfo.project.use.isMobile) await cleanupTestOrg(cleanRoutesOrgSlug);
-  });
-
-  test("homepage and sign-in stay on the Rust origin", async ({ page, isMobile }) => {
-    test.skip(!!isMobile, "desktop route and supply-chain contract");
-    const requests: string[] = [];
-    page.on("request", (request) => requests.push(request.url()));
-
-    const home = await page.goto("/");
-    expect(home?.status()).toBe(200);
-    await expect(page.getByRole("heading", { name: /Give every AI agent/i })).toBeVisible();
-    await page.getByRole("link", { name: "Sign in" }).first().click();
-    await expect(page).toHaveURL(`${ssrUrl}/login`);
-    await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
-    await expect(page.getByLabel("Email")).toHaveAttribute("autocomplete", "email");
-    await expect(page.getByLabel("Password")).toHaveAttribute("autocomplete", "current-password");
-
-    await page.goto("/signup");
-    await expect(page.getByLabel("Invite code")).toBeVisible();
-
-    expect(requests.length).toBeGreaterThan(0);
-    expect(requests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
-  });
-
-  test("homepage preserves the complete landing page and motion contract", async ({ page, isMobile }) => {
-    test.skip(!!isMobile, "desktop landing-page motion contract");
-    await page.goto("/");
-
-    for (const heading of [
-      "Your AI tools are stuck on one machine.",
-      "AI agents write and run code you haven't reviewed. They need real isolation.",
-      "What you get",
-      "Up and running in 3 commands",
-      "No seat tax on AI agents",
-      "Ready to multiply your stack?",
-    ]) {
-      await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
-    }
-
-    const currentTask = page.locator("[data-current-task]");
-    await expect(currentTask).toHaveAttribute("data-active-task", "0");
-    await expect.poll(() => currentTask.getAttribute("data-active-task"), { timeout: 4000 }).not.toBe("0");
-    expect(await page.locator(".cw-workspace").first().evaluate((element) => (
-      getComputedStyle(element.querySelector("b")!).animationName
-    ))).toBe("cw-fill-progress");
-    await expect(page.locator("script[src='/assets/codewire/public-v1.js']")).toHaveCount(1);
-    await expect(page.getByRole("link", { name: "Documentation", exact: true })).toHaveAttribute("href", "/docs");
   });
 
   test("password-reset token is moved to a scoped HttpOnly cookie and removed from the URL", async ({ browser, isMobile }) => {
@@ -126,7 +159,10 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.getByRole("heading", { name: "Add SSH identity" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Credential inventory" })).toBeVisible();
     await expect(page.locator('form[action="/settings/credentials/_actions/profiles/create"]')).toHaveCount(1);
-    await expect(page.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
+    const connectCard = page.locator("section", {
+      has: page.getByRole("heading", { name: "Connect provider account", exact: true }),
+    });
+    await expect(connectCard.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/api-key/add"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/generate"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/import"]')).toHaveCount(1);
@@ -217,16 +253,11 @@ test.describe("server-rendered public, auth, and account routes", () => {
     }
   });
 
-  test("public and auth layout remains responsive on mobile", async ({ page, isMobile }) => {
+  test("auth layout remains responsive on mobile", async ({ page, isMobile }) => {
     test.skip(!isMobile, "mobile visual contract");
-    await page.goto("/");
-    await expect(page.getByRole("heading", { name: /Give every AI agent/i })).toBeVisible();
-    await page.getByRole("button", { name: "Toggle menu" }).click();
-    await expect(page.locator("#landing-menu")).toHaveClass(/is-open/);
-    await expect(page.getByRole("link", { name: "Docs", exact: true })).toBeVisible();
     await page.goto("/login");
-    await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
-    await expect(page.locator(".cw-auth-card")).toBeInViewport();
+    await expect(page.getByRole("heading", { name: "Log in to Codewire", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Log in to Codewire", exact: true })).toBeInViewport();
   });
 });
 

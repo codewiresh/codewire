@@ -35,7 +35,7 @@ test.describe("managed provider credential browser journey", () => {
     const response = await enrollmentResponse;
     expect(response.status()).toBe(200);
     expect(response.headers()["cache-control"]).toBe("no-store, no-cache, must-revalidate");
-    expect(response.headers()["x-accel-buffering"]).toBe("no");
+    expect(response.headers()["x-accel-buffering"]).toBeUndefined();
     const responseBody = await response.text();
     const challenge = responseBody.indexOf("ABCD-EFGH");
     const committed = responseBody.indexOf("Credential connected.");

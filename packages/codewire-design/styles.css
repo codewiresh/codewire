@@ -312,6 +312,8 @@
   font-size: 0.75rem;
 }
 
+.cw-button--pill { border-radius: var(--radius-pill); }
+
 .cw-card {
   border: 1px solid var(--border);
   border-radius: 0.625rem;
