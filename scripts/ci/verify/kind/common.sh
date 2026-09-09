@@ -2332,133 +2332,9 @@ exec_service_connect_smoke() {
 }
 
 environment_setup_terminal_smoke() (
-  local environment_id=env-terminal-ticket-smoke
-  local claim_name=sandbox-env-terminal-ticket-smoke
-  local pod_name=sandbox-env-terminal-ticket-smoke
-  local original_replicas pod_ip ready
-
-  original_replicas="$(
-    kubectl -n agent-sandbox-system get deploy/agent-sandbox-controller \
-      -o jsonpath='{.spec.replicas}'
-  )"
-  if [[ ! "$original_replicas" =~ ^[0-9]+$ ]]; then
-    echo "::error::agent-sandbox controller replica count is invalid: ${original_replicas:-missing}"
-    return 1
-  fi
-
-  # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
-  cleanup_terminal_fixture() {
-    set +e
-    kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-      --ignore-not-found=true --wait=true >/dev/null
-    kubectl -n "$NS" exec -i deploy/postgres -- \
-      psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
-DELETE FROM sandbox_environment_backend WHERE environment_id = '$environment_id';
-DELETE FROM environments WHERE id = '$environment_id';
-SQL
-    kubectl -n "$SANDBOX_NS" delete pod "$pod_name" \
-      --ignore-not-found=true --wait=true >/dev/null
-    kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller \
-      --replicas="$original_replicas" >/dev/null
-    if [ "$original_replicas" -gt 0 ]; then
-      kubectl -n agent-sandbox-system rollout status \
-        deploy/agent-sandbox-controller --timeout=180s
-    fi
-  }
-  trap cleanup_terminal_fixture EXIT
+  local environment_id="$1"
 
   log "proving a Connect-issued ticket opens the permanent raw terminal WebSocket"
-  kubectl -n agent-sandbox-system scale deploy/agent-sandbox-controller --replicas=0
-  if [ "$original_replicas" -gt 0 ]; then
-    kubectl -n agent-sandbox-system wait pod -l app=agent-sandbox-controller \
-      --for=delete --timeout=60s
-  fi
-
-  kubectl -n "$SANDBOX_NS" delete sandboxclaim "$claim_name" \
-    --ignore-not-found=true --wait=true >/dev/null
-  kubectl -n "$SANDBOX_NS" delete pod "$pod_name" \
-    --ignore-not-found=true --wait=true >/dev/null
-  kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
-DELETE FROM sandbox_environment_backend WHERE environment_id = '$environment_id';
-DELETE FROM environments WHERE id = '$environment_id';
-SQL
-
-  kubectl_apply -f - <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: ${pod_name}
-  namespace: ${SANDBOX_NS}
-  labels:
-    codewire.sh/environment-id: ${environment_id}
-    codewire.sh/type: workspace
-spec:
-  serviceAccountName: codewire-sandbox
-  restartPolicy: Always
-  containers:
-    - name: workspace
-      image: busybox:1.36
-      imagePullPolicy: IfNotPresent
-      command: ["sleep", "600"]
-EOF
-  kubectl -n "$SANDBOX_NS" wait "pod/${pod_name}" \
-    --for=condition=Ready --timeout=60s
-  pod_ip="$(
-    kubectl -n "$SANDBOX_NS" get pod "$pod_name" -o jsonpath='{.status.podIP}'
-  )"
-  if [ -z "$pod_ip" ]; then
-    echo "::error::terminal fixture Pod has no IP"
-    return 1
-  fi
-
-  kubectl -n "$NS" exec -i deploy/postgres -- \
-    psql -U codewire -d codewire -v ON_ERROR_STOP=1 <<SQL
-INSERT INTO environments (
-  id, org_id, created_by, type, name, state, desired_state, preset_id,
-  cpu_millicores, memory_mb, disk_gb,
-  environment_operation_generation, state_changed_at, project_spec
-)
-VALUES (
-  '$environment_id', 'org_contract_1', 'usr_contract_user', 'sandbox',
-  'terminal-ticket-smoke', 'running', 'started', 'preset_contract_1',
-  2000, 4096, 10, 1, NOW(),
-  '{"schema_version":1,"working_directory":"/workspace"}'::jsonb
-);
-
-INSERT INTO sandbox_environment_backend (
-  environment_id, namespace, pod_name, pod_ip,
-  setup_owner_generation, setup_owner_activity_id, setup_owner_attempt,
-  setup_owner_phase, setup_owner_status, setup_owner_pod_uid
-)
-VALUES (
-  '$environment_id', '$SANDBOX_NS', '$pod_name', '$pod_ip',
-  1, 'kind-terminal-ticket-smoke', 1, 0, 'claimed', NULL
-);
-SQL
-
-  kubectl_apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxClaim
-metadata:
-  name: ${claim_name}
-  namespace: ${SANDBOX_NS}
-spec:
-  warmPoolRef:
-    name: kind-terminal-ready-fixture
-EOF
-  kubectl -n "$SANDBOX_NS" patch sandboxclaim "$claim_name" \
-    --subresource=status --type=merge \
-    -p '{"status":{"conditions":[{"lastTransitionTime":"2026-01-01T00:00:00Z","message":"Kind terminal fixture is ready","reason":"Ready","status":"True","type":"Ready"}]}}'
-  ready="$(
-    kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" \
-      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
-  )"
-  if [ "$ready" != "True" ]; then
-    echo "::error::terminal fixture SandboxClaim Ready status is ${ready:-missing}"
-    return 1
-  fi
-
   SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_URL" \
     SMOKE_ORG_ID=org_contract_1 \
     SMOKE_ENVIRONMENT_ID="$environment_id" \
@@ -2582,6 +2458,7 @@ SET namespace = EXCLUDED.namespace,
 SQL
 
   environment_daemon_proxy_smoke "$environment_id" "$daemon_pod"
+  environment_setup_terminal_smoke "$environment_id"
   exec_service_connect_smoke "$environment_id"
   platform_run_connect_smoke "$environment_id"
   environment_session_protocol_smoke "$environment_id"
@@ -2813,7 +2690,6 @@ workspace_service_smokes() {
   log "running workspace exec smoke"
   SMOKE_NAMESPACE="$SANDBOX_NS" SMOKE_POD_NAME=crd-smoke-workspace-daemon \
     "$CARGO_CI_DIR/exec-smoke"
-  environment_setup_terminal_smoke
   file_service_smoke
   environment_resize_smoke
 }

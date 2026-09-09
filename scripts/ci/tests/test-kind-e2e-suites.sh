@@ -71,6 +71,32 @@ done
 grep -Fq 'SMOKE_POD_NAME=crd-smoke-workspace-daemon' "$COMMON" ||
   fail 'workspace exec does not target the authenticated gateway fixture'
 
+# Terminal tickets connect through that same authenticated daemon. The public
+# helper must run inside the ready claim/database binding, before its cleanup.
+terminal_fixture="$(sed -n '/^environment_setup_terminal_smoke() (/,/^file_service_smoke() (/p' "$COMMON")"
+grep -Fq 'local environment_id="$1"' <<<"$terminal_fixture" ||
+  fail 'terminal smoke must use the caller-owned environment'
+if grep -Eq 'busybox:|kubectl|psql|cleanup_terminal_fixture' <<<"$terminal_fixture"; then
+  fail 'terminal smoke still owns an isolated unauthenticated fixture'
+fi
+grep -Fq '"$CARGO_CI_DIR/environment-setup-smoke"' <<<"$terminal_fixture" ||
+  fail 'terminal smoke no longer exercises the public ticket/WebSocket helper'
+file_fixture="$(sed -n '/^file_service_smoke() (/,/^platform_run_connect_smoke() {/p' "$COMMON")"
+[[ "$(grep -Fc 'environment_setup_terminal_smoke "$environment_id"' "$COMMON")" -eq 1 ]] ||
+  fail 'terminal smoke must run exactly once against the bound environment'
+awk '
+  /if \[ "\$ready" != "True" \]/ { ready = 1 }
+  /setup_owner_pod_uid = EXCLUDED.setup_owner_pod_uid;/ { bound = ready }
+  /environment_daemon_proxy_smoke "\$environment_id"/ { daemon = bound }
+  /environment_setup_terminal_smoke "\$environment_id"/ { terminal = daemon }
+  /DELETE FROM sandbox_environment_backend/ { cleaned = terminal }
+  END { exit !(terminal && cleaned) }
+' <<<"$file_fixture" || fail 'terminal smoke must follow authenticated binding and precede cleanup'
+workspace_fixture="$(sed -n '/^workspace_service_smokes() {/,/^environment_resize_smoke() (/p' "$COMMON")"
+if grep -Fq 'environment_setup_terminal_smoke' <<<"$workspace_fixture"; then
+  fail 'workspace suite runs terminal smoke outside the authenticated binding'
+fi
+
 # A runnable resize fixture cannot use the deliberately non-runnable shared
 # contract preset. Keep its image/base mapping and the original runtime proof.
 resize_fixture="$(sed -n '/^environment_resize_smoke() (/,/^temporal_workflow_smoke() {/p' "$COMMON")"
