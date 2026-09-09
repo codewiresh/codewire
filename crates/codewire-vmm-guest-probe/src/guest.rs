@@ -101,6 +101,8 @@ const ROOT_MERGED_PATH: &str = "/generation/merged";
 const CONTAINER_CONTROL_PATH: &str = "/run/codewire/container";
 const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
 const CONTAINER_MACHINE_ID_PATH: &str = "/run/codewire/container/machine-id";
+const CONTAINER_HOSTNAME: &str = "codewire";
+const CONTAINER_HOSTS_PATH: &str = "/run/codewire/container/hosts";
 const CONTAINER_RESOLV_CONF_PATH: &str = "/run/codewire/container/resolv.conf";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
 const DOCKER_DATA_PATH: &str = "/var/lib/docker";
@@ -117,6 +119,7 @@ const CREDENTIAL_INGRESS_SOCKET: &str = "/run/codewire/container/credential.sock
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
 const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
+const CONTAINER_HOSTS_DESTINATION: &str = "/etc/hosts";
 const CONTAINER_RESOLV_CONF_DESTINATION: &str = "/etc/resolv.conf";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
 const CONTAINER_CREDENTIAL_SOCKET: &str = "/run/codewire-host/credential.sock";
@@ -3679,6 +3682,7 @@ fn prepare_container_control(
         0o444,
     )
     .context("publish environment-specific machine identity")?;
+    publish_container_hosts(Path::new(CONTAINER_HOSTS_PATH))?;
     write_durable(
         Path::new(CONTAINER_RESOLV_CONF_PATH),
         format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
@@ -3713,6 +3717,20 @@ fn prepare_container_control(
         .set_nonblocking(true)
         .context("make guest poweroff socket nonblocking")?;
     Ok(socket)
+}
+
+fn publish_container_hosts(path: &Path) -> Result<()> {
+    // OCI sets the hostname but does not synthesize /etc/hosts. The runtime
+    // owns both this name and the isolated interface address; resolving the
+    // container's own identity must not consume an upstream DNS transaction.
+    // No provider names, host-machine entries, or image-supplied aliases cross
+    // this boundary.
+    let (address, _) = NETWORK_GUEST_ADDRESS
+        .split_once('/')
+        .expect("the guest interface address includes its prefix");
+    let hosts = format!("127.0.0.1 localhost\n{address} {CONTAINER_HOSTNAME}\n");
+    write_durable(path, hosts.as_bytes(), 0o444)
+        .context("publish isolated workspace hostname mapping")
 }
 
 fn prepare_docker_runtime(seed: &Seed, workspace_identity: &WorkspaceIdentity) -> Result<()> {
@@ -4251,7 +4269,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             "noNewPrivileges": true
         },
         "root": { "path": "../merged", "readonly": false },
-        "hostname": "codewire",
+        "hostname": CONTAINER_HOSTNAME,
         "mounts": [
             { "destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"] },
             { "destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "strictatime", "mode=755", "size=65536k"] },
@@ -4263,6 +4281,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": ACTIVE_WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_MACHINE_ID_DESTINATION, "type": "none", "source": CONTAINER_MACHINE_ID_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_HOSTS_DESTINATION, "type": "none", "source": CONTAINER_HOSTS_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_RESOLV_CONF_DESTINATION, "type": "none", "source": CONTAINER_RESOLV_CONF_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
             { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
@@ -5738,6 +5757,42 @@ mod tests {
         ] {
             assert!(!runc_helper_environment_is_admitted(&rejected));
         }
+    }
+
+    #[test]
+    fn workspace_hosts_contains_only_runtime_owned_local_names() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("hosts");
+        publish_container_hosts(&path).unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"127.0.0.1 localhost\n192.0.2.2 codewire\n"
+        );
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o444);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.nlink(), 1);
+    }
+
+    #[test]
+    fn workspace_hostname_has_a_runtime_owned_read_only_hosts_mapping() {
+        let plan = test_workspace_plan();
+        let config: serde_json::Value =
+            serde_json::from_slice(&workspace_oci_config(&plan).unwrap()).unwrap();
+        assert_eq!(config["hostname"], "codewire");
+        let hosts = config["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["destination"] == "/etc/hosts")
+            .expect("the runtime hostname must resolve without upstream DNS");
+        assert_eq!(hosts["source"], "/run/codewire/container/hosts");
+        assert_eq!(hosts["type"], "none");
+        assert_eq!(
+            hosts["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
+        );
     }
 
     #[test]

@@ -94,6 +94,12 @@ mod linux {
     const AUTHORITY_LOSS_READY: &[u8] = b"codewire-authority-loss-ready\n";
     const AUTHORITY_LOSS_TRIGGER: &[u8] = b"go\n";
     const DENIED_LAUNCH_MARKER: &str = "codewire-denied-launch-ran";
+    const HOSTNAME_MARKER: &[u8] = b"codewire-local-hostname-ok\n";
+    const HOSTNAME_SCRIPT: &str = r#"const fs=require('fs');const dns=require('dns');const os=require('os');
+const hosts=fs.lstatSync('/etc/hosts');
+if(!hosts.isFile()||hosts.uid!==0||hosts.gid!==0||hosts.nlink!==1||(hosts.mode&0o777)!==0o444||os.hostname()!=='codewire')process.exit(81);
+try{const fd=fs.openSync('/etc/hosts','r+');fs.closeSync(fd);process.exit(81);}catch(error){if(error.code!=='EROFS'&&error.code!=='EACCES')process.exit(81);}
+dns.lookup(os.hostname(),{family:4},(error,address)=>{if(error||address!=='192.0.2.2'){process.exit(81);return;}process.stdout.write('codewire-local-hostname-ok\n');});"#;
     // Classify only locally observed socket phases, never upstream error text,
     // addresses or certificate data. A post-handshake failure still fails the
     // existing proof; this discriminator does not change socket shutdown.
@@ -235,6 +241,20 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
             .get_capabilities(&[DAEMON_CAPABILITY_CREDENTIAL_BRIDGE])
             .await?;
         require(capabilities.state == v1::DaemonState::Ready as i32)?;
+
+        stage("hostname-check");
+        let hostname = run_transient(
+            &daemon,
+            vec!["node".into(), "-e".into(), HOSTNAME_SCRIPT.into()],
+            &environment.working_directory,
+            Vec::new(),
+        )
+        .await?;
+        require(
+            hostname.exit_code == 0
+                && hostname.stdout == HOSTNAME_MARKER
+                && hostname.stderr.is_empty(),
+        )?;
 
         stage("config-check");
         if args.managed_broker {
@@ -2084,6 +2104,48 @@ function generalEgress(){
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn hostname_probe_requires_owned_read_only_mapping_and_exact_local_resolution() {
+            const FIXTURE: &str = r#"const vm=require('vm');const scenario=process.argv[2];
+const stop={};let exit=0;let output='';let lookups=0;
+const fs={lstatSync:path=>{if(path!=='/etc/hosts')throw Error('path');return {isFile:()=>scenario!=='not-file',uid:scenario==='wrong-owner'?1000:0,gid:scenario==='wrong-group'?1000:0,nlink:scenario==='hardlink'?2:1,mode:scenario==='writable'?0o644:0o444};},
+openSync:(path,mode)=>{if(path!=='/etc/hosts'||mode!=='r+')throw Error('open');if(scenario==='write-open')return 9;throw Object.assign(Error(),{code:scenario==='other-error'?'EIO':scenario==='permission'?'EACCES':'EROFS'});},closeSync:()=>{}};
+const os={hostname:()=>scenario==='wrong-name'?'other':'codewire'};
+const dns={lookup:(name,options,callback)=>{if(name!=='codewire'||options.family!==4)throw Error('lookup');lookups++;callback(scenario==='dns-error'?Error():null,scenario==='wrong-address'?'203.0.113.1':'192.0.2.2');}};
+try{vm.runInNewContext(process.argv[1],{require:name=>{if(name==='fs')return fs;if(name==='os')return os;if(name==='dns')return dns;throw Error('module');},process:{exit:code=>{exit=code;throw stop;},stdout:{write:value=>{output+=value;}}}},{timeout:1000});}catch(error){if(error!==stop)throw error;}
+process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
+            for scenario in [
+                "valid",
+                "permission",
+                "not-file",
+                "wrong-owner",
+                "wrong-group",
+                "hardlink",
+                "writable",
+                "write-open",
+                "other-error",
+                "wrong-name",
+                "dns-error",
+                "wrong-address",
+            ] {
+                let output = std::process::Command::new("node")
+                    .env_clear()
+                    .args(["-e", FIXTURE, HOSTNAME_SCRIPT, scenario])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+                if matches!(scenario, "valid" | "permission") {
+                    assert_eq!(result["exit"], 0);
+                    assert_eq!(result["output"], "codewire-local-hostname-ok\n");
+                    assert_eq!(result["lookups"], 1);
+                } else {
+                    assert_eq!(result["exit"], 81, "{scenario}");
+                    assert_eq!(result["output"], "", "{scenario}");
+                }
+            }
+        }
 
         fn selected_response(content_type: &str, body: String) -> SelectedHttpProbeOutput {
             SelectedHttpProbeOutput {
