@@ -64,6 +64,8 @@ mod enabled {
     const SANDBOX_NAMESPACE: &str = "dev-sandboxes";
     const SETUP_WAIT_QUIET_LIMIT: Duration = Duration::from_secs(240);
     const SETUP_WAIT_ABSOLUTE_LIMIT: Duration = Duration::from_secs(600);
+    const ATTEMPT_HISTORY_WAIT: Duration = Duration::from_secs(10);
+    const ATTEMPT_HISTORY_POLL: Duration = Duration::from_millis(100);
     const WORKER_DEATH_MARKER: &str = "/workspace/.wi-f-worker-death";
     const WORKER_DEATH_MARKER_WAIT: Duration = Duration::from_secs(30);
 
@@ -981,10 +983,7 @@ mod enabled {
                 claim == (1, 1),
                 "retry claimed a second generation: {claim:?}"
             );
-            anyhow::ensure!(
-                setup_activity_attempted_at_least(&handle, 2).await?,
-                "fail-once setup did not retry at attempt two"
-            );
+            wait_setup_activity_attempted_at_least(&handle, 2).await?;
             self.destroy_and_wait(&env_id, &handle).await?;
             worker.stop().await?;
             println!("temporal-fencing-smoke: same-generation retry PASS");
@@ -1742,21 +1741,30 @@ mod enabled {
         }))
     }
 
-    async fn setup_activity_attempted_at_least<W>(
-        handle: &temporalio_client::WorkflowHandle<Client, W>,
-        expected_attempt: i32,
-    ) -> anyhow::Result<bool>
-    where
-        W: temporalio_common::HasWorkflowDefinition,
-    {
-        activity_attempted_at_least(handle, "EnvironmentSetupActivity", expected_attempt).await
-    }
-
     async fn activity_attempted_at_least<W>(
         handle: &temporalio_client::WorkflowHandle<Client, W>,
         activity_name: &str,
         expected_attempt: i32,
     ) -> anyhow::Result<bool>
+    where
+        W: temporalio_common::HasWorkflowDefinition,
+    {
+        Ok(activity_attempt_observation(handle, activity_name)
+            .await?
+            .maximum_attempt
+            >= expected_attempt)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ActivityAttemptObservation {
+        maximum_attempt: i32,
+        terminal: Option<String>,
+    }
+
+    async fn activity_attempt_observation<W>(
+        handle: &temporalio_client::WorkflowHandle<Client, W>,
+        activity_name: &str,
+    ) -> anyhow::Result<ActivityAttemptObservation>
     where
         W: temporalio_common::HasWorkflowDefinition,
     {
@@ -1775,16 +1783,96 @@ mod enabled {
                 .is_some_and(|kind| kind.name == activity_name))
             .then_some(event.event_id)
         });
-        let Some(scheduled) = scheduled else {
-            return Ok(false);
-        };
-        Ok(history.events().iter().any(|event| {
-            matches!(
-                event.attributes.as_ref(),
-                Some(Attributes::ActivityTaskStartedEventAttributes(started))
-                    if started.scheduled_event_id == scheduled && started.attempt >= expected_attempt
-            )
-        }))
+        let maximum_attempt = scheduled
+            .map(|scheduled| {
+                history
+                    .events()
+                    .iter()
+                    .filter_map(|event| {
+                        let Some(Attributes::ActivityTaskStartedEventAttributes(started)) =
+                            event.attributes.as_ref()
+                        else {
+                            return None;
+                        };
+                        (started.scheduled_event_id == scheduled).then_some(started.attempt)
+                    })
+                    .max()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let terminal = history
+            .events()
+            .iter()
+            .rev()
+            .find(|event| event.is_final_wf_execution_event())
+            .map(|event| format!("{:?}", event.event_type()));
+        Ok(ActivityAttemptObservation {
+            maximum_attempt,
+            terminal,
+        })
+    }
+
+    async fn wait_setup_activity_attempted_at_least<W>(
+        handle: &temporalio_client::WorkflowHandle<Client, W>,
+        expected_attempt: i32,
+    ) -> anyhow::Result<i32>
+    where
+        W: temporalio_common::HasWorkflowDefinition,
+    {
+        wait_activity_attempted_at_least(
+            "EnvironmentSetupActivity",
+            expected_attempt,
+            ATTEMPT_HISTORY_WAIT,
+            ATTEMPT_HISTORY_POLL,
+            || activity_attempt_observation(handle, "EnvironmentSetupActivity"),
+        )
+        .await
+    }
+
+    async fn wait_activity_attempted_at_least<F, Fut>(
+        activity_name: &str,
+        expected_attempt: i32,
+        timeout: Duration,
+        poll_interval: Duration,
+        mut observe: F,
+    ) -> anyhow::Result<i32>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<ActivityAttemptObservation>>,
+    {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut maximum_attempt = 0;
+        loop {
+            let observation = tokio::time::timeout_at(deadline, observe())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "{activity_name} did not reach attempt {expected_attempt} within \
+                         {}ms; maximum observed attempt={maximum_attempt}",
+                        timeout.as_millis()
+                    )
+                })?
+                .with_context(|| format!("fetch {activity_name} retry history"))?;
+            maximum_attempt = maximum_attempt.max(observation.maximum_attempt);
+            if maximum_attempt >= expected_attempt {
+                return Ok(maximum_attempt);
+            }
+            if let Some(terminal) = observation.terminal {
+                anyhow::bail!(
+                    "{activity_name} workflow became terminal before attempt {expected_attempt}: \
+                     {terminal}; maximum observed attempt={maximum_attempt}"
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "{activity_name} did not reach attempt {expected_attempt} within \
+                     {}ms; maximum observed attempt={maximum_attempt}",
+                    timeout.as_millis()
+                );
+            }
+            tokio::time::sleep_until((tokio::time::Instant::now() + poll_interval).min(deadline))
+                .await;
+        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -2042,6 +2130,120 @@ mod enabled {
             assert_eq!(
                 tracker.observe(Duration::from_secs(1), CompletionState::Complete, &1),
                 CompletionDecision::Complete
+            );
+        }
+
+        #[tokio::test]
+        async fn delayed_attempt_history_is_observed_without_weakening_retry_count() {
+            let mut observations = std::collections::VecDeque::from([
+                ActivityAttemptObservation {
+                    maximum_attempt: 1,
+                    terminal: None,
+                },
+                ActivityAttemptObservation {
+                    maximum_attempt: 2,
+                    terminal: None,
+                },
+            ]);
+            let attempt = wait_activity_attempted_at_least(
+                "EnvironmentSetupActivity",
+                2,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                || {
+                    std::future::ready(Ok(observations
+                        .pop_front()
+                        .expect("fixture supplies the delayed history")))
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(attempt, 2);
+            assert!(observations.is_empty());
+        }
+
+        #[tokio::test]
+        async fn missing_retry_expires_with_maximum_attempt_diagnostic() {
+            let error = wait_activity_attempted_at_least(
+                "EnvironmentSetupActivity",
+                2,
+                Duration::ZERO,
+                Duration::ZERO,
+                || {
+                    std::future::ready(Ok(ActivityAttemptObservation {
+                        maximum_attempt: 1,
+                        terminal: None,
+                    }))
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "EnvironmentSetupActivity did not reach attempt 2 within 0ms; \
+                 maximum observed attempt=1"
+            );
+        }
+
+        #[tokio::test]
+        async fn terminal_history_fails_before_waiting_for_retry() {
+            let error = wait_activity_attempted_at_least(
+                "EnvironmentSetupActivity",
+                2,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                || {
+                    std::future::ready(Ok(ActivityAttemptObservation {
+                        maximum_attempt: 1,
+                        terminal: Some("WorkflowExecutionFailed".to_string()),
+                    }))
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "EnvironmentSetupActivity workflow became terminal before attempt 2: \
+                 WorkflowExecutionFailed; maximum observed attempt=1"
+            );
+        }
+
+        #[tokio::test]
+        async fn history_fetch_error_remains_terminal_for_the_fixture() {
+            let error = wait_activity_attempted_at_least(
+                "EnvironmentSetupActivity",
+                2,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                || std::future::ready(Err(anyhow::anyhow!("history unavailable"))),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "fetch EnvironmentSetupActivity retry history"
+            );
+            assert_eq!(
+                format!("{error:#}"),
+                "fetch EnvironmentSetupActivity retry history: history unavailable"
+            );
+        }
+
+        #[tokio::test]
+        async fn hung_history_fetch_cannot_escape_attempt_deadline() {
+            let error = wait_activity_attempted_at_least(
+                "EnvironmentSetupActivity",
+                2,
+                Duration::from_millis(1),
+                Duration::ZERO,
+                || std::future::pending(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "EnvironmentSetupActivity did not reach attempt 2 within 1ms; \
+                 maximum observed attempt=0"
             );
         }
     }
