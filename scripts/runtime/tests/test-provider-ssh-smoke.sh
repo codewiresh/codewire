@@ -26,6 +26,7 @@ fixture() {
   SMOKE_TIMEOUT_SECONDS=1; SMOKE_EXEC_TIMEOUT=1
   ENV_ID=33333333-3333-4333-8333-333333333333
   PROVIDER_SSH_CREDENTIAL_ID="$KEY_ID"
+  PROVIDER_SSH_PROFILE_ID="$PROFILE_ID"
   unset CODEWIRE_API_KEY CODEWIRE_DEV_SMOKE_API_KEY
   FAILURE=''
   : >"$TMPDIR_SMOKE/calls"
@@ -35,6 +36,16 @@ cw_with_timeout() { shift; cw "$@"; }
 cw() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   case "$*" in
+    'env --platform info '*" --output json")
+      [[ "$4" == "$ENV_ID" ]] || fail 'inspected a different environment'
+      [[ "$FAILURE" != info ]] || return 1
+      local id="$ENV_ID" profile="platform:id:$PROFILE_ID" revision=1
+      [[ "$FAILURE" != wrong-environment ]] || id="$KEY_ID"
+      [[ "$FAILURE" != wrong-profile ]] || profile="platform:id:$KEY_ID"
+      [[ "$FAILURE" != wrong-revision ]] || revision=2
+      [[ "$FAILURE" != missing-revision ]] || revision=null
+      jq -n --arg id "$id" --arg profile "$profile" --argjson revision "$revision" \
+        '{id:$id,source_selection:{credentials:{profile:$profile},profile_revision:$revision}}' ;;
     'run --no-tty '*" public-host-key") printf '%s\n' "$HOST_KEY" ;;
     'run --no-tty '*" prove "*)
       [[ "$8" == "$HOST_KEY" ]] || fail 'changed host trust'
@@ -111,7 +122,8 @@ done
 fixture
 run_provider_ssh_smoke
 pass
-for failure in proof empty-proof bad-revoke denial empty-denial new-launch; do
+for failure in info wrong-environment wrong-profile wrong-revision missing-revision \
+    proof empty-proof bad-revoke denial empty-denial new-launch; do
   invalid_journey() { fixture; FAILURE="$failure"; run_provider_ssh_smoke; }
   expect_failure "$failure" invalid_journey
 done

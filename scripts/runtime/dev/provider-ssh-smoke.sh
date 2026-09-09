@@ -109,6 +109,14 @@ prepare_provider_ssh() {
 run_provider_ssh_smoke() {
   run_kube_assertions
   wait_for_cw_run
+  cw_with_timeout 30 env --platform info "$ENV_ID" --output json \
+    >"$TMPDIR_SMOKE/provider-ssh-environment.json" 2>"$TMPDIR_SMOKE/provider-ssh-info.err" ||
+    die 'cannot inspect the SSH environment binding'
+  jq -e --arg id "$ENV_ID" --arg profile "platform:id:$PROVIDER_SSH_PROFILE_ID" '
+    .id == $id and .source_selection.credentials.profile == $profile and
+    .source_selection.profile_revision == 1
+  ' "$TMPDIR_SMOKE/provider-ssh-environment.json" >/dev/null ||
+    die 'SSH environment did not acknowledge the exact selected profile and revision'
   # Host trust comes from the authenticated managed execution channel, never
   # from an unauthenticated first SSH connection or ssh-keyscan.
   cw_with_timeout 30 run --no-tty "$ENV_ID" -- /bin/bash "$PROVIDER_SSH_SCRIPT" public-host-key \
