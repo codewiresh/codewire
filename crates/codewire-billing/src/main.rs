@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
     let auth = AuthState { pool: pool.clone() };
+    let email = EmailClient::from_env().await?;
 
     let state = BillingState {
         pool: pool.clone(),
@@ -52,8 +53,7 @@ async fn main() -> anyhow::Result<()> {
         // existing handle fail-closed for a deployment misconfiguration; it is
         // not a BillingCatalogService wire outcome.
         stripe: StripeHandle::from_env(),
-        // Emails are disabled without RESEND_API_KEY, same as Go.
-        email: EmailClient::new(std::env::var("RESEND_API_KEY").unwrap_or_default()),
+        email: email.clone(),
         frontend_origin: FrontendOrigin::parse(
             &std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:5173".to_string()),
         )?,
@@ -67,9 +67,7 @@ async fn main() -> anyhow::Result<()> {
         let deps = Arc::new(codewire_billing::metering::MeteringDeps {
             pool: pool.clone(),
             stripe: Arc::new(StripeHandle::from_env()),
-            email: Arc::new(EmailClient::new(
-                std::env::var("RESEND_API_KEY").unwrap_or_default(),
-            )),
+            email: Arc::new(email),
             database_url: cfg.database_url.clone(),
         });
         codewire_billing::metering::start_loops(deps, &loops);

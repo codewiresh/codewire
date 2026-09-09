@@ -23,6 +23,7 @@ path = "src/lib.rs"
 codewire-admin-proto = { workspace = true }
 codewire-proto = { workspace = true }
 codewire-server-core = { workspace = true }
+codewire-email = { workspace = true }
 
 axum = { workspace = true }
 tokio = { workspace = true }

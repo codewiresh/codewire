@@ -66,7 +66,7 @@ Codewire is in private beta. Invite codes are distributed by existing users or t
 <details>
 <summary>I didn't receive my verification email</summary>
 
-Check your spam/junk folder. You can resend the verification email from the login page. Make sure you entered the correct email during signup.
+Check your spam/junk folder. You can send the verification email again from the login page. Make sure you entered the correct email during signup.
 
 </details>
 

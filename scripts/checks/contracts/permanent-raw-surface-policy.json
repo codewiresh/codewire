@@ -5,6 +5,8 @@
     "/.well-known/jwks.json",
     "/.well-known/oauth-authorization-server",
     "/.well-known/openid-configuration",
+    "/api/admin/accounts",
+    "/api/admin/accounts/{user_id}/enabled",
     "/api/auth/forget-password",
     "/api/auth/get-session",
     "/api/auth/reset-password",

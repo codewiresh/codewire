@@ -38,7 +38,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{NaiveDateTime, Utc};
+use chrono::{Duration, NaiveDateTime, Utc};
+use codewire_email::EmailClient;
 use codewire_server_core::auth::{
     api_key_prefix, hash_api_key, hash_session_token, touch_api_key_last_used_best_effort,
 };
@@ -55,6 +56,10 @@ use std::sync::Arc;
 use argon2::password_hash::SaltString;
 use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 
+use crate::email_password::{
+    VerificationPurpose, create_verification_in_transaction, send_verification_email,
+};
+
 /// Web session lifetime: 8 hours (`auth.SessionDuration`, 28800s).
 pub(crate) const SESSION_DURATION_SECS: i64 = 8 * 60 * 60;
 /// Account lockout window after 5 failed sign-ins: 15 minutes.
@@ -67,15 +72,20 @@ pub(crate) const MAX_FAILED_ATTEMPTS: i32 = 5;
 const SIGNUP_INVITE_CODE_HASHES_ENV: &str = "IDP_SIGNUP_INVITE_CODE_HASHES";
 const SHA256_DIGEST_BYTES: usize = 32;
 const SHA256_HEX_CHARS: usize = SHA256_DIGEST_BYTES * 2;
+const MAX_ACCESS_REASON_CHARS: usize = 2_000;
+const MAX_TURNSTILE_TOKEN_BYTES: usize = 2_048;
+const TURNSTILE_SITEVERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 /// Configuration-owned signup invite policy.
 ///
-/// An empty hash list is an explicit open-signup policy for backward
-/// compatibility. A configured policy stores only fixed-size SHA-256 digests;
-/// plaintext invite codes are never retained.
+/// Runtime configuration sends signups through access review when the hash
+/// list is empty. Trusted tests can opt into the explicit open-signup policy.
+/// A configured policy stores only fixed-size SHA-256 digests; plaintext
+/// invite codes are never retained.
 #[derive(Clone, Default)]
 pub struct SignupInvitePolicy {
     accepted_hashes: Arc<[[u8; SHA256_DIGEST_BYTES]]>,
+    open_signup: bool,
 }
 
 impl fmt::Debug for SignupInvitePolicy {
@@ -83,23 +93,26 @@ impl fmt::Debug for SignupInvitePolicy {
         formatter
             .debug_struct("SignupInvitePolicy")
             .field("configured", &self.is_configured())
+            .field("open_signup", &self.open_signup)
             .field("accepted_hash_count", &self.accepted_hashes.len())
             .finish()
     }
 }
 
 impl SignupInvitePolicy {
-    /// Construct the explicit open-signup policy used when no hashes are
-    /// configured.
+    /// Construct the explicit open-signup policy used by trusted tests.
     pub fn open() -> Self {
-        Self::default()
+        Self {
+            accepted_hashes: Arc::default(),
+            open_signup: true,
+        }
     }
 
     /// Parse an optional comma-separated list of lowercase SHA-256 hex
-    /// digests. Absent or whitespace-only input selects open signup.
+    /// digests. Absent or whitespace-only input selects access review.
     pub fn from_sha256_hashes(value: Option<&str>) -> anyhow::Result<Self> {
         let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-            return Ok(Self::open());
+            return Ok(Self::default());
         };
 
         let mut accepted_hashes = Vec::new();
@@ -113,6 +126,7 @@ impl SignupInvitePolicy {
 
         Ok(Self {
             accepted_hashes: accepted_hashes.into(),
+            open_signup: false,
         })
     }
 
@@ -122,8 +136,11 @@ impl SignupInvitePolicy {
     }
 
     fn accepts(&self, invite_code: &str) -> bool {
-        if !self.is_configured() {
+        if self.open_signup {
             return true;
+        }
+        if !self.is_configured() || invite_code.is_empty() {
+            return false;
         }
 
         let candidate: [u8; SHA256_DIGEST_BYTES] = Sha256::digest(invite_code.as_bytes()).into();
@@ -173,16 +190,30 @@ fn constant_time_digest_eq(
     u8::from(difference == 0)
 }
 
-/// State for the session-auth handlers: the pool, the cookie `Secure`
-/// flag (HTTPS frontends only, mirroring Go's
-/// `secure := strings.HasPrefix(cfg.FrontendURL, "https")`), and the
-/// frontend URL (kept for parity with the other handler groups even
-/// though these four handlers don't build links).
+#[derive(Clone)]
+enum HumanVerification {
+    /// `router` is retained as a trusted in-process test entrypoint.
+    TrustedTest,
+    /// Production configuration intentionally fails closed until its
+    /// Turnstile secret is delivered.
+    Unavailable,
+    Configured {
+        secret: String,
+        hostname: String,
+    },
+}
+
+/// State for the session-auth handlers: the pool, cookie policy, and signup
+/// delivery/verification configuration.
 #[derive(Clone)]
 pub struct SessionAuthState {
     pub pool: PgPool,
     pub secure: bool,
     signup_invite_policy: SignupInvitePolicy,
+    frontend_url: String,
+    email: EmailClient,
+    human_verification: HumanVerification,
+    http: reqwest::Client,
 }
 
 impl FromRef<SessionAuthState> for PgPool {
@@ -201,6 +232,10 @@ pub(crate) struct SignUpRequest {
     name: String,
     #[serde(default)]
     invite_code: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default, rename = "turnstile_token", alias = "cf-turnstile-response")]
+    turnstile_token: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -274,6 +309,32 @@ pub(crate) struct SignInResponseBody {
     two_factor_token: String,
 }
 
+/// Signup returns the normal session-shaped response for an immediately
+/// admitted invite, or an accepted pending-access response with no session.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct SignUpResponseBody {
+    user: UserResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<SessionResponse>,
+    #[serde(rename = "accessPending", skip_serializing_if = "is_false")]
+    access_pending: bool,
+}
+
+#[derive(Serialize)]
+struct TurnstileValidationRequest<'a> {
+    secret: &'a str,
+    response: &'a str,
+}
+
+#[derive(Clone, Deserialize)]
+struct TurnstileValidationResponse {
+    success: bool,
+    #[serde(default)]
+    hostname: String,
+    #[serde(default)]
+    action: String,
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -297,6 +358,24 @@ pub(crate) struct UserAuthRow {
     pub(crate) enabled: bool,
     pub(crate) locked_until: Option<NaiveDateTime>,
     pub(crate) created_at: Option<NaiveDateTime>,
+}
+
+/// A disabled, unverified account that is waiting for an administrator to
+/// review an access request. This projection is deliberately separate from
+/// the sign-in row so the retry path can lock and re-check every state that
+/// makes an email reissue safe.
+#[derive(sqlx::FromRow)]
+struct PendingAccessSignupRow {
+    id: String,
+    email: String,
+    email_verified: bool,
+    name: Option<String>,
+    image: Option<String>,
+    is_admin: bool,
+    two_factor_enabled: bool,
+    enabled: bool,
+    access_reason: Option<String>,
+    created_at: NaiveDateTime,
 }
 
 #[derive(sqlx::FromRow)]
@@ -653,6 +732,181 @@ pub(crate) fn user_response(r: UserAuthRow) -> UserResponse {
     }
 }
 
+async fn validate_turnstile(state: &SessionAuthState, token: &str) -> Result<(), AppError> {
+    let HumanVerification::Configured { secret, hostname } = &state.human_verification else {
+        return match &state.human_verification {
+            HumanVerification::TrustedTest => Ok(()),
+            HumanVerification::Unavailable => Err(AppError::ServiceUnavailable(
+                "Human verification is temporarily unavailable".into(),
+            )),
+            HumanVerification::Configured { .. } => unreachable!("matched above"),
+        };
+    };
+
+    if token.is_empty()
+        || token.len() > MAX_TURNSTILE_TOKEN_BYTES
+        || token.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(AppError::BadRequest(
+            "Complete the human verification challenge".into(),
+        ));
+    }
+
+    let response = state
+        .http
+        .post(TURNSTILE_SITEVERIFY_URL)
+        .form(&TurnstileValidationRequest {
+            secret,
+            response: token,
+        })
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "turnstile validation request failed");
+            AppError::ServiceUnavailable("Human verification is temporarily unavailable".into())
+        })?;
+    if !response.status().is_success() {
+        tracing::error!(status = %response.status(), "turnstile validation returned an error");
+        return Err(AppError::ServiceUnavailable(
+            "Human verification is temporarily unavailable".into(),
+        ));
+    }
+    let validation = response
+        .json::<TurnstileValidationResponse>()
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "turnstile validation response was invalid");
+            AppError::ServiceUnavailable("Human verification is temporarily unavailable".into())
+        })?;
+    if !turnstile_validation_matches(&validation, hostname) {
+        return Err(AppError::BadRequest(
+            "Complete the human verification challenge".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn turnstile_validation_matches(
+    validation: &TurnstileValidationResponse,
+    expected_hostname: &str,
+) -> bool {
+    validation.success
+        && validation.action == "signup"
+        && !expected_hostname.is_empty()
+        && validation.hostname == expected_hostname
+}
+
+fn pending_access_user_response(row: &PendingAccessSignupRow) -> UserResponse {
+    UserResponse {
+        id: row.id.clone(),
+        email: row.email.clone(),
+        email_verified: row.email_verified,
+        name: row.name.clone(),
+        image: row.image.clone(),
+        is_admin: row.is_admin,
+        two_factor_enabled: row.two_factor_enabled,
+        created_at: format_time(row.created_at),
+    }
+}
+
+async fn deliver_pending_signup_verification(
+    state: &SessionAuthState,
+    user: UserResponse,
+    token: String,
+) -> Result<Response, AppError> {
+    let verify_url = format!(
+        "{}/verify-email?token={token}",
+        state.frontend_url.trim_end_matches('/')
+    );
+    if let Err(error) = send_verification_email(&state.email, &user.email, &verify_url).await {
+        tracing::error!(%error, user_id = %user.id, "failed to send signup verification email");
+        return Err(AppError::ServiceUnavailable(
+            "Your access request was saved, but email delivery is temporarily unavailable. Try again shortly."
+                .into(),
+        ));
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SignUpResponseBody {
+            user,
+            session: None,
+            access_pending: true,
+        }),
+    )
+        .into_response())
+}
+
+async fn retry_pending_signup(
+    state: &SessionAuthState,
+    headers: &HeaderMap,
+    email: &str,
+) -> Result<Option<Response>, AppError> {
+    let mut tx = state.pool.begin().await.map_err(|error| {
+        tracing::error!(%error, "failed to begin pending signup retry");
+        AppError::InternalMsg("Failed to create account".into())
+    })?;
+    let user = sqlx::query_as::<_, PendingAccessSignupRow>(
+        r#"SELECT id,
+                  email,
+                  COALESCE(email_verified, false) AS email_verified,
+                  name,
+                  image,
+                  COALESCE(is_admin, false) AS is_admin,
+                  COALESCE(two_factor_enabled, false) AS two_factor_enabled,
+                  enabled,
+                  access_reason,
+                  COALESCE(created_at, NOW()) AS created_at
+           FROM users
+           WHERE email = $1
+           FOR UPDATE"#,
+    )
+    .bind(email)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "failed to load pending signup retry");
+        AppError::InternalMsg("Failed to create account".into())
+    })?;
+    let Some(user) = user else {
+        tx.commit().await.map_err(|error| {
+            tracing::error!(%error, "failed to complete pending signup retry lookup");
+            AppError::InternalMsg("Failed to create account".into())
+        })?;
+        return Ok(None);
+    };
+    if user.enabled || user.email_verified || user.access_reason.is_none() {
+        return Err(AppError::Conflict(
+            "An account with this email already exists".into(),
+        ));
+    }
+    let token = create_verification_in_transaction(
+        &mut tx,
+        &user.email,
+        VerificationPurpose::EmailVerification,
+        Duration::hours(24),
+    )
+    .await?;
+    tx.commit().await.map_err(|error| {
+        tracing::error!(%error, "failed to commit pending signup retry");
+        AppError::InternalMsg("Failed to create account".into())
+    })?;
+
+    let (ip, ua) = request_info(headers);
+    log_audit(
+        &state.pool,
+        "user.signup.access_requested.retry",
+        &user.id,
+        &ip,
+        &ua,
+        json!({ "email": &user.email }),
+        "info",
+    )
+    .await;
+    deliver_pending_signup_verification(state, pending_access_user_response(&user), token)
+        .await
+        .map(Some)
+}
+
 // --- handlers ---
 
 /// `POST /api/auth/sign-up` (public).
@@ -669,19 +923,35 @@ async fn sign_up(
     if let Err(msg) = validate_password(&req.password) {
         return Err(AppError::BadRequest(msg.into()));
     }
-    // A configured invite policy is checked before any account lookup or
-    // transaction. Missing and incorrect values deliberately share one
-    // response so the endpoint does not reveal policy contents.
-    if !state.signup_invite_policy.accepts(&req.invite_code) {
-        return Err(AppError::BadRequest("Invalid invitation code".into()));
+    validate_turnstile(&state, &req.turnstile_token).await?;
+
+    let enabled = state.signup_invite_policy.accepts(&req.invite_code);
+    let access_reason = req.reason.trim();
+    if !enabled
+        && (access_reason.is_empty() || access_reason.chars().count() > MAX_ACCESS_REASON_CHARS)
+    {
+        return Err(AppError::BadRequest(
+            "Tell us why you want to use Codewire".into(),
+        ));
+    }
+    if !enabled && !state.email.is_configured() {
+        return Err(AppError::ServiceUnavailable(
+            "Email verification is temporarily unavailable".into(),
+        ));
     }
 
-    // email-exists → 409 "An account with this email already exists".
+    // A repeated request for an unverified pending account only reissues its
+    // verification email. This makes the post-commit delivery failure
+    // recoverable without changing a password or allowing a disabled account
+    // to sign in.
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
         .bind(&req.email)
         .fetch_optional(&state.pool)
         .await?;
     if exists.is_some() {
+        if let Some(response) = retry_pending_signup(&state, &headers, &req.email).await? {
+            return Ok(response);
+        }
         return Err(AppError::Conflict(
             "An account with this email already exists".into(),
         ));
@@ -695,6 +965,7 @@ async fn sign_up(
     } else {
         Some(&req.name)
     };
+    let stored_access_reason = (!enabled).then_some(access_reason);
 
     // users + accounts in one transaction (`provider_id='credential'`,
     // `account_id=email`, `password=hash`). `created_at`/`updated_at`
@@ -706,14 +977,17 @@ async fn sign_up(
 
     let created_at: NaiveDateTime = sqlx::query_scalar(
         r#"
-        INSERT INTO users (id, email, email_verified, name, created_at, updated_at)
-        VALUES ($1, $2, false, $3, NOW(), NOW())
+        INSERT INTO users
+            (id, email, email_verified, name, enabled, access_reason, created_at, updated_at)
+        VALUES ($1, $2, false, $3, $4, $5, NOW(), NOW())
         RETURNING created_at
         "#,
     )
     .bind(&user_id)
     .bind(&req.email)
     .bind(name)
+    .bind(enabled)
+    .bind(stored_access_reason)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -739,30 +1013,44 @@ async fn sign_up(
         AppError::InternalMsg("Failed to create account".into())
     })?;
 
+    let verification_token = if enabled {
+        None
+    } else {
+        Some(
+            create_verification_in_transaction(
+                &mut tx,
+                &req.email,
+                VerificationPurpose::EmailVerification,
+                Duration::hours(24),
+            )
+            .await?,
+        )
+    };
+
     tx.commit().await.map_err(|e| {
         tracing::error!(error = %e, "failed to commit tx");
         AppError::InternalMsg("Failed to create account".into())
     })?;
 
     let (ip, ua) = request_info(&headers);
-    let created_session = create_session(&state.pool, &user_id, &ip, &ua)
-        .await
-        .map_err(|_| AppError::InternalMsg("Account created but session failed".into()))?;
-
     log_audit(
         &state.pool,
-        "user.signup",
+        if enabled {
+            "user.signup"
+        } else {
+            "user.signup.access_requested"
+        },
         &user_id,
         &ip,
         &ua,
-        json!({ "email": req.email }),
+        json!({ "email": req.email, "enabled": enabled }),
         "info",
     )
     .await;
 
     let user = UserResponse {
-        id: user_id,
-        email: req.email,
+        id: user_id.clone(),
+        email: req.email.clone(),
         email_verified: false,
         name: name.map(str::to_owned),
         image: None,
@@ -771,10 +1059,18 @@ async fn sign_up(
         created_at: format_time(created_at),
     };
 
-    let body = AuthResponse {
+    if !enabled {
+        let token = verification_token.expect("pending signups create a verification token");
+        return deliver_pending_signup_verification(&state, user, token).await;
+    }
+
+    let created_session = create_session(&state.pool, &user_id, &ip, &ua)
+        .await
+        .map_err(|_| AppError::InternalMsg("Account created but session failed".into()))?;
+    let body = SignUpResponseBody {
         user,
-        session: created_session.response,
-        skip_2fa_setup: false,
+        session: Some(created_session.response),
+        access_pending: false,
     };
     Ok(with_cookie(
         session_cookie_string(&created_session.token, state.secure),
@@ -1145,10 +1441,63 @@ fn with_cookie(cookie: String, body: impl IntoResponse) -> Response {
 /// is optional-auth) — auth is resolved inside the handlers, so no
 /// `require_auth` layer is attached.
 pub fn router(pool: PgPool, secure: bool, signup_invite_policy: SignupInvitePolicy) -> Router {
+    router_with_state(
+        pool,
+        secure,
+        signup_invite_policy,
+        String::new(),
+        EmailClient::disabled(),
+        HumanVerification::TrustedTest,
+    )
+}
+
+pub fn router_with_signup_delivery(
+    pool: PgPool,
+    secure: bool,
+    signup_invite_policy: SignupInvitePolicy,
+    frontend_url: String,
+    email: EmailClient,
+    turnstile_secret_key: String,
+) -> Router {
+    let hostname = reqwest::Url::parse(&frontend_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned));
+    let human_verification = match (turnstile_secret_key.trim().is_empty(), hostname) {
+        (false, Some(hostname)) if !hostname.is_empty() => HumanVerification::Configured {
+            secret: turnstile_secret_key,
+            hostname,
+        },
+        _ => HumanVerification::Unavailable,
+    };
+    router_with_state(
+        pool,
+        secure,
+        signup_invite_policy,
+        frontend_url,
+        email,
+        human_verification,
+    )
+}
+
+fn router_with_state(
+    pool: PgPool,
+    secure: bool,
+    signup_invite_policy: SignupInvitePolicy,
+    frontend_url: String,
+    email: EmailClient,
+    human_verification: HumanVerification,
+) -> Router {
     let state = SessionAuthState {
         pool,
         secure,
         signup_invite_policy,
+        frontend_url,
+        email,
+        human_verification,
+        http: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("static signup HTTP client configuration"),
     };
     Router::new()
         .route("/api/auth/sign-up", post(sign_up))
@@ -1167,13 +1516,17 @@ mod tests {
     }
 
     #[test]
-    fn signup_invite_policy_is_explicitly_open_without_hashes() {
+    fn signup_invite_policy_requires_review_without_hashes() {
         for value in [None, Some(""), Some("   ")] {
             let policy = SignupInvitePolicy::from_sha256_hashes(value).unwrap();
             assert!(!policy.is_configured());
-            assert!(policy.accepts(""));
-            assert!(policy.accepts("any-value"));
+            assert!(!policy.accepts(""));
+            assert!(!policy.accepts("any-value"));
         }
+
+        let open = SignupInvitePolicy::open();
+        assert!(open.accepts(""));
+        assert!(open.accepts("any-value"));
     }
 
     #[test]
@@ -1208,6 +1561,58 @@ mod tests {
             assert!(error.to_string().contains(SIGNUP_INVITE_CODE_HASHES_ENV));
             assert!(!error.to_string().contains("synthetic-invite"));
         }
+    }
+
+    #[test]
+    fn turnstile_validation_binds_success_to_action_and_hostname() {
+        let valid = TurnstileValidationResponse {
+            success: true,
+            hostname: "codewire.sh".into(),
+            action: "signup".into(),
+        };
+        assert!(turnstile_validation_matches(&valid, "codewire.sh"));
+
+        for candidate in [
+            TurnstileValidationResponse {
+                success: false,
+                ..valid.clone()
+            },
+            TurnstileValidationResponse {
+                action: "login".into(),
+                ..valid.clone()
+            },
+            TurnstileValidationResponse {
+                hostname: "example.test".into(),
+                ..valid.clone()
+            },
+        ] {
+            assert!(!turnstile_validation_matches(&candidate, "codewire.sh"));
+        }
+        assert!(!turnstile_validation_matches(&valid, ""));
+    }
+
+    #[test]
+    fn pending_access_response_preserves_review_account_identity() {
+        let row = PendingAccessSignupRow {
+            id: "pending-user".into(),
+            email: "pending@example.test".into(),
+            email_verified: false,
+            name: Some("Pending Person".into()),
+            image: None,
+            is_admin: false,
+            two_factor_enabled: false,
+            enabled: false,
+            access_reason: Some("Evaluate Codewire".into()),
+            created_at: NaiveDateTime::parse_from_str("2026-09-09 17:00:00", "%Y-%m-%d %H:%M:%S")
+                .expect("parse fixed timestamp"),
+        };
+
+        let response = pending_access_user_response(&row);
+        assert_eq!(response.id, row.id);
+        assert_eq!(response.email, row.email);
+        assert!(!response.email_verified);
+        assert_eq!(response.name.as_deref(), Some("Pending Person"));
+        assert_eq!(response.created_at, "2026-09-09T17:00:00Z");
     }
 
     #[test]
@@ -1400,6 +1805,10 @@ mod tests {
             pool,
             secure: false,
             signup_invite_policy: SignupInvitePolicy::open(),
+            frontend_url: String::new(),
+            email: EmailClient::disabled(),
+            human_verification: HumanVerification::TrustedTest,
+            http: reqwest::Client::new(),
         };
         let mut headers = HeaderMap::new();
         headers.insert(

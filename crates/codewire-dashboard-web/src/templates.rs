@@ -5,7 +5,8 @@ use crate::billing_connect::BillingPageView;
 #[cfg(test)]
 use crate::view::EnvironmentCreateFormView;
 use crate::view::{
-    ApiKeysPageView, AuthFormView, CredentialSettingsView, DashboardView, DevicePageView,
+    AccountAccessView, ApiKeysPageView, AuthFormView, CredentialSettingsView, DashboardView,
+    DevicePageView,
     EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
     OrganizationFormView, OrganizationRow, PresetsPageView, SecretBucketPageView,
     SecretProjectsPageView, SettingsPageView, SettingsPlaceholderView, SetupTwoFactorView,
@@ -21,6 +22,16 @@ pub(crate) struct HomeTemplate;
 pub(crate) struct AdminOverviewTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) stats: &'a AdminStatsView,
+}
+
+#[derive(Template)]
+#[template(path = "admin-accounts.html")]
+pub(crate) struct AdminAccountsTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) accounts: &'a [AccountAccessView],
+    pub(crate) csrf_token: &'a str,
+    pub(crate) message: &'a str,
+    pub(crate) error: &'a str,
 }
 
 #[derive(Template)]

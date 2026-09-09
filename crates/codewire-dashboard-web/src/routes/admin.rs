@@ -1,16 +1,17 @@
 use axum::{
     Form,
     extract::{Query, State},
-    http::{HeaderMap, HeaderValue},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
 use connectrpc::{ConnectError, ErrorCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     admin_connect::{self, CatalogPlanView, PlanMutation, PriceMutation},
     auth::{authenticated_identity, enforce_two_factor},
     error::WebError,
+    raw_auth::{forward_session_cookies, get_json, post_json},
     response::{error_page, login_redirect, redirect, render_page, two_factor_redirect},
     routes::{
         dashboard::{dashboard_shell_view_from_identity, select_shell_organization},
@@ -21,11 +22,14 @@ use crate::{
         with_csrf_cookie,
     },
     state::AppState,
-    templates::{AdminAuditTemplate, AdminBillingTemplate, AdminOverviewTemplate},
-    view::DashboardView,
+    templates::{
+        AdminAccountsTemplate, AdminAuditTemplate, AdminBillingTemplate, AdminOverviewTemplate,
+    },
+    view::{AccountAccessView, DashboardView},
 };
 
 const ADMIN_PATH: &str = "/admin/";
+const ACCOUNTS_PATH: &str = "/admin/accounts/";
 const AUDIT_PATH: &str = "/admin/audit/";
 const BILLING_PATH: &str = "/admin/billing/";
 
@@ -49,6 +53,41 @@ pub(super) struct AuditQuery {
     severity: String,
     #[serde(default)]
     offset: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountAccessResponse {
+    id: String,
+    email: String,
+    name: Option<String>,
+    email_verified: bool,
+    enabled: bool,
+    access_reason: Option<String>,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountAccessListResponse {
+    accounts: Vec<AccountAccessResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct SetAccountEnabledRequest {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetAccountEnabledResponse {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AccountAccessSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    user_id: String,
+    enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +181,123 @@ pub(super) async fn overview(
             stats: &stats,
         }),
         Err(error) => admin_connect_error(error, &continuation, &headers),
+    }
+}
+
+pub(super) async fn accounts(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let continuation = global_path(ACCOUNTS_PATH, &query.org);
+    let (dashboard, cookie) = match admin_context(&state, &headers, &continuation, &query.org).await
+    {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let identity =
+        match get_json::<AccountAccessListResponse>(&state, "/api/admin/accounts", cookie).await {
+            Ok(identity) => identity,
+            Err(()) => return error_page(WebError::IdentityUnavailable),
+        };
+    if identity.status == StatusCode::UNAUTHORIZED {
+        return login_redirect(&continuation, &headers);
+    }
+    if identity.status == StatusCode::FORBIDDEN {
+        return error_page(WebError::Forbidden);
+    }
+    if !identity.status.is_success() {
+        return error_page(WebError::IdentityUnavailable);
+    }
+    let Some(body) = identity.body.as_ref() else {
+        return error_page(WebError::IdentityUnavailable);
+    };
+    let accounts = body
+        .accounts
+        .iter()
+        .map(account_access_view)
+        .collect::<Vec<_>>();
+    let token = new_csrf_token();
+    let response = with_csrf_cookie(
+        render_page(AdminAccountsTemplate {
+            view: &dashboard,
+            accounts: &accounts,
+            csrf_token: &token,
+            message: account_message(&query.message),
+            error: account_error(&query.error),
+        }),
+        csrf_cookie(&state.public_origin, &token),
+    );
+    forward_session_cookies(response, &identity)
+}
+
+pub(super) async fn set_account_enabled(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<AccountAccessSubmission>,
+) -> Response {
+    let cookie = match admin_action_page_context_for(
+        &state,
+        &headers,
+        &submission.csrf,
+        &query.org,
+        ACCOUNTS_PATH,
+    )
+    .await
+    {
+        Ok((_, cookie)) => cookie,
+        Err(response) => return response,
+    };
+    if !valid_identifier(&submission.user_id) {
+        return account_redirect(&state, "", "invalid", &query.org, &headers);
+    }
+    let path = format!("/api/admin/accounts/{}/enabled", submission.user_id);
+    let identity = match post_json::<_, SetAccountEnabledResponse>(
+        &state,
+        &path,
+        Some(cookie),
+        &SetAccountEnabledRequest {
+            enabled: submission.enabled,
+        },
+    )
+    .await
+    {
+        Ok(identity) => identity,
+        Err(()) => {
+            return account_redirect(&state, "", "unavailable", &query.org, &headers);
+        }
+    };
+    match identity.status {
+        status
+            if status.is_success()
+                && identity
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| body.enabled == submission.enabled) =>
+        {
+            account_redirect(
+                &state,
+                if submission.enabled {
+                    "account-enabled"
+                } else {
+                    "account-disabled"
+                },
+                "",
+                &query.org,
+                &headers,
+            )
+        }
+        StatusCode::UNAUTHORIZED => {
+            login_redirect(&global_path(ACCOUNTS_PATH, &query.org), &headers)
+        }
+        StatusCode::FORBIDDEN => error_page(WebError::Forbidden),
+        StatusCode::NOT_FOUND => account_redirect(&state, "", "not-found", &query.org, &headers),
+        StatusCode::BAD_REQUEST => account_redirect(&state, "", "invalid", &query.org, &headers),
+        StatusCode::SERVICE_UNAVAILABLE => {
+            account_redirect(&state, "", "email-unavailable", &query.org, &headers)
+        }
+        _ => account_redirect(&state, "", "unavailable", &query.org, &headers),
     }
 }
 
@@ -533,11 +689,48 @@ async fn admin_action_page_context(
     csrf: &str,
     selected_slug: &str,
 ) -> Result<(DashboardView, HeaderValue), Response> {
+    admin_action_page_context_for(state, headers, csrf, selected_slug, BILLING_PATH).await
+}
+
+async fn admin_action_page_context_for(
+    state: &AppState,
+    headers: &HeaderMap,
+    csrf: &str,
+    selected_slug: &str,
+    path: &str,
+) -> Result<(DashboardView, HeaderValue), Response> {
     if !request_has_same_origin(headers, &state.public_origin) || !valid_csrf_token(headers, csrf) {
         return Err(error_page(WebError::CsrfRejected));
     }
-    let continuation = global_path(BILLING_PATH, selected_slug);
+    let continuation = global_path(path, selected_slug);
     admin_context(state, headers, &continuation, selected_slug).await
+}
+
+fn account_access_view(account: &AccountAccessResponse) -> AccountAccessView {
+    let name = account
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("No name supplied")
+        .to_owned();
+    let reason = account
+        .access_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("No access request supplied")
+        .to_owned();
+    AccountAccessView {
+        id: account.id.clone(),
+        email: account.email.clone(),
+        name,
+        email_verified: account.email_verified,
+        enabled: account.enabled,
+        reason,
+        has_reason: account.access_reason.is_some(),
+        created_at: account.created_at.clone(),
+    }
 }
 
 fn plan_mutation(submission: PlanSubmission) -> Option<PlanMutation> {
@@ -675,6 +868,27 @@ fn admin_redirect(
     selected_slug: &str,
     headers: &HeaderMap,
 ) -> Response {
+    admin_redirect_to(state, BILLING_PATH, message, error, selected_slug, headers)
+}
+
+fn account_redirect(
+    state: &AppState,
+    message: &str,
+    error: &str,
+    selected_slug: &str,
+    headers: &HeaderMap,
+) -> Response {
+    admin_redirect_to(state, ACCOUNTS_PATH, message, error, selected_slug, headers)
+}
+
+fn admin_redirect_to(
+    state: &AppState,
+    path: &str,
+    message: &str,
+    error: &str,
+    selected_slug: &str,
+    headers: &HeaderMap,
+) -> Response {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     if !selected_slug.is_empty() {
         query.append_pair("org", selected_slug);
@@ -686,15 +900,35 @@ fn admin_redirect(
     }
     let query = query.finish();
     let target = if query.is_empty() {
-        BILLING_PATH.to_owned()
+        path.to_owned()
     } else {
-        format!("{BILLING_PATH}?{query}")
+        format!("{path}?{query}")
     };
     let token = new_csrf_token();
     with_csrf_cookie(
         redirect(target, headers),
         csrf_cookie(&state.public_origin, &token),
     )
+}
+
+fn account_message(value: &str) -> &'static str {
+    match value {
+        "account-enabled" => "Account enabled and access email sent.",
+        "account-disabled" => "Account disabled.",
+        _ => "",
+    }
+}
+
+fn account_error(value: &str) -> &'static str {
+    match value {
+        "invalid" => "Verify the account email before enabling access.",
+        "not-found" => "The account no longer exists.",
+        "email-unavailable" => {
+            "Access was updated, but the ready email was not sent. Select Enable again to retry."
+        }
+        "unavailable" => "Account access is temporarily unavailable.",
+        _ => "",
+    }
 }
 
 fn mutation_error(error: &ConnectError) -> &'static str {

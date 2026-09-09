@@ -70,7 +70,7 @@ async fn sign_up_missing_required_fields_uses_rust_validation_envelope() {
 }
 
 #[tokio::test]
-async fn configured_signup_invite_policy_rejects_before_database_access() {
+async fn unmatched_signup_invites_enter_review_before_database_access() {
     let pool = lazy_pool();
     let accepted_hash = format!("{:x}", Sha256::digest(b"synthetic-accepted-invite"));
     let policy =
@@ -80,12 +80,15 @@ async fn configured_signup_invite_policy_rejects_before_database_access() {
 
     for invite_code in ["", "synthetic-rejected-invite"] {
         let body = format!(
-            r#"{{"email":"n@example.com","password":"CorrectHorse9#xy","invite_code":"{invite_code}"}}"#
+            r#"{{"email":"n@example.com","password":"CorrectHorse9#xy","invite_code":"{invite_code}","reason":"Evaluate isolated agent environments"}}"#
         );
         let (status, body) = post_json(app.clone(), "/api/auth/sign-up", &body).await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["detail"], "Invalid invitation code");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body["detail"],
+            "Email verification is temporarily unavailable"
+        );
     }
 }
 
@@ -95,7 +98,7 @@ async fn reset_password_missing_token_uses_rust_validation_envelope() {
     let app = codewire_idp::email_password::router(
         pool.clone(),
         "https://app.codewire.test".to_string(),
-        String::new(),
+        codewire_email::EmailClient::disabled(),
         AuthState { pool },
     );
 

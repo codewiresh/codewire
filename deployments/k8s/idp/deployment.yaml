@@ -22,6 +22,11 @@ spec:
       labels:
         app.kubernetes.io/name: codewire
         app.kubernetes.io/component: idp
+      annotations:
+        # Increment with a successful dedicated SES key rotation. Environment
+        # variables are fixed at container start, so this rolls the workload
+        # onto the verified next credential generation.
+        codewire.sh/ses-credential-generation: "1"
     spec:
       imagePullSecrets:
         - name: nexus-registry
@@ -44,6 +49,32 @@ spec:
             - secretRef:
                 name: codewire-secrets
           env:
+            # These explicit values override any broad envFrom input. The SES
+            # client rejects configured endpoint overrides and cannot use IMDS.
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
+            - name: AWS_IGNORE_CONFIGURED_ENDPOINT_URLS
+              value: "true"
+            # The IdP receives only its own SES key pair plus the activation
+            # marker. It never imports the whole Secret or billing's sender.
+            - name: CODEWIRE_SES_ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-idp-ses
+                  key: CODEWIRE_SES_ENABLED
+                  optional: false
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-idp-ses
+                  key: AWS_ACCESS_KEY_ID
+                  optional: false
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-idp-ses
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: false
             - name: IDP_PORT
               value: "8091"
             - name: IDP_SIGNING_KEK_DIR

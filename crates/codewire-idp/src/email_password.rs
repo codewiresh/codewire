@@ -3,13 +3,13 @@
 //! Owns `/api/auth/{verify-email,forget-password,reset-password,
 //! send-verification-email}`.
 
-use anyhow::{Context, bail};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, NaiveDateTime, Utc};
+use codewire_email::EmailClient;
 use codewire_server_core::auth::{AuthState, AuthUser, require_session_auth};
 use codewire_server_core::{AppError, ValidatedJson};
 use schemars::JsonSchema;
@@ -19,13 +19,11 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::auth_session::{hash_password, hex_id, hex_lower, hex_token, validate_password};
 
-const RESEND_API: &str = "https://api.resend.com/emails";
-
 #[derive(Clone)]
 pub struct EmailPasswordState {
     pool: PgPool,
     frontend_url: String,
-    resend_api_key: String,
+    email: EmailClient,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -49,6 +47,8 @@ pub(crate) struct ResetPasswordRequest {
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct VerifyEmailResponse {
     verified: bool,
+    #[serde(rename = "accessPending", skip_serializing_if = "is_false")]
+    access_pending: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -76,7 +76,7 @@ struct VerificationRow {
 }
 
 #[derive(Clone, Copy)]
-enum VerificationPurpose {
+pub(crate) enum VerificationPurpose {
     EmailVerification,
     PasswordReset,
 }
@@ -94,14 +94,6 @@ impl VerificationPurpose {
 struct EmailUserRow {
     email: String,
     email_verified: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct ResendRequest<'a> {
-    from: &'static str,
-    to: Vec<&'a str>,
-    subject: &'static str,
-    html: String,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -145,6 +137,39 @@ async fn create_verification(
     Ok(token)
 }
 
+pub(crate) async fn create_verification_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    email: &str,
+    purpose: VerificationPurpose,
+    expires_in: Duration,
+) -> Result<String, AppError> {
+    let id = hex_id();
+    let token = hex_token();
+    let token_hash = verification_token_hash(purpose, &token);
+    let now = Utc::now().naive_utc();
+    let expires_at = now + expires_in;
+
+    sqlx::query(
+        r#"INSERT INTO verifications
+               (id, identifier, purpose, token_hash, expires_at, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $6)"#,
+    )
+    .bind(&id)
+    .bind(email)
+    .bind(purpose.as_str())
+    .bind(&token_hash)
+    .bind(expires_at)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "failed to create verification");
+        AppError::InternalMsg("Failed to send verification".into())
+    })?;
+
+    Ok(token)
+}
+
 fn verification_token_hash(purpose: VerificationPurpose, token: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"codewire/idp/verification/v1\0");
@@ -171,35 +196,11 @@ async fn claim_verification(
     .await
 }
 
-async fn send_resend_email(
-    api_key: &str,
+async fn send_password_reset_email(
+    email: &EmailClient,
     to: &str,
-    subject: &'static str,
-    html: String,
+    reset_url: &str,
 ) -> anyhow::Result<()> {
-    let req = ResendRequest {
-        from: "Codewire <ops@example.invalid>",
-        to: vec![to],
-        subject,
-        html,
-    };
-
-    let resp = reqwest::Client::new()
-        .post(RESEND_API)
-        .bearer_auth(api_key)
-        .json(&req)
-        .send()
-        .await
-        .context("send email")?;
-    let status = resp.status();
-    if status.is_client_error() || status.is_server_error() {
-        let body = resp.text().await.unwrap_or_default();
-        bail!("resend API error {}: {}", status.as_u16(), body);
-    }
-    Ok(())
-}
-
-async fn send_password_reset_email(api_key: &str, to: &str, reset_url: &str) -> anyhow::Result<()> {
     let html = format!(
         r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
 	<h2>Reset your password</h2>
@@ -208,10 +209,16 @@ async fn send_password_reset_email(api_key: &str, to: &str, reset_url: &str) -> 
 	<p style="color: #666; font-size: 14px;">This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>
 </div>"#
     );
-    send_resend_email(api_key, to, "Reset your Codewire password", html).await
+    email
+        .send_html(to, "Reset your Codewire password", &html)
+        .await
 }
 
-async fn send_verification_email(api_key: &str, to: &str, verify_url: &str) -> anyhow::Result<()> {
+pub(crate) async fn send_verification_email(
+    email: &EmailClient,
+    to: &str,
+    verify_url: &str,
+) -> anyhow::Result<()> {
     let html = format!(
         r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
 	<h2>Verify your email</h2>
@@ -220,7 +227,40 @@ async fn send_verification_email(api_key: &str, to: &str, verify_url: &str) -> a
 	<p style="color: #666; font-size: 14px;">This link expires in 24 hours.</p>
 </div>"#
     );
-    send_resend_email(api_key, to, "Verify your Codewire email", html).await
+    email
+        .send_html(to, "Verify your Codewire email", &html)
+        .await
+}
+
+pub(crate) async fn send_access_request_received_email(
+    email: &EmailClient,
+    to: &str,
+) -> anyhow::Result<()> {
+    let html = r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+	<h2>Your Codewire email is verified</h2>
+	<p>We received your request for Codewire access. We will email you when your account is enabled.</p>
+</div>"#
+        .to_owned();
+    email
+        .send_html(to, "Your Codewire access request is verified", &html)
+        .await
+}
+
+pub(crate) async fn send_access_enabled_email(
+    email: &EmailClient,
+    to: &str,
+    login_url: &str,
+) -> anyhow::Result<()> {
+    let html = format!(
+        r#"<div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+	<h2>Your Codewire account is enabled</h2>
+	<p>Your access is ready. Sign in to finish setting up your account.</p>
+	<p><a href="{login_url}" style="display: inline-block; padding: 12px 24px; background: #171717; color: #fff; text-decoration: none; border-radius: 999px;">Sign in to Codewire</a></p>
+</div>"#
+    );
+    email
+        .send_html(to, "Your Codewire access is ready", &html)
+        .await
 }
 
 async fn verify_email(
@@ -248,20 +288,34 @@ async fn verify_email(
         return Err(bad_request("Verification token has expired"));
     }
 
-    sqlx::query("UPDATE users SET email_verified = true, updated_at = NOW() WHERE email = $1")
-        .bind(&row.identifier)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to verify email");
-            AppError::InternalMsg("Failed to verify email".into())
-        })?;
+    let access_pending: bool = sqlx::query_scalar(
+        "UPDATE users SET email_verified = true, updated_at = NOW() WHERE email = $1 \
+         RETURNING NOT enabled AND access_reason IS NOT NULL",
+    )
+    .bind(&row.identifier)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "failed to verify email");
+        AppError::InternalMsg("Failed to verify email".into())
+    })?
+    .ok_or_else(|| bad_request("Invalid or expired verification token"))?;
     tx.commit().await.map_err(|e| {
         tracing::error!(error = %e, "failed to commit email verification");
         AppError::InternalMsg("Failed to verify email".into())
     })?;
 
-    Ok(Json(VerifyEmailResponse { verified: true }))
+    if access_pending
+        && state.email.is_configured()
+        && let Err(error) = send_access_request_received_email(&state.email, &row.identifier).await
+    {
+        tracing::error!(%error, "failed to send access request receipt");
+    }
+
+    Ok(Json(VerifyEmailResponse {
+        verified: true,
+        access_pending,
+    }))
 }
 
 async fn forget_password(
@@ -291,10 +345,10 @@ async fn forget_password(
         {
             Ok(token) => {
                 let reset_url = format!("{}/reset-password?token={}", state.frontend_url, token);
-                if state.resend_api_key.is_empty() {
-                    tracing::warn!(email = %req.email, "RESEND_API_KEY not set, skipping password reset email");
+                if !state.email.is_configured() {
+                    tracing::warn!(email = %req.email, "SES email delivery is not configured, skipping password reset email");
                 } else if let Err(e) =
-                    send_password_reset_email(&state.resend_api_key, &req.email, &reset_url).await
+                    send_password_reset_email(&state.email, &req.email, &reset_url).await
                 {
                     tracing::error!(email = %req.email, error = %e, "failed to send password reset email");
                 }
@@ -390,11 +444,9 @@ async fn send_verification(
     )
     .await?;
     let verify_url = format!("{}/verify-email?token={}", state.frontend_url, token);
-    if state.resend_api_key.is_empty() {
-        tracing::warn!(email = %row.email, "RESEND_API_KEY not set, skipping verification email");
-    } else if let Err(e) =
-        send_verification_email(&state.resend_api_key, &row.email, &verify_url).await
-    {
+    if !state.email.is_configured() {
+        tracing::warn!(email = %row.email, "SES email delivery is not configured, skipping verification email");
+    } else if let Err(e) = send_verification_email(&state.email, &row.email, &verify_url).await {
         tracing::error!(email = %row.email, error = %e, "failed to send verification email");
         return Err(AppError::InternalMsg(
             "Failed to send verification email".into(),
@@ -407,16 +459,11 @@ async fn send_verification(
     }))
 }
 
-pub fn router(
-    pool: PgPool,
-    frontend_url: String,
-    resend_api_key: String,
-    auth: AuthState,
-) -> Router {
+pub fn router(pool: PgPool, frontend_url: String, email: EmailClient, auth: AuthState) -> Router {
     let state = EmailPasswordState {
         pool,
         frontend_url,
-        resend_api_key,
+        email,
     };
 
     let required = Router::new()

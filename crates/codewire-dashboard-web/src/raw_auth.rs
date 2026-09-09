@@ -15,6 +15,25 @@ pub(crate) struct IdentityResponse<T> {
     set_cookies: Vec<HeaderValue>,
 }
 
+pub(crate) async fn get_json<O>(
+    state: &AppState,
+    path: &str,
+    cookie: HeaderValue,
+) -> Result<IdentityResponse<O>, ()>
+where
+    O: DeserializeOwned,
+{
+    debug_assert!(path.starts_with('/'));
+    let response = state
+        .http
+        .get(format!("{}{}", state.identity_origin_string, path))
+        .header(header::COOKIE, cookie)
+        .send()
+        .await
+        .map_err(|_| ())?;
+    decode_identity_response(response).await
+}
+
 pub(crate) async fn post_json<I, O>(
     state: &AppState,
     path: &str,
@@ -34,6 +53,13 @@ where
         request = request.header(header::COOKIE, cookie);
     }
     let response = request.send().await.map_err(|_| ())?;
+    decode_identity_response(response).await
+}
+
+async fn decode_identity_response<O>(response: reqwest::Response) -> Result<IdentityResponse<O>, ()>
+where
+    O: DeserializeOwned,
+{
     if response
         .content_length()
         .is_some_and(|length| length > MAX_IDENTITY_RESPONSE_BYTES)
@@ -88,6 +114,9 @@ pub(crate) fn user_message(status: StatusCode, operation: &'static str) -> &'sta
             "Too many sign-in attempts. Wait a few minutes and try again."
         }
         (StatusCode::CONFLICT, "sign-up") => "An account with this email already exists.",
+        (StatusCode::SERVICE_UNAVAILABLE, "sign-up") => {
+            "Your request was saved, but verification email delivery is temporarily unavailable. Complete the challenge and submit again shortly."
+        }
         (StatusCode::BAD_REQUEST, "reset-password") => {
             "The reset link is invalid or expired, or the password does not meet the requirements."
         }

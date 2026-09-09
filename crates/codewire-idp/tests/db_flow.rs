@@ -320,7 +320,7 @@ async fn native_clients_full_flow_against_postgres() {
     let cfg = IdpConfig {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
-        resend_api_key: String::new(),
+        turnstile_secret_key: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
@@ -758,7 +758,7 @@ async fn oidc_access_token_authenticates_product_api_against_postgres() {
     let cfg = IdpConfig {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
-        resend_api_key: String::new(),
+        turnstile_secret_key: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
@@ -1091,7 +1091,7 @@ async fn provider_startup_publishes_jwks_before_token_issuance() {
         let cfg = IdpConfig {
             issuer: "https://idp.codewire.test".into(),
             frontend_url: "https://app.codewire.test".into(),
-            resend_api_key: String::new(),
+            turnstile_secret_key: String::new(),
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
@@ -1702,7 +1702,7 @@ async fn jwk_final_schema_uses_only_envelopes_and_fails_closed() {
         let cfg = IdpConfig {
             issuer: "https://idp.codewire.test".into(),
             frontend_url: "https://app.codewire.test".into(),
-            resend_api_key: String::new(),
+            turnstile_secret_key: String::new(),
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
@@ -1894,7 +1894,7 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
     let cfg = IdpConfig {
         issuer: "https://idp.codewire.test".into(),
         frontend_url: "https://app.codewire.test".into(),
-        resend_api_key: String::new(),
+        turnstile_secret_key: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         scopes_supported: vec![
             "openid".into(),
@@ -2754,24 +2754,28 @@ async fn session_auth_flow_against_postgres() {
             .unwrap();
     let app = codewire_idp::auth_session::router(pool.clone(), false, invite_policy);
 
-    // 1. A wrong configured invite fails before any user is inserted.
+    // 1. A wrong configured invite enters review and fails closed when review
+    // email delivery is unavailable, before any user is inserted.
     let (st, body, _) = sess_req(
         &app,
         "POST",
         "/api/auth/sign-up",
         None,
         &format!(
-            r#"{{"email":"{email}","password":"{pw}","name":"Sess Flow","invite_code":"synthetic-wrong-invite"}}"#
+            r#"{{"email":"{email}","password":"{pw}","name":"Sess Flow","invite_code":"synthetic-wrong-invite","reason":"Evaluate session persistence"}}"#
         ),
     )
     .await;
-    assert_eq!(st, 400, "invalid invite: {body}");
+    assert_eq!(st, 503, "review request without email delivery: {body}");
     let inserted: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email=$1")
         .bind(email)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(inserted, 0, "invalid invite must not create an account");
+    assert_eq!(
+        inserted, 0,
+        "undeliverable review request must not create an account"
+    );
 
     // 2. A configured valid invite signs up and returns a session.
     let (st, body, cookie) = sess_req(
@@ -3124,12 +3128,12 @@ async fn email_password_flow_against_postgres() {
     let app = codewire_idp::email_password::router(
         pool.clone(),
         "https://app.codewire.test".to_string(),
-        String::new(),
+        codewire_email::EmailClient::disabled(),
         AuthState { pool: pool.clone() },
     );
 
     // 1. Authenticated send-verification-email creates a 24h token but
-    // succeeds without RESEND_API_KEY.
+    // succeeds without SES delivery configuration.
     let (st, body, _) = sess_req(
         &app,
         "POST",
@@ -3236,7 +3240,7 @@ async fn email_password_flow_against_postgres() {
     assert_eq!(missing_rows, 0);
 
     // 5. Existing email creates a 1h reset token and still returns
-    // {sent:true} without RESEND_API_KEY.
+    // {sent:true} without SES delivery configuration.
     let (st, body, _) = sess_req(
         &app,
         "POST",

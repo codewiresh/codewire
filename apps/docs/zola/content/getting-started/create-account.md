@@ -35,7 +35,7 @@ After signing up, you'll receive a verification email. Click the link to activat
 ### Didn't receive the email?
 
 - Check your spam or junk folder
-- Use the **Resend verification email** option on the login page
+- Use the **Send verification email again** option on the login page
 - Make sure you entered the correct email address during signup
 
 ## Set up two-factor authentication
