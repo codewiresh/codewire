@@ -375,6 +375,14 @@ async fn cancellation_does_not_reopen_blocking_projection_capacity() {
     assert_eq!(store.reads.load(Ordering::Relaxed), 1);
     drop(release);
     let _barrier = service.projection_operations.acquire().await.unwrap();
+    // The worker drops the capacity permit before its lifetime guard. Capacity
+    // returning is not a barrier for channel drain; wait for that separately.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        service.refresh_lifetime.close_and_wait(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         service
             .refresh_lifetime
