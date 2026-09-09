@@ -7,7 +7,7 @@ CREATE ROLE codewire_credential_broker LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
     PASSWORD 'kind-credential-broker-synthetic-only';
 GRANT CONNECT ON DATABASE codewire TO codewire_credential_broker;
 GRANT USAGE ON SCHEMA public TO codewire_credential_broker;
-GRANT SELECT (id,is_admin) ON public.users TO codewire_credential_broker;
+GRANT SELECT (id,is_admin,enabled) ON public.users TO codewire_credential_broker;
 GRANT SELECT (id,deletion_state) ON public.organizations TO codewire_credential_broker;
 GRANT SELECT (id,org_id,user_id,role) ON public.org_members TO codewire_credential_broker;
 GRANT SELECT (id,created_by,org_id,type,state,desired_state,deletion_requested_at,environment_operation_generation)

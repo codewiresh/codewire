@@ -326,6 +326,35 @@ only the disposable application `public` schema; its test preserves another
 schema. Cluster roles, other databases and external OpenBao keys remain outside
 this boundary. This is not authority for a live reset.
 
+### Account-access revocation
+
+Migration `0024_account_access.sql` adds `users.enabled` and an optional
+operator-facing access reason. Existing users default to enabled. Changing an
+enabled account to disabled atomically revokes browser sessions, authorization
+codes, opaque OAuth access/refresh tokens, bound device grants, and pending
+2FA challenges; it retires API keys. New capability inserts and subject-binding
+application paths take the user lock before they write. The six corresponding
+`user_id` indexes keep each revocation predicate bounded to the account being
+disabled. A rolling predecessor transition may already hold its capability row,
+so its database guard uses a non-waiting user lock and returns a retriable
+lock-conflict result when disablement owns the account row. That avoids a
+capability-to-user cycle while preserving the rule that an issuer which wins
+first is purged and an issuer that arrives after disablement cannot issue
+access.
+
+The version-24 ledger is not compatible with starting a version-23 service.
+SQLx must reject missing migration history; the trigger fence is only for
+writers already participating during a rolling deployment, not executable
+same-database source rollback. There is no in-place downgrade. After stopping
+the new writers, rollback to version 23 recreates only the disposable
+application `public` schema and replays the selected prior source's embedded
+history. The rollback fixture proves that the account-access columns, triggers,
+indexes, and version-24 helper replacement disappear while a separate schema
+survives. The upgrade matrix pins version-23 bytes and proves index inventory,
+both-order predecessor transitions, current device/2FA completion ordering, and
+the no-resurrection boundary. It does not authorize a live reset,
+migration-ledger rewrite, cluster change, or credential operation.
+
 ## Mesh Database
 
 Issue #823 was implemented by PR #835. Mesh uses:

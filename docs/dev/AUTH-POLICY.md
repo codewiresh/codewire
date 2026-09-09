@@ -52,6 +52,43 @@ to bootstrap gateway binding.
   context. Credential values never belong in protobuf fields, logs, traces,
   metrics, errors, retries, persistence, or response metadata.
 
+## Account access revocation
+
+`users.enabled = false` is a security revocation boundary. The disabling
+transaction deletes Codewire-issued browser sessions, authorization codes,
+opaque OAuth access and refresh tokens, bound device approvals, and pending
+2FA challenges. It retires API keys by setting `disabled_at` and clamping their
+expiry; their rows remain only as disabled, expired records. Six targeted
+`user_id` indexes keep those revocation predicates bounded to the affected
+account. Database guards also reject issuance for a disabled subject from a
+predecessor-shaped writer during a rolling deployment. A predecessor ownership
+transition that already holds its capability row fails promptly while a
+disablement holds the account row, rather than allowing a lock cycle to choose
+the winner.
+Re-enabling an account requires fresh authentication and cannot revive any of
+those prior bearer capabilities. An older service binary cannot start against
+the version-24 SQLx ledger; its supported rollback boundary is the disposable
+application-schema rebuild documented in `DATABASE-MIGRATIONS.md`.
+
+The boundary does not erase account identity factors or user-owned
+configuration. A pending device request with no user bound to it has no subject
+to revoke; it can only be approved after a newly authenticated enabled account
+action. A previously bound approval is deleted on disablement.
+
+An ID token is a signed, self-contained assertion. Built-in public clients
+issue one-hour ID tokens, and a third party that validates one offline cannot be
+notified retroactively of an account disable. Codewire product APIs do not
+accept ID tokens as user credentials; they validate the revocable opaque access
+token store. Relying parties that need live account status must use token
+introspection instead of offline ID-token validation.
+
+Disablement is checked when Codewire authenticates a new request or begins a
+new stream. This migration does not forcibly terminate an already admitted
+terminal, exec, file, or other long-lived stream; that residual authority lasts
+only until the stream's existing closure or reauthorization boundary. A future
+active-stream revocation feature must explicitly close those connections rather
+than claiming that database token revocation does so.
+
 ## Client use
 
 - The dashboard uses connect-es/connect-query with the same-origin session

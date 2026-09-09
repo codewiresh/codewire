@@ -77,7 +77,7 @@ impl Harness {
                 format!("CONNECT ON DATABASE {}", quote(&name)),
                 "USAGE ON SCHEMA public".into(),
                 "SELECT ON public.platform_credentials".into(),
-                "SELECT (id,is_admin) ON public.users".into(),
+                "SELECT (id,is_admin,enabled) ON public.users".into(),
                 "SELECT (id,deletion_state) ON public.organizations".into(),
                 "SELECT (token_hash,user_id,client_id,scopes,expires_at) ON public.oidc_access_tokens".into(),
                 "SELECT (id,disabled) ON public.oidc_clients".into(),

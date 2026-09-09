@@ -294,6 +294,7 @@ pub(crate) struct UserAuthRow {
     pub(crate) image: Option<String>,
     pub(crate) is_admin: Option<bool>,
     pub(crate) two_factor_enabled: Option<bool>,
+    pub(crate) enabled: bool,
     pub(crate) locked_until: Option<NaiveDateTime>,
     pub(crate) created_at: Option<NaiveDateTime>,
 }
@@ -308,6 +309,7 @@ struct ApiKeySessionRow {
     image: Option<String>,
     is_admin: Option<bool>,
     two_factor_enabled: Option<bool>,
+    enabled: bool,
     locked_until: Option<NaiveDateTime>,
     created_at: Option<NaiveDateTime>,
 }
@@ -512,6 +514,14 @@ fn unauthorized(detail: &'static str) -> AppError {
     }
 }
 
+pub(crate) fn account_disabled() -> AppError {
+    AppError::Coded {
+        status: StatusCode::FORBIDDEN,
+        code: "account_disabled",
+        detail: "Account access is disabled".into(),
+    }
+}
+
 /// huma `Error429TooManyRequests(detail)` parity — a bare 429 with a
 /// custom detail and no code/hint.
 pub(crate) fn too_many_requests(detail: &'static str) -> AppError {
@@ -599,7 +609,11 @@ pub(crate) async fn create_session(
         r#"
         INSERT INTO sessions
             (id, user_id, token_hash, expires_at, ip_address, user_agent, created_at, updated_at)
-        VALUES ($1, $2, $3, NOW() + ($4::bigint * interval '1 second'), $5, $6, NOW(), NOW())
+        SELECT $1, user_account.id, $3, NOW() + ($4::bigint * interval '1 second'),
+               $5, $6, NOW(), NOW()
+          FROM users AS user_account
+         WHERE user_account.id = $2
+           AND user_account.enabled
         RETURNING expires_at
         "#,
     )
@@ -609,12 +623,13 @@ pub(crate) async fn create_session(
     .bind(SESSION_DURATION_SECS)
     .bind(ip)
     .bind(ua)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "failed to create session");
         AppError::InternalMsg("Failed to create session".into())
-    })?;
+    })?
+    .ok_or_else(account_disabled)?;
 
     Ok(CreatedSession {
         token,
@@ -777,7 +792,7 @@ async fn sign_in(
     let user: Option<UserAuthRow> = sqlx::query_as(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
-               two_factor_enabled, locked_until, created_at
+               two_factor_enabled, enabled, locked_until, created_at
         FROM users WHERE email = $1
         "#,
     )
@@ -844,6 +859,10 @@ async fn sign_in(
         )
         .await;
         return Err(unauthorized("Invalid email or password"));
+    }
+
+    if !user.enabled {
+        return Err(account_disabled());
     }
 
     // 2FA challenge branch: no session, no cookie.
@@ -991,25 +1010,31 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
     if is_api_key(&token) {
         let key_hash = hash_api_key(&token);
         let key_prefix = api_key_prefix(&token);
-        let row: Option<ApiKeySessionRow> = sqlx::query_as(
+        let row: Option<ApiKeySessionRow> = match sqlx::query_as(
             r#"
             SELECT ak.id AS key_id,
                    u.id, u.email, u.email_verified, u.name, u.image, u.is_admin,
-                   u.two_factor_enabled, u.locked_until, u.created_at
+                   u.two_factor_enabled, u.enabled, u.locked_until, u.created_at
               FROM api_keys ak
               JOIN users u ON u.id = ak.user_id
              WHERE ak.key_prefix = $1
                AND ak.key_hash = $2
                AND (ak.expires_at IS NULL OR ak.expires_at > NOW())
                AND ak.disabled_at IS NULL
+               AND u.enabled
             "#,
         )
         .bind(key_prefix)
         .bind(&key_hash)
         .fetch_optional(&state.pool)
         .await
-        .ok()
-        .flatten();
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to resolve API-key optional session");
+                return AppError::InternalMsg("Failed to resolve session".into()).into_response();
+            }
+        };
 
         let Some(row) = row else {
             return Json(serde_json::Value::Null).into_response();
@@ -1025,6 +1050,7 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
             image: row.image,
             is_admin: row.is_admin,
             two_factor_enabled: row.two_factor_enabled,
+            enabled: row.enabled,
             locked_until: row.locked_until,
             created_at: row.created_at,
         };
@@ -1042,39 +1068,52 @@ async fn get_session(State(state): State<SessionAuthState>, headers: HeaderMap) 
 
     // Sliding-expiry bump + fetch (mirrors auth.GetSessionByToken).
     let token_hash = hash_session_token(&token);
-    let row: Option<(String, String, NaiveDateTime)> = sqlx::query_as(
+    let row: Option<(String, String, NaiveDateTime)> = match sqlx::query_as(
         r#"
-        UPDATE sessions
-           SET expires_at = GREATEST(expires_at, NOW() + ($2::bigint * interval '1 second')),
+        UPDATE sessions AS session
+           SET expires_at = GREATEST(session.expires_at, NOW() + ($2::bigint * interval '1 second')),
                updated_at = NOW()
-         WHERE token_hash = $1
-           AND expires_at > NOW()
-        RETURNING id, user_id, expires_at
+          FROM users AS user_account
+         WHERE session.token_hash = $1
+           AND session.expires_at > NOW()
+           AND session.user_id = user_account.id
+           AND user_account.enabled
+        RETURNING session.id, session.user_id, session.expires_at
         "#,
     )
     .bind(&token_hash)
     .bind(SESSION_DURATION_SECS)
     .fetch_optional(&state.pool)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to resolve optional browser session");
+            return AppError::InternalMsg("Failed to resolve session".into()).into_response();
+        }
+    };
 
     let Some((session_id, user_id, expires_at)) = row else {
         return Json(serde_json::Value::Null).into_response();
     };
 
-    let user: Option<UserAuthRow> = sqlx::query_as(
+    let user: Option<UserAuthRow> = match sqlx::query_as(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
-               two_factor_enabled, locked_until, created_at
-        FROM users WHERE id = $1
+               two_factor_enabled, enabled, locked_until, created_at
+        FROM users WHERE id = $1 AND enabled
         "#,
     )
     .bind(&user_id)
     .fetch_optional(&state.pool)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load user for optional session");
+            return AppError::InternalMsg("Failed to resolve session".into()).into_response();
+        }
+    };
 
     let Some(user) = user else {
         return Json(serde_json::Value::Null).into_response();
@@ -1351,5 +1390,24 @@ mod tests {
             }
             _ => panic!("expected Coded"),
         }
+    }
+
+    #[tokio::test]
+    async fn optional_session_database_failure_is_not_reported_as_signed_out() {
+        let pool = PgPool::connect_lazy("postgres://localhost/none").unwrap();
+        pool.close().await;
+        let state = SessionAuthState {
+            pool,
+            secure: false,
+            signup_invite_policy: SignupInvitePolicy::open(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "codewire.session_token=synthetic-session".parse().unwrap(),
+        );
+
+        let response = get_session(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

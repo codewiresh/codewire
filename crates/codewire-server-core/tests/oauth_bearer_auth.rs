@@ -8,8 +8,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::{Router, middleware, routing::get};
 use codewire_server_core::auth::{
-    AuthState, AuthUser, SESSION_COOKIE_NAME, hash_oauth_token, hash_session_token,
-    require_session_auth,
+    AuthState, AuthUser, SESSION_COOKIE_NAME, api_key_prefix, hash_api_key, hash_oauth_token,
+    hash_session_token, require_session_auth,
 };
 use codewire_server_core::connect::{ConnectAuthLayer, connect_unary_router_with_auth};
 use codewire_server_core::connect_testing::ProbePingService;
@@ -222,7 +222,7 @@ impl TestDatabase {
             "USAGE ON SCHEMA public".to_owned(),
             "SELECT (token_hash,user_id,client_id,scopes,expires_at) ON public.oidc_access_tokens"
                 .to_owned(),
-            "SELECT (id,is_admin) ON public.users".to_owned(),
+            "SELECT (id,is_admin,enabled) ON public.users".to_owned(),
             "SELECT (id,disabled) ON public.oidc_clients".to_owned(),
         ] {
             sqlx::query(&format!("GRANT {grant} TO {role}"))
@@ -330,6 +330,22 @@ async fn oauth_only_restricted_identity_login_preserves_shared_policy() -> Resul
              VALUES ('synthetic-session','cookie-owner',$1,now()+interval '1 hour')",
         )
         .bind(hash_session_token(cookie_token))
+        .execute(&db.pool)
+        .await?;
+        let api_key = format!("cw_{}", "a".repeat(64));
+        sqlx::query(
+            "INSERT INTO organizations (id,name,slug,created_by) \
+             VALUES ('cookie-owner-org','Cookie Owner Org','cookie-owner-org','cookie-owner')",
+        )
+        .execute(&db.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO api_keys (id,user_id,org_id,name,key_hash,key_prefix,scopes) \
+             VALUES ('cookie-owner-api-key','cookie-owner','cookie-owner-org','Synthetic', \
+                     $1,$2,ARRAY[]::text[])",
+        )
+        .bind(hash_api_key(&api_key))
+        .bind(api_key_prefix(&api_key))
         .execute(&db.pool)
         .await?;
         let reader = db.reader().await?;
@@ -484,6 +500,16 @@ async fn oauth_only_restricted_identity_login_preserves_shared_policy() -> Resul
             )
             .await?;
             ensure!(status == StatusCode::FORBIDDEN && body["code"] == "permission_denied");
+            let (status, body) = call(
+                app(ConnectAuthLayer::authenticated(AuthState {
+                    pool: db.pool.clone(),
+                })),
+                "Ping",
+                headers(Some(&format!("Bearer {api_key}")), None),
+                r#"{"message":"whoami"}"#,
+            )
+            .await?;
+            ensure!(status == StatusCode::OK && body["message"] == "cookie-owner");
             let session_app = Router::new()
                 .route(
                     "/session",
@@ -504,6 +530,92 @@ async fn oauth_only_restricted_identity_login_preserves_shared_policy() -> Resul
                 )
                 .await?;
             ensure!(response.status() == StatusCode::UNAUTHORIZED);
+
+            // Disabling is durable revocation: the existing browser session
+            // and API key are removed or retired, and re-enabling must not
+            // make either presented credential valid again.
+            sqlx::query("UPDATE users SET enabled=false WHERE id='cookie-owner'")
+                .execute(&db.pool)
+                .await?;
+            let (status, body) = call(
+                app(ConnectAuthLayer::authenticated(AuthState {
+                    pool: db.pool.clone(),
+                })),
+                "Ping",
+                headers(None, Some(&cookie)),
+                r#"{"message":"whoami"}"#,
+            )
+            .await?;
+            ensure!(status == StatusCode::UNAUTHORIZED && body["code"] == "unauthenticated");
+            let sessions_after_disable: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM sessions WHERE id='synthetic-session'")
+                    .fetch_one(&db.pool)
+                    .await?;
+            ensure!(
+                sessions_after_disable == 0,
+                "disabled account retained a browser session"
+            );
+            let (status, body) = call(
+                app(ConnectAuthLayer::authenticated(AuthState {
+                    pool: db.pool.clone(),
+                })),
+                "Ping",
+                headers(Some(&format!("Bearer {api_key}")), None),
+                r#"{"message":"whoami"}"#,
+            )
+            .await?;
+            ensure!(status == StatusCode::UNAUTHORIZED && body["code"] == "unauthenticated");
+            sqlx::query("UPDATE users SET enabled=true WHERE id='cookie-owner'")
+                .execute(&db.pool)
+                .await?;
+            let (status, body) = call(
+                app(ConnectAuthLayer::authenticated(AuthState {
+                    pool: db.pool.clone(),
+                })),
+                "Ping",
+                headers(Some(&format!("Bearer {api_key}")), None),
+                r#"{"message":"whoami"}"#,
+            )
+            .await?;
+            ensure!(
+                status == StatusCode::UNAUTHORIZED && body["code"] == "unauthenticated",
+                "re-enabling an account revived its old API key"
+            );
+
+            sqlx::query("UPDATE users SET enabled=false WHERE id='oauth-owner'")
+                .execute(&db.pool)
+                .await?;
+            for policy in [
+                ConnectAuthLayer::oauth_bearer_only(AuthState {
+                    pool: reader.clone(),
+                }),
+                ConnectAuthLayer::authenticated(AuthState {
+                    pool: db.pool.clone(),
+                }),
+            ] {
+                let (status, body) = call(
+                    app(policy),
+                    "Ping",
+                    headers(Some(&format!("Bearer {token}")), None),
+                    r#"{"message":"whoami"}"#,
+                )
+                .await?;
+                ensure!(status == StatusCode::UNAUTHORIZED && body["code"] == "unauthenticated");
+            }
+            sqlx::query("UPDATE users SET enabled=true WHERE id='oauth-owner'")
+                .execute(&db.pool)
+                .await?;
+            let (status, body) = call(
+                restricted(),
+                "Ping",
+                headers(Some(&format!("Bearer {token}")), None),
+                r#"{"message":"whoami"}"#,
+            )
+            .await?;
+            ensure!(
+                status == StatusCode::UNAUTHORIZED && body["code"] == "unauthenticated",
+                "re-enabling an account revived its old OAuth bearer"
+            );
 
             // Revocation is observed on the next request, not cached identity.
             sqlx::query("DELETE FROM oidc_access_tokens WHERE token_hash=$1")
