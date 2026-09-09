@@ -10,15 +10,21 @@
 //! initialized through the standard SQLx migration entrypoint.
 
 use base64::Engine;
-use codewire_idp::{IdpConfig, SigningKekKeyring, build_provider};
-use codewire_oidc::{AuthorizeOutcome, ErrorCode, KeyStore, RawAuthorizeParams, RequestContext};
+use codewire_idp::{
+    IdpConfig, PgAuthorizationStore, PgDeviceAuthorizationStore, SigningKekKeyring, build_provider,
+};
+use codewire_oidc::{
+    AuthRequestId, AuthorizationRequest, AuthorizationStore, AuthorizeOutcome, DeviceAuthorization,
+    DeviceAuthorizationStore, DeviceStatus, ErrorCode, KeyStore, RawAuthorizeParams,
+    RequestContext, ResponseType, Scopes, StoredAuthRequest, Subject,
+};
 use codewire_server_core::auth::{
     AuthState, AuthUser, CredentialContext, api_key_prefix, generate_api_key, hash_api_key,
     hash_oauth_token, hash_session_token, require_auth,
 };
 use hmac::{Hmac, Mac as _};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use totp_rs::{Algorithm, Secret, TOTP};
 
 // PKCE pair from RFC 7636 Appendix B.
@@ -68,6 +74,105 @@ fn test_device_user_code_digest(raw: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn database_url_with_application_name(database_url: &str, application_name: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("parse test database URL");
+    url.query_pairs_mut()
+        .append_pair("application_name", application_name);
+    url.into()
+}
+
+async fn wait_for_application_lock_blocker(
+    pool: &PgPool,
+    application_name: &str,
+    blocker: i32,
+) -> i32 {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let pids: Vec<i32> = sqlx::query_scalar(
+                "SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name = $1",
+            )
+            .bind(application_name)
+            .fetch_all(pool)
+            .await
+            .expect("inspect completion-path worker");
+            for pid in pids {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT $2::integer = ANY(pg_catalog.pg_blocking_pids($1::integer))",
+                )
+                .bind(pid)
+                .bind(blocker)
+                .fetch_one(pool)
+                .await
+                .expect("inspect completion-path lock blocker");
+                if blocked {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("completion-path worker did not reach its lock barrier")
+}
+
+async fn wait_for_pid_lock_blocker(pool: &PgPool, waiter: i32, blocker: i32) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT $2::integer = ANY(pg_catalog.pg_blocking_pids($1::integer))",
+            )
+            .bind(waiter)
+            .bind(blocker)
+            .fetch_one(pool)
+            .await
+            .expect("inspect completion-path lock blocker");
+            if blocked {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("completion-path transaction did not reach its lock barrier");
+}
+
+async fn spawn_account_disable(
+    pool: PgPool,
+    user_id: String,
+) -> (i32, tokio::task::JoinHandle<()>) {
+    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin account-disable transaction");
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read account-disable backend pid");
+        pid_tx
+            .send(pid)
+            .expect("account-disable observer is still waiting");
+        sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .expect("disable account");
+        tx.commit().await.expect("commit account disablement");
+    });
+    (
+        pid_rx.await.expect("receive account-disable backend pid"),
+        task,
+    )
+}
+
+async fn finish_completion_path_task(task: tokio::task::JoinHandle<()>, context: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), task)
+        .await
+        .expect(context)
+        .expect(context);
 }
 
 fn rotation_test_keyrings(label: &str) -> (SigningKekKeyring, SigningKekKeyring) {
@@ -334,6 +439,13 @@ async fn native_clients_full_flow_against_postgres() {
 
     // 6. refresh rotation works against the DB.
     let rt = tokens.refresh_token.unwrap();
+    assert!(
+        p.introspect(CLIENT, None, &rt, Some("refresh_token"))
+            .await
+            .unwrap()
+            .active,
+        "refresh-token introspection must resolve a live grant"
+    );
     let refreshed = p
         .exchange_refresh_token(CLIENT, None, &rt, None)
         .await
@@ -378,6 +490,178 @@ async fn native_clients_full_flow_against_postgres() {
     assert!(
         ios_tokens.refresh_token.is_some(),
         "offline_access → refresh token"
+    );
+
+    // 8. Account disablement invalidates every capability already issued to
+    // the subject. Keep one code unredeemed and mint a separate access/refresh
+    // pair while the account is enabled, then disable it between issuance and
+    // use. This exercises the database fences rather than a cache or route
+    // policy alone.
+    let disabled_code_url = match p
+        .authorize(
+            &ctx,
+            RawAuthorizeParams {
+                client_id: Some(CLIENT.into()),
+                redirect_uri: Some(REDIRECT.into()),
+                response_type: Some("code".into()),
+                scope: Some("openid profile email offline_access codewire.api".into()),
+                state: Some("disabled-code".into()),
+                code_challenge: Some(CHALLENGE.into()),
+                code_challenge_method: Some("S256".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    {
+        AuthorizeOutcome::Redirect(url) => url,
+        other => panic!("expected disabled-code redirect, got {other:?}"),
+    };
+    let disabled_code = disabled_code_url
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_string();
+    let issued_tokens_url = match p
+        .authorize(
+            &ctx,
+            RawAuthorizeParams {
+                client_id: Some(CLIENT.into()),
+                redirect_uri: Some(REDIRECT.into()),
+                response_type: Some("code".into()),
+                scope: Some("openid profile email offline_access codewire.api".into()),
+                state: Some("disabled-tokens".into()),
+                code_challenge: Some(CHALLENGE.into()),
+                code_challenge_method: Some("S256".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    {
+        AuthorizeOutcome::Redirect(url) => url,
+        other => panic!("expected disabled-token redirect, got {other:?}"),
+    };
+    let issued_tokens_code = issued_tokens_url
+        .split("code=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    let issued_tokens = p
+        .exchange_authorization_code(CLIENT, None, issued_tokens_code, REDIRECT, Some(VERIFIER))
+        .await
+        .expect("enabled account mints final access/refresh pair");
+    let issued_access = issued_tokens.access_token;
+    let issued_refresh = issued_tokens
+        .refresh_token
+        .expect("offline_access mints a refresh token");
+
+    sqlx::query("UPDATE users SET enabled=false WHERE id=$1")
+        .bind(USER)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        p.exchange_authorization_code(CLIENT, None, &disabled_code, REDIRECT, Some(VERIFIER))
+            .await
+            .is_err(),
+        "disabled account redeemed an authorization code"
+    );
+    let revoked_code: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM oidc_auth_requests WHERE code_hash=$1")
+            .bind(hash_oauth_token(&disabled_code))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(revoked_code, 0, "disabling retained an authorization code");
+    assert_eq!(
+        p.userinfo(&issued_access).await.unwrap_err().code,
+        ErrorCode::InvalidToken,
+        "disabled account retained access-token UserInfo authority"
+    );
+    assert!(
+        !p.introspect(CLIENT, None, &issued_access, None)
+            .await
+            .unwrap()
+            .active,
+        "disabled account retained an active access token"
+    );
+    assert!(
+        !p.introspect(CLIENT, None, &issued_refresh, Some("refresh_token"))
+            .await
+            .unwrap()
+            .active,
+        "disabled account retained an active refresh token"
+    );
+    assert!(
+        p.exchange_refresh_token(CLIENT, None, &issued_refresh, None)
+            .await
+            .is_err(),
+        "disabled account redeemed a refresh token"
+    );
+    let revoked_refresh: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM oidc_refresh_tokens WHERE token_hash=$1")
+            .bind(hash_oauth_token(&issued_refresh))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        revoked_refresh, 0,
+        "disabling retained a refresh capability"
+    );
+    assert!(
+        matches!(
+            p.authorize(
+                &ctx,
+                RawAuthorizeParams {
+                    client_id: Some(CLIENT.into()),
+                    redirect_uri: Some(REDIRECT.into()),
+                    response_type: Some("code".into()),
+                    scope: Some("openid profile email".into()),
+                    state: Some("disabled-session".into()),
+                    code_challenge: Some(CHALLENGE.into()),
+                    code_challenge_method: Some("S256".into()),
+                    ..Default::default()
+                },
+            )
+            .await,
+            Ok(AuthorizeOutcome::RedirectToLogin(_))
+        ),
+        "disabled account retained browser-session authorization"
+    );
+    sqlx::query("UPDATE users SET enabled=true WHERE id=$1")
+        .bind(USER)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        p.exchange_authorization_code(CLIENT, None, &disabled_code, REDIRECT, Some(VERIFIER))
+            .await
+            .is_err(),
+        "re-enabling revived an authorization code"
+    );
+    assert_eq!(
+        p.userinfo(&issued_access).await.unwrap_err().code,
+        ErrorCode::InvalidToken,
+        "re-enabling revived access-token UserInfo authority"
+    );
+    assert!(
+        p.exchange_refresh_token(CLIENT, None, &issued_refresh, None)
+            .await
+            .is_err(),
+        "re-enabling revived a refresh token"
+    );
+    assert!(
+        !p.introspect(CLIENT, None, &issued_refresh, Some("refresh_token"))
+            .await
+            .unwrap()
+            .active,
+        "re-enabling revived refresh-token introspection"
     );
 
     // Best-effort cleanup (CI's DB is ephemeral, but keep reruns clean).
@@ -1719,7 +2003,9 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
     assert_eq!(
         usize::from(first_exchange.is_ok()) + usize::from(second_exchange.is_ok()),
         1,
-        "one concurrent device redemption succeeds"
+        "one concurrent device redemption succeeds; first error: {:?}; second error: {:?}",
+        first_exchange.as_ref().err(),
+        second_exchange.as_ref().err(),
     );
     let replay = first_exchange
         .as_ref()
@@ -1757,6 +2043,122 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
     .unwrap();
     assert_eq!(pending_rows, 0, "device code is single-use");
 
+    // Disabling before browser approval removes the session that proves the
+    // user identity, so a pending device grant cannot be approved. The
+    // pending row has no owner yet and is cleaned explicitly below.
+    let before_approval = provider
+        .authorize_device(
+            "codewire-cli",
+            None,
+            Some("openid profile email offline_access codewire.api"),
+        )
+        .await
+        .expect("start pre-disable device grant");
+    sqlx::query("UPDATE users SET enabled=false WHERE id=$1")
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _) = device_post(
+        &app,
+        "/api/oauth/device_verification",
+        Some(&session),
+        &format!(r#"{{"user_code":"{}"}}"#, before_approval.user_code),
+    )
+    .await;
+    assert_eq!(status, 401, "disabled account approved a device grant");
+    let before_approval_state: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, user_id FROM oidc_device_authorizations WHERE device_code_hash=$1",
+    )
+    .bind(hash_oauth_token(&before_approval.device_code))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        before_approval_state,
+        ("pending".to_string(), None),
+        "disabled browser approval bound a user to the device grant"
+    );
+    sqlx::query("DELETE FROM oidc_device_authorizations WHERE device_code_hash=$1")
+        .bind(hash_oauth_token(&before_approval.device_code))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // A fresh post-reenable login can approve a new request, but disabling
+    // between approval and redemption deletes the bound grant. Re-enabling
+    // must not make its original device code redeemable.
+    sqlx::query("UPDATE users SET enabled=true WHERE id=$1")
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let renewed_session = format!("sess_cli_device_after_reenable_{}", std::process::id());
+    sqlx::query(
+        "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+         VALUES ($1, $2, $3, NOW() + interval '1 hour')",
+    )
+    .bind(format!(
+        "s_cli_device_after_reenable_{}",
+        std::process::id()
+    ))
+    .bind(&user)
+    .bind(hash_session_token(&renewed_session))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after_approval = provider
+        .authorize_device(
+            "codewire-cli",
+            None,
+            Some("openid profile email offline_access codewire.api"),
+        )
+        .await
+        .expect("start post-reenable device grant");
+    let (status, body) = device_post(
+        &app,
+        "/api/oauth/device_verification",
+        Some(&renewed_session),
+        &format!(r#"{{"user_code":"{}"}}"#, after_approval.user_code),
+    )
+    .await;
+    assert_eq!(status, 200, "fresh account approved device grant: {body}");
+    sqlx::query("UPDATE users SET enabled=false WHERE id=$1")
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .exchange_device_code("codewire-cli", None, &after_approval.device_code)
+            .await
+            .is_err(),
+        "disabled account redeemed an approved device grant"
+    );
+    let after_approval_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM oidc_device_authorizations WHERE device_code_hash=$1",
+    )
+    .bind(hash_oauth_token(&after_approval.device_code))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after_approval_rows, 0,
+        "disabling retained an approved device grant"
+    );
+    sqlx::query("UPDATE users SET enabled=true WHERE id=$1")
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .exchange_device_code("codewire-cli", None, &after_approval.device_code)
+            .await
+            .is_err(),
+        "re-enabling revived an approved device grant"
+    );
+
     for sql in [
         "DELETE FROM oidc_access_tokens WHERE user_id = $1",
         "DELETE FROM oidc_refresh_tokens WHERE user_id = $1",
@@ -1767,6 +2169,516 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
     }
     let _ = sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(&user)
+        .execute(&pool)
+        .await;
+}
+
+/// Account disablement and browser-side grant completion use the same
+/// user-before-capability lock order. These barriers prove both orders for
+/// the current device store: approval first is purged by disablement, while
+/// disablement first cannot bind a pending grant or deadlock the worker.
+#[tokio::test]
+async fn account_access_completion_paths_serialize_in_both_orders_against_postgres() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping account-access completion-path e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    let suffix = std::process::id();
+    let client_id = format!("account-access-completion-client-{suffix}");
+
+    for statement in [
+        "DELETE FROM oidc_device_authorizations WHERE client_id = $1",
+        "DELETE FROM oidc_auth_requests WHERE client_id = $1",
+        "DELETE FROM oidc_clients WHERE id = $1",
+    ] {
+        let _ = sqlx::query(statement).bind(&client_id).execute(&pool).await;
+    }
+    sqlx::query(
+        "INSERT INTO oidc_clients (id, name, application_type, auth_method, redirect_uris) \
+         VALUES ($1, 'Account access completion', 'native', 'none', ARRAY['https://example.test/callback'])",
+    )
+    .bind(&client_id)
+    .execute(&pool)
+    .await
+    .expect("create completion-path client");
+
+    for (label, approval_first) in [("approval-first", true), ("disable-first", false)] {
+        let user_id = format!("account-access-device-{label}-{suffix}");
+        let device_code = format!("account-access-device-code-{label}-{suffix}");
+        let user_code = format!("ACCT-{label}-{suffix}");
+        let worker_name = format!("codewire-account-device-{label}-{suffix}");
+        let _ = sqlx::query("DELETE FROM oidc_device_authorizations WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@example.test"))
+            .execute(&pool)
+            .await
+            .expect("create completion-path user");
+
+        let worker_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url_with_application_name(&url, &worker_name))
+            .await
+            .expect("connect device completion worker");
+        let store =
+            PgDeviceAuthorizationStore::new(worker_pool.clone(), TEST_CAPABILITY_HMAC_SECRET)
+                .expect("create device completion store");
+        let pending = DeviceAuthorization {
+            device_code: device_code.clone(),
+            user_code: user_code.clone(),
+            client_id: client_id.clone(),
+            scopes: Scopes(vec!["openid".into()]),
+            status: DeviceStatus::Pending,
+        };
+        store
+            .store_device(pending.clone(), 3600)
+            .await
+            .expect("store pending device authorization");
+        let approved = DeviceAuthorization {
+            status: DeviceStatus::Approved {
+                subject: Subject(user_id.clone()),
+                auth_time: Some(1),
+            },
+            ..pending
+        };
+
+        if approval_first {
+            let mut row_locker = pool.begin().await.expect("begin device row locker");
+            let locker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *row_locker)
+                .await
+                .expect("read device row-lock backend pid");
+            sqlx::query(
+                "SELECT device_code_hash FROM oidc_device_authorizations \
+                 WHERE device_code_hash = $1 FOR UPDATE",
+            )
+            .bind(hash_oauth_token(&device_code))
+            .fetch_one(&mut *row_locker)
+            .await
+            .expect("lock pending device authorization");
+
+            let update_store = store.clone();
+            let update_auth = approved.clone();
+            let update_task = tokio::spawn(async move { update_store.update(&update_auth).await });
+            let update_pid =
+                wait_for_application_lock_blocker(&pool, &worker_name, locker_pid).await;
+            let (disable_pid, disable_task) =
+                spawn_account_disable(pool.clone(), user_id.clone()).await;
+            wait_for_pid_lock_blocker(&pool, disable_pid, update_pid).await;
+
+            row_locker.commit().await.expect("release device row lock");
+            let update_result =
+                tokio::time::timeout(std::time::Duration::from_secs(3), update_task)
+                    .await
+                    .expect("device approval deadlocked")
+                    .expect("device approval task panicked");
+            assert!(
+                update_result.is_ok(),
+                "approval first should complete before disablement purges it: {update_result:?}"
+            );
+            finish_completion_path_task(
+                disable_task,
+                "account disablement deadlocked device approval",
+            )
+            .await;
+            let retained: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM oidc_device_authorizations WHERE user_id = $1",
+            )
+            .bind(&user_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read disabled device grants");
+            assert_eq!(retained, 0, "disablement retained an approved device grant");
+        } else {
+            let mut disable = pool.begin().await.expect("begin device disablement");
+            let disable_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *disable)
+                .await
+                .expect("read device-disable backend pid");
+            sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                .bind(&user_id)
+                .fetch_one(&mut *disable)
+                .await
+                .expect("lock device user before disablement");
+
+            let update_store = store.clone();
+            let update_auth = approved.clone();
+            let update_task = tokio::spawn(async move { update_store.update(&update_auth).await });
+            let _ = wait_for_application_lock_blocker(&pool, &worker_name, disable_pid).await;
+            sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                .bind(&user_id)
+                .execute(&mut *disable)
+                .await
+                .expect("disable device user");
+            disable.commit().await.expect("commit device disablement");
+
+            let update_result =
+                tokio::time::timeout(std::time::Duration::from_secs(3), update_task)
+                    .await
+                    .expect("device approval did not finish after disablement")
+                    .expect("device approval task panicked");
+            assert!(
+                update_result.is_err(),
+                "disablement first bound a pending device grant"
+            );
+            let state: (String, Option<String>) = sqlx::query_as(
+                "SELECT status, user_id FROM oidc_device_authorizations WHERE device_code_hash = $1",
+            )
+            .bind(hash_oauth_token(&device_code))
+            .fetch_one(&pool)
+            .await
+            .expect("read unbound device grant after disablement");
+            assert_eq!(state, ("pending".into(), None));
+        }
+
+        worker_pool.close().await;
+        let _ = sqlx::query("DELETE FROM oidc_device_authorizations WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+    }
+
+    for (label, completion_first) in [("completion-first", true), ("disable-first", false)] {
+        let user_id = format!("account-access-authorize-{label}-{suffix}");
+        let request_id = format!("account-access-auth-request-{label}-{suffix}");
+        let worker_name = format!("codewire-account-authorize-{label}-{suffix}");
+        let _ = sqlx::query("DELETE FROM oidc_auth_requests WHERE id = $1")
+            .bind(&request_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@example.test"))
+            .execute(&pool)
+            .await
+            .expect("create authorization-completion user");
+        sqlx::query(
+            "INSERT INTO oidc_auth_requests (id, client_id, scopes, redirect_uri, expires_at) \
+             VALUES ($1, $2, ARRAY['openid'], 'https://example.test/callback', \
+                     NOW() + interval '10 minutes')",
+        )
+        .bind(&request_id)
+        .bind(&client_id)
+        .execute(&pool)
+        .await
+        .expect("create pending authorization request");
+
+        let worker_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url_with_application_name(&url, &worker_name))
+            .await
+            .expect("connect authorization completion worker");
+        let store = PgAuthorizationStore::new(worker_pool.clone());
+        let completed = StoredAuthRequest {
+            id: AuthRequestId(request_id.clone()),
+            request: AuthorizationRequest {
+                client_id: client_id.clone(),
+                redirect_uri: "https://example.test/callback".into(),
+                response_type: ResponseType::Code,
+                scopes: Scopes(vec!["openid".into()]),
+                state: None,
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                prompt: None,
+                max_age: None,
+            },
+            subject: Some(Subject(user_id.clone())),
+        };
+
+        if completion_first {
+            let mut row_locker = pool.begin().await.expect("begin authorization row locker");
+            let locker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *row_locker)
+                .await
+                .expect("read authorization row-lock backend pid");
+            sqlx::query("SELECT id FROM oidc_auth_requests WHERE id = $1 FOR UPDATE")
+                .bind(&request_id)
+                .fetch_one(&mut *row_locker)
+                .await
+                .expect("lock pending authorization request");
+
+            let update_store = store.clone();
+            let update_request = completed.clone();
+            let update_task =
+                tokio::spawn(async move { update_store.update(&update_request).await });
+            let update_pid =
+                wait_for_application_lock_blocker(&pool, &worker_name, locker_pid).await;
+            let (disable_pid, disable_task) =
+                spawn_account_disable(pool.clone(), user_id.clone()).await;
+            wait_for_pid_lock_blocker(&pool, disable_pid, update_pid).await;
+
+            row_locker
+                .commit()
+                .await
+                .expect("release authorization row lock");
+            let update_result =
+                tokio::time::timeout(std::time::Duration::from_secs(3), update_task)
+                    .await
+                    .expect("authorization completion deadlocked")
+                    .expect("authorization completion task panicked");
+            assert!(
+                update_result.is_ok(),
+                "completion first should finish before disablement purges it: {update_result:?}"
+            );
+            finish_completion_path_task(
+                disable_task,
+                "account disablement deadlocked authorization completion",
+            )
+            .await;
+            let retained: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM oidc_auth_requests WHERE user_id = $1")
+                    .bind(&user_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read disabled authorization requests");
+            assert_eq!(retained, 0, "disablement retained an authorization request");
+        } else {
+            let mut disable = pool.begin().await.expect("begin authorization disablement");
+            let disable_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *disable)
+                .await
+                .expect("read authorization-disable backend pid");
+            sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                .bind(&user_id)
+                .fetch_one(&mut *disable)
+                .await
+                .expect("lock authorization user before disablement");
+
+            let update_store = store.clone();
+            let update_request = completed.clone();
+            let update_task =
+                tokio::spawn(async move { update_store.update(&update_request).await });
+            let _ = wait_for_application_lock_blocker(&pool, &worker_name, disable_pid).await;
+            sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                .bind(&user_id)
+                .execute(&mut *disable)
+                .await
+                .expect("disable authorization user");
+            disable
+                .commit()
+                .await
+                .expect("commit authorization disablement");
+
+            let update_result =
+                tokio::time::timeout(std::time::Duration::from_secs(3), update_task)
+                    .await
+                    .expect("authorization completion did not finish after disablement")
+                    .expect("authorization completion task panicked");
+            assert!(
+                update_result.is_err(),
+                "disablement first bound a pending authorization request"
+            );
+            let subject: Option<String> =
+                sqlx::query_scalar("SELECT user_id FROM oidc_auth_requests WHERE id = $1")
+                    .bind(&request_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read unbound authorization request after disablement");
+            assert!(
+                subject.is_none(),
+                "disablement first bound an authorization request"
+            );
+        }
+
+        worker_pool.close().await;
+        let _ = sqlx::query("DELETE FROM oidc_auth_requests WHERE id = $1")
+            .bind(&request_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+    }
+
+    for (label, validation_first) in [("validation-first", true), ("disable-first", false)] {
+        let user_id = format!("account-access-two-factor-{label}-{suffix}");
+        let token_id = format!("account-access-two-factor-token-id-{label}-{suffix}");
+        let token = format!("account-access-two-factor-token-{label}-{suffix}");
+        let worker_name = format!("codewire-account-two-factor-{label}-{suffix}");
+        let _ = sqlx::query("DELETE FROM two_factor_tokens WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM two_factor WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        sqlx::query("INSERT INTO users (id, email, two_factor_enabled) VALUES ($1, $2, true)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@example.test"))
+            .execute(&pool)
+            .await
+            .expect("create two-factor completion user");
+        // An intentionally invalid encrypted value drives the normal
+        // failed-attempt path after the one-use challenge is claimed, without
+        // using a real TOTP credential in this lock-order proof.
+        sqlx::query(
+            "INSERT INTO two_factor (id, user_id, secret, backup_codes) \
+             VALUES ($1, $2, 'not-an-encrypted-totp-secret', NULL)",
+        )
+        .bind(format!("account-access-two-factor-config-{label}-{suffix}"))
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("create two-factor completion configuration");
+        insert_two_factor_token(&pool, &token_id, &user_id, &token).await;
+
+        let worker_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url_with_application_name(&url, &worker_name))
+            .await
+            .expect("connect two-factor completion worker");
+        let app = codewire_idp::two_factor::router(
+            worker_pool.clone(),
+            "account-access-completion-session-secret".into(),
+            false,
+            AuthState {
+                pool: worker_pool.clone(),
+            },
+        );
+        let body = format!(r#"{{"code":"000000","token":"{token}"}}"#);
+
+        if validation_first {
+            let mut row_locker = pool.begin().await.expect("begin two-factor row locker");
+            let locker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *row_locker)
+                .await
+                .expect("read two-factor row-lock backend pid");
+            sqlx::query("SELECT id FROM two_factor_tokens WHERE id = $1 FOR UPDATE")
+                .bind(&token_id)
+                .fetch_one(&mut *row_locker)
+                .await
+                .expect("lock two-factor challenge");
+
+            let validate_app = app.clone();
+            let validate_body = body.clone();
+            let validate_task = tokio::spawn(async move {
+                sess_req(
+                    &validate_app,
+                    "POST",
+                    "/api/auth/two-factor/validate",
+                    None,
+                    &validate_body,
+                )
+                .await
+            });
+            let validate_pid =
+                wait_for_application_lock_blocker(&pool, &worker_name, locker_pid).await;
+            let (disable_pid, disable_task) =
+                spawn_account_disable(pool.clone(), user_id.clone()).await;
+            wait_for_pid_lock_blocker(&pool, disable_pid, validate_pid).await;
+
+            row_locker
+                .commit()
+                .await
+                .expect("release two-factor row lock");
+            let (status, _, cookie) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), validate_task)
+                    .await
+                    .expect("two-factor validation deadlocked")
+                    .expect("two-factor validation task panicked");
+            assert_eq!(status, 401, "invalid synthetic TOTP should fail normally");
+            assert!(
+                cookie.is_none(),
+                "failed two-factor validation minted a session"
+            );
+            finish_completion_path_task(
+                disable_task,
+                "account disablement deadlocked two-factor validation",
+            )
+            .await;
+        } else {
+            let mut disable = pool.begin().await.expect("begin two-factor disablement");
+            let disable_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *disable)
+                .await
+                .expect("read two-factor-disable backend pid");
+            sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                .bind(&user_id)
+                .fetch_one(&mut *disable)
+                .await
+                .expect("lock two-factor user before disablement");
+
+            let validate_app = app.clone();
+            let validate_body = body.clone();
+            let validate_task = tokio::spawn(async move {
+                sess_req(
+                    &validate_app,
+                    "POST",
+                    "/api/auth/two-factor/validate",
+                    None,
+                    &validate_body,
+                )
+                .await
+            });
+            let _ = wait_for_application_lock_blocker(&pool, &worker_name, disable_pid).await;
+            sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                .bind(&user_id)
+                .execute(&mut *disable)
+                .await
+                .expect("disable two-factor user");
+            disable
+                .commit()
+                .await
+                .expect("commit two-factor disablement");
+
+            let (status, _, cookie) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), validate_task)
+                    .await
+                    .expect("two-factor validation did not finish after disablement")
+                    .expect("two-factor validation task panicked");
+            assert_ne!(
+                status, 200,
+                "disablement first completed a two-factor login"
+            );
+            assert!(
+                cookie.is_none(),
+                "disabled two-factor validation minted a session"
+            );
+        }
+
+        let challenges: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE user_id = $1")
+                .bind(&user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read disabled two-factor challenges");
+        assert_eq!(challenges, 0, "disablement retained a two-factor challenge");
+        worker_pool.close().await;
+        let _ = sqlx::query("DELETE FROM two_factor WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await;
+    }
+
+    let _ = sqlx::query("DELETE FROM oidc_clients WHERE id = $1")
+        .bind(&client_id)
         .execute(&pool)
         .await;
 }
@@ -1949,13 +2861,46 @@ async fn session_auth_flow_against_postgres() {
         .await
         .unwrap();
 
-    // 7. sign-out → {success:true} + clear-cookie (Max-Age=0).
+    // 7. Disabling an account invalidates its existing session without
+    // refreshing it, and prevents a correct password from minting another.
+    sqlx::query("UPDATE users SET enabled=false WHERE email=$1")
+        .bind(email)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body, _) = sess_req(&app, "GET", "/api/auth/get-session", Some(&token), "").await;
+    assert_eq!(st, 200);
+    assert!(
+        body.is_null(),
+        "disabled account retained a browser session"
+    );
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{pw}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 403, "disabled account signed in: {body}");
+    assert_eq!(body["code"], "account_disabled");
+    assert!(
+        cookie.is_none(),
+        "disabled account received a session cookie"
+    );
+    sqlx::query("UPDATE users SET enabled=true WHERE email=$1")
+        .bind(email)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 8. sign-out → {success:true} + clear-cookie (Max-Age=0).
     let (st, body, clear) = sess_req(&app, "POST", "/api/auth/sign-out", Some(&token), "").await;
     assert_eq!(st, 200);
     assert_eq!(body["success"], true);
     assert!(clear.unwrap().contains("Max-Age=0"));
 
-    // 8. get-session after sign-out → null (session deleted).
+    // 9. get-session after sign-out → null (session deleted).
     let (st, body, _) = sess_req(&app, "GET", "/api/auth/get-session", Some(&token), "").await;
     assert_eq!(st, 200);
     assert!(body.is_null());
@@ -2065,6 +3010,47 @@ async fn get_session_accepts_codewire_api_key_against_postgres() {
     assert!(
         last_used.is_some(),
         "api-key get-session should bump last_used_at"
+    );
+
+    sqlx::query("UPDATE users SET enabled=false WHERE id=$1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body, _) = sess_req_bearer(&app, "GET", "/api/auth/get-session", &raw_key, "").await;
+    assert_eq!(st, 200);
+    assert!(body.is_null(), "disabled account retained API-key access");
+
+    sqlx::query("UPDATE users SET enabled=true WHERE id=$1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // This is the state transition the normal key-management endpoint uses
+    // for `disabled=false`. Account disablement has already retired the key by
+    // expiring it, so clearing the administrative flag cannot revive its raw
+    // bearer value.
+    sqlx::query("UPDATE api_keys SET disabled_at=NULL WHERE id=$1")
+        .bind(key_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let retired: bool = sqlx::query_scalar(
+        "SELECT expires_at IS NOT NULL AND expires_at <= NOW() FROM api_keys WHERE id=$1",
+    )
+    .bind(key_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        retired,
+        "account disablement did not retire the API key expiry"
+    );
+    let (st, body, _) = sess_req_bearer(&app, "GET", "/api/auth/get-session", &raw_key, "").await;
+    assert_eq!(st, 200);
+    assert!(
+        body.is_null(),
+        "re-enabling and reactivating revived an API key"
     );
 
     cleanup(pool).await;
@@ -2513,6 +3499,7 @@ async fn two_factor_flow_against_postgres() {
             .starts_with("otpauth://totp/Codewire:twofactor-e2e%40example.com?")
     );
     let backup_code = body["backupCodes"][0].as_str().unwrap().to_string();
+    let retained_backup_code = body["backupCodes"][1].as_str().unwrap().to_string();
 
     // A pending setup is idempotent. SSR retries and rejected form posts must
     // never rotate the secret out from under the authenticator the user just
@@ -2640,12 +3627,100 @@ async fn two_factor_flow_against_postgres() {
         "failed backup-code attempt consumes challenge"
     );
 
-    // 5. disable → row removed and users.two_factor_enabled false.
+    // 5. Disabling removes both a valid TOTP challenge and an unconsumed
+    // backup-code challenge. It also revokes all sessions; re-enabling cannot
+    // make either raw challenge usable again.
+    insert_two_factor_token(
+        &pool,
+        "tf_2fa_e2e_disabled_totp",
+        user,
+        "tf-token-e2e-disabled-totp",
+    )
+    .await;
+    insert_two_factor_token(
+        &pool,
+        "tf_2fa_e2e_disabled-backup",
+        user,
+        "tf-token-e2e-disabled-backup",
+    )
+    .await;
+    sqlx::query("UPDATE users SET enabled=false WHERE id=$1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let challenge_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM two_factor_tokens WHERE user_id=$1")
+            .bind(user)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        challenge_count, 0,
+        "disabled account retained a 2FA challenge"
+    );
+    let session_count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE user_id=$1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(session_count, 0, "disabled account retained a 2FA session");
+    for (token, code) in [
+        (
+            "tf-token-e2e-disabled-totp",
+            current_totp_code(&secret, email),
+        ),
+        ("tf-token-e2e-disabled-backup", retained_backup_code.clone()),
+    ] {
+        let (st, _body, cookie) = sess_req(
+            &app,
+            "POST",
+            "/api/auth/two-factor/validate",
+            None,
+            &format!(r#"{{"code":"{code}","token":"{token}"}}"#),
+        )
+        .await;
+        assert_eq!(st, 401, "disabled account completed a 2FA challenge");
+        assert!(cookie.is_none(), "disabled 2FA completion minted a session");
+    }
+    sqlx::query("UPDATE users SET enabled=true WHERE id=$1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, _body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/two-factor/validate",
+        None,
+        &format!(
+            r#"{{"code":"{}","token":"tf-token-e2e-disabled-totp"}}"#,
+            current_totp_code(&secret, email)
+        ),
+    )
+    .await;
+    assert_eq!(st, 401, "re-enabling revived a 2FA challenge");
+    assert!(cookie.is_none(), "revived 2FA challenge minted a session");
+
+    // A fresh post-reenable session may make a deliberate 2FA configuration
+    // change, while the original challenge/session remain unusable.
+    let renewed_session = "sess_2fa_e2e_after_reenable";
+    sqlx::query(
+        "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+         VALUES ('s_2fa_e2e_after_reenable', $1, $2, NOW() + interval '1 hour')",
+    )
+    .bind(user)
+    .bind(hash_session_token(renewed_session))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 6. disable → row removed and users.two_factor_enabled false.
     let (st, body, _) = sess_req(
         &app,
         "POST",
         "/api/auth/two-factor/disable",
-        Some(session),
+        Some(renewed_session),
         "",
     )
     .await;

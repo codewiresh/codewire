@@ -181,7 +181,7 @@ grep -Fq -- '--locked --profile ci -p codewire-server-core --bin codewire-db-mig
 
 
 # Freeze the accepted pre-batching execution contract (main 10233aee3): compile
-# grouping may change, but all 23 suites, environments and 166 assertions stay.
+# grouping may change, but all 23 suites, environments and 171 assertions stay.
 python3 - "$ROOT" "$TMP" <<'PYTHON'
 import json
 import os
@@ -191,7 +191,7 @@ import sys
 
 root, temporary = map(Path, sys.argv[1:])
 suites = [
-    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 28},
+    {'args': ['test', '-p', 'codewire-server-core', '--lib', 'migrate::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'server-core migration matrix', 'count': 33},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform credential storage matrix', 'count': 13},
     {'args': ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'platform access profile matrix', 'count': 10},
     {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'access_profiles', '--', '--ignored', '--nocapture', '--test-threads=4'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'public access profile restricted API matrix', 'count': 7},
@@ -316,7 +316,7 @@ for failure in ['compile:codewire-server-core', 'compile:codewire-platform-crede
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, failure
     if failure.startswith('compile:'):
         assert '--no-run' in trace[-1]['args'], failure
-print('Database batching: 32 trace/failure cases; all 23 suite contracts and 166 count assertions preserved')
+print('Database batching: 32 trace/failure cases; all 23 suite contracts and 171 count assertions preserved')
 PYTHON
 
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'

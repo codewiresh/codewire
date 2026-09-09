@@ -130,18 +130,45 @@ impl AuthorizationStore for PgAuthorizationStore {
     async fn update(&self, request: &StoredAuthRequest) -> StoreResult<()> {
         // Binding the subject is the Go `CompleteAuthRequest`: record the
         // user, the authentication time, and mark the request done.
-        sqlx::query(
+        let subject = request.subject.as_ref().map(|subject| subject.0.as_str());
+        let mut tx = self.pool.begin().await.map_err(StoreError::new)?;
+        if let Some(subject) = subject {
+            // Account disablement locks the account before deleting bound
+            // requests. Take the same lock before this update takes the
+            // pending-request row, so browser completion and disablement
+            // serialize without a user/request lock cycle. The database
+            // trigger remains the compatibility fence for older writers.
+            let enabled_subject: Option<String> =
+                sqlx::query_scalar("SELECT id FROM users WHERE id = $1 AND enabled FOR SHARE")
+                    .bind(subject)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::new)?;
+            if enabled_subject.is_none() {
+                tx.rollback().await.map_err(StoreError::new)?;
+                return Err(StoreError::new(
+                    "authorization request is expired or subject access is disabled",
+                ));
+            }
+        }
+
+        let updated = sqlx::query(
             r#"
             UPDATE oidc_auth_requests
             SET user_id = $1, auth_time = NOW(), done = ($1 IS NOT NULL)
             WHERE id = $2
             "#,
         )
-        .bind(request.subject.as_ref().map(|s| &s.0))
+        .bind(subject)
         .bind(&request.id.0)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(StoreError::new)?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await.map_err(StoreError::new)?;
+            return Err(StoreError::new("authorization request is expired"));
+        }
+        tx.commit().await.map_err(StoreError::new)?;
         Ok(())
     }
 

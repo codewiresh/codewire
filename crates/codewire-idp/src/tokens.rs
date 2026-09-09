@@ -108,10 +108,16 @@ impl TokenStore for PgTokenStore {
             Option<DateTime<Utc>>,
         )> = sqlx::query_as(
             r#"
-                DELETE FROM oidc_auth_requests
-                WHERE code_hash = $1 AND expires_at > NOW()
-                RETURNING client_id, redirect_uri, user_id, scopes,
-                          code_challenge, nonce, auth_time
+                DELETE FROM oidc_auth_requests AS request
+                USING users AS user_account
+                WHERE request.code_hash = $1
+                  AND request.expires_at > NOW()
+                  AND request.user_id = user_account.id
+                  AND user_account.enabled
+                RETURNING request.client_id, request.redirect_uri,
+                          request.user_id, request.scopes,
+                          request.code_challenge, request.nonce,
+                          request.auth_time
                 "#,
         )
         .bind(code_hash)
@@ -167,8 +173,12 @@ impl TokenStore for PgTokenStore {
     async fn get_access(&self, token: &str) -> StoreResult<Option<AccessGrant>> {
         let row: Option<(String, String, Vec<String>)> = sqlx::query_as(
             r#"
-            SELECT client_id, user_id, scopes FROM oidc_access_tokens
-            WHERE token_hash = $1 AND expires_at > NOW()
+            SELECT token.client_id, token.user_id, token.scopes
+            FROM oidc_access_tokens AS token
+            JOIN users AS user_account ON user_account.id = token.user_id
+            WHERE token.token_hash = $1
+              AND token.expires_at > NOW()
+              AND user_account.enabled
             "#,
         )
         .bind(hash_oauth_token(token))
@@ -212,9 +222,13 @@ impl TokenStore for PgTokenStore {
         // Rotation: atomic single-use delete-and-return of a still-valid token.
         let row: Option<(String, String, Vec<String>)> = sqlx::query_as(
             r#"
-            DELETE FROM oidc_refresh_tokens
-            WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > NOW())
-            RETURNING client_id, user_id, scopes
+            DELETE FROM oidc_refresh_tokens AS token
+            USING users AS user_account
+            WHERE token.token_hash = $1
+              AND (token.expires_at IS NULL OR token.expires_at > NOW())
+              AND token.user_id = user_account.id
+              AND user_account.enabled
+            RETURNING token.client_id, token.user_id, token.scopes
             "#,
         )
         .bind(hash_oauth_token(token))
@@ -231,8 +245,12 @@ impl TokenStore for PgTokenStore {
     async fn get_refresh(&self, token: &str) -> StoreResult<Option<RefreshGrant>> {
         let row: Option<(String, String, Vec<String>)> = sqlx::query_as(
             r#"
-            SELECT client_id, user_id, scopes FROM oidc_refresh_tokens
-            WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > NOW())
+            SELECT token.client_id, token.user_id, token.scopes
+            FROM oidc_refresh_tokens AS token
+            JOIN users AS user_account ON user_account.id = token.user_id
+            WHERE token.token_hash = $1
+              AND (token.expires_at IS NULL OR token.expires_at > NOW())
+              AND user_account.enabled
             "#,
         )
         .bind(hash_oauth_token(token))

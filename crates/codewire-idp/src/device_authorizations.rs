@@ -167,11 +167,16 @@ impl DeviceAuthorizationStore for PgDeviceAuthorizationStore {
         let device_code_hash = hash_oauth_token(device_code);
         sqlx::query_as::<_, DeviceRow>(
             r#"
-            DELETE FROM oidc_device_authorizations
-            WHERE device_code_hash = $1
-              AND expires_at > NOW()
-              AND status = 'approved'
-            RETURNING client_id, scopes, status, user_id, auth_time
+            DELETE FROM oidc_device_authorizations AS device_auth
+            USING users AS user_account
+            WHERE device_auth.device_code_hash = $1
+              AND device_auth.expires_at > NOW()
+              AND device_auth.status = 'approved'
+              AND device_auth.user_id = user_account.id
+              AND user_account.enabled
+            RETURNING device_auth.client_id, device_auth.scopes,
+                      device_auth.status, device_auth.user_id,
+                      device_auth.auth_time
             "#,
         )
         .bind(device_code_hash)
@@ -195,6 +200,24 @@ impl DeviceAuthorizationStore for PgDeviceAuthorizationStore {
                 ("approved", Some(subject.0.as_str()), *auth_time)
             }
         };
+        let mut tx = self.pool.begin().await.map_err(StoreError::new)?;
+        if let Some(user_id) = user_id {
+            // Account disablement holds this same user lock before deleting
+            // bound device grants. Take it before the pending grant row so a
+            // browser approval and disablement serialize in one order.
+            let enabled_user: Option<String> =
+                sqlx::query_scalar("SELECT id FROM users WHERE id = $1 AND enabled FOR SHARE")
+                    .bind(user_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(StoreError::new)?;
+            if enabled_user.is_none() {
+                tx.rollback().await.map_err(StoreError::new)?;
+                return Err(StoreError::new(
+                    "device authorization is expired or already resolved",
+                ));
+            }
+        }
         let result = sqlx::query(
             r#"
             UPDATE oidc_device_authorizations
@@ -208,14 +231,16 @@ impl DeviceAuthorizationStore for PgDeviceAuthorizationStore {
         .bind(user_id)
         .bind(auth_time)
         .bind(self.user_code_lookup_digest(&auth.user_code))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(StoreError::new)?;
         if result.rows_affected() != 1 {
+            tx.rollback().await.map_err(StoreError::new)?;
             return Err(StoreError::new(
                 "device authorization is expired or already resolved",
             ));
         }
+        tx.commit().await.map_err(StoreError::new)?;
         Ok(())
     }
 

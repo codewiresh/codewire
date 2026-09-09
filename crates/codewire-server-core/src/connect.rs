@@ -447,7 +447,7 @@ impl ConnectAuthLayer {
     /// Unlike `authenticated`, this mount ignores cookies entirely and rejects
     /// API keys before database access. Its pool needs only identity SELECTs:
     /// `oidc_access_tokens(token_hash,user_id,client_id,scopes,expires_at)`,
-    /// `users(id,is_admin)` and `oidc_clients(id,disabled)`. No session, API-key,
+    /// `users(id,is_admin,enabled)` and `oidc_clients(id,disabled)`. No session, API-key,
     /// refresh-token or signing-key authority is needed. Handlers must still
     /// authorize the authenticated owner and resource; payload IDs confer none.
     pub fn oauth_bearer_only(state: AuthState) -> Self {
