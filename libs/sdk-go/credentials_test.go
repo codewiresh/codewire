@@ -39,6 +39,13 @@ func credentialProto() *codewirev1.Credential {
 		ExpiresAtUnix:      &maximum, RevocationGeneration: credentialExact}
 }
 
+func sshCredentialProto() *codewirev1.Credential {
+	return &codewirev1.Credential{Id: "credential-ssh", Name: "ssh", Provider: "ssh",
+		AuthenticationKind: codewirev1.CredentialAuthenticationKind_CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY,
+		Status:             codewirev1.CredentialStatus_CREDENTIAL_STATUS_ACTIVE, RevocationGeneration: credentialExact,
+		SshPublicKey: &codewirev1.SshPublicKey{Openssh: "ssh-ed25519 AAAAC3NzaSynthetic", Fingerprint: "SHA256:synthetic-public-fingerprint"}}
+}
+
 func (f *credentialFixture) record(method string, message proto.Message) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -67,7 +74,11 @@ func (f *credentialFixture) ListCredentials(_ context.Context, req *connect.Requ
 	if req.Msg.PageToken == "" {
 		next = "page-two"
 	}
-	return connect.NewResponse(&codewirev1.ListCredentialsResponse{Credentials: []*codewirev1.Credential{credentialProto()}, NextPageToken: next}), nil
+	credential := credentialProto()
+	if req.Msg.PageToken == "page-two" {
+		credential = sshCredentialProto()
+	}
+	return connect.NewResponse(&codewirev1.ListCredentialsResponse{Credentials: []*codewirev1.Credential{credential}, NextPageToken: next}), nil
 }
 
 func (f *credentialFixture) GetCredential(_ context.Context, req *connect.Request[codewirev1.GetCredentialRequest]) (*connect.Response[codewirev1.GetCredentialResponse], error) {
@@ -104,8 +115,8 @@ func (f *credentialFixture) DeleteCredential(_ context.Context, req *connect.Req
 
 func (f *credentialFixture) EnrollCodex(ctx context.Context, req *connect.Request[codewirev1.EnrollCodexRequest], stream *connect.ServerStream[codewirev1.EnrollCodexResponse]) error {
 	f.record("EnrollCodex", req.Msg)
-	if req.Msg.ProtoReflect().Descriptor().Fields().Len() != 1 {
-		f.t.Error("enrollment must send only its name")
+	if req.Msg.CredentialId != nil || req.Msg.ExpectedRevocationGeneration != nil {
+		f.t.Error("create-only enrollment must omit reconnect authority")
 	}
 	deadline, err := strconv.ParseInt(req.Header().Get("Connect-Timeout-Ms"), 10, 64)
 	if err != nil || deadline <= 900_000 || deadline > 960_000 {
@@ -172,6 +183,9 @@ func TestCredentialsMetadataAndExactLifecycle(t *testing.T) {
 	}
 	if values[0].RevocationGeneration != credentialExact || values[0].ExpiresAtUnix == nil || *values[0].ExpiresAtUnix != ^uint64(0) || values[0].AccountHint != nil {
 		t.Fatal("lossy or incorrect optional metadata")
+	}
+	if values[1].AuthenticationKind != "ssh_key" || values[1].SSHPublicKey == nil || values[1].SSHPublicKey.OpenSSH != "ssh-ed25519 AAAAC3NzaSynthetic" || values[1].SSHPublicKey.Fingerprint != "SHA256:synthetic-public-fingerprint" {
+		t.Fatalf("SSH public metadata changed: %#v", values[1])
 	}
 	if _, err = c.Credentials.Get(ctx, "credential-one"); err != nil {
 		t.Fatal(err)

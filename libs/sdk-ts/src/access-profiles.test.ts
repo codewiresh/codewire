@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { Codewire, CodewireError, type EnvironmentAccessProfileBinding } from "./index.js";
+import { Codewire, CodewireError } from "./index.js";
 
 /** Fake HTTP boundary still exercises the actual generated Connect JSON codec. */
 export async function runAccessProfileTests(): Promise<void> {
@@ -8,7 +8,6 @@ export async function runAccessProfileTests(): Promise<void> {
   const calls: { method: string; body: Record<string, any> }[] = [];
   const profile = { id: "profile-one", name: "personal", revision: exact.toString(), entries: [{ capabilitySlot: "codex", credentialId: "credential-one" }] };
   const wireBinding = { environmentId: "environment-one", accessProfileId: "profile-one", accessProfileRevision: exact.toString() };
-  const binding: EnvironmentAccessProfileBinding = { environment_id: "environment-one", access_profile_id: "profile-one", access_profile_revision: exact };
   const cw = new Codewire({
     apiKey: "synthetic-opaque-oauth", baseUrl: "https://sdk.example.test",
     fetch: async (input, init) => {
@@ -35,11 +34,7 @@ export async function runAccessProfileTests(): Promise<void> {
       }
       if (method === "CreateAccessProfile" || method === "UpdateAccessProfile") return response({ accessProfile: profile });
       if (method === "GetEnvironmentAccessProfile") return response(body.environmentId === "unbound" ? {} : { binding: wireBinding, personalCredentialsConfirmed: true });
-      if (method === "SetEnvironmentAccessProfile") {
-        if (!body.confirmPersonalCredentials) return response({ code: "failed_precondition", message: "explicit consent required" }, 400);
-        return response({ binding: wireBinding });
-      }
-      if (method === "DeleteAccessProfile" || method === "ClearEnvironmentAccessProfile") return response({});
+      if (method === "DeleteAccessProfile") return response({});
       throw new Error("unexpected access profile method");
     },
   });
@@ -67,16 +62,6 @@ export async function runAccessProfileTests(): Promise<void> {
   assert.equal(calls.at(-1)!.body.expectedRevision, exact.toString());
   assert.equal((await cw.accessProfiles.getEnvironmentBinding("environment-one")).personal_credentials_confirmed, true);
   assert.deepEqual(await cw.accessProfiles.getEnvironmentBinding("unbound"), { binding: undefined, personal_credentials_confirmed: false });
-  await assert.rejects(cw.accessProfiles.setEnvironmentBinding({ binding, confirm_personal_credentials: false }), (error: unknown) => error instanceof CodewireError && error.status === 400);
-  assert.equal(calls.at(-1)!.body.confirmPersonalCredentials ?? false, false);
-  assert.ok(!("expectedBinding" in calls.at(-1)!.body));
-  const expected = { ...binding, access_profile_id: "previous-profile", access_profile_revision: exact - 3n };
-  const wireExpected = { ...wireBinding, accessProfileId: "previous-profile", accessProfileRevision: (exact - 3n).toString() };
-  await cw.accessProfiles.setEnvironmentBinding({ binding, expected_binding: expected, confirm_personal_credentials: true });
-  assert.equal(calls.at(-1)!.body.confirmPersonalCredentials, true);
-  assert.deepEqual(calls.at(-1)!.body.expectedBinding, wireExpected);
-  await cw.accessProfiles.clearEnvironmentBinding(expected);
-  assert.deepEqual(calls.at(-1)!.body.expectedBinding, wireExpected);
   const beforeErrors = calls.length;
   await assert.rejects(cw.accessProfiles.update("stale", exact, []), (error: unknown) => error instanceof CodewireError && error.status === 409);
   assert.equal(calls.length, beforeErrors + 1, "stale CAS must not fetch and retry");
@@ -86,16 +71,15 @@ export async function runAccessProfileTests(): Promise<void> {
   await assert.rejects(cw.accessProfiles.get("profile-one", 0n), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", 42 as unknown as bigint), /positive uint64 bigint/);
   await assert.rejects(cw.accessProfiles.delete("profile-one", maximum + 1n), /positive uint64 bigint/);
-  await assert.rejects(cw.accessProfiles.setEnvironmentBinding({ binding } as never), /explicit boolean/);
   assert.equal(calls.length, callsBeforeValidation);
   await assert.rejects(cw.accessProfiles.get("missing-response"), /omitted access_profile/);
   await assert.rejects(cw.accessProfiles.get("missing"), (error: unknown) => error instanceof CodewireError && error.status === 404);
   await cw.accessProfiles.delete("profile-one", maximum);
   assert.equal(calls.at(-1)!.body.expectedRevision, maximum.toString());
-  assert.equal(calls.length, 16);
+  assert.equal(calls.length, 13);
   assert.deepEqual(new Set(calls.map((call) => call.method)), new Set([
     "ListAccessProfiles", "GetAccessProfile", "CreateAccessProfile", "UpdateAccessProfile", "DeleteAccessProfile",
-    "GetEnvironmentAccessProfile", "SetEnvironmentAccessProfile", "ClearEnvironmentAccessProfile",
+    "GetEnvironmentAccessProfile",
   ]));
-  console.log("Access profiles: all 8 generated methods, exact uint64/CAS, consent, pagination and errors passed");
+  console.log("Access profiles: all 6 generated methods, exact uint64/CAS, pagination and errors passed");
 }

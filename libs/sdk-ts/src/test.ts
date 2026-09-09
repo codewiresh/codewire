@@ -1,16 +1,21 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import nodeAssert from "node:assert/strict";
 import { create } from "@bufbuild/protobuf";
 import { DurationSchema } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, createConnectRouter } from "@connectrpc/connect";
 import { BadRequestSchema, ErrorInfoSchema } from "@codewire/proto-ts";
 import { ApiKeySchema, ApiKeyService } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
-import { ProjectSkillSource } from "@codewire/proto-ts/gen/codewire/v1/common_pb";
+import {
+  ProjectSkillSource,
+  ProjectStoragePlacement,
+} from "@codewire/proto-ts/gen/codewire/v1/common_pb";
 import {
   DesiredState,
   EnvironmentResizeExecutionMode,
   EnvironmentResizeOperationState,
   EnvironmentSchema,
   EnvironmentService,
+  EnvironmentSourcesUpdateOutcome,
   EnvironmentState,
   IsolationTier,
 } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
@@ -70,6 +75,7 @@ async function runTests() {
   let createWaitCounter = 0;
   let uploadHeaders = 0;
   let uploadedBytes = 0;
+  let sourceUpdateCalls = 0;
 
   const router = createConnectRouter({
     connect: true,
@@ -181,6 +187,8 @@ async function runTests() {
     totalRunningSeconds: 0,
     createdAt: timestamp,
     retryCount: 0,
+    operationGeneration: 9_007_199_254_741_007n,
+    sourceSelection: {},
   });
   const resizeOperation = (requestId: string) => ({
     id: "resize_123",
@@ -223,10 +231,43 @@ async function runTests() {
     },
     createEnvironment: (request, context) => {
       requireTestKey(context);
+      const requestedSecrets = request.projectSpec?.secrets;
+      const requestedCredentials = request.projectSpec?.credentials;
+      const created = {
+        ...environment("env_123", EnvironmentState.RUNNING),
+        orgId: request.orgId,
+        sourceSelection: {
+          secrets: requestedSecrets
+            ? {
+                ...requestedSecrets,
+                project: requestedSecrets.project
+                  ? "platform:id:33333333-3333-4333-8333-333333333333"
+                  : "",
+              }
+            : undefined,
+          credentials: requestedCredentials
+            ? {
+                profile: "platform:id:44444444-4444-4444-8444-444444444444",
+              }
+            : undefined,
+          profileRevision: request.expectedProfileRevision,
+        },
+      };
       if (request.projectSpec?.preset === "wait-test") {
-        return { environment: environment("env_cwait", EnvironmentState.PENDING) };
+        return {
+          environment: {
+            ...created,
+            id: "env_cwait",
+            state: EnvironmentState.PENDING,
+          },
+        };
       }
-      return { environment: environment("env_123", EnvironmentState.RUNNING) };
+      if (request.projectSpec?.preset === "missing-sources") {
+        return {
+          environment: { ...created, sourceSelection: undefined },
+        };
+      }
+      return { environment: created };
     },
     getEnvironment: (request, context) => {
       requireTestKey(context);
@@ -302,6 +343,101 @@ async function runTests() {
     startEnvironment: (_request, context) => {
       requireTestKey(context);
       return { status: "ok" };
+    },
+    updateEnvironmentSources: (request, context) => {
+      requireTestKey(context);
+      sourceUpdateCalls++;
+      if (request.environmentId === "missing-selection") {
+        return {
+          environmentId: request.environmentId,
+          operationGeneration: request.expectedOperationGeneration + 1n,
+          outcome: EnvironmentSourcesUpdateOutcome.STORED,
+        };
+      }
+      if (request.environmentId === "stale-selection") {
+        throw new ConnectError("stale source selection", Code.Aborted);
+      }
+      if (request.environmentId === "changed-environment") {
+        return {
+          environmentId: "different-environment",
+          operationGeneration: request.expectedOperationGeneration,
+          selection: request.replacement,
+          outcome: EnvironmentSourcesUpdateOutcome.STORED,
+        };
+      }
+      if (request.environmentId === "unknown-outcome") {
+        return {
+          environmentId: request.environmentId,
+          operationGeneration: request.expectedOperationGeneration,
+          selection: request.replacement,
+          outcome: EnvironmentSourcesUpdateOutcome.UNSPECIFIED,
+        };
+      }
+      if (request.expectedOperationGeneration === 12n) {
+        return {
+          environmentId: request.environmentId,
+          operationGeneration: 0n,
+          selection: request.replacement,
+          outcome: EnvironmentSourcesUpdateOutcome.STORED,
+        };
+      }
+      if (request.expectedOperationGeneration === 10n) {
+        assert(request.expected !== undefined, "empty expected selection remains present");
+        assert(request.replacement !== undefined, "empty replacement selection remains present");
+        assert(
+          !request.allowRestart &&
+            !request.confirmPersonalCredentials &&
+            !request.confirmPersonalSecrets,
+          "omitted source-update consent flags remain false",
+        );
+        return {
+          environmentId: request.environmentId,
+          operationGeneration: 10n,
+          selection: request.replacement,
+          outcome: EnvironmentSourcesUpdateOutcome.UNCHANGED,
+        };
+      }
+      assert(request.orgId === "org_test", "source update carries organization identity");
+      assert(request.environmentId === "env_123", "source update carries environment identity");
+      assert(
+        request.expectedOperationGeneration === 9_007_199_254_741_007n,
+        "source update preserves the operation generation losslessly",
+      );
+      assert(
+        request.expected?.secrets?.user === ProjectStoragePlacement.PLATFORM &&
+          request.expected.credentials?.profile === "platform:id:22222222-2222-4222-8222-222222222222" &&
+          request.expected.profileRevision === 9_007_199_254_741_009n,
+        "source update preserves the exact expected selection",
+      );
+      assert(
+        request.replacement?.secrets?.project === "platform:project-two" &&
+          request.replacement.secrets.organization &&
+          request.replacement.secrets.user === ProjectStoragePlacement.PLATFORM &&
+          request.replacement.credentials?.profile === "platform:user/profile-two" &&
+          request.replacement.profileRevision === 0xffff_ffff_ffff_ffffn,
+        "source update preserves every replacement source",
+      );
+      assert(request.allowRestart, "source update preserves explicit restart consent");
+      assert(
+        request.confirmPersonalCredentials && request.confirmPersonalSecrets,
+        "source update preserves explicit personal-source confirmations",
+      );
+      return {
+        environmentId: request.environmentId,
+        operationGeneration: request.expectedOperationGeneration,
+        selection: {
+          secrets: {
+            project: "platform:id:33333333-3333-4333-8333-333333333333",
+            organization: request.replacement?.secrets?.organization,
+            user: request.replacement?.secrets?.user,
+          },
+          credentials: {
+            profile: "platform:id:44444444-4444-4444-8444-444444444444",
+          },
+          profileRevision: request.replacement?.profileRevision,
+        },
+        outcome: EnvironmentSourcesUpdateOutcome.RESTART_REQUIRED,
+      };
     },
   });
 
@@ -601,6 +737,15 @@ async function runTests() {
     destroyedAt: timestamp,
     isolationTier: IsolationTier.CONFIDENTIAL,
     presetName: "Go",
+    sourceSelection: {
+      secrets: {
+        project: "platform:id:11111111-1111-4111-8111-111111111111",
+        organization: false,
+        user: ProjectStoragePlacement.PLATFORM,
+      },
+      credentials: { profile: "platform:id:22222222-2222-4222-8222-222222222222" },
+      profileRevision: 9_007_199_254_741_009n,
+    },
     ports: [{
       id: "port_1",
       environmentId: "env_full",
@@ -618,9 +763,16 @@ async function runTests() {
   assert(convertedEnvironment.ports?.[0]?.access === "org_members", "environment ports preserve access values");
   assert(convertedEnvironment.ports?.[0]?.preview_url === "https://preview.example.test", "environment ports preserve optional URLs");
   assert(convertedEnvironment.ttl_seconds === 300, "environment optional numbers are retained");
+  assert(convertedEnvironment.operation_generation === 9_007_199_254_741_007n, "environment operation generations remain lossless");
+  assert(convertedEnvironment.source_selection?.secrets?.user === "platform", "environment personal-secret origins remain typed");
+  assert(convertedEnvironment.source_selection?.credentials?.profile === "platform:id:22222222-2222-4222-8222-222222222222", "environment credential profiles are retained");
+  assert(convertedEnvironment.source_selection?.profile_revision === 9_007_199_254_741_009n, "environment profile revisions remain lossless");
 
   const createEnvironment = toProtoCreateEnvironmentRequest("org_test", {
     isolation_tier: "confidential",
+    expected_profile_revision: 9_007_199_254_741_009n,
+    confirm_personal_credentials: true,
+    confirm_personal_secrets: true,
     project_spec: {
       schema_version: 1,
       preset: "python",
@@ -629,18 +781,24 @@ async function runTests() {
         revision: "deadbeef",
         destination: "/workspace/platform",
         source: "https://git.example.test/org/platform",
+        known_hosts: ["git.example.test ssh-ed25519 AAAASynthetic"],
       }],
       working_directory: "/workspace/platform",
       skills: [{ source: "repository", reference: ".agents/skills/rust", agents: ["codex"] }],
-      resources: { cpu_millicores: 2000, memory_mib: 16384, disk_gib: 40 },
-      access: { profile: "user/work" },
+      resources: { cpu_millicores: 2000, memory_mib: 16384n, disk_gib: 40n },
+      secrets: { project: "platform:id:project-one", organization: false, user: "platform" },
+      credentials: { profile: "platform:id:profile-one" },
     },
   });
   assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
   assert(createEnvironment.projectSpec?.repositories[0]?.destination === "/workspace/platform", "create environment preserves repository destinations");
   assert(createEnvironment.projectSpec?.repositories[0]?.revision === "deadbeef", "create environment preserves repository revisions");
   assert(createEnvironment.projectSpec?.resources?.memoryMib === 16384n, "create environment preserves project resource units");
-  assert(createEnvironment.projectSpec?.access?.profile === "user/work", "create environment preserves access profile references");
+  assert(createEnvironment.projectSpec?.repositories[0]?.knownHosts[0]?.includes("AAAASynthetic") === true, "create environment preserves direct repository host trust");
+  assert(createEnvironment.projectSpec?.credentials?.profile === "platform:id:profile-one", "create environment preserves credential profile references");
+  assert(createEnvironment.projectSpec?.secrets?.user === 2, "create environment preserves the personal-secret platform origin");
+  assert(createEnvironment.expectedProfileRevision === 9_007_199_254_741_009n, "create environment preserves profile revision losslessly");
+  assert(createEnvironment.confirmPersonalCredentials && createEnvironment.confirmPersonalSecrets, "create environment preserves explicit personal-source confirmations");
   let rejectedMissingProjectSpec = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {} as never);
@@ -652,6 +810,8 @@ async function runTests() {
   try {
     toProtoCreateEnvironmentRequest("org_test", {
       isolation_tier: "container" as never,
+      confirm_personal_credentials: false,
+      confirm_personal_secrets: false,
       project_spec: { schema_version: 1, working_directory: "/workspace" },
     });
   } catch {
@@ -661,6 +821,8 @@ async function runTests() {
   let rejectedUnknownSkillSource = false;
   try {
     toProtoCreateEnvironmentRequest("org_test", {
+      confirm_personal_credentials: false,
+      confirm_personal_secrets: false,
       project_spec: {
         schema_version: 1,
         working_directory: "/workspace",
@@ -671,6 +833,33 @@ async function runTests() {
     rejectedUnknownSkillSource = true;
   }
   assert(rejectedUnknownSkillSource, "create environment rejects unknown project skill sources");
+  for (const invalid of [
+    {
+      project_spec: {
+        schema_version: 1,
+        working_directory: "/workspace",
+        credentials: { profile: "platform:id:profile-one" },
+      },
+      confirm_personal_credentials: true,
+      confirm_personal_secrets: false,
+    },
+    {
+      project_spec: { schema_version: 1, working_directory: "/workspace" },
+      expected_profile_revision: 1n,
+      confirm_personal_credentials: true,
+      confirm_personal_secrets: false,
+    },
+    {
+      project_spec: { schema_version: 1, working_directory: "/workspace" },
+      confirm_personal_credentials: "yes" as never,
+      confirm_personal_secrets: false,
+    },
+  ]) {
+    nodeAssert.throws(
+      () => toProtoCreateEnvironmentRequest("org_test", invalid),
+      /codewire:/,
+    );
+  }
 
   const convertedPort = fromProtoEnvironmentPort(create(PortSchema, {
     id: "port_2",
@@ -720,11 +909,21 @@ async function runTests() {
         branch: "main",
         destination: "/workspace/repo",
         source: "https://git.example.test/org/repo",
+        knownHosts: ["git.example.test ssh-ed25519 AAAASyntheticPreset"],
       }],
       startupScript: "go test ./...",
       skills: [{ source: ProjectSkillSource.USER, reference: "personal", agents: ["codex"] }],
-      resources: { cpuMillicores: 4000 },
-      secrets: { project: "development" },
+      resources: {
+        cpuMillicores: 4000,
+        memoryMib: 0xffff_ffff_ffff_ffffn,
+        diskGib: 9_007_199_254_741_011n,
+      },
+      secrets: {
+        project: "development",
+        organization: true,
+        user: ProjectStoragePlacement.PLATFORM,
+      },
+      credentials: { profile: "platform:id:profile-preset" },
     },
   }));
   assert(convertedPreset.project_spec.resources?.cpu_millicores === 4000, "preset project resources keep SDK values");
@@ -732,6 +931,11 @@ async function runTests() {
   assert(convertedPreset.project_spec.repositories?.[0]?.destination === "/workspace/repo", "preset repository destinations are retained");
   assert(convertedPreset.project_spec.skills?.[0]?.source === "user", "preset project skill sources use ergonomic values");
   assert(convertedPreset.project_spec.secrets?.project === "development", "preset secret bindings remain opaque names");
+  assert(convertedPreset.project_spec.repositories?.[0]?.known_hosts?.[0]?.includes("AAAASyntheticPreset") === true, "preset repository host trust is retained");
+  assert(convertedPreset.project_spec.resources?.memory_mib === 0xffff_ffff_ffff_ffffn, "preset project memory remains a lossless uint64");
+  assert(convertedPreset.project_spec.resources?.disk_gib === 9_007_199_254_741_011n, "preset project disk remains lossless above the safe integer range");
+  assert(convertedPreset.project_spec.secrets?.user === "platform", "preset personal-secret origin remains typed");
+  assert(convertedPreset.project_spec.credentials?.profile === "platform:id:profile-preset", "preset credential profiles are retained");
 
   const convertedSecretMetadata = fromProtoSecretMetadata(create(SecretMetadataSchema, {
     key: "DB_URL",
@@ -796,11 +1000,44 @@ async function runTests() {
     console.log("Test: Environment CRUD");
     const env = await cw.environments.create({
       project_spec: { schema_version: 1, preset: "python", working_directory: "/workspace" },
+      confirm_personal_credentials: false,
+      confirm_personal_secrets: false,
     });
     assert(env instanceof Environment, "create returns Environment instance");
     assert(env.id === "env_123", "env.id matches");
     assert(env.state === "running", "env.state matches");
     assert(env.isolation_tier === "standard", "env.isolation_tier matches");
+    assert(env.operation_generation === 9_007_199_254_741_007n, "environment wrapper exposes the operation generation");
+    assert(env.source_selection !== undefined && env.source_selection.credentials === undefined, "environment wrapper preserves an explicitly empty source selection");
+    const canonicalizedCreate = await cw.environments.create({
+      project_spec: {
+        schema_version: 1,
+        working_directory: "/workspace",
+        secrets: {
+          project: "platform:project-two",
+          organization: true,
+          user: "platform",
+        },
+        credentials: { profile: "platform:user/profile-two" },
+      },
+      expected_profile_revision: 17n,
+      confirm_personal_credentials: true,
+      confirm_personal_secrets: true,
+    });
+    assert(canonicalizedCreate.source_selection?.secrets?.project === "platform:id:33333333-3333-4333-8333-333333333333", "create accepts the canonical secret-project acknowledgement for a name");
+    assert(canonicalizedCreate.source_selection?.credentials?.profile === "platform:id:44444444-4444-4444-8444-444444444444", "create accepts the canonical profile acknowledgement for a name");
+    await nodeAssert.rejects(
+      cw.environments.create({
+        project_spec: {
+          schema_version: 1,
+          preset: "missing-sources",
+          working_directory: "/workspace",
+        },
+        confirm_personal_credentials: false,
+        confirm_personal_secrets: false,
+      }),
+      /different organization or source selection/,
+    );
 
     // Test: Get environment
     const env2 = await cw.environments.get("env_123");
@@ -838,6 +1075,105 @@ async function runTests() {
       directResize.id,
     );
     assert(fetchedResize.request_id === "stable-request", "resize operation identity is stable");
+
+    const sourceUpdate = await cw.environments.updateSources("env_123", {
+      expected_operation_generation: 9_007_199_254_741_007n,
+      expected: {
+        secrets: {
+          project: "platform:id:11111111-1111-4111-8111-111111111111",
+          organization: false,
+          user: "platform",
+        },
+        credentials: {
+          profile: "platform:id:22222222-2222-4222-8222-222222222222",
+        },
+        profile_revision: 9_007_199_254_741_009n,
+      },
+      replacement: {
+        secrets: {
+          project: "platform:project-two",
+          organization: true,
+          user: "platform",
+        },
+        credentials: { profile: "platform:user/profile-two" },
+        profile_revision: 0xffff_ffff_ffff_ffffn,
+      },
+      allow_restart: true,
+      confirm_personal_credentials: true,
+      confirm_personal_secrets: true,
+    });
+    assert(sourceUpdate.environment_id === "env_123", "source update returns the environment identity");
+    assert(sourceUpdate.operation_generation === 9_007_199_254_741_007n, "source update acknowledges the exact operation generation losslessly");
+    assert(sourceUpdate.outcome === "restart_required", "source update returns explicit restart semantics");
+    assert(sourceUpdate.selection.secrets?.project === "platform:id:33333333-3333-4333-8333-333333333333", "source update returns the canonical replacement project");
+    assert(sourceUpdate.selection.secrets?.user === "platform", "source update returns replacement origin");
+    assert(sourceUpdate.selection.credentials?.profile === "platform:id:44444444-4444-4444-8444-444444444444", "source update returns the canonical replacement profile");
+    assert(sourceUpdate.selection.profile_revision === 0xffff_ffff_ffff_ffffn, "source update returns the exact profile revision");
+
+    const unchangedSources = await env.updateSources({
+      expected_operation_generation: 10n,
+      expected: {},
+      replacement: {},
+    });
+    assert(unchangedSources.outcome === "unchanged", "wrapper preserves unchanged source semantics");
+    assert(unchangedSources.selection.secrets === undefined, "an explicitly empty source selection is not synthesized");
+
+    const sourceCallsBeforeValidation = sourceUpdateCalls;
+    const validEmptySourceUpdate = {
+      expected_operation_generation: 1n,
+      expected: {},
+      replacement: {},
+      allow_restart: false,
+      confirm_personal_credentials: false,
+      confirm_personal_secrets: false,
+    };
+    for (const invalid of [
+      { ...validEmptySourceUpdate, expected_operation_generation: 0n },
+      { ...validEmptySourceUpdate, allow_restart: "yes" as never },
+      {
+        ...validEmptySourceUpdate,
+        replacement: { credentials: { profile: "platform:id:profile-one" } },
+      },
+      {
+        ...validEmptySourceUpdate,
+        replacement: { profile_revision: 1n },
+      },
+      {
+        ...validEmptySourceUpdate,
+        replacement: { secrets: { user: "ambient" as never } },
+      },
+    ]) {
+      await nodeAssert.rejects(
+        cw.environments.updateSources("env_123", invalid),
+        /codewire:/,
+      );
+    }
+    assert(sourceUpdateCalls === sourceCallsBeforeValidation, "invalid source updates fail before transport");
+    await nodeAssert.rejects(
+      cw.environments.updateSources("missing-selection", validEmptySourceUpdate),
+      /omitted selection/,
+    );
+    const beforeStaleSourceUpdate = sourceUpdateCalls;
+    await nodeAssert.rejects(
+      cw.environments.updateSources("stale-selection", validEmptySourceUpdate),
+      (error: unknown) => error instanceof CodewireError && error.status === 409,
+    );
+    assert(sourceUpdateCalls === beforeStaleSourceUpdate + 1, "stale source updates are not fetched or retried");
+    await nodeAssert.rejects(
+      cw.environments.updateSources("changed-environment", validEmptySourceUpdate),
+      /did not acknowledge the exact environment operation and replacement/,
+    );
+    await nodeAssert.rejects(
+      cw.environments.updateSources("unknown-outcome", validEmptySourceUpdate),
+      /unknown environment sources outcome/,
+    );
+    await nodeAssert.rejects(
+      env.updateSources({
+        ...validEmptySourceUpdate,
+        expected_operation_generation: 12n,
+      }),
+      /did not acknowledge the exact environment operation and replacement/,
+    );
 
     const directFiles = await cw.environments.listFiles(
       "env_123",
@@ -1124,7 +1460,15 @@ async function runTests() {
     console.log("Test: create(wait=true)");
     createWaitCounter = 0;
     const envWaited = await cw.environments.create(
-      { project_spec: { schema_version: 1, preset: "wait-test", working_directory: "/workspace" } },
+      {
+        project_spec: {
+          schema_version: 1,
+          preset: "wait-test",
+          working_directory: "/workspace",
+        },
+        confirm_personal_credentials: false,
+        confirm_personal_secrets: false,
+      },
       { wait: true, waitTimeout: 10_000 },
     );
     assert(envWaited.id === "env_cwait", "create(wait) returns correct env id");
@@ -1133,7 +1477,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 108;
+  const expectedAssertions = 146;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

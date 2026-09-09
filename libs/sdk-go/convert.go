@@ -217,7 +217,10 @@ func fromProtoPreset(preset *codewirev1.Preset) (Preset, error) {
 	if preset.GetProjectSpec() == nil {
 		return Preset{}, fmt.Errorf("codewire: preset response omitted project_spec")
 	}
-	projectSpec := fromProtoProjectSpec(preset.GetProjectSpec())
+	projectSpec, err := fromProtoProjectSpec(preset.GetProjectSpec())
+	if err != nil {
+		return Preset{}, err
+	}
 	var ttl *int64
 	if preset.DefaultTtlSeconds != nil {
 		value := int64(*preset.DefaultTtlSeconds)
@@ -312,7 +315,8 @@ func fromProtoRepositorySpecs(repositories []*codewirev1.RepositorySpec) *[]Repo
 	converted := make([]RepositorySpec, 0, len(repositories))
 	for _, repository := range repositories {
 		converted = append(converted, RepositorySpec{
-			Source: repository.GetSource(), Branch: stringPointer(repository.GetBranch()), Destination: stringPointer(repository.GetDestination()), Revision: stringPointer(repository.GetRevision()),
+			Source: repository.GetSource(), Branch: stringPointer(repository.GetBranch()), Destination: stringPointer(repository.GetDestination()),
+			Revision: stringPointer(repository.GetRevision()), KnownHosts: append([]string(nil), repository.GetKnownHosts()...),
 		})
 	}
 	return &converted
@@ -382,15 +386,16 @@ func toProtoRepositorySpecs(repositories *[]RepositorySpec) []*codewirev1.Reposi
 	converted := make([]*codewirev1.RepositorySpec, 0, len(*repositories))
 	for _, repository := range *repositories {
 		converted = append(converted, &codewirev1.RepositorySpec{
-			Source: repository.Source, Branch: valueOrEmpty(repository.Branch), Destination: valueOrEmpty(repository.Destination), Revision: valueOrEmpty(repository.Revision),
+			Source: repository.Source, Branch: valueOrEmpty(repository.Branch), Destination: valueOrEmpty(repository.Destination),
+			Revision: valueOrEmpty(repository.Revision), KnownHosts: append([]string(nil), repository.KnownHosts...),
 		})
 	}
 	return converted
 }
 
-func fromProtoProjectSpec(value *codewirev1.ProjectSpec) *ProjectSpec {
+func fromProtoProjectSpec(value *codewirev1.ProjectSpec) (*ProjectSpec, error) {
 	if value == nil {
-		return nil
+		return nil, nil
 	}
 	result := &ProjectSpec{
 		SchemaVersion:    value.GetSchemaVersion(),
@@ -423,14 +428,21 @@ func fromProtoProjectSpec(value *codewirev1.ProjectSpec) *ProjectSpec {
 		}
 	}
 	if secrets := value.GetSecrets(); secrets != nil {
+		var user *ProjectStoragePlacement
+		if secrets.User != nil {
+			user = projectStoragePlacement(secrets.GetUser())
+			if user == nil {
+				return nil, fmt.Errorf("codewire: project spec has an unknown personal secret source")
+			}
+		}
 		result.Secrets = &ProjectSecretBindings{
-			Project: secrets.GetProject(), Organization: secrets.GetOrganization(), User: secrets.GetUser(),
+			Project: secrets.GetProject(), Organization: secrets.GetOrganization(), User: user,
 		}
 	}
-	if access := value.GetAccess(); access != nil {
-		result.Access = &ProjectAccessBinding{Profile: access.GetProfile()}
+	if credentials := value.GetCredentials(); credentials != nil {
+		result.Credentials = &ProjectCredentialBinding{Profile: credentials.GetProfile()}
 	}
-	return result
+	return result, nil
 }
 
 func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
@@ -474,14 +486,115 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 		}
 	}
 	if value.Secrets != nil {
+		user, err := toProtoProjectStoragePlacement(value.Secrets.User)
+		if err != nil {
+			return nil, err
+		}
 		result.Secrets = &codewirev1.ProjectSecretBindings{
-			Project: value.Secrets.Project, Organization: value.Secrets.Organization, User: value.Secrets.User,
+			Project: value.Secrets.Project, Organization: value.Secrets.Organization, User: user,
 		}
 	}
-	if value.Access != nil {
-		result.Access = &codewirev1.ProjectAccessBinding{Profile: value.Access.Profile}
+	if value.Credentials != nil {
+		result.Credentials = &codewirev1.ProjectCredentialBinding{Profile: value.Credentials.Profile}
 	}
 	return result, nil
+}
+
+func projectStoragePlacement(value codewirev1.ProjectStoragePlacement) *ProjectStoragePlacement {
+	var placement ProjectStoragePlacement
+	switch value {
+	case codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_LOCAL:
+		placement = ProjectStoragePlacementLocal
+	case codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_PLATFORM:
+		placement = ProjectStoragePlacementPlatform
+	default:
+		return nil
+	}
+	return &placement
+}
+
+func toProtoProjectStoragePlacement(value *ProjectStoragePlacement) (*codewirev1.ProjectStoragePlacement, error) {
+	if value == nil {
+		return nil, nil
+	}
+	var placement codewirev1.ProjectStoragePlacement
+	switch *value {
+	case ProjectStoragePlacementLocal:
+		placement = codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_LOCAL
+	case ProjectStoragePlacementPlatform:
+		placement = codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_PLATFORM
+	default:
+		return nil, fmt.Errorf("codewire: personal secret source must be local or platform")
+	}
+	return &placement, nil
+}
+
+func fromProtoEnvironmentSourceSelection(value *codewirev1.EnvironmentSourceSelection) (*EnvironmentSourceSelection, error) {
+	if value == nil {
+		return nil, nil
+	}
+	result := &EnvironmentSourceSelection{}
+	if secrets := value.GetSecrets(); secrets != nil {
+		result.Secrets = &ProjectSecretBindings{Project: secrets.GetProject(), Organization: secrets.GetOrganization()}
+		if secrets.User != nil {
+			result.Secrets.User = projectStoragePlacement(secrets.GetUser())
+			if result.Secrets.User == nil {
+				return nil, fmt.Errorf("codewire: environment source selection has an unknown personal secret source")
+			}
+		}
+	}
+	if credentials := value.GetCredentials(); credentials != nil {
+		result.Credentials = &ProjectCredentialBinding{Profile: credentials.GetProfile()}
+	}
+	if value.ProfileRevision != nil {
+		revision := value.GetProfileRevision()
+		if err := accessProfileRevision(revision); err != nil {
+			return nil, err
+		}
+		result.ProfileRevision = &revision
+	}
+	if (result.Credentials == nil) != (result.ProfileRevision == nil) {
+		return nil, fmt.Errorf("codewire: environment credential selection requires an exact profile revision")
+	}
+	return result, nil
+}
+
+func toProtoEnvironmentSourceSelection(value EnvironmentSourceSelection) (*codewirev1.EnvironmentSourceSelection, error) {
+	if (value.Credentials == nil) != (value.ProfileRevision == nil) {
+		return nil, fmt.Errorf("codewire: environment credential selection requires an exact profile revision")
+	}
+	result := &codewirev1.EnvironmentSourceSelection{}
+	if value.Secrets != nil {
+		user, err := toProtoProjectStoragePlacement(value.Secrets.User)
+		if err != nil {
+			return nil, err
+		}
+		result.Secrets = &codewirev1.ProjectSecretBindings{
+			Project: value.Secrets.Project, Organization: value.Secrets.Organization, User: user,
+		}
+	}
+	if value.Credentials != nil {
+		if err := accessProfileRevision(*value.ProfileRevision); err != nil {
+			return nil, err
+		}
+		revision := *value.ProfileRevision
+		result.Credentials = &codewirev1.ProjectCredentialBinding{Profile: value.Credentials.Profile}
+		result.ProfileRevision = &revision
+	}
+	return result, nil
+}
+
+func environmentSourcesUpdateOutcome(value codewirev1.EnvironmentSourcesUpdateOutcome) (EnvironmentSourcesUpdateOutcome, error) {
+	switch value {
+	case codewirev1.EnvironmentSourcesUpdateOutcome_ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNCHANGED:
+		return EnvironmentSourcesUpdateOutcomeUnchanged, nil
+	case codewirev1.EnvironmentSourcesUpdateOutcome_ENVIRONMENT_SOURCES_UPDATE_OUTCOME_STORED:
+		return EnvironmentSourcesUpdateOutcomeStored, nil
+	case codewirev1.EnvironmentSourcesUpdateOutcome_ENVIRONMENT_SOURCES_UPDATE_OUTCOME_RESTART_REQUIRED:
+		return EnvironmentSourcesUpdateOutcomeRestartRequired, nil
+	default:
+		return "", fmt.Errorf("codewire: environment sources response has an unknown outcome")
+	}
 }
 
 func projectSkillSource(value codewirev1.ProjectSkillSource) string {
@@ -522,9 +635,19 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 	if err != nil {
 		return nil, err
 	}
+	if (body.ProjectSpec.Credentials == nil) != (body.ExpectedProfileRevision == nil) {
+		return nil, fmt.Errorf("codewire: environment credential selection requires an exact profile revision")
+	}
+	if body.ExpectedProfileRevision != nil {
+		if err := accessProfileRevision(*body.ExpectedProfileRevision); err != nil {
+			return nil, err
+		}
+	}
 	return &codewirev1.CreateEnvironmentRequest{
 		OrgId: orgID, PresetId: copyStringPointer(body.PresetId), Name: copyStringPointer(body.Name),
 		TtlSeconds: ttl, IsolationTier: isolation, ProjectSpec: projectSpec,
+		ExpectedProfileRevision:    copyUint64Pointer(body.ExpectedProfileRevision),
+		ConfirmPersonalCredentials: body.ConfirmPersonalCredentials, ConfirmPersonalSecrets: body.ConfirmPersonalSecrets,
 	}, nil
 }
 
@@ -575,6 +698,10 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 	if err != nil {
 		return EnvironmentData{}, err
 	}
+	sourceSelection, err := fromProtoEnvironmentSourceSelection(environment.GetSourceSelection())
+	if err != nil {
+		return EnvironmentData{}, err
+	}
 	var ttl *int64
 	if environment.TtlSeconds != nil {
 		value := int64(*environment.TtlSeconds)
@@ -588,6 +715,7 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 		Id: environment.GetId(), IsolationTier: isolation,
 		MemoryMb: int64(environment.GetMemoryMb()), Name: stringPointer(environment.GetName()),
 		Network: stringPointer(environment.GetNetwork()), OrgId: environment.GetOrgId(), Ports: ports,
+		OperationGeneration: environment.GetOperationGeneration(), SourceSelection: sourceSelection,
 		PresetId: stringPointer(environment.GetPresetId()), PresetName: stringPointer(environment.GetPresetName()),
 		Protected: environment.GetProtected(), Recoverable: environment.GetRecoverable(), RetryCount: int64(environment.GetRetryCount()),
 		SetupComplete: environment.GetSetupComplete(), SetupError: stringPointer(environment.GetSetupError()),
@@ -974,15 +1102,15 @@ func ensureSecretProjectConverterCoverage() error {
 func ensureProjectSpecConverterCoverage() error {
 	messages := codewirev1.File_codewire_v1_common_proto.Messages()
 	for name, fields := range map[string]map[protoreflect.FieldNumber]protoreflect.Name{
-		"RepositorySpec":        {1: "source", 2: "branch", 3: "destination", 4: "revision"},
-		"ApplicationPort":       {1: "port", 2: "label", 3: "access"},
-		"ProjectAgents":         {1: "install", 2: "tools"},
-		"ProjectSkillSelection": {1: "source", 2: "reference", 3: "agents"},
-		"ProjectResources":      {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
-		"ProjectSecretBindings": {1: "project", 4: "organization", 5: "user"},
-		"ProjectAccessBinding":  {1: "profile"},
+		"RepositorySpec":           {1: "source", 2: "branch", 3: "destination", 4: "revision", 5: "known_hosts"},
+		"ApplicationPort":          {1: "port", 2: "label", 3: "access"},
+		"ProjectAgents":            {1: "install", 2: "tools"},
+		"ProjectSkillSelection":    {1: "source", 2: "reference", 3: "agents"},
+		"ProjectResources":         {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
+		"ProjectSecretBindings":    {1: "project", 4: "organization", 6: "user"},
+		"ProjectCredentialBinding": {1: "profile"},
 		"ProjectSpec": {
-			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 17: "access",
+			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 18: "credentials",
 		},
 	} {
 		if err := ensureDescriptorCoverage("project "+name, messages.ByName(protoreflect.Name(name)), fields); err != nil {
@@ -998,14 +1126,34 @@ func ensureEnvironmentConverterCoverage() error {
 			environmentCoverageErr = err
 			return
 		}
-		environmentCoverageErr = ensureDescriptorCoverage("environment", codewirev1.File_codewire_v1_environment_proto.Messages().ByName("Environment"), map[protoreflect.FieldNumber]protoreflect.Name{
+		messages := codewirev1.File_codewire_v1_environment_proto.Messages()
+		environmentCoverageErr = ensureDescriptorCoverage("environment", messages.ByName("Environment"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "id", 2: "org_id", 3: "created_by", 4: "preset_id", 5: "type", 6: "name", 7: "state", 8: "desired_state", 9: "error_reason", 10: "recoverable", 11: "state_changed_at", 12: "retry_count", 13: "setup_phase", 14: "setup_complete", 15: "setup_error", 16: "ttl_seconds", 17: "shutdown_at", 18: "cpu_millicores", 19: "memory_mb", 20: "disk_gb", 21: "total_running_seconds", 22: "created_at", 23: "started_at", 24: "stopped_at", 25: "destroyed_at", 26: "protected", 27: "deletion_requested_at", 28: "deletion_grace_until", 29: "preset_name", 30: "network", 31: "ports", 32: "isolation_tier",
+			33: "operation_generation", 34: "source_selection",
 		})
 		if environmentCoverageErr != nil {
 			return
 		}
-		environmentCoverageErr = ensureDescriptorCoverage("create environment request", codewirev1.File_codewire_v1_environment_proto.Messages().ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
-			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec",
+		environmentCoverageErr = ensureDescriptorCoverage("create environment request", messages.ByName("CreateEnvironmentRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets",
+		})
+		if environmentCoverageErr != nil {
+			return
+		}
+		environmentCoverageErr = ensureDescriptorCoverage("environment source selection", messages.ByName("EnvironmentSourceSelection"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "secrets", 2: "credentials", 3: "profile_revision",
+		})
+		if environmentCoverageErr != nil {
+			return
+		}
+		environmentCoverageErr = ensureDescriptorCoverage("update environment sources request", messages.ByName("UpdateEnvironmentSourcesRequest"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "org_id", 2: "environment_id", 3: "expected_operation_generation", 4: "expected", 5: "replacement", 6: "allow_restart", 7: "confirm_personal_credentials", 8: "confirm_personal_secrets",
+		})
+		if environmentCoverageErr != nil {
+			return
+		}
+		environmentCoverageErr = ensureDescriptorCoverage("update environment sources response", messages.ByName("UpdateEnvironmentSourcesResponse"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "environment_id", 2: "operation_generation", 3: "selection", 4: "outcome",
 		})
 	})
 	return environmentCoverageErr

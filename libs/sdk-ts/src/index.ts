@@ -45,13 +45,18 @@ export { Environment } from "./environment.js";
 export { Files } from "./files.js";
 export { AccessProfiles } from "./access-profiles.js";
 export { Credentials, EnrollmentOutcomeUnknownError } from "./credentials.js";
-export type { Credential, CodexDeviceChallenge, CodexEnrollmentEvent } from "./credentials.js";
+export type {
+  Credential,
+  SshPublicKey,
+  CodexDeviceChallenge,
+  CodexEnrollmentEvent,
+  CodexEnrollmentOptions,
+} from "./credentials.js";
 export type {
   AccessProfile,
   AccessProfileEntry,
   EnvironmentAccessProfile,
   EnvironmentAccessProfileBinding,
-  SetEnvironmentAccessProfileRequest,
 } from "./access-profiles.js";
 export {
   MeshClient,
@@ -83,10 +88,15 @@ export type {
   ProjectAgents,
   ProjectSkillSelection,
   ProjectResources,
+  ProjectStoragePlacement,
   ProjectSecretBindings,
-  ProjectAccessBinding,
+  ProjectCredentialBinding,
   ProjectSpec,
   EnvironmentData,
+  EnvironmentSourceSelection,
+  EnvironmentSourcesUpdate,
+  EnvironmentSourcesUpdateOutcome,
+  UpdateEnvironmentSourcesRequest,
   IsolationTier,
   EnvironmentResources,
   EnvironmentResizeFailure,

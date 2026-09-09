@@ -72,15 +72,17 @@ func TestUpdateAPIKeyDisabledPreservesPresence(t *testing.T) {
 }
 
 func TestFromProtoPresetGolden(t *testing.T) {
+	platform := codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_PLATFORM
 	project := &codewirev1.ProjectSpec{
 		SchemaVersion: 1, Image: "node:22", WorkingDirectory: "/workspace/app",
-		Repositories:     []*codewirev1.RepositorySpec{{Source: "https://example.test/extra", Branch: "dev", Destination: "/workspace/extra"}},
+		Repositories:     []*codewirev1.RepositorySpec{{Source: "https://example.test/extra", Branch: "dev", Destination: "/workspace/extra", KnownHosts: []string{"example.test ssh-ed25519 AAAA"}}},
 		InstallCommand:   "bun install",
 		StartupScript:    "bun run dev",
 		Environment:      map[string]string{"A": "1"},
 		Agents:           &codewirev1.ProjectAgents{Install: testBoolPointer(true), Tools: []string{"codex"}},
 		ApplicationPorts: []*codewirev1.ApplicationPort{{Port: 3000, Label: "web", Access: "public"}},
-		Secrets:          &codewirev1.ProjectSecretBindings{Project: "development", Organization: true},
+		Secrets:          &codewirev1.ProjectSecretBindings{Project: "development", Organization: true, User: &platform},
+		Credentials:      &codewirev1.ProjectCredentialBinding{Profile: "platform:id:profile-one"},
 	}
 	got, err := fromProtoPreset(&codewirev1.Preset{
 		Id: "preset_1", OrgId: testStringPointer("org_1"), Name: "Node", Slug: testStringPointer("node"),
@@ -98,13 +100,14 @@ func TestFromProtoPresetGolden(t *testing.T) {
 		BuildStatus: "ready", BuildError: testStringPointer(""), DefaultTtlSeconds: testInt64Pointer(3600),
 		CreatedAt: "2026-02-03T04:05:06Z", ProjectSpec: ProjectSpec{
 			SchemaVersion: 1, Image: "node:22", WorkingDirectory: "/workspace/app",
-			Repositories:     []RepositorySpec{{Source: "https://example.test/extra", Branch: testStringPointer("dev"), Destination: testStringPointer("/workspace/extra")}},
+			Repositories:     []RepositorySpec{{Source: "https://example.test/extra", Branch: testStringPointer("dev"), Destination: testStringPointer("/workspace/extra"), KnownHosts: []string{"example.test ssh-ed25519 AAAA"}}},
 			InstallCommand:   "bun install",
 			StartupScript:    "bun run dev",
 			Environment:      map[string]string{"A": "1"},
 			Agents:           &ProjectAgents{Install: testBoolPointer(true), Tools: []string{"codex"}},
 			ApplicationPorts: []ApplicationPort{{Port: 3000, Label: "web", Access: testStringPointer("public")}},
-			Secrets:          &ProjectSecretBindings{Project: "development", Organization: true},
+			Secrets:          &ProjectSecretBindings{Project: "development", Organization: true, User: projectStoragePlacementPointer(ProjectStoragePlacementPlatform)},
+			Credentials:      &ProjectCredentialBinding{Profile: "platform:id:profile-one"},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -169,6 +172,8 @@ func TestPresetRequestPresenceAndOverflow(t *testing.T) {
 
 func TestEnvironmentConvertersGolden(t *testing.T) {
 	ttl := int32(3600)
+	profileRevision := uint64(9_007_199_254_741_009)
+	platform := codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_PLATFORM
 	protoEnvironment := &codewirev1.Environment{
 		Id: "env_1", OrgId: "org_1", CreatedBy: "user_1", PresetId: "preset_1", Type: "sandbox", Name: "work",
 		State: codewirev1.EnvironmentState_ENVIRONMENT_STATE_RUNNING, DesiredState: codewirev1.DesiredState_DESIRED_STATE_STARTED,
@@ -184,6 +189,11 @@ func TestEnvironmentConvertersGolden(t *testing.T) {
 		DeletionRequestedAt: timestamppb.New(time.Date(2026, 3, 1, 0, 4, 0, 0, time.UTC)),
 		DeletionGraceUntil:  timestamppb.New(time.Date(2026, 3, 1, 0, 5, 0, 0, time.UTC)),
 		PresetName:          "Starter", Network: "tailnet",
+		OperationGeneration: profileRevision,
+		SourceSelection: &codewirev1.EnvironmentSourceSelection{
+			Secrets:     &codewirev1.ProjectSecretBindings{Project: "platform:id:project-one", User: &platform},
+			Credentials: &codewirev1.ProjectCredentialBinding{Profile: "platform:id:profile-one"}, ProfileRevision: &profileRevision,
+		},
 		IsolationTier: codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL,
 		Ports: []*codewirev1.Port{{
 			Id: "port_1", EnvironmentId: "env_1", Port: 3000, Label: "web", Access: codewirev1.PortAccess_PORT_ACCESS_PUBLIC,
@@ -204,6 +214,11 @@ func TestEnvironmentConvertersGolden(t *testing.T) {
 		RetryCount: 2, SetupComplete: true, SetupError: testStringPointer("setup warning"), SetupPhase: 3,
 		ShutdownAt: testStringPointer("2026-03-02T01:02:03Z"), StartedAt: testStringPointer("2026-03-01T00:01:00Z"),
 		State: "running", StateChangedAt: "2026-03-01T01:02:03Z", StoppedAt: testStringPointer("2026-03-01T00:02:00Z"),
+		OperationGeneration: profileRevision,
+		SourceSelection: &EnvironmentSourceSelection{
+			Secrets:     &ProjectSecretBindings{Project: "platform:id:project-one", User: projectStoragePlacementPointer(ProjectStoragePlacementPlatform)},
+			Credentials: &ProjectCredentialBinding{Profile: "platform:id:profile-one"}, ProfileRevision: &profileRevision,
+		},
 		TotalRunningSeconds: 123, TtlSeconds: testInt64Pointer(3600), Type: "sandbox",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -235,19 +250,24 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	zero := int64(0)
 	confidential := "confidential"
 	destination := "/workspace/repo"
+	profileRevision := uint64(9_007_199_254_741_009)
+	platform := ProjectStoragePlacementPlatform
 	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{
 		Name: &empty, PresetId: &empty, IsolationTier: &confidential, TtlSeconds: &zero,
+		ExpectedProfileRevision: &profileRevision, ConfirmPersonalCredentials: true, ConfirmPersonalSecrets: true,
 		ProjectSpec: ProjectSpec{
 			SchemaVersion: 1, WorkingDirectory: destination,
-			Repositories:     []RepositorySpec{{Source: "https://example.test/repo", Branch: &empty, Destination: &destination}},
+			Repositories:     []RepositorySpec{{Source: "ssh://git@example.test/repo", Branch: &empty, Destination: &destination, KnownHosts: []string{"example.test ssh-ed25519 AAAA"}}},
 			Agents:           &ProjectAgents{Tools: []string{"codex"}},
 			ApplicationPorts: []ApplicationPort{{Port: 3000, Label: "web", Access: &empty}},
+			Secrets:          &ProjectSecretBindings{User: &platform},
+			Credentials:      &ProjectCredentialBinding{Profile: "platform:id:profile-one"},
 		},
 	})
 	if err != nil {
 		t.Fatalf("create environment request: %v", err)
 	}
-	if request.PresetId == nil || request.Name == nil || request.TtlSeconds == nil || request.ProjectSpec == nil {
+	if request.PresetId == nil || request.Name == nil || request.TtlSeconds == nil || request.ProjectSpec == nil || request.ExpectedProfileRevision == nil {
 		t.Errorf("request lost scalar presence: %#v", request)
 	}
 	if len(request.GetProjectSpec().GetAgents().GetTools()) != 1 || len(request.GetProjectSpec().GetApplicationPorts()) != 1 || len(request.GetProjectSpec().GetRepositories()) != 1 {
@@ -256,8 +276,11 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	if request.GetIsolationTier() != codewirev1.IsolationTier_ISOLATION_TIER_CONFIDENTIAL {
 		t.Errorf("request changed isolation tier: %#v", request)
 	}
-	if request.GetProjectSpec().GetAgents().GetTools()[0] != "codex" || request.GetProjectSpec().GetApplicationPorts()[0].GetPort() != 3000 || request.GetProjectSpec().GetRepositories()[0].GetSource() != "https://example.test/repo" || request.GetProjectSpec().GetRepositories()[0].GetDestination() != destination {
+	if request.GetProjectSpec().GetAgents().GetTools()[0] != "codex" || request.GetProjectSpec().GetApplicationPorts()[0].GetPort() != 3000 || request.GetProjectSpec().GetRepositories()[0].GetSource() != "ssh://git@example.test/repo" || request.GetProjectSpec().GetRepositories()[0].GetDestination() != destination || len(request.GetProjectSpec().GetRepositories()[0].GetKnownHosts()) != 1 {
 		t.Errorf("request changed nested values: %#v", request)
+	}
+	if request.GetExpectedProfileRevision() != profileRevision || !request.GetConfirmPersonalCredentials() || !request.GetConfirmPersonalSecrets() || request.GetProjectSpec().GetSecrets().GetUser() != codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_PLATFORM || request.GetProjectSpec().GetCredentials().GetProfile() != "platform:id:profile-one" {
+		t.Errorf("request changed source selection: %#v", request)
 	}
 	invalidIsolation := "container"
 	if _, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{IsolationTier: &invalidIsolation}); err == nil {
@@ -271,11 +294,12 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 	cpu := uint32(2000)
 	memory := uint64(16384)
 	disk := uint64(40)
+	local := ProjectStoragePlacementLocal
 	project := &ProjectSpec{
 		SchemaVersion: 1,
 		Image:         "ghcr.io/example/workspace@sha256:abc",
 		Repositories: []RepositorySpec{{
-			Source: "https://example.test/org/app.git", Revision: &revision, Destination: &destination,
+			Source: "ssh://git@example.test/org/app.git", Revision: &revision, Destination: &destination, KnownHosts: []string{"example.test ssh-ed25519 AAAA"},
 		}},
 		WorkingDirectory: "/workspace/app",
 		Environment:      map[string]string{"RUST_LOG": "info"},
@@ -283,22 +307,41 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 		Skills:           []ProjectSkillSelection{{Source: "repository", Reference: ".agents/skills/rust", Agents: []string{"codex"}}},
 		ApplicationPorts: []ApplicationPort{{Port: 8080, Label: "api"}},
 		Resources:        &ProjectResources{CpuMillicores: &cpu, MemoryMib: &memory, DiskGib: &disk},
-		Secrets:          &ProjectSecretBindings{Project: "development", User: true},
-		Access:           &ProjectAccessBinding{Profile: "user/work"},
+		Secrets:          &ProjectSecretBindings{Project: "development", User: &local},
+		Credentials:      &ProjectCredentialBinding{Profile: "local:id:profile-one"},
 	}
 	protoProject, err := toProtoProjectSpec(project)
 	if err != nil {
 		t.Fatalf("encode project spec: %v", err)
 	}
-	got := fromProtoProjectSpec(protoProject)
+	got, err := fromProtoProjectSpec(protoProject)
+	if err != nil {
+		t.Fatalf("decode project spec: %v", err)
+	}
 	if !reflect.DeepEqual(got, project) {
 		t.Errorf("project round trip mismatch (-want +got):\nwant: %#v\n got: %#v", project, got)
 	}
 	project.Environment["RUST_LOG"] = "changed"
-	project.Access.Profile = "user/changed"
-	if protoProject.GetEnvironment()["RUST_LOG"] != "info" || protoProject.GetAccess().GetProfile() != "user/work" {
+	project.Credentials.Profile = "local:id:changed"
+	project.Repositories[0].KnownHosts[0] = "changed"
+	if protoProject.GetEnvironment()["RUST_LOG"] != "info" || protoProject.GetCredentials().GetProfile() != "local:id:profile-one" || protoProject.GetRepositories()[0].GetKnownHosts()[0] != "example.test ssh-ed25519 AAAA" {
 		t.Errorf("protobuf request aliases caller-owned project values: %#v", protoProject)
 	}
+}
+
+func TestProjectSpecRejectsUnknownPersonalSecretPlacement(t *testing.T) {
+	unknown := codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_UNSPECIFIED
+	if _, err := fromProtoProjectSpec(&codewirev1.ProjectSpec{Secrets: &codewirev1.ProjectSecretBindings{User: &unknown}}); err == nil {
+		t.Fatal("project conversion silently dropped a present unknown personal secret source")
+	}
+	invalid := ProjectStoragePlacement("foreign")
+	if _, err := toProtoProjectSpec(&ProjectSpec{Secrets: &ProjectSecretBindings{User: &invalid}}); err == nil {
+		t.Fatal("project conversion accepted an unknown personal secret source")
+	}
+}
+
+func projectStoragePlacementPointer(value ProjectStoragePlacement) *ProjectStoragePlacement {
+	return &value
 }
 
 func TestFromProtoSecretMetadataGolden(t *testing.T) {

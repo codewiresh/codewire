@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import { Codewire, CodewireError, EnrollmentOutcomeUnknownError } from "./index.js";
+import { assertCredentialConverterCoverage } from "./credentials.js";
 
 function frame(value: object, flags = 0): Uint8Array {
   const payload = new TextEncoder().encode(JSON.stringify(value));
@@ -44,11 +45,23 @@ export async function runCredentialTests(): Promise<void> {
 }
 
 async function checkCredentialTransport(assertTimers: (expected: number) => Promise<void>): Promise<void> {
+  assertCredentialConverterCoverage();
   const exact = 9_007_199_254_741_009n;
   const maximum = 0xffff_ffff_ffff_ffffn;
   const credential = { id: "credential-one", name: "personal", provider: "openai",
     authenticationKind: "CREDENTIAL_AUTHENTICATION_KIND_OAUTH", status: "CREDENTIAL_STATUS_ACTIVE",
     expiresAtUnix: maximum.toString(), revocationGeneration: exact.toString() };
+  const sshCredential = {
+    ...credential,
+    id: "credential-ssh",
+    name: "ssh",
+    provider: "ssh",
+    authenticationKind: "CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY",
+    sshPublicKey: {
+      openssh: "ssh-ed25519 AAAASynthetic sdk-fixture",
+      fingerprint: "SHA256:synthetic-fingerprint",
+    },
+  };
   const challenge = { verificationUrl: "https://auth.openai.com/codex/device",
     userCode: "SYNTHETIC-CODE", expiresAtUnix: maximum.toString() };
   const calls: { method: string; body: Record<string, any> }[] = [];
@@ -72,7 +85,13 @@ async function checkCredentialTransport(assertTimers: (expected: number) => Prom
       if (method === "GetCredential") {
         if (body.credentialId === "missing") return unary({});
         const statuses: Record<string, string> = { expired: "CREDENTIAL_STATUS_EXPIRED", refresh_failed: "CREDENTIAL_STATUS_REFRESH_FAILED", revoked: "CREDENTIAL_STATUS_REVOKED" };
-        return unary({ credential: { ...credential, status: statuses[body.name] ?? credential.status } });
+        return unary({ credential: body.name === "ssh"
+          ? sshCredential
+          : body.name === "ssh-missing-public"
+            ? { ...sshCredential, sshPublicKey: undefined }
+            : body.name === "oauth-with-public"
+              ? { ...credential, sshPublicKey: sshCredential.sshPublicKey }
+              : { ...credential, status: statuses[body.name] ?? credential.status } });
       }
       if (method === "RevokeCredential") {
         if (body.credentialId === "stale") return unary({ code: "aborted", message: "stale revision" }, 409);
@@ -81,7 +100,12 @@ async function checkCredentialTransport(assertTimers: (expected: number) => Prom
       if (method === "DeleteCredential") return unary({});
       assert.equal(method, "EnrollCodex");
       assert.equal(url.pathname, "/codewire.v1.CredentialMutationService/EnrollCodex");
-      assert.deepEqual(Object.keys(body), ["name"]);
+      assert.deepEqual(
+        Object.keys(body),
+        body.name === "reconnect"
+          ? ["name", "credentialId", "expectedRevocationGeneration"]
+          : ["name"],
+      );
       const timeout = Number(request.headers.get("connect-timeout-ms"));
       assert.ok(timeout > 900_000 && timeout <= 960_000, "enrollment must override only this call's 30-second default");
       enrollmentAborted = false;
@@ -122,6 +146,20 @@ async function checkCredentialTransport(assertTimers: (expected: number) => Prom
     assert.equal(calls.at(-1)!.body.name, status);
     assert.ok(!("credentialId" in calls.at(-1)!.body));
   }
+  const ssh = await cw.credentials.getByName("ssh");
+  assert.equal(ssh.authentication_kind, "ssh_key");
+  assert.deepEqual(ssh.ssh_public_key, {
+    openssh: "ssh-ed25519 AAAASynthetic sdk-fixture",
+    fingerprint: "SHA256:synthetic-fingerprint",
+  });
+  await assert.rejects(
+    cw.credentials.getByName("ssh-missing-public"),
+    /SSH public metadata exactly for SSH credentials/,
+  );
+  await assert.rejects(
+    cw.credentials.getByName("oauth-with-public"),
+    /SSH public metadata exactly for SSH credentials/,
+  );
   assert.equal((await cw.credentials.revoke("credential-one", exact)).status, "revoked");
   assert.equal(calls.at(-1)!.body.expectedRevocationGeneration, exact.toString());
   await cw.credentials.delete("credential-one", maximum);
@@ -149,6 +187,29 @@ async function checkCredentialTransport(assertTimers: (expected: number) => Prom
   // Cleanup must precede exposing terminal metadata, not depend on another read.
   await assertTimers(0);
   assert.equal((await enrollment.next()).done, true);
+
+  const reconnect = cw.credentials.enrollCodex("reconnect", {
+    credential_id: "credential-one",
+    expected_revocation_generation: exact,
+  });
+  assert.equal((await reconnect.next()).value?.type, "challenge");
+  assert.equal(calls.at(-1)!.body.credentialId, "credential-one");
+  assert.equal(calls.at(-1)!.body.expectedRevocationGeneration, exact.toString());
+  await reconnect.return(undefined);
+  await assertTimers(0);
+  const beforeInvalidReconnect = calls.length;
+  await assert.rejects(
+    cw.credentials.enrollCodex("invalid", { credential_id: "credential-one" }).next(),
+    /requires credential_id and expected_revocation_generation together/,
+  );
+  await assert.rejects(
+    cw.credentials.enrollCodex("invalid", {
+      credential_id: "credential-one",
+      expected_revocation_generation: 0n,
+    }).next(),
+    /positive uint64 bigint/,
+  );
+  assert.equal(calls.length, beforeInvalidReconnect);
 
   for (const name of ["eof", "error", "duplicate"]) {
     const start = calls.length;

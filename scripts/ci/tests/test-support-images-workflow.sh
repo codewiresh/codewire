@@ -154,10 +154,29 @@ fi
 grep -qF -- '-p codewire-cli-bin --bin cw' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace builds cw from the wrong Rust package'
 builder_stage="$(sed -n '/^FROM rust:.* AS cw-builder$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
-grep -qF 'protobuf-compiler' <<<"$builder_stage" ||
-  fail 'workspace Rust builder does not install protoc'
-grep -qF 'libprotobuf-dev' <<<"$builder_stage" ||
-  fail 'workspace Rust builder does not install well-known protobuf contracts'
+# The pinned upstream archive supplies both protoc and its well-known includes.
+# Distribution protobuf packages are too old for the canonical descriptors.
+protoc_inputs=(
+  'ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7'
+  'https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip'
+  'unzip -q /tmp/protoc.zip -d /opt/protoc'
+  'ENV PROTOC=/opt/protoc/bin/protoc'
+  'test "$(/opt/protoc/bin/protoc --version)" = '\''libprotoc 35.1'\'''
+)
+workspace_protoc_contract() {
+  local stage="$1" input
+  for input in "${protoc_inputs[@]}"; do
+    grep -qF -- "$input" <<<"$stage" || return 1
+  done
+}
+workspace_protoc_contract "$builder_stage" ||
+  fail 'workspace Rust builder lacks the exact checked protoc archive and includes'
+for protoc_input in "${protoc_inputs[@]}"; do
+  incomplete_stage="$(grep -vF -- "$protoc_input" <<<"$builder_stage")"
+  if workspace_protoc_contract "$incomplete_stage"; then
+    fail 'workspace protoc guard accepted a missing pinned input'
+  fi
+done
 grep -qF -- '--mount=type=bind,target=/src,readonly' <<<"$builder_stage" ||
   fail 'workspace Rust builder does not consume the source tree read-only'
 grep -qF -- '--manifest-path /src/Cargo.toml' <<<"$builder_stage" ||

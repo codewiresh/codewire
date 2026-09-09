@@ -325,6 +325,7 @@ class TransportTestCase(unittest.TestCase):
                 "deletion_grace_until": "2026-01-01T00:00:00Z",
                 "preset_name": "Python",
                 "network": "net_1",
+                "operation_generation": 0,
                 "ports": [
                     {
                         "id": "port_1",
@@ -403,12 +404,14 @@ class TransportTestCase(unittest.TestCase):
                     "source": "https://example.test/a",
                     "branch": "branch",
                     "destination": "/workspace/a",
+                    "known_hosts": [],
                 },
                 {
                     "source": "https://example.test/b",
                     "branch": "",
                     "destination": "/workspace/b",
                     "revision": "deadbeef",
+                    "known_hosts": [],
                 },
             ],
         )
@@ -423,7 +426,7 @@ class TransportTestCase(unittest.TestCase):
         )
         self.assertEqual(
             project["secrets"],
-            {"project": "development", "organization": True, "user": False},
+            {"project": "development", "organization": True},
         )
 
     def test_connect_error_maps_status_violations_and_request_id(self) -> None:
