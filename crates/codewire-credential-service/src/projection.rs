@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::authority::{KubernetesPlatformRuntimeAuthority, SCOPE_QUERY, Scope};
 
+#[cfg(feature = "enrollment")]
 pub(crate) mod composition;
 
 #[derive(Clone, PartialEq, Eq, sqlx::FromRow)]

@@ -293,6 +293,11 @@ async fn broker_admission_precedes_open_and_typed_frames_are_preserved() {
         recipient_public_key: vec![7; 32],
         selection_sha256: vec![9; 32],
         deadline_unix_ms: 123456,
+        local_inventories: vec![v1::EnvironmentProjectionInventory {
+            source: v1::EnvironmentProjectionSource::Project as i32,
+            source_identity: "/projects/local-owner/local-project".into(),
+            keys: vec!["LOCAL_ONLY".into()],
+        }],
     };
     daemon
         .output
@@ -482,6 +487,7 @@ async fn epoch_expiry_drains_both_producers_and_only_fresh_requests_reach_replac
         recipient_public_key: vec![7; 32],
         selection_sha256: vec![9; 32],
         deadline_unix_ms: 123456,
+        local_inventories: Vec::new(),
     };
     daemon
         .output
