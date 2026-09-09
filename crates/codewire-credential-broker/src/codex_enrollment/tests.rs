@@ -1,8 +1,10 @@
 use super::*;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 
 use base64::Engine as _;
+use tokio::io::unix::AsyncFd;
 
 const PROMPT: &str = "\nWelcome to Codex [v\x1b[90m0.149.0\x1b[0m]\n\x1b[90mOpenAI's command-line coding agent\x1b[0m\n\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n\n2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n   \x1b[94mABCD-EFGH\x1b[0m\n\n\x1b[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\x1b[0m\n\n";
 
@@ -408,39 +410,81 @@ async fn publication_wait_keeps_original_deadline_and_preserves_a_late_commit() 
     assert!(!fixture.root.path().join("logout.called").exists());
 }
 
-fn assert_not_running(root: &Path, name: &str) {
-    let pid: i32 = std::fs::read_to_string(root.join(name))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    let status = std::fs::read_to_string(format!("/proc/{pid}/stat"));
-    match status {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(status) => {
-            // Grandchildren are reaped by their normal parent/init, not a
-            // process-wide subreaper. A zombie has no executing code or writer.
-            let state = status.rsplit_once(") ").unwrap().1.as_bytes()[0];
-            assert!(
-                state == b'Z' || state == b'X',
-                "synthetic group member remains live"
-            );
-        }
-        Err(_) => panic!("inspect exact synthetic child status"),
+fn observe_process(pid: i32) -> AsyncFd<OwnedFd> {
+    let pid = Pid::from_raw(pid).expect("exact synthetic process PID");
+    let descriptor = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+        .expect("pin exact synthetic process before cancellation");
+    AsyncFd::new(descriptor).expect("register synthetic process exit observation")
+}
+
+fn observe_group(root: &Path) -> [(&'static str, AsyncFd<OwnedFd>); 2] {
+    ["wrapper.pid", "native.pid"].map(|name| {
+        let pid = std::fs::read_to_string(root.join(name))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        (name, observe_process(pid))
+    })
+}
+
+async fn wait_for_exit(
+    process: &AsyncFd<OwnedFd>,
+    deadline: Instant,
+) -> Result<(), tokio::time::error::Elapsed> {
+    let _ready = tokio::time::timeout_at(deadline, process.readable())
+        .await?
+        .expect("observe exact synthetic process exit");
+    Ok(())
+}
+
+async fn assert_group_exited(processes: [(&'static str, AsyncFd<OwnedFd>); 2]) {
+    // Linux closes inherited pipes during exit_files before exit_notify marks
+    // a grandchild terminal. EOF and the direct parent's wait can therefore
+    // precede the grandchild's observable exit. Pin identities while both are
+    // still blocked, then observe actual exit without racing PID reuse or init.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for (name, process) in processes {
+        wait_for_exit(&process, deadline)
+            .await
+            .unwrap_or_else(|_| panic!("synthetic group member {name} did not exit"));
     }
+}
+
+#[tokio::test]
+async fn process_exit_observation_rejects_live_child_and_accepts_its_exit() {
+    let mut child = Command::new("/bin/sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let process = observe_process(i32::try_from(child.id().unwrap()).unwrap());
+    assert!(
+        wait_for_exit(&process, Instant::now() + Duration::from_millis(10))
+            .await
+            .is_err(),
+        "a live process must not satisfy the cleanup observation"
+    );
+    child.kill().await.unwrap();
+    wait_for_exit(&process, Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn cancellation_drains_wrapper_and_native_child_before_home_cleanup() {
     let fixture = Fixture::new();
     let pending = fixture.ready().await;
+    let processes = observe_group(fixture.root.path());
     tokio::time::timeout(Duration::from_secs(5), pending.cancel())
         .await
         .unwrap()
         .unwrap();
     assert!(fixture.homes().is_empty());
-    assert_not_running(fixture.root.path(), "wrapper.pid");
-    assert_not_running(fixture.root.path(), "native.pid");
+    assert_group_exited(processes).await;
     fixture.release();
     assert!(!fixture.root.path().join("native.finished").exists());
     fixture.assert_clean().await;
@@ -450,13 +494,13 @@ async fn cancellation_drains_wrapper_and_native_child_before_home_cleanup() {
 async fn owner_shutdown_drains_dropped_pending_and_rejects_new_admission() {
     let fixture = Fixture::new();
     let pending = fixture.ready().await;
+    let processes = observe_group(fixture.root.path());
     drop(pending);
     tokio::time::timeout(Duration::from_secs(5), fixture.owner.shutdown())
         .await
         .unwrap()
         .unwrap();
-    assert_not_running(fixture.root.path(), "wrapper.pid");
-    assert_not_running(fixture.root.path(), "native.pid");
+    assert_group_exited(processes).await;
     assert!(fixture.homes().is_empty());
     assert!(fixture.owner.start().is_err());
 }
@@ -468,6 +512,7 @@ async fn original_deadline_expires_pending_exchange_and_drains_the_group() {
     // The process remains blocked after printing a valid challenge; receiving it
     // does not restart the original lifetime.
     pending.challenge().await.unwrap();
+    let processes = observe_group(fixture.root.path());
     tokio::time::pause();
     tokio::time::advance(ENROLLMENT_LIFETIME).await;
     tokio::time::resume();
@@ -475,8 +520,7 @@ async fn original_deadline_expires_pending_exchange_and_drains_the_group() {
         .await
         .unwrap();
     assert_eq!(result.err(), Some(CodexEnrollmentError::Expired));
-    assert_not_running(fixture.root.path(), "wrapper.pid");
-    assert_not_running(fixture.root.path(), "native.pid");
+    assert_group_exited(processes).await;
     fixture.assert_clean().await;
 }
 
