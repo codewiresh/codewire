@@ -237,14 +237,111 @@ class HarnessGuards(unittest.TestCase):
                 *provider[1:]]
 
     def rotation_proof(self, events, session=None):
-        with tempfile.TemporaryDirectory(prefix="kind-rotation-proof-") as directory:
-            path = Path(directory) / "session.jsonl"
-            path.write_text("\n".join(json.dumps(event) for event in (
-                self.session_events() if session is None else session)))
-            return self.shell('''
+        directory = tempfile.TemporaryDirectory(prefix="kind-rotation-proof-")
+        self.addCleanup(directory.cleanup)
+        self.rotation_directory = Path(directory.name)
+        path = self.rotation_directory / "session.jsonl"
+        path.write_text("\n".join(json.dumps(event) for event in (
+            self.session_events() if session is None else session)))
+        return self.shell('''
+RUN_DIR='%s'
 kind_credential_fixture_events() { printf '%%s\\n' '%s'; }
 assert_kind_credential_rotation '%s' 2 '%s' '%s' '%s'
-''' % (json.dumps(events), ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID, path))
+''' % (self.rotation_directory, json.dumps(events), ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID, path))
+
+    def rotation_evidence(self):
+        paths = list(self.rotation_directory.glob("credential-rotation.*/evidence.json"))
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(paths[0].parent.stat().st_mode & 0o777, 0o700)
+        return json.loads(paths[0].read_text())
+
+    def test_rotation_evidence_survives_both_assertion_failures(self):
+        for session_failure in (False, True):
+            events = self.rotation_events()
+            session = self.session_events()
+            if session_failure:
+                session[0]["codex_processes"] = 2
+            else:
+                events[2]["workspace_token_changed"] = False
+            with self.subTest(session_failure=session_failure):
+                result = self.rotation_proof(events, session)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("fixture record:", result.stderr)
+                self.assertEqual(self.rotation_evidence(), {
+                    "expected": {"environment_id": ENVIRONMENT, "generation": 2,
+                                 "workspace_pod_uid": WORKSPACE_UID, "gateway_pod_uid": GATEWAY_UID},
+                    "events": events,
+                })
+
+    def test_rotation_evidence_excludes_unknown_fields_and_malformed_values(self):
+        events = self.rotation_events()
+        for event in events:
+            event["message"] = "synthetic-do-not-save"
+            event["unknown_material"] = {"nested": "synthetic-do-not-save"}
+        events[0].update(environment_id="synthetic-do-not-save", generation="synthetic-do-not-save",
+                         workspace_pod_uid=["synthetic-do-not-save"], gateway_pod_uid=None,
+                         auth_sequence=-1, workspace_token_changed="synthetic-do-not-save")
+        events[1].update(scenario="synthetic-do-not-save", attempt=1.5,
+                         status="synthetic-do-not-save", response_calls=2**53,
+                         refresh_calls={"secret": "synthetic-do-not-save"})
+        events += [{"event": "synthetic-do-not-save"}, "synthetic-do-not-save"]
+        result = self.rotation_proof(events)
+        self.assertNotEqual(result.returncode, 0)
+        evidence = self.rotation_evidence()
+        self.assertNotIn("synthetic-do-not-save", json.dumps(evidence) + result.stdout + result.stderr)
+        self.assertEqual(evidence["events"][0], {key: "bridge_authenticated" if key == "event" else None
+                                                for key in self.rotation_events()[0]})
+        self.assertEqual(evidence["events"][1], {key: "provider_response" if key == "event" else None
+                                                for key in self.rotation_events()[1]})
+        self.assertEqual(evidence["events"][-2:], [{"event": None}, {"event": None}])
+        self.assertTrue(all("message" not in event and "unknown_material" not in event
+                            for event in evidence["events"]))
+
+    def test_rotation_evidence_rejects_oversized_transcript(self):
+        result = self.rotation_proof([{}] * 4097)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not preserve bounded credential fixture evidence", result.stderr)
+        self.assertEqual(list(self.rotation_directory.glob("credential-rotation.*/evidence.json")), [])
+        for path in self.rotation_directory.glob("credential-rotation.*/evidence.pending"):
+            self.assertEqual(path.read_bytes(), b"")
+
+    def test_rotation_evidence_does_not_overwrite_and_sanitizes_expected_coordinates(self):
+        with tempfile.TemporaryDirectory(prefix="kind-rotation-capture-") as directory:
+            result = self.shell('''
+RUN_DIR='%s'
+save_kind_credential_rotation_evidence sensitive sensitive sensitive sensitive <<<'[]'
+save_kind_credential_rotation_evidence '%s' 2 '%s' '%s' <<<'[]'
+''' % (directory, ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            paths = [Path(path) for path in result.stdout.splitlines()]
+            self.assertEqual(len(set(paths)), 2)
+            self.assertEqual(json.loads(paths[0].read_text())["expected"], {
+                "environment_id": None, "generation": None,
+                "workspace_pod_uid": None, "gateway_pod_uid": None,
+            })
+            self.assertEqual(json.loads(paths[1].read_text())["expected"]["environment_id"], ENVIRONMENT)
+
+    def test_rotation_evidence_write_failure_cannot_reach_acceptance(self):
+        with tempfile.TemporaryDirectory(prefix="kind-rotation-write-") as directory:
+            result = self.shell('''
+RUN_DIR='%s'
+kind_credential_fixture_events() { printf '[]'; }
+mktemp() { return 38; }
+assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
+''' % (directory, ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID))
+            self.assertEqual(result.returncode, 38, result.stderr)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_rotation_collector_failure_cannot_pass_or_emit_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="kind-rotation-collector-") as directory:
+            result = self.shell('''
+RUN_DIR='%s'
+kind_credential_fixture_events() { printf '[]'; return 37; }
+assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
+''' % (directory, ENVIRONMENT, WORKSPACE_UID, GATEWAY_UID))
+            self.assertEqual(result.returncode, 37, result.stderr)
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_rotation_requires_composed_token_time_authentication_and_stock_turn_proof(self):
         result = self.rotation_proof(self.rotation_events())

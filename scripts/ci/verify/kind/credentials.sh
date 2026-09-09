@@ -292,8 +292,59 @@ assert_kind_credential_provider_counts() {
   ' >/dev/null || { echo '::error::credential fixture restarted during acceptance' >&2; return 1; }
 }
 
+save_kind_credential_rotation_evidence() (
+  # Save only closed public fixture fields, not arbitrary subscriber fields or
+  # messages. Invalid values become null for diagnosis; the assertions below
+  # still consume the original events and are never relaxed by this projection.
+  umask 077
+  local directory
+  directory="$(mktemp -d "$RUN_DIR/credential-rotation.XXXXXX")" || return $?
+  jq -ce --arg environment "$1" --arg generation "$2" --arg workspace "$3" --arg gateway "$4" '
+    def uuid: if type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+      then . else null end;
+    def count: if type == "number" and . >= 0 and . <= 9007199254740991 and floor == .
+      then . else null end;
+    def boolean: if type == "boolean" then . else null end;
+    def event:
+      if type != "object" then {event:null}
+      elif .event == "bridge_authenticated" then {
+        event, environment_id:(.environment_id | uuid), generation:(.generation | count),
+        workspace_pod_uid:(.workspace_pod_uid | uuid), gateway_pod_uid:(.gateway_pod_uid | uuid),
+        auth_sequence:(.auth_sequence | count), workspace_token_changed:(.workspace_token_changed | boolean)
+      }
+      elif .event == "provider_response" then {
+        event, scenario:(.scenario | if . == "baseline" or . == "broker_retry_once" or
+          . == "broker_retry_exhausted" then . else null end),
+        attempt:(.attempt | count), status:(.status | count | if . >= 100 and . <= 599 then . else null end),
+        response_calls:(.response_calls | count), refresh_calls:(.refresh_calls | count)
+      }
+      elif .event == "provider_refresh" or .event == "provider_totals" then {
+        event, response_calls:(.response_calls | count), refresh_calls:(.refresh_calls | count)
+      }
+      else {event:null} end;
+    if type == "array" and length <= 4096 then {
+      expected:{environment_id:($environment | uuid),
+        generation:($generation | try tonumber catch null | count),
+        workspace_pod_uid:($workspace | uuid), gateway_pod_uid:($gateway | uuid)},
+      events:map(event)
+    } else error("invalid bounded fixture transcript") end
+  ' > "$directory/evidence.pending" 2>/dev/null || {
+    echo '::error::could not preserve bounded credential fixture evidence' >&2
+    return 1
+  }
+  # The closed schemas already bound output; keep an explicit publication cap
+  # so a future projection change cannot silently broaden retained evidence.
+  [ "$(wc -c < "$directory/evidence.pending")" -le 2097152 ] || return 1
+  mv "$directory/evidence.pending" "$directory/evidence.json" || return $?
+  printf '%s\n' "$directory/evidence.json"
+)
+
 assert_kind_credential_rotation() {
-  local environment="$1" generation="$2" workspace_uid="$3" gateway_uid="$4" session="$5" events
+  local environment="$1" generation="$2" workspace_uid="$3" gateway_uid="$4" session="$5" events evidence
+  events="$(kind_credential_fixture_events)" || return $?
+  evidence="$(save_kind_credential_rotation_evidence "$environment" "$generation" \
+    "$workspace_uid" "$gateway_uid" <<<"$events")" || return $?
   # Authentication is not Ready/admission by itself. Compose the exact live
   # authenticator transcript with the >600s epoch bound and a successful stock
   # turn after actual projected-token replacement; never print token digests.
@@ -306,10 +357,9 @@ assert_kind_credential_rotation() {
     all(.[3,4]; .elapsed_ms >= 0 and .elapsed_ms < 30000) and
     .[5] == {event:"complete", turns:4, completed:3, failed:1, same_process:true, token_changed:true}
   ' "$session" >/dev/null || {
-    echo '::error::stock Codex hosted rotation/session evidence is incomplete' >&2
+    echo "::error::stock Codex hosted rotation/session evidence is incomplete; fixture record: $evidence" >&2
     return 1
   }
-  events="$(kind_credential_fixture_events)"
   jq -e --arg environment "$environment" --argjson generation "$generation" \
     --arg workspace "$workspace_uid" --arg gateway "$gateway_uid" '
     def uuid: type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
@@ -337,7 +387,7 @@ assert_kind_credential_rotation() {
     any($auth[]; .key > $baseline[0].key and .key < $rotation[0].key and
       .value.workspace_token_changed == true)
   ' <<<"$events" >/dev/null || {
-    echo '::error::fresh same-identity hosted authentication evidence is incomplete' >&2
+    echo "::error::fresh same-identity hosted authentication evidence is incomplete; fixture record: $evidence" >&2
     return 1
   }
 }
