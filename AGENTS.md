@@ -34,9 +34,9 @@ production actions do not.
 
 ## Method and risk
 
-Use Noel Method v0.9.3, commit
-`93f68ba4abc9f6e222481265b9b759e71d332575`, manifest
-`a005933cd29affc6555731d5921cbad2977e5d932c1f7a413fdd69da4def9d05`.
+Use Noel Method v0.10.0, exact merged commit
+`6d7826aecda20f875bc1f9a29c333d5d5ef4e5e7`, manifest
+`ff68193d531043d0498841fa104cfc1de713307ab80577eabaaae09c05b53151`.
 Direct mode is normal. Use Program only for persistent dependent work across
 sessions, repositories, or operational gates; Experiment for controlled
 comparisons; Secrets when a local process can access secret material. Protocols
