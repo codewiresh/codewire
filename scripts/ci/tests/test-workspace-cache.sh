@@ -39,6 +39,7 @@ case "$1 $2" in
     printf 'build\n' >>"$FAKE_BUILDS"
     if [[ "${FAKE_CANARY:-}" == hang ]]; then
       printf '%s\n' "$$" >"$FAKE_CANARY_PROCESS"
+      sleep "${FAKE_CANARY_READY_DELAY:-0}"
       sleep 30 &
       child_pid=$!
       printf '%s\n' "$child_pid" >"$FAKE_CANARY_CHILD"
@@ -378,20 +379,28 @@ for canary in hit lazy-hit lazy-wrong miss export-failure; do
 done
 export FAKE_CANARY_PROCESS="$work/canary-process" FAKE_CANARY_CHILD="$work/canary-child"
 : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
-FAKE_CANARY=hang "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
+FAKE_CANARY=hang FAKE_CANARY_READY_DELAY=3 "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
   "$credential_work/r2.aws" "$work/report-cancel" >"$work/canary-cancel.out" 2>&1 &
 canary_pid=$!
-for ((attempt=0; attempt<100; attempt++)); do
+for ((attempt=0; attempt<200; attempt++)); do
   [[ ! -s "$FAKE_CANARY_CHILD" ]] || break
-  sleep 0.02
+  sleep 0.05
 done
-[[ -s "$FAKE_CANARY_CHILD" && -s "$FAKE_FILE" ]] || { kill -TERM "$canary_pid"; exit 1; }
+[[ -s "$FAKE_CANARY_CHILD" && -s "$FAKE_FILE" ]] || {
+  kill -TERM "$canary_pid" 2>/dev/null || true
+  wait "$canary_pid" 2>/dev/null || true
+  echo 'cache canary did not publish cancellation readiness within ten seconds' >&2
+  exit 1
+}
 kill -TERM "$canary_pid"
 set +e
 wait "$canary_pid"
 status=$?
 set -e
-[[ "$status" != 0 && ! -e "$work/report-cancel/result.txt" && ! -e "$FAKE_FILE" ]]
+[[ "$status" != 0 && ! -e "$work/report-cancel/result.txt" && ! -e "$FAKE_FILE" ]] || {
+  echo 'cache canary cancellation did not fail and clean its credential/report' >&2
+  exit 1
+}
 grep -q 'exec .* rm -f /run/codewire-cache/aws-credentials' "$FAKE_LOG"
 grep -q '^buildx rm --force codewire-workspace-' "$FAKE_LOG"
 for pid_file in "$FAKE_CANARY_PROCESS" "$FAKE_CANARY_CHILD"; do
