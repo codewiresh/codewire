@@ -134,22 +134,22 @@ cache_jobs=(
   database
   services-control
   services-runtime
-  edge-kind
+  kind-workspace
+  kind-product
+  kind-smokes
 )
 [[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq "${#cache_jobs[@]}" ]] ||
-  fail 'CI OIDC is not confined to the eight cache-consuming jobs'
-for index in "${!cache_jobs[@]}"; do
-  job="${cache_jobs[$index]}"
-  if (( index + 1 < ${#cache_jobs[@]} )); then
-    next_job="${cache_jobs[$((index + 1))]}"
-    job_block="$(sed -n "/^  ${job}:/,/^  ${next_job}:/p" "$WORKFLOW")"
-  else
-    job_block="$(sed -n '/^  edge-kind:/,/^  required-verification:/p' "$WORKFLOW")"
-  fi
+  fail 'CI OIDC is not confined to the declared cache-consuming jobs'
+for job in "${cache_jobs[@]}"; do
+  job_block="$(awk -v wanted="$job" '
+    $0 == "  " wanted ":" { capture = 1 }
+    capture && /^  [A-Za-z0-9_-]+:$/ && $0 != "  " wanted ":" { exit }
+    capture { print }
+  ' "$WORKFLOW")"
   grep -Fq '    enable-openid-connect: true' <<<"$job_block" ||
     fail "$job cannot request its untrusted cache identity"
   cache_selector=select-untrusted-rust-cache.sh
-  if [[ "$job" == workspace-image || "$job" == edge-kind ]]; then
+  if [[ "$job" == workspace-image || "$job" == kind-workspace ]]; then
     cache_selector=select-untrusted-workspace-cache.sh
   fi
   grep -Fq "scripts/ci/setup/$cache_selector \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \
@@ -166,4 +166,4 @@ if grep -Eq '^      (SCCACHE_BUCKET|SCCACHE_ENDPOINT|CODEWIRE_SCCACHE_PREFIX):' 
   fail 'workflow exposes remote cache configuration outside selected cache steps'
 fi
 
-printf '[test-fetch-openbao-sccache-r2-credentials] exact-claim eight-job private-file contract passed\n'
+printf '[test-fetch-openbao-sccache-r2-credentials] exact-claim %s-job private-file contract passed\n' "${#cache_jobs[@]}"

@@ -168,10 +168,8 @@ class WorkflowContractTests(unittest.TestCase):
     def test_consumer_downloads_bound_manifests_outside_checkout(self) -> None:
         edge = self.jobs["edge-kind"]
         self.assertEqual(edge["env"]["CODEWIRE_KIND_PRODUCT_IMAGE_MODE"], "prebuilt-ci")
-        self.assertEqual(
-            edge["env"]["CODEWIRE_KIND_ARTIFACT_ROOT"],
-            "${{ runner.temp }}/kind-inputs",
-        )
+        # Forgejo resolves job-level env before the runner context exists.
+        self.assertNotIn("CODEWIRE_KIND_ARTIFACT_ROOT", edge["env"])
         for job_name, group in PRODUCERS.items():
             self.assertEqual(
                 edge["env"][f"CODEWIRE_KIND_{group.upper()}_MANIFEST_SHA256"],
@@ -181,11 +179,13 @@ class WorkflowContractTests(unittest.TestCase):
         guard = named_step(edge, "Require fresh artifact download directories outside the checkout")
         self.assertEqual(guard["if"], KIND_STEP_IF)
         for contract in (
+            'CODEWIRE_KIND_ARTIFACT_ROOT="$RUNNER_TEMP/kind-inputs"',
             'test ! -e "$CODEWIRE_KIND_ARTIFACT_ROOT"',
             'test ! -L "$CODEWIRE_KIND_ARTIFACT_ROOT"',
             'case "$(realpath "$RUNNER_TEMP")" in',
             '"$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*) exit 1',
             'mkdir -m 700 "$CODEWIRE_KIND_ARTIFACT_ROOT"',
+            '''printf 'CODEWIRE_KIND_ARTIFACT_ROOT=%s\\n' "$CODEWIRE_KIND_ARTIFACT_ROOT" >> "$GITHUB_ENV"''',
         ):
             self.assertIn(contract, guard["run"])
 
@@ -227,6 +227,47 @@ class WorkflowContractTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, commands)
         self.assertEqual(named_step(edge, "Run Kind")["run"], "scripts/ci/verify/kind-e2e.sh")
+
+    def test_download_guard_exports_only_a_fresh_external_directory(self) -> None:
+        guard = named_step(
+            self.jobs["edge-kind"],
+            "Require fresh artifact download directories outside the checkout",
+        )["run"]
+        for case in ("fresh", "existing", "symlink", "checkout", "inside-checkout"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                workspace = root / "checkout"
+                workspace.mkdir()
+                runtime = (workspace if case == "checkout" else
+                           workspace / "temp" if case == "inside-checkout" else
+                           root / "temp")
+                runtime.mkdir(exist_ok=True)
+                artifact_root = runtime / "kind-inputs"
+                if case == "existing":
+                    artifact_root.mkdir()
+                elif case == "symlink":
+                    artifact_root.symlink_to(root / "missing")
+                env_file = root / "github-env"
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-c", guard],
+                    env={
+                        "PATH": os.environ["PATH"],
+                        "RUNNER_TEMP": str(runtime),
+                        "GITHUB_WORKSPACE": str(workspace),
+                        "GITHUB_ENV": str(env_file),
+                    },
+                    capture_output=True, text=True, check=False,
+                )
+                if case == "fresh":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(artifact_root.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(
+                        env_file.read_text(encoding="utf-8"),
+                        f"CODEWIRE_KIND_ARTIFACT_ROOT={artifact_root}\n",
+                    )
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(env_file.exists())
 
     def test_integrated_runtime_order_remains_atomic(self) -> None:
         source = INTEGRATED.read_text(encoding="utf-8")

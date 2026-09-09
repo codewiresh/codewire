@@ -1126,7 +1126,6 @@ jobs:
       KIND_DIND_IMAGE: nexus.example.invalid/oci-approved/docker/dind@sha256:66fd272fc375aad4c8fa06351c414e15bffe8cb015c171e1b8a8efe36a72cc1e
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ci-cache/kind-ci
       CODEWIRE_KIND_PRODUCT_IMAGE_MODE: prebuilt-ci
-      CODEWIRE_KIND_ARTIFACT_ROOT: ${{ runner.temp }}/kind-inputs
       CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256: ${{ needs.kind-workspace.outputs.manifest_sha256 }}
       CODEWIRE_KIND_PRODUCT_MANIFEST_SHA256: ${{ needs.kind-product.outputs.manifest_sha256 }}
       CODEWIRE_KIND_SMOKES_MANIFEST_SHA256: ${{ needs.kind-smokes.outputs.manifest_sha256 }}
@@ -1181,12 +1180,14 @@ jobs:
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: |
           set -euo pipefail
+          CODEWIRE_KIND_ARTIFACT_ROOT="$RUNNER_TEMP/kind-inputs"
           test ! -e "$CODEWIRE_KIND_ARTIFACT_ROOT"
           test ! -L "$CODEWIRE_KIND_ARTIFACT_ROOT"
           case "$(realpath "$RUNNER_TEMP")" in
             "$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*) exit 1 ;;
           esac
           mkdir -m 700 "$CODEWIRE_KIND_ARTIFACT_ROOT"
+          printf 'CODEWIRE_KIND_ARTIFACT_ROOT=%s\n' "$CODEWIRE_KIND_ARTIFACT_ROOT" >> "$GITHUB_ENV"
 
       - name: Download exact workspace producer output
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
