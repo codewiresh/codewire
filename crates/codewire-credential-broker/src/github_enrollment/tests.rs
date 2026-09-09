@@ -1,6 +1,8 @@
 use super::*;
+use crate::process_test_support::{
+    assert_group_exited, observe_group, observe_process, ready_pid, wait_for_exit,
+};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-use std::path::Path;
 
 const TOKEN: &str = "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const PROMPT: &str = "\n! First copy your one-time code: ABCD-EFGH\nTo continue, open this URL in your web browser: https://github.com/login/device\n";
@@ -226,31 +228,6 @@ impl Fixture {
     }
 }
 
-fn ready_pid(path: &Path) -> Option<i32> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => panic!("cannot read synthetic process PID: {error}"),
-    };
-    let digits = contents.strip_suffix('\n')?;
-    let pid: i32 = digits.parse().expect("complete synthetic process PID");
-    assert!(pid > 1);
-    assert_eq!(digits, pid.to_string());
-    Some(pid)
-}
-
-fn assert_stopped(root: &Path, name: &str) {
-    let pid = ready_pid(&root.join(name)).expect("synthetic process PID is ready");
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(stat) => assert!(matches!(
-            stat.rsplit_once(") ").unwrap().1.as_bytes()[0],
-            b'Z' | b'X'
-        )),
-        Err(_) => panic!("cannot inspect exact synthetic group member"),
-    }
-}
-
 #[tokio::test]
 async fn completed_import_is_single_use_and_every_disposition_cleans_without_logout() {
     for outcome in [
@@ -259,14 +236,19 @@ async fn completed_import_is_single_use_and_every_disposition_cleans_without_log
         GitHubPublicationOutcome::Unknown,
     ] {
         let f = Fixture::new();
-        let mut completed = f.completed().await;
+        let pending = f.ready().await;
+        let processes = observe_group(f.root.path());
+        f.flag("release");
+        let mut completed = tokio::time::timeout(Duration::from_secs(5), pending.complete())
+            .await
+            .unwrap()
+            .unwrap();
         let (token, login) = completed.take_import().unwrap().into_parts();
         assert_eq!(&*token, TOKEN.as_bytes());
         assert_eq!(login.as_deref(), Some("synthetic-user"));
         assert!(completed.take_import().is_err());
         assert!(f.homes()[0].join("login.log").exists());
-        assert_stopped(f.root.path(), "wrapper.pid");
-        assert_stopped(f.root.path(), "native.pid");
+        assert_group_exited(processes).await;
         completed.finish(outcome).await.unwrap();
         f.clean().await;
         assert_eq!(&*token, TOKEN.as_bytes());
@@ -278,14 +260,14 @@ async fn cancellation_and_dropped_waiter_retain_group_drain_before_cleanup() {
     for explicit in [true, false] {
         let f = Fixture::new();
         let pending = f.ready().await;
+        let processes = observe_group(f.root.path());
         if explicit {
             pending.cancel().await.unwrap();
         } else {
             drop(pending);
         }
         f.clean().await;
-        assert_stopped(f.root.path(), "wrapper.pid");
-        assert_stopped(f.root.path(), "native.pid");
+        assert_group_exited(processes).await;
         assert!(!f.root.path().join("native.finished").exists());
     }
 }
@@ -298,16 +280,22 @@ async fn cancellation_before_challenge_drains_version_child() {
     // state so file existence alone cannot be mistaken for child readiness.
     std::fs::write(f.root.path().join("version.pid"), b"").unwrap();
     let pending = f.owner.start().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while ready_pid(&f.root.path().join("version.pid")).is_none() {
+    let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(pid) = ready_pid(&f.root.path().join("version.pid")) {
+                break pid;
+            }
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
+    let process = observe_process(pid);
     pending.cancel().await.unwrap();
     f.clean().await;
-    assert_stopped(f.root.path(), "version.pid");
+    wait_for_exit(&process, Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
     assert!(!f.root.path().join("wrapper.pid").exists());
 }
 

@@ -1,10 +1,9 @@
 use super::*;
-use std::os::fd::OwnedFd;
+use crate::process_test_support::{assert_group_exited, observe_group};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 
 use base64::Engine as _;
-use tokio::io::unix::AsyncFd;
 
 const PROMPT: &str = "\nWelcome to Codex [v\x1b[90m0.149.0\x1b[0m]\n\x1b[90mOpenAI's command-line coding agent\x1b[0m\n\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n\n2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n   \x1b[94mABCD-EFGH\x1b[0m\n\n\x1b[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\x1b[0m\n\n";
 
@@ -408,70 +407,6 @@ async fn publication_wait_keeps_original_deadline_and_preserves_a_late_commit() 
             .is_empty()
     );
     assert!(!fixture.root.path().join("logout.called").exists());
-}
-
-fn observe_process(pid: i32) -> AsyncFd<OwnedFd> {
-    let pid = Pid::from_raw(pid).expect("exact synthetic process PID");
-    let descriptor = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
-        .expect("pin exact synthetic process before cancellation");
-    AsyncFd::new(descriptor).expect("register synthetic process exit observation")
-}
-
-fn observe_group(root: &Path) -> [(&'static str, AsyncFd<OwnedFd>); 2] {
-    ["wrapper.pid", "native.pid"].map(|name| {
-        let pid = std::fs::read_to_string(root.join(name))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        (name, observe_process(pid))
-    })
-}
-
-async fn wait_for_exit(
-    process: &AsyncFd<OwnedFd>,
-    deadline: Instant,
-) -> Result<(), tokio::time::error::Elapsed> {
-    let _ready = tokio::time::timeout_at(deadline, process.readable())
-        .await?
-        .expect("observe exact synthetic process exit");
-    Ok(())
-}
-
-async fn assert_group_exited(processes: [(&'static str, AsyncFd<OwnedFd>); 2]) {
-    // Linux closes inherited pipes during exit_files before exit_notify marks
-    // a grandchild terminal. EOF and the direct parent's wait can therefore
-    // precede the grandchild's observable exit. Pin identities while both are
-    // still blocked, then observe actual exit without racing PID reuse or init.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    for (name, process) in processes {
-        wait_for_exit(&process, deadline)
-            .await
-            .unwrap_or_else(|_| panic!("synthetic group member {name} did not exit"));
-    }
-}
-
-#[tokio::test]
-async fn process_exit_observation_rejects_live_child_and_accepts_its_exit() {
-    let mut child = Command::new("/bin/sleep")
-        .arg("30")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let process = observe_process(i32::try_from(child.id().unwrap()).unwrap());
-    assert!(
-        wait_for_exit(&process, Instant::now() + Duration::from_millis(10))
-            .await
-            .is_err(),
-        "a live process must not satisfy the cleanup observation"
-    );
-    child.kill().await.unwrap();
-    wait_for_exit(&process, Instant::now() + Duration::from_secs(5))
-        .await
-        .unwrap();
 }
 
 #[tokio::test]

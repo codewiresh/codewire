@@ -659,16 +659,16 @@ impl SyntheticOpenAiSmokeTransport {
             serde_json::from_slice(&body).map_err(|_| BrokerUpstreamError::Protocol)?;
         if !payload.is_object()
             || payload.get("model").and_then(serde_json::Value::as_str) != Some("claude-sonnet-4-6")
-            || !payload
+            || payload
                 .get("messages")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|messages| !messages.is_empty())
+                .is_none_or(|messages| messages.is_empty())
             || (messages
                 && (payload.get("stream").and_then(serde_json::Value::as_bool) != Some(true)
-                    || !payload
+                    || payload
                         .get("max_tokens")
                         .and_then(serde_json::Value::as_u64)
-                        .is_some_and(|maximum| maximum > 0)))
+                        .is_none_or(|maximum| maximum == 0)))
             || (!messages && payload.get("stream").is_some())
         {
             return Err(BrokerUpstreamError::Protocol);

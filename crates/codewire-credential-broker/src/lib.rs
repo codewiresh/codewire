@@ -22,6 +22,8 @@ mod network;
 mod openai;
 #[cfg(feature = "platform")]
 pub mod platform;
+#[cfg(all(test, feature = "codex-enrollment"))]
+mod process_test_support;
 #[cfg(any(feature = "codex-enrollment", feature = "ssh-agent"))]
 pub mod provider_enrollment;
 mod runtime;
