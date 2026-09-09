@@ -1273,8 +1273,6 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       scripts/ci/setup/select-untrusted-workspace-cache.sh|\
-      scripts/ci/setup/prepare-workspace-cache-measurement.sh|\
-      scripts/ci/setup/select-workspace-cache-experiment.py|\
       scripts/ci/images/workspace-cache.sh|\
       scripts/ci/tests/test-select-untrusted-workspace-cache.sh|\
       scripts/ci/tests/test-workspace-cache.sh|\

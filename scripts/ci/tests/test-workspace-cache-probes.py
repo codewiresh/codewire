@@ -283,8 +283,11 @@ class ProbeFixture(unittest.TestCase):
     def test_actual_wrapper_replay_binds_observed_failure(self):
         self.report.mkdir()
         for index, (text, status, retried) in enumerate((
-            ("ERROR failed to load cache key: S3 GetObject NoSuchKey", 51, True),
-            ("ERROR S3 GetObject InvalidAccessKeyId", 52, False),
+            ("ERROR: failed to build: failed to solve: failed to load cache: S3 GetObject NoSuchKey", 1, True),
+            ("ERROR: failed to build: failed to solve: failed to load cache: S3 GetObject NoSuchKey", 51, False),
+            ("ERROR: failed to build: failed to solve: failed to load cache: S3 GetObject NoSuchKey", 124, False),
+            ("#1 ERROR: failed to import cache: S3 GetObject unavailable\nERROR: failed to build: failed to solve: process cargo failed", 1, False),
+            ("ERROR S3 GetObject InvalidAccessKeyId", 1, False),
             ("ERROR invalid character during importing cache manifest", 0, False),
         )):
             directory = self.report / "native-missing-blob"

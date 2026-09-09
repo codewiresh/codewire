@@ -63,13 +63,6 @@ workspace_cache_command() {
   return "$status"
 }
 
-workspace_cache_logged_command() {
-  local log="$1"
-  shift
-  workspace_cache_command bash -c 'set -o pipefail; log=$1; shift; "$@" 2>&1 | tee "$log"' \
-    workspace-command "$log" "$@"
-}
-
 workspace_cache_create_builder() {
   local scratch_dir="$1" node
   # Use a random private directory basename, never a caller-selected builder.
