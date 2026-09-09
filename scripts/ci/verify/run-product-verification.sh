@@ -183,6 +183,8 @@ run_policy_core() {
   scripts/ci/tests/test-dashboard-image-network-probe.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  scripts/ci/tests/test-build-kind-smokes.sh
+  python3 -B scripts/ci/tests/test-kind-build-artifacts.py
   scripts/ci/tests/test-openbao-only-secret-authority.sh
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
   scripts/ci/tests/test-sync-local-secrets.sh

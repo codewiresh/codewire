@@ -592,8 +592,22 @@ build_images_and_smokes() {
       log "using exact prebuilt protected release images without rebuilding"
       assert_prebuilt_release_product_images
       ;;
+    prebuilt-ci)
+      log "importing exact same-run CI artifacts without rebuilding"
+      local group manifest
+      for group in workspace product smokes; do
+        case "$group" in
+          workspace) manifest="${CODEWIRE_KIND_WORKSPACE_MANIFEST_SHA256:?missing workspace producer digest}" ;;
+          product) manifest="${CODEWIRE_KIND_PRODUCT_MANIFEST_SHA256:?missing product producer digest}" ;;
+          smokes) manifest="${CODEWIRE_KIND_SMOKES_MANIFEST_SHA256:?missing smoke producer digest}" ;;
+        esac
+        RUN_DIR="$RUN_DIR" EXPECTED_MANIFEST_SHA256="$manifest" \
+          python3 "$ROOT/scripts/ci/verify/kind-build-artifacts.py" consume "$group" \
+            "${CODEWIRE_KIND_ARTIFACT_ROOT:?missing private artifact directory}/$group"
+      done
+      ;;
     *)
-      echo "::error::CODEWIRE_KIND_PRODUCT_IMAGE_MODE must be build-ci or prebuilt-release"
+      echo "::error::CODEWIRE_KIND_PRODUCT_IMAGE_MODE must be build-ci, prebuilt-ci or prebuilt-release"
       return 2
       ;;
   esac
@@ -603,21 +617,11 @@ build_images_and_smokes() {
 
   prepare_kind_support_images
 
-  log "building Rust kind smoke binaries"
-  local smoke_started_at
-  smoke_started_at="$(date +%s)"
-  (
-    cd "$ROOT"
-    "$ROOT/scripts/ci/verify/run-host-rust-build.sh" bash -ceu '
-      cargo build --profile ci -p codewire-orchestration --bin crd-smoke --bin environment-setup-smoke --bin exec-smoke --bin exec-stream-smoke --bin file-service-smoke --bin prepare-stream-smoke --bin log-stream-smoke --bin temporal-smoke --bin temporal-fencing-smoke --bin reconciler-ttl-smoke --bin sidecar-smoke --features kind-e2e
-      cargo build --profile ci -p codewire-client --example platform-run-smoke --example environment-session-smoke
-      cargo build --profile ci -p codewire-client --example coordinator-ingress-smoke --features kind-e2e
-      cargo build --locked --profile ci -p codewire-cli-bin --bin cw
-      cargo test --locked --profile ci -p codewire-orchestration --lib --no-run --message-format=json >"$1"
-    ' -- "$RUN_DIR/credential-bootstrap-build.jsonl"
-  )
-  printf 'CODEWIRE_CI_PHASE name=kind-smoke-binary-build seconds=%s\n' \
-    "$(( $(date +%s) - smoke_started_at ))"
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-ci ]; then
+    log "building Rust kind smoke binaries"
+    "$ROOT/scripts/ci/images/build-kind-smokes.sh" \
+      "$RUN_DIR/credential-bootstrap-build.jsonl" "$RUN_DIR/billing-contract-build.jsonl"
+  fi
 }
 
 assert_prebuilt_release_product_images() {
@@ -801,7 +805,7 @@ kind_workspace_runtime_image() {
   local sealed_status=0
   validate_sealed_kind_images || sealed_status=$?
   [ "$sealed_status" -le 1 ] || return "$sealed_status"
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ]; then
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
     python3 "$ROOT/scripts/ci/verify/workspace-image-artifact.py" reuse "$ROOT" \
       "$ROOT/.tmp/codewire-workspace-image-verification.json"
     return $?
@@ -871,7 +875,7 @@ load_images_into_kind() {
 
   load_kind_credential_support_images
 
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = build-ci ]; then
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != prebuilt-release ]; then
     image="$(kind_workspace_runtime_image)" || return $?
     log "loading the exact verified source workspace image into Kind"
     kind load docker-image --name "$KIND_CLUSTER_NAME" "$image"
@@ -3519,14 +3523,20 @@ billing_contract_through_ingress() {
   log "running configured Rust billing Connect contract through ingress"
   (
     cd "$ROOT"
+    local binary
+    binary="$(jq -ser '
+      [.[] | select(.reason == "compiler-artifact" and .profile.test == true
+        and .target.name == "wire_contract" and .executable != null) | .executable]
+      | if length == 1 then .[0] else error("expected one billing wire contract") end
+    ' "$RUN_DIR/billing-contract-build.jsonl")"
+    [ -x "$binary" ] || { echo '::error::billing contract executable is missing' >&2; return 1; }
     BILLING_BASE_URL="$KIND_INGRESS_URL" \
       BILLING_ADMIN_SESSION_TOKEN=contract-admin-session-token \
       BILLING_USER_SESSION_TOKEN=contract-user-session-token \
       BILLING_SEEDED=1 \
       BILLING_SKIP_HEALTH=1 \
-      "$ROOT/scripts/ci/verify/run-host-rust-build.sh" cargo test --locked --profile ci -p codewire-billing \
-        --test wire_contract configured_billing_wire_contract \
-        -- --ignored --exact --nocapture | tee "$RUN_DIR/billing-contract.log"
+      "$binary" configured_billing_wire_contract \
+        --ignored --exact --nocapture | tee "$RUN_DIR/billing-contract.log"
     local passed_count
     passed_count="$(sed -nE \
       's/.*test result: ok\. ([0-9]+) passed.*/\1/p' \
