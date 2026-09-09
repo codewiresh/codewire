@@ -13,9 +13,12 @@ use zeroize::Zeroize as _;
 use crate::config::DAEMON_AUTH_TOKEN_ENV;
 use crate::env::is_internal_environment_name;
 
+#[cfg(target_os = "linux")]
 mod bootstrap;
 mod projection;
+#[cfg(target_os = "linux")]
 pub(crate) use bootstrap::StartupProjectionIngress;
+#[cfg(target_os = "linux")]
 pub use bootstrap::{BOOTSTRAP_FINISH, BOOTSTRAP_PROJECTION_SOCKET_NAME, BootstrapPhase};
 #[cfg(target_os = "linux")]
 pub use codewire_workload_secrets::launcher::run_environment_launcher;

@@ -2131,6 +2131,10 @@ process.stdout.write(JSON.stringify({exit,output,lookups}));"#;
             ] {
                 let output = std::process::Command::new("node")
                     .env_clear()
+                    .env(
+                        "PATH",
+                        std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+                    )
                     .args(["-e", FIXTURE, HOSTNAME_SCRIPT, scenario])
                     .output()
                     .unwrap();
@@ -2888,7 +2892,10 @@ process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,ti
             let mut command = tokio::process::Command::new("node");
             command
                 .env_clear()
-                .env("PATH", "/usr/bin:/bin")
+                .env(
+                    "PATH",
+                    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+                )
                 .arg("-e")
                 .arg(SELECTED_HTTP_FIXTURE)
                 .arg(SELECTED_HTTP_SCRIPT)

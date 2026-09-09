@@ -184,6 +184,7 @@ where
     if selected_ssh && (config.credential_bridge.is_none() || config.launch_projection.is_none()) {
         anyhow::bail!("selected SSH ingress has no launch authority");
     }
+    #[cfg(target_os = "linux")]
     let startup_config = config.clone();
     let implementation = DaemonServiceImpl::with_runtime_state(config, runtime_state);
     let bridge_owner = implementation.credential_bridge();
@@ -194,11 +195,13 @@ where
         .credential_bridge()
         .prepare_ingress(selected_ssh)
         .context("prepare credential bridge guest ingress")?;
+    #[cfg(target_os = "linux")]
     let startup = crate::execution::StartupProjectionIngress::prepare(
         &startup_config,
         implementation.credential_bridge(),
     )
     .context("prepare bootstrap environment launch ingress")?;
+    #[cfg(target_os = "linux")]
     drop(startup_config);
     let transport_shutdown = TransportShutdown::new();
     let incoming_shutdown = Arc::clone(&transport_shutdown);
@@ -232,6 +235,7 @@ where
                 }
             }
         };
+        #[cfg(target_os = "linux")]
         let startup_serving = async move {
             if let Some(startup) = startup {
                 startup
@@ -241,6 +245,11 @@ where
             }
             // Successful bootstrap Finish is expected; it must not stop the
             // long-lived daemon or its provider HTTP ingress.
+            wait_for_shutdown(startup_shutdown).await;
+            Ok::<(), anyhow::Error>(())
+        };
+        #[cfg(not(target_os = "linux"))]
+        let startup_serving = async move {
             wait_for_shutdown(startup_shutdown).await;
             Ok::<(), anyhow::Error>(())
         };

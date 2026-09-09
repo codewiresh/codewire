@@ -2107,7 +2107,7 @@ for contract in 'Run selected Rust and transport|rust' 'Run selected Rust and tr
   }
 done
 rust_transport_protoc_line="$(grep -n -m1 \
-  'name: Install pinned protoc for guest initramfs reproduction' \
+  'name: Install pinned protoc for Rust and guest builds' \
   "$rust_transport_block" | cut -d: -f1)"
 rust_transport_run_line="$(grep -n -m1 'name: Run selected Rust and transport' \
   "$rust_transport_block" | cut -d: -f1)"
@@ -2117,12 +2117,18 @@ if [ -z "$rust_transport_protoc_line" ] \
   exit 1
 fi
 rust_transport_protoc_condition="$(grep -A1 -F \
-  'name: Install pinned protoc for guest initramfs reproduction' \
+  'name: Install pinned protoc for Rust and guest builds' \
   "$rust_transport_block")"
-grep -qF \
-  "contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_vmm_guest_probe|')" \
+for token in rust transport transport_pkg_codewire_vmm_guest_probe; do
+  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
+    <<<"$rust_transport_protoc_condition" || {
+    echo "rust-transport: pinned protoc omits ${token} compilation" >&2
+    exit 1
+  }
+done
+grep -qF "needs.verification-selection.outputs.desktop_package_selected == 'true'" \
   <<<"$rust_transport_protoc_condition" || {
-  echo 'rust-transport: pinned protoc is not isolated to guest-probe reproduction' >&2
+  echo 'rust-transport: pinned protoc omits desktop compilation' >&2
   exit 1
 }
 grep -qF 'protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \
