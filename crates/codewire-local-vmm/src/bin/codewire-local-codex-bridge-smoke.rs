@@ -68,7 +68,7 @@ mod linux {
 
     type SmokeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-    const CODEX_BIN: &str = "/home/codewire/.npm-global/bin/codex";
+    const CODEX_BIN: &str = "codex";
     const CODEX_VERSION: &str = "codex-cli 0.149.0\n";
     const CODEX_MODEL: &str = "codewire-synthetic";
     const CODEX_PROMPT: &str = "Return the synthetic marker.";
@@ -2907,6 +2907,9 @@ process.stdout.write(JSON.stringify({calls,exit_code:exitCode,captured,output,ti
         #[test]
         fn standalone_transport_config_is_invocation_only_and_managed_command_is_unmodified() {
             let managed = codex_command();
+            // Resolve the installed command through the workload's image PATH,
+            // including when its persistent home starts empty.
+            assert_eq!(&managed[..2], &["codex", "exec"]);
             assert!(!managed.iter().any(|arg| arg.contains("model_provider")));
             let standalone = standalone_codex_command();
             assert_eq!(&standalone[..2], &managed[..2]);
