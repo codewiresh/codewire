@@ -5,25 +5,48 @@ readonly attempts=4
 readonly delay_seconds=30
 readonly transaction_timeout_seconds=300
 
-status=1
-for ((attempt = 1; attempt <= attempts; attempt++)); do
-  # Transport timeouts do not bound a stalled APT acquisition queue. Keep each
-  # transaction finite so the existing retry policy can handle that failure.
-  # APT otherwise accepts partial indexes after transient download failures.
-  # Retry the update itself before an install can consume those indexes. Put
-  # the policy last so caller options cannot restore warning-only updates.
-  if timeout --signal=TERM --kill-after=3s "${transaction_timeout_seconds}s" \
-    apt-get "$@" -o APT::Update::Error-Mode=any; then
-    exit 0
-  else
-    status=$?
-  fi
-  if [ "$attempt" -ge "$attempts" ]; then
-    break
-  fi
-  printf 'APT transaction failed; retrying the exact command (%d/%d) after %d seconds\n' \
-    "$((attempt + 1))" "$attempts" "$delay_seconds" >&2
-  sleep "$delay_seconds"
+bounded_apt() {
+  local attempt status=1
+  local -a command=("$@")
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    # Transport timeouts do not bound a stalled APT acquisition queue. Keep
+    # network acquisition finite so the retry policy can handle that failure.
+    # APT otherwise accepts partial indexes after transient download failures.
+    # Put the policy last so callers cannot restore warning-only updates.
+    if timeout --signal=TERM --kill-after=3s "${transaction_timeout_seconds}s" \
+      apt-get "${command[@]}" -o APT::Update::Error-Mode=any; then
+      return 0
+    else
+      status=$?
+    fi
+    if [ "$attempt" -ge "$attempts" ]; then
+      break
+    fi
+    printf 'APT acquisition failed; retrying the exact command (%d/%d) after %d seconds\n' \
+      "$((attempt + 1))" "$attempts" "$delay_seconds" >&2
+    sleep "$delay_seconds"
+  done
+  return "$status"
+}
+
+install_requested=false
+for argument in "$@"; do
+  case "$argument" in
+    install) install_requested=true ;;
+    -d|--download-only|--no-download)
+      printf 'apt-get-with-retry owns install acquisition mode\n' >&2
+      exit 2 ;;
+  esac
 done
 
-exit "$status"
+if [[ "$install_requested" == true ]]; then
+  # A timeout may safely discard a partial package download, but killing dpkg
+  # during unpack/configure makes the same-layer retry state unsafe. Acquire
+  # every package under the bounded retry policy, then apply those exact local
+  # bytes once. The enclosing owned BuildKit deadline bounds the apply phase;
+  # any failure discards the fresh layer instead of retrying damaged state.
+  bounded_apt "$@" --download-only
+  exec apt-get "$@" --no-download -o APT::Update::Error-Mode=any
+fi
+
+bounded_apt "$@"
