@@ -62,14 +62,15 @@ FROM github-${TARGETARCH} AS github-enrollment
 # Only the two selected-agent tools and their missing crypto library are
 # extracted. These official Bookworm artifacts are independently checksum
 # pinned for both architectures; no package scripts or dependency resolver run.
+# Immutable Debian snapshots use the dependency origin already admitted by CI.
 # Debian tracks CVE-2026-73281 as postponed in this OpenSSH version. Its
 # lock/session-bind path is not exposed by our identities/sign-only adapter;
 # the private agent is never forwarded and is drained after each Sign.
 FROM ${DEBIAN_IMAGE} AS ssh-tools-amd64
 ADD --checksum=sha256:42c250b8b9110382488c53c066a960bc564ddac2cb9e449f47b6cdbb5fc1cb60 \
-    https://deb.debian.org/debian/pool/main/o/openssh/openssh-client_9.2p1-2+deb12u10_amd64.deb /openssh.deb
+    https://snapshot.debian.org/archive/debian/20260505T204143Z/pool/main/o/openssh/openssh-client_9.2p1-2%2Bdeb12u10_amd64.deb /openssh.deb
 ADD --checksum=sha256:89be24b41bff568ee6e7caf5680a3d808e80315ed92e407056ce0fa7a5bda025 \
-    https://deb.debian.org/debian/pool/main/o/openssl/libssl3_3.0.20-1~deb12u2_amd64.deb /libssl.deb
+    https://snapshot.debian.org/archive/debian/20260612T023739Z/pool/main/o/openssl/libssl3_3.0.20-1%7Edeb12u2_amd64.deb /libssl.deb
 RUN dpkg-deb --extract /openssh.deb /payload && \
     dpkg-deb --extract /libssl.deb /payload && \
     install -D /payload/usr/bin/ssh-agent /out/usr/bin/ssh-agent && \
@@ -80,9 +81,9 @@ RUN dpkg-deb --extract /openssh.deb /payload && \
 
 FROM ${DEBIAN_IMAGE} AS ssh-tools-arm64
 ADD --checksum=sha256:72f7cb7eb432038a62cd89e0552b352a514e880fe3907e73dc50ca2ef6d088d7 \
-    https://deb.debian.org/debian/pool/main/o/openssh/openssh-client_9.2p1-2+deb12u10_arm64.deb /openssh.deb
+    https://snapshot.debian.org/archive/debian/20260505T204143Z/pool/main/o/openssh/openssh-client_9.2p1-2%2Bdeb12u10_arm64.deb /openssh.deb
 ADD --checksum=sha256:a256e03cc3abd7243ac5c6ee91a9deb56478221ef0d3c2b0748551e13140c0bf \
-    https://deb.debian.org/debian/pool/main/o/openssl/libssl3_3.0.20-1~deb12u2_arm64.deb /libssl.deb
+    https://snapshot.debian.org/archive/debian/20260612T023739Z/pool/main/o/openssl/libssl3_3.0.20-1%7Edeb12u2_arm64.deb /libssl.deb
 RUN dpkg-deb --extract /openssh.deb /payload && \
     dpkg-deb --extract /libssl.deb /payload && \
     install -D /payload/usr/bin/ssh-agent /out/usr/bin/ssh-agent && \

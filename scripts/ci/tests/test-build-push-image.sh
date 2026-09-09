@@ -127,10 +127,10 @@ verify_services_dockerfile_contract() {
       fail "$architecture OpenSSH checksum is absent"
     grep -Fq "ADD --checksum=sha256:$crypto_hash" <<<"$ssh_block" ||
       fail "$architecture crypto checksum is absent"
-    grep -Fq "https://deb.debian.org/debian/pool/main/o/openssh/openssh-client_9.2p1-2+deb12u10_$architecture.deb" <<<"$ssh_block" ||
-      fail "$architecture OpenSSH artifact is not the reviewed exact version/origin"
-    grep -Fq "https://deb.debian.org/debian/pool/main/o/openssl/libssl3_3.0.20-1~deb12u2_$architecture.deb" <<<"$ssh_block" ||
-      fail "$architecture crypto artifact is not the reviewed exact version/origin"
+    grep -Fq "https://snapshot.debian.org/archive/debian/20260505T204143Z/pool/main/o/openssh/openssh-client_9.2p1-2%2Bdeb12u10_$architecture.deb" <<<"$ssh_block" ||
+      fail "$architecture OpenSSH artifact is not the reviewed immutable snapshot"
+    grep -Fq "https://snapshot.debian.org/archive/debian/20260612T023739Z/pool/main/o/openssl/libssl3_3.0.20-1%7Edeb12u2_$architecture.deb" <<<"$ssh_block" ||
+      fail "$architecture crypto artifact is not the reviewed immutable snapshot"
     for binary in ssh-agent ssh-add; do
       grep -Fq "install -D /payload/usr/bin/$binary /out/usr/bin/$binary" <<<"$ssh_block" ||
         fail "$architecture omits the selected $binary executable"
