@@ -369,12 +369,16 @@ assert_kind_credential_rotation() {
     [$events[] | select(.value.event == "provider_response" and .value.scenario == "baseline"
       and .value.attempt == 2 and .value.status == 200)] as $rotation |
     [$events[] | select(.value.event == "bridge_authenticated")] as $all_auth |
-    # The earlier unbound direct probe may authenticate on the pre-update
-    # generation and then fail its lease. It is not this selected journey.
-    [$all_auth[] | select(.value.environment_id == $environment and .value.generation == $generation)] as $auth |
+    # A source restart retains its workflow generation but replaces both Pods.
+    # Start at the exact selected identity; earlier unbound probes cannot prove
+    # this journey. Do not filter away any later identity/generation change.
+    [$all_auth[] | select(.value.environment_id == $environment and .value.generation == $generation and
+      .value.workspace_pod_uid == $workspace and .value.gateway_pod_uid == $gateway)] as $selected |
+    [$all_auth[] | select(.value.environment_id == $environment and .key >= $selected[0].key)] as $auth |
     ($environment | uuid) and ($workspace | uuid) and ($gateway | uuid) and $generation > 0 and
     ($baseline | length == 1) and ($rotation | length == 1) and
-    $baseline[0].key < $rotation[0].key and ($auth | length >= 2) and
+    $baseline[0].key < $rotation[0].key and ($selected | length >= 2) and
+    $selected[0].key < $baseline[0].key and $selected[0].value.workspace_token_changed == false and
     ([$all_auth[].value.auth_sequence] == [range(1; ($all_auth | length) + 1)]) and
     all($all_auth[].value; (.environment_id | uuid) and (.workspace_pod_uid | uuid) and
       (.gateway_pod_uid | uuid) and (.generation | type == "number") and .generation > 0 and

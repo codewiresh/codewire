@@ -349,17 +349,50 @@ assert_kind_credential_rotation '%s' 2 '%s' '%s' /not-a-session
         self.assertEqual(result.stdout, "")
 
     def test_initial_unbound_auth_is_not_selected_epoch_evidence(self):
+        # A queued source restart legitimately retains its workflow generation.
+        # Its old unbound Pod pair must not join the replacement Pod journey.
+        for generation in (1, 2):
+            events = self.rotation_events()
+            first = dict(events[0], generation=generation, workspace_pod_uid=ENVIRONMENT,
+                         gateway_pod_uid=ENVIRONMENT)
+            for event in events:
+                if event["event"] == "bridge_authenticated":
+                    event["auth_sequence"] += 1
+            with self.subTest(generation=generation):
+                result = self.rotation_proof([first, *events])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                events[2]["workspace_token_changed"] = False
+                self.assertNotEqual(self.rotation_proof([first, *events]).returncode, 0)
+
+    def test_identity_or_generation_change_after_selection_cannot_be_filtered_out(self):
+        for changes in ({"workspace_pod_uid": ENVIRONMENT}, {"gateway_pod_uid": ENVIRONMENT},
+                        {"generation": 3}):
+            for position in (1, 2, 4):
+                events = self.rotation_events()
+                events.insert(position, dict(events[0], **changes))
+                sequence = 0
+                for event in events:
+                    if event["event"] == "bridge_authenticated":
+                        sequence += 1
+                        event["auth_sequence"] = sequence
+                with self.subTest(changes=changes, position=position):
+                    # Even a later correct changed-token event cannot hide this.
+                    self.assertNotEqual(self.rotation_proof(events).returncode, 0)
+
+    def test_selected_journey_requires_its_own_initial_authentication(self):
         events = self.rotation_events()
-        first = dict(events[0], generation=1, workspace_pod_uid=ENVIRONMENT,
-                     gateway_pod_uid=ENVIRONMENT)
-        for event in events:
-            if event["event"] == "bridge_authenticated":
-                event["auth_sequence"] += 1
-                event["workspace_token_changed"] = True
-        result = self.rotation_proof([first, *events])
+        events[0]["workspace_pod_uid"] = ENVIRONMENT
+        self.assertNotEqual(self.rotation_proof(events).returncode, 0)
+        events = self.rotation_events()
+        events[0]["workspace_token_changed"] = True
+        self.assertNotEqual(self.rotation_proof(events).returncode, 0)
+
+    def test_other_environment_authentication_does_not_join_selected_journey(self):
+        events = self.rotation_events()
+        events.insert(2, dict(events[0], environment_id=WORKSPACE_UID, auth_sequence=2))
+        events[3]["auth_sequence"] = 3
+        result = self.rotation_proof(events)
         self.assertEqual(result.returncode, 0, result.stderr)
-        events[2]["workspace_token_changed"] = False
-        self.assertNotEqual(self.rotation_proof([first, *events]).returncode, 0)
 
     def test_wrong_identity_old_token_missing_or_misordered_auth_cannot_prove_rotation(self):
         for changes in ({"workspace_token_changed": False}, {"workspace_token_changed": "true"},
