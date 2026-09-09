@@ -128,8 +128,9 @@ fn secret_source_selection(project: bool, organization: bool, user: bool) -> App
     ))
 }
 
-/// Application-source selection stays closed until normal environment injection
-/// is composed. Provider credentials have a separate key-hidden delivery gate.
+/// Stored defaults cannot select application-secret authority. Explicit create
+/// requests are resolved and admitted transactionally after the environment row
+/// is inserted.
 pub(crate) fn ensure_no_secret_delivery(spec: &codewire_project::ProjectSpec) -> AppResult<()> {
     secret_source_selection(
         !spec.secrets.project.is_empty(),
@@ -176,7 +177,7 @@ pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> A
             "preset_id and project_spec.preset are mutually exclusive",
         ));
     }
-    ensure_no_secret_delivery(&body.project_spec)
+    Ok(())
 }
 
 /// Fill omitted canonical fields without creating a second representation.
@@ -248,8 +249,6 @@ pub(crate) fn ensure_current_platform_runtime_support(
         Some("repositories.revision")
     } else if !spec.skills.is_empty() {
         Some("skills")
-    } else if spec.credentials.is_some() {
-        Some("credentials")
     } else {
         let destinations = codewire_project::validate_repository_destinations(
             spec.repositories
@@ -927,7 +926,6 @@ pub(crate) async fn create_environment_core(
             merge_project_spec_defaults(&mut body.project_spec, &preset.project_spec)?;
             apply_environment_resource_defaults(&mut body.project_spec);
             body.project_spec.validate().map_err(invalid_project_spec)?;
-            ensure_no_secret_delivery(&body.project_spec)?;
             ensure_current_platform_runtime_support(&body)?;
             validate_environment_repository_mounts(&body.project_spec.repositories)?;
 
@@ -1195,9 +1193,9 @@ credentials: {profile: user/work}
     }
 
     #[test]
-    fn canonical_secret_sources_fail_closed_without_disclosing_bindings() {
+    fn explicit_canonical_secret_sources_pass_initial_validation() {
         for yaml in [
-            "secrets: {project: nested-project-secret-value}\n",
+            "secrets: {project: platform:development}\n",
             "secrets: {organization: true}\n",
             "secrets: {user: platform}\n",
         ] {
@@ -1205,10 +1203,7 @@ credentials: {profile: user/work}
                 project_spec: codewire_project::parse_project_yaml(yaml).unwrap().spec,
                 ..Default::default()
             };
-            assert_secret_delivery_pending(
-                apply_project_spec_defaults(&mut body).unwrap_err(),
-                Some("nested-project-secret-value"),
-            );
+            apply_project_spec_defaults(&mut body).unwrap();
         }
 
         ensure_no_secret_delivery(
@@ -1267,11 +1262,10 @@ credentials: {profile: user/work}
     }
 
     #[test]
-    fn represented_project_features_fail_closed_until_the_platform_runtime_owns_them() {
+    fn represented_unsupported_project_features_fail_closed() {
         for yaml in [
             "repositories: [{source: https://example.test/app.git, revision: deadbeef}]\n",
             "skills: [{source: repository, path: .agents/skills/rust}]\n",
-            "credentials: {profile: user/work}\n",
             "repositories: [{source: https://example.test/app.git}]\nworking_directory: /workspace/app/subdir\n",
         ] {
             let spec = codewire_project::parse_project_yaml(yaml).unwrap().spec;
@@ -1291,6 +1285,15 @@ credentials: {profile: user/work}
                 "unexpected result for {yaml:?}: {error}"
             );
         }
+        let credentials =
+            codewire_project::parse_project_yaml("credentials: {profile: platform:user/work}\n")
+                .unwrap()
+                .spec;
+        ensure_current_platform_runtime_support(&CreateEnvironmentBody {
+            project_spec: credentials,
+            ..Default::default()
+        })
+        .unwrap();
     }
 
     #[test]

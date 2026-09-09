@@ -180,8 +180,8 @@ grep -Fq -- '--locked --profile ci -p codewire-server-core --bin codewire-db-mig
   "$FAKE_CARGO_LOG"
 
 
-# Freeze the accepted pre-batching execution contract (main 10233aee3): compile
-# grouping may change, but all 28 suites, environments and 230 assertions stay.
+# Preserve the accepted execution contracts while adding source-admission proof:
+# compile grouping may change, but no suite, environment or count may disappear.
 python3 - "$ROOT" "$TMP" <<'PYTHON'
 import json
 import os
@@ -219,6 +219,7 @@ suites = [
     {'args': ['test', '-p', 'codewire-orchestration', '--lib', 'worker::tenant_secret_teardown::tests::db_', '--', '--nocapture'], 'database_env': 'DATABASE_URL', 'ci': False, 'label': 'organization tenant secret teardown matrix', 'count': 2},
     {'args': ['test', '-p', 'codewire-orchestration', '--lib', 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek', '--', '--ignored', '--exact', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'encrypted tenant secret store matrix', 'count': 1},
     {'args': ['test', '-p', 'codewire-mesh', '--lib', 'store::migration_tests::', '--', '--ignored', '--nocapture'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'Mesh migration ledger', 'count': 11},
+    {'args': ['test', '--locked', '-p', 'codewire-orchestration', '--test', 'environment_sources', '--', '--ignored', '--nocapture', '--test-threads=1'], 'database_env': 'TEST_DATABASE_URL', 'ci': False, 'label': 'environment source admission matrix', 'count': 6},
 ]
 batches = [
     ['test', '-p', 'codewire-server-core', '--lib', '--test', 'session_auth',
@@ -226,7 +227,7 @@ batches = [
     ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage',
      '--test', 'profiles', '--test', 'refresh', '--test', 'authority', '--test', 'owner_sources', '--no-run'],
     ['test', '--locked', '-p', 'codewire-orchestration', '--lib', '--test', 'access_profiles',
-     '--test', 'credentials', '--test', 'environment_external_cleanup', '--no-run'],
+     '--test', 'credentials', '--test', 'environment_external_cleanup', '--test', 'environment_sources', '--no-run'],
 ]
 trace_root = temporary / 'database-trace'
 trace_root.mkdir()
@@ -299,7 +300,7 @@ assert all(command['target'] == environment['CARGO_TARGET_DIR'] and
            command['test_database'] == environment['DATABASE_URL_RUST'] for command in actual_batches)
 executions = [command for command in commands if command['args'][0] == 'test'
               and '--no-run' not in command['args']]
-assert len(executions) == len(suites) == 28
+assert len(executions) == len(suites) == 29
 for expected, actual in zip(suites, executions):
     assert actual['args'] == expected['args'], expected['label']
     assert actual['target'] == environment['CODEWIRE_CARGO_CI_TARGET_DIR' if expected['ci']
@@ -321,7 +322,8 @@ for failure in ['compile:codewire-server-core', 'compile:codewire-platform-crede
     assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout, failure
     if failure.startswith('compile:'):
         assert '--no-run' in trace[-1]['args'], failure
-print('Database batching: 36 trace/failure cases; all 28 suite contracts and 230 count assertions preserved')
+print(f'Database batching: {len(suites) + 8} trace/failure cases; '
+      f'all {len(suites)} suite contracts and {sum(suite["count"] for suite in suites)} required tests preserved')
 PYTHON
 
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'

@@ -109,7 +109,7 @@ impl AuthUser {
     pub fn require_global_admin(&self) -> Result<(), AppError> {
         self.require_account_credential()?;
         if !self.is_admin {
-            return Err(AppError::Unauthorized);
+            return Err(AppError::Forbidden);
         }
         Ok(())
     }
@@ -920,6 +920,26 @@ mod tests {
                     ..
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn account_credentials_require_global_admin_authorization() {
+        for credential in [
+            CredentialContext::SessionCookie,
+            CredentialContext::OidcAccessToken {
+                client_id: "native-client".into(),
+                scopes: vec![PRODUCT_API_SCOPE.into()],
+            },
+        ] {
+            let mut user = auth_with(credential).user;
+            user.is_admin = false;
+            assert!(matches!(
+                user.require_global_admin(),
+                Err(AppError::Forbidden)
+            ));
+            user.is_admin = true;
+            assert!(user.require_global_admin().is_ok());
         }
     }
 

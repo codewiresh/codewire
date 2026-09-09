@@ -37,6 +37,7 @@ import { runCredentialTests } from "./credentials.test.js";
 import {
   assertAPIKeyConverterCoverage,
   assertRuntimeConverterCoverage,
+  environmentSourceSelectionAcknowledges,
   fromProtoAPIKey,
   fromProtoEnvironment,
   fromProtoEnvironmentPort,
@@ -237,7 +238,10 @@ async function runTests() {
         ...environment("env_123", EnvironmentState.RUNNING),
         orgId: request.orgId,
         sourceSelection: {
-          secrets: requestedSecrets
+          secrets: requestedSecrets && (
+            requestedSecrets.project || requestedSecrets.organization ||
+            requestedSecrets.user !== undefined
+          )
             ? {
                 ...requestedSecrets,
                 project: requestedSecrets.project
@@ -393,7 +397,8 @@ async function runTests() {
         return {
           environmentId: request.environmentId,
           operationGeneration: 10n,
-          selection: request.replacement,
+          // Rust omits structurally empty ProjectSecretBindings on the wire.
+          selection: { ...request.replacement, secrets: undefined },
           outcome: EnvironmentSourcesUpdateOutcome.UNCHANGED,
         };
       }
@@ -1026,6 +1031,12 @@ async function runTests() {
     });
     assert(canonicalizedCreate.source_selection?.secrets?.project === "platform:id:33333333-3333-4333-8333-333333333333", "create accepts the canonical secret-project acknowledgement for a name");
     assert(canonicalizedCreate.source_selection?.credentials?.profile === "platform:id:44444444-4444-4444-8444-444444444444", "create accepts the canonical profile acknowledgement for a name");
+    for (const secrets of [{}, { project: "", organization: false }]) {
+      const emptyCreate = await cw.environments.create({
+        project_spec: { schema_version: 1, working_directory: "/workspace", secrets },
+      });
+      assert(emptyCreate.source_selection?.secrets === undefined, "create accepts omitted empty secret bindings");
+    }
     await nodeAssert.rejects(
       cw.environments.create({
         project_spec: {
@@ -1117,6 +1128,22 @@ async function runTests() {
     });
     assert(unchangedSources.outcome === "unchanged", "wrapper preserves unchanged source semantics");
     assert(unchangedSources.selection.secrets === undefined, "an explicitly empty source selection is not synthesized");
+    for (const secrets of [{}, { project: "", organization: false }]) {
+      const emptyUpdate = await env.updateSources({
+        expected_operation_generation: 10n,
+        expected: { secrets },
+        replacement: { secrets },
+      });
+      assert(emptyUpdate.selection.secrets === undefined, "update accepts omitted empty secret bindings");
+    }
+    for (const secrets of [
+      { organization: true },
+      { user: "platform" as const },
+      { project: "platform:id:33333333-3333-4333-8333-333333333333" },
+    ]) {
+      assert(!environmentSourceSelectionAcknowledges({}, { secrets }), "omitted bindings cannot acknowledge a nonempty secret source");
+      assert(!environmentSourceSelectionAcknowledges({ secrets }, {}), "unexpected nonempty bindings cannot acknowledge empty sources");
+    }
 
     const sourceCallsBeforeValidation = sourceUpdateCalls;
     const validEmptySourceUpdate = {
@@ -1477,7 +1504,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 146;
+  const expectedAssertions = 162;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

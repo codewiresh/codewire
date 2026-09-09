@@ -1,5 +1,6 @@
 mod connect_smoke;
 mod environment_session;
+mod environment_sources;
 mod exec_file;
 
 use std::env;
@@ -123,6 +124,7 @@ impl Harness {
 
         self.assert_health().await;
         connect_smoke::run(self).await;
+        environment_sources::run(self).await;
         environment_session::run(self).await;
         exec_file::run(self).await;
     }

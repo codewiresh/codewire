@@ -92,6 +92,28 @@ fn profile_uses_exact_pinned_revision_and_shared_reserved_key_reducer() {
 }
 
 #[test]
+fn exact_pinned_empty_profile_is_valid_but_missing_revision_is_not() {
+    let (project, mut captured) = selected_profile();
+    captured.profile_slots.clear();
+    let selected = captured
+        .selection(&project, "synthetic-org", 7)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.profile, Some((PROFILE.into(), 3)));
+    assert_eq!(
+        selected.reserved_keys,
+        platform_projection_reserved_keys([]).unwrap()
+    );
+    assert_eq!(
+        captured.managed_credential_clients(&project).unwrap(),
+        Default::default()
+    );
+
+    captured.profile_revision_exists = false;
+    assert_eq!(captured.selection(&project, "synthetic-org", 7), Err(Error));
+}
+
+#[test]
 fn digest_binds_ordinary_names_but_never_their_values_or_an_extra_generation() {
     let mut project = ProjectSpec::default();
     project.secrets.user = Some(StoragePlacement::Platform);
@@ -153,7 +175,7 @@ fn capture_errors_are_content_free_and_do_not_require_a_live_cleanup_binding() {
 
 #[test]
 fn missing_partial_stale_and_orphan_profile_bindings_are_rejected() {
-    for changed_field in 0..7 {
+    for changed_field in 0..6 {
         let (mut project, mut captured) = selected_profile();
         match changed_field {
             0 => captured.profile_id = None,
@@ -161,8 +183,7 @@ fn missing_partial_stale_and_orphan_profile_bindings_are_rejected() {
             2 => captured.profile_id = Some(PROJECT.into()),
             3 => captured.profile_revision = Some(0),
             4 => captured.profile_revision_exists = false,
-            5 => captured.profile_slots.clear(),
-            6 => project.credentials = None,
+            5 => project.credentials = None,
             _ => unreachable!(),
         }
         assert_eq!(captured.selection(&project, "synthetic-org", 7), Err(Error));

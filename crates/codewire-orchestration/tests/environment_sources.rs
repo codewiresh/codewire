@@ -196,6 +196,54 @@ async fn pending_create_publishes_canonical_sources_profile_and_creator_acl_atom
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn empty_profile_selection_commits_an_exact_revision_for_runtime_capture() -> Result<()> {
+    let h = Harness::create().await?;
+    let result = async {
+        let profile = h
+            .rpc
+            .ok(
+                "CreateAccessProfile",
+                Auth::Alice,
+                serde_json::json!({"name":"empty-runtime-profile","entries":[]}),
+            )
+            .await?["accessProfile"]
+            .clone();
+        let profile_id = id(&profile)?;
+        sqlx::query("UPDATE environments SET state='stopped',desired_state='stopped' WHERE id=$1")
+            .bind(ENV)
+            .execute(&h.db)
+            .await?;
+        let profiles = PlatformAccessProfileStore::new(h.db.clone(), builtin_provider_catalog());
+        let mut request = update(EnvironmentSourceSelection {
+            credentials: Some(CredentialBinding {
+                profile: format!("platform:id:{profile_id}"),
+            }),
+            profile_revision: Some(1),
+            ..Default::default()
+        });
+        request.confirm_personal_credentials = true;
+        let mut tx = profiles.begin_transaction().await?;
+        let selected =
+            replace_environment_sources_in(&mut tx, &profiles, &alice(), ORG, ENV, &request)
+                .await?;
+        tx.commit().await?;
+        ensure!(selected.outcome == Outcome::Stored);
+        ensure!(selected.selection.profile_revision == Some(1));
+        let stored: (String, i64) = sqlx::query_as(
+            "SELECT profile_id,profile_revision FROM platform_environment_access_bindings WHERE environment_id=$1",
+        )
+        .bind(ENV)
+        .fetch_one(&h.db)
+        .await?;
+        ensure!(stored == (profile_id.to_owned(), 1));
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn source_replacement_cas_is_exact_stopped_noop_and_running_restart_are_distinct()
 -> Result<()> {
     let h = Harness::create().await?;

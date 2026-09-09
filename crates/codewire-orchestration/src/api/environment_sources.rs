@@ -1,9 +1,9 @@
-//! Metadata-only, transaction-composable environment source admission.
+//! Transaction-composable environment source admission.
 //!
 //! The public operation composes the transaction with the existing organization
 //! mutation lease and durable lifecycle recovery. No path reads protected values
-//! or creates a second environment operation generation. Production selection
-//! gates stay closed until delivery is composed.
+//! or creates a second environment operation generation. Runtime delivery uses
+//! the canonical selection captured by the replacement workspace bootstrap.
 
 use std::collections::BTreeSet;
 
@@ -67,14 +67,6 @@ pub enum EnvironmentSourcesUpdateOutcome {
     RestartRequired,
 }
 
-/// Admission is implemented independently of enabling runtime delivery. This
-/// gate must be removed only with the real in-workspace launcher composition.
-pub(crate) fn ensure_source_delivery_available() -> AppResult<()> {
-    Err(AppError::Precondition(
-        "environment source changes are not yet available for platform delivery".into(),
-    ))
-}
-
 pub(crate) async fn update_environment_sources_core(
     state: &ApiState,
     user: &AuthUser,
@@ -82,7 +74,6 @@ pub(crate) async fn update_environment_sources_core(
     environment: &str,
     body: UpdateEnvironmentSourcesBody,
 ) -> AppResult<EnvironmentSourcesUpdate> {
-    ensure_source_delivery_available()?;
     require_org_member(&state.pool, user, organization).await?;
     let profiles = PlatformAccessProfileStore::new(
         state.pool.clone(),
@@ -394,7 +385,7 @@ pub async fn replace_environment_sources_in(
     spec.credentials = selection.credentials;
     sqlx::query(
         "UPDATE environments SET project_spec=$2,state=CASE WHEN $3 THEN 'stopping' ELSE state END, \
-         state_changed_at=CASE WHEN $3 THEN now() ELSE state_changed_at END,updated_at=now() WHERE id=$1",
+         state_changed_at=CASE WHEN $3 THEN now() ELSE state_changed_at END WHERE id=$1",
     )
     .bind(environment)
     .bind(serde_json::to_value(spec).map_err(|_| unavailable())?)
@@ -702,7 +693,6 @@ mod tests {
 
     #[test]
     fn operation_generation_and_profile_revision_are_distinct_positive_fences() {
-        assert!(ensure_source_delivery_available().is_err());
         assert!(positive(0).is_err());
         assert!(positive(u64::MAX).is_err());
         assert_eq!(positive(7).unwrap(), 7);

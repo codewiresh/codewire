@@ -642,17 +642,16 @@ export function environmentSourceSelectionAcknowledges(
   actual: EnvironmentSourceSelection,
   requested: EnvironmentSourceSelection,
 ): boolean {
-  const actualSecrets = actual.secrets;
-  const requestedSecrets = requested.secrets;
-  if ((actualSecrets === undefined) !== (requestedSecrets === undefined)) return false;
+  // The server omits structurally empty secret bindings when encoding a selection.
+  const actualSecrets = actual.secrets ?? {};
+  const requestedSecrets = requested.secrets ?? {};
   if (
-    actualSecrets && requestedSecrets &&
-    (!resolvedReferenceAcknowledges(
-      actualSecrets.project,
+    !resolvedReferenceAcknowledges(
+      optionalString(actualSecrets.project),
       optionalString(requestedSecrets.project),
     ) ||
-      actualSecrets.organization !== (requestedSecrets.organization ?? false) ||
-      actualSecrets.user !== requestedSecrets.user)
+    (actualSecrets.organization ?? false) !== (requestedSecrets.organization ?? false) ||
+    actualSecrets.user !== requestedSecrets.user
   ) {
     return false;
   }

@@ -202,7 +202,7 @@ run_database() {
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-orchestration --lib --test access_profiles \
-      --test credentials --test environment_external_cleanup --no-run
+      --test credentials --test environment_external_cleanup --test environment_sources --no-run
 
   logfile="$RUN_DIR/public-access-profiles.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -377,6 +377,12 @@ run_database() {
     cargo test -p codewire-mesh --lib 'store::migration_tests::' \
       -- --ignored --nocapture | tee "$logfile"
   assert_passed_count "Mesh migration ledger" "$logfile" 11
+
+  logfile="$RUN_DIR/environment-source-admission.log"
+  TEST_DATABASE_URL="$DATABASE_URL_RUST" \
+    cargo test --locked -p codewire-orchestration --test environment_sources \
+      -- --ignored --nocapture --test-threads=1 | tee "$logfile"
+  assert_passed_count "environment source admission matrix" "$logfile" 6
 
 }
 

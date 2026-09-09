@@ -89,9 +89,7 @@ impl ProjectionCapture {
                 None
             }
             (Some(binding), Some(id), Some(revision))
-                if revision > 0
-                    && self.profile_revision_exists
-                    && !self.profile_slots.is_empty() =>
+                if revision > 0 && self.profile_revision_exists =>
             {
                 if exact_platform_id(&binding.profile)? != *id {
                     return Err(Error);
