@@ -147,11 +147,15 @@ if docker run --rm --entrypoint /bin/sh "$image" -c true >/dev/null 2>&1; then
   exit 1
 fi
 
+# Static-page checks need valid BFF configuration, not a live credential
+# service. Keep this required origin inside the disposable container; the
+# integrated Kind/browser gate exercises the actual service separately.
 docker run --detach --name "$smoke_container" \
   --publish 127.0.0.1::5173 \
   --pids-limit 1 \
   --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --env CODEWIRE_DASHBOARD_RUNTIME_MODE=current-thread \
+  --env CODEWIRE_CREDENTIAL_ORIGIN=http://127.0.0.1:8086 \
   "$image" >/dev/null
 
 # A local Docker daemon publishes the smoke port onto this process's loopback.
