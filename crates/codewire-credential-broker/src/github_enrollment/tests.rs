@@ -226,12 +226,21 @@ impl Fixture {
     }
 }
 
+fn ready_pid(path: &Path) -> Option<i32> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("cannot read synthetic process PID: {error}"),
+    };
+    let digits = contents.strip_suffix('\n')?;
+    let pid: i32 = digits.parse().expect("complete synthetic process PID");
+    assert!(pid > 1);
+    assert_eq!(digits, pid.to_string());
+    Some(pid)
+}
+
 fn assert_stopped(root: &Path, name: &str) {
-    let pid: i32 = std::fs::read_to_string(root.join(name))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = ready_pid(&root.join(name)).expect("synthetic process PID is ready");
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Ok(stat) => assert!(matches!(
@@ -285,9 +294,12 @@ async fn cancellation_and_dropped_waiter_retain_group_drain_before_cleanup() {
 async fn cancellation_before_challenge_drains_version_child() {
     let f = Fixture::new();
     f.flag("block-version");
+    // Opening the shell redirection can precede writing its PID. Force that
+    // state so file existence alone cannot be mistaken for child readiness.
+    std::fs::write(f.root.path().join("version.pid"), b"").unwrap();
     let pending = f.owner.start().unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !f.root.path().join("version.pid").exists() {
+        while ready_pid(&f.root.path().join("version.pid")).is_none() {
             tokio::task::yield_now().await;
         }
     })
