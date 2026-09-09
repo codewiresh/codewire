@@ -45,8 +45,9 @@ EOF
 [ "$(expected_snapshots prepared-kind-management-secrets-mobile)" = "$(cat <<'EOF'
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-secrets-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
-)" ] || die 'prepared Kind snapshot profile does not select exactly the two mobile Secrets surfaces'
+)" ] || die 'prepared Kind snapshot profile does not select exactly the three affected mobile surfaces'
 if expected_snapshots unknown-profile >/dev/null 2>&1; then
   die 'unknown snapshot profile was accepted'
 fi
@@ -133,6 +134,7 @@ for prepared_contract in \
     '--prepared-kind-management-secrets-mobile' \
     '--project=dashboard-ssr-mobile' \
     'renders every organization management surface without page overflow' \
+    'renders account, security, and session surfaces in the selected context' \
     'deployment/codewire-credential-service' \
     'codewire-dashboard:e2e'; do
   grep -Fq -- "$prepared_contract" "$RUNNER" ||
@@ -573,13 +575,13 @@ promote_snapshots "$prepared_stage" "$prepared_target" \
   prepared-kind-management-secrets-mobile
 while IFS= read -r prepared_snapshot; do
   cmp -s "$prepared_stage/$prepared_snapshot" "$prepared_target/$prepared_snapshot" ||
-    die 'prepared Kind profile did not promote both allowlisted snapshots'
+    die 'prepared Kind profile did not promote every allowlisted snapshot'
 done < <(expected_snapshots prepared-kind-management-secrets-mobile)
 mkdir -p "$prepared_stage/$(dirname "$current_snapshot")"
 printf '\x89PNG\r\n\x1a\nunapproved\n' >"$prepared_stage/$current_snapshot"
 if validate_snapshot_stage "$prepared_baseline" "$prepared_stage" \
     prepared-kind-management-secrets-mobile >/dev/null 2>&1; then
-  die 'prepared Kind profile accepted a mutation outside its two targets'
+  die 'prepared Kind profile accepted a mutation outside its three targets'
 fi
 rm -f "$stage/$unapproved_stage_snapshot"
 unapproved_stage_link='ssr-dashboard.management-visual.ssr.ts-snapshots/unapproved-link.png'

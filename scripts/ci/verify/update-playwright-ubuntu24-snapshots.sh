@@ -36,9 +36,9 @@ Regenerate the five affected dashboard snapshots whose checked-in suffix is
 ubuntu24-cft145. The local Kind stack must already be running through `make up`.
 
 With --prepared-kind-management-secrets-mobile, regenerate only the two mobile
-Secrets overview and organization Secrets snapshots against the already-running
-codewire-e2e-ci Kind topology. This profile never creates, deploys, or forwards
-that topology and does not qualify the full runtime suite.
+Secrets snapshots and the mobile Security settings snapshot against the
+already-running codewire-e2e-ci Kind topology. This profile never creates,
+deploys, or forwards that topology and does not qualify the full runtime suite.
 
 The Chromium archive must be chrome-linux64.zip for version 145.0.7632.6 with
 the checksum pinned by scripts/ci/install-pinned-playwright-chromium.sh.
@@ -85,6 +85,7 @@ EOF
       cat <<'EOF'
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-secrets-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 EOF
       ;;
     *)
@@ -800,7 +801,7 @@ main() {
               --config apps/dashboard/playwright.config.ts \
               --project=dashboard-ssr-mobile \
               apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts \
-              --grep "renders every organization management surface without page overflow" \
+              --grep "renders every organization management surface without page overflow|renders account, security, and session surfaces in the selected context" \
               --output /tmp/codewire-run/test-results \
               --update-snapshots=changed --retries=0 --workers=1 --reporter=line
             ;;
