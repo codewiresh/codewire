@@ -42,6 +42,35 @@ record() {
   printf '%s\n' "$1" >>"$CALLS"
 }
 
+# Workspace exec uses the production private adapter and authenticated daemon,
+# not a bare container shell. Reuse the gateway fixture without giving the host
+# exec binary ownership of its Pod lifecycle.
+exec_source="$ROOT/crates/codewire-orchestration/src/bin/exec-smoke.rs"
+grep -Fq 'std::env::var("SMOKE_POD_NAME")?' "$exec_source" ||
+  fail 'workspace exec must require the caller-owned authenticated Pod'
+if grep -Eq 'pods\.(create|delete)\(|busybox:|SMOKE_KEEP_POD' "$exec_source"; then
+  fail 'workspace exec still creates an unauthenticated Pod or owns its lifecycle'
+fi
+gateway_fixture="$(sed -n '/^gateway_host_key_restart_smoke() {/,/^billing_contract_through_ingress() {/p' "$COMMON")"
+for binding in \
+    'name: workspace' \
+    'name: codewire-daemon-init' \
+    'cp /usr/local/bin/cw /codewire/bin/.cw.tmp' \
+    'chmod 0755 /codewire/bin/.cw.tmp' \
+    'mv /codewire/bin/.cw.tmp /codewire/bin/cw' \
+    'command: ["/codewire/bin/cw", "__hosted-daemon"]' \
+    'name: CODEWIRE_DAEMON_AUTH_TOKEN' \
+    'value: 0.0.0.0:7777' \
+    'mountPath: /codewire/bin' \
+    'mountPath: /codewire/run' \
+    'mountPath: /home/codewire' \
+    'mountPath: /workspace'; do
+  grep -Fq "$binding" <<<"$gateway_fixture" ||
+    fail "authenticated workspace exec fixture missing: $binding"
+done
+grep -Fq 'SMOKE_POD_NAME=crd-smoke-workspace-daemon' "$COMMON" ||
+  fail 'workspace exec does not target the authenticated gateway fixture'
+
 # A runnable resize fixture cannot use the deliberately non-runnable shared
 # contract preset. Keep its image/base mapping and the original runtime proof.
 resize_fixture="$(sed -n '/^environment_resize_smoke() (/,/^temporal_workflow_smoke() {/p' "$COMMON")"

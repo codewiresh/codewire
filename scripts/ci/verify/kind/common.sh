@@ -2811,7 +2811,8 @@ workspace_service_smokes() {
   gateway_host_key_restart_smoke
 
   log "running workspace exec smoke"
-  SMOKE_NAMESPACE="$SANDBOX_NS" "$CARGO_CI_DIR/exec-smoke"
+  SMOKE_NAMESPACE="$SANDBOX_NS" SMOKE_POD_NAME=crd-smoke-workspace-daemon \
+    "$CARGO_CI_DIR/exec-smoke"
   environment_setup_terminal_smoke
   file_service_smoke
   environment_resize_smoke
@@ -3475,6 +3476,10 @@ gateway_host_key_restart_smoke() {
     CRD_SMOKE_LOCAL_GATEWAY=1 \
     "$CARGO_CI_DIR/crd-smoke"
 
+  # Pod specs are immutable. Recreate only this owned daemon fixture when a
+  # retained service smoke is repeated; preserve the gateway and host-key Secret.
+  kubectl -n "$SANDBOX_NS" delete "pod/${daemon_pod}" \
+    --ignore-not-found=true --wait=true --timeout=120s
   kubectl_apply -f - <<EOF
 apiVersion: v1
 kind: Pod
@@ -3487,11 +3492,24 @@ metadata:
 spec:
   serviceAccountName: codewire-sandbox
   restartPolicy: Always
-  containers:
-    - name: codewire-daemon
+  initContainers:
+    - name: codewire-daemon-init
       image: codewire-gateway:e2e
       imagePullPolicy: Never
-      command: ["/usr/local/bin/cw", "__hosted-daemon"]
+      command:
+        - sh
+        - -ec
+        - umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes && cp /usr/local/bin/cw /codewire/bin/.cw.tmp && chmod 0755 /codewire/bin/.cw.tmp && mv /codewire/bin/.cw.tmp /codewire/bin/cw
+      volumeMounts:
+        - name: codewire-bin
+          mountPath: /codewire/bin
+        - name: codewire-run
+          mountPath: /codewire/run
+  containers:
+    - name: workspace
+      image: codewire-gateway:e2e
+      imagePullPolicy: Never
+      command: ["/codewire/bin/cw", "__hosted-daemon"]
       env:
         - name: CODEWIRE_WORKSPACE_SHIM_ADDR
           value: 0.0.0.0:7777
@@ -3503,11 +3521,20 @@ spec:
         periodSeconds: 1
         timeoutSeconds: 1
       volumeMounts:
+        - name: codewire-bin
+          mountPath: /codewire/bin
+        - name: codewire-run
+          mountPath: /codewire/run
         - name: workspace
           mountPath: /home/codewire
         - name: workspace
           mountPath: /workspace
   volumes:
+    - name: codewire-bin
+      emptyDir: {}
+    - name: codewire-run
+      emptyDir:
+        medium: Memory
     - name: workspace
       emptyDir: {}
 EOF
