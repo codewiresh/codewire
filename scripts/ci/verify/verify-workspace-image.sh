@@ -9,8 +9,15 @@ docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
 base_context_name="codewire-verified-base"
 artifact_tool="$ROOT/scripts/ci/verify/workspace-image-artifact.py"
 receipt="$ROOT/.tmp/codewire-workspace-image-verification.json"
+source "$ROOT/scripts/ci/images/workspace-cache.sh"
+workspace_cache_validate
+case "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" in
+  auto|disabled) ;;
+  *) echo 'workspace image reuse must be auto or disabled' >&2; exit 2 ;;
+esac
+export CODEWIRE_SCCACHE_MODE="$sccache_mode" CODEWIRE_BUILDKIT_CACHE_MODE="$layer_cache_mode"
 
-for tool in "$docker_bin" python3 jq sed; do
+for tool in "$docker_bin" python3 jq timeout bash tee stat realpath; do
   command -v "$tool" >/dev/null 2>&1 || {
     printf 'workspace image verification: missing required tool: %s\n' "$tool" >&2
     exit 1
@@ -21,29 +28,36 @@ done
 identity="$(python3 "$artifact_tool" identity "$ROOT")"
 source_id="$(jq -er '.source_sha' <<<"$identity")"
 source_tree="$(jq -er '.source_tree' <<<"$identity")"
+architecture="$(jq -er '.architecture' <<<"$identity")"
 contract_sha="$(jq -er '.inputs["scripts/ci/verify/workspace-agent-contract.sh"]' <<<"$identity")"
 workspace_tag="codewire-workspace-verify:${source_id}"
-if alias="$(python3 "$artifact_tool" reuse "$ROOT" "$receipt" 2>/dev/null)"; then
+if [[ "${CODEWIRE_WORKSPACE_IMAGE_REUSE:-auto}" == auto ]] \
+    && alias="$(python3 "$artifact_tool" reuse-for-build "$ROOT" "$receipt" 2>/dev/null)"; then
   printf 'workspace image verification: reused exact verified image %s\n' "$alias"
   exit 0
 fi
 mkdir -p "$ROOT/.tmp"
+# A fresh failed attempt must never leave an older acceptance marker behind.
+[[ ! -L "$receipt" && ! -L "$ROOT/.tmp" ]] || { echo 'invalid workspace receipt destination' >&2; exit 2; }
+umask 077
 work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-image-verify.XXXXXX")"
 archive_work="$(mktemp -d "$ROOT/.tmp/.workspace-oci.XXXXXX")"
 workspace_archive="$archive_work/workspace.oci.tar"
+previous_receipt="$archive_work/previous-receipt.json"
 base_layout="$work/base.oci"
 base_metadata="$work/base-metadata.json"
-builder=""
-owns_builder=false
 workspace_id=''
 base_digest=''
+contract_container=''
 
 cleanup() {
   local status=$? cleanup_status=0
   trap - EXIT INT TERM
 
-  if [[ "$owns_builder" == true && -n "$builder" ]]; then
-    "$docker_bin" buildx rm --force "$builder" >/dev/null 2>&1 || cleanup_status=$?
+  workspace_cache_cleanup_builder || cleanup_status=$?
+  if [[ -n "$contract_container" ]]; then
+    timeout --signal=TERM --kill-after=3s 10s \
+      "$docker_bin" rm --force "$contract_container" >/dev/null 2>&1 || cleanup_status=$?
   fi
   rm -rf "$work"
 
@@ -54,7 +68,11 @@ cleanup() {
   fi
   if [[ "$status" -eq 0 ]]; then
     # No acceptance marker may survive a failed contract or builder cleanup.
-    python3 "$artifact_tool" seal "$ROOT" "$receipt" "$workspace_id" "$base_digest" "$workspace_archive" || status=$?
+    local -a prior_receipt=()
+    [[ ! -e "$previous_receipt" ]] || prior_receipt+=("$previous_receipt")
+    CODEWIRE_BUILDKIT_CACHE_FALLBACK="$workspace_cache_fallback" \
+      python3 "$artifact_tool" seal "$ROOT" "$receipt" "$workspace_id" \
+        "$base_digest" "$workspace_archive" "${prior_receipt[@]}" || status=$?
   fi
   rm -rf "$archive_work"
   exit "$status"
@@ -62,29 +80,19 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [[ -e "$receipt" ]]; then
+  [[ -f "$receipt" ]] || { echo 'invalid workspace receipt destination' >&2; exit 2; }
+  mv -- "$receipt" "$previous_receipt"
+fi
 
-# OCI export is unavailable on Buildx's legacy Docker driver. Reuse an already
-# selected container builder (and its cache); otherwise create an isolated
-# fallback without changing the caller's selected builder.
-builder_details="$("$docker_bin" buildx inspect)"
-selected_builder="$(sed -n 's/^Name:[[:space:]]*//p' <<<"$builder_details" | head -n 1)"
-selected_driver="$(sed -n 's/^Driver:[[:space:]]*//p' <<<"$builder_details" | head -n 1)"
-if [[ "$selected_driver" == docker-container ]]; then
-  builder="$selected_builder"
-else
-  builder="$("$docker_bin" buildx create --driver docker-container)"
-  owns_builder=true
-fi
-if [[ ! "$builder" =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]]; then
-  echo 'workspace image verification: Buildx returned an invalid builder name' >&2
-  exit 1
-fi
+started_at="$(date +%s)"
+workspace_cache_create_builder "$work"
+workspace_cache_compiler_args
 
 # Export the exact base as a local OCI layout. The workspace build consumes the
 # exported manifest by digest through a named context, so this handoff neither
 # relies on a daemon-local tag nor publishes an intermediate image.
-"$docker_bin" buildx build \
-  --builder "$builder" \
+workspace_cache_build base "$source_tree" "$architecture" "$work/base-build.log" \
   --pull \
   --metadata-file "$base_metadata" \
   --output "type=oci,dest=$base_layout,tar=false" \
@@ -106,8 +114,7 @@ PY
 )"
 readonly base_digest
 
-"$docker_bin" buildx build \
-  --builder "$builder" \
+workspace_cache_build workspace "$source_tree" "$architecture" "$work/workspace-build.log" \
   --pull \
   --build-context "$base_context_name=oci-layout://$base_layout@$base_digest" \
   --tag "$workspace_tag" \
@@ -119,17 +126,29 @@ readonly base_digest
   --provenance=false --sbom=false \
   --output "type=oci,dest=$workspace_archive" \
   --load \
+  "${compiler_args[@]}" \
   --build-arg "BASE_IMAGE_REF=$base_context_name" \
   --file "$ROOT/images/workspace/Dockerfile" \
   "$ROOT"
 chmod 0400 "$workspace_archive"
 
-workspace_id="$("$docker_bin" image inspect "$workspace_tag" --format '{{.Id}}')"
+# Loaded runtime bytes do not depend on BuildKit. Remove its provider file and
+# state before any runtime inspection or potentially slow agent command.
+workspace_cache_cleanup_builder
+workspace_cache_command "$docker_bin" image inspect "$workspace_tag" --format '{{.Id}}' >"$work/workspace-id"
+workspace_id="$(<"$work/workspace-id")"
 [[ "$workspace_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'invalid workspace image ID' >&2; exit 1; }
-"$docker_bin" run --rm --interactive --pids-limit=2048 --user codewire --entrypoint bash \
+contract_container="$builder-full"
+workspace_cache_command "$docker_bin" run --rm --interactive --pids-limit=2048 \
+  --name "$contract_container" --user codewire --entrypoint bash \
   "$workspace_id" -eu -s <"$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
-"$docker_bin" run --rm --interactive --pids-limit=2048 --user codewire \
+contract_container="$builder-mounted-home"
+workspace_cache_command "$docker_bin" run --rm --interactive --pids-limit=2048 \
+  --name "$contract_container" --user codewire \
   --tmpfs /home/codewire:rw,exec,uid=1000,gid=1000,mode=0700,size=256m --entrypoint bash \
   "$workspace_id" -eu -s -- --mounted-home-agents <"$ROOT/scripts/ci/verify/workspace-agent-contract.sh"
+contract_container=''
 
 printf 'workspace image verification: base=%s workspace=%s\n' "$base_digest" "$workspace_tag"
+printf 'CODEWIRE_CI_PHASE name=workspace-image-verification seconds=%s compiler=%s layers=%s layer_fallback=%s\n' \
+  "$(( $(date +%s) - started_at ))" "$sccache_mode" "$layer_cache_mode" "$workspace_cache_fallback"

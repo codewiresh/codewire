@@ -153,7 +153,8 @@ if grep -Fq 'secrets.' <<<"$publish_job$probe_job"; then
 fi
 grep -qF -- '-p codewire-cli-bin --bin cw' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace builds cw from the wrong Rust package'
-builder_stage="$(sed -n '/^FROM rust:.* AS cw-builder$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+builder_stage="$(sed -n '/^FROM cw-toolchain AS cw-builder$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+toolchain_stage="$(sed -n '/^FROM rust:.* AS cw-toolchain$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
 # The pinned upstream archive supplies both protoc and its well-known includes.
 # Distribution protobuf packages are too old for the canonical descriptors.
 protoc_inputs=(
@@ -169,10 +170,10 @@ workspace_protoc_contract() {
     grep -qF -- "$input" <<<"$stage" || return 1
   done
 }
-workspace_protoc_contract "$builder_stage" ||
+workspace_protoc_contract "$toolchain_stage" ||
   fail 'workspace Rust builder lacks the exact checked protoc archive and includes'
 for protoc_input in "${protoc_inputs[@]}"; do
-  incomplete_stage="$(grep -vF -- "$protoc_input" <<<"$builder_stage")"
+  incomplete_stage="$(grep -vF -- "$protoc_input" <<<"$toolchain_stage")"
   if workspace_protoc_contract "$incomplete_stage"; then
     fail 'workspace protoc guard accepted a missing pinned input'
   fi
@@ -184,6 +185,15 @@ grep -qF -- '--manifest-path /src/Cargo.toml' <<<"$builder_stage" ||
 if grep -Eq '^COPY (Cargo|crates|proto|libs)' <<<"$builder_stage"; then
   fail 'workspace Rust builder still copies repository source into image layers'
 fi
+grep -qF 'rm -rf /tmp/cargo-target' <<<"$builder_stage" ||
+  fail 'workspace compiler exports disposable target artifacts to the layer cache'
+[[ "$(grep -c '^RUN ' <<<"$builder_stage")" == 1 ]] ||
+  fail 'workspace target cleanup must share the compile layer'
+floating_stage="$(sed -n '/^FROM workspace-foundation AS workspace-floating-tools$/,/^FROM /p' "$WORKSPACE_DOCKERFILE")"
+for tool in 'NPM_CONFIG_PREFIX=/usr/local npm install' 'npm@latest pnpm yarn' \
+  'https://bun.sh/install' 'gopls@latest' 'hcloud@latest' 'pipx install poetry' 'pipx install uv' 'pipx install aider-chat'; do
+  grep -qF "$tool" <<<"$floating_stage" || fail "floating tool omitted from the fresh stage: $tool"
+done
 grep -qF 'COPY --from=cw-builder /out/cw /usr/local/bin/cw' \
   "$WORKSPACE_DOCKERFILE" || fail 'workspace final stage receives more than the exported cw binary'
 if grep -Eq '/usr/local/bin/(daemon|codewire-daemon)' "$WORKSPACE_DOCKERFILE"; then
@@ -195,7 +205,7 @@ for moving_tool_pattern in \
   'go install golang.org/x/tools/gopls@latest' \
   'pipx install aider-chat' \
   'npm install -g --ignore-scripts' \
-  'COPY --from=cw-builder --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/'; do
+  'COPY --from=cw-toolchain --chown=codewire:codewire /usr/local/rustup/ /home/codewire/.rustup/'; do
   moving_tool_line="$(grep -n -m1 -F "$moving_tool_pattern" \
     "$WORKSPACE_DOCKERFILE" | cut -d: -f1)"
   [[ -n "$moving_tool_line" && "$moving_tool_line" -lt "$cw_copy_line" ]] ||
@@ -239,7 +249,7 @@ if grep -qF 'ghcr.io/codewiresh/base:latest' "$WORKSPACE_DOCKERFILE"; then
 fi
 grep -Eq '^FROM ubuntu:noble@sha256:[0-9a-f]{64}$' "$ROOT/images/base/Dockerfile" ||
   fail 'base image foundation is not digest-pinned'
-grep -Eq '^FROM rust:1\.91\.1-slim-bookworm@sha256:[0-9a-f]{64} AS cw-builder$' \
+grep -Eq '^FROM rust:1\.91\.1-slim-bookworm@sha256:[0-9a-f]{64} AS cw-toolchain$' \
   "$WORKSPACE_DOCKERFILE" || fail 'workspace builder foundation is not digest-pinned'
 for dockerfile in "$ROOT/images/base/Dockerfile" "$WORKSPACE_DOCKERFILE"; do
   grep -qF 'amd64)' "$dockerfile" || fail "$dockerfile omits amd64 installers"

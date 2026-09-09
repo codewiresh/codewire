@@ -3,10 +3,17 @@ set -euo pipefail
 
 readonly attempts=4
 readonly delay_seconds=30
+readonly transaction_timeout_seconds=300
 
 status=1
 for ((attempt = 1; attempt <= attempts; attempt++)); do
-  if apt-get "$@"; then
+  # Transport timeouts do not bound a stalled APT acquisition queue. Keep each
+  # transaction finite so the existing retry policy can handle that failure.
+  # APT otherwise accepts partial indexes after transient download failures.
+  # Retry the update itself before an install can consume those indexes. Put
+  # the policy last so caller options cannot restore warning-only updates.
+  if timeout --signal=TERM --kill-after=3s "${transaction_timeout_seconds}s" \
+    apt-get "$@" -o APT::Update::Error-Mode=any; then
     exit 0
   else
     status=$?

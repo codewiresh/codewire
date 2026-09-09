@@ -858,6 +858,8 @@ grep -qF -- "--build-arg BASE_IMAGE_REF=$base_ref" "$FAKE_DOCKER_CALLS" ||
   fail 'exact base digest did not reach the workspace build'
 [[ "$(build_invocation_count)" -eq 2 ]] ||
   fail 'workspace image was not built exactly once'
+grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" ||
+  fail 'published workspace could reuse floating developer tools'
 
 : >"$GITHUB_OUTPUT"
 create_calls_before="$(grep -c 'buildx imagetools create' "$FAKE_DOCKER_CALLS" || true)"
@@ -1200,6 +1202,54 @@ fi
   fail 'non-Nexus BuildKit failure entered the retry delay'
 grep -qF 'non-retryable BuildKit failure' "$work/non-retryable-build.out" ||
   fail 'non-Nexus BuildKit failure was not preserved'
+
+# Workspace publication retains the protected compiler-cache API, but no
+# untrusted external layer cache may reach any publisher, even on source reuse.
+fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"
+for mode in r2 auto invalid; do
+  if CODEWIRE_BUILDKIT_CACHE_MODE="$mode" "$BUILDER" workspace images/workspace/Dockerfile . >"$work/layer-rejection.out" 2>&1; then
+    fail "publisher accepted external layer mode $mode"
+  fi
+done
+[[ "$(wc -l <"$FAKE_FETCH_CALLS")" == "$fetch_calls_before" ]] || fail 'layer mode rejection reached protected credentials'
+if CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+    SCCACHE_BUCKET=codewire-ci SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+    CODEWIRE_SCCACHE_PREFIX=untrusted/codewire/v1 \
+    "$BUILDER" workspace images/workspace/Dockerfile . >"$work/compiler-rejection.out" 2>&1; then
+  fail 'published workspace accepted an untrusted compiler prefix'
+fi
+
+# Exercise old release sources and explicit cold mode through the real argument
+# construction. Only the synthetic registry manifests are removed between runs.
+workspace_source_tag="nexus-system-cluster.example.invalid/oci-promoted/codewire/workspace:$source_sha"
+printf 'FROM scratch\n' >"$work/legacy-workspace.Dockerfile"
+for variant in legacy disabled protected; do
+  awk -F '\t' -v reference="$workspace_source_tag" '$1 != reference' "$FAKE_MANIFESTS" >"$FAKE_MANIFESTS.tmp"
+  mv "$FAKE_MANIFESTS.tmp" "$FAKE_MANIFESTS"
+  : >"$FAKE_DOCKER_CALLS"
+  case "$variant" in
+    legacy)
+      CODEWIRE_BASE_IMAGE_REF="$base_ref" "$BUILDER" workspace "$work/legacy-workspace.Dockerfile" . ;;
+    disabled)
+      CODEWIRE_BUILDKIT_CACHE_MODE=disabled CODEWIRE_BASE_IMAGE_REF="$base_ref" \
+        "$BUILDER" workspace images/workspace/Dockerfile . ;;
+    protected)
+      CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_SCCACHE_CREDENTIALS_FILE="$r2_credentials_file" \
+        SCCACHE_BUCKET=codewire-ci SCCACHE_ENDPOINT=https://account.r2.cloudflarestorage.com \
+        CODEWIRE_SCCACHE_PREFIX=protected/codewire/test CODEWIRE_BASE_IMAGE_REF="$base_ref" \
+        "$BUILDER" workspace images/workspace/Dockerfile . ;;
+  esac
+  [[ "$(build_invocation_count)" == 1 ]] || fail "$variant workspace was not built exactly once"
+  if [[ "$variant" == protected ]]; then
+    grep -qF -- '--no-cache-filter workspace-floating-tools' "$FAKE_DOCKER_CALLS" || fail 'protected compiler cache omitted freshness'
+    grep -qF -- '--build-arg CODEWIRE_SCCACHE_MODE=r2' "$FAKE_DOCKER_CALLS" || fail 'protected workspace compiler API was lost'
+    grep -qF -- 'CODEWIRE_SCCACHE_PREFIX=protected/codewire/test' "$FAKE_DOCKER_CALLS" || fail 'protected compiler prefix was lost'
+  else
+    grep -qF -- '--no-cache ' "$FAKE_DOCKER_CALLS" || fail "$variant workspace lacks cold-layer bypass"
+    if grep -qF -- '--no-cache-filter' "$FAKE_DOCKER_CALLS"; then fail 'publisher combined exclusive no-cache flags'; fi
+  fi
+  if grep -qE -- '--cache-(from|to)|untrusted-(access-key|secret-key)' "$FAKE_DOCKER_CALLS"; then fail 'publisher exported candidate cache or credential material'; fi
+done
 
 printf 'untrusted build input\n' >"$source_worktree/forbidden-untracked-input"
 fetch_calls_before="$(wc -l <"$FAKE_FETCH_CALLS")"

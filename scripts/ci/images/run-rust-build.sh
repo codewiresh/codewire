@@ -12,7 +12,11 @@ case "$build_profile" in
     ;;
 esac
 case "$mode" in
-  disabled) ;;
+  disabled)
+    # A preceding workflow selection may have exported a wrapper. Disabling
+    # compiler caching must also close that inherited execution path.
+    unset RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
+    ;;
   local)
     # The workflow exports the reviewed R2 endpoint and bucket before it knows
     # whether short-lived identity is available. sccache auto-enables S3 when

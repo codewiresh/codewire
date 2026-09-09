@@ -164,8 +164,24 @@ while IFS=$'\t' read -r path expected_sha384; do
   fi
 done < <(jq -r '.npm[] | [.path, .sha384] | @tsv' "$vendor_manifest")
 
+# Match an attribute token, not the suffix of a BuildKit option or data attribute.
+# Keep the same scan paths and exercise the exact pattern used by the audit.
+readonly inline_style_attribute='(^|[[:space:]])style[[:space:]]*='
+for style_attribute in 'style="color:red"' '<p style = "color:red">' $'<p\tstyle="color:red">'; do
+  if ! grep -Eq "$inline_style_attribute" <<<"$style_attribute"; then
+    echo "supply-chain audit: inline-style positive self-test failed" >&2
+    exit 1
+  fi
+done
+for style_identifier in 'use_path_style=true' '<p data-style="compact">' 'lifestyle=compact'; do
+  if grep -Eq "$inline_style_attribute" <<<"$style_identifier"; then
+    echo "supply-chain audit: inline-style negative self-test failed" >&2
+    exit 1
+  fi
+done
+
 report_matches "runtime templates must not use inline style attributes" \
-  'style[[:space:]]*=' \
+  "$inline_style_attribute" \
   "${runtime_template_paths[@]}"
 
 report_matches "runtime templates must not use inline DOM event handlers" \

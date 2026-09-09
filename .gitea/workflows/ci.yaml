@@ -16,6 +16,10 @@ on:
         description: Rust image-build cache mode (auto, local, or disabled)
         required: false
         default: auto
+      layer_cache:
+        description: Workspace layer cache mode (auto, local, or disabled)
+        required: false
+        default: local
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -280,11 +284,12 @@ jobs:
         run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
 
   workspace-image:
+    enable-openid-connect: true
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this untrusted job has no protected credential.
     name: Container contract verification
     runs-on: ci-heavy
-    # A selected workspace verification performs two credential-free cold
-    # image builds. Keep its ceiling below the heavy runner's
+    # Workspace verification uses only the existing untrusted cache identity.
+    # Keep the cold-build ceiling below the heavy runner's
     # independently enforced 90-minute task budget while allowing the admitted
     # cold path to exceed 45 minutes.
     timeout-minutes: 55
@@ -326,12 +331,34 @@ jobs:
           scripts/ci/tests/test-workspace-agent-contract.sh
           scripts/ci/verify/rehearse-build-local-image.sh
 
+      - name: Select independent workspace caches
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        env:
+          CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
+          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event.inputs.layer_cache }}
+        run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Prove labeled R2 backend compatibility
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') && env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true' }}
+        run: |
+          set -euo pipefail
+          [[ "$CODEWIRE_BUILDKIT_CACHE_MODE" == r2 ]] || { echo 'Labeled R2 canary could not obtain its existing cache identity' >&2; exit 1; }
+          scripts/ci/tests/canary-workspace-r2-cache.sh \
+            "$CODEWIRE_SCCACHE_CREDENTIALS_FILE" "$RUNNER_TEMP/workspace-r2-cache-canary"
+
       - name: Build and inspect without publication
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
         run: scripts/ci/verify/verify-workspace-image.sh
 
+      - name: Clean workspace cache credentials
+        if: ${{ always() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_image_selected == 'true' && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        run: scripts/ci/setup/finish-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
       - name: Build and inspect the standalone dashboard image
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|web|') && !contains(needs.verification-selection.outputs.selection, '|kind|') }}
+        env:
+          # This direct bake does not receive the workspace compiler secret.
+          CODEWIRE_SCCACHE_MODE: disabled
         run: scripts/ci/verify/run-product-verification.sh dashboard-image
 
       - name: Run iOS package tests in the pinned Swift image
@@ -1019,11 +1046,20 @@ jobs:
           install kind-linux-amd64 "$HOME/.local/bin/kind"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Select best-effort shared Rust cache
+      - name: Select independent workspace and shared Rust caches
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}
         env:
           CODEWIRE_SCCACHE_REQUEST: ${{ github.event.inputs.rust_cache }}
-        run: scripts/ci/setup/select-untrusted-rust-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+          CODEWIRE_BUILDKIT_CACHE_REQUEST: ${{ github.event.inputs.layer_cache }}
+        run: scripts/ci/setup/select-untrusted-workspace-cache.sh "$RUNNER_TEMP/codewire-sccache-r2.aws"
+
+      - name: Prove labeled R2 backend compatibility
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') && env.CODEWIRE_WORKSPACE_CACHE_CANARY == 'true' }}
+        run: |
+          set -euo pipefail
+          [[ "$CODEWIRE_BUILDKIT_CACHE_MODE" == r2 ]] || { echo 'Labeled R2 canary could not obtain its existing cache identity' >&2; exit 1; }
+          scripts/ci/tests/canary-workspace-r2-cache.sh \
+            "$CODEWIRE_SCCACHE_CREDENTIALS_FILE" "$RUNNER_TEMP/workspace-r2-cache-canary"
 
       - name: Install pinned protoc for Rust compilation
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|kind|') }}

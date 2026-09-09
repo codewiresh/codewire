@@ -108,6 +108,25 @@ grep -Fq "VALUES ('\$preset_id', 'codewire-gateway:e2e', 'resize-template');" <<
   fail 'resize fixture image/template base does not match its runtime'
 grep -Fq 'INSERT INTO environment_presets (id, org_id, name, official, project_spec)' <<<"$resize_fixture" ||
   fail 'resize fixture does not own its preset'
+# Names and immutable daemon bootstrap come from the same Rust renderer used
+# by runtime reconciliation. This also covers shadow names exceeding 63 bytes.
+for binding in \
+    'CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id"' \
+    'SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS"' \
+    'SANDBOX_CREDENTIAL_GATEWAY_ROOTS_CONFIGMAP=codewire-credential-gateway-roots' \
+    'SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots' \
+    'CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token"' \
+    '"$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"' \
+    'select(.kind == "SandboxTemplate") | .metadata.name' \
+    'select(.kind == "SandboxWarmPool") | .metadata.name' \
+    '.metadata.name == $claim and .spec.warmPoolRef.name == $pool' \
+    'kubectl_apply -f "$resize_manifest"' \
+    'CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id"'; do
+  grep -Fq "$binding" <<<"$resize_fixture" || fail "resize renderer binding missing: $binding"
+done
+if grep -Eq '^kind: (SandboxTemplate|SandboxWarmPool|SandboxClaim)$|local shadow_pool_name="shadow-pool-' <<<"$resize_fixture"; then
+  fail 'resize fixture still duplicates production bootstrap or shadow naming'
+fi
 [[ "$(grep -c '^BEGIN;' <<<"$resize_fixture")" -eq 2 && "$(grep -c '^COMMIT;' <<<"$resize_fixture")" -eq 2 ]] ||
   fail 'resize fixture creation and cleanup must each be atomic'
 for assertion in \
@@ -129,6 +148,17 @@ run_resize_cleanup_fixture() (
   local claim_name="sandbox-$environment_id" template_name="resize-template-$environment_id"
   local shadow_pool_name="shadow-pool-resize-template-$environment_id"
   local daemon_service="cw-daemon-$environment_id" NS=codewire-e2e SANDBOX_NS=dev-sandboxes
+  local CARGO_CI_DIR="$FIXTURE" resize_manifest="$FIXTURE/resize-manifest.json"
+  export RESIZE_FIXTURE_CALLS="$CALLS" RESIZE_FIXTURE_FAILURE="$failure"
+  cat >"$CARGO_CI_DIR/crd-smoke" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$CRD_SMOKE_RESIZE_PHASE" == release && "$CRD_SMOKE_NAMESPACE" == dev-sandboxes &&
+   "$CRD_SMOKE_RESIZE_ENVIRONMENT_ID" == 00000000-0000-4000-8000-000000000123 ]] || exit 2
+printf 'release %s\n' "$CRD_SMOKE_RESIZE_ENVIRONMENT_ID" >>"$RESIZE_FIXTURE_CALLS"
+[[ "$RESIZE_FIXTURE_FAILURE" != release ]]
+SH
+  chmod +x "$CARGO_CI_DIR/crd-smoke"
   kubectl() {
     record "$*"
     if [[ " $* " == *' exec '* ]]; then
@@ -160,26 +190,28 @@ run_resize_cleanup_fixture() (
 )
 : >"$CALLS"
 run_resize_cleanup_fixture none 0
-[[ "$(wc -l <"$CALLS")" -eq 5 ]] || fail 'resize cleanup lost a required phase'
+[[ "$(wc -l <"$CALLS")" -eq 6 ]] || fail 'resize cleanup lost a required phase'
 mapfile -t resize_cleanup_calls <"$CALLS"
 [[ "${resize_cleanup_calls[0]}" == *' exec '* &&
-   "${resize_cleanup_calls[1]}" == *' --cascade=foreground '* &&
-   "${resize_cleanup_calls[2]}" == *' delete certificate/'* &&
-   "${resize_cleanup_calls[3]}" == *' delete secret/cw-credential-gateway-'* &&
-   "${resize_cleanup_calls[4]}" == *' delete secret/cw-gateway-host-key-'* ]] ||
-  fail 'resize cleanup does not preserve database, workload, issuer, leaf and host-key order'
+   "${resize_cleanup_calls[1]}" == 'release '* &&
+   "${resize_cleanup_calls[2]}" == *' --cascade=foreground '* &&
+   "${resize_cleanup_calls[3]}" == *' delete certificate/'* &&
+   "${resize_cleanup_calls[4]}" == *' delete secret/cw-credential-gateway-'* &&
+   "${resize_cleanup_calls[5]}" == *' delete secret/cw-gateway-host-key-'* ]] ||
+  fail 'resize cleanup does not preserve database, claim release, workload, issuer, leaf and host-key order'
 grep -Fq -- '--cascade=foreground --wait=true --timeout=120s' "$CALLS" ||
   fail 'resize cleanup does not wait for exact dependants to stop'
 grep -Fq "DELETE FROM environment_presets WHERE id = 'preset-env-resize-fixture' AND org_id = 'org_contract_1';" \
   "$FIXTURE/resize-cleanup.sql" || fail 'resize cleanup omitted its exact preset'
-for failure in database foreground certificate leaf hostkey; do
+for failure in database release foreground certificate leaf hostkey; do
   : >"$CALLS"
   expect_failure "resize-cleanup-$failure" run_resize_cleanup_fixture "$failure" 0
   case "$failure" in
-    database|hostkey) expected_calls=5 ;;
-    foreground) expected_calls=2 ;;
-    certificate) expected_calls=3 ;;
-    leaf) expected_calls=4 ;;
+    database|hostkey) expected_calls=6 ;;
+    release) expected_calls=2 ;;
+    foreground) expected_calls=3 ;;
+    certificate) expected_calls=4 ;;
+    leaf) expected_calls=5 ;;
   esac
   [[ "$(wc -l <"$CALLS")" -eq "$expected_calls" ]] ||
     fail "resize cleanup continued past failed $failure phase or omitted bounded cleanup"

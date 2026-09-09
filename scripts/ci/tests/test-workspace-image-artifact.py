@@ -81,7 +81,8 @@ class SyntheticSource(unittest.TestCase):
         ))
         self.start_patch(mock.patch.object(artifact.platform, "system", return_value="Linux"))
         self.start_patch(mock.patch.object(artifact.platform, "machine", return_value="x86_64"))
-        self.start_patch(mock.patch.dict(os.environ, {"CODEWIRE_DOCKER_BIN": "synthetic-docker"}))
+        self.start_patch(mock.patch.dict(os.environ, {"CODEWIRE_DOCKER_BIN": "synthetic-docker", "CODEWIRE_SCCACHE_MODE": "local",
+             "CODEWIRE_BUILDKIT_CACHE_MODE": "local", "CODEWIRE_BUILDKIT_CACHE_FALLBACK": "false"}))
 
     def start_patch(self, patcher):
         value = patcher.start()
@@ -111,7 +112,7 @@ class SourceIdentityTests(SyntheticSource):
     def test_clean_identity_hashes_every_checked_in_input(self):
         identity = artifact.source_identity(self.root)
         self.assertEqual(identity, {
-            "schema_version": 1,
+            "schema_version": 2,
             "source_sha": SOURCE,
             "source_tree": TREE,
             "inputs": {
@@ -203,6 +204,8 @@ class ReceiptTests(SyntheticSource):
             "workspace_image_id": IMAGE_ID,
             "workspace_alias": alias,
             "workspace_oci": oci,
+            "cache_modes": {"compiler": "local", "layers": "local"},
+            "layer_cache_fallback": False,
         })
         self.assertEqual(oci, artifact.archive_identity(self.root / oci["file"], IMAGE_ID, "amd64"))
         self.assertEqual(oci["source_digest"], self.source_digest)
@@ -211,6 +214,51 @@ class ReceiptTests(SyntheticSource):
         self.assertEqual(artifact.reuse(self.root, self.receipt), alias)
         self.assertEqual(list(self.root.glob(".workspace-image-*")), [])
         self.command.assert_any_call("synthetic-docker", "image", "tag", IMAGE_ID, alias)
+
+    def test_mode_change_requires_build_but_kind_can_consume_verified_bytes(self):
+        alias = self.seal()
+        for compiler in ("disabled", "local", "r2"):
+            for layers in ("disabled", "local", "r2"):
+                with self.subTest(compiler=compiler, layers=layers):
+                    with mock.patch.dict(os.environ, {"CODEWIRE_SCCACHE_MODE": compiler,
+                                                     "CODEWIRE_BUILDKIT_CACHE_MODE": layers}):
+                        self.assertEqual(artifact.reuse(self.root, self.receipt), alias)
+                        if compiler == layers == "local":
+                            self.assertEqual(artifact.reuse(self.root, self.receipt, for_build=True), alias)
+                        else:
+                            with self.assertRaisesRegex(ValueError, "cache mode mismatch"):
+                                artifact.reuse(self.root, self.receipt, for_build=True)
+
+    def test_r2_fallback_is_recorded_without_credential_or_endpoint(self):
+        with mock.patch.dict(os.environ, {"CODEWIRE_BUILDKIT_CACHE_MODE": "r2",
+                                         "CODEWIRE_BUILDKIT_CACHE_FALLBACK": "true",
+                                         "CODEWIRE_SCCACHE_CREDENTIALS_FILE": "/private/synthetic.aws"}):
+            self.seal()
+        value = self.read_receipt()
+        self.assertTrue(value["layer_cache_fallback"])
+        self.assertEqual(value["cache_modes"]["layers"], "r2")
+        self.assertNotIn("synthetic.aws", self.receipt.read_text())
+
+    def test_invalid_cache_evidence_cannot_seal_or_reuse(self):
+        for env in ({"CODEWIRE_SCCACHE_MODE": "auto"}, {"CODEWIRE_BUILDKIT_CACHE_MODE": "invalid"},
+                    {"CODEWIRE_BUILDKIT_CACHE_FALLBACK": "1"}):
+            with mock.patch.dict(os.environ, env):
+                with self.assertRaises(ValueError):
+                    self.seal()
+        self.seal()
+        valid = self.read_receipt()
+        for modes in ({"compiler": "local"}, {"compiler": "local", "layers": "auto"}, [],
+                      {"compiler": "local", "layers": "local", "key": "synthetic"}):
+            invalid = copy.deepcopy(valid)
+            invalid["cache_modes"] = modes
+            self.write_receipt(invalid)
+            with self.assertRaisesRegex(ValueError, "cache modes"):
+                artifact.reuse(self.root, self.receipt)
+        invalid = copy.deepcopy(valid)
+        invalid["layer_cache_fallback"] = "false"
+        self.write_receipt(invalid)
+        with self.assertRaisesRegex(ValueError, "cache modes"):
+            artifact.reuse(self.root, self.receipt)
 
     def test_same_tree_commit_can_reuse_original_verified_image(self):
         alias = self.seal()
@@ -297,7 +345,7 @@ class ReceiptTests(SyntheticSource):
     def test_schema_os_architecture_and_input_inventory_must_match(self):
         self.seal()
         for key, changed in (
-            ("schema_version", 2), ("os", "windows"), ("architecture", "arm64"), ("inputs", {}),
+            ("schema_version", 1), ("os", "windows"), ("architecture", "arm64"), ("inputs", {}),
         ):
             current = {**self.identity, key: changed}
             with self.subTest(field=key):
@@ -432,6 +480,25 @@ class ReceiptTests(SyntheticSource):
         self.assertTrue(current.exists())
         self.assertTrue(unrelated.exists())
         self.assertEqual(artifact.reuse(self.root, self.receipt), artifact.alias_for(IMAGE_ID))
+
+    def test_moved_stale_receipt_still_selects_only_its_verified_prior_archive(self):
+        self.seal()
+        previous = self.root / self.read_receipt()["workspace_oci"]["file"]
+        private_staging = self.root / "private-staging"
+        private_staging.mkdir(mode=0o700)
+        stale_receipt = private_staging / "previous-receipt.json"
+        self.receipt.rename(stale_receipt)
+        self.write_distinct_archive()
+
+        artifact.seal(
+            self.root, self.receipt, IMAGE_ID, BASE_DIGEST, self.archive, stale_receipt
+        )
+
+        current = self.root / self.read_receipt()["workspace_oci"]["file"]
+        self.assertNotEqual(previous, current)
+        self.assertFalse(previous.exists())
+        self.assertTrue(current.exists())
+        self.assertTrue(stale_receipt.exists())
 
     def test_replacement_never_prunes_untrusted_prior_artifacts(self):
         for change in ("writable", "hardlink", "symlink", "wrong-hash", "traversal"):

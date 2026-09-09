@@ -2696,17 +2696,37 @@ workspace_service_smokes() {
 
 environment_resize_smoke() (
   log "running public environment resize against the agent-sandbox controller"
+  umask 077
   local environment_id
   environment_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   local request_id="kind-resize-${RANDOM}-${RANDOM}"
   local preset_id="preset-${environment_id}"
-  local template_name="resize-template-${environment_id}"
-  local shadow_pool_name="shadow-pool-resize-template-${environment_id}"
+  local template_name shadow_pool_name
   local claim_name="sandbox-${environment_id}"
   local daemon_service="cw-daemon-${environment_id}"
-  local daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
+  local gateway_token daemon_token sandbox_name old_pod_uid new_pod_uid old_restart_count new_restart_count pod_name pod_ip pvc_name pvc_uid
   local operation_id operation_state response runtime_state marker image resources
+  local resize_manifest="$RUN_DIR/resize-$environment_id.json"
+  trap 'rm -f -- "$resize_manifest"' EXIT
+  gateway_token="$(gateway_auth_token_for_environment "$environment_id")"
   daemon_token="$(daemon_auth_token_for_environment "$environment_id")"
+
+  # Render through the same production code that runtime reconciliation validates.
+  # No cluster mutation occurs before these exact object identities are known.
+  CRD_SMOKE_RESIZE_PHASE=render CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
+    CRD_SMOKE_NAMESPACE="$SANDBOX_NS" CRD_SMOKE_SERVER_NAMESPACE="$NS" \
+    CRD_SMOKE_LOCAL_GATEWAY=1 CRD_SMOKE_WORKSPACE_IMAGE=codewire-gateway:e2e \
+    SANDBOX_CREDENTIAL_BROKER_NAMESPACE="$NS" \
+    SANDBOX_CREDENTIAL_GATEWAY_ROOTS_CONFIGMAP=codewire-credential-gateway-roots \
+    SANDBOX_CREDENTIAL_BROKER_ROOTS_CONFIGMAP=codewire-credential-broker-roots \
+    CRD_SMOKE_GATEWAY_TOKEN="$gateway_token" CRD_SMOKE_DAEMON_AUTH_TOKEN="$daemon_token" \
+    "$CARGO_CI_DIR/crd-smoke" >"$resize_manifest"
+  template_name="$(jq -er '.items[] | select(.kind == "SandboxTemplate") | .metadata.name' "$resize_manifest")"
+  shadow_pool_name="$(jq -er '.items[] | select(.kind == "SandboxWarmPool") | .metadata.name' "$resize_manifest")"
+  jq -e --arg claim "$claim_name" --arg pool "$shadow_pool_name" \
+    '.items[] | select(.kind == "SandboxClaim") |
+      .metadata.name == $claim and .spec.warmPoolRef.name == $pool' \
+    "$resize_manifest" >/dev/null
 
   # shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap below.
   cleanup_environment_resize_smoke() {
@@ -2725,7 +2745,9 @@ SQL
     # Runtime identity reconciliation creates the ordinary gateway stack.
     # Stop its Deployment and issuing Certificate before deleting either leaf key;
     # never delete the shared fixture Issuers or public root ConfigMaps.
-    if kubectl -n "$SANDBOX_NS" delete \
+    if CRD_SMOKE_RESIZE_PHASE=release CRD_SMOKE_RESIZE_ENVIRONMENT_ID="$environment_id" \
+      CRD_SMOKE_NAMESPACE="$SANDBOX_NS" "$CARGO_CI_DIR/crd-smoke" &&
+      kubectl -n "$SANDBOX_NS" delete \
       "sandboxclaim/$claim_name" "sandboxwarmpool/$shadow_pool_name" \
       "sandboxtemplate/$template_name" "service/$daemon_service" \
       "deployment/cw-gateway-$environment_id" \
@@ -2742,140 +2764,12 @@ SQL
     else
       status=1
     fi
+    rm -f -- "$resize_manifest" || status=1
     exit "$status"
   }
   trap cleanup_environment_resize_smoke EXIT
 
-  kubectl_apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxTemplate
-metadata:
-  name: ${template_name}
-  namespace: ${SANDBOX_NS}
-spec:
-  networkPolicy:
-    ingress:
-      - from:
-          - namespaceSelector:
-              matchLabels:
-                kubernetes.io/metadata.name: ${NS}
-            podSelector:
-              matchLabels:
-                app.kubernetes.io/name: codewire
-                app.kubernetes.io/component: orchestration
-        ports:
-          - protocol: TCP
-            port: 7777
-  podTemplate:
-    metadata:
-      labels:
-        codewire.sh/environment-id: ${environment_id}
-        codewire.sh/type: workspace
-        codewire.sh/resize-smoke-marker: preserved
-    spec:
-      restartPolicy: Never
-      serviceAccountName: codewire-sandbox
-      containers:
-        - name: workspace
-          image: codewire-gateway:e2e
-          imagePullPolicy: Never
-          command: ["/usr/local/bin/cw", "__hosted-daemon"]
-          env:
-            - name: CODEWIRE_WORKSPACE_SHIM_ADDR
-              value: 0.0.0.0:7777
-            - name: CODEWIRE_DAEMON_AUTH_TOKEN
-              value: ${daemon_token}
-            - name: CODEWIRE_RESIZE_SMOKE_IDENTITY
-              value: preserved
-          ports:
-            - name: daemon
-              containerPort: 7777
-          readinessProbe:
-            tcpSocket:
-              port: 7777
-            periodSeconds: 1
-            timeoutSeconds: 1
-          resources:
-            requests:
-              cpu: 250m
-              memory: 256Mi
-            limits:
-              cpu: 250m
-              memory: 256Mi
-          resizePolicy:
-            - resourceName: cpu
-              restartPolicy: NotRequired
-            - resourceName: memory
-              restartPolicy: NotRequired
-          volumeMounts:
-            - name: workspace
-              mountPath: /workspace
-  volumeClaimTemplates:
-    - metadata:
-        name: workspace
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        storageClassName: standard
-        resources:
-          requests:
-            storage: 1Gi
----
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxWarmPool
-metadata:
-  name: ${shadow_pool_name}
-  namespace: ${SANDBOX_NS}
-  labels:
-    codewire.sh/environment-id: ${environment_id}
-    codewire.sh/type: sandbox-claim-shadow
-spec:
-  replicas: 0
-  sandboxTemplateRef:
-    name: ${template_name}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${daemon_service}
-  namespace: ${SANDBOX_NS}
-spec:
-  selector:
-    codewire.sh/environment-id: ${environment_id}
-    codewire.sh/type: workspace
-  ports:
-    - name: daemon
-      port: 7777
-      targetPort: 7777
-EOF
-
-  kubectl_apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxClaim
-metadata:
-  name: ${claim_name}
-  namespace: ${SANDBOX_NS}
-  labels:
-    codewire.sh/environment-id: ${environment_id}
-    codewire.sh/org-id: org_contract_1
-    codewire.sh/type: sandbox
-spec:
-  warmPoolRef:
-    name: ${shadow_pool_name}
-  additionalPodMetadata:
-    labels:
-      codewire.sh/environment-id: ${environment_id}
-      codewire.sh/type: workspace
-      codewire.sh/resize-smoke-marker: preserved
-  workspaceResources:
-    - containerName: workspace
-      resources:
-        requests:
-          cpu: 250m
-          memory: 256Mi
-        limits:
-          cpu: 250m
-          memory: 256Mi
-EOF
+  kubectl_apply -f "$resize_manifest"
   kubectl -n "$SANDBOX_NS" wait "sandboxclaim/${claim_name}" \
     --for=condition=Ready --timeout=180s
   sandbox_name="$(kubectl -n "$SANDBOX_NS" get sandboxclaim "$claim_name" \

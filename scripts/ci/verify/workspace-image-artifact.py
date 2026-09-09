@@ -19,6 +19,9 @@ INPUTS = (
     "scripts/ci/verify/workspace-agent-contract.sh",
     "scripts/ci/verify/verify-workspace-image.sh",
     "scripts/ci/verify/workspace-image-artifact.py",
+    "scripts/ci/images/workspace-cache.sh",
+    "scripts/ci/images/run-rust-build.sh",
+    "scripts/ci/setup/select-untrusted-workspace-cache.sh",
 )
 MAXIMUM_ARCHIVE_BYTES = 80 * 1024 * 1024 * 1024
 MAXIMUM_DOCUMENT_BYTES = 4 * 1024 * 1024
@@ -47,7 +50,7 @@ def source_identity(root):
     if platform.system() != "Linux" or architecture is None:
         raise ValueError("workspace verification requires a supported native Linux host")
     return {
-        "schema_version": 1, "source_sha": source, "source_tree": tree,
+        "schema_version": 2, "source_sha": source, "source_tree": tree,
         "inputs": {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in INPUTS},
         "os": "linux", "architecture": architecture,
     }
@@ -187,7 +190,15 @@ def archive_identity(path, image_id, architecture):
             "sha256": archive_sha, "size": info.st_size, "source_digest": source_digest}
 
 
-def reuse(root, receipt, *, native=False):
+def cache_modes():
+    values = {"compiler": os.environ.get("CODEWIRE_SCCACHE_MODE", "local"),
+              "layers": os.environ.get("CODEWIRE_BUILDKIT_CACHE_MODE", "local")}
+    if any(mode not in ("disabled", "local", "r2") for mode in values.values()):
+        raise ValueError("invalid workspace cache mode")
+    return values
+
+
+def reuse(root, receipt, *, native=False, for_build=False):
     current = source_identity(root)
     if receipt.is_symlink() or not receipt.is_file():
         raise ValueError("invalid receipt file")
@@ -196,8 +207,18 @@ def reuse(root, receipt, *, native=False):
     if len(raw) > 64 * 1024:
         raise ValueError("receipt exceeds its bound")
     value = json.loads(raw)
-    if set(value) != set(current) | {"base_manifest_digest", "workspace_image_id", "workspace_alias", "workspace_oci"}:
+    if set(value) != set(current) | {
+            "base_manifest_digest", "workspace_image_id", "workspace_alias",
+            "workspace_oci", "cache_modes", "layer_cache_fallback"}:
         raise ValueError("invalid receipt fields")
+    modes = value["cache_modes"]
+    if not isinstance(modes, dict) or set(modes) != {"compiler", "layers"} \
+            or any(mode not in ("disabled", "local", "r2") for mode in modes.values()) \
+            or type(value["layer_cache_fallback"]) is not bool \
+            or (value["layer_cache_fallback"] and modes["layers"] != "r2"):
+        raise ValueError("invalid receipt cache modes")
+    if for_build and modes != cache_modes():
+        raise ValueError("receipt cache mode mismatch")
     if not isinstance(value["source_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["source_sha"]):
         raise ValueError("invalid receipt source")
     # Identical committed content can retain proof across a merge commit.
@@ -242,7 +263,10 @@ def previous_archive(receipt, destination):
         name = oci["file"]
         if not isinstance(name, str) or not re.fullmatch(r"workspace-image-[0-9a-f]{64}\.oci\.tar", name):
             return None
-        path = receipt.parent / name
+        # The stale acceptance marker may have been atomically moved aside
+        # before a fresh attempt. Artifacts always live beside the canonical
+        # destination, not beside that private temporary receipt.
+        path = destination.parent / name
         if path == destination:
             return None
         before = path.lstat()
@@ -254,19 +278,26 @@ def previous_archive(receipt, destination):
         return None
 
 
-def seal(root, receipt, image_id, base_digest, archive_path):
+def seal(root, receipt, image_id, base_digest, archive_path, previous_receipt=None):
     value = source_identity(root)
+    modes = cache_modes()
+    fallback = os.environ.get("CODEWIRE_BUILDKIT_CACHE_FALLBACK", "false")
+    if fallback not in ("true", "false"):
+        raise ValueError("invalid layer cache fallback")
+    if fallback == "true" and modes["layers"] != "r2":
+        raise ValueError("local layer cache cannot report remote fallback")
     validate_image(value, image_id)
     alias = alias_for(image_id)
     command(os.environ.get("CODEWIRE_DOCKER_BIN", "docker"), "image", "tag", image_id, alias)
     if inspect(alias).get("Id") != image_id:
         raise ValueError("image alias mismatch")
     value.update(base_manifest_digest=digest(base_digest), workspace_image_id=image_id, workspace_alias=alias)
+    value.update(cache_modes=modes, layer_cache_fallback=fallback == "true")
     if receipt.is_symlink() or receipt.parent.is_symlink() or not receipt.parent.is_dir():
         raise ValueError("invalid receipt destination")
     oci = archive_identity(archive_path, image_id, value["architecture"])
     destination = receipt.parent / oci["file"]
-    previous = previous_archive(receipt, destination)
+    previous = previous_archive(previous_receipt or receipt, destination)
     created_archive = False
     published_receipt = False
     temporary = None
@@ -326,8 +357,11 @@ def main(argv):
         print(reuse(root, Path(args[0])))
     elif mode == "native-input" and len(args) == 1:
         print(json.dumps(reuse(root, Path(args[0]), native=True), sort_keys=True))
-    elif mode == "seal" and len(args) == 4:
-        print(seal(root, Path(args[0]), args[1], args[2], Path(args[3])))
+    elif mode == "reuse-for-build" and len(args) == 1:
+        print(reuse(root, Path(args[0]), for_build=True))
+    elif mode == "seal" and len(args) in (4, 5):
+        prior = Path(args[4]) if len(args) == 5 else None
+        print(seal(root, Path(args[0]), args[1], args[2], Path(args[3]), prior))
     else:
         raise ValueError("arguments")
 

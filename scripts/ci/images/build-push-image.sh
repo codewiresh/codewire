@@ -19,6 +19,7 @@ public_source_url='https://github.com/codewiresh/codewire'
 base_image_ref="${CODEWIRE_BASE_IMAGE_REF:-}"
 require_existing_source_image="${REQUIRE_EXISTING_SOURCE_IMAGE:-0}"
 sccache_mode="${CODEWIRE_SCCACHE_MODE:-disabled}"
+layer_cache_mode="${CODEWIRE_BUILDKIT_CACHE_MODE:-local}"
 build_runtime_set="${CODEWIRE_BUILD_RUNTIME_SET:-0}"
 
 : "${GITHUB_SHA:?GITHUB_SHA is required}"
@@ -96,6 +97,13 @@ case "$sccache_mode" in
     printf 'Invalid CODEWIRE_SCCACHE_MODE: %s\n' "$sccache_mode" >&2
     exit 2
     ;;
+esac
+
+# Publication has no candidate layer-cache interface. Preserve the existing
+# protected compiler-cache API above, while rejecting all new remote imports.
+case "$layer_cache_mode" in
+  local|disabled) ;;
+  *) echo 'Published images accept only local or disabled BuildKit cache mode' >&2; exit 2 ;;
 esac
 
 case "$build_runtime_set" in
@@ -562,6 +570,22 @@ label_args=(
 build_args=()
 if [ -n "$base_image_ref" ]; then
   build_args+=("--build-arg" "BASE_IMAGE_REF=$base_image_ref")
+fi
+if [ "$image_name" = workspace ]; then
+  # Every actual build refreshes moving tool channels. Historical release
+  # sources without the named stage need the conservative whole-build bypass.
+  if [ "$layer_cache_mode" = disabled ] \
+      || ! grep -Eqi '^FROM .+ AS workspace-floating-tools$' "$dockerfile"; then
+    build_args+=(--no-cache)
+  else
+    build_args+=(--no-cache-filter workspace-floating-tools)
+  fi
+  build_args+=(--build-arg "CODEWIRE_SCCACHE_MODE=$sccache_mode")
+  if [ "$sccache_mode" = r2 ]; then
+    build_args+=(--secret "id=aws_shared_credentials,src=$credentials_file"
+      --build-arg "SCCACHE_BUCKET=$SCCACHE_BUCKET" --build-arg "SCCACHE_ENDPOINT=$SCCACHE_ENDPOINT"
+      --build-arg "CODEWIRE_SCCACHE_PREFIX=$CODEWIRE_SCCACHE_PREFIX")
+  fi
 fi
 
 product_bake_target=''

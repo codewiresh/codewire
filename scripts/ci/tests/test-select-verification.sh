@@ -254,6 +254,10 @@ run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
 run_paths_case service_ssh_image_verifier pull_request refs/pull/1922/head false \
   'policy' scripts/ci/tests/test-service-ssh-image-verifier.sh \
   scripts/ci/verify/service-ssh-image-contract.sh scripts/ci/verify/verify-service-ssh-image.sh
+run_paths_case apt_transactions pull_request refs/pull/3/head false \
+  'go_consumer_interop go_support policy release runtime_confidential' \
+  scripts/ci/tests/test-apt-get-with-retry.sh
+
 run_paths_case release pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
   .gitea/workflows/cli-release.yaml \
@@ -310,6 +314,21 @@ run_paths_case sccache_host_selector pull_request refs/pull/1751/head false \
 run_paths_case sccache_host_selector_fixture pull_request refs/pull/1752/head false \
   'policy security' \
   scripts/ci/tests/test-select-untrusted-rust-cache.sh
+run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false \
+  'policy security' \
+  scripts/ci/setup/select-untrusted-workspace-cache.sh \
+  scripts/ci/images/workspace-cache.sh \
+  scripts/ci/tests/test-select-untrusted-workspace-cache.sh \
+  scripts/ci/tests/test-workspace-cache.sh \
+  scripts/ci/tests/canary-workspace-r2-cache.sh
+run_present_paths_case workspace_cache_experiment_consumers pull_request refs/pull/2047/head false \
+  'policy policy_shell security' \
+  scripts/ci/setup/select-workspace-cache-experiment.py \
+  scripts/ci/tests/probe-workspace-r2-cache.sh \
+  scripts/ci/tests/test-workspace-cache-experiment.py \
+  scripts/ci/tests/test-workspace-cache-probes.py \
+  scripts/ci/verify/workspace-cache-probes.py \
+  scripts/ci/verify/workspace-cache-report.py
 run_paths_case dev_deploy_contract pull_request refs/pull/30/head false \
   'deploy go_consumer_interop go_support policy release runtime_confidential' scripts/ci/tests/test-deploy-dev.sh
 run_paths_case dev_smoke_receipt pull_request refs/pull/302/head false \
@@ -1937,8 +1956,11 @@ grep -qF 'name: Build and inspect the standalone dashboard image' \
   echo 'container contracts: standalone Web changes omit dashboard image verification' >&2
   exit 1
 }
-dashboard_step="$(grep -A2 -F 'name: Build and inspect the standalone dashboard image' \
-  "$workspace_block")"
+dashboard_step="$(awk '
+  $0 == "      - name: Build and inspect the standalone dashboard image" { capture = 1 }
+  capture && $0 ~ /^      - / && $0 != "      - name: Build and inspect the standalone dashboard image" { exit }
+  capture { print }
+' "$workspace_block")"
 for token in web kind; do
   grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
     <<<"$dashboard_step" || {
