@@ -56,7 +56,20 @@ case "$1 $2" in
       printf '#7 [1/1] COPY payload /payload\n'
       if [[ "$FAKE_CANARY" == hit && "$(wc -l <"$FAKE_BUILDS")" == 2 ]]; then
         printf '#7 CACHED\n'
+      elif [[ "$FAKE_CANARY" == lazy-hit || "$FAKE_CANARY" == lazy-wrong ]]; then
+        digest=7
+        [[ "$FAKE_CANARY" != lazy-wrong ]] || digest=8
+        if [[ "$(wc -l <"$FAKE_BUILDS")" == 2 ]]; then
+          printf '#7 sha256:%064d 0B / 8.39MB 0.1s\n' "$digest"
+          printf '#7 sha256:%064d 8.39MB / 8.39MB 0.2s done\n' "$digest"
+        else
+          printf '#7 DONE 0.1s\n'
+        fi
       else printf '#7 DONE 0.1s\n'; fi
+      if [[ "$FAKE_CANARY" == lazy-* && "$(wc -l <"$FAKE_BUILDS")" == 1 ]]; then
+        printf '#8 exporting cache to Amazon S3\n'
+        printf '#8 writing layer sha256:%064d 0.1s done\n' 7
+      fi
       [[ "$FAKE_CANARY" != export-failure ]] || echo 'ignoring error exporting cache to Amazon S3'
     fi
     case "${FAKE_FAILURE:-}" in
@@ -348,14 +361,14 @@ if (
 grep -q 'outside the build context' "$work/context-rejection.out"
 # Run the actual bounded canary against the fake API. A generic CACHED line is
 # insufficient: the COPY vertex in the second daemon must reuse remote data.
-for canary in hit miss export-failure; do
+for canary in hit lazy-hit lazy-wrong miss export-failure; do
   : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
   set +e
   FAKE_CANARY="$canary" "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
     "$credential_work/r2.aws" "$work/report-$canary" >"$work/canary.out" 2>&1
   status=$?
   set -e
-  if [[ "$canary" == hit ]]; then
+  if [[ "$canary" == hit || "$canary" == lazy-hit ]]; then
     [[ "$status" == 0 && -s "$work/report-$canary/result.txt" ]]
     [[ "$(grep -c '^buildx create ' "$FAKE_LOG")" == 2 && "$(grep -c '^buildx rm ' "$FAKE_LOG")" == 2 ]]
   else
