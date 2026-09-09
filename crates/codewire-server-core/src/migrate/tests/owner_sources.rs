@@ -1,25 +1,25 @@
-//! Function-only staged 25 -> 26 proof. No platform environment is synthesized.
+//! Function-only staged 26 -> 27 proof. No platform environment is synthesized.
 
 use super::*;
 
-const VERSION: i64 = 26;
+const VERSION: i64 = 27;
 const SIGNATURE: &str = "public.codewire_platform_lock_owner_source_authority(text,text,text)";
 const CALL: &str =
     "SELECT public.codewire_platform_lock_owner_source_authority($1::text,$2::text,$3::text)";
-const SQL: &str = include_str!("../../../migrations/0026_owner_source_authority.sql");
+const SQL: &str = include_str!("../../../migrations/0027_owner_source_authority.sql");
 // Independently frozen after the accepted SSH component PostgreSQL proof.
-// This is a staged branch boundary, not deployed or merged version25 history.
-const ACCEPTED_STAGED25: &str = "a1fa99436ba0690f41f8e90f2152dcec9253c263e73086104b7de23efd12d0a09a7b6d9d93d87c299658f817bb311edf";
+// This is a staged branch boundary, not deployed or merged version26 history.
+const ACCEPTED_STAGED26: &str = "a1fa99436ba0690f41f8e90f2152dcec9253c263e73086104b7de23efd12d0a09a7b6d9d93d87c299658f817bb311edf";
 const WAIT: Duration = Duration::from_secs(5);
 
-pub(super) fn assert_accepted_staged25() -> anyhow::Result<()> {
+pub(super) fn assert_accepted_staged26() -> anyhow::Result<()> {
     let migration = MIGRATOR
         .iter()
-        .find(|migration| migration.version == 25)
-        .context("accepted staged migration25 missing")?;
+        .find(|migration| migration.version == 26)
+        .context("accepted staged migration26 missing")?;
     anyhow::ensure!(
-        format!("{:x}", Sha384::digest(migration.sql.as_bytes())) == ACCEPTED_STAGED25,
-        "migration25 differs from the accepted staged SSH component"
+        format!("{:x}", Sha384::digest(migration.sql.as_bytes())) == ACCEPTED_STAGED26,
+        "migration26 differs from the accepted staged SSH component"
     );
     Ok(())
 }
@@ -34,9 +34,9 @@ fn owner_source_upgrade_retains_independently_accepted_history() -> anyhow::Resu
     anyhow::ensure!(
         format!("{:x}", Sha384::digest(consent.sql.as_bytes())) == FROZEN_BINDING_CONSENT_CHECKSUM
     );
-    projection::assert_accepted_prior23()?;
-    ssh::assert_accepted_staged24()?;
-    assert_accepted_staged25()
+    projection::assert_accepted_prior24()?;
+    ssh::assert_accepted_staged25()?;
+    assert_accepted_staged26()
 }
 
 async fn definition(pool: &PgPool) -> anyhow::Result<String> {
@@ -74,9 +74,9 @@ async fn definition(pool: &PgPool) -> anyhow::Result<String> {
 }
 
 async fn old_functions(pool: &PgPool) -> anyhow::Result<Vec<String>> {
-    // Compare every pre-26 helper byte-for-byte. Migration27's two new
+    // Compare every pre-27 helper byte-for-byte. Migration28's two new
     // session helpers have their own inventory/authority proof; neither was
-    // present in the staged25 baseline and neither replaces a prior helper.
+    // present in the staged26 baseline and neither replaces a prior helper.
     Ok(sqlx::query_scalar(
         "SELECT pg_catalog.pg_get_functiondef(p.oid) FROM pg_catalog.pg_proc p \
          JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
@@ -139,16 +139,16 @@ async fn rows(pool: &PgPool) -> anyhow::Result<Vec<String>> {
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
-async fn owner_source_staged_upgrade_preserves25_rows_authority_and_noop() -> anyhow::Result<()> {
+async fn owner_source_staged_upgrade_preserves26_rows_authority_and_noop() -> anyhow::Result<()> {
     let admin = std::env::var("TEST_DATABASE_URL").context("TEST_DATABASE_URL required")?;
     let db = TestDatabase::create(&admin).await?;
     let result = async {
         apply_migrations_before(&db.url, VERSION).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let before = applied_migrations(&pool).await?;
-        anyhow::ensure!(before.len() == 25 && before[24].0 == 25);
-        let prior_checksum: String = sqlx::query_scalar("SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=25 AND success").fetch_one(&pool).await?;
-        anyhow::ensure!(prior_checksum == ACCEPTED_STAGED25);
+        anyhow::ensure!(before.len() == 26 && before[25].0 == 26);
+        let prior_checksum: String = sqlx::query_scalar("SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=26 AND success").fetch_one(&pool).await?;
+        anyhow::ensure!(prior_checksum == ACCEPTED_STAGED26);
         seed(&pool).await?;
         seed_platform_credential(&pool, "source-retained", Some("credential-user-a"), None, "Retained").await?;
         seed_platform_credential_material(&pool, "source-retained", 1).await?;
@@ -158,7 +158,7 @@ async fn owner_source_staged_upgrade_preserves25_rows_authority_and_noop() -> an
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..25] == before && after[25].0 == VERSION);
+        anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..26] == before && after[26].0 == VERSION);
         anyhow::ensure!(rows(&pool).await? == retained);
         anyhow::ensure!(old_functions(&pool).await? == old);
         let installed = definition(&pool).await?;
@@ -568,7 +568,7 @@ async fn owner_source_failed_forward_migration_rolls_back_function_and_ledger() 
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
-async fn owner_source_rollback_replays_staged25_only_in_disposable_application_schema()
+async fn owner_source_rollback_replays_staged26_only_in_disposable_application_schema()
 -> anyhow::Result<()> {
     let admin = std::env::var("TEST_DATABASE_URL").context("TEST_DATABASE_URL required")?;
     let db = TestDatabase::create(&admin).await?;
@@ -586,9 +586,9 @@ async fn owner_source_rollback_replays_staged25_only_in_disposable_application_s
         apply_migrations_before(&db.url, VERSION).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let ledger = applied_migrations(&pool).await?;
-        anyhow::ensure!(ledger.len() == 25 && ledger[24].0 == 25);
-        let prior_checksum: String = sqlx::query_scalar("SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=25 AND success").fetch_one(&pool).await?;
-        anyhow::ensure!(prior_checksum == ACCEPTED_STAGED25);
+        anyhow::ensure!(ledger.len() == 26 && ledger[25].0 == 26);
+        let prior_checksum: String = sqlx::query_scalar("SELECT encode(checksum,'hex') FROM public._sqlx_migrations WHERE version=26 AND success").fetch_one(&pool).await?;
+        anyhow::ensure!(prior_checksum == ACCEPTED_STAGED26);
         anyhow::ensure!(sqlx::query_scalar::<_, bool>("SELECT to_regprocedure($1) IS NULL").bind(SIGNATURE).fetch_one(&pool).await?);
         anyhow::ensure!(sqlx::query_scalar::<_, i32>("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await? == 1);
         anyhow::ensure!(sqlx::query_scalar::<_, bool>("SELECT NOT EXISTS(SELECT 1 FROM public.platform_credentials) AND NOT EXISTS(SELECT 1 FROM public.platform_credential_material)").fetch_one(&pool).await?);

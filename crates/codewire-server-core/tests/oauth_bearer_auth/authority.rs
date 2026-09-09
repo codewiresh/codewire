@@ -215,6 +215,7 @@ async fn original_authority_uses_restricted_login_and_separate_connect_extension
                 "UPDATE public.oidc_access_tokens SET expires_at=now() WHERE false",
                 "UPDATE public.oidc_clients SET disabled=false WHERE false",
                 "UPDATE public.users SET is_admin=true WHERE false",
+                "UPDATE public.users SET enabled=false WHERE false",
                 "SELECT secret FROM public.oidc_clients LIMIT 0",
                 "SELECT * FROM public.oidc_refresh_tokens LIMIT 0",
                 "SELECT * FROM public.platform_credential_material LIMIT 0",
@@ -254,13 +255,14 @@ async fn original_authority_rejects_revocation_identity_scope_and_expiry_changes
                 ("changed-client", "UPDATE oidc_access_tokens SET client_id='oauth-authority-client-other' WHERE token_hash=$1"),
                 ("disable", "UPDATE oidc_clients SET disabled=true WHERE id=$1"),
                 ("delete-client", "DELETE FROM oidc_clients WHERE id=$1"),
+                ("disable-user", "UPDATE users SET enabled=false WHERE id=$1"),
                 ("delete-user", "DELETE FROM users WHERE id=$1"),
             ] {
                 let (raw, user, client) = fixture(&db.pool, label, 60_000).await?;
                 let authority = capture(&reader, &raw).await?;
                 let target = match label {
                     "disable" | "delete-client" => client,
-                    "delete-user" => user,
+                    "disable-user" | "delete-user" => user,
                     _ => hash_oauth_token(&raw),
                 };
                 sqlx::query(mutation).bind(target).execute(&db.pool).await?;
@@ -292,7 +294,7 @@ async fn original_authority_rejects_revocation_identity_scope_and_expiry_changes
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn original_authority_fences_both_orders_of_token_client_and_owner_revocation() -> Result<()>
+async fn original_authority_fences_both_orders_of_token_client_and_account_revocation() -> Result<()>
 {
     let db = TestDatabase::create().await?;
     let result = async {
@@ -309,6 +311,7 @@ async fn original_authority_fences_both_orders_of_token_client_and_owner_revocat
                     "UPDATE oidc_clients SET disabled=true WHERE id=$1",
                 ),
                 ("owner", "DELETE FROM users WHERE id=$1"),
+                ("disable-user", "UPDATE users SET enabled=false WHERE id=$1"),
                 (
                     "scope",
                     "UPDATE oidc_access_tokens SET scopes=ARRAY['openid'] WHERE token_hash=$1",
@@ -320,7 +323,7 @@ async fn original_authority_fences_both_orders_of_token_client_and_owner_revocat
                     let authority = capture(&reader, &raw).await?;
                     let target = match label {
                         "client" => client,
-                        "owner" => user,
+                        "owner" | "disable-user" => user,
                         _ => hash_oauth_token(&raw),
                     };
                     if publication_first {

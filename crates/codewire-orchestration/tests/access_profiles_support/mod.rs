@@ -244,7 +244,7 @@ impl Harness {
                 "USAGE ON SCHEMA public".into(),
                 "SELECT,INSERT,UPDATE,DELETE ON public.platform_access_profiles, public.platform_access_profile_revisions, public.platform_access_profile_entries, public.platform_environment_access_bindings".into(),
                 "SELECT ON public.platform_credentials".into(),
-                "SELECT (id,is_admin) ON public.users".into(),
+                "SELECT (id,is_admin,enabled) ON public.users".into(),
                 "SELECT (id,deletion_state) ON public.organizations".into(),
                 "SELECT (id,org_id,created_by,type,state,desired_state,deletion_requested_at,environment_operation_generation) ON public.environments".into(),
                 // PostgreSQL row locks need UPDATE privilege on at least one

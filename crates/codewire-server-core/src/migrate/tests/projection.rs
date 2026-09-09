@@ -1,22 +1,22 @@
-//! Function-only 23 -> 24 proof. Table fingerprints do not prove SQL authority;
+//! Function-only 24 -> 25 proof. Table fingerprints do not prove SQL authority;
 //! check both complete installed function bodies and their owner/search path/ACL.
 
 use super::*;
 
-const VERSION: i64 = 24;
-// SHA384 measured directly from accepted canonical 10233aee34b2498863aba0f8bad9d85a7c36b654,
-// not from the proposed branch. Prior 1..22 retain their independent pins.
-const ACCEPTED_23: &str = "28ba96ad9bf9e8b914f2a524613081636f3e3cc0d6b36545f8fd3c621f8f3a521515fb6d8d6feef253841d0f5be11ec2";
-const SQL: &str = include_str!("../../../migrations/0024_platform_environment_projection.sql");
+const VERSION: i64 = 25;
+// SHA-384 measured from canonical origin/main 7dfd53dfd's immutable account
+// access migration. Prior 1..23 retain their independent accepted pins.
+const ACCEPTED_24: &str = "02e123969a2875f61f07dc33a6da16e5cc76a3a92abcf402ce2aa4cead81a858e2838fae46791c362fde93f3ca49be16";
+const SQL: &str = include_str!("../../../migrations/0025_platform_environment_projection.sql");
 
-pub(super) fn assert_accepted_prior23() -> anyhow::Result<()> {
+pub(super) fn assert_accepted_prior24() -> anyhow::Result<()> {
     let migration = MIGRATOR
         .iter()
-        .find(|m| m.version == 23)
-        .context("accepted migration23 missing")?;
+        .find(|m| m.version == 24)
+        .context("accepted migration24 missing")?;
     anyhow::ensure!(
-        format!("{:x}", Sha384::digest(migration.sql.as_bytes())) == ACCEPTED_23,
-        "migration23 differs from accepted canonical10233aee3"
+        format!("{:x}", Sha384::digest(migration.sql.as_bytes())) == ACCEPTED_24,
+        "migration24 differs from accepted canonical origin/main"
     );
     Ok(())
 }
@@ -32,7 +32,8 @@ fn platform_projection_prior_history_retains_accepted_release() -> anyhow::Resul
         format!("{:x}", Sha384::digest(migration.sql.as_bytes()))
             == FROZEN_BINDING_CONSENT_CHECKSUM
     );
-    assert_accepted_prior23()
+    assert_frozen_oauth_publication_authority_checksum()?;
+    assert_accepted_prior24()
 }
 
 pub(super) async fn definitions(pool: &PgPool) -> anyhow::Result<Vec<String>> {
@@ -101,7 +102,7 @@ async fn platform_projection_upgrade_retains_accepted_history_envelopes_and_noop
         apply_migrations_before(&db.url,VERSION).await?;
         let pool=PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let before=applied_migrations(&pool).await?;
-        anyhow::ensure!(before.len()==23 && before[22].0==23);
+        anyhow::ensure!(before.len()==24 && before[23].0==24);
         seed_platform_credential_owners(&pool).await?;
         seed_platform_credential(&pool,"projection-retained",Some("credential-user-a"),None,"Work").await?;
         seed_platform_credential_material(&pool,"projection-retained",1).await?;
@@ -114,17 +115,17 @@ async fn platform_projection_upgrade_retains_accepted_history_envelopes_and_noop
             JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='projection-retained'";
         let rows_before:(String,String,String,String)=sqlx::query_as(rows_sql).fetch_one(&pool).await?;
         let old=assert_platform_broker_lock_authority(&pool,true).await?;
-        let old_oauth=assert_oauth_publication_authority(&pool).await?;
+        let old_oauth=assert_oauth_publication_authority(&pool, true).await?;
         pool.close().await;
         ensure_schema(&db.url).await?;
         let pool=PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after=applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len()==MIGRATOR.iter().count() && after[..23]==before && after[23].0==24);
+        anyhow::ensure!(after.len()==MIGRATOR.iter().count() && after[..24]==before && after[24].0==VERSION);
         let fingerprint:String=sqlx::query_scalar(include_str!("../../../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
         anyhow::ensure!(fingerprint==ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,"current application schema changed: {fingerprint}");
         anyhow::ensure!(sqlx::query_as::<_,(String,String,String,String)>(rows_sql).fetch_one(&pool).await?==rows_before);
         anyhow::ensure!(assert_platform_broker_lock_authority(&pool,true).await?==old);
-        anyhow::ensure!(assert_oauth_publication_authority(&pool).await?==old_oauth);
+        anyhow::ensure!(assert_oauth_publication_authority(&pool, true).await?==old_oauth);
         let installed=definitions(&pool).await?;
         pool.close().await;
         ensure_schema(&db.url).await?;
@@ -179,7 +180,7 @@ async fn platform_projection_rollback_recreates_only_disposable_application_sche
         apply_migrations_before(&db.url,VERSION).await?;
         let pool=PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let ledger=applied_migrations(&pool).await?;
-        anyhow::ensure!(ledger.len()==23 && ledger[22].0==23);
+        anyhow::ensure!(ledger.len()==24 && ledger[23].0==24);
         let absent:bool=sqlx::query_scalar("SELECT to_regprocedure('public.codewire_platform_projection_metadata(text)') IS NULL \
             AND to_regprocedure('public.codewire_platform_lock_projection_authority(text,text,text,text)') IS NULL")
             .fetch_one(&pool).await?;

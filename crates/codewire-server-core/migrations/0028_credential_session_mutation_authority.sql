@@ -13,14 +13,16 @@ AS $$
         UPDATE public.sessions AS s
            SET expires_at = GREATEST(s.expires_at, NOW() + interval '8 hours'),
                updated_at = NOW()
+          FROM public.users AS u
          WHERE s.token_hash = $1
            AND $1 ~ '^[0-9a-f]{64}$'
            AND s.expires_at > NOW()
-         RETURNING s.id, s.user_id, s.expires_at
+           AND s.user_id = u.id
+           AND u.enabled
+         RETURNING s.id, s.user_id, u.is_admin, s.expires_at
     )
-    SELECT r.id, r.user_id, u.is_admin, r.expires_at AT TIME ZONE 'UTC'
+    SELECT r.id, r.user_id, r.is_admin, r.expires_at AT TIME ZONE 'UTC'
       FROM refreshed AS r
-      JOIN public.users AS u ON u.id = r.user_id
 $$;
 
 CREATE FUNCTION public.codewire_lock_credential_session_authority(
@@ -36,7 +38,7 @@ SET search_path = pg_catalog, pg_temp
 SET TimeZone = 'UTC'
 AS $$
 BEGIN
-    PERFORM u.id FROM public.users AS u WHERE u.id = $3 FOR SHARE;
+    PERFORM u.id FROM public.users AS u WHERE u.id = $3 AND u.enabled FOR SHARE;
     IF NOT FOUND THEN RETURN false; END IF;
 
     PERFORM s.id FROM public.sessions AS s

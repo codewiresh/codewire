@@ -176,7 +176,7 @@ run_database() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-server-core --lib migrate:: -- --ignored --nocapture \
       | tee "$logfile"
-  assert_passed_count "server-core migration matrix" "$logfile" 41
+  assert_passed_count "server-core migration matrix" "$logfile" 46
 
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
@@ -538,7 +538,7 @@ run_idp() {
     echo "::error::idp db_flow skipped"
     return 1
   fi
-  assert_passed_count "idp db_flow" "$logfile" 12
+  assert_passed_count "idp db_flow" "$logfile" 13
 
   logfile="$RUN_DIR/idp-rewrap-cli.log"
   DATABASE_URL="$DATABASE_URL_RUST" \

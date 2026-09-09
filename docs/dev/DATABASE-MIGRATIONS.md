@@ -327,10 +327,46 @@ only the disposable application `public` schema; its test preserves another
 schema. Cluster roles, other databases and external OpenBao keys remain outside
 this boundary. This is not authority for a live reset.
 
+### Account-access revocation
+
+Migration `0024_account_access.sql` adds `users.enabled` and an optional
+operator-facing access reason. Existing users default to enabled. Changing an
+enabled account to disabled atomically revokes browser sessions, authorization
+codes, opaque OAuth access/refresh tokens, bound device grants, and pending
+2FA challenges; it retires API keys. New capability inserts and subject-binding
+application paths take the user lock before they write. The six corresponding
+`user_id` indexes keep each revocation predicate bounded to the account being
+disabled. A rolling predecessor transition may already hold its capability row,
+so its database guard uses a non-waiting user lock and returns a retriable
+lock-conflict result when disablement owns the account row. That avoids a
+capability-to-user cycle while preserving the rule that an issuer which wins
+first is purged and an issuer that arrives after disablement cannot issue
+access.
+
+The version-24 ledger is not compatible with starting a version-23 service.
+SQLx must reject missing migration history; the trigger fence is only for
+writers already participating during a rolling deployment, not executable
+same-database source rollback. There is no in-place downgrade. After stopping
+the new writers, rollback to version 23 recreates only the disposable
+application `public` schema and replays the selected prior source's embedded
+history. The rollback fixture proves that the account-access columns, triggers,
+indexes, and version-24 helper replacement disappear while a separate schema
+survives. The upgrade matrix pins version-23 bytes and proves index inventory,
+both-order predecessor transitions, current device/2FA completion ordering, and
+the no-resurrection boundary. It does not authorize a live reset,
+migration-ledger rewrite, cluster change, or credential operation.
+
+Before publication, the product branch's staged migrations 24–27 moved to
+25–28 to preserve canonical account-access migration 24. The existing
+projection, SSH and owner-source byte pins remain evidence for those unchanged
+SQL sources at their new versions. Session migration 28 was composed with the
+new enabled-account fence and has its own final bytes. None of these fixtures
+describes an applied old-number ledger.
+
 ### Platform application environment projection
 
-Migration `0024_platform_environment_projection.sql` is function-only and
-retains the accepted versions 1–23. Its metadata helper exposes exact canonical
+Migration `0025_platform_environment_projection.sql` is function-only and
+retains the accepted versions 1–24. Its metadata helper exposes exact canonical
 application-source/profile selectors and ordinary configuration key names,
 never full `project_spec` or configured values. Its second helper takes SHARE
 locks on the exact creator, active organization, membership, running environment,
@@ -352,20 +388,20 @@ envelopes, decrypts outside SQL locks, then revalidates authority and exact
 inventory/envelope/DEK bytes under the same locks before recipient-bound sealing.
 The existing environment operation is the only generation.
 
-Upgrade fixtures independently pin migration 23 from accepted canonical
-`10233aee34b2498863aba0f8bad9d85a7c36b654`, retain the existing pins for 1–22,
+Upgrade fixtures independently pin migration 24 from accepted canonical
+`7dfd53dfd93ed56f7564111a4eba9fc0a730cef3`, retain the existing pins for 1–23,
 and check exact prior ledger and protected bytes, installed function bodies,
 owner/search-path/ACL, unchanged table fingerprint and second-startup no-op.
 A deliberate function collision proves failed application rolls back both DDL
 and migration ledger changes. There is no in-place downgrade. Stop new readers
-and replay version-23 source into only the disposable application `public`
+and replay version-24 source into only the disposable application `public`
 schema to roll back; the fixture preserves a separate schema. Other databases,
 cluster roles and external OpenBao keys are outside this boundary. These
 instructions do not authorize live resets or imply runtime delivery is enabled.
 
 ### Typed SSH credential enrollment
 
-Migration `0025_platform_ssh_credentials.sql` adds the fresh `ssh_key`
+Migration `0026_platform_ssh_credentials.sql` adds the fresh `ssh_key`
 authentication kind and nullable `ssh_public_key`/`ssh_fingerprint` public
 metadata columns. The pair is required exactly for provider `ssh` and kind
 `ssh_key`; other credentials retain NULL in both columns. Shape/size checks
@@ -391,10 +427,10 @@ new SECURITY DEFINER function, or change to the applied credential-lock
 function is required. Profile metadata loading holds that exact existing SHARE
 lock before its additional public-column read in the same transaction.
 
-The 24→25 fixture is a **staged branch upgrade**, not a claim that version24
-was deployed or merged. It pins the accepted projection component's version24
+The 25→26 fixture is a **staged branch upgrade**, not a claim that version25
+was deployed or merged. It pins the accepted projection component's version25
 bytes (SHA-256 `12de82cd0afc166e15fa3d4dbcb18111ae2ef2b19fdf5c8bd9a4e9476414c975`,
-PostgreSQL component proof session46208), while versions1–23 retain their
+PostgreSQL component proof session46208), while versions1–24 retain their
 independent accepted history pins. It preserves all prior credential/envelope
 bytes and function authority, proves the new fields remain NULL on old rows,
 and checks second-startup no-op. Fresh-schema constraints, real restricted-role
@@ -403,7 +439,7 @@ proofs. The current schema fingerprint must be measured from real disposable
 PostgreSQL before acceptance; a pending marker is not successful proof.
 
 There is no in-place downgrade. Stop new writers and replay the selected
-version24 source into only an empty, disposable application `public` schema.
+version25 source into only an empty, disposable application `public` schema.
 That rollback discards credential records rather than retaining or translating
 SSH material. The test preserves another schema; cluster roles, other databases
 and external OpenBao material remain outside the reset boundary. These
@@ -411,7 +447,7 @@ instructions do not authorize any live reset or direct credential access.
 
 ### Owner-authenticated source authority
 
-Migration `0026_owner_source_authority.sql` adds only
+Migration `0027_owner_source_authority.sql` adds only
 `codewire_platform_lock_owner_source_authority(text,text,text)`. It takes SHARE
 locks in the fixed order exact user, active organization, current nonempty-role
 membership, then optional exact organization-owned secret project. A NULL
@@ -435,13 +471,13 @@ PUBLIC execution revocation in the SQLx migration transaction. It creates no
 role and grants no table privileges. Provisioning must separately grant only
 its exact EXECUTE signature to the trusted restricted authority login; that
 login must not own the function or assume its owner's role. Existing helpers
-and migration bytes 1–25 remain unchanged.
+and migration bytes 1–26 remain unchanged.
 
-The 25→26 proof is a **staged branch upgrade**, not deployed or merged history.
-It independently pins version25 from the accepted SSH PostgreSQL component
+The 26→27 proof is a **staged branch upgrade**, not deployed or merged history.
+It independently pins version26 from the accepted SSH PostgreSQL component
 proof: SHA-256 `0359fcfeeccffe93be57dcbafedb98a3f37ae7123bfddcc284de4f49b62d2483`,
 SHA-384 `a1fa99436ba0690f41f8e90f2152dcec9253c263e73086104b7de23efd12d0a09a7b6d9d93d87c299658f817bb311edf`.
-Versions1–24 retain their previous independent pins. The fixtures check fresh
+Versions1–25 retain their previous independent pins. The fixtures check fresh
 apply, exact prior ledger/rows/envelopes and function definitions, the existing
 unchanged table fingerprint, and second-startup no-op. Separate real restricted
 login checks cover allowed/denied scope, absence of direct table authority,
@@ -453,7 +489,7 @@ the existing isolated database fixture administrator with role/event-trigger
 creation authority; authored tests are not database acceptance evidence.
 
 There is no in-place downgrade. After stopping new callers, rollback replays
-the selected version25 source into only an empty, disposable application
+the selected version26 source into only an empty, disposable application
 `public` schema. The test proves removal of the new helper and credential rows,
 restoration of the prior schema/functions, and preservation of another schema.
 Other databases, cluster roles and external OpenBao keys are outside this reset
@@ -461,9 +497,9 @@ boundary. These instructions authorize no live reset or direct credential use.
 
 ### Browser-session credential-mutation authority
 
-Migration `0027_credential_session_mutation_authority.sql` adds two fixed
+Migration `0028_credential_session_mutation_authority.sql` adds two fixed
 SECURITY DEFINER helpers. `codewire_authenticate_credential_session(text)`
-performs the existing digest-only live-session validation and eight-hour
+performs the existing digest-only, enabled-account live-session validation and eight-hour
 sliding update while returning only the exact row identity, user, administrator
 flag and post-slide expiry. `codewire_lock_credential_session_authority(...)`
 locks user then exact session in the credential publication transaction.
@@ -477,8 +513,8 @@ Deletion by logout makes the publication lock fail; deletion racing an already
 held SHARE lock serializes after that publication. Existing OAuth publication
 and OAuth-only delegation are unchanged.
 
-This staged 26→27 change adds no tables or credential formats and does not
-rewrite versions 1–26. Fresh/no-op, helper owner/search-path/ACL, restricted
+This staged 27→28 change adds no tables or credential formats and does not
+rewrite versions 1–27. Fresh/no-op, helper owner/search-path/ACL, restricted
 EXECUTE-only admission, fixed-expiry, sliding-session and logout/publication
 ordering proofs are required before acceptance. Rollback requires stopping new
 credential-mutation callers and resetting only a disposable application schema;

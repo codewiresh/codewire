@@ -55,13 +55,17 @@ mod tests {
 
     use super::*;
 
-    // Measured against real isolated PostgreSQL after the staged 24 -> 25
-    // upgrade; prior history and authority definitions are checked separately.
+    // Measured in isolated PostgreSQL after composing account access,
+    // environment projection, and typed SSH metadata through version28.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "83a79c28d34c5e30f5b0947afc62db046c6413b7327c0b4506b082f35907b37f";
-    // Measured and accepted for versions22..24; keep this historical boundary
-    // independent of the new SSH columns and current-schema fingerprint.
+        "8b3dbe164a9ef7e31d44c3e3322433b7021a919ddc7525325540505dac04d45a";
+    // Canonical version24 account-access schema before the function-only
+    // projection migration and new SSH columns.
     const ACCEPTED_PRE_SSH_SCHEMA_FINGERPRINT: &str =
+        "4fb9ed784ea81747dabb42153f7836b4a0e8e10e2ea72adac8da39e98b81367e";
+    // Measured from the unchanged version-21 migrator plus migration 22 in a
+    // managed disposable PostgreSQL; accepted history stays independently pinned.
+    const ACCEPTED_PRE_ACCOUNT_ACCESS_SCHEMA_FINGERPRINT: &str =
         "f2bdf1cd4ac385f8f8b1d58dd7fae26a581cf569ea67e723e79c4cf3bbe97bbe";
     const ACCEPTED_PRE_CONSENT_SCHEMA_FINGERPRINT: &str =
         "7ed7e45a11b90ab2953ef0df92613cee949638a47631fabf490d988fc278c309";
@@ -89,9 +93,13 @@ mod tests {
     const PLATFORM_BROKER_LOCK_AUTHORITY_VERSION: i64 = 21;
     const PLATFORM_BINDING_CONSENT_VERSION: i64 = 22;
     const OAUTH_PUBLICATION_AUTHORITY_VERSION: i64 = 23;
+    const ACCOUNT_ACCESS_VERSION: i64 = 24;
     // Frozen migration22 after accepted isolated component20566, before adding
     // the function-only OAuth publication fence; not an already-landed release.
     const FROZEN_BINDING_CONSENT_CHECKSUM: &str = "0a242f5c9a85afc75a025d678485786e992b523fae7eeccf4f3212f7c7a5c5007e6debfca8ed8d6bf15a71e73d539da2";
+    // Migration 23 was accepted before account access replaced its function.
+    // The version-24 upgrade fixture must construct those exact prior bytes.
+    const FROZEN_OAUTH_PUBLICATION_AUTHORITY_CHECKSUM: &str = "28ba96ad9bf9e8b914f2a524613081636f3e3cc0d6b36545f8fd3c621f8f3a521515fb6d8d6feef253841d0f5be11ec2";
     // Accepted canonical c0921baf2cfeffbc627991b97fc3fcbb9f254bfb,
     // independently pinned before adding the binding-consent migration.
     const APPLIED_BROKER_LOCK_CHECKSUM: &str = "a71c8fda91a63a9e9890823fd0bc4a826ce6982336b4e8d6408fc794de88f13c8bb283baaa8080f556669895d345f303";
@@ -137,6 +145,11 @@ mod tests {
     #[test]
     fn embedded_broker_lock_history_matches_the_accepted_release() -> anyhow::Result<()> {
         assert_applied_broker_lock_history()
+    }
+
+    #[test]
+    fn embedded_oauth_publication_authority_matches_the_accepted_release() -> anyhow::Result<()> {
+        assert_frozen_oauth_publication_authority_checksum()
     }
 
     #[tokio::test]
@@ -435,21 +448,21 @@ mod tests {
             let rows_before: (String,String,String) = sqlx::query_as(rows_sql).fetch_one(&pool).await?;
             let old_helpers = assert_platform_broker_lock_authority(&pool, true).await?;
             pool.close().await;
-            ensure_schema(&test_db.url).await?;
+            apply_migrations_before(&test_db.url, ACCOUNT_ACCESS_VERSION).await?;
             let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
             let after = applied_migrations(&pool).await?;
-            anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..22] == before && after[22].0 == 23);
+            anyhow::ensure!(after.len() == 23 && after[..22] == before && after[22].0 == OAUTH_PUBLICATION_AUTHORITY_VERSION);
             let rows_after: (String,String,String) = sqlx::query_as(rows_sql).fetch_one(&pool).await?;
             anyhow::ensure!(rows_after == rows_before);
             anyhow::ensure!(assert_platform_broker_lock_authority(&pool, true).await? == old_helpers);
-            let definition = assert_oauth_publication_authority(&pool).await?;
+            let definition = assert_oauth_publication_authority(&pool, false).await?;
             let fingerprint: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
-            anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT, "function-only migration changed tables: {fingerprint}");
+            anyhow::ensure!(fingerprint == ACCEPTED_PRE_ACCOUNT_ACCESS_SCHEMA_FINGERPRINT, "function-only migration changed tables: {fingerprint}");
             pool.close().await;
-            ensure_schema(&test_db.url).await?;
+            apply_migrations_before(&test_db.url, ACCOUNT_ACCESS_VERSION).await?;
             let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
             anyhow::ensure!(applied_migrations(&pool).await? == after);
-            anyhow::ensure!(assert_oauth_publication_authority(&pool).await? == definition);
+            anyhow::ensure!(assert_oauth_publication_authority(&pool, false).await? == definition);
             let rows_again: (String,String,String) = sqlx::query_as(rows_sql).fetch_one(&pool).await?;
             anyhow::ensure!(rows_again == rows_before);
             pool.close().await;
@@ -466,9 +479,9 @@ mod tests {
             .context("TEST_DATABASE_URL is required for migration tests")?;
         let test_db = TestDatabase::create(&admin_url).await?;
         let result = async {
-            ensure_schema(&test_db.url).await?;
+            apply_migrations_before(&test_db.url, ACCOUNT_ACCESS_VERSION).await?;
             let pool = PgPoolOptions::new().max_connections(1).connect(&test_db.url).await?;
-            assert_oauth_publication_authority(&pool).await?;
+            assert_oauth_publication_authority(&pool, false).await?;
             seed_platform_credential_owners(&pool).await?;
             seed_platform_credential(&pool, "discarded", Some("credential-user-a"), None, "Discarded").await?;
             seed_platform_credential_material(&pool, "discarded", 1).await?;
@@ -484,7 +497,7 @@ mod tests {
             anyhow::ensure!(absent);
             assert_platform_broker_lock_authority(&pool, true).await?;
             let fingerprint: String = sqlx::query_scalar(include_str!("../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
-            anyhow::ensure!(fingerprint == ACCEPTED_PRE_SSH_SCHEMA_FINGERPRINT);
+            anyhow::ensure!(fingerprint == ACCEPTED_PRE_ACCOUNT_ACCESS_SCHEMA_FINGERPRINT);
             let empty: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM platform_credentials)").fetch_one(&pool).await?;
             anyhow::ensure!(empty);
             let retained: i32 = sqlx::query_scalar("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await?;
@@ -492,6 +505,1233 @@ mod tests {
             pool.close().await;
             anyhow::Ok(())
         }.await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn account_access_rollback_recreates_only_disposable_schema() -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            sqlx::query("INSERT INTO users (id, email) VALUES ('account-access-rollback-user', 'account-access-rollback@example.test')")
+                .execute(&pool)
+                .await?;
+            let enabled: bool = sqlx::query_scalar(
+                "SELECT enabled FROM users WHERE id = 'account-access-rollback-user'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(enabled, "account-access schema was not installed before rollback");
+            sqlx::raw_sql(
+                "CREATE SCHEMA rollback_boundary; \
+                 CREATE TABLE rollback_boundary.keep (id integer); \
+                 INSERT INTO rollback_boundary.keep VALUES (1); \
+                 DROP SCHEMA public CASCADE; \
+                 CREATE SCHEMA public;",
+            )
+            .execute(&pool)
+            .await?;
+            pool.close().await;
+
+            // There is no in-place downgrade: replay only the prior release's
+            // exact history into this test's disposable application schema.
+            apply_migrations_before(&test_db.url, ACCOUNT_ACCESS_VERSION).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let history = applied_migrations(&pool).await?;
+            anyhow::ensure!(
+                history.len() == 23 && history[22].0 == OAUTH_PUBLICATION_AUTHORITY_VERSION,
+                "prior release did not stop at the version-23 ledger"
+            );
+            let fingerprint: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            ))
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(fingerprint == ACCEPTED_PRE_ACCOUNT_ACCESS_SCHEMA_FINGERPRINT);
+            assert_oauth_publication_authority(&pool, false).await?;
+            let access_helpers_absent: bool = sqlx::query_scalar(
+                "SELECT to_regprocedure('public.codewire_revoke_user_capabilities()') IS NULL \
+                 AND to_regprocedure('public.codewire_require_enabled_account()') IS NULL \
+                 AND to_regprocedure('public.codewire_require_enabled_api_key()') IS NULL",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                access_helpers_absent,
+                "account-access helpers survived the disposable-schema rollback"
+            );
+            let enabled_column_absent: bool = sqlx::query_scalar(
+                "SELECT NOT EXISTS ( \
+                    SELECT 1 FROM information_schema.columns \
+                    WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'enabled' \
+                 )",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                enabled_column_absent,
+                "account-access column survived the disposable-schema rollback"
+            );
+            let retained: i32 =
+                sqlx::query_scalar("SELECT id FROM rollback_boundary.keep")
+                    .fetch_one(&pool)
+                    .await?;
+            anyhow::ensure!(retained == 1);
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn account_access_upgrade_defaults_existing_users_and_fences_disabled_oauth_authority()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let execution_role = format!(
+            "cw_account_access_exec_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        );
+        let result = async {
+            apply_migrations_before(&test_db.url, ACCOUNT_ACCESS_VERSION).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let before = applied_migrations(&pool).await?;
+            anyhow::ensure!(
+                before.len() == 23 && before[22].0 == OAUTH_PUBLICATION_AUTHORITY_VERSION
+            );
+            let before_fingerprint: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            ))
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(before_fingerprint == ACCEPTED_PRE_ACCOUNT_ACCESS_SCHEMA_FINGERPRINT);
+
+            let user_id = "account-access-existing-user";
+            let client_id = "account-access-existing-client";
+            let token_digest = "account-access-existing-token-digest";
+            sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+                .bind(user_id)
+                .bind("account-access-existing@example.test")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "INSERT INTO oidc_clients (id, name, application_type, auth_method, redirect_uris) \
+                 VALUES ($1, 'Account Access Migration', 'native', 'none', '{}')",
+            )
+            .bind(client_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO oidc_access_tokens (token_hash, user_id, client_id, scopes, expires_at) \
+                 VALUES ($1, $2, $3, ARRAY['openid', 'codewire.api'], \
+                         clock_timestamp() + interval '1 hour')",
+            )
+            .bind(token_digest)
+            .bind(user_id)
+            .bind(client_id)
+            .execute(&pool)
+            .await?;
+            let session_hash = "0".repeat(64);
+            let api_key_hash = "1".repeat(64);
+            let authorization_code_hash = "2".repeat(64);
+            let refresh_token_hash = "3".repeat(64);
+            let device_code_hash = "4".repeat(64);
+            let device_user_code_hash = "5".repeat(64);
+            let two_factor_token_hash = "6".repeat(64);
+            let organization_id = "account-access-existing-organization";
+
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(organization_id)
+            .bind("Account Access Existing Organization")
+            .bind("account-access-existing-organization")
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+                 VALUES ('account-access-existing-session', $1, $2, NOW() + interval '1 hour')",
+            )
+            .bind(user_id)
+            .bind(&session_hash)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO api_keys (id, user_id, org_id, name, key_hash, key_prefix, scopes) \
+                 VALUES ('account-access-existing-api-key', $1, $2, 'Existing key', $3, 'existing', ARRAY[]::text[])",
+            )
+            .bind(user_id)
+            .bind(organization_id)
+            .bind(&api_key_hash)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO oidc_auth_requests \
+                    (id, client_id, scopes, redirect_uri, user_id, auth_time, code_hash, done, expires_at) \
+                 VALUES \
+                    ('account-access-existing-code', $1, ARRAY['openid'], \
+                     'https://account-access.example.test/callback', $2, NOW(), $3, true, \
+                     NOW() + interval '1 hour')",
+            )
+            .bind(client_id)
+            .bind(user_id)
+            .bind(&authorization_code_hash)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO oidc_auth_requests \
+                    (id, client_id, scopes, redirect_uri, expires_at) \
+                 VALUES \
+                    ('account-access-pending-code', $1, ARRAY['openid'], \
+                     'https://account-access.example.test/pending', NOW() + interval '1 hour')",
+            )
+            .bind(client_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO oidc_refresh_tokens \
+                    (id, token_hash, client_id, user_id, scopes, auth_time, expires_at) \
+                 VALUES \
+                    ('account-access-existing-refresh', $1, $2, $3, ARRAY['openid'], NOW(), \
+                     NOW() + interval '1 hour')",
+            )
+            .bind(&refresh_token_hash)
+            .bind(client_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO oidc_device_authorizations \
+                    (device_code_hash, user_code_hash, client_id, scopes, status, user_id, auth_time, expires_at) \
+                 VALUES \
+                    ($1, $2, $3, ARRAY['openid'], 'approved', $4, \
+                     EXTRACT(EPOCH FROM clock_timestamp())::bigint, NOW() + interval '1 hour')",
+            )
+            .bind(&device_code_hash)
+            .bind(&device_user_code_hash)
+            .bind(client_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+            let pending_device_code_hash = "f".repeat(64);
+            let pending_device_user_code_hash = "e".repeat(64);
+            sqlx::query(
+                "INSERT INTO oidc_device_authorizations \
+                    (device_code_hash, user_code_hash, client_id, scopes, status, expires_at) \
+                 VALUES \
+                    ($1, $2, $3, ARRAY['openid'], 'pending', NOW() + interval '1 hour')",
+            )
+            .bind(&pending_device_code_hash)
+            .bind(&pending_device_user_code_hash)
+            .bind(client_id)
+            .execute(&pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO two_factor_tokens (id, user_id, token_hash, expires_at) \
+                 VALUES ('account-access-existing-2fa', $1, $2, NOW() + interval '10 minutes')",
+            )
+            .bind(user_id)
+            .bind(&two_factor_token_hash)
+            .execute(&pool)
+            .await?;
+            assert_oauth_publication_authority(&pool, false).await?;
+            sqlx::query(&format!(
+                "CREATE ROLE {} NOLOGIN",
+                quote_ident(&execution_role)
+            ))
+            .execute(&pool)
+            .await?;
+            sqlx::query(&format!(
+                "GRANT EXECUTE ON FUNCTION \
+                 public.codewire_lock_oauth_bearer_authority(text,text,text,timestamptz) TO {}",
+                quote_ident(&execution_role)
+            ))
+            .execute(&pool)
+            .await?;
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            let after = applied_migrations(&pool).await?;
+            anyhow::ensure!(
+                after.len() == MIGRATOR.iter().count()
+                    && after[..23] == before
+                    && after[23].0 == ACCOUNT_ACCESS_VERSION
+            );
+            let migrated_user: (bool, Option<String>) = sqlx::query_as(
+                "SELECT enabled, access_reason FROM users WHERE id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                migrated_user == (true, None),
+                "existing users must retain enabled access"
+            );
+            let index_definition: String = sqlx::query_scalar(
+                "SELECT pg_get_indexdef('public.users_access_review_idx'::regclass)",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                index_definition.contains("(enabled, email_verified, created_at DESC)")
+                    && index_definition.contains("WHERE (access_reason IS NOT NULL)"),
+                "account-access review index changed: {index_definition}"
+            );
+            let revocation_indexes: Vec<(String, String, String)> = sqlx::query_as(
+                r#"
+                SELECT table_class.relname, index_class.relname,
+                       pg_catalog.pg_get_indexdef(index_class.oid)
+                FROM pg_catalog.pg_index AS index_row
+                JOIN pg_catalog.pg_class AS index_class
+                  ON index_class.oid = index_row.indexrelid
+                JOIN pg_catalog.pg_class AS table_class
+                  ON table_class.oid = index_row.indrelid
+                JOIN pg_catalog.pg_namespace AS namespace
+                  ON namespace.oid = table_class.relnamespace
+                WHERE namespace.nspname = 'public'
+                  AND index_class.relname = ANY (ARRAY[
+                      'sessions_user_id_idx',
+                      'oidc_auth_requests_user_id_idx',
+                      'oidc_access_tokens_user_id_idx',
+                      'oidc_refresh_tokens_user_id_idx',
+                      'oidc_device_authorizations_user_id_idx',
+                      'two_factor_tokens_user_id_idx'
+                  ]::text[])
+                ORDER BY index_class.relname
+                "#,
+            )
+            .fetch_all(&pool)
+            .await?;
+            let expected_revocation_indexes = [
+                ("oidc_access_tokens_user_id_idx", "oidc_access_tokens"),
+                ("oidc_auth_requests_user_id_idx", "oidc_auth_requests"),
+                (
+                    "oidc_device_authorizations_user_id_idx",
+                    "oidc_device_authorizations",
+                ),
+                ("oidc_refresh_tokens_user_id_idx", "oidc_refresh_tokens"),
+                ("sessions_user_id_idx", "sessions"),
+                ("two_factor_tokens_user_id_idx", "two_factor_tokens"),
+            ];
+            anyhow::ensure!(
+                revocation_indexes
+                    .iter()
+                    .map(|(table, index, _)| (index.as_str(), table.as_str()))
+                    .eq(expected_revocation_indexes),
+                "account-access revocation index inventory changed: {revocation_indexes:?}"
+            );
+            for (table, index, definition) in &revocation_indexes {
+                anyhow::ensure!(
+                    definition
+                        == &format!("CREATE INDEX {index} ON public.{table} USING btree (user_id)"),
+                    "account-access revocation index changed: {definition}"
+                );
+            }
+            let execution_grant_preserved: bool = sqlx::query_scalar(
+                "SELECT has_function_privilege( \
+                 $1::name, \
+                 'public.codewire_lock_oauth_bearer_authority(text,text,text,timestamp with time zone)'::regprocedure, \
+                 'EXECUTE')",
+            )
+            .bind(&execution_role)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                execution_grant_preserved,
+                "replacing the OAuth authority helper removed its named EXECUTE grant"
+            );
+            sqlx::query(&format!(
+                "REVOKE EXECUTE ON FUNCTION \
+                 public.codewire_lock_oauth_bearer_authority(text,text,text,timestamptz) FROM {}",
+                quote_ident(&execution_role)
+            ))
+            .execute(&pool)
+            .await?;
+            assert_oauth_publication_authority(&pool, true).await?;
+
+            let authorized: bool = sqlx::query_scalar(
+                "SELECT public.codewire_lock_oauth_bearer_authority( \
+                 $1, $2, $3, \
+                 (SELECT expires_at FROM oidc_access_tokens WHERE token_hash = $1))",
+            )
+            .bind(token_digest)
+            .bind(user_id)
+            .bind(client_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(authorized, "enabled user lost OAuth publication authority");
+
+            let too_long_reason = "x".repeat(2001);
+            for reason in ["   ", "\t\n\r", too_long_reason.as_str()] {
+                let rejected = sqlx::query("UPDATE users SET access_reason = $1 WHERE id = $2")
+                    .bind(reason)
+                    .bind(user_id)
+                    .execute(&pool)
+                    .await
+                    .expect_err("invalid access reason must be rejected");
+                anyhow::ensure!(
+                    rejected
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .as_deref()
+                        == Some("23514"),
+                    "access reason failure must be a check violation"
+                );
+            }
+
+            sqlx::query("UPDATE users SET enabled = false, access_reason = $1 WHERE id = $2")
+                .bind("Requested early access")
+                .bind(user_id)
+                .execute(&pool)
+                .await?;
+            let disabled_authority: bool = sqlx::query_scalar(
+                "SELECT public.codewire_lock_oauth_bearer_authority( \
+                 $1, $2, $3, \
+                 (SELECT expires_at FROM oidc_access_tokens WHERE token_hash = $1))",
+            )
+            .bind(token_digest)
+            .bind(user_id)
+            .bind(client_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                !disabled_authority,
+                "disabled user retained OAuth publication authority"
+            );
+            let revoked_counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                "SELECT \
+                    (SELECT COUNT(*) FROM sessions WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM oidc_auth_requests WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM oidc_access_tokens WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM oidc_refresh_tokens WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM oidc_device_authorizations WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM two_factor_tokens WHERE user_id = $1)",
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                revoked_counts == (0, 0, 0, 0, 0, 0),
+                "disabling an account must remove every existing bearer capability: {revoked_counts:?}"
+            );
+            let api_key_retired: (bool, bool) = sqlx::query_as(
+                "SELECT disabled_at IS NOT NULL, \
+                        expires_at IS NOT NULL AND expires_at <= clock_timestamp() \
+                 FROM api_keys WHERE id = 'account-access-existing-api-key'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                api_key_retired == (true, true),
+                "disabling an account must disable and expire existing API keys"
+            );
+
+            for (label, statement) in [
+                (
+                    "session",
+                    "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+                     VALUES ('account-access-disabled-session', 'account-access-existing-user', \
+                             '7777777777777777777777777777777777777777777777777777777777777777', \
+                             NOW() + interval '1 hour')",
+                ),
+                (
+                    "API key",
+                    "INSERT INTO api_keys (id, user_id, org_id, name, key_hash, key_prefix, scopes) \
+                     VALUES ('account-access-disabled-api-key', 'account-access-existing-user', \
+                             'account-access-existing-organization', 'Disabled key', \
+                             '8888888888888888888888888888888888888888888888888888888888888888', \
+                             'disabled', ARRAY[]::text[])",
+                ),
+                (
+                    "authorization code",
+                    "INSERT INTO oidc_auth_requests \
+                        (id, client_id, scopes, redirect_uri, user_id, auth_time, code_hash, done, expires_at) \
+                     VALUES ('account-access-disabled-code', 'account-access-existing-client', ARRAY['openid'], \
+                             'https://account-access.example.test/callback', 'account-access-existing-user', NOW(), \
+                             '9999999999999999999999999999999999999999999999999999999999999999', true, \
+                             NOW() + interval '1 hour')",
+                ),
+                (
+                    "access token",
+                    "INSERT INTO oidc_access_tokens (token_hash, client_id, user_id, scopes, expires_at) \
+                     VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+                             'account-access-existing-client', 'account-access-existing-user', ARRAY['openid'], \
+                             NOW() + interval '1 hour')",
+                ),
+                (
+                    "refresh token",
+                    "INSERT INTO oidc_refresh_tokens \
+                        (id, token_hash, client_id, user_id, scopes, auth_time, expires_at) \
+                     VALUES ('account-access-disabled-refresh', \
+                             'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', \
+                             'account-access-existing-client', 'account-access-existing-user', ARRAY['openid'], NOW(), \
+                             NOW() + interval '1 hour')",
+                ),
+                (
+                    "approved device grant",
+                    "INSERT INTO oidc_device_authorizations \
+                        (device_code_hash, user_code_hash, client_id, scopes, status, user_id, auth_time, expires_at) \
+                     VALUES ('cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', \
+                             'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', \
+                             'account-access-existing-client', ARRAY['openid'], 'approved', \
+                             'account-access-existing-user', EXTRACT(EPOCH FROM clock_timestamp())::bigint, \
+                             NOW() + interval '1 hour')",
+                ),
+                (
+                    "2FA challenge",
+                    "INSERT INTO two_factor_tokens (id, user_id, token_hash, expires_at) \
+                     VALUES ('account-access-disabled-2fa', 'account-access-existing-user', \
+                             'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', \
+                             NOW() + interval '10 minutes')",
+                ),
+            ] {
+                let rejected = sqlx::query(statement)
+                    .execute(&pool)
+                    .await
+                    .expect_err("disabled account must reject a predecessor issuer");
+                anyhow::ensure!(
+                    rejected
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .as_deref()
+                        == Some("28000"),
+                    "predecessor {label} writer returned the wrong disabled-account error"
+                );
+            }
+            for (label, statement) in [
+                (
+                    "authorization-request subject binding",
+                    "UPDATE oidc_auth_requests \
+                     SET user_id = 'account-access-existing-user', auth_time = NOW(), done = true \
+                     WHERE id = 'account-access-pending-code'",
+                ),
+                (
+                    "device-grant subject binding",
+                    "UPDATE oidc_device_authorizations \
+                     SET status = 'approved', user_id = 'account-access-existing-user', \
+                         auth_time = EXTRACT(EPOCH FROM clock_timestamp())::bigint \
+                     WHERE device_code_hash = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+                ),
+                (
+                    "API-key reactivation",
+                    "UPDATE api_keys SET disabled_at = NULL \
+                     WHERE id = 'account-access-existing-api-key'",
+                ),
+            ] {
+                let rejected = sqlx::query(statement)
+                    .execute(&pool)
+                    .await
+                    .expect_err("disabled account must reject a predecessor capability update");
+                anyhow::ensure!(
+                    rejected
+                        .as_database_error()
+                        .and_then(|error| error.code())
+                        .as_deref()
+                        == Some("28000"),
+                    "predecessor {label} update returned the wrong disabled-account error"
+                );
+            }
+
+            sqlx::query("UPDATE users SET enabled = true WHERE id = $1")
+                .bind(user_id)
+                .execute(&pool)
+                .await?;
+            let revived_counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                "SELECT \
+                    (SELECT COUNT(*) FROM sessions WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM oidc_auth_requests WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM oidc_access_tokens WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM oidc_refresh_tokens WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM oidc_device_authorizations WHERE user_id = $1), \
+                    (SELECT COUNT(*) FROM two_factor_tokens WHERE user_id = $1)",
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                revived_counts == (0, 0, 0, 0, 0, 0),
+                "re-enabling an account resurrected an old capability: {revived_counts:?}"
+            );
+            sqlx::query(
+                "UPDATE api_keys SET disabled_at = NULL \
+                 WHERE id = 'account-access-existing-api-key'",
+            )
+            .execute(&pool)
+            .await?;
+            let api_key_still_expired: bool = sqlx::query_scalar(
+                "SELECT expires_at IS NOT NULL AND expires_at <= clock_timestamp() \
+                 FROM api_keys WHERE id = 'account-access-existing-api-key'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                api_key_still_expired,
+                "re-enabling and reactivating an account resurrected an old API key"
+            );
+            let fingerprint: String = sqlx::query_scalar(include_str!(
+                "../tests/data/application_schema_fingerprint.sql"
+            ))
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT,
+                "application schema fingerprint changed: {fingerprint}"
+            );
+            let definition = assert_oauth_publication_authority(&pool, true).await?;
+            pool.close().await;
+
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_db.url)
+                .await?;
+            anyhow::ensure!(applied_migrations(&pool).await? == after);
+            anyhow::ensure!(assert_oauth_publication_authority(&pool, true).await? == definition);
+            let persisted_user: (bool, Option<String>) = sqlx::query_as(
+                "SELECT enabled, access_reason FROM users WHERE id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::ensure!(
+                persisted_user == (true, Some("Requested early access".into()))
+            );
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let database_cleanup = test_db.drop().await;
+        let role_cleanup = async {
+            let admin = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&admin_url)
+                .await?;
+            let drop = sqlx::query(&format!(
+                "DROP ROLE IF EXISTS {}",
+                quote_ident(&execution_role)
+            ))
+            .execute(&admin)
+            .await;
+            admin.close().await;
+            drop.context("drop exact account-access migration test role")?;
+            anyhow::Ok(())
+        }
+        .await;
+        result.and(database_cleanup).and(role_cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn account_access_disable_and_predecessor_issuance_serialize_in_both_orders()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&test_db.url)
+                .await?;
+
+            for (label, disable_first) in [("issuer-first", false), ("disable-first", true)] {
+                let user_id = format!("account-access-concurrent-{label}");
+                let session_id = format!("account-access-concurrent-session-{label}");
+                let token_hash = if disable_first {
+                    "a".repeat(64)
+                } else {
+                    "b".repeat(64)
+                };
+                sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+                    .bind(&user_id)
+                    .bind(format!("{user_id}@example.test"))
+                    .execute(&pool)
+                    .await?;
+
+                if disable_first {
+                    let mut disable = pool.begin().await?;
+                    let disable_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(&mut *disable)
+                        .await?;
+                    sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                        .bind(&user_id)
+                        .execute(&mut *disable)
+                        .await?;
+
+                    let issuer_pool = pool.clone();
+                    let issuer_user = user_id.clone();
+                    let issuer_session = session_id.clone();
+                    let issuer_hash = token_hash.clone();
+                    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+                    let issuer = tokio::spawn(async move {
+                        let mut tx = issuer_pool.begin().await?;
+                        let issuer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(&mut *tx)
+                            .await?;
+                        let _ = pid_tx.send(issuer_pid);
+                        let insert = sqlx::query(
+                            "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+                             VALUES ($1, $2, $3, NOW() + interval '1 hour')",
+                        )
+                        .bind(issuer_session)
+                        .bind(issuer_user)
+                        .bind(issuer_hash)
+                        .execute(&mut *tx)
+                        .await;
+                        let error_code = insert
+                            .as_ref()
+                            .err()
+                            .and_then(|error| error.as_database_error())
+                            .and_then(|error| error.code())
+                            .map(|code| code.into_owned());
+                        tx.rollback().await?;
+                        anyhow::Ok(error_code)
+                    });
+                    wait_for_lock_blocker(&pool, pid_rx.await?, disable_pid).await?;
+                    disable.commit().await?;
+                    anyhow::ensure!(
+                        issuer.await??.as_deref() == Some("28000"),
+                        "predecessor issuer succeeded after disable in {label}"
+                    );
+                } else {
+                    let mut issuer = pool.begin().await?;
+                    let issuer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(&mut *issuer)
+                        .await?;
+                    sqlx::query(
+                        "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+                         VALUES ($1, $2, $3, NOW() + interval '1 hour')",
+                    )
+                    .bind(&session_id)
+                    .bind(&user_id)
+                    .bind(&token_hash)
+                    .execute(&mut *issuer)
+                    .await?;
+
+                    let disable_pool = pool.clone();
+                    let disable_user = user_id.clone();
+                    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+                    let disable = tokio::spawn(async move {
+                        let mut tx = disable_pool.begin().await?;
+                        let disable_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(&mut *tx)
+                            .await?;
+                        let _ = pid_tx.send(disable_pid);
+                        sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                            .bind(disable_user)
+                            .execute(&mut *tx)
+                            .await?;
+                        tx.commit().await?;
+                        anyhow::Ok(())
+                    });
+                    wait_for_lock_blocker(&pool, pid_rx.await?, issuer_pid).await?;
+                    issuer.commit().await?;
+                    disable.await??;
+                }
+
+                let sessions: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM sessions WHERE user_id = $1")
+                        .bind(&user_id)
+                        .fetch_one(&pool)
+                        .await?;
+                anyhow::ensure!(
+                    sessions == 0,
+                    "disable/issuer order retained a session in {label}"
+                );
+            }
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn account_access_disable_serializes_existing_capability_updates_in_both_orders()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(6)
+                .connect(&test_db.url)
+                .await?;
+
+            for (capability_index, (capability, update_sql)) in [
+                (
+                    "session",
+                    "UPDATE sessions SET updated_at = NOW() WHERE id = $1",
+                ),
+                (
+                    "api-key-touch",
+                    "UPDATE api_keys SET last_used_at = NOW() WHERE id = $1",
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for (order_index, (order, update_first)) in
+                    [("update-first", true), ("disable-first", false)]
+                        .into_iter()
+                        .enumerate()
+                {
+                    let suffix = format!("{capability_index}-{order_index}");
+                    let user_id = format!("account-access-existing-update-user-{suffix}");
+                    let organization_id = format!("account-access-update-org-{suffix}");
+                    let session_id = format!("account-access-existing-update-session-{suffix}");
+                    let api_key_id = format!("account-access-existing-update-api-key-{suffix}");
+                    let update_id = if capability == "session" {
+                        session_id.clone()
+                    } else {
+                        api_key_id.clone()
+                    };
+                    let token_hash = format!("{:064x}", suffix.len());
+                    let key_hash = format!("{:064x}", suffix.len() + 1);
+                    sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+                        .bind(&user_id)
+                        .bind(format!("{user_id}@example.test"))
+                        .execute(&pool)
+                        .await?;
+                    sqlx::query(
+                        "INSERT INTO organizations (id, name, slug, created_by) \
+                         VALUES ($1, $2, $3, $4)",
+                    )
+                    .bind(&organization_id)
+                    .bind(format!("Account Access Existing Update {suffix}"))
+                    .bind(&organization_id)
+                    .bind(&user_id)
+                    .execute(&pool)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO sessions (id, user_id, token_hash, expires_at) \
+                         VALUES ($1, $2, $3, NOW() + interval '1 hour')",
+                    )
+                    .bind(&session_id)
+                    .bind(&user_id)
+                    .bind(&token_hash)
+                    .execute(&pool)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO api_keys (id, user_id, org_id, name, key_hash, key_prefix, scopes) \
+                         VALUES ($1, $2, $3, 'Existing update key', $4, $5, ARRAY[]::text[])",
+                    )
+                    .bind(&api_key_id)
+                    .bind(&user_id)
+                    .bind(&organization_id)
+                    .bind(&key_hash)
+                    .bind(format!("update-{suffix}"))
+                    .execute(&pool)
+                    .await?;
+
+                    if update_first {
+                        let mut update = pool.begin().await?;
+                        let update_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(&mut *update)
+                            .await?;
+                        sqlx::query(update_sql)
+                            .bind(&update_id)
+                            .execute(&mut *update)
+                            .await?;
+
+                        let disable_pool = pool.clone();
+                        let disable_user = user_id.clone();
+                        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+                        let disable = tokio::spawn(async move {
+                            let mut tx = disable_pool.begin().await?;
+                            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                                .fetch_one(&mut *tx)
+                                .await?;
+                            let _ = pid_tx.send(pid);
+                            sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                                .bind(disable_user)
+                                .execute(&mut *tx)
+                                .await?;
+                            tx.commit().await?;
+                            anyhow::Ok(())
+                        });
+                        wait_for_lock_blocker(&pool, pid_rx.await?, update_pid).await?;
+                        update.commit().await?;
+                        disable.await??;
+                    } else {
+                        let mut disable = pool.begin().await?;
+                        sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                            .bind(&user_id)
+                            .fetch_one(&mut *disable)
+                            .await?;
+                        let update_pool = pool.clone();
+                        let update_id = update_id.clone();
+                        let mut update = tokio::spawn(async move {
+                            let mut tx = update_pool.begin().await?;
+                            sqlx::query(update_sql)
+                                .bind(update_id)
+                                .execute(&mut *tx)
+                                .await?;
+                            tx.commit().await?;
+                            anyhow::Ok(())
+                        });
+                        match tokio::time::timeout(Duration::from_millis(500), &mut update).await {
+                            Ok(result) => result??,
+                            Err(_) => {
+                                disable.rollback().await?;
+                                let _ = update.await;
+                                anyhow::bail!(
+                                    "ordinary {capability} update waited on the account lock in {order}"
+                                );
+                            }
+                        }
+                        sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                            .bind(&user_id)
+                            .execute(&mut *disable)
+                            .await?;
+                        disable.commit().await?;
+                    }
+
+                    let sessions: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM sessions WHERE user_id = $1",
+                    )
+                    .bind(&user_id)
+                    .fetch_one(&pool)
+                    .await?;
+                    let api_key_disabled: bool = sqlx::query_scalar(
+                        "SELECT disabled_at IS NOT NULL FROM api_keys WHERE id = $1",
+                    )
+                    .bind(&api_key_id)
+                    .fetch_one(&pool)
+                    .await?;
+                    anyhow::ensure!(
+                        sessions == 0 && api_key_disabled,
+                        "disablement did not revoke existing {capability} update state in {order}"
+                    );
+                }
+            }
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
+        let cleanup = test_db.drop().await;
+        result.and(cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn account_access_transition_guards_avoid_predecessor_deadlocks_in_both_orders()
+    -> anyhow::Result<()> {
+        let admin_url = std::env::var("TEST_DATABASE_URL")
+            .context("TEST_DATABASE_URL is required for migration tests")?;
+        let test_db = TestDatabase::create(&admin_url).await?;
+        let result = async {
+            ensure_schema(&test_db.url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(8)
+                .connect(&test_db.url)
+                .await?;
+            let client_id = "account-access-transition-client";
+            sqlx::query(
+                "INSERT INTO oidc_clients (id, name, application_type, auth_method, redirect_uris) \
+                 VALUES ($1, 'Account transition guard', 'native', 'none', \
+                         ARRAY['https://account-access.example.test/callback'])",
+            )
+            .bind(client_id)
+            .execute(&pool)
+            .await?;
+
+            for (label, transition_first) in [
+                ("authorization-request-transition-first", true),
+                ("authorization-request-disable-first", false),
+            ] {
+                let user_id = format!("account-access-transition-user-{label}");
+                let request_id = format!("account-access-transition-request-{label}");
+                sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+                    .bind(&user_id)
+                    .bind(format!("{user_id}@example.test"))
+                    .execute(&pool)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO oidc_auth_requests (id, client_id, scopes, redirect_uri, expires_at) \
+                     VALUES ($1, $2, ARRAY['openid'], \
+                             'https://account-access.example.test/callback', \
+                             NOW() + interval '10 minutes')",
+                )
+                .bind(&request_id)
+                .bind(client_id)
+                .execute(&pool)
+                .await?;
+
+                if transition_first {
+                    let mut transition = pool.begin().await?;
+                    let transition_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(&mut *transition)
+                        .await?;
+                    sqlx::query(
+                        "UPDATE oidc_auth_requests \
+                         SET user_id = $1, auth_time = NOW(), done = true WHERE id = $2",
+                    )
+                    .bind(&user_id)
+                    .bind(&request_id)
+                    .execute(&mut *transition)
+                    .await?;
+
+                    let disable_pool = pool.clone();
+                    let disable_user = user_id.clone();
+                    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+                    let disable = tokio::spawn(async move {
+                        let mut tx = disable_pool.begin().await?;
+                        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(&mut *tx)
+                            .await?;
+                        let _ = pid_tx.send(pid);
+                        sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                            .bind(disable_user)
+                            .execute(&mut *tx)
+                            .await?;
+                        tx.commit().await?;
+                        anyhow::Ok(())
+                    });
+                    wait_for_lock_blocker(&pool, pid_rx.await?, transition_pid).await?;
+                    transition.commit().await?;
+                    disable.await??;
+                    let retained: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM oidc_auth_requests WHERE user_id = $1",
+                    )
+                    .bind(&user_id)
+                    .fetch_one(&pool)
+                    .await?;
+                    anyhow::ensure!(
+                        retained == 0,
+                        "disablement retained predecessor authorization-request state in {label}"
+                    );
+                } else {
+                    let mut disable = pool.begin().await?;
+                    sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                        .bind(&user_id)
+                        .fetch_one(&mut *disable)
+                        .await?;
+                    let transition_pool = pool.clone();
+                    let transition_user = user_id.clone();
+                    let transition_request = request_id.clone();
+                    let transition = tokio::spawn(async move {
+                        let mut tx = transition_pool.begin().await?;
+                        let result = sqlx::query(
+                            "UPDATE oidc_auth_requests \
+                             SET user_id = $1, auth_time = NOW(), done = true WHERE id = $2",
+                        )
+                        .bind(transition_user)
+                        .bind(transition_request)
+                        .execute(&mut *tx)
+                        .await;
+                        let code = result
+                            .as_ref()
+                            .err()
+                            .and_then(|error| error.as_database_error())
+                            .and_then(|error| error.code())
+                            .map(|code| code.into_owned());
+                        tx.rollback().await?;
+                        anyhow::Ok(code)
+                    });
+                    let code = tokio::time::timeout(Duration::from_millis(500), transition)
+                        .await
+                        .context("predecessor authorization-request transition waited on disablement")???;
+                    anyhow::ensure!(
+                        code.as_deref() == Some("55P03"),
+                        "predecessor authorization-request transition returned {code:?} instead of 55P03"
+                    );
+                    sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                        .bind(&user_id)
+                        .execute(&mut *disable)
+                        .await?;
+                    disable.commit().await?;
+                    let state: (Option<String>, bool) = sqlx::query_as(
+                        "SELECT user_id, done FROM oidc_auth_requests WHERE id = $1",
+                    )
+                    .bind(&request_id)
+                    .fetch_one(&pool)
+                    .await?;
+                    anyhow::ensure!(
+                        state == (None, false),
+                        "disablement-first authorization-request transition changed state: {state:?}"
+                    );
+                }
+
+                sqlx::query("DELETE FROM oidc_auth_requests WHERE id = $1")
+                    .bind(&request_id)
+                    .execute(&pool)
+                    .await?;
+                sqlx::query("DELETE FROM users WHERE id = $1")
+                    .bind(&user_id)
+                    .execute(&pool)
+                    .await?;
+            }
+
+            for (label, transition_first) in [
+                ("api-key-transition-first", true),
+                ("api-key-disable-first", false),
+            ] {
+                let user_id = format!("account-access-api-key-transition-user-{label}");
+                let organization_id = format!("account-access-api-key-transition-org-{label}");
+                let organization_slug = format!("account-access-key-{label}");
+                let key_id = format!("account-access-api-key-transition-key-{label}");
+                let key_hash = if transition_first {
+                    "f".repeat(64)
+                } else {
+                    "e".repeat(64)
+                };
+                sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+                    .bind(&user_id)
+                    .bind(format!("{user_id}@example.test"))
+                    .execute(&pool)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
+                )
+                .bind(&organization_id)
+                .bind(format!("Account access API key transition {label}"))
+                .bind(&organization_slug)
+                .bind(&user_id)
+                .execute(&pool)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO api_keys \
+                     (id, user_id, org_id, name, key_hash, key_prefix, scopes, disabled_at) \
+                     VALUES ($1, $2, $3, 'Transition key', $4, $5, ARRAY[]::text[], NOW())",
+                )
+                .bind(&key_id)
+                .bind(&user_id)
+                .bind(&organization_id)
+                .bind(&key_hash)
+                .bind(format!("transition-{label}"))
+                .execute(&pool)
+                .await?;
+
+                if transition_first {
+                    let mut transition = pool.begin().await?;
+                    let transition_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(&mut *transition)
+                        .await?;
+                    sqlx::query("UPDATE api_keys SET disabled_at = NULL WHERE id = $1")
+                        .bind(&key_id)
+                        .execute(&mut *transition)
+                        .await?;
+
+                    let disable_pool = pool.clone();
+                    let disable_user = user_id.clone();
+                    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+                    let disable = tokio::spawn(async move {
+                        let mut tx = disable_pool.begin().await?;
+                        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                            .fetch_one(&mut *tx)
+                            .await?;
+                        let _ = pid_tx.send(pid);
+                        sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                            .bind(disable_user)
+                            .execute(&mut *tx)
+                            .await?;
+                        tx.commit().await?;
+                        anyhow::Ok(())
+                    });
+                    wait_for_lock_blocker(&pool, pid_rx.await?, transition_pid).await?;
+                    transition.commit().await?;
+                    disable.await??;
+                } else {
+                    let mut disable = pool.begin().await?;
+                    sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+                        .bind(&user_id)
+                        .fetch_one(&mut *disable)
+                        .await?;
+                    let transition_pool = pool.clone();
+                    let transition_key = key_id.clone();
+                    let transition = tokio::spawn(async move {
+                        let mut tx = transition_pool.begin().await?;
+                        let result = sqlx::query("UPDATE api_keys SET disabled_at = NULL WHERE id = $1")
+                            .bind(transition_key)
+                            .execute(&mut *tx)
+                            .await;
+                        let code = result
+                            .as_ref()
+                            .err()
+                            .and_then(|error| error.as_database_error())
+                            .and_then(|error| error.code())
+                            .map(|code| code.into_owned());
+                        tx.rollback().await?;
+                        anyhow::Ok(code)
+                    });
+                    let code = tokio::time::timeout(Duration::from_millis(500), transition)
+                        .await
+                        .context("predecessor API-key reactivation waited on disablement")???;
+                    anyhow::ensure!(
+                        code.as_deref() == Some("55P03"),
+                        "predecessor API-key reactivation returned {code:?} instead of 55P03"
+                    );
+                    sqlx::query("UPDATE users SET enabled = false WHERE id = $1")
+                        .bind(&user_id)
+                        .execute(&mut *disable)
+                        .await?;
+                    disable.commit().await?;
+                }
+
+                let retired: (bool, bool) = sqlx::query_as(
+                    "SELECT disabled_at IS NOT NULL, \
+                            expires_at IS NOT NULL AND expires_at <= clock_timestamp() \
+                     FROM api_keys WHERE id = $1",
+                )
+                .bind(&key_id)
+                .fetch_one(&pool)
+                .await?;
+                anyhow::ensure!(
+                    retired == (true, true),
+                    "disablement did not permanently retire predecessor API key in {label}"
+                );
+                sqlx::query("DELETE FROM api_keys WHERE id = $1")
+                    .bind(&key_id)
+                    .execute(&pool)
+                    .await?;
+                sqlx::query("DELETE FROM organizations WHERE id = $1")
+                    .bind(&organization_id)
+                    .execute(&pool)
+                    .await?;
+                sqlx::query("DELETE FROM users WHERE id = $1")
+                    .bind(&user_id)
+                    .execute(&pool)
+                    .await?;
+            }
+
+            sqlx::query("DELETE FROM oidc_clients WHERE id = $1")
+                .bind(client_id)
+                .execute(&pool)
+                .await?;
+            pool.close().await;
+            anyhow::Ok(())
+        }
+        .await;
         let cleanup = test_db.drop().await;
         result.and(cleanup)
     }
@@ -3557,6 +4797,19 @@ mod tests {
         Ok(())
     }
 
+    fn assert_frozen_oauth_publication_authority_checksum() -> anyhow::Result<()> {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == OAUTH_PUBLICATION_AUTHORITY_VERSION)
+            .context("frozen OAuth publication migration is missing")?;
+        anyhow::ensure!(
+            format!("{:x}", Sha384::digest(migration.sql.as_bytes()))
+                == FROZEN_OAUTH_PUBLICATION_AUTHORITY_CHECKSUM,
+            "migration 23 changed after its accepted release"
+        );
+        Ok(())
+    }
+
     async fn assert_platform_broker_locks_absent(pool: &PgPool) -> anyhow::Result<()> {
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_catalog.pg_proc p \
@@ -3678,7 +4931,10 @@ mod tests {
         Ok(rows.into_iter().map(|row| row.5).collect())
     }
 
-    async fn assert_oauth_publication_authority(pool: &PgPool) -> anyhow::Result<String> {
+    async fn assert_oauth_publication_authority(
+        pool: &PgPool,
+        account_access_fence: bool,
+    ) -> anyhow::Result<String> {
         let rows: Vec<(String, String, bool, String, String)> = sqlx::query_as(
             r#"SELECT pg_catalog.oidvectortypes(p.proargtypes),
                       pg_catalog.pg_get_function_result(p.oid),
@@ -3713,17 +4969,23 @@ mod tests {
             *private_authority,
             "OAuth publication definer/search-path/ACL changed"
         );
-        let expected = "BEGIN \
-            PERFORM u.id FROM public.users AS u WHERE u.id = $2 FOR SHARE; \
-            IF NOT FOUND THEN RETURN false; END IF; \
-            PERFORM c.id FROM public.oidc_clients AS c \
-            WHERE c.id = $3 AND NOT c.disabled FOR SHARE; \
-            IF NOT FOUND THEN RETURN false; END IF; \
-            PERFORM t.token_hash FROM public.oidc_access_tokens AS t \
-            WHERE t.token_hash = $1 AND t.user_id = $2 AND t.client_id = $3 \
-              AND t.expires_at = $4 AND 'codewire.api' = ANY(t.scopes) FOR SHARE; \
-            IF NOT FOUND THEN RETURN false; END IF; \
-            RETURN $4 > pg_catalog.clock_timestamp(); END;";
+        let user_lock = if account_access_fence {
+            "PERFORM u.id FROM public.users AS u WHERE u.id = $2 AND u.enabled FOR SHARE;"
+        } else {
+            "PERFORM u.id FROM public.users AS u WHERE u.id = $2 FOR SHARE;"
+        };
+        let expected = format!(
+            "BEGIN {user_lock} \
+             IF NOT FOUND THEN RETURN false; END IF; \
+             PERFORM c.id FROM public.oidc_clients AS c \
+             WHERE c.id = $3 AND NOT c.disabled FOR SHARE; \
+             IF NOT FOUND THEN RETURN false; END IF; \
+             PERFORM t.token_hash FROM public.oidc_access_tokens AS t \
+             WHERE t.token_hash = $1 AND t.user_id = $2 AND t.client_id = $3 \
+               AND t.expires_at = $4 AND 'codewire.api' = ANY(t.scopes) FOR SHARE; \
+             IF NOT FOUND THEN RETURN false; END IF; \
+             RETURN $4 > pg_catalog.clock_timestamp(); END;"
+        );
         let normalize = |sql: &str| {
             sql.lines()
                 .map(|line| line.split_once("--").map_or(line, |(sql, _)| sql))
@@ -3732,7 +4994,7 @@ mod tests {
                 .join(" ")
         };
         anyhow::ensure!(
-            normalize(body) == normalize(expected),
+            normalize(body) == normalize(&expected),
             "OAuth publication lock order/query changed"
         );
         Ok(definition.clone())
@@ -3746,14 +5008,14 @@ mod tests {
         assert_applied_credential_storage_history()?;
         assert_applied_access_history()?;
         assert_applied_broker_lock_history()?;
-        if version > OAUTH_PUBLICATION_AUTHORITY_VERSION {
-            projection::assert_accepted_prior23()?;
-        }
-        if version > 24 {
-            ssh::assert_accepted_staged24()?;
+        if version > ACCOUNT_ACCESS_VERSION {
+            projection::assert_accepted_prior24()?;
         }
         if version > 25 {
-            owner_sources::assert_accepted_staged25()?;
+            ssh::assert_accepted_staged25()?;
+        }
+        if version > 26 {
+            owner_sources::assert_accepted_staged26()?;
         }
         if version > PLATFORM_BINDING_CONSENT_VERSION {
             let consent = MIGRATOR
@@ -3765,6 +5027,9 @@ mod tests {
                     == FROZEN_BINDING_CONSENT_CHECKSUM,
                 "migration22 changed after accepted component proof"
             );
+        }
+        if version > OAUTH_PUBLICATION_AUTHORITY_VERSION {
+            assert_frozen_oauth_publication_authority_checksum()?;
         }
         anyhow::ensure!(
             MIGRATOR.version_exists(version),
@@ -3944,5 +5209,25 @@ mod tests {
 
     fn quote_ident(identifier: &str) -> String {
         format!(r#""{}""#, identifier.replace('"', r#""""#))
+    }
+
+    async fn wait_for_lock_blocker(pool: &PgPool, waiter: i32, blocker: i32) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT $2::integer = ANY(pg_catalog.pg_blocking_pids($1::integer))",
+                )
+                .bind(waiter)
+                .bind(blocker)
+                .fetch_one(pool)
+                .await?;
+                if blocked {
+                    return anyhow::Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .context("expected account-access transaction lock barrier")?
     }
 }

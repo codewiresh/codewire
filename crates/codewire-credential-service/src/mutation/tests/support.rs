@@ -379,7 +379,7 @@ impl Harness {
             seed(&db.pool).await?;
             let (pool,role) = db.broker_pool().await?;
             for grant in [
-                "SELECT (id,is_admin) ON public.users",
+                "SELECT (id,is_admin,enabled) ON public.users",
                 "SELECT (token_hash,user_id,client_id,scopes,expires_at) ON public.oidc_access_tokens",
                 "SELECT (id,disabled) ON public.oidc_clients",
                 "EXECUTE ON FUNCTION public.codewire_lock_oauth_bearer_authority(text,text,text,timestamptz)",

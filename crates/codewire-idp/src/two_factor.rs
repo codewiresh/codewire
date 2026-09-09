@@ -25,8 +25,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::auth_session::{
-    AuthResponse, LOCKOUT_DURATION_SECS, MAX_FAILED_ATTEMPTS, UserAuthRow, create_session, hex_id,
-    request_info, session_cookie_string, too_many_requests, user_response,
+    AuthResponse, LOCKOUT_DURATION_SECS, MAX_FAILED_ATTEMPTS, UserAuthRow, account_disabled,
+    create_session, hex_id, request_info, session_cookie_string, too_many_requests, user_response,
 };
 
 #[derive(Clone)]
@@ -177,19 +177,6 @@ fn validate_totp(code: &str, secret: &str, account_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn load_two_factor_user(pool: &PgPool, user_id: &str) -> Result<TwoFactorUser, AppError> {
-    sqlx::query_as(
-        r#"
-        SELECT id, email, two_factor_enabled
-        FROM users WHERE id = $1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(AppError::Unauthorized)
-}
-
 async fn enable(
     State(state): State<TwoFactorState>,
     auth: AuthUser,
@@ -198,7 +185,7 @@ async fn enable(
     let user: TwoFactorUser = sqlx::query_as(
         r#"
         SELECT id, email, two_factor_enabled
-        FROM users WHERE id = $1
+        FROM users WHERE id = $1 AND enabled
         FOR UPDATE
         "#,
     )
@@ -276,10 +263,21 @@ async fn verify(
     if req.code.is_empty() {
         return Err(AppError::BadRequest("Code is required".into()));
     }
-    let user = load_two_factor_user(&state.pool, &auth.user_id).await?;
+    let mut tx = state.pool.begin().await?;
+    let user: TwoFactorUser = sqlx::query_as(
+        r#"
+        SELECT id, email, two_factor_enabled
+        FROM users WHERE id = $1 AND enabled
+        FOR UPDATE
+        "#,
+    )
+    .bind(&auth.user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
     let enc_secret: String = sqlx::query_scalar("SELECT secret FROM two_factor WHERE user_id = $1")
         .bind(&user.id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::BadRequest("2FA not set up. Call enable first.".into()))?;
     let secret = decrypt(&enc_secret, &state.session_secret)
@@ -290,12 +288,13 @@ async fn verify(
 
     sqlx::query("UPDATE users SET two_factor_enabled = true, updated_at = NOW() WHERE id = $1")
         .bind(&user.id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to enable 2FA");
             AppError::InternalMsg("Failed to enable 2FA".into())
         })?;
+    tx.commit().await?;
 
     let (ip, ua) = request_info(&headers);
     crate::auth_session::log_audit(
@@ -317,10 +316,21 @@ async fn disable(
     auth: AuthUser,
     headers: HeaderMap,
 ) -> Result<Json<DisableResponse>, AppError> {
-    let user = load_two_factor_user(&state.pool, &auth.user_id).await?;
+    let mut tx = state.pool.begin().await?;
+    let user: TwoFactorUser = sqlx::query_as(
+        r#"
+        SELECT id, email, two_factor_enabled
+        FROM users WHERE id = $1 AND enabled
+        FOR UPDATE
+        "#,
+    )
+    .bind(&auth.user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
     sqlx::query("DELETE FROM two_factor WHERE user_id = $1")
         .bind(&user.id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to disable 2FA");
@@ -328,12 +338,13 @@ async fn disable(
         })?;
     sqlx::query("UPDATE users SET two_factor_enabled = false, updated_at = NOW() WHERE id = $1")
         .bind(&user.id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to update 2FA user");
             AppError::InternalMsg("Failed to update user".into())
         })?;
+    tx.commit().await?;
 
     let (ip, ua) = request_info(&headers);
     crate::auth_session::log_audit(
@@ -355,19 +366,19 @@ async fn complete_login(
     headers: &HeaderMap,
     user_id: &str,
 ) -> Result<Response, AppError> {
-    let (ip, ua) = request_info(headers);
-    let created_session = create_session(&state.pool, user_id, &ip, &ua).await?;
     let user: UserAuthRow = sqlx::query_as(
         r#"
         SELECT id, email, email_verified, name, image, is_admin,
-               two_factor_enabled, failed_login_attempts, locked_until, created_at
-        FROM users WHERE id = $1
+               two_factor_enabled, enabled, failed_login_attempts, locked_until, created_at
+        FROM users WHERE id = $1 AND enabled
         "#,
     )
     .bind(user_id)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or_else(|| AppError::InternalMsg("Failed to get user".into()))?;
+    .ok_or_else(account_disabled)?;
+    let (ip, ua) = request_info(headers);
+    let created_session = create_session(&state.pool, user_id, &ip, &ua).await?;
 
     let body = AuthResponse {
         user: user_response(user),
@@ -402,6 +413,27 @@ async fn claim_token(
         .execute(&mut **tx)
         .await?;
     Ok(user_id)
+}
+
+// Find the subject without taking the challenge-row lock. `validate` locks
+// that subject before it consumes the one-use challenge, matching account
+// disablement's user -> challenge lock order.
+async fn token_subject(
+    tx: &mut Transaction<'_, Postgres>,
+    token: &str,
+) -> Result<Option<String>, AppError> {
+    let token_hash = hash_session_token(token);
+    sqlx::query_scalar(
+        r#"
+        SELECT user_id
+        FROM two_factor_tokens
+        WHERE token_hash = $1 AND expires_at > NOW()
+        "#,
+    )
+    .bind(token_hash)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::from)
 }
 
 async fn record_failed_attempt(
@@ -457,29 +489,59 @@ async fn validate(
     }
 
     let mut tx = state.pool.begin().await?;
-    let user_id = claim_token(&mut tx, &req.token).await?;
-    if req.code.is_empty() {
+    let candidate_user_id = token_subject(&mut tx, &req.token).await?;
+    if candidate_user_id.is_none() && req.code.is_empty() {
         tx.commit().await?;
         return Err(AppError::BadRequest("Code and token are required".into()));
     }
-    let Some(user_id) = user_id else {
+    let Some(user_id) = candidate_user_id else {
         tx.commit().await?;
         return Err(bare_unauthorized("Invalid or expired 2FA token"));
     };
 
-    let tf: Option<(String, Option<String>, String, Option<NaiveDateTime>)> = sqlx::query_as(
+    // Take the account lock before the token-row lock in `claim_token`. A
+    // disablement takes this same account lock then deletes challenges, so
+    // either operation wins cleanly instead of forming a lock cycle.
+    let user: Option<(String, Option<NaiveDateTime>, bool)> = sqlx::query_as(
         r#"
-        SELECT tf.secret, tf.backup_codes, u.email, u.locked_until
-        FROM two_factor tf
-        JOIN users u ON u.id = tf.user_id
-        WHERE tf.user_id = $1
-        FOR UPDATE OF tf, u
+        SELECT email, locked_until, enabled
+        FROM users
+        WHERE id = $1
+        FOR UPDATE
         "#,
     )
     .bind(&user_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((enc_secret, enc_backup, email, locked_until)) = tf else {
+    let Some((email, locked_until, enabled)) = user else {
+        tx.commit().await?;
+        return Err(AppError::BadRequest("2FA not enabled".into()));
+    };
+    if !enabled {
+        tx.commit().await?;
+        return Err(account_disabled());
+    }
+    // This must be a fresh statement after the account lock is granted. A
+    // joined factor row from the lock-waiting statement can carry an older
+    // MVCC snapshot and let concurrent backup-code validation reuse a code.
+    // Every intentional factor mutation takes the account lock first, then
+    // this factor lock, so the order also remains compatible with disablement.
+    let (enc_secret, enc_backup): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT secret, backup_codes FROM two_factor WHERE user_id = $1 FOR UPDATE")
+            .bind(&user_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or((None, None));
+    let claimed_user_id = claim_token(&mut tx, &req.token).await?;
+    if req.code.is_empty() {
+        tx.commit().await?;
+        return Err(AppError::BadRequest("Code and token are required".into()));
+    }
+    if claimed_user_id.as_deref() != Some(user_id.as_str()) {
+        tx.commit().await?;
+        return Err(bare_unauthorized("Invalid or expired 2FA token"));
+    }
+    let Some(enc_secret) = enc_secret else {
         tx.commit().await?;
         return Err(AppError::BadRequest("2FA not enabled".into()));
     };

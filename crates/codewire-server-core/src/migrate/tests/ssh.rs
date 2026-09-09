@@ -1,27 +1,27 @@
-//! Staged 24 -> 25 proof, not a claim that migration24 was deployed or merged.
+//! Staged 25 -> 26 proof; version25 remains unpublished product history.
 
 use super::*;
 
-const VERSION: i64 = 25;
+const VERSION: i64 = 26;
 // Frozen staged projection component accepted by root's PostgreSQL publication3
-// + credential-service13 run (session46208). Versions1..23 retain independent
+// + credential-service13 run (session46208). Versions1..24 retain independent
 // accepted history pins; this is deliberately not labeled canonical history.
-const ACCEPTED_STAGED24: &str = "0ac742efd684bd7b2959096bca594fdc0c7cef0b9ac5731a2fc873afc0214a5eef1cfc92c03308a47406fc03731cbe9d";
+const ACCEPTED_STAGED25: &str = "0ac742efd684bd7b2959096bca594fdc0c7cef0b9ac5731a2fc873afc0214a5eef1cfc92c03308a47406fc03731cbe9d";
 
-pub(super) fn assert_accepted_staged24() -> anyhow::Result<()> {
+pub(super) fn assert_accepted_staged25() -> anyhow::Result<()> {
     let migration = MIGRATOR
         .iter()
-        .find(|m| m.version == 24)
-        .context("staged migration24 missing")?;
+        .find(|m| m.version == 25)
+        .context("staged migration25 missing")?;
     anyhow::ensure!(
-        format!("{:x}", Sha384::digest(migration.sql.as_bytes())) == ACCEPTED_STAGED24,
-        "migration24 differs from accepted staged component"
+        format!("{:x}", Sha384::digest(migration.sql.as_bytes())) == ACCEPTED_STAGED25,
+        "migration25 differs from accepted staged component"
     );
     Ok(())
 }
 
 #[test]
-fn ssh_upgrade_retains_independently_accepted_history_and_staged24() -> anyhow::Result<()> {
+fn ssh_upgrade_retains_independently_accepted_history_and_staged25() -> anyhow::Result<()> {
     assert_applied_broker_lock_history()?;
     let consent = MIGRATOR
         .iter()
@@ -30,8 +30,8 @@ fn ssh_upgrade_retains_independently_accepted_history_and_staged24() -> anyhow::
     anyhow::ensure!(
         format!("{:x}", Sha384::digest(consent.sql.as_bytes())) == FROZEN_BINDING_CONSENT_CHECKSUM
     );
-    projection::assert_accepted_prior23()?;
-    assert_accepted_staged24()
+    projection::assert_accepted_prior24()?;
+    assert_accepted_staged25()
 }
 
 async fn public_columns(pool: &PgPool) -> anyhow::Result<()> {
@@ -62,7 +62,7 @@ async fn ssh_staged_upgrade_preserves_history_envelopes_locks_and_second_startup
         apply_migrations_before(&db.url, VERSION).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let before = applied_migrations(&pool).await?;
-        anyhow::ensure!(before.len() == 24 && before[23].0 == 24);
+        anyhow::ensure!(before.len() == 25 && before[24].0 == 25);
         let fingerprint: String = sqlx::query_scalar(include_str!("../../../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
         anyhow::ensure!(fingerprint == ACCEPTED_PRE_SSH_SCHEMA_FINGERPRINT);
         seed_platform_credential_owners(&pool).await?;
@@ -72,22 +72,22 @@ async fn ssh_staged_upgrade_preserves_history_envelopes_locks_and_second_startup
             FROM platform_credentials c JOIN platform_credential_material m ON m.credential_id=c.id WHERE c.id='ssh-retained'";
         let rows: (String,String) = sqlx::query_as(rows_sql).fetch_one(&pool).await?;
         let locks = assert_platform_broker_lock_authority(&pool, true).await?;
-        let oauth = assert_oauth_publication_authority(&pool).await?;
+        let oauth = assert_oauth_publication_authority(&pool, true).await?;
         let projection = projection::definitions(&pool).await?;
         pool.close().await;
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let after = applied_migrations(&pool).await?;
-        anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..24] == before && after[24].0 == VERSION);
+        anyhow::ensure!(after.len() == MIGRATOR.iter().count() && after[..25] == before && after[25].0 == VERSION);
         public_columns(&pool).await?;
         anyhow::ensure!(sqlx::query_as::<_,(String,String)>(rows_sql).fetch_one(&pool).await? == rows);
         let absent: bool = sqlx::query_scalar("SELECT ssh_public_key IS NULL AND ssh_fingerprint IS NULL FROM platform_credentials WHERE id='ssh-retained'").fetch_one(&pool).await?;
         anyhow::ensure!(absent, "upgrade inferred SSH identity from previous material");
         anyhow::ensure!(assert_platform_broker_lock_authority(&pool, true).await? == locks);
-        anyhow::ensure!(assert_oauth_publication_authority(&pool).await? == oauth);
+        anyhow::ensure!(assert_oauth_publication_authority(&pool, true).await? == oauth);
         anyhow::ensure!(projection::definitions(&pool).await? == projection);
         let fingerprint: String = sqlx::query_scalar(include_str!("../../../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
-        anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT, "schema25 measured fingerprint: {fingerprint}");
+        anyhow::ensure!(fingerprint == ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT, "schema26 measured fingerprint: {fingerprint}");
         pool.close().await;
         ensure_schema(&db.url).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
@@ -172,7 +172,7 @@ async fn ssh_failed_forward_migration_rolls_back_columns_constraints_and_ledger(
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
-async fn ssh_rollback_replays_staged24_only_in_disposable_application_schema() -> anyhow::Result<()>
+async fn ssh_rollback_replays_staged25_only_in_disposable_application_schema() -> anyhow::Result<()>
 {
     let admin = std::env::var("TEST_DATABASE_URL").context("TEST_DATABASE_URL required")?;
     let db = TestDatabase::create(&admin).await?;
@@ -185,7 +185,7 @@ async fn ssh_rollback_replays_staged24_only_in_disposable_application_schema() -
         apply_migrations_before(&db.url, VERSION).await?;
         let pool = PgPoolOptions::new().max_connections(1).connect(&db.url).await?;
         let ledger = applied_migrations(&pool).await?;
-        anyhow::ensure!(ledger.len() == 24 && ledger[23].0 == 24);
+        anyhow::ensure!(ledger.len() == 25 && ledger[24].0 == 25);
         let fingerprint: String = sqlx::query_scalar(include_str!("../../../tests/data/application_schema_fingerprint.sql")).fetch_one(&pool).await?;
         anyhow::ensure!(fingerprint == ACCEPTED_PRE_SSH_SCHEMA_FINGERPRINT);
         anyhow::ensure!(sqlx::query_scalar::<_,i32>("SELECT id FROM rollback_boundary.keep").fetch_one(&pool).await? == 1);

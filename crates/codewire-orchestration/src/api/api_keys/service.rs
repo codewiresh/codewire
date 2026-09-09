@@ -256,6 +256,40 @@ pub(crate) async fn update(
     let disabled_at: Option<NaiveDateTime> = disabled.then(|| Utc::now().naive_utc());
 
     run_organization_database_mutation(pool, org_id, async {
+        let mut tx = pool.begin().await.map_err(AppError::from)?;
+        if !disabled {
+            // Reactivation changes an existing bearer from disabled to active.
+            // Lock its owner before the key row, matching account-disablement's
+            // user -> API-key order. The migration trigger retains the same
+            // check for rolling predecessor/raw writers.
+            let owner: Option<(String, bool)> = sqlx::query_as(
+                r#"
+                SELECT user_account.id, user_account.enabled
+                FROM users AS user_account
+                WHERE user_account.id = (
+                    SELECT user_id FROM api_keys WHERE id = $1 AND org_id = $2
+                )
+                FOR SHARE
+                "#,
+            )
+            .bind(key_id)
+            .bind(org_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(AppError::from)?;
+            let Some((_owner_id, enabled)) = owner else {
+                tx.rollback().await.map_err(AppError::from)?;
+                return Err(AppError::NotFound("api key not found".into()));
+            };
+            if !enabled {
+                tx.rollback().await.map_err(AppError::from)?;
+                return Err(AppError::Coded {
+                    status: StatusCode::FORBIDDEN,
+                    code: "account_disabled",
+                    detail: "Account access is disabled".into(),
+                });
+            }
+        }
         let row = sqlx::query(
             r#"UPDATE api_keys SET disabled_at = $1
                 WHERE id = $2 AND org_id = $3
@@ -266,10 +300,18 @@ pub(crate) async fn update(
         .bind(disabled_at)
         .bind(key_id)
         .bind(org_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(AppError::from)?
-        .ok_or_else(|| AppError::NotFound("api key not found".into()))?;
+        .ok_or_else(|| AppError::NotFound("api key not found".into()));
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                tx.rollback().await.map_err(AppError::from)?;
+                return Err(error);
+            }
+        };
+        tx.commit().await.map_err(AppError::from)?;
 
         scan_api_key(&row).map_err(|e| {
             tracing::error!(error = %e, "scan api key failed");

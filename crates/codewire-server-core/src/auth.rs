@@ -672,21 +672,21 @@ pub fn session_cookie(headers: &HeaderMap) -> Option<&str> {
 }
 
 async fn authenticate_session_cookie(pool: &PgPool, token: &str) -> Result<AuthUser, AppError> {
-    // Sliding expiry: mirrors `auth.GetSessionByToken` exactly. Bumps
-    // expires_at and updated_at on every hit, refuses tokens past
-    // their expiry. Returning the user_id keeps the round-trip to one
-    // query; the `is_admin` flag comes from a follow-up lookup so we
-    // don't have to keep the two queries in sync if either schema
-    // changes.
+    // Sliding expiry: mirrors `auth.GetSessionByToken` exactly for an enabled
+    // account. Disabled users do not refresh their session expiry and cannot
+    // reach a product or identity operation through an existing cookie.
     let token_hash = hash_session_token(token);
-    let user_id: String = sqlx::query_scalar(
+    let user: (String, bool) = sqlx::query_as(
         r#"
-        UPDATE sessions
-           SET expires_at = GREATEST(expires_at, NOW() + $2::interval),
+        UPDATE sessions AS session
+           SET expires_at = GREATEST(session.expires_at, NOW() + $2::interval),
                updated_at = NOW()
-         WHERE token_hash = $1
-           AND expires_at > NOW()
-         RETURNING user_id
+          FROM users AS user_account
+         WHERE session.token_hash = $1
+           AND session.expires_at > NOW()
+           AND session.user_id = user_account.id
+           AND user_account.enabled
+         RETURNING session.user_id, user_account.is_admin
         "#,
     )
     .bind(&token_hash)
@@ -695,13 +695,7 @@ async fn authenticate_session_cookie(pool: &PgPool, token: &str) -> Result<AuthU
     .await
     .map_err(AppError::from)?
     .ok_or(AppError::Unauthorized)?;
-
-    let is_admin: bool = sqlx::query_scalar(r#"SELECT is_admin FROM users WHERE id = $1"#)
-        .bind(&user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(AppError::from)?
-        .ok_or(AppError::Unauthorized)?;
+    let (user_id, is_admin) = user;
 
     Ok(AuthUser {
         user_id,
@@ -735,10 +729,12 @@ async fn authenticate_api_key(pool: &PgPool, full_token: &str) -> Result<Authent
                a.org_id,
                a.scopes
           FROM api_keys a
+          JOIN users u ON u.id = a.user_id
          WHERE a.key_prefix = $1
            AND a.key_hash = $2
            AND (a.expires_at IS NULL OR a.expires_at > NOW())
            AND a.disabled_at IS NULL
+           AND u.enabled
         "#,
     )
     .bind(prefix)
@@ -780,15 +776,20 @@ pub fn touch_api_key_last_used_best_effort(pool: &PgPool, key_id: &str) {
     let key_id = key_id.to_owned();
     std::mem::drop(tokio::spawn(async move {
         let update = sqlx::query(
-            r#"UPDATE api_keys
-                  SET last_used_at = NOW()
-                WHERE id = (
-                    SELECT id
-                      FROM api_keys
-                     WHERE id = $1
-                       AND (last_used_at IS NULL OR last_used_at < NOW() - interval '1 minute')
-                       FOR UPDATE SKIP LOCKED
-                )"#,
+            r#"WITH eligible AS (
+                    SELECT key.id
+                    FROM api_keys AS key
+                    JOIN users AS user_account ON user_account.id = key.user_id
+                    WHERE key.id = $1
+                      AND user_account.enabled
+                      AND (key.last_used_at IS NULL
+                           OR key.last_used_at < NOW() - interval '1 minute')
+                    FOR UPDATE OF key SKIP LOCKED
+                )
+                UPDATE api_keys AS key
+                   SET last_used_at = NOW()
+                  FROM eligible
+                 WHERE key.id = eligible.id"#,
         )
         .bind(key_id)
         .execute(&pool);
@@ -832,6 +833,7 @@ async fn authenticate_oidc_access_token(
          WHERE t.token_hash = $1
            AND t.expires_at > NOW()
            AND NOT c.disabled
+           AND u.enabled
         "#,
     )
     .bind(&digest)

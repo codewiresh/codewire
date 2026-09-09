@@ -14,7 +14,7 @@ async fn session_mutation_helpers_are_private_exact_and_logout_fenced() -> anyho
             .max_connections(2)
             .connect(&database.url)
             .await?;
-        anyhow::ensure!(embedded_max_version()? == 27);
+        anyhow::ensure!(embedded_max_version()? == 28);
         let functions: Vec<(String, bool)> = sqlx::query_as(
             "SELECT p.proname, p.prosecdef AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp','TimeZone=UTC']::text[] AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('codewire_authenticate_credential_session','codewire_lock_credential_session_authority') ORDER BY p.proname",
         )
@@ -74,6 +74,41 @@ async fn session_mutation_helpers_are_private_exact_and_logout_fenced() -> anyho
         .fetch_one(&pool)
         .await?;
         anyhow::ensure!(!denied);
+
+        sqlx::query("INSERT INTO users(id,email,is_admin) VALUES ('disabled-session-user','disabled-session@example.test',false)")
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES ('disabled-session-id','disabled-session-user',$1,NOW()+interval '1 hour')")
+            .bind("b".repeat(64))
+            .execute(&pool)
+            .await?;
+        let disabled: (String, String, bool, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+            "SELECT session_id,user_id,is_admin,expires_at FROM public.codewire_authenticate_credential_session($1)",
+        )
+        .bind("b".repeat(64))
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query("UPDATE users SET enabled=false WHERE id=$1")
+            .bind(&disabled.1)
+            .execute(&pool)
+            .await?;
+        let disabled_authentication: Option<String> = sqlx::query_scalar(
+            "SELECT session_id FROM public.codewire_authenticate_credential_session($1)",
+        )
+        .bind("b".repeat(64))
+        .fetch_optional(&pool)
+        .await?;
+        anyhow::ensure!(disabled_authentication.is_none());
+        let disabled_lock: bool = sqlx::query_scalar(
+            "SELECT public.codewire_lock_credential_session_authority($1,$2,$3,$4)",
+        )
+        .bind(&disabled.0)
+        .bind("b".repeat(64))
+        .bind(&disabled.1)
+        .bind(disabled.3)
+        .fetch_one(&pool)
+        .await?;
+        anyhow::ensure!(!disabled_lock);
         pool.close().await;
         Ok::<_, anyhow::Error>(())
     }
