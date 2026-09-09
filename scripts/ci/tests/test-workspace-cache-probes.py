@@ -124,7 +124,8 @@ elif args[:2] == ["buildx", "build"]:
                     raise SystemExit(51)
                 cached = True
             elif phase == "native-denied":
-                print("#1 ERROR: S3 GetObject InvalidAccessKeyId StatusCode: 403")
+                print("#1 ERROR: operation error S3: GetObject, https response error "
+                      "StatusCode: 401, api error Unauthorized: Unauthorized")
                 raise SystemExit(52)
         else:
             assert "--cache-from" not in args and "--cache-to" not in args

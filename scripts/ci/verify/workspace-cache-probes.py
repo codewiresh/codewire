@@ -338,7 +338,10 @@ def check_phase(report, phase):
         categories = {
             "native-malformed": r"invalid character|unexpected data after JSON object",
             "native-missing-blob": r"NoSuchKey|NotFound|StatusCode: 404|status code: 404",
-            "native-denied": r"AccessDenied|InvalidAccessKeyId|SignatureDoesNotMatch|StatusCode: 403|status code: 403",
+            # Cloudflare R2 reports a synthetic S3 identity as HTTP 401 with
+            # `api error Unauthorized`; other S3 implementations use 403 or
+            # one of the named signature/access errors below.
+            "native-denied": r"api error Unauthorized|AccessDenied|InvalidAccessKeyId|SignatureDoesNotMatch|StatusCode: 40[13]|status code: 40[13]",
         }
         if phase in categories:
             if not re.search(categories[phase], text, re.I) \
