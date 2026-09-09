@@ -1319,7 +1319,13 @@ for billing_runner in \
     "$integration_runner" \
     "$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh" \
     "$ROOT/scripts/ci/verify/kind/common.sh"; do
-  grep -qF -- '--test wire_contract configured_billing_wire_contract' "$billing_runner"
+  if [[ "$billing_runner" == */kind/common.sh ]]; then
+    # Kind executes the exact libtest produced by the separate build job.
+    grep -qF -- '"$binary" configured_billing_wire_contract' "$billing_runner"
+    grep -qF -- '"$RUN_DIR/billing-contract-build.jsonl"' "$billing_runner"
+  else
+    grep -qF -- '--test wire_contract configured_billing_wire_contract' "$billing_runner"
+  fi
   if rg -n '(^|[[:space:]])go test.*billing|\./billing/\.\.\.|BILLING_STRIPE_CONFIGURED.*absent|billing is not enabled' \
       "$billing_runner"; then
     echo "Automatic gate still carries a retired Go or Stripe-disabled billing contract: $billing_runner" >&2
@@ -1471,9 +1477,17 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
   grep -qF "  ${job_id}:" "$block"
   grep -qF "    name: ${job_name}" "$block"
   grep -qF "    runs-on: ${runner}" "$block"
-  grep -qF \
-    "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
-    "$block"
+  if [ "$job_id" = edge-kind ]; then
+    # Its optional producer dependencies need an always() condition so edge-
+    # only selection still runs. The executable workflow fixture also proves
+    # every selected Kind producer must succeed before this job can run.
+    grep -qF "needs.verification-selection.outputs.edge_kind_expected == 'true'" "$block"
+    python3 -B "$ROOT/scripts/ci/tests/test-kind-build-workflow.py"
+  else
+    grep -qF \
+      "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
+      "$block"
+  fi
   if grep -qF '    strategy:' "$block"; then
     echo "${job_id}: capability dispatch retained an empty-matrix dependency" >&2
     exit 1
@@ -1746,8 +1760,8 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 9 ]] || {
-  echo 'Codewire CI heavy capability groups are not explicit' >&2
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 12 ]] || {
+  echo 'Codewire CI requires nine ordinary heavy groups and three parallel Kind producers' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
@@ -1832,8 +1846,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 12 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eight groups, and aggregate" >&2
+if [ "$top_level_jobs" != 15 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eight groups, three Kind producers and aggregate" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \

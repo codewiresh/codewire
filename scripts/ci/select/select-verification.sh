@@ -1264,6 +1264,11 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/kind-host-runtime.sh|\
       scripts/ci/verify/playwright-browser-runtime.sh|\
       scripts/ci/verify/kind-e2e.sh|scripts/ci/verify/kind/*|\
+      scripts/ci/verify/kind-build-artifacts.py|\
+      scripts/ci/images/build-kind-smokes.sh|\
+      scripts/ci/tests/test-kind-build-artifacts.py|\
+      scripts/ci/tests/test-kind-build-workflow.py|\
+      scripts/ci/tests/test-build-kind-smokes.sh|\
       scripts/dev/kind/install-temporal.sh|scripts/ci/tests/test-install-temporal.sh|\
       deployments/k8s/*ingress*|\
       deployments/k8s/overlays/local-kind/*|deployments/k8s/overlays/local-kind-static/*)

@@ -576,7 +576,7 @@ wait_kind_credential_environment '%s' destroyed
         manifest = tomllib.loads((ROOT / "crates/codewire-cli-bin/Cargo.toml").read_text())
         self.assertIn("cw", [binary["name"] for binary in manifest["bin"]])
         expected = f'cargo build --locked --profile ci -p {manifest["package"]["name"]} --bin cw'
-        source = (ROOT / "scripts/ci/verify/kind/common.sh").read_text()
+        source = (ROOT / "scripts/ci/images/build-kind-smokes.sh").read_text()
         self.assertEqual(source.count(expected), 1)
         self.assertNotIn("-p codewire-cli --bin cw", source)
 

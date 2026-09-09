@@ -154,7 +154,7 @@ kind_credential_bootstrap_smoke() (
 )
 
 start_kind_credential_fixture() {
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != build-ci ]; then
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     # A release-image gate must never load or execute a synthetic authority.
     # The dedicated synthetic composition is owned by the services-ci gate.
     log "release-image gate: synthetic credential service is not selected"
@@ -399,7 +399,7 @@ assert_kind_credential_rotation() {
 }
 
 kind_credential_native_smoke() (
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != build-ci ]; then
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     log "release-image gate: synthetic native credential composition is not selected"
     return 0
   fi

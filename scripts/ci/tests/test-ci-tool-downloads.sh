@@ -59,7 +59,7 @@ grep -Fq "$PROTOC_URL" "$RUST_BASE_DOCKERFILE" ||
 
 # Every host job compiling the shared bridge needs debug_redact support, not
 # only the release and guest-probe jobs. Image builds already pin this compiler.
-for job in database services-control services-runtime edge-kind; do
+for job in database services-control services-runtime kind-smokes; do
   block="$(awk -v job="$job" '
     $0 == "  " job ":" { selected=1; next }
     selected && /^  [a-z][a-z-]*:$/ { exit }
@@ -73,6 +73,14 @@ for job in database services-control services-runtime edge-kind; do
   grep -Fq '"$HOME/.proto-tools/protoc/bin" >> "$GITHUB_PATH"' <<<"$block" ||
     fail "$job does not select the pinned protoc for host Cargo builds"
 done
+edge_kind_block="$(awk '
+  $0 == "  edge-kind:" { selected=1; next }
+  selected && /^  [a-z][a-z-]*:$/ { exit }
+  selected { print }
+' "$WORKFLOW")"
+if grep -Fq 'name: Install pinned protoc for Rust compilation' <<<"$edge_kind_block"; then
+  fail 'Kind consumer still installs the compiler used only by the smoke producer'
+fi
 grep -Fq 'ADD --checksum=sha256:67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006' \
   "$RUST_BASE_DOCKERFILE" || fail 'shared Rust build base does not checksum-pin sccache'
 
