@@ -163,6 +163,9 @@ test.describe("server-rendered public, auth, and account routes", () => {
       has: page.getByRole("heading", { name: "Connect provider account", exact: true }),
     });
     await expect(connectCard.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
+    await expect(connectCard).toContainText("Enable device code authorization for Codex");
+    await expect(connectCard.getByRole("link", { name: "ChatGPT Security settings", exact: true }))
+      .toHaveAttribute("href", "https://chatgpt.com/#settings/Security");
     await expect(page.locator('form[action$="/credentials/api-key/add"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/generate"]')).toHaveCount(1);
     await expect(page.locator('form[action$="/credentials/ssh/import"]')).toHaveCount(1);

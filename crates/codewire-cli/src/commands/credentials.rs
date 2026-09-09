@@ -45,6 +45,8 @@ const GITHUB_CHILD_PATH: &str = "/usr/bin:/bin";
 const GITHUB_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_GITHUB_TOKEN_BYTES: usize = 4 * 1024;
 
+pub(super) const CODEX_DEVICE_AUTHORIZATION_GUIDANCE: &str = "Before connecting, turn on \"Enable device code authorization for Codex\" in ChatGPT Security settings: https://chatgpt.com/#settings/Security. For a managed workspace, your administrator may need to allow device code login.";
+
 #[derive(Debug)]
 pub(super) enum CredentialOperation {
     Credential(CredentialsCommand),
@@ -662,6 +664,9 @@ async fn run_isolated_codex_login(
     owner: &CodexEnrollmentOwner,
     interactive: bool,
 ) -> anyhow::Result<CompletedCodexEnrollment> {
+    if interactive {
+        eprintln!("{CODEX_DEVICE_AUTHORIZATION_GUIDANCE}");
+    }
     let mut pending = owner.start().context("start isolated Codex enrollment")?;
     let challenge = pending
         .challenge()
@@ -1503,6 +1508,21 @@ mod tests {
 
     use super::*;
     use crate::{Cli, Command};
+
+    #[test]
+    fn codex_connect_help_explains_device_authorization_for_both_placements() {
+        for placement in ["--local", "--platform"] {
+            let error = Cli::try_parse_from(["cw", "credentials", placement, "connect", "--help"])
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+            let help = error
+                .to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(help.contains(CODEX_DEVICE_AUTHORIZATION_GUIDANCE), "{help}");
+        }
+    }
 
     fn credential() -> CredentialRecord {
         credential_with("11111111-1111-4111-8111-111111111111", "work-openai")
