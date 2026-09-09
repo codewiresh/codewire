@@ -120,7 +120,10 @@ def derive(archive, work, report, credential, nonce):
     dockerfile.write_text(original_dockerfile.replace(
         tool_anchor, "    rm -rf /root/.bun && \\\n"
         f"    printf '%s\\n' 'codewire-cache-probe-{nonce}' > /usr/local/share/codewire-cache-probe-token\n"))
-    (work / "cw-probe.Dockerfile").write_text(original_dockerfile + STAGES)
+    # BuildKit includes the Dockerfile frontend input name in the LLB cache
+    # identity. Keep the ordinary basename so the unmodified control can reuse
+    # the exact seed vertices before the derived-source miss is asserted.
+    (work / "Dockerfile").write_text(original_dockerfile + STAGES)
     inventories = {"control": original, "cw-edit": inventory(contexts / "cw-edit"),
                    "tools": inventory(contexts / "tools")}
     for name, expected in (("cw-edit", MAIN), ("tools", DOCKERFILE)):
@@ -147,7 +150,7 @@ def derive(archive, work, report, credential, nonce):
     private_key(synthetic, roots)
     write(report / "contexts.json", {
         "inventories": inventories, "archive_sha256": digest(Path(archive).read_bytes()),
-        "probe_dockerfile_sha256": digest((work / "cw-probe.Dockerfile").read_bytes()),
+        "probe_dockerfile_sha256": digest((work / "Dockerfile").read_bytes()),
         "native_payload_sha256": digest((native / "payload").read_bytes()),
         "cw_insert": inserted, "tool_dockerfile_sha256": digest(dockerfile.read_bytes())})
 

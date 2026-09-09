@@ -147,7 +147,7 @@ for phase in cw-control cw-edit; do
     --cache-from "$common,name=$architecture/workspace/experiments/$seed_id" \
     --cache-to "$common,name=$architecture/workspace/experiments/$seed_id/probes/$nonce/$phase-$builder_container,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false" \
     "${compiler_args[@]}" --build-arg BASE_IMAGE_REF=scratch \
-    --file "$work/cw-probe.Dockerfile" --target cw-cache-probe-result \
+    --file "$work/Dockerfile" --target cw-cache-probe-result \
     --output "type=local,dest=$work/$phase-output" "$context" || status=$?
   printf '%s\n' "$status" >"$report/$phase/status"
   [[ "$status" == 0 ]]

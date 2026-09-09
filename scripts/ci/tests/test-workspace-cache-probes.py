@@ -142,6 +142,7 @@ elif args[:2] == ["buildx", "build"]:
             print("#8 exporting cache to Amazon S3\n#8 writing layer sha256:" + "f" * 64 + "\n#8 DONE 0.1s")
     elif phase.startswith("cw-"):
         assert option("--target") == "cw-cache-probe-result"
+        assert Path(option("--file")).name == "Dockerfile"
         assert option("--build-arg") == "CODEWIRE_SCCACHE_MODE=r2"
         print("#2 [cw-builder 1/1] RUN cargo build")
         print("#2 CACHED" if phase == "cw-control" and failure != "control-miss" else "#2 DONE 0.1s")
