@@ -47,3 +47,10 @@ partial HTML under `_fragments`, and event streams under `_events`. Route-local
 JavaScript and CSS must be registered as immutable same-origin assets by the
 Rust adapter. Do not add inline scripts, eval-dependent HTMX features, dynamic
 package runners, package-CDN references, or install-time generation.
+
+The homepage template, `reference/fixtures/home.html`, and `docs/design/story.html`
+share `routes/public.css`, `public.js`, and the white Codewire artwork. The Rust
+asset tests verify homepage parity after resolving fixture asset paths.
+The homepage, sign-in, and sign-up share the decorative background in `cosmos.css`
+and `cosmos.js`. The auth template and `reference/fixtures/login.html` and
+`reference/fixtures/signup.html` share `routes/auth.css`.

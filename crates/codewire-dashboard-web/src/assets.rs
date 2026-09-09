@@ -18,6 +18,8 @@ pub(crate) const STYLE_PATH: &str = "/assets/codewire/design-v1.css";
 pub(crate) const DASHBOARD_STYLE_PATH: &str = "/assets/codewire/routes/dashboard-v1.css";
 pub(crate) const AUTH_STYLE_PATH: &str = "/assets/codewire/routes/auth-v1.css";
 pub(crate) const PUBLIC_STYLE_PATH: &str = "/assets/codewire/routes/public-v1.css";
+pub(crate) const COSMOS_STYLE_PATH: &str = "/assets/codewire/cosmos-v1.css";
+pub(crate) const COSMOS_SCRIPT_PATH: &str = "/assets/codewire/cosmos-v1.js";
 pub(crate) const SETTINGS_STYLE_PATH: &str = "/assets/codewire/routes/settings-v1.css";
 pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organizations-v1.css";
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
@@ -35,8 +37,11 @@ pub(crate) const XTERM_SCRIPT_PATH: &str = "/assets/codewire/xterm-6.0.0.js";
 pub(crate) const XTERM_FIT_SCRIPT_PATH: &str = "/assets/codewire/addon-fit-0.11.0.js";
 pub(crate) const XTERM_WEB_LINKS_SCRIPT_PATH: &str = "/assets/codewire/addon-web-links-0.12.0.js";
 pub(crate) const LOGO_PATH: &str = "/assets/codewire/logo-v1.svg";
+pub(crate) const BRAND_WORDMARK_PATH: &str = "/assets/codewire/brand-wordmark-v1.svg";
+pub(crate) const BRAND_ICON_PATH: &str = "/assets/codewire/brand-icon-v1.svg";
 pub(crate) const CONSOLE_LOGO_PATH: &str = "/assets/codewire/console-logo-v1.svg";
 pub(crate) const ICONS_PATH: &str = "/assets/codewire/icons-v2.svg";
+pub(crate) const SPACE_GROTESK_PATH: &str = "/assets/codewire/fonts/space-grotesk-2.0.woff2";
 pub(crate) const IBM_PLEX_MONO_REGULAR_PATH: &str =
     "/assets/codewire/fonts/ibm-plex-mono-regular-2.5.0.woff2";
 pub(crate) const IBM_PLEX_MONO_MEDIUM_PATH: &str =
@@ -54,6 +59,8 @@ const DASHBOARD_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/dashboard.css");
 const AUTH_STYLES: &str = include_str!("../../../packages/codewire-design/routes/auth.css");
 const PUBLIC_STYLES: &str = include_str!("../../../packages/codewire-design/routes/public.css");
+const COSMOS_STYLES: &str = include_str!("../../../packages/codewire-design/cosmos.css");
+const COSMOS_SCRIPT: &str = include_str!("../../../packages/codewire-design/cosmos.js");
 const SETTINGS_STYLES: &str = include_str!("../../../packages/codewire-design/routes/settings.css");
 const ORGANIZATIONS_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/organizations.css");
@@ -75,9 +82,14 @@ const XTERM_SCRIPT: &str = include_str!("../assets/xterm/xterm-6.0.0.js");
 const XTERM_FIT_SCRIPT: &str = include_str!("../assets/xterm/addon-fit-0.11.0.js");
 const XTERM_WEB_LINKS_SCRIPT: &str = include_str!("../assets/xterm/addon-web-links-0.12.0.js");
 const LOGO: &str = include_str!("../../../packages/codewire-design/assets/logo.svg");
+const BRAND_WORDMARK: &str =
+    include_str!("../../../packages/codewire-design/assets/brand-wordmark.svg");
+const BRAND_ICON: &str = include_str!("../../../packages/codewire-design/assets/brand-icon.svg");
 const CONSOLE_LOGO: &str =
     include_str!("../../../packages/codewire-design/assets/console-logo.svg");
 const ICONS: &str = include_str!("../../../packages/codewire-design/assets/icons.svg");
+const SPACE_GROTESK: &[u8] =
+    include_bytes!("../../../packages/codewire-design/fonts/space-grotesk-2.0.woff2");
 const IBM_PLEX_MONO_REGULAR: &[u8] =
     include_bytes!("../assets/fonts/IBMPlexMono-Regular-2.5.0.woff2");
 const IBM_PLEX_MONO_MEDIUM: &[u8] =
@@ -88,10 +100,22 @@ const IBM_PLEX_MONO_SEMIBOLD: &[u8] =
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route(
+            SPACE_GROTESK_PATH,
+            static_binary_asset("font/woff2", SPACE_GROTESK),
+        )
+        .route(
             HTMX_PATH,
             static_asset("application/javascript; charset=utf-8", HTMX),
         )
         .route(STYLE_PATH, static_asset("text/css; charset=utf-8", STYLES))
+        .route(
+            COSMOS_STYLE_PATH,
+            static_asset("text/css; charset=utf-8", COSMOS_STYLES),
+        )
+        .route(
+            COSMOS_SCRIPT_PATH,
+            static_asset("application/javascript; charset=utf-8", COSMOS_SCRIPT),
+        )
         .route(
             DASHBOARD_STYLE_PATH,
             static_asset("text/css; charset=utf-8", DASHBOARD_STYLES),
@@ -171,6 +195,11 @@ pub(crate) fn router() -> Router<AppState> {
             ),
         )
         .route(LOGO_PATH, static_asset("image/svg+xml", LOGO))
+        .route(
+            BRAND_WORDMARK_PATH,
+            static_asset("image/svg+xml", BRAND_WORDMARK),
+        )
+        .route(BRAND_ICON_PATH, static_asset("image/svg+xml", BRAND_ICON))
         .route(
             CONSOLE_LOGO_PATH,
             static_asset("image/svg+xml", CONSOLE_LOGO),
@@ -256,6 +285,48 @@ fn static_binary_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn homepage_fixtures_and_docs_share_production_assets() {
+        use askama::Template;
+
+        let html = crate::templates::HomeTemplate.render().unwrap();
+        for (fixture, prefix) in [
+            (
+                include_str!("../../../packages/codewire-design/reference/fixtures/home.html"),
+                "../../",
+            ),
+            (
+                include_str!("../../../docs/design/story.html"),
+                "../../packages/codewire-design/",
+            ),
+        ] {
+            let mut normalized = fixture.to_owned();
+            for (local, public) in [
+                ("cosmos.css", COSMOS_STYLE_PATH),
+                ("cosmos.js", COSMOS_SCRIPT_PATH),
+                ("routes/public.css", PUBLIC_STYLE_PATH),
+                ("public.js", PUBLIC_SCRIPT_PATH),
+                ("assets/brand-icon.svg", BRAND_ICON_PATH),
+                ("assets/brand-wordmark.svg", BRAND_WORDMARK_PATH),
+            ] {
+                normalized = normalized.replace(&format!("{prefix}{local}"), public);
+            }
+            assert_eq!(
+                normalized.trim_end(),
+                html,
+                "homepage fixture drifted from production"
+            );
+        }
+        assert_eq!(
+            BRAND_WORDMARK,
+            include_str!("../../../apps/docs/zola/static/codewire-wordmark.svg")
+        );
+        assert_eq!(
+            BRAND_ICON,
+            include_str!("../../../apps/docs/zola/static/favicon.svg")
+        );
+    }
 
     #[test]
     fn static_assets_revalidate_by_content_etag_and_are_nosniff() {
