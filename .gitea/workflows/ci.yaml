@@ -1084,6 +1084,7 @@ jobs:
 
   workspace-cache-measurement:
     # This experiment uses the existing untrusted PR cache identity only.
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job obtains only the reviewed untrusted cache identity.
     name: Workspace cache measurement (${{ matrix.case }})
     runs-on: ci-heavy
     enable-openid-connect: true
@@ -1147,6 +1148,7 @@ jobs:
 
   workspace-cache-probes:
     # Cost-only opt-in, after all measured workers stop using the shared cache.
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job obtains only the reviewed untrusted cache identity.
     name: Workspace cache fault and invalidation probes
     runs-on: ci-heavy
     enable-openid-connect: true
