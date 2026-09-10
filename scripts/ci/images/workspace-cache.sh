@@ -52,11 +52,17 @@ workspace_cache_validate() {
 }
 
 workspace_cache_command() {
+  workspace_cache_timed_command 3300s "$@"
+}
+
+workspace_cache_timed_command() {
+  local duration="$1"
+  shift
   local status=0
   # Waiting on a supervised background child lets Bash run its signal trap
   # immediately. The timeout owns the child's process group, including tee or
   # a Docker client blocked in a remote request. No caller process is signalled.
-  timeout --signal=TERM --kill-after=5s 3300s "$@" <&0 &
+  timeout --signal=TERM --kill-after=5s "$duration" "$@" <&0 &
   workspace_command_pid=$!
   wait "$workspace_command_pid" || status=$?
   workspace_command_pid=''

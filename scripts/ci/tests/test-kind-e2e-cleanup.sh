@@ -14,6 +14,8 @@ KIND_CONFIG="$FIXTURE/kind-config.yaml"
 KIND_GET_FAILURE=0
 KIND_DELETE_FAILURE=''
 DOCKER_PS_FAILURE=0
+# The fixture owns this transaction name even when hosted CI exports its own.
+export KIND_CLUSTER_NAME=codewire-e2e-ci
 
 cleanup_fixture() {
   rm -rf "$FIXTURE"

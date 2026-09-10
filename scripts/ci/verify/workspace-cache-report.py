@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Bounded, value-blind workspace cache measurements; no provider API client."""
+from datetime import datetime
+import hashlib
 import json
 import math
 import os
@@ -91,7 +93,94 @@ def sample(docker, container, directory, once=False):
             (directory / "metrics-error").write_text("resource sampler ended without an intentional clean stop\n")
 
 
-def logs(path, layers, warm=False, workspace=False):
+def history_identity(directory, builder):
+    metadata = json.loads((Path(directory) / "workspace-metadata.json").read_text())
+    reference = metadata.get("buildx.build.ref", "")
+    if not isinstance(builder, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{1,160}", builder) \
+            or not isinstance(reference, str) \
+            or not re.fullmatch(re.escape(f"{builder}/{builder}-node/") + r"[a-z0-9]{20,32}", reference):
+        raise ValueError("workspace history does not belong to the owned builder and node")
+    image = metadata.get("containerimage.config.digest", "")
+    if not isinstance(image, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        raise ValueError("workspace history metadata lacks its output image identity")
+    return {"build_ref": reference, "workspace_image_id": image}
+
+
+def capture_history(docker, builder, directory):
+    directory = Path(directory)
+    marker = directory / "workspace-history.json"
+    marker.unlink(missing_ok=True)
+    identity = history_identity(directory, builder)
+    path = directory / "workspace-progress.jsonl"
+    # Buildx's history lookup takes the solve ID, not its builder/node prefix.
+    # Its rawjson printer writes to stderr. Never substitute latest/^0.
+    with path.open("wb") as output:
+        subprocess.run([docker, "buildx", "history", "logs", "--builder", builder,
+                        "--progress", "rawjson", identity["build_ref"].rsplit("/", 1)[1]],
+                       stdout=subprocess.DEVNULL, stderr=output, check=True)
+    raw = path.read_bytes()
+    if not raw or len(raw) > 64 * 1024 * 1024:
+        raise ValueError("workspace history capture is empty or exceeds its bound")
+    marker.write_text(compact(dict(identity, sha256=hashlib.sha256(raw).hexdigest())) + "\n")
+
+
+def compiler_history(directory, header, receipt):
+    directory = Path(directory)
+    identity = history_identity(directory, header["builder_name"])
+    marker = json.loads((directory / "workspace-history.json").read_text())
+    raw = (directory / "workspace-progress.jsonl").read_bytes()
+    if not raw or len(raw) > 64 * 1024 * 1024 \
+            or marker != dict(identity, sha256=hashlib.sha256(raw).hexdigest()) \
+            or identity["workspace_image_id"] != receipt["workspace_image_id"]:
+        raise ValueError("workspace history capture is incomplete or belongs to another output")
+    vertices = {}
+    for line in raw.splitlines():
+        status = json.loads(line)
+        if not isinstance(status, dict) or not isinstance(status.get("vertexes", []), list):
+            raise ValueError("malformed workspace history status")
+        for vertex in status.get("vertexes", []):
+            if not isinstance(vertex, dict) or vertex.get("error"):
+                raise ValueError("workspace history contains a failed vertex")
+            digest = vertex.get("digest", "")
+            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) \
+                    or type(vertex.get("cached", False)) is not bool \
+                    or not isinstance(vertex.get("name", ""), str) \
+                    or not isinstance(vertex.get("inputs", []), list):
+                raise ValueError("malformed workspace history vertex")
+            if any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+                   for value in vertex.get("inputs", [])):
+                raise ValueError("malformed workspace history dependency")
+            for field in ("started", "completed"):
+                stamp = vertex.get(field)
+                if stamp is not None:
+                    if not isinstance(stamp, str):
+                        raise ValueError("malformed workspace history timestamp")
+                    datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            vertices.setdefault(digest, []).append(vertex)
+    compiler = [(digest, events) for digest, events in vertices.items()
+                if any(re.match(r"\[cw-builder [^]]+\] RUN\b", v.get("name", "")) for v in events)]
+    if len(compiler) != 1:
+        raise ValueError("workspace history lacks one exact compiler vertex")
+    digest, events = compiler[0]
+    if len({v["name"] for v in events if v.get("name")}) != 1:
+        raise ValueError("workspace compiler history changes vertex identity")
+    # BuildKit 0.29 LoadCache emits Cached=true, then lazy extraction can emit
+    # further events for the same digest without Cached or Inputs. Preserve the
+    # successful hit, but reject real Exec events (which retain dependency Inputs).
+    # Repeated initial graph records do not reset a started vertex. Only a
+    # later started interval can make its completion pending again.
+    started = [v for v in events if v.get("started")]
+    if not started or not started[-1].get("completed"):
+        raise ValueError("workspace compiler history is incomplete")
+    cached = any(v.get("cached") is True and v.get("started") and v.get("completed") for v in events)
+    executed = any(v.get("started") and v.get("inputs") and not v.get("cached", False) for v in events)
+    if header["case"].startswith("warm-") and (not cached or executed):
+        raise ValueError("warm workspace did not prove reuse of its compiler layer")
+    return dict(identity, compiler_vertex_digest=digest, compiler_layer_cached=bool(cached),
+                compiler_executed=bool(executed))
+
+
+def logs(path, layers, workspace=False):
     text = Path(path).read_text()
     if re.search(r"(?im)^#\d+ ERROR:|ignoring error|sccache: error|failed to configure s3 cache|"
                  r"error (?:reading|writing).*?(?:cache|blob|manifest)|failed to (?:export|import).*?cache", text):
@@ -116,8 +205,8 @@ def logs(path, layers, warm=False, workspace=False):
     if workspace:
         if len(floating) != 2 or any("CACHED" in lines or not any(line.startswith("DONE") for line in lines) for lines in floating):
             raise ValueError("both floating tool RUNs must execute")
-        if len(compiler) != 1 or (warm and "CACHED" not in compiler[0]):
-            raise ValueError("warm workspace did not reuse its seeded compiler layer")
+        if len(compiler) != 1:
+            raise ValueError("workspace log lacks one compiler vertex")
     statistics = {key: int(value) for key, value in re.findall(
         r"(?im)(Cache hits(?: \(Rust\))?|Cache misses|Cache read errors|Cache write errors|Cache errors)\s+(\d+)", text)}
     def duration(lines):
@@ -188,7 +277,8 @@ def finalize(directory, receipt_path):
     if set(version_values) != set(VERSION_COMMANDS) or any(not isinstance(v, str) or not v for v in version_values.values()):
         raise ValueError("floating tool inventory is incomplete")
     phases = {target: logs(directory / f"{target}-build.log", expected_modes["layers"],
-                           warm=case.startswith("warm-"), workspace=target == "workspace") for target in ("base", "workspace")}
+                           workspace=target == "workspace") for target in ("base", "workspace")}
+    phases["workspace"].update(compiler_history(directory, header, receipt))
     statistics = phases["workspace"]["compiler_cache_statistics"]
     if case == "compiler" and statistics.get("Cache hits (Rust)", statistics.get("Cache hits", 0)) <= 0:
         raise ValueError("compiler-only measurement did not prove reuse from its remote compiler cache")
@@ -273,6 +363,8 @@ if __name__ == "__main__":
             sample(*args, once=True)
         elif mode == "finalize" and len(args) == 2:
             finalize(*args)
+        elif mode == "capture-history" and len(args) == 3:
+            capture_history(*args)
         elif mode == "seed-id" and not args:
             value = seed_report(os.environ["CODEWIRE_WORKSPACE_CACHE_SEED_REPORT"],
                                 os.environ["CODEWIRE_EXPECTED_SOURCE_SHA"], os.environ["CODEWIRE_EXPECTED_SOURCE_TREE"])

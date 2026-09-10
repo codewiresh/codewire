@@ -2,6 +2,7 @@
 """Synthetic source/event/report contracts. No host Docker, provider, or build."""
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -160,6 +161,7 @@ class ReportTests(unittest.TestCase):
         compiler, layers = report.MODES[case]
         header = {"case": case, "source_sha": SOURCE, "source_tree": TREE, "architecture": "amd64",
                   "docker_daemon_id": "daemon-" + identity, "builder_container_id": identity * 64,
+                  "builder_name": "codewire-workspace-fixture-" + identity,
                   "pins": {"buildkit_image": "pinned", "job_image_id": "pinned"}, "seed_cache_id": SEED}
         (directory / "identity.json").write_text(json.dumps(header))
         receipt = {"source_sha": SOURCE, "source_tree": TREE, "architecture": "amd64",
@@ -182,7 +184,23 @@ class ReportTests(unittest.TestCase):
             "#2 [workspace-floating-tools 2/2] RUN go install\n#2 DONE 2.0s\n"
             "#3 [cw-builder 1/1] RUN codewire-rust-build cargo build\n#3 " + compile_result + "\n"
             "#3 1.0 Cache hits 4\n#3 1.0 Cache misses 2\n#3 1.0 Cache write errors 0\n" + export)
+        builder = header["builder_name"]
+        (directory / "workspace-metadata.json").write_text(json.dumps({
+            "buildx.build.ref": f"{builder}/{builder}-node/" + "a" * 25,
+            "containerimage.config.digest": receipt["workspace_image_id"]}))
+        self.history(directory, [{"digest": "sha256:" + "6" * 64, "inputs": ["sha256:" + "7" * 64],
+                                 "name": "[cw-builder 1/1] RUN codewire-rust-build cargo build",
+                                 "started": "2026-09-10T10:00:00Z", "completed": "2026-09-10T10:00:03Z",
+                                 "cached": case.startswith("warm-")}])
         return directory
+
+    def history(self, directory, events):
+        raw = b"".join((json.dumps({"vertexes": [event]}) + "\n").encode() for event in events)
+        (directory / "workspace-progress.jsonl").write_bytes(raw)
+        metadata = json.loads((directory / "workspace-metadata.json").read_text())
+        (directory / "workspace-history.json").write_text(json.dumps({
+            "build_ref": metadata["buildx.build.ref"], "workspace_image_id": metadata["containerimage.config.digest"],
+            "sha256": hashlib.sha256(raw).hexdigest()}))
 
     def finish(self, directory):
         case = json.loads((directory / "identity.json").read_text())["case"]
@@ -213,14 +231,14 @@ class ReportTests(unittest.TestCase):
 
     def test_missing_metrics_export_hits_and_drift_are_inconclusive(self):
         directory = self.fixture("warm-1", "5")
-        files = ("metrics-error", "resources.jsonl", "versions.json", "workspace-build.log", "base-build.log", "receipt.json")
+        files = ("metrics-error", "resources.jsonl", "versions.json", "workspace-progress.jsonl", "base-build.log", "receipt.json")
         baseline = {name: (directory / name).read_text() for name in files if (directory / name).exists()}
         mutations = {
             "metrics-error": "sampling failed",
             "resources.jsonl": "",
             "versions.json": json.dumps({key: "drift" for key in report.VERSION_COMMANDS}),
             "base-build.log": "#9 exporting cache to Amazon S3\n#9 ERROR: upload failed\n",
-            "workspace-build.log": baseline["workspace-build.log"].replace("#3 CACHED", "#3 DONE 3.0s"),
+            "workspace-progress.jsonl": baseline["workspace-progress.jsonl"].replace('"cached": true', '"cached": false'),
             "receipt.json": baseline["receipt.json"].replace('"layer_cache_fallback": false', '"layer_cache_fallback": true'),
         }
         for name, value in mutations.items():
@@ -233,6 +251,176 @@ class ReportTests(unittest.TestCase):
                     (directory / name).write_text(baseline[name])
                 else:
                     (directory / name).unlink()
+
+    def test_cached_completion_survives_lazy_extraction_and_plain_done(self):
+        directory = self.fixture("warm-1", "5")
+        cached = json.loads((directory / "workspace-progress.jsonl").read_text())["vertexes"][0]
+        extraction = {key: value for key, value in cached.items() if key not in ("cached", "inputs")}
+        self.history(directory, [cached, extraction])
+        path = directory / "workspace-build.log"
+        path.write_text(path.read_text().replace("#3 CACHED", "#3 DONE 16.2s"))
+        result = self.finish(directory)
+        self.assertTrue(result["phases"]["workspace"]["compiler_layer_cached"])
+        self.assertFalse(result["phases"]["workspace"]["compiler_executed"])
+        initial = {key: value for key, value in cached.items() if key not in ("cached", "started", "completed")}
+        self.history(directory, [initial, cached, extraction, initial])
+        self.assertTrue(self.finish(directory)["phases"]["workspace"]["compiler_layer_cached"])
+
+    def test_compiler_execution_missing_or_malformed_native_proof_never_passes(self):
+        directory = self.fixture("warm-1", "5")
+        cached = json.loads((directory / "workspace-progress.jsonl").read_text())["vertexes"][0]
+        execution = dict(cached, cached=False)
+        extraction = {key: value for key, value in execution.items() if key != "inputs"}
+        for events in (
+            [], [extraction], [execution, extraction], [cached, execution],
+            [dict(cached, cached="true")], [dict(cached, cached=1)],
+            [dict(cached, completed=None)], [dict(cached, completed=True)],
+            [dict(cached, error="failed")], [cached, dict(cached, completed=None)],
+            [dict(cached, name="[other 1/1] RUN unrelated")],
+            [cached, dict(cached, digest="sha256:" + "8" * 64)],
+            [dict(cached, inputs="invalid")], [dict(cached, digest="invalid")],
+        ):
+            with self.subTest(events=events):
+                self.history(directory, events)
+                output = io.StringIO()
+                with self.assertRaises(ValueError), contextlib.redirect_stdout(output):
+                    self.finish(directory)
+                self.assertFalse((directory / "result.json").exists())
+                self.assertEqual(output.getvalue(), "")
+
+    def test_history_requires_exact_owned_build_output_and_complete_capture(self):
+        directory = self.fixture("warm-1", "5")
+        metadata_path = directory / "workspace-metadata.json"
+        original = json.loads(metadata_path.read_text())
+        for metadata in (dict(original, **{"buildx.build.ref": "^0"}),
+                         dict(original, **{"buildx.build.ref": original["buildx.build.ref"].replace("fixture-5/", "fixture-6/")}),
+                         dict(original, **{"buildx.build.ref": original["buildx.build.ref"].replace("-node/", "-other/")}),
+                         dict(original, **{"containerimage.config.digest": "sha256:" + "8" * 64})):
+            metadata_path.write_text(json.dumps(metadata))
+            with self.assertRaises(ValueError):
+                self.finish(directory)
+            self.assertFalse((directory / "result.json").exists())
+        metadata_path.write_text(json.dumps(original))
+        for name in ("workspace-progress.jsonl", "workspace-history.json"):
+            path = directory / name
+            raw = path.read_bytes()
+            path.write_bytes(raw[:-2])
+            with self.assertRaises(ValueError):
+                self.finish(directory)
+            self.assertFalse((directory / "result.json").exists())
+            path.unlink()
+            with self.assertRaises(OSError):
+                self.finish(directory)
+            path.write_bytes(raw)
+
+    def test_capture_queries_only_owned_solve_and_failed_command_never_seals(self):
+        directory = self.fixture("warm-1", "5")
+        builder = "codewire-workspace-fixture-5"
+        raw = (directory / "workspace-progress.jsonl").read_bytes()
+        def capture(command, **kwargs):
+            self.assertEqual(command, ["fixture-docker", "buildx", "history", "logs", "--builder", builder,
+                                       "--progress", "rawjson", "a" * 25])
+            self.assertNotIn("timeout", kwargs)  # The caller's process-group supervisor owns the deadline.
+            self.assertTrue(kwargs["check"])
+            kwargs["stderr"].write(raw)
+        with mock.patch.object(report.subprocess, "run", side_effect=capture):
+            report.capture_history("fixture-docker", builder, directory)
+        self.finish(directory)
+        for error in (subprocess.CalledProcessError(1, "fixture"), subprocess.TimeoutExpired("fixture", 60)):
+            with mock.patch.object(report.subprocess, "run", side_effect=error), self.assertRaises(type(error)):
+                report.capture_history("fixture-docker", builder, directory)
+            self.assertFalse((directory / "workspace-history.json").exists())
+            with self.assertRaises(OSError):
+                self.finish(directory)
+            self.assertFalse((directory / "result.json").exists())
+
+    def test_history_capture_timeout_kills_plugin_descendants_without_acceptance(self):
+        import signal
+        import sys
+        import time
+
+        directory = self.fixture("warm-1", "5")
+        builder = "codewire-workspace-fixture-5"
+        temporary_parent = ROOT / ".tmp"
+        temporary_parent.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="workspace-history-timeout-", dir=temporary_parent) as temporary:
+            private = Path(temporary)
+            binary = private / "docker"
+            (private / "expected.jsonl").write_bytes((directory / "workspace-progress.jsonl").read_bytes())
+            binary.write_text("""#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+private = Path(__file__).parent
+plugin = sys.argv[1:] == ["--plugin"]
+if not plugin:
+    assert sys.argv[1:] == ["buildx", "history", "logs", "--builder",
+                           "codewire-workspace-fixture-5", "--progress", "rawjson", "a" * 25]
+pid = os.getpid()
+start = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+(private / ("plugin.pid" if plugin else "docker.pid")).write_text(json.dumps([pid, start]))
+if plugin:
+    time.sleep(30)
+else:
+    sys.stderr.buffer.write((private / "expected.jsonl").read_bytes())
+    sys.stderr.buffer.flush()
+    child = subprocess.Popen([sys.executable, __file__, "--plugin"])
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        child.wait()
+    finally:
+        child.wait(timeout=2)
+""")
+            binary.chmod(0o700)
+
+            def live_pid(path):
+                if not path.exists():
+                    return None
+                pid, start = json.loads(path.read_text())
+                try:
+                    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                except FileNotFoundError:
+                    return None
+                return pid if fields[19] == start and fields[0] != "Z" else None
+
+            pid_paths = [private / "plugin.pid", private / "docker.pid"]
+            try:
+                completed = subprocess.run([
+                    "bash", "-euo", "pipefail", "-c",
+                    'source "$1"; workspace_cache_timed_command 1s "$2" "$3" capture-history "$4" "$5" "$6"',
+                    "history-timeout-fixture", str(ROOT / "scripts/ci/images/workspace-cache.sh"),
+                    sys.executable, str(ROOT / "scripts/ci/verify/workspace-cache-report.py"),
+                    str(binary), builder, str(directory),
+                ], cwd=ROOT, capture_output=True, text=True, timeout=10)
+                self.assertEqual(completed.returncode, 124, completed.stderr)
+                self.assertTrue(all(path.exists() for path in pid_paths), "Docker and plugin must both have started")
+                deadline = time.monotonic() + 2
+                while any(live_pid(path) for path in pid_paths) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual([live_pid(path) for path in pid_paths], [None, None])
+                self.assertEqual((directory / "workspace-progress.jsonl").read_bytes(),
+                                 (private / "expected.jsonl").read_bytes())
+                self.assertFalse((directory / "workspace-history.json").exists())
+                self.assertFalse((directory / "result.json").exists())
+                self.assertNotIn("CODEWIRE_WORKSPACE_CACHE_REPORT=", completed.stdout + completed.stderr)
+                with self.assertRaises(OSError):
+                    self.finish(directory)
+                self.assertFalse((directory / "result.json").exists())
+            finally:
+                for path in pid_paths:
+                    pid = live_pid(path)
+                    if pid is not None:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     def test_floating_cache_hit_and_sccache_errors_fail(self):
         directory = self.fixture("warm-1", "5")

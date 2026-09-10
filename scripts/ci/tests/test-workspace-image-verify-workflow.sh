@@ -271,6 +271,12 @@ case "${1:-} ${2:-}" in
   'buildx create')
     printf 'workspace-verifier-%s\n' "$FAKE_BUILDER_SUFFIX"
     ;;
+  'buildx history')
+    [[ "$3 $4 $6 $7 $8" == 'logs --builder --progress rawjson aaaaaaaaaaaaaaaaaaaaaaaaa' ]] || exit 97
+    [[ "$5/$5-node/$8" == "$(<"$FAKE_IMAGE_ID.build-ref")" ]] || exit 97
+    [[ "${FAKE_FAIL:-}" != history-failure ]] || exit 47
+    printf '{"vertexes":[{"digest":"sha256:%064d","inputs":["sha256:%064d"],"name":"[cw-builder 1/1] RUN cargo build","started":"2026-09-10T10:00:00Z","completed":"2026-09-10T10:00:01Z"}]}\n' 6 7 >&2
+    ;;
   'buildx build')
     if [[ "${FAKE_FAIL:-}" == cancel ]]; then
       # The actual verifier owns this pipeline. Deliver TERM to that process,
@@ -280,10 +286,12 @@ case "${1:-} ${2:-}" in
     fi
     metadata_file=''
     archive_file=''
+    builder=''
     : >"$FAKE_IMAGE_LABELS.next"
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --metadata-file) metadata_file="$2"; shift ;;
+        --builder) builder="$2"; shift ;;
         --output)
           if [[ "$2" == type=oci,dest=*.oci.tar ]]; then archive_file="${2#type=oci,dest=}"; fi
           shift ;;
@@ -304,7 +312,7 @@ case "${1:-} ${2:-}" in
     fi
     if [[ -n "${CODEWIRE_WORKSPACE_CACHE_CASE:-}" ]]; then
       sleep 0.1
-      if [[ -z "$metadata_file" ]]; then
+      if [[ -n "$archive_file" ]]; then
         if [[ "${FAKE_FAIL:-}" == sampler-bookkeeping ]]; then
           mkdir "$CODEWIRE_WORKSPACE_CACHE_REPORT_DIR/sampler-stop-request"
         fi
@@ -332,6 +340,14 @@ if os.environ.get('FAKE_ARCHIVE_VARIANT') == 'true':
     })
 fixture['write_archive'](Path(sys.argv[2]), config=config, change=change)
 Path(sys.argv[3]).write_text('sha256:' + hashlib.sha256(config).hexdigest())
+PY
+      printf '%s/%s-node/aaaaaaaaaaaaaaaaaaaaaaaaa' "$builder" "$builder" >"$FAKE_IMAGE_ID.build-ref"
+      python3 - "$metadata_file" "$FAKE_IMAGE_ID" <<'PY'
+import json, sys
+from pathlib import Path
+image = Path(sys.argv[2])
+Path(sys.argv[1]).write_text(json.dumps({'containerimage.config.digest': image.read_text(),
+                                       'buildx.build.ref': Path(str(image) + '.build-ref').read_text()}))
 PY
     fi
     ;;
@@ -592,7 +608,7 @@ done
 
 # Exercise the complete measurement lifecycle against the absolute fake client.
 # Reports are finalized only after the job-owned credential finisher succeeds.
-for measurement in seed sampler-crash sampler-bookkeeping; do
+for measurement in seed sampler-crash sampler-bookkeeping history-failure; do
   status=0
   rm -f "$work/sampler-process"
   : >"$work/docker.log"
@@ -606,7 +622,7 @@ for measurement in seed sampler-crash sampler-bookkeeping; do
     state="$(ps -o stat= -p "$sampler_process" || true)"
     [[ -z "$state" || "$state" == Z* ]] || { kill -TERM "$sampler_process"; fail 'measurement left a live sampler'; }
   fi
-  if [[ "$measurement" == sampler-* ]]; then
+  if [[ "$measurement" == sampler-* || "$measurement" == history-failure ]]; then
     [[ "$status" != 0 && ! -e "$fixture_receipt" && ! -e "$directory/result.json" ]] || fail 'sampler failure emitted an acceptance marker'
     continue
   fi

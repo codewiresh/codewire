@@ -62,6 +62,7 @@ workspace_archive="$archive_work/workspace.oci.tar"
 previous_receipt="$archive_work/previous-receipt.json"
 base_layout="$work/base.oci"
 base_metadata="$work/base-metadata.json"
+workspace_metadata="$build_log_root/workspace-metadata.json"
 workspace_id=''
 base_digest=''
 contract_container=''
@@ -140,10 +141,10 @@ if [[ -n "$report_dir" ]]; then
   workspace_cache_command "$docker_bin" version --format '{{.Client.Version}}' >"$report_dir/docker-version"
   workspace_cache_command "$docker_bin" buildx version >"$report_dir/buildx-version"
   workspace_cache_command "$docker_bin" container inspect "${HOSTNAME:?}" --format '{{.Image}}' >"$report_dir/job-image-id"
-  python3 - "$report_dir" "$identity" "$builder_container" "$WORKSPACE_BUILDKIT_IMAGE" "$HOSTNAME" <<'PY'
+  python3 - "$report_dir" "$identity" "$builder_container" "$WORKSPACE_BUILDKIT_IMAGE" "$HOSTNAME" "$builder" <<'PY'
 import json, os, re, sys
 from pathlib import Path
-directory, identity, builder, pin, job_container = sys.argv[1:]
+directory, identity, builder, pin, job_container, builder_name = sys.argv[1:]
 directory = Path(directory)
 value = json.loads(identity)
 daemon = (directory / "docker-id").read_text().strip()
@@ -152,7 +153,7 @@ if not re.fullmatch(r"[A-Za-z0-9:_-]{8,128}", daemon) or not re.fullmatch(r"sha2
     raise SystemExit("invalid worker identity")
 header = {key: value[key] for key in ("source_sha", "source_tree", "architecture")}
 header.update(case=os.environ["CODEWIRE_WORKSPACE_CACHE_CASE"],
-              docker_daemon_id=daemon, builder_container_id=builder,
+              docker_daemon_id=daemon, builder_container_id=builder, builder_name=builder_name,
               job_container_id=job_container, job_id=os.environ["GITHUB_JOB"],
               run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
               seed_cache_id=os.environ["CODEWIRE_WORKSPACE_CACHE_SEED_ID"],
@@ -197,6 +198,7 @@ readonly base_digest
 
 workspace_cache_build workspace "$source_tree" "$architecture" "$build_log_root/workspace-build.log" \
   --pull \
+  --metadata-file "$workspace_metadata" \
   --build-context "$base_context_name=oci-layout://$base_layout@$base_digest" \
   --tag "$workspace_tag" \
   --label "org.opencontainers.image.revision=$source_id" \
@@ -216,6 +218,9 @@ chmod 0400 "$workspace_archive"
 # Loaded runtime bytes do not depend on BuildKit. Remove its provider file and
 # state before any runtime inspection or potentially slow agent command.
 if [[ -n "$report_dir" ]]; then
+  # Plain progress can hide a cache hit behind later lazy layer extraction.
+  # Capture this exact completed build's native events before deleting its state.
+  workspace_cache_timed_command 60s python3 "$report_tool" capture-history "$docker_bin" "$builder" "$report_dir"
   stop_sampler
   workspace_cache_command python3 "$report_tool" sample-once "$docker_bin" "$builder_container" "$report_dir"
 fi
