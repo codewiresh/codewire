@@ -7,10 +7,11 @@ import { seedSyntheticIdentity, TEST_PASSWORD_HASH } from "./synthetic-users";
 // Run only against an explicitly supplied disposable, migrated test database.
 // Ordinary fixture unit tests never discover a database from ambient app config.
 const databaseUrl = process.env.CODEWIRE_DASHBOARD_FIXTURE_DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error("CODEWIRE_DASHBOARD_FIXTURE_DATABASE_URL must name a disposable migrated test database");
+}
 
-test("synthetic credential reseeding resets only its identity without duplicating accounts", {
-  skip: !databaseUrl,
-}, async () => {
+test("synthetic credential reseeding resets only its identity without duplicating accounts", async () => {
   const sql = postgres(databaseUrl!);
   const email = `e2e-fixture-${randomBytes(16).toString("hex")}@codewire.sh`;
   try {
