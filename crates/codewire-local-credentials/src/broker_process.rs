@@ -1,7 +1,17 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use codewire_access::{CredentialAuthKind, EnvironmentId};
+use codewire_access::{EnvironmentId, HttpProvider};
 use thiserror::Error;
+
+/// Exact owner-selected sources for one environment broker. Absence of a
+/// local profile explicitly selects none; it never discovers an ambient one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EnvironmentBrokerSelection {
+    pub local_profile: Option<codewire_access::EnvironmentAccessBinding>,
+    pub projection: Option<crate::LocalEnvironmentProjectionBinding>,
+    pub platform: Option<crate::PlatformCredentialBinding>,
+}
 
 /// Material-free launch description for one environment generation. Provider
 /// values and protected-store references are structurally absent.
@@ -10,24 +20,23 @@ pub struct LocalBrokerProcessConfig {
     pub environment_id: EnvironmentId,
     pub environment_generation: u64,
     pub environment_name: String,
-    pub supervisor_socket: PathBuf,
-    pub credential_authentication_kind: CredentialAuthKind,
+    pub runner_socket: PathBuf,
+    pub http_providers: BTreeSet<HttpProvider>,
+    /// The child is a material-free platform relay, not a local store reader.
+    pub platform_delegated: bool,
 }
 
 impl LocalBrokerProcessConfig {
     pub(crate) fn validate(&self) -> Result<(), LocalBrokerSpawnError> {
         if self.environment_generation == 0
+            || (self.platform_delegated && !self.http_providers.is_empty())
             || !valid_environment_name(&self.environment_name)
-            || !matches!(
-                self.credential_authentication_kind,
-                CredentialAuthKind::ApiKey | CredentialAuthKind::OAuth
-            )
-            || !self.supervisor_socket.is_absolute()
+            || !self.runner_socket.is_absolute()
             || self
-                .supervisor_socket
+                .runner_socket
                 .file_name()
                 .and_then(|name| name.to_str())
-                != Some("supervisor.sock")
+                != Some(format!("{}.sock", self.environment_id).as_str())
         {
             return Err(LocalBrokerSpawnError::InvalidConfiguration);
         }
@@ -81,8 +90,9 @@ mod tests {
             environment_id: EnvironmentId::parse("environment-id").unwrap(),
             environment_generation: 1,
             environment_name: name.to_owned(),
-            supervisor_socket: PathBuf::from("/run/user/1000/codewire/supervisor.sock"),
-            credential_authentication_kind: CredentialAuthKind::ApiKey,
+            runner_socket: PathBuf::from("/run/user/1000/codewire/runners/environment-id.sock"),
+            http_providers: BTreeSet::from([HttpProvider::OpenAiApiKey]),
+            platform_delegated: false,
         }
     }
 
@@ -108,12 +118,20 @@ mod tests {
     }
 
     #[test]
-    fn launch_rejects_unimplemented_authentication_kinds() {
+    fn launch_accepts_application_only_and_exact_supported_provider_sets() {
         let mut config = config("project");
-        config.credential_authentication_kind = CredentialAuthKind::AccessToken;
-        assert_eq!(
-            config.validate(),
-            Err(LocalBrokerSpawnError::InvalidConfiguration)
-        );
+        config.http_providers.clear();
+        config.validate().unwrap();
+        for provider in [
+            HttpProvider::OpenAiApiKey,
+            HttpProvider::CodexOAuth,
+            HttpProvider::AnthropicApiKey,
+            HttpProvider::GitHubOAuth,
+        ] {
+            assert_eq!(HttpProvider::parse(provider.as_str()), Some(provider));
+            config.http_providers.insert(provider);
+            config.validate().unwrap();
+        }
+        assert!(HttpProvider::parse("https://arbitrary-provider.invalid").is_none());
     }
 }

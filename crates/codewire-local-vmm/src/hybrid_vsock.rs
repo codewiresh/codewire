@@ -307,6 +307,8 @@ mod tests {
                     auth_token: DaemonAuthToken::new("daemon-auth-token-for-hybrid-test").unwrap(),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
+                    managed_credential_clients: Default::default(),
+                    launch_projection: None,
                 },
                 tokio_stream::wrappers::ReceiverStream::new(incoming_rx),
                 async {
@@ -392,6 +394,8 @@ mod tests {
                     auth_token: DaemonAuthToken::new("correct-daemon-token").unwrap(),
                     process_execution: codewire_daemon::execution::ProcessExecution::Native,
                     credential_bridge: None,
+                    managed_credential_clients: Default::default(),
+                    launch_projection: None,
                 },
                 tokio_stream::once(Ok::<_, io::Error>(stream)),
                 async {

@@ -1,4 +1,5 @@
-//! Material-free HTTP/credential-frame bridge shared by local and platform ingress.
+//! HTTP/credential-frame bridge shared by local and platform ingress, with a
+//! separate typed operations for launcher ciphertext and selected SSH signing.
 //!
 //! This crate does not authenticate peers, authorize credentials, bind listeners,
 //! or access provider material. The consumer authenticates its transport and
@@ -17,10 +18,12 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
+#[cfg(test)]
+use axum::http::Method;
 use axum::http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING, UPGRADE};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use bytes::Bytes as WireBytes;
-use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::codewire::bridge::v1;
 use codewire_gateway_proto::{
     CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_BYTES,
     CREDENTIAL_BRIDGE_MAX_HEADER_NAME_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_VALUE_BYTES,
@@ -28,11 +31,24 @@ use codewire_gateway_proto::{
     CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES, CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES,
     CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
 use uuid::Uuid;
+
+mod http_ingress;
+pub use http_ingress::{
+    ClassifiedHttpRequest, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
+    classify_http_request,
+};
+mod projection;
+pub use projection::RelayedEnvironmentProjection;
+use projection::{PendingProjection, fail_projections, take_projections};
+mod ssh;
+use ssh::{PendingSsh, fail_ssh, take_ssh};
+mod ssh_ingress;
+pub use ssh_ingress::{SshAgentRelay, serve_ssh_agent};
 
 const HOST_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -57,12 +73,27 @@ pub struct CredentialBridge {
     environment_id: Uuid,
     environment_generation: u64,
     inner: Arc<Mutex<BridgeState>>,
+    host_admitted: Arc<Notify>,
 }
 
 struct BridgeState {
     next_epoch: u64,
     active: Option<ActiveHost>,
     pending: BTreeMap<String, PendingResponse>,
+    projections: BTreeMap<String, PendingProjection>,
+    ssh: BTreeMap<String, PendingSsh>,
+}
+
+impl BridgeState {
+    fn in_flight(&self) -> usize {
+        self.pending.len() + self.projections.len() + self.ssh.len()
+    }
+
+    fn contains_request(&self, request_id: &str) -> bool {
+        self.pending.contains_key(request_id)
+            || self.projections.contains_key(request_id)
+            || self.ssh.contains_key(request_id)
+    }
 }
 
 struct ActiveHost {
@@ -109,7 +140,7 @@ pub struct PreparedBridgeConnection {
 }
 
 /// Owned response driver. The consumer must run it for the transport lifetime.
-/// Normal shutdown detaches the epoch and fails pending HTTP requests. Dropping
+/// Normal shutdown detaches the epoch and fails all pending operations. Dropping
 /// an unrun/cancelled driver also schedules material-free epoch cleanup when a
 /// Tokio runtime is available; it never owns broker-side refresh work.
 #[must_use = "run this driver for the lifetime of the admitted transport"]
@@ -157,7 +188,10 @@ impl CredentialBridge {
                 next_epoch: 0,
                 active: None,
                 pending: BTreeMap::new(),
+                projections: BTreeMap::new(),
+                ssh: BTreeMap::new(),
             })),
+            host_admitted: Arc::new(Notify::new()),
         })
     }
 
@@ -192,8 +226,10 @@ impl CredentialBridge {
         ))
     }
 
-    /// Serve only the bounded Responses route. Authentication and removal of
-    /// identity headers belong to the ingress adapter, before this method.
+    /// Serve only the closed managed HTTP families in [`classify_http_request`].
+    /// Authentication, endpoint authority validation and removal of identity
+    /// headers belong to the ingress adapter, before this method. The broker
+    /// remains the final operation, policy and credential-lease authority.
     pub async fn respond(&self, request: Request<Body>) -> Response<Body> {
         match prepare_guest_request(request).await {
             Ok(request) => match self.submit(request).await {
@@ -344,20 +380,30 @@ impl CredentialBridge {
                 fail_pending(vec![pending], reason);
                 Ok(())
             }
+            Some(Payload::EnvironmentProjection(response)) => {
+                self.apply_projection_response(epoch, response).await
+            }
+            Some(Payload::Ssh(response)) => self.apply_ssh_response(epoch, response).await,
             Some(Payload::Open(_)) | None => Err(invalid_host_frame()),
         }
     }
 
     async fn detach(&self, epoch: u64) {
-        let stale = {
+        let (stale, projections, ssh) = {
             let mut state = self.inner.lock().await;
             if state.active.as_ref().map(|active| active.epoch) != Some(epoch) {
                 return;
             }
             state.active = None;
-            take_pending(&mut state, |pending| pending.epoch == epoch)
+            (
+                take_pending(&mut state, |pending| pending.epoch == epoch),
+                take_projections(&mut state, epoch),
+                take_ssh(&mut state, epoch),
+            )
         };
         fail_pending(stale, BridgeFailure::Unavailable);
+        fail_projections(projections);
+        fail_ssh(ssh);
     }
 
     async fn submit(
@@ -371,10 +417,10 @@ impl CredentialBridge {
         let (epoch, output) = {
             let mut state = self.inner.lock().await;
             let active = state.active.as_ref().ok_or(BridgeFailure::Unavailable)?;
-            if state.pending.len() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
+            if state.in_flight() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
                 return Err(BridgeFailure::Unavailable);
             }
-            if state.pending.contains_key(&request_id) {
+            if state.contains_request(&request_id) {
                 return Err(BridgeFailure::Unavailable);
             }
             let epoch = active.epoch;
@@ -429,14 +475,25 @@ impl CredentialBridge {
     async fn cancel(&self, request_id: &str, epoch: u64) {
         let output = {
             let mut state = self.inner.lock().await;
-            let Some(pending) = state.pending.get_mut(request_id) else {
-                return;
-            };
-            if pending.epoch != epoch || pending.phase == ResponsePhase::Cancelled {
+            if let Some(pending) = state.projections.get_mut(request_id) {
+                if pending.epoch != epoch || pending.response.is_none() {
+                    return;
+                }
+                drop(pending.response.take());
+            } else if let Some(pending) = state.ssh.get_mut(request_id) {
+                if pending.epoch != epoch || pending.response.is_none() {
+                    return;
+                }
+                drop(pending.response.take());
+            } else if let Some(pending) = state.pending.get_mut(request_id) {
+                if pending.epoch != epoch || pending.phase == ResponsePhase::Cancelled {
+                    return;
+                }
+                pending.phase = ResponsePhase::Cancelled;
+                drop(pending.start.take());
+            } else {
                 return;
             }
-            pending.phase = ResponsePhase::Cancelled;
-            drop(pending.start.take());
             state
                 .active
                 .as_ref()
@@ -462,7 +519,7 @@ impl PreparedBridgeConnection {
         S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Send + 'static,
     {
         let (cancel, cancelled) = oneshot::channel();
-        let (epoch, replaced, stale) = {
+        let (epoch, replaced, stale, projections, ssh) = {
             let mut state = self.bridge.inner.lock().await;
             if self.output.is_closed() {
                 return Err(Status::unavailable(
@@ -480,12 +537,19 @@ impl PreparedBridgeConnection {
                 cancel,
             });
             let stale = take_pending(&mut state, |_| true);
-            (epoch, replaced, stale)
+            let projections = std::mem::take(&mut state.projections)
+                .into_values()
+                .collect();
+            let ssh = std::mem::take(&mut state.ssh).into_values().collect();
+            (epoch, replaced, stale, projections, ssh)
         };
+        self.bridge.host_admitted.notify_waiters();
         if let Some(replaced) = replaced {
             let _ = replaced.cancel.send(());
         }
         fail_pending(stale, BridgeFailure::Unavailable);
+        fail_projections(projections);
+        fail_ssh(ssh);
         Ok(CredentialBridgeConnection {
             bridge: self.bridge,
             epoch,
@@ -581,23 +645,23 @@ impl Stream for CredentialBridgeOutput {
 async fn prepare_guest_request(
     request: Request<Body>,
 ) -> Result<v1::CredentialBridgeRequest, StatusCode> {
-    if request.method() != Method::POST
-        || request.uri().path() != "/v1/responses"
-        || request.uri().query().is_some()
-        || request.uri().scheme().is_some()
-        || request.uri().authority().is_some()
-    {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let classified = classify_http_request(request.method(), request.uri(), request.headers())?;
+    let capability_slot = classified.capability_slot.to_owned();
+    let route = classified.route.to_owned();
+    let path = classified.path.to_owned();
+    let query = classified.query.unwrap_or_default().to_owned();
+    let method = request.method().as_str().to_owned();
     let headers = headers_to_proto(request.headers()).map_err(|_| StatusCode::BAD_REQUEST)?;
     let body = to_bytes(request.into_body(), CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     Ok(v1::CredentialBridgeRequest {
+        capability_slot,
+        route,
         request_id: uuid::Uuid::new_v4().to_string(),
-        method: Method::POST.as_str().to_owned(),
-        path: "/responses".to_owned(),
-        query: String::new(),
+        method,
+        path,
+        query,
         headers,
         body: body.to_vec(),
     })

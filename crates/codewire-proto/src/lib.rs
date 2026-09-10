@@ -4,7 +4,8 @@
 //! Message types (buffa), Connect service traits, and — behind the default
 //! `client` feature — Connect client stubs are generated at build time by
 //! `connectrpc-build` from the schema-of-record protos. Packages map to modules:
-//! `codewire.v1` is [`codewire::v1`]; `codewire.console.v1` is
+//! `codewire.v1` is [`codewire::v1`]; material-free shared frames in
+//! `codewire.bridge.v1` are [`codewire::bridge::v1`]; `codewire.console.v1` is
 //! [`codewire::console::v1`]; `codewire.internal.v1` is
 //! [`codewire::internal::v1`]; `codewire.testing.v1` (the
 //! never-routed Connect-infrastructure probe, doc 03 D8) is
@@ -23,6 +24,34 @@ connectrpc::include_generated!();
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
+
+    #[test]
+    fn shared_ssh_frames_redact_signing_inputs_and_signatures() {
+        use super::codewire::bridge::v1::{CredentialSshSignRequest, CredentialSshSignature};
+
+        let marker = b"synthetic-ssh-signing-debug-canary".to_vec();
+        let numeric = format!("{marker:?}");
+        for rendered in [
+            format!(
+                "{:?}",
+                CredentialSshSignRequest {
+                    data: marker.clone(),
+                    ..Default::default()
+                }
+            ),
+            format!(
+                "{:?}",
+                CredentialSshSignature {
+                    signature_blob: marker,
+                    ..Default::default()
+                }
+            ),
+        ] {
+            assert!(!rendered.contains("synthetic-ssh-signing-debug-canary"));
+            assert!(!rendered.contains(&numeric));
+            assert!(rendered.contains("[REDACTED]"));
+        }
+    }
 
     use super::codewire::console::v1::{
         ACCOUNT_SERVICE_SERVICE_NAME, BILLING_SERVICE_SERVICE_NAME,
@@ -46,9 +75,9 @@ mod tests {
         MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshKeyValue, MeshNetwork, MeshNode,
         MeshNodeEnrollment, ORGANIZATION_SERVICE_SERVICE_NAME, OrgMember, OrgRole, Organization,
         OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME, PRESET_SERVICE_SERVICE_NAME, Port,
-        PortAccess, Preset, PreviewWorkloadSecretResolutionResponse, ProjectAccessBinding,
-        ProjectAgents, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
-        ProjectSkillSource, ProjectSpec, RedeemMeshNodeEnrollmentRequest,
+        PortAccess, Preset, PreviewWorkloadSecretResolutionResponse, ProjectAgents,
+        ProjectCredentialBinding, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
+        ProjectSkillSource, ProjectSpec, ProjectStoragePlacement, RedeemMeshNodeEnrollmentRequest,
         RedeemMeshNodeEnrollmentResponse, RepositorySpec, ResolvedWorkloadSecretMetadata,
         SECRET_SERVICE_PREVIEW_WORKLOAD_SECRET_RESOLUTION_SPEC, SECRET_SERVICE_SERVICE_NAME,
         SecretMetadata, SetMeshKeyValueRequest, SetProjectSecretRequest, SetSecretRequest,
@@ -360,13 +389,13 @@ mod tests {
             })
             .into(),
             secrets: Some(ProjectSecretBindings {
-                project: "development".into(),
-                user: true,
+                project: "platform:development".into(),
+                user: Some(ProjectStoragePlacement::Platform.into()),
                 ..Default::default()
             })
             .into(),
-            access: Some(ProjectAccessBinding {
-                profile: "user/work".into(),
+            credentials: Some(ProjectCredentialBinding {
+                profile: "platform:work".into(),
                 ..Default::default()
             })
             .into(),
@@ -382,7 +411,13 @@ mod tests {
         assert_eq!(json["repositories"][0]["revision"], "deadbeef");
         assert!(json["repositories"][0].get("url").is_none());
         assert!(json["repositories"][0].get("mountPath").is_none());
-        assert_eq!(json["access"]["profile"], "user/work");
+        assert_eq!(json["credentials"]["profile"], "platform:work");
+        assert_eq!(json["secrets"]["project"], "platform:development");
+        assert_eq!(
+            json["secrets"]["user"],
+            "PROJECT_STORAGE_PLACEMENT_PLATFORM"
+        );
+        assert!(json.get("access").is_none());
         let encoded = json.to_string();
         for forbidden in [
             "hostPath",

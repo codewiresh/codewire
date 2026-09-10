@@ -16,6 +16,7 @@ name = "codewire-vmm-guest-probe"
 path = "src/main.rs"
 
 [dependencies]
+codewire-access = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
@@ -24,10 +25,10 @@ zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 anyhow = { workspace = true }
-codewire-access = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-project = { workspace = true }
+codewire-workload-secrets = { workspace = true }
 flate2 = { workspace = true }
 libc = "0.2"
 oci-spec = { workspace = true }

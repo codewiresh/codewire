@@ -80,13 +80,6 @@ func fromProtoAccessProfile(profile *codewirev1.AccessProfile) (*AccessProfile, 
 	return result, nil
 }
 
-func toProtoAccessProfileBinding(binding EnvironmentAccessProfileBinding) (*codewirev1.EnvironmentAccessProfileBinding, error) {
-	if err := accessProfileRevision(binding.AccessProfileRevision); err != nil {
-		return nil, err
-	}
-	return &codewirev1.EnvironmentAccessProfileBinding{EnvironmentId: binding.EnvironmentID, AccessProfileId: binding.AccessProfileID, AccessProfileRevision: binding.AccessProfileRevision}, nil
-}
-
 func fromProtoAccessProfileBinding(binding *codewirev1.EnvironmentAccessProfileBinding) (*EnvironmentAccessProfileBinding, error) {
 	if binding == nil {
 		return nil, fmt.Errorf("codewire: access profile response omitted binding")
@@ -197,35 +190,4 @@ func (s *AccessProfileService) GetEnvironmentBinding(ctx context.Context, enviro
 		}
 	}
 	return result, nil
-}
-
-// SetEnvironmentBinding requires explicit consent for this exact selection.
-// A nil expectedBinding requires no binding; a nonnil value performs exact CAS.
-func (s *AccessProfileService) SetEnvironmentBinding(ctx context.Context, binding EnvironmentAccessProfileBinding, expectedBinding *EnvironmentAccessProfileBinding, confirmPersonalCredentials bool) (*EnvironmentAccessProfileBinding, error) {
-	value, err := toProtoAccessProfileBinding(binding)
-	if err != nil {
-		return nil, err
-	}
-	request := &codewirev1.SetEnvironmentAccessProfileRequest{Binding: value, ConfirmPersonalCredentials: confirmPersonalCredentials}
-	if expectedBinding != nil {
-		request.ExpectedBinding, err = toProtoAccessProfileBinding(*expectedBinding)
-		if err != nil {
-			return nil, err
-		}
-	}
-	response, err := s.client.accessProfiles.SetEnvironmentAccessProfile(ctx, connect.NewRequest(request))
-	if err != nil {
-		return nil, connectSDKError(err)
-	}
-	return fromProtoAccessProfileBinding(response.Msg.GetBinding())
-}
-
-// ClearEnvironmentBinding removes only the exact caller-supplied binding.
-func (s *AccessProfileService) ClearEnvironmentBinding(ctx context.Context, expectedBinding EnvironmentAccessProfileBinding) error {
-	value, err := toProtoAccessProfileBinding(expectedBinding)
-	if err != nil {
-		return err
-	}
-	_, err = s.client.accessProfiles.ClearEnvironmentAccessProfile(ctx, connect.NewRequest(&codewirev1.ClearEnvironmentAccessProfileRequest{ExpectedBinding: value}))
-	return connectSDKError(err)
 }

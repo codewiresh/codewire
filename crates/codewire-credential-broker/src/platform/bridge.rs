@@ -1,6 +1,6 @@
 //! Private generated-service adapter, not a listener or production authenticator.
 //!
-//! The owner supplies the accepted TLS/Pod-bound identity implementation and
+//! The owner supplies the accepted trusted runtime identity implementation and
 //! isolated store/upstream handles. It must call `shutdown` and await it before
 //! dropping those dependencies. Dropping a server or runtime is not a promise
 //! that provider-side rotation or protected-store publication was drained.
@@ -20,8 +20,9 @@ use codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use codewire_gateway_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
 };
-use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::codewire::bridge::v1;
 use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformCredentialStore};
+use futures::{Stream, StreamExt, stream::BoxStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
@@ -87,9 +88,11 @@ struct ServiceState<A, U> {
     profiles: PlatformAccessProfileStore,
     upstream: U,
     permits: Arc<Semaphore>,
-    accepting: Mutex<bool>,
+    accepting: Arc<Mutex<bool>>,
     workers: TaskTracker,
     shutdown: CancellationToken,
+    #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+    ssh: Option<Arc<super::ssh::Service>>,
 }
 
 /// One isolated broker service owner. Clones share admission limits, shutdown
@@ -124,11 +127,33 @@ where
                 profiles,
                 upstream,
                 permits: Arc::new(Semaphore::new(PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS)),
-                accepting: Mutex::new(true),
+                accepting: Arc::new(Mutex::new(true)),
                 workers: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
+                #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+                ssh: None,
             }),
         }
+    }
+
+    /// Explicit trusted process composition only, before cloning or serving.
+    /// No executable lookup or catalog activation is inferred by this seam.
+    #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+    pub fn with_ssh_agent_owner(
+        mut self,
+        owner: Arc<crate::ssh_agent::SshAgentOwner>,
+    ) -> Result<Self, PlatformRuntimeError> {
+        let state = Arc::get_mut(&mut self.state).ok_or(PlatformRuntimeError::Denied)?;
+        if state.ssh.is_some() || state.shutdown.is_cancelled() {
+            return Err(PlatformRuntimeError::Denied);
+        }
+        state.ssh = Some(super::ssh::Service::new(
+            owner,
+            state.accepting.clone(),
+            state.workers.clone(),
+            state.shutdown.clone(),
+        ));
+        Ok(self)
     }
 
     /// Register only this private service, with the existing frame ceilings.
@@ -138,6 +163,60 @@ where
         CredentialBrokerServiceServer::new(self)
             .max_decoding_message_size(CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES)
             .max_encoding_message_size(CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES)
+    }
+
+    /// Admit an already-authenticated transport inside this same service owner.
+    /// This is trusted process composition, not authentication of guest scope.
+    ///
+    /// The lazy future must include first selection-frame consumption and all
+    /// authority construction. It is polled only after reserving the existing
+    /// stream permit, under the same complete admission timeout as the private
+    /// Pod RPC. The supplied authority must retain and recheck its exact original
+    /// identity, selection and expiry; no raw identity token belongs in a frame.
+    /// The adapter must bound decoding/allocation before yielding typed frames.
+    ///
+    /// Dropping this future cancels incomplete admission. After success, dropping
+    /// the returned receiver signals transport cancellation; the tracked worker
+    /// retains its permit until accepted refresh/signing work has drained. Only
+    /// awaiting this owner's `shutdown` acknowledges that process-owned drain.
+    pub async fn serve_authenticated<B, I, F>(
+        &self,
+        admission: F,
+    ) -> Result<ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>, Status>
+    where
+        B: PlatformRuntimeAuthority + 'static,
+        I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
+        F: Future<Output = Result<(Arc<B>, I), PlatformBridgeAuthenticationError>> + Send,
+    {
+        let deadline = Instant::now() + ADMISSION_TIMEOUT;
+        let permit = self.acquire()?;
+        let admission = tokio::select! {
+            biased;
+            _ = self.state.shutdown.cancelled() => return Err(unavailable()),
+            result = tokio::time::timeout_at(deadline, async {
+                let (authority, input) = admission.await
+                    .map_err(PlatformBridgeAuthenticationError::status)?;
+                self.admit(authority, input.boxed()).await
+            }) => {
+                result.map_err(|_| Status::deadline_exceeded("platform credential bridge admission timed out"))??
+            }
+        };
+        let Admission {
+            broker,
+            admitted,
+            sink,
+            receiver,
+        } = admission;
+        sink.epoch.ensure_live().map_err(bridge_status)?;
+        self.spawn_worker(permit, async move {
+            // Never select cancellation against or abort this future. Transport
+            // termination ends request tasks, then the shared runner drains
+            // accepted refresh work before this worker releases its stream slot.
+            if let Err(error) = run_admitted_credential_bridge(broker, admitted).await {
+                let _ = sink.output.try_send(Err(bridge_status(error)));
+            }
+        })?;
+        Ok(ReceiverStream::new(receiver))
     }
 
     /// Stop admission and signal transport cancellation synchronously. The
@@ -159,9 +238,14 @@ where
 
     /// Close admission and await every managed stream and blocking refresh.
     /// Safe to call concurrently or repeatedly. No mutex is held across await.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<(), PlatformRuntimeError> {
         self.start_shutdown();
         self.state.workers.wait().await;
+        #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+        if let Some(ssh) = &self.state.ssh {
+            ssh.shutdown().await?;
+        }
+        Ok(())
     }
 
     fn acquire(&self) -> Result<OwnedSemaphorePermit, Status> {
@@ -192,19 +276,11 @@ where
         Ok(())
     }
 
-    async fn admit(
+    async fn admit<B: PlatformRuntimeAuthority + 'static>(
         &self,
-        metadata: MetadataMap,
-        input: Streaming<v1::CredentialBridgeGuestMessage>,
-    ) -> Result<Admission<A::Authority, U>, Status> {
-        // No frame consumption, domain lookup or material access precedes this.
-        let authority = self
-            .state
-            .authenticator
-            .authenticate(&metadata)
-            .await
-            .map_err(PlatformBridgeAuthenticationError::status)?;
-        drop(metadata);
+        authority: Arc<B>,
+        input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
+    ) -> Result<Admission<B, U>, Status> {
         let provider = PlatformBrokerLeaseProvider::connect(
             authority,
             Arc::clone(&self.state.credentials),
@@ -212,6 +288,11 @@ where
         )
         .await
         .map_err(runtime_status)?;
+        #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+        let provider = PlatformBrokerLeaseProvider {
+            ssh: self.state.ssh.as_ref().map(|ssh| ssh.epoch()),
+            ..provider
+        };
         let session = &provider.session;
         let environment_id =
             Uuid::parse_str(session.context.environment_id.as_str()).map_err(|_| denied())?;
@@ -275,33 +356,15 @@ where
         &self,
         request: Request<Streaming<v1::CredentialBridgeGuestMessage>>,
     ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
-        let deadline = Instant::now() + ADMISSION_TIMEOUT;
-        let permit = self.acquire()?;
-        let metadata = request.metadata().clone();
-        let input = request.into_inner();
-        let admission = tokio::select! {
-            biased;
-            _ = self.state.shutdown.cancelled() => return Err(unavailable()),
-            result = tokio::time::timeout_at(deadline, self.admit(metadata, input)) => {
-                result.map_err(|_| Status::deadline_exceeded("platform credential bridge admission timed out"))??
-            }
-        };
-        let Admission {
-            broker,
-            admitted,
-            sink,
-            receiver,
-        } = admission;
-        sink.epoch.ensure_live().map_err(bridge_status)?;
-        self.spawn_worker(permit, async move {
-            // Never select cancellation against or abort this future. Transport
-            // termination ends request tasks, then the shared runner drains
-            // accepted refresh work before this worker releases its stream slot.
-            if let Err(error) = run_admitted_credential_bridge(broker, admitted).await {
-                let _ = sink.output.try_send(Err(bridge_status(error)));
-            }
-        })?;
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        self.serve_authenticated(async move {
+            let (metadata, _, input) = request.into_parts();
+            // Preserve the private Pod path: no frame consumption, domain
+            // lookup or material access precedes its existing authenticator.
+            let authority = self.state.authenticator.authenticate(&metadata).await?;
+            Ok((authority, input))
+        })
+        .await
+        .map(Response::new)
     }
 }
 
@@ -328,7 +391,7 @@ impl Epoch {
 }
 
 struct GatewayTransport {
-    input: Streaming<v1::CredentialBridgeGuestMessage>,
+    input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
     sink: ResponseSink,
 }
 
@@ -355,7 +418,7 @@ impl CredentialBridgeTransport for GatewayTransport {
             _ = self.sink.epoch.shutdown.cancelled() => Err(BrokerBridgeError::Unavailable),
             _ = self.sink.output.closed() => Err(BrokerBridgeError::Unavailable),
             _ = tokio::time::sleep_until(self.sink.epoch.deadline) => Err(BrokerBridgeError::Unavailable),
-            result = self.input.message() => result.map_err(|_| BrokerBridgeError::Unavailable),
+            result = self.input.next() => result.transpose().map_err(|_| BrokerBridgeError::Unavailable),
         };
         if !matches!(result, Ok(Some(_))) {
             self.sink.epoch.input_closed.cancel();

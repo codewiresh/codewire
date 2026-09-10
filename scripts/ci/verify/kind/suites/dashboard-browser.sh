@@ -11,6 +11,7 @@ fi
 
 run_retained_dashboard_browser_suite() {
   require_tool curl
+  require_tool jq
   require_tool kind
   require_tool kubectl
 

@@ -6,6 +6,13 @@ set -euo pipefail
 
 readonly LINUX_SUN_PATH_BYTES=108
 readonly LONGEST_SOCKET_SUFFIX='/engine/vms/00000000-0000-4000-8000-000000000000/vsock/vsock.sock'
+# PrivateProviderHome plus the selected SSH agent's fixed socket name.
+readonly SSH_AGENT_SOCKET_SUFFIX='/.codewire-provider-login-00000000-0000-4000-8000-000000000000/a'
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIRECTORY
+SOURCE_ROOT="$(cd -- "$SCRIPT_DIRECTORY/../../.." && pwd -P)"
+readonly SOURCE_ROOT
+readonly STOCK_SSH_WORKLOAD_SOURCE="$SCRIPT_DIRECTORY/stock-ssh-workload.sh"
 
 CW_BIN=''
 MESH_BIN=''
@@ -13,6 +20,7 @@ DERP_BIN=''
 DATA_PLANE_SMOKE_BIN=''
 CREDENTIAL_BRIDGE_SMOKE_BIN=''
 STATE_PROBE_BIN=''
+WORKSPACE_IMAGE_IMPORT_BIN=''
 ARTIFACT_ROOT=''
 ARTIFACT_LOCK=''
 ORIGINAL_ARTIFACT_ROOT=''
@@ -67,7 +75,22 @@ CREDENTIAL_CANARY=''
 CREDENTIAL_REFRESH_CANARY=''
 GITHUB_CREDENTIAL_ID=''
 GITHUB_CREDENTIAL_CANARY=''
+OPENAI_CREDENTIAL_ID=''
+OPENAI_CREDENTIAL_CANARY=''
+ANTHROPIC_CREDENTIAL_ID=''
+ANTHROPIC_CREDENTIAL_CANARY=''
+SSH_CREDENTIAL_ID=''
+SSH_PUBLIC_KEY=''
+SSH_PUBLIC_KEY_FINGERPRINT=''
 WORKLOAD_SECRET_CANARY=''
+APP_SECRET_PROJECT_A='native-app-a'
+APP_SECRET_PROJECT_B='native-app-b'
+APP_SECRET_PROJECT_A_ID=''
+APP_SECRET_PROJECT_B_ID=''
+APP_SECRET_CANARY_A=''
+APP_SECRET_CANARY_B=''
+APP_SECRET_SHA_A=''
+APP_SECRET_SHA_B=''
 KEYRING_ROOT=''
 KEYRING_RUNTIME=''
 KEYRING_RUNTIME_PARENT=''
@@ -93,6 +116,7 @@ usage: smoke-native-local-environment.sh \
   --artifact-root ABSOLUTE_PRIVATE_DIRECTORY \
   --artifact-lock ABSOLUTE_LOCK_FILE \
   [--managed-credential-broker] \
+  [--workspace-image-import-bin ABSOLUTE_PATH] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
 Runs the built cw Linux/KVM native-environment product smoke with 2 vCPUs and
@@ -118,9 +142,20 @@ transport-loss recovery, and journaled exact deletion cleanup.
 With --managed-credential-broker, it instead runs the focused protected-store
 product proof. That mode requires a specially featured cw binary named exactly
 cw-local-credential-broker-smoke, an isolated Secret Service implementation,
-and a private tmpfs-backed XDG runtime. It enrolls synthetic Codex and GitHub
-OAuth identities through the public commands; it never contacts either
-provider or reads the desktop session keyring or an ambient provider home.
+and a private tmpfs-backed XDG runtime. It also requires
+--workspace-image-import-bin and the exact local image receipt produced by
+verify-workspace-image.sh in this clean source tree. The importer verifies and
+pins that same OCI artifact in the fresh synthetic supervisor; no image override,
+registry publication or live package installation is used. Normal builds cannot
+load this synthetic-only input. It enrolls synthetic Codex and GitHub
+OAuth identities, OpenAI and Anthropic API keys, and one generated SSH identity
+through the public commands;
+it never contacts any provider or reads the desktop session keyring or an
+ambient provider home.
+It also selects synthetic local application projects for install, startup,
+managed exec, and PTY sessions; replaces and clears them through confirmed
+source updates; and proves installed-root, workspace, and skill preservation.
+Application values are intentionally child-visible, unlike provider credentials.
 USAGE
 }
 
@@ -189,6 +224,11 @@ while [[ $# -gt 0 ]]; do
       STATE_PROBE_BIN="$2"
       shift 2
       ;;
+    --workspace-image-import-bin)
+      [[ $# -ge 2 && -z "$WORKSPACE_IMAGE_IMPORT_BIN" ]] || { usage; exit 2; }
+      WORKSPACE_IMAGE_IMPORT_BIN="$2"
+      shift 2
+      ;;
     --artifact-root)
       [[ $# -ge 2 && -z "$ARTIFACT_ROOT" ]] || { usage; exit 2; }
       ARTIFACT_ROOT="$2"
@@ -229,9 +269,15 @@ for tool in awk base64 cat chmod cp dirname e2fsck find findmnt git id jq ln mkd
   require_cmd "$tool"
 done
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  [[ -n "$WORKSPACE_IMAGE_IMPORT_BIN" ]] || die 'managed smoke requires --workspace-image-import-bin'
+  require_absolute_canonical_file 'workspace image importer' "$WORKSPACE_IMAGE_IMPORT_BIN"
+  [[ -x "$WORKSPACE_IMAGE_IMPORT_BIN" ]] || die 'workspace image importer is not executable'
   for tool in busctl dbus-daemon gnome-keyring-daemon secret-tool; do
     require_cmd "$tool"
   done
+  require_absolute_canonical_file 'stock SSH workload fixture' "$STOCK_SSH_WORKLOAD_SOURCE"
+elif [[ -n "$WORKSPACE_IMAGE_IMPORT_BIN" ]]; then
+  die 'workspace image importer is only available in managed synthetic mode'
 fi
 [[ "$(uname -s)" == Linux ]] || die 'the native local-environment smoke requires Linux'
 [[ "$(uname -m)" == x86_64 ]] || die 'the current native artifact set requires x86_64'
@@ -264,6 +310,17 @@ require_absolute_canonical_dir 'artifact root' "$ARTIFACT_ROOT"
 require_absolute_canonical_file 'artifact lock' "$ARTIFACT_LOCK"
 [[ "$(dirname "$ARTIFACT_ROOT")" == "$(dirname "$ARTIFACT_LOCK")" ]] ||
   die 'artifact root and lock must share one staging parent'
+[[ "$(stat -c %a -- "$ARTIFACT_LOCK")" == 400 ]] || die 'artifact lock must have mode 0400'
+for artifact in cloud_hypervisor virtiofsd kernel initramfs; do
+  artifact_path="$(jq -er --arg artifact "$artifact" '.[$artifact].path' "$ARTIFACT_LOCK")" ||
+    die "artifact lock has no $artifact path"
+  artifact_path="$ARTIFACT_ROOT/$artifact_path"
+  require_absolute_canonical_file "$artifact artifact" "$artifact_path"
+  [[ "$artifact_path" == "$ARTIFACT_ROOT/"* ]] || die 'artifact escaped its staging root'
+  case "$artifact" in cloud_hypervisor|virtiofsd) artifact_mode=500 ;; *) artifact_mode=400 ;; esac
+  [[ "$(stat -c %a -- "$artifact_path")" == "$artifact_mode" ]] ||
+    die "$artifact artifact must have mode 0$artifact_mode"
+done
 require_absolute_canonical_dir 'scratch parent' "$SMOKE_PARENT"
 if ! SCRATCH_MOUNT_OPTIONS="$(findmnt -nro OPTIONS -T "$SMOKE_PARENT")"; then
   die "cannot inspect scratch-parent mount options: $SMOKE_PARENT"
@@ -300,12 +357,36 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     die 'XDG runtime parent must be private and owned by the smoke user'
   [[ "$(findmnt -nro FSTYPE -T "$KEYRING_RUNTIME_PARENT")" == tmpfs ]] ||
     die 'XDG runtime parent must be backed by tmpfs'
-  KEYRING_RUNTIME="$(mktemp -d "$KEYRING_RUNTIME_PARENT/.codewire-native-smoke-runtime.XXXXXX")"
+  # Leave room for the broker-owned provider home and SSH agent socket. The
+  # former descriptive prefix exceeded sockaddr_un even under /run/user/1000.
+  KEYRING_RUNTIME_TEMPLATE="$KEYRING_RUNTIME_PARENT/.cwn-XXXXXX"
+  (( ${#KEYRING_RUNTIME_TEMPLATE} + ${#SSH_AGENT_SOCKET_SUFFIX} < LINUX_SUN_PATH_BYTES )) ||
+    die 'XDG runtime parent is too long for the private SSH agent socket'
+  KEYRING_RUNTIME="$(mktemp -d "$KEYRING_RUNTIME_TEMPLATE")"
   chmod 0700 "$KEYRING_RUNTIME"
   KEYRING_RUNTIME="$(realpath -e -- "$KEYRING_RUNTIME")"
   KEYRING_DBUS_ADDRESS="unix:path=$KEYRING_RUNTIME/bus"
 fi
 mkdir -m 0700 "$SMOKE_HOME" "$STATE_ROOT" "$WORKSPACE" "$PLATFORM_CONFIG" "$SMOKE_ROOT/bin"
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  workspace_input="$(env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
+    PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIRECTORY/workspace-image-artifact.py" \
+    native-input "$SOURCE_ROOT" "$SOURCE_ROOT/.tmp/codewire-workspace-image-verification.json")" ||
+    die 'no matching verified workspace OCI artifact; run verify-workspace-image.sh first'
+  workspace_archive="$(jq -er '.path' <<<"$workspace_input")"
+  workspace_archive_sha="$(jq -er '.sha256' <<<"$workspace_input")"
+  workspace_archive_size="$(jq -er '.size' <<<"$workspace_input")"
+  workspace_source_digest="$(jq -er '.source_digest' <<<"$workspace_input")"
+  imported_image="$(env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
+    "$WORKSPACE_IMAGE_IMPORT_BIN" --archive "$workspace_archive" \
+    --archive-sha256 "$workspace_archive_sha" --archive-size "$workspace_archive_size" \
+    --source-digest "$workspace_source_digest" --state-root "$STATE_ROOT")" ||
+    die 'verified workspace OCI import failed'
+  [[ "$imported_image" == "registry.invalid/codewire/workspace@$workspace_source_digest" ]] ||
+    die 'workspace OCI importer returned a different image identity'
+  WORKSPACE_IMAGE="$imported_image"
+  log "using the exact locally verified workspace OCI artifact: $workspace_source_digest"
+fi
 touch "$TRANSCRIPT"
 chmod 0600 "$TRANSCRIPT"
 
@@ -607,6 +688,15 @@ run_cw() {
   LAST_STDERR="$stderr_file"
 }
 
+assert_current_target_cleared() {
+  if rg -qF 'could not save the current local target' "$LAST_STDERR"; then
+    die 'last environment deletion failed to clear the current target'
+  fi
+  run_cw current --verbose
+  rg -q '^Target: +local$' "$LAST_STDOUT" ||
+    die 'last environment deletion retained a stale current target'
+}
+
 run_cw_with_secret_stdin() {
   local secret_value="$1"
   shift
@@ -713,6 +803,7 @@ run_public_data_smoke() {
 
 run_docker_persistence_smoke() {
   local marker="$1"
+  # shellcheck disable=SC2016 # Expressions are evaluated inside the guest.
   run_cw run --no-tty -- /bin/sh -c '
     set -eu
     test "$(docker info --format "{{.DockerRootDir}}|{{.Driver}}")" = "/var/lib/docker|overlay2"
@@ -761,6 +852,248 @@ run_codex_credential_bridge_smoke() {
     die 'stock Codex credential-bridge smoke receipt drifted'
 }
 
+prepare_application_secret_fixture() {
+  local project phase
+  APP_SECRET_CANARY_A="cwappfirst$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  APP_SECRET_CANARY_B="cwappsecond$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  APP_SECRET_SHA_A="$(printf '%s' "$APP_SECRET_CANARY_A" | sha256sum | cut -d ' ' -f 1)"
+  APP_SECRET_SHA_B="$(printf '%s' "$APP_SECRET_CANARY_B" | sha256sum | cut -d ' ' -f 1)"
+  [[ "$APP_SECRET_SHA_A" =~ ^[0-9a-f]{64}$ && "$APP_SECRET_SHA_B" =~ ^[0-9a-f]{64}$ &&
+     "$APP_SECRET_SHA_A" != "$APP_SECRET_SHA_B" ]] || die 'application fixture digests are invalid'
+  for project in "$APP_SECRET_PROJECT_A" "$APP_SECRET_PROJECT_B"; do
+    run_cw secrets --local projects create "$project"
+    run_cw_with_secret_stdin stored-project-precedence-must-lose \
+      secrets --local --project "$project" set CW_NATIVE_PRECEDENCE
+  done
+  run_cw_with_secret_stdin "$APP_SECRET_CANARY_A" \
+    secrets --local --project "$APP_SECRET_PROJECT_A" set DATABASE_URL
+  run_cw_with_secret_stdin selected-a-only \
+    secrets --local --project "$APP_SECRET_PROJECT_A" set CW_NATIVE_APP_A_ONLY
+  run_cw_with_secret_stdin "$APP_SECRET_CANARY_B" \
+    secrets --local --project "$APP_SECRET_PROJECT_B" set DATABASE_URL
+  run_cw_with_secret_stdin selected-b-only \
+    secrets --local --project "$APP_SECRET_PROJECT_B" set CW_NATIVE_APP_B_ONLY
+  run_cw secrets --local projects list --output json
+  APP_SECRET_PROJECT_A_ID="$(jq -er --arg name "$APP_SECRET_PROJECT_A" \
+    '.[] | select(.name == $name) | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")"
+  APP_SECRET_PROJECT_B_ID="$(jq -er --arg name "$APP_SECRET_PROJECT_B" \
+    '.[] | select(.name == $name) | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")"
+  for project in "$APP_SECRET_PROJECT_A" "$APP_SECRET_PROJECT_B"; do
+    run_cw secrets --local --project "$project" list --output json
+    jq -e 'length == 3 and any(.[]; .key == "DATABASE_URL") and
+      all(.[]; (keys | sort) == ["created_at", "key", "updated_at"]) and
+      (tostring | contains("cwapp") | not)' "$LAST_STDOUT" >/dev/null ||
+      die 'selected application project metadata is not key-only'
+  done
+  cat >"$MOUNT_SOURCE/app-secrets-install.sh" <<'APP_INSTALL'
+#!/bin/sh
+set -eu
+test -n "${DATABASE_URL:-}"
+test "$(printf '%s' "$DATABASE_URL" | sha256sum | cut -d ' ' -f 1)" = "$1"
+test "$CW_NATIVE_PRECEDENCE" = explicit-project-environment
+test -z "${CW_NATIVE_SMOKE_SECRET+x}"
+count=0
+if test -f /workspace/native-app-install-count; then count=$(cat /workspace/native-app-install-count); fi
+count=$((count + 1))
+printf '%s\n' "$count" > /workspace/native-app-install-count
+mkdir -p "$HOME/.local/bin"
+cat >"$HOME/.local/bin/native-app-installed" <<'INSTALLED_TOOL'
+#!/bin/sh
+printf '%s\n' app-installed-tool-ok
+INSTALLED_TOOL
+chmod 0755 "$HOME/.local/bin/native-app-installed"
+printf '%s\n' app-install-secret-ok > /workspace/native-app-install-proof
+/bin/bash /workspace/fixtures/stock-ssh-workload.sh install \
+  /workspace/fixtures/native-ssh-public-key.pub
+APP_INSTALL
+  cat >"$MOUNT_SOURCE/app-secrets-startup.sh" <<'APP_STARTUP'
+#!/bin/sh
+set -eu
+test "$CW_NATIVE_PRECEDENCE" = explicit-project-environment
+test -z "${CW_NATIVE_SMOKE_SECRET+x}"
+if test -n "${DATABASE_URL+x}"; then
+  printf '%s' "$DATABASE_URL" | sha256sum | cut -d ' ' -f 1 > /workspace/native-app-startup-proof
+else
+  printf '%s\n' absent > /workspace/native-app-startup-proof
+fi
+/bin/bash /workspace/fixtures/stock-ssh-workload.sh startup
+APP_STARTUP
+  cat >"$MOUNT_SOURCE/app-secrets-check.sh" <<'APP_CHECK'
+#!/bin/sh
+set -eu
+expected=$1
+phase=$2
+assert_app() {
+  label=$1
+  shift
+  if ! "$@"; then
+    printf 'application assertion failed: %s (phase %s)\n' "$label" "$phase" >&2
+    exit 1
+  fi
+}
+assert_app ambient-absent test -z "${CW_NATIVE_SMOKE_SECRET+x}"
+assert_app explicit-project-precedence test "$CW_NATIVE_PRECEDENCE" = explicit-project-environment
+assert_app install-ran-once test "$(cat /workspace/native-app-install-count)" = 1
+assert_app install-proof-preserved test "$(cat /workspace/native-app-install-proof)" = app-install-secret-ok
+assert_app installed-tool-preserved test "$("$HOME/.local/bin/native-app-installed")" = app-installed-tool-ok
+assert_app workspace-write-preserved test "$(cat /workspace/native-app-workspace-proof)" = app-workspace-preserved
+case "$phase" in
+  a)
+    assert_app selected-a-present test "${CW_NATIVE_APP_A_ONLY-}" = selected-a-only
+    assert_app unselected-b-absent test -z "${CW_NATIVE_APP_B_ONLY+x}"
+    ;;
+  b)
+    assert_app selected-b-present test "${CW_NATIVE_APP_B_ONLY-}" = selected-b-only
+    assert_app old-a-absent test -z "${CW_NATIVE_APP_A_ONLY+x}"
+    ;;
+  clear)
+    assert_app cleared-database-absent test -z "${DATABASE_URL+x}"
+    assert_app cleared-a-absent test -z "${CW_NATIVE_APP_A_ONLY+x}"
+    assert_app cleared-b-absent test -z "${CW_NATIVE_APP_B_ONLY+x}"
+    ;;
+  *) exit 76 ;;
+esac
+if test "$phase" != clear; then
+  assert_app selected-database-matches test "$(printf '%s' "${DATABASE_URL-}" | sha256sum | cut -d ' ' -f 1)" = "$expected"
+fi
+attempt=0
+while test "$(cat /workspace/native-app-startup-proof 2>/dev/null || true)" != "$expected"; do
+  attempt=$((attempt + 1))
+  assert_app startup-current-generation test "$attempt" -lt 100
+  sleep 0.05
+done
+printf '%s\n' app-managed-exec-ok
+APP_CHECK
+  cp -- "$STOCK_SSH_WORKLOAD_SOURCE" "$MOUNT_SOURCE/stock-ssh-workload.sh"
+  chmod 0755 "$MOUNT_SOURCE/stock-ssh-workload.sh" \
+    "$MOUNT_SOURCE/app-secrets-install.sh" "$MOUNT_SOURCE/app-secrets-startup.sh" \
+    "$MOUNT_SOURCE/app-secrets-check.sh"
+  cat >>"$WORKSPACE/codewire.yaml" <<EOF
+environment:
+  CW_NATIVE_PRECEDENCE: explicit-project-environment
+install_command: /bin/sh /workspace/fixtures/app-secrets-install.sh $APP_SECRET_SHA_A
+startup_script: /bin/sh /workspace/fixtures/app-secrets-startup.sh
+EOF
+  # Only hashes and fixed receipts enter scripts/YAML/output. The selected app
+  # values are intentionally child-visible; this is not a provider-hiding proof.
+  for phase in "$APP_SECRET_CANARY_A" "$APP_SECRET_CANARY_B"; do
+    if rg -qF "$phase" "$WORKSPACE/codewire.yaml" "$MOUNT_SOURCE"/app-secrets-*.sh; then
+      die 'application value entered a checked launch fixture instead of protected storage'
+    fi
+  done
+}
+
+run_application_secret_pty() {
+  local expected="$1" phase="$2" pty_log attempt
+  pty_log="$SMOKE_ROOT/app-pty-$phase.log"
+  if ! (
+    cd "$WORKSPACE"
+    {
+      printf 'test -t 0 && test -t 1 && /bin/sh /workspace/fixtures/app-secrets-check.sh %s %s && printf "app-secret-pty-ok\\n" || exit 77\nexit\n' \
+        "$expected" "$phase"
+      # Keep the checked-in PTY/detach path, but wait for the exact guest
+      # receipt instead of guessing when the console hop has completed.
+      for ((attempt = 0; attempt < 400; attempt++)); do
+        if rg -q $'^app-secret-pty-ok\r?$' "$pty_log" 2>/dev/null; then
+          printf '\002d' || true
+          exit 0
+        fi
+        sleep 0.05
+      done
+      exit 1
+    } | env -i PATH="$SMOKE_ROOT/bin:/usr/bin:/bin" HOME="$SMOKE_HOME" USER="$(id -un)" \
+      LOGNAME="$(id -un)" SHELL='/bin/sh' TERM='xterm-256color' LC_ALL=C \
+      CW_CONFIG_DIR="$PLATFORM_CONFIG" CODEWIRE_NATIVE_STATE_ROOT="$STATE_ROOT" \
+      CODEWIRE_NATIVE_ARTIFACT_ROOT="$ARTIFACT_ROOT" CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
+      CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT" XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
+      DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
+      CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
+      HTTP_PROXY='http://127.0.0.1:1' HTTPS_PROXY='http://127.0.0.1:1' ALL_PROXY='http://127.0.0.1:1' \
+      NO_PROXY='127.0.0.1,localhost' /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 30s \
+      /usr/bin/script -qefc "$CW_BIN shell" "$pty_log"
+  ) >"$SMOKE_ROOT/app-pty-$phase.stdout" 2>"$SMOKE_ROOT/app-pty-$phase.stderr"; then
+    tail -n 80 "$SMOKE_ROOT/app-pty-$phase.stderr" >&2
+    die 'application projection PTY proof failed'
+  fi
+  cat "$SMOKE_ROOT/app-pty-$phase.stdout" "$SMOKE_ROOT/app-pty-$phase.stderr" >>"$TRANSCRIPT"
+  rg -q $'^app-secret-pty-ok\r?$' "$pty_log" || die 'PTY did not confirm the current application projection'
+}
+
+run_application_secret_smoke() {
+  local built root_generation root_file root_identity generation expected phase project_id journal
+  log 'checking selected application keys during install, startup, managed exec, PTY, restart, and clear'
+  built="$(native_database_value built_workspace_identity)"
+  [[ "$built" =~ ^[0-9a-f]{64}:[0-9a-f]{64}$ ]] || die 'built workspace identity is unavailable'
+  # The build record identifies OCI/setup intent. The disk's storage generation
+  # also binds the immutable skill seed, so read the runner's admitted identity.
+  root_generation="$(jq -er '.root_generation | select(test("^[0-9a-f]{64}$"))' \
+    "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")"
+  root_file="$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/generations/$root_generation/root.raw"
+  root_identity="$(stat -c '%d:%i:%s' "$root_file")"
+  run_cw run --no-tty -- /bin/sh -lc 'printf "%s\n" app-workspace-preserved > /workspace/native-app-workspace-proof'
+  generation="$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")"
+  for phase in a b clear; do
+    case "$phase" in
+      a) expected="$APP_SECRET_SHA_A"; project_id="$APP_SECRET_PROJECT_A_ID" ;;
+      b)
+        expected="$APP_SECRET_SHA_B"; project_id="$APP_SECRET_PROJECT_B_ID"
+        journal="$(native_database_value journal_summary)"
+        run_cw_expect_failure env update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" --output json
+        [[ "$(jq -er '.generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")" == "$generation" &&
+           "$(native_database_value journal_summary)" == "$journal" ]] ||
+          die 'unconfirmed source update changed the running generation or admitted an operation'
+        run_cw env update --local "$NAME" --secrets "local:$APP_SECRET_PROJECT_B" --yes --output json
+        assert_previous_direct_share_processes_gone
+        assert_direct_share_processes
+        generation=$((generation + 1))
+        ;;
+      clear)
+        expected=absent; project_id=''
+        run_cw env update --local "$NAME" --clear-secrets --yes --output json
+        assert_previous_direct_share_processes_gone
+        assert_direct_share_processes
+        generation=$((generation + 1))
+        ;;
+    esac
+    run_cw env info --local "$NAME" --output json
+    jq -e --argjson generation "$generation" --arg id "$ENVIRONMENT_ID" --arg project "$project_id" \
+      --arg skills "$INITIAL_SKILL_SNAPSHOT" '
+      .id == $id and .generation == $generation and .state == "running" and
+      .access_profile == "user/native-broker" and .access_profile_revision == 5 and
+      .source_selection.credentials.reference == "user/native-broker" and
+      .source_selection.credentials.revision == 5 and
+      (.source_selection.secrets.project // "") == (if $project == "" then "" else "local:id:" + $project end) and
+      (.source_selection.secrets.user // null) == null and
+      (.source_selection.secrets.organization // false) == false and
+      .skill_snapshot == $skills and .skill_snapshot_generation == 1
+    ' "$LAST_STDOUT" >/dev/null || die 'source update changed an unrelated pin or did not replace the exact source'
+    [[ "$(native_database_value built_workspace_identity)" == "$built" &&
+       "$(jq -er '.root_generation' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json")" == "$root_generation" &&
+       "$(stat -c '%d:%i:%s' "$root_file")" == "$root_identity" ]] ||
+      die 'source-only update rebuilt the installed root or changed immutable setup/skill intent'
+    run_cw run --no-tty -- /bin/sh /workspace/fixtures/app-secrets-check.sh "$expected" "$phase"
+    rg -qxF app-managed-exec-ok "$LAST_STDOUT" || die 'managed exec did not receive the exact current application keys'
+    # shellcheck disable=SC2016 # These variables belong to the guest command.
+    run_cw run --no-tty --env DATABASE_URL=explicit-command-database -- /bin/sh -lc \
+      'test "$DATABASE_URL" = explicit-command-database'
+    run_application_secret_pty "$expected" "$phase"
+    if [[ "$phase" != a ]]; then
+      [[ "$(native_database_value source_operation)" == 'update_environment_sources:completed:10' ]] ||
+        die 'source update did not complete its exact durable operation'
+    fi
+  done
+  # Per-command environment remains an explicit override, independent of the
+  # stored source or canonical project environment.
+  # shellcheck disable=SC2016 # These variables belong to the guest command.
+  run_cw run --no-tty --env CW_NATIVE_PRECEDENCE=explicit-command-environment -- /bin/sh -lc \
+    'test "$CW_NATIVE_PRECEDENCE" = explicit-command-environment'
+  [[ ! -e "$KEYRING_RUNTIME/codewire/workload-secrets-v1" ]] ||
+    die 'application source updates created a second durable delivery store'
+  if rg -qF "$APP_SECRET_CANARY_A" "$TRANSCRIPT" || rg -qF "$APP_SECRET_CANARY_B" "$TRANSCRIPT"; then
+    die 'application smoke accidentally printed a selected value'
+  fi
+}
+
 run_managed_credential_broker_smoke() {
   local stdout_file stderr_file
   COMMAND_INDEX=$((COMMAND_INDEX + 1))
@@ -785,7 +1118,11 @@ run_managed_credential_broker_smoke() {
       --cw-bin "$CW_BIN" \
       --target "$NAME" \
       --managed-broker \
-      --credential-id "$CREDENTIAL_ID" >"$stdout_file" 2>"$stderr_file"; then
+      --credential-id "$CREDENTIAL_ID" \
+      --openai-credential-id "$OPENAI_CREDENTIAL_ID" \
+      --anthropic-credential-id "$ANTHROPIC_CREDENTIAL_ID" \
+      --ssh-credential-id "$SSH_CREDENTIAL_ID" \
+      >"$stdout_file" 2>"$stderr_file"; then
     cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
     tail -n 80 "$stderr_file" >&2
     die 'managed local credential-broker product smoke failed'
@@ -935,8 +1272,9 @@ stop_isolated_keyring() {
 remove_isolated_keyring_runtime() {
   local expected_prefix
   [[ -n "$KEYRING_RUNTIME" ]] || return 0
-  expected_prefix="$KEYRING_RUNTIME_PARENT/.codewire-native-smoke-runtime."
+  expected_prefix="$KEYRING_RUNTIME_PARENT/.cwn-"
   [[ -n "$KEYRING_RUNTIME_PARENT" && "$KEYRING_RUNTIME" == "$expected_prefix"* &&
+     "${KEYRING_RUNTIME#"$expected_prefix"}" =~ ^[[:alnum:]]{6}$ &&
      -d "$KEYRING_RUNTIME" && ! -L "$KEYRING_RUNTIME" &&
      "$(stat -c '%u' "$KEYRING_RUNTIME")" == "$(id -u)" ]] || return 1
   rm -rf -- "$KEYRING_RUNTIME"
@@ -1465,14 +1803,18 @@ assert_direct_share_processes() {
   done
 }
 
-assert_direct_share_processes_stopped() {
+assert_previous_direct_share_processes_gone() {
   local pid
   for pid in "${DIRECT_SHARE_PIDS[@]}"; do
     wait_for_pid_death "$pid" || die "direct-share process $pid survived VM stop"
   done
+  DIRECT_SHARE_PIDS=()
+}
+
+assert_direct_share_processes_stopped() {
+  assert_previous_direct_share_processes_gone
   [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/fs" -mindepth 1 -print -quit)" ]] ||
     die 'direct-share runtime endpoints remained after VM stop'
-  DIRECT_SHARE_PIDS=()
 }
 
 runtime_artifact_manifest_count() {
@@ -1594,6 +1936,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   CREDENTIAL_CANARY="cwlocalbroker$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   CREDENTIAL_REFRESH_CANARY="cwlocalrefresh$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   GITHUB_CREDENTIAL_CANARY="cwlocalgithub$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  OPENAI_CREDENTIAL_CANARY="cwlocalopenai$(tr -d '-' </proc/sys/kernel/random/boot_id)"
+  ANTHROPIC_CREDENTIAL_CANARY="cwlocalanthropic$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   WORKLOAD_SECRET_CANARY="cwworkload$(tr -d '-' </proc/sys/kernel/random/boot_id)"
   [[ ${#CREDENTIAL_CANARY} -ge 16 && ${#CREDENTIAL_CANARY} -le 256 &&
      "$CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
@@ -1604,28 +1948,39 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ ${#GITHUB_CREDENTIAL_CANARY} -ge 16 && ${#GITHUB_CREDENTIAL_CANARY} -le 256 &&
      "$GITHUB_CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated GitHub credential canary is invalid'
+  [[ ${#OPENAI_CREDENTIAL_CANARY} -ge 16 && ${#OPENAI_CREDENTIAL_CANARY} -le 256 &&
+     "$OPENAI_CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated OpenAI credential canary is invalid'
+  [[ ${#ANTHROPIC_CREDENTIAL_CANARY} -ge 16 && ${#ANTHROPIC_CREDENTIAL_CANARY} -le 256 &&
+     "$ANTHROPIC_CREDENTIAL_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die 'generated Anthropic credential canary is invalid'
   [[ ${#WORKLOAD_SECRET_CANARY} -ge 16 && ${#WORKLOAD_SECRET_CANARY} -le 256 &&
      "$WORKLOAD_SECRET_CANARY" =~ ^[A-Za-z0-9._-]+$ ]] ||
     die 'generated workload-secret canary is invalid'
   install_synthetic_codex
   install_synthetic_github
   for canary in "$CREDENTIAL_CANARY" "$CREDENTIAL_REFRESH_CANARY" \
-    "$GITHUB_CREDENTIAL_CANARY"; do
+    "$GITHUB_CREDENTIAL_CANARY" "$OPENAI_CREDENTIAL_CANARY" \
+    "$ANTHROPIC_CREDENTIAL_CANARY"; do
     if rg -qF "$canary" "$SMOKE_ROOT/bin/codex" "$SMOKE_ROOT/bin/gh"; then
       die 'synthetic provider executable contains a generated credential canary'
     fi
   done
 
-  log 'enrolling synthetic protected Codex and GitHub OAuth credentials through public commands'
+  log 'enrolling synthetic protected Codex/GitHub OAuth, OpenAI/Anthropic API-key, and generated SSH credentials through public commands'
   run_cw_connect_synthetic_codex
   run_cw_connect_synthetic_github
+  run_cw_with_secret_stdin "$OPENAI_CREDENTIAL_CANARY" \
+    credentials --local add openai --name native-broker-openai
+  run_cw_with_secret_stdin "$ANTHROPIC_CREDENTIAL_CANARY" \
+    credentials --local add anthropic --name native-broker-anthropic
+  run_cw credentials --local generate ssh --name native-broker-ssh
   run_cw_with_secret_stdin "$WORKLOAD_SECRET_CANARY" \
-    secrets --local user set CW_NATIVE_SMOKE_SECRET
-  run_cw secrets --local list --output json
+    secrets --local --user set CW_NATIVE_SMOKE_SECRET
+  run_cw secrets --local --user list --output json
   jq -e '
     length == 1 and
-    .[0].placement == "local" and
-    .[0].scope == "user" and
+    (.[0] | keys | sort) == ["created_at", "key", "updated_at"] and
     .[0].key == "CW_NATIVE_SMOKE_SECRET" and
     (tostring | contains("cwworkload") | not)
   ' "$LAST_STDOUT" >/dev/null || die 'local workload-secret inventory was not key-only'
@@ -1637,7 +1992,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     die 'transient GitHub login directory remained after enrollment'
   run_cw credentials --local list --output json
   jq -e '
-    length == 2 and
+    length == 5 and
     any(.[];
       .placement == "local" and
       .owner == "user/local-user" and
@@ -1661,29 +2016,110 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
       .revocation_generation == 1 and
       .protected_store_persistence == "operating_system" and
       .cleanup_pending == false
+    ) and
+    any(.[];
+      .placement == "local" and
+      .owner == "user/local-user" and
+      .provider == "openai" and
+      .authentication_kind == "api_key" and
+      .name == "native-broker-openai" and
+      .account_hint == null and
+      .status == "active" and
+      .revocation_generation == 1 and
+      .protected_store_persistence == "operating_system" and
+      .cleanup_pending == false
+    ) and
+    any(.[];
+      .placement == "local" and
+      .owner == "user/local-user" and
+      .provider == "anthropic" and
+      .authentication_kind == "api_key" and
+      .name == "native-broker-anthropic" and
+      .account_hint == null and
+      .status == "active" and
+      .revocation_generation == 1 and
+      .protected_store_persistence == "operating_system" and
+      .cleanup_pending == false
+    ) and
+    any(.[];
+      .placement == "local" and
+      .owner == "user/local-user" and
+      .provider == "ssh" and
+      .authentication_kind == "ssh_key" and
+      .name == "native-broker-ssh" and
+      .account_hint == null and
+      .expires_at_unix == null and
+      (.ssh_public_key | keys | sort) == ["fingerprint", "openssh"] and
+      (.ssh_public_key.openssh | test("^ssh-(ed25519|rsa) [A-Za-z0-9+/]+={0,2}$")) and
+      (.ssh_public_key.fingerprint | test("^SHA256:[A-Za-z0-9+/]+={0,2}$")) and
+      .status == "active" and
+      .revocation_generation == 1 and
+      .protected_store_persistence == "operating_system" and
+      .cleanup_pending == false
     )
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic protected credential metadata drifted'
-  CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "openai") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+  CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "openai" and .authentication_kind == "oauth" and .name == "native-broker-codex") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
     die 'synthetic protected credential ID is invalid'
-  GITHUB_CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "github") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+  GITHUB_CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "github" and .authentication_kind == "oauth" and .name == "native-broker-github") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
     die 'synthetic protected GitHub credential ID is invalid'
-  run_cw credentials --local profile create "$CREDENTIAL_PROFILE_NAME"
-  run_cw credentials --local profile set \
-    "$CREDENTIAL_PROFILE_NAME" codex "id:$CREDENTIAL_ID"
-  run_cw credentials --local profile set \
-    "$CREDENTIAL_PROFILE_NAME" github "id:$GITHUB_CREDENTIAL_ID"
-  run_cw credentials --local profile get "$CREDENTIAL_PROFILE_NAME" --output json
-  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" '
+  OPENAI_CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "openai" and .authentication_kind == "api_key" and .name == "native-broker-openai") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+    die 'synthetic protected OpenAI credential ID is invalid'
+  ANTHROPIC_CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "anthropic" and .authentication_kind == "api_key" and .name == "native-broker-anthropic") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+    die 'synthetic protected Anthropic credential ID is invalid'
+  SSH_CREDENTIAL_ID="$(jq -er '.[] | select(.provider == "ssh" and .authentication_kind == "ssh_key" and .name == "native-broker-ssh") | .id | select(test("^[0-9a-f-]{36}$"))' "$LAST_STDOUT")" ||
+    die 'synthetic protected SSH credential ID is invalid'
+  SSH_PUBLIC_KEY="$(jq -er --arg id "$SSH_CREDENTIAL_ID" '.[] | select(.id == $id) | .ssh_public_key.openssh' "$LAST_STDOUT")" ||
+    die 'synthetic protected SSH public key is invalid'
+  SSH_PUBLIC_KEY_FINGERPRINT="$(jq -er --arg id "$SSH_CREDENTIAL_ID" '.[] | select(.id == $id) | .ssh_public_key.fingerprint' "$LAST_STDOUT")" ||
+    die 'synthetic protected SSH public-key fingerprint is invalid'
+  printf '%s\n' "$SSH_PUBLIC_KEY" >"$MOUNT_SOURCE/native-ssh-public-key.pub"
+  chmod 0600 "$MOUNT_SOURCE/native-ssh-public-key.pub"
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set codex "id:$CREDENTIAL_ID"
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
+  jq -e 'length == 1 and .[0].revision == 1 and (.[0].entries | length) == 1' "$LAST_STDOUT" >/dev/null ||
+    die 'first profile set did not create exactly revision one'
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set github "id:$GITHUB_CREDENTIAL_ID"
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
+  jq -e 'length == 1 and .[0].revision == 2 and (.[0].entries | length) == 2' "$LAST_STDOUT" >/dev/null ||
+    die 'second profile set did not create exactly revision two'
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set openai "id:$OPENAI_CREDENTIAL_ID"
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
+  jq -e 'length == 1 and .[0].revision == 3 and (.[0].entries | length) == 3' "$LAST_STDOUT" >/dev/null ||
+    die 'third profile set did not create exactly revision three'
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set anthropic "id:$ANTHROPIC_CREDENTIAL_ID"
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
+  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" \
+    --arg openai "$OPENAI_CREDENTIAL_ID" --arg anthropic "$ANTHROPIC_CREDENTIAL_ID" '
     length == 1 and
     .[0].placement == "local" and
     .[0].owner == "user/local-user" and
     .[0].name == "native-broker" and
-    .[0].revision == 3 and
-    (.[0].entries | length) == 2 and
+    .[0].revision == 4 and
+    (.[0].entries | length) == 4 and
     .[0].entries.codex == $credential and
-    .[0].entries.github == $github
+    .[0].entries.github == $github and
+    .[0].entries.openai == $openai and
+    .[0].entries.anthropic == $anthropic
+  ' "$LAST_STDOUT" >/dev/null || die 'fourth profile set did not create exact revision four'
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" set ssh "id:$SSH_CREDENTIAL_ID"
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
+  jq -e --arg credential "$CREDENTIAL_ID" --arg github "$GITHUB_CREDENTIAL_ID" \
+    --arg openai "$OPENAI_CREDENTIAL_ID" --arg anthropic "$ANTHROPIC_CREDENTIAL_ID" \
+    --arg ssh "$SSH_CREDENTIAL_ID" '
+    length == 1 and
+    .[0].placement == "local" and
+    .[0].owner == "user/local-user" and
+    .[0].name == "native-broker" and
+    .[0].revision == 5 and
+    (.[0].entries | length) == 5 and
+    .[0].entries.codex == $credential and
+    .[0].entries.github == $github and
+    .[0].entries.openai == $openai and
+    .[0].entries.anthropic == $anthropic and
+    .[0].entries.ssh == $ssh
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic access profile metadata drifted'
-  CREATE_ACCESS_ARGS=(--access-profile "user/$CREDENTIAL_PROFILE_NAME")
+  prepare_application_secret_fixture
+  CREATE_ACCESS_ARGS=(--profile "local:user/$CREDENTIAL_PROFILE_NAME" --secrets "local:$APP_SECRET_PROJECT_A" --yes)
 fi
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
@@ -1735,7 +2171,7 @@ rg -qF 'Read-write grants let guest root modify or delete that host content' "$L
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   jq -e '
     .access_profile == "user/native-broker" and
-    .access_profile_revision == 3
+    .access_profile_revision == 5
   ' "$LAST_STDOUT" >/dev/null || die 'created native environment access profile drifted'
 fi
 [[ ! -e "$SOURCE_HOOK_MARKER" ]] || die 'source Git hook ran during native clone preparation'
@@ -1772,7 +2208,7 @@ for sqlite_sidecar in "$STATE_ROOT/supervisor.db-wal" "$STATE_ROOT/supervisor.db
   [[ ! -e "$sqlite_sidecar" || "$(stat -c '%a' "$sqlite_sidecar")" == 600 ]] ||
     die "native supervisor database sidecar is not mode 0600: $sqlite_sidecar"
 done
-[[ "$(native_database_value contract)" == '1129797197:10:wal:ok' ]] ||
+[[ "$(native_database_value contract)" == '1129797197:11:wal:ok' ]] ||
   die 'native supervisor database contract drifted'
 wait_for_journal_complete ||
   die "initial create returned before its lifecycle journal became terminal: $(native_database_value journal_summary)"
@@ -1803,7 +2239,8 @@ RUNNER_PID="$(native_database_value runner_pid)"
   die 'credential-free one-boot setup pack remained after readiness'
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   [[ ! -e "$KEYRING_RUNTIME/codewire/workload-secrets-v1" ]] ||
-    die 'stored workload-secret inventory materialized a guest delivery'
+    die 'application selection created a second durable delivery store'
+  # shellcheck disable=SC2016 # This variable belongs to the guest environment.
   run_cw run --no-tty -- /bin/sh -lc 'test -z "${CW_NATIVE_SMOKE_SECRET+x}"'
 fi
 
@@ -1819,6 +2256,7 @@ run_cw run --no-tty -- /bin/sh -lc \
   die 'direct-share symlink access mutated unselected host content'
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  run_application_secret_smoke
   log 'checking protected injection, redaction, denial, broker recovery, revocation, and audit'
   run_managed_credential_broker_smoke
   run_cw credentials --local get "id:$CREDENTIAL_ID" --output json
@@ -1829,6 +2267,18 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     .[0].protected_store_persistence == "operating_system" and
     .[0].cleanup_pending == false
   ' "$LAST_STDOUT" >/dev/null || die 'synthetic credential revocation metadata drifted'
+  run_cw credentials --local get "id:$SSH_CREDENTIAL_ID" --output json
+  jq -e --arg key "$SSH_PUBLIC_KEY" --arg fingerprint "$SSH_PUBLIC_KEY_FINGERPRINT" '
+    length == 1 and
+    .[0].provider == "ssh" and
+    .[0].authentication_kind == "ssh_key" and
+    .[0].status == "revoked" and
+    .[0].revocation_generation == 2 and
+    .[0].ssh_public_key.openssh == $key and
+    .[0].ssh_public_key.fingerprint == $fingerprint and
+    .[0].protected_store_persistence == "operating_system" and
+    .[0].cleanup_pending == false
+  ' "$LAST_STDOUT" >/dev/null || die 'synthetic SSH revocation metadata drifted'
 
   log 'stopping the VM before scanning all durable test-owned state'
   run_cw env stop --local "$NAME" --output json
@@ -1837,6 +2287,18 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   wait_for_journal_complete ||
     die 'broker-bound native stop returned before its lifecycle journal became terminal'
   assert_direct_share_processes_stopped
+  # The preceding scenario deliberately revoked the selected credential and
+  # killed its authority. Detach that now-unusable profile through the public
+  # API before the independent offline/direct-share lifecycle scenario.
+  run_cw env update --local "$NAME" --clear-profile --yes --output json
+  jq -e '
+    .state == "stopped" and
+    .access_profile == null and
+    .access_profile_revision == null and
+    .source_selection.credentials == null
+  ' "$LAST_STDOUT" >/dev/null || die 'revoked profile remained selected after clear'
+  wait_for_journal_complete ||
+    die 'stopped profile clear did not finish its lifecycle journal'
   printf 'direct read-only offline host change\n' >"$DIRECT_RO_SOURCE/restart.txt"
   printf 'direct read-write offline host change\n' >"$DIRECT_RW_SOURCE/restart.txt"
   log 'checking offline restart reopens the exact direct-share roots'
@@ -1844,10 +2306,15 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
     die 'broker-bound native environment did not restart'
   assert_direct_share_processes
+  # shellcheck disable=SC2016 # SSH_AUTH_SOCK belongs to the guest environment.
   run_cw run --no-tty -- /bin/sh -lc \
-    'set -eu; grep -qx "direct read-only offline host change" /workspace/direct-ro/restart.txt; grep -qx "direct read-write offline host change" /workspace/direct-rw/restart.txt; grep -qx "direct guest write" /workspace/direct-rw/guest-write.txt; printf "direct restarted guest write\n" > /workspace/direct-rw/restarted.txt'
+    'set -eu; test -z "${SSH_AUTH_SOCK+x}"; grep -qx "direct read-only offline host change" /workspace/direct-ro/restart.txt; grep -qx "direct read-write offline host change" /workspace/direct-rw/restart.txt; grep -qx "direct guest write" /workspace/direct-rw/guest-write.txt; printf "direct restarted guest write\n" > /workspace/direct-rw/restarted.txt'
   [[ "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
     die 'restarted direct read-write share was not live'
+  # Keep the fixture through the preceding restart so the unchanged startup
+  # script remains valid. Retire it only before the final stop and deletion.
+  run_cw run --no-tty -- /bin/bash /workspace/fixtures/stock-ssh-workload.sh cleanup
+  rg -qxF stock-ssh-workload-cleaned "$LAST_STDOUT" || die 'stock SSH fixture cleanup failed'
   run_cw env stop --local "$NAME" --output json
   jq -e '.state == "stopped"' "$LAST_STDOUT" >/dev/null ||
     die 'restarted broker-bound native environment did not stop'
@@ -1857,27 +2324,38 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   scan_for_credential_canary before-delete-access-token "$CREDENTIAL_CANARY"
   scan_for_credential_canary before-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
   scan_for_credential_canary before-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
+  scan_for_credential_canary before-delete-openai-key "$OPENAI_CREDENTIAL_CANARY"
+  scan_for_credential_canary before-delete-anthropic-key "$ANTHROPIC_CREDENTIAL_CANARY"
   scan_for_credential_canary before-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
 
-  log 'deleting the environment, profile, credential, and protected-store entry'
+  log 'deleting the environment, profile, credentials, and protected-store entries'
   run_cw env rm --local "$NAME" --yes
   ENV_CREATED=0
+  assert_current_target_cleared
   [[ -d "$DIRECT_RO_SOURCE" && -d "$DIRECT_RW_SOURCE" ]] ||
     die 'environment deletion removed a direct-share host root'
   [[ "$(cat "$DIRECT_RW_SOURCE/guest-write.txt")" == 'direct guest write' &&
      "$(cat "$DIRECT_RW_SOURCE/restarted.txt")" == 'direct restarted guest write' ]] ||
     die 'environment deletion changed acknowledged direct-share host content'
-  run_cw credentials --local profile delete "$CREDENTIAL_PROFILE_NAME" --yes
+  run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" delete --yes
   run_cw credentials --local delete "id:$CREDENTIAL_ID" --yes
   run_cw credentials --local delete "id:$GITHUB_CREDENTIAL_ID" --yes
-  run_cw secrets --local user delete CW_NATIVE_SMOKE_SECRET
-  run_cw secrets --local list --output json
+  run_cw credentials --local delete "id:$OPENAI_CREDENTIAL_ID" --yes
+  run_cw credentials --local delete "id:$ANTHROPIC_CREDENTIAL_ID" --yes
+  run_cw credentials --local delete "id:$SSH_CREDENTIAL_ID" --yes
+  run_cw secrets --local --user delete CW_NATIVE_SMOKE_SECRET
+  run_cw secrets --local projects delete "$APP_SECRET_PROJECT_A" --yes
+  run_cw secrets --local projects delete "$APP_SECRET_PROJECT_B" --yes
+  run_cw secrets --local projects list --output json
+  jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
+    die 'synthetic application projects remained after deletion'
+  run_cw secrets --local --user list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'synthetic workload-secret metadata remained after deletion'
   run_cw credentials --local list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'synthetic credential metadata remained after deletion'
-  run_cw credentials --local profile list --output json
+  run_cw credentials --local profiles list --output json
   jq -e 'length == 0' "$LAST_STDOUT" >/dev/null ||
     die 'synthetic access profile remained after deletion'
   keyring_service_ready || die 'isolated Secret Service exited before deletion proof'
@@ -1895,14 +2373,41 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     >/dev/null 2>"$SMOKE_ROOT/deleted-github-keyring-entry.stderr"; then
     die 'synthetic GitHub protected-store entry remained after credential deletion'
   fi
+  if secret_tool_isolated lookup \
+    application codewire \
+    service sh.codewire.credentials \
+    entry "local/credentials/$OPENAI_CREDENTIAL_ID/material-v1" \
+    >/dev/null 2>"$SMOKE_ROOT/deleted-openai-keyring-entry.stderr"; then
+    die 'synthetic OpenAI protected-store entry remained after credential deletion'
+  fi
+  if secret_tool_isolated lookup \
+    application codewire \
+    service sh.codewire.credentials \
+    entry "local/credentials/$ANTHROPIC_CREDENTIAL_ID/material-v1" \
+    >/dev/null 2>"$SMOKE_ROOT/deleted-anthropic-keyring-entry.stderr"; then
+    die 'synthetic Anthropic protected-store entry remained after credential deletion'
+  fi
+  if secret_tool_isolated lookup \
+    application codewire \
+    service sh.codewire.credentials \
+    entry "local/credentials/$SSH_CREDENTIAL_ID/material-v1" \
+    >/dev/null 2>"$SMOKE_ROOT/deleted-ssh-keyring-entry.stderr"; then
+    die 'synthetic SSH protected-store entry remained after credential deletion'
+  fi
   scan_for_credential_canary after-delete-access-token "$CREDENTIAL_CANARY"
   scan_for_credential_canary after-delete-refresh-token "$CREDENTIAL_REFRESH_CANARY"
   scan_for_credential_canary after-delete-github-token "$GITHUB_CREDENTIAL_CANARY"
+  scan_for_credential_canary after-delete-openai-key "$OPENAI_CREDENTIAL_CANARY"
+  scan_for_credential_canary after-delete-anthropic-key "$ANTHROPIC_CREDENTIAL_CANARY"
   scan_for_credential_canary after-delete-workload-secret "$WORKLOAD_SECRET_CANARY"
   unset CREDENTIAL_CANARY
   unset CREDENTIAL_REFRESH_CANARY
   unset GITHUB_CREDENTIAL_CANARY
+  unset OPENAI_CREDENTIAL_CANARY
+  unset ANTHROPIC_CREDENTIAL_CANARY
   unset WORKLOAD_SECRET_CANARY
+  unset SSH_PUBLIC_KEY SSH_PUBLIC_KEY_FINGERPRINT
+  unset APP_SECRET_CANARY_A APP_SECRET_CANARY_B
 
   [[ ! -e "$TRIPWIRE" ]] ||
     die "a forbidden fallback was invoked: $(tr '\n' ' ' <"$TRIPWIRE")"
@@ -2125,6 +2630,7 @@ run_cw run --no-tty -- docker rm -f codewire-native-smoke-port
 
 log 'checking bounded Docker logs and recoverable block and inode exhaustion'
 CW_COMMAND_TIMEOUT_SECONDS=900
+# shellcheck disable=SC2016 # Expressions are evaluated inside the guest.
 run_cw run --no-tty -- /bin/sh -lc '
   set -eu
   docker volume create codewire-native-smoke-bytes >/dev/null
@@ -2438,6 +2944,7 @@ jq -e '.replaced_pod_name == "" and .status.state == "ready"' "$LAST_STDOUT" >/d
 RECOVERED_VMM_PID="$(recorded_vmm_pid)" || die 'repaired Docker VMM identity was not readable'
 [[ "$RECOVERED_VMM_PID" != "$VMM_PID" && -d "/proc/$RECOVERED_VMM_PID" ]] ||
   die 'Docker crash recovery did not produce a new live VMM process'
+# shellcheck disable=SC2016 # Read the persistent file inside the guest.
 run_cw run --no-tty -- /bin/sh -lc 'test "$(cat /workspace/sentinel.txt)" = persistence-ok'
 run_docker_persistence_smoke docker-crash-persistence-ok
 
@@ -2468,6 +2975,7 @@ rg -qF 'disk shrink is not supported' "$LAST_STDERR" ||
 log 'deleting the environment and proving complete owned-object cleanup'
 run_cw env rm --local "$NAME" --yes
 ENV_CREATED=0
+assert_current_target_cleared
 DELETED_SUPERVISOR_PID="$(find_exact_supervisor_pid)" ||
   die 'per-user supervisor did not survive final environment deletion'
 [[ "$(owned_processes)" == "$DELETED_SUPERVISOR_PID" ]] ||
@@ -2561,6 +3069,7 @@ rg -qF 'copy-executable-ok' "$LAST_STDOUT" ||
   die 'copy-mode guest write escaped into the selected host source'
 run_cw env rm --local "$NAME" --yes
 ENV_CREATED=0
+assert_current_target_cleared
 [[ "$(cat "$WORKSPACE/data.txt")" == 'host changed after copy creation' ]] ||
   die 'copy-mode deletion mutated the selected host source'
 [[ "$(cat "$WORKSPACE/host-only.txt")" == 'host-only after copy' ]] ||

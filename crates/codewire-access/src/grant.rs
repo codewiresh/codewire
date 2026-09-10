@@ -8,12 +8,45 @@ use crate::{
     Placement, ProviderCatalog,
 };
 
+/// Closed credential-storage and execution-target combinations. This describes
+/// a grant context, not authority to use it: placement entrypoints must admit
+/// their exact variant using the corresponding authenticated runtime identity.
+/// Local credentials cannot target platform execution.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantPlacement {
+    /// Local authority and local execution.
+    Local,
+    /// Platform authority and platform execution.
+    Platform,
+    /// Platform authority and explicitly authorized local execution.
+    PlatformToLocal,
+}
+
+impl GrantPlacement {
+    /// Placement that owns the profile and its credential metadata.
+    pub const fn credential_storage(self) -> Placement {
+        match self {
+            Self::Local => Placement::Local,
+            Self::Platform | Self::PlatformToLocal => Placement::Platform,
+        }
+    }
+
+    /// Placement running the environment named by this grant context.
+    pub const fn execution_target(self) -> Placement {
+        match self {
+            Self::Local | Self::PlatformToLocal => Placement::Local,
+            Self::Platform => Placement::Platform,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GrantContext {
     pub environment_id: EnvironmentId,
     pub environment_generation: u64,
-    pub placement: Placement,
+    pub placement: GrantPlacement,
     pub user_id: OwnerId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<OwnerId>,
@@ -28,7 +61,8 @@ impl GrantContext {
                 field: "environment generation",
             });
         }
-        if self.placement == Placement::Local && self.organization_id.is_some() {
+        if self.placement.credential_storage() == Placement::Local && self.organization_id.is_some()
+        {
             return Err(AccessError::LocalOrganizationUnsupported);
         }
         Ok(())
@@ -133,7 +167,7 @@ pub fn derive_grants(
     {
         return Err(AccessError::BindingMismatch);
     }
-    if profile.placement != context.placement {
+    if profile.placement != context.placement.credential_storage() {
         return Err(AccessError::PlacementMismatch {
             subject: "access profile",
         });
@@ -159,7 +193,7 @@ pub fn derive_grants(
             });
         }
         credential.validate()?;
-        if credential.placement != context.placement {
+        if credential.placement != context.placement.credential_storage() {
             return Err(AccessError::PlacementMismatch {
                 subject: "credential",
             });
@@ -229,7 +263,7 @@ pub fn derive_grants(
 fn validate_profile_owner(context: &GrantContext, owner: &Owner) -> Result<(), AccessError> {
     match owner {
         Owner::Organization(owner_id) => {
-            if context.placement == Placement::Local {
+            if context.placement.credential_storage() == Placement::Local {
                 return Err(AccessError::LocalOrganizationUnsupported);
             }
             if context.organization_id.as_ref() != Some(owner_id) {
@@ -275,7 +309,9 @@ fn validate_credential_owner(
     profile_owner: &Owner,
     credential: &CredentialMetadata,
 ) -> Result<(), AccessError> {
-    if context.placement == Placement::Local && credential.owner.is_organization() {
+    if context.placement.credential_storage() == Placement::Local
+        && credential.owner.is_organization()
+    {
         return Err(AccessError::LocalOrganizationUnsupported);
     }
     let compatible = match (profile_owner, &credential.owner) {
@@ -286,7 +322,7 @@ fn validate_credential_owner(
             profile_user == credential_user
         }
         (Owner::User(_), Owner::Organization(credential_org)) => {
-            context.placement == Placement::Platform
+            context.placement.credential_storage() == Placement::Platform
                 && context.organization_id.as_ref() == Some(credential_org)
         }
         (Owner::Organization(profile_org), Owner::Organization(credential_org)) => {

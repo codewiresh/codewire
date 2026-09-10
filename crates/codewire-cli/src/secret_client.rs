@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use codewire_client::{self as rpc, ClientConfig, CodewireClient};
 use codewire_workload_secrets::{
@@ -11,6 +13,7 @@ use crate::config::ResolvedPlatformConfig;
 use crate::environment_client::display_client_error;
 
 const SECRET_LIST_PAGE_SIZE: i32 = 100;
+const SECRET_LIST_MAX_PAGES: usize = 10;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
@@ -185,17 +188,22 @@ impl SecretClient {
     pub async fn list_secret_projects(&self, org_id: &str) -> anyhow::Result<Vec<SecretProject>> {
         let mut projects = Vec::new();
         let mut page_token = String::new();
-        loop {
+        let mut cursors = BTreeSet::new();
+        for _ in 0..SECRET_LIST_MAX_PAGES {
             let response = self
                 .inner
                 .list_secret_projects(rpc::ListSecretProjectsRequest {
                     org_id: org_id.to_string(),
                     page_size: SECRET_LIST_PAGE_SIZE,
-                    page_token,
+                    page_token: page_token.clone(),
                     ..Default::default()
                 })
                 .await
                 .map_err(display_client_error)?;
+            anyhow::ensure!(
+                response.secret_projects.len() <= SECRET_LIST_PAGE_SIZE as usize,
+                "platform secret-project metadata exceeded its requested page bound"
+            );
             projects.extend(
                 response
                     .secret_projects
@@ -205,8 +213,15 @@ impl SecretClient {
             if response.next_page_token.is_empty() {
                 return Ok(projects);
             }
+            anyhow::ensure!(
+                cursors.insert(response.next_page_token.clone()),
+                "platform secret-project metadata repeated a page cursor"
+            );
             page_token = response.next_page_token;
         }
+        anyhow::bail!(
+            "platform secret-project metadata exceeded the complete-list page bound; no selection was made"
+        )
     }
 
     pub async fn create_secret_project(
@@ -776,5 +791,153 @@ mod tests {
                 overridden_sources: vec![WorkloadSecretSource::User],
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn secret_project_listing_rejects_repeated_cursors_without_partial_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.SecretService/ListSecretProjects"))
+            .respond_with(|_: &wiremock::Request| {
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(
+                        rpc::ListSecretProjectsResponse {
+                            secret_projects: vec![rpc::SecretProject {
+                                id: "11111111-1111-4111-8111-111111111111".into(),
+                                org_id: "org_123".into(),
+                                name: "development".into(),
+                                ..Default::default()
+                            }],
+                            next_page_token: "repeated-cursor".into(),
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    )
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = SecretClient::new(&ResolvedPlatformConfig::static_token(
+            server.uri(),
+            "test-token",
+            false,
+            None,
+        ))
+        .unwrap();
+
+        assert!(client.list_secret_projects("org_123").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn secret_project_listing_rejects_unique_nonterminal_pages_at_the_bound() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let server = MockServer::start().await;
+        let page = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.SecretService/ListSecretProjects"))
+            .respond_with(move |_: &wiremock::Request| {
+                let page = page.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(
+                        rpc::ListSecretProjectsResponse {
+                            secret_projects: vec![rpc::SecretProject::default()],
+                            next_page_token: format!("cursor-{page}"),
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    )
+            })
+            .expect(SECRET_LIST_MAX_PAGES as u64)
+            .mount(&server)
+            .await;
+        let client = SecretClient::new(&ResolvedPlatformConfig::static_token(
+            server.uri(),
+            "test-token",
+            false,
+            None,
+        ))
+        .unwrap();
+
+        assert!(client.list_secret_projects("org_123").await.is_err());
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            SECRET_LIST_MAX_PAGES
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_project_listing_accepts_an_exact_terminal_page_and_rejects_oversize() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let server = MockServer::start().await;
+        let page = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.SecretService/ListSecretProjects"))
+            .respond_with(move |_: &wiremock::Request| {
+                let page = page.fetch_add(1, Ordering::SeqCst);
+                let next_page_token = if page + 1 == SECRET_LIST_MAX_PAGES {
+                    String::new()
+                } else {
+                    format!("cursor-{page}")
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(
+                        rpc::ListSecretProjectsResponse {
+                            secret_projects: vec![rpc::SecretProject::default()],
+                            next_page_token,
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    )
+            })
+            .expect(SECRET_LIST_MAX_PAGES as u64)
+            .mount(&server)
+            .await;
+        let client = SecretClient::new(&ResolvedPlatformConfig::static_token(
+            server.uri(),
+            "test-token",
+            false,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            client.list_secret_projects("org_123").await.unwrap().len(),
+            SECRET_LIST_MAX_PAGES
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.SecretService/ListSecretProjects"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(
+                        rpc::ListSecretProjectsResponse {
+                            secret_projects: vec![
+                                rpc::SecretProject::default();
+                                SECRET_LIST_PAGE_SIZE as usize + 1
+                            ],
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                    ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = SecretClient::new(&ResolvedPlatformConfig::static_token(
+            server.uri(),
+            "test-token",
+            false,
+            None,
+        ))
+        .unwrap();
+        assert!(client.list_secret_projects("org_123").await.is_err());
     }
 }

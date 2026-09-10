@@ -25,6 +25,7 @@ pub enum Action {
     Create,
     Start,
     Stop,
+    RestartSources,
     Destroy,
     Unhandled,
 }
@@ -446,6 +447,9 @@ impl<S: LifecycleStore> Service<S> {
                     .await?;
                 Ok(true)
             }
+            // An interrupted Start resumes its runtime checks without
+            // resetting the persisted setup/install phase.
+            "starting" => Ok(true),
             _ => Ok(false),
         }
     }
@@ -493,6 +497,7 @@ impl<S: LifecycleStore> Service<S> {
                 Ok(Action::Create)
             }
             ("stopped", "stopping") => Ok(Action::Stop),
+            ("started", "stopping") => Ok(Action::RestartSources),
             ("destroyed", _) => Ok(Action::Destroy),
             _ => Ok(Action::Unhandled),
         }
@@ -1237,10 +1242,10 @@ mod tests {
             svc.reconcile(&snap("error", "destroyed")).await.unwrap(),
             Action::Destroy
         );
-        // Unhandled.
+        // Durable managed source restart does not fall into create recovery.
         assert_eq!(
             svc.reconcile(&snap("stopping", "started")).await.unwrap(),
-            Action::Unhandled
+            Action::RestartSources
         );
     }
 
@@ -1280,6 +1285,11 @@ mod tests {
                 .unwrap()
         );
         assert!(svc.prepare_start(&snap("error", "started")).await.unwrap());
+        assert!(
+            svc.prepare_start(&snap("starting", "started"))
+                .await
+                .unwrap()
+        );
         assert!(
             !svc.prepare_start(&snap("running", "started"))
                 .await

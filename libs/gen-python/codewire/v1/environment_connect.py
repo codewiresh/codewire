@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
+from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -60,6 +60,9 @@ class EnvironmentService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def start_environment(self, request: StartEnvironmentRequest, ctx: RequestContext[StartEnvironmentRequest, StartEnvironmentResponse]) -> StartEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def update_environment_sources(self, request: UpdateEnvironmentSourcesRequest, ctx: RequestContext[UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse]) -> UpdateEnvironmentSourcesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def protect_environment(self, request: ProtectEnvironmentRequest, ctx: RequestContext[ProtectEnvironmentRequest, ProtectEnvironmentResponse]) -> ProtectEnvironmentResponse:
@@ -204,6 +207,16 @@ class EnvironmentServiceASGIApplication(ConnectASGIApplication[EnvironmentServic
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.start_environment,
+                ),
+                "/codewire.v1.EnvironmentService/UpdateEnvironmentSources": Endpoint.unary(
+                    method=MethodInfo(
+                        name="UpdateEnvironmentSources",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=UpdateEnvironmentSourcesRequest,
+                        output=UpdateEnvironmentSourcesResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.update_environment_sources,
                 ),
                 "/codewire.v1.EnvironmentService/ProtectEnvironment": Endpoint.unary(
                     method=MethodInfo(
@@ -561,6 +574,26 @@ class EnvironmentServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def update_environment_sources(
+        self,
+        request: UpdateEnvironmentSourcesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UpdateEnvironmentSourcesResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="UpdateEnvironmentSources",
+                service_name="codewire.v1.EnvironmentService",
+                input=UpdateEnvironmentSourcesRequest,
+                output=UpdateEnvironmentSourcesResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def protect_environment(
         self,
         request: ProtectEnvironmentRequest,
@@ -855,6 +888,9 @@ class EnvironmentServiceSync(Protocol):
     def start_environment(self, request: StartEnvironmentRequest, ctx: RequestContext[StartEnvironmentRequest, StartEnvironmentResponse]) -> StartEnvironmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def update_environment_sources(self, request: UpdateEnvironmentSourcesRequest, ctx: RequestContext[UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse]) -> UpdateEnvironmentSourcesResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def protect_environment(self, request: ProtectEnvironmentRequest, ctx: RequestContext[ProtectEnvironmentRequest, ProtectEnvironmentResponse]) -> ProtectEnvironmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -995,6 +1031,16 @@ class EnvironmentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.start_environment,
+                ),
+                "/codewire.v1.EnvironmentService/UpdateEnvironmentSources": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="UpdateEnvironmentSources",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=UpdateEnvironmentSourcesRequest,
+                        output=UpdateEnvironmentSourcesResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.update_environment_sources,
                 ),
                 "/codewire.v1.EnvironmentService/ProtectEnvironment": EndpointSync.unary(
                     method=MethodInfo(
@@ -1338,6 +1384,25 @@ class EnvironmentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentService",
                 input=StartEnvironmentRequest,
                 output=StartEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def update_environment_sources(
+        self,
+        request: UpdateEnvironmentSourcesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> UpdateEnvironmentSourcesResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="UpdateEnvironmentSources",
+                service_name="codewire.v1.EnvironmentService",
+                input=UpdateEnvironmentSourcesRequest,
+                output=UpdateEnvironmentSourcesResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

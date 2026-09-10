@@ -15,6 +15,8 @@ fi
 cgroup_root="${CODEWIRE_CGROUP_ROOT:-/sys/fs/cgroup}"
 expected_pids_max="${CODEWIRE_EXPECTED_PIDS_MAX:-2048}"
 bin_root="${CODEWIRE_BIN_ROOT:-/usr/local/bin}"
+ssh_fixture_root="${CODEWIRE_SSH_FIXTURE_ROOT:-/opt/codewire/fixtures/openssh}"
+system_sbin_root="${CODEWIRE_SYSTEM_SBIN_ROOT:-/usr/sbin}"
 
 emit_pid_evidence_on_failure() {
   status=$?
@@ -106,6 +108,34 @@ if [ "$mode" = mounted-home-agents ]; then
   printf 'workspace image verification: fresh-home six-agent contract passed\n'
   exit 0
 fi
+
+# The SSH acceptance target is an inert, immutable image artifact, not a system
+# service. Executing -V proves its loader closure without creating host keys or
+# a listener. Per-run host keys and configuration belong only to the smoke.
+test -d "$ssh_fixture_root"
+test ! -L "$ssh_fixture_root"
+test -f "$ssh_fixture_root/usr/sbin/sshd"
+test ! -L "$ssh_fixture_root/usr/sbin/sshd"
+test -x "$ssh_fixture_root/usr/sbin/sshd"
+test ! -e "$system_sbin_root/sshd"
+invalid_fixture="$(find "$ssh_fixture_root" -xdev \( ! -uid 0 -o \( \( -type f -o -type d \) -perm /022 \) \) -print -quit)"
+test -z "$invalid_fixture"
+host_keys="$(find "$ssh_fixture_root" -name 'ssh_host_*' -print -quit)"
+test -z "$host_keys"
+case "$(uname -m)" in
+  x86_64) ssh_multiarch=x86_64-linux-gnu ;;
+  aarch64) ssh_multiarch=aarch64-linux-gnu ;;
+  *) printf 'workspace image verification: unsupported SSH fixture architecture\n' >&2; exit 1 ;;
+esac
+test -f "$ssh_fixture_root/usr/lib/$ssh_multiarch/libwrap.so.0" ||
+  test -f "$ssh_fixture_root/lib/$ssh_multiarch/libwrap.so.0"
+ssh_version="$(LD_LIBRARY_PATH="$ssh_fixture_root/usr/lib/$ssh_multiarch:$ssh_fixture_root/lib/$ssh_multiarch" \
+  "$ssh_fixture_root/usr/sbin/sshd" -V 2>&1)"
+case "$ssh_version" in
+  OpenSSH_9.6*) ;;
+  *) printf 'workspace image verification: unexpected SSH fixture version\n' >&2; exit 1 ;;
+esac
+printf 'workspace image verification: inert SSH fixture contract passed\n'
 
 check_version() {
   executable="$1"

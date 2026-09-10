@@ -12,9 +12,11 @@ default = ["local"]
 local = ["dep:codewire-local-credentials", "dep:codewire-protected-store"]
 platform = ["dep:codewire-platform-credentials", "dep:codewire-protected-store", "dep:tonic"]
 codex-enrollment = ["dep:rustix"]
+ssh-agent = ["dep:rustix", "dep:codewire-protected-store", "codewire-protected-store/ssh-material"]
 local-broker-synthetic-smoke = []
 
 [dependencies]
+prost = { workspace = true }
 async-trait = { workspace = true }
 av-credential-proxy = { workspace = true }
 base64 = { workspace = true }
@@ -25,6 +27,7 @@ codewire-gateway-proto = { workspace = true }
 codewire-local-credentials = { workspace = true, optional = true }
 codewire-platform-credentials = { workspace = true, optional = true }
 codewire-protected-store = { workspace = true, optional = true }
+codewire-workload-secrets = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 reqwest = { workspace = true }

@@ -418,6 +418,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-resolve-cargo-target-dir.sh|\
       scripts/ci/tests/test-cargo-target-runner-failures.sh|\
       scripts/ci/tests/test-ci-tool-downloads.sh|\
+      scripts/ci/tests/test-service-ssh-image-verifier.sh|\
       scripts/ci/verify/run-product-verification.sh|\
       scripts/ci/tests/test-retired-local-sdk-contract.sh|\
       scripts/checks/security/audit-rust-only-runtime.sh|\
@@ -651,6 +652,27 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
+      proto/codewire/bridge/v1/bridge.proto)
+        # Neutral credential bridge frames are generated publicly and consumed
+        # by both private native and platform Rust transports.
+        select_token rust
+        select_token rust_pkg_codewire_cli
+        select_token rust_pkg_codewire_credential_bridge
+        select_token rust_pkg_codewire_credential_broker
+        select_token rust_pkg_codewire_credential_service
+        select_token rust_pkg_codewire_daemon
+        select_token rust_pkg_codewire_gateway
+        select_token rust_pkg_codewire_gateway_proto
+        select_token rust_pkg_codewire_local_credentials
+        select_token rust_pkg_codewire_local_vmm
+        select_token rust_pkg_codewire_proto
+        select_token transport
+        select_token transport_pkg_codewire_daemon
+        select_token transport_pkg_codewire_gateway
+        select_token transport_pkg_codewire_local_vmm
+        select_token transport_pkg_codewire_vmm_guest_probe
+        recognized=true
+        ;;
       proto/codewire/v1/environment.proto)
         # Environment requests are consumed directly by the platform clients,
         # dashboard, orchestration adapter, and local VMM public API.
@@ -782,7 +804,7 @@ if [ "$event_selected" = false ]; then
         recognized=true
         ;;
       apps/dashboard/*|apps/docs/*|favicon.svg|logo/*|\
-      scripts/dev/design-system-server.py)
+      scripts/dev/design-system-server.py|scripts/ci/tests/test-dashboard-browser-gate.sh)
         select_token web
         recognized=true
         ;;
@@ -1017,10 +1039,14 @@ if [ "$event_selected" = false ]; then
         ;;
       scripts/ci/verify/build-local-vmm-initramfs.sh|\
       scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh|\
-      scripts/ci/verify/smoke-native-local-environment.sh)
+      scripts/ci/verify/smoke-native-local-environment.sh|\
+      scripts/ci/verify/stock-ssh-workload.sh)
         select_token transport
         select_token transport_pkg_codewire_local_vmm
         select_token transport_pkg_codewire_vmm_guest_probe
+        if [[ "$path" == scripts/ci/verify/stock-ssh-workload.sh ]]; then
+          select_token runtime_dev_smoke
+        fi
         recognized=true
         ;;
       crates/*/migrations/*)
@@ -1165,8 +1191,13 @@ if [ "$event_selected" = false ]; then
         ;;
       scripts/runtime/dev/provision-dev-smoke-user.sh|\
       scripts/runtime/dev/smoke-dev-commodity.sh|\
+      scripts/runtime/dev/provider-ssh-smoke.sh|\
+      scripts/runtime/dev/smoke-local-platform-sources.sh|\
       scripts/runtime/dev/with-dev-smoke-auth.sh|\
       scripts/runtime/tests/test-provision-dev-smoke-user.sh|\
+      scripts/runtime/tests/test-provider-ssh-smoke.sh|\
+      scripts/runtime/tests/test-local-platform-sources-smoke.sh|\
+      scripts/runtime/tests/fixtures/local-platform/__local-credential-authority|\
       scripts/runtime/tests/test-smoke-dev-commodity.sh|\
       scripts/runtime/tests/test-with-dev-smoke-auth.sh)
         select_token runtime_dev_smoke
@@ -1233,6 +1264,11 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/kind-host-runtime.sh|\
       scripts/ci/verify/playwright-browser-runtime.sh|\
       scripts/ci/verify/kind-e2e.sh|scripts/ci/verify/kind/*|\
+      scripts/ci/verify/kind-build-artifacts.py|\
+      scripts/ci/images/build-kind-smokes.sh|\
+      scripts/ci/tests/test-kind-build-artifacts.py|\
+      scripts/ci/tests/test-kind-build-workflow.py|\
+      scripts/ci/tests/test-build-kind-smokes.sh|\
       scripts/dev/kind/install-temporal.sh|scripts/ci/tests/test-install-temporal.sh|\
       deployments/k8s/*ingress*|\
       deployments/k8s/overlays/local-kind/*|deployments/k8s/overlays/local-kind-static/*)

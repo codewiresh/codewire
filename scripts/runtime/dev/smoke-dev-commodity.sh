@@ -100,6 +100,12 @@ COCO_REST_ISOLATION_CURL_EXIT=""
 COCO_REST_ISOLATION_EVIDENCE_SOURCE=""
 COCO_REST_ISOLATION_RECEIPT=""
 declare -a SMOKE_ONLY_PHASES=()
+declare -a APP_SECRET_PROJECTS=() APP_SECRET_IDS=() APP_SECRET_VALUES=() APP_SECRET_HASHES=()
+APP_SECRET_DOCUMENT=""
+APP_SECRET_CREATE_ATTEMPTED=0
+
+# shellcheck source=scripts/runtime/dev/provider-ssh-smoke.sh
+source "$ROOT/scripts/runtime/dev/provider-ssh-smoke.sh"
 
 usage() {
   cat <<'USAGE'
@@ -119,7 +125,14 @@ Options:
   --only PHASE             Run only one smoke phase; repeatable. Phases:
                            kube, exec, coco, docker, doctor, ssh,
                            tailnet-ssh, derp-ssh, websocket-ssh,
-                           host-key, app-preview
+                           host-key, app-preview, application-secrets, provider-ssh
+                           application-secrets requires the dedicated smoke
+                           API key, a fresh disposable env and Kubernetes checks.
+                           It tests project application secrets, not personal
+                           secrets or outbound provider SSH.
+                           provider-ssh is owner-operated --admin-oidc with an
+                           explicit login directory and expected email; it creates
+                           only a disposable generated SSH identity/profile/env.
   --keep                   Keep the environment after the smoke
   --skip-kube              Skip Kubernetes shape assertions
   --skip-docker            Skip Docker/compose/Postgres guest smoke
@@ -357,7 +370,7 @@ while (($# > 0)); do
     --only)
       [[ $# -ge 2 ]] || die "--only requires a phase"
       case "$2" in
-        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview)
+        kube|exec|coco|docker|doctor|ssh|tailnet-ssh|derp-ssh|websocket-ssh|host-key|app-preview|application-secrets|provider-ssh)
           SMOKE_ONLY_PHASES+=("$2")
           ;;
         *)
@@ -411,7 +424,11 @@ cleanup() {
   if [[ "$rc" != "0" ]]; then
     collect_failure_diagnostics "failure" || true
   fi
-  if [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" != "1" && -x "${CW_BIN:-}" ]]; then
+  if [[ -n "$PROVIDER_SSH_CREDENTIAL_NAME" ]]; then
+    cleanup_provider_ssh || rc=1
+  elif ((${#APP_SECRET_PROJECTS[@]} > 0)); then
+    cleanup_application_secrets || rc=1
+  elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" != "1" && -x "${CW_BIN:-}" ]]; then
     log "deleting smoke environment $ENV_ID"
     "$CW_BIN" --server "$CODEWIRE_SERVER_URL" env rm --yes "$ENV_ID" >/dev/null 2>&1 || true
   elif [[ -n "$ENV_ID" && "$SMOKE_KEEP_ENV" == "1" ]]; then
@@ -936,6 +953,14 @@ assert_admin_oauth_principal() {
 
 create_environment() {
   local create_out="$TMPDIR_SMOKE/create.out"
+  local -a source_args=()
+  if [[ -n "$APP_SECRET_DOCUMENT" ]]; then
+    source_args=(--platform --file "$APP_SECRET_DOCUMENT")
+    APP_SECRET_CREATE_ATTEMPTED=1
+  elif [[ -n "$PROVIDER_SSH_DOCUMENT" ]]; then
+    source_args=(--platform --file "$PROVIDER_SSH_DOCUMENT")
+    PROVIDER_SSH_CREATE_ATTEMPTED=1
+  fi
 
   case "$SMOKE_ISOLATION_TIER" in
     standard|confidential) ;;
@@ -944,6 +969,7 @@ create_environment() {
 
   log "creating environment $SMOKE_NAME on $CODEWIRE_SERVER_URL"
   if ! cw env create \
+      "${source_args[@]}" \
       --image "$SMOKE_IMAGE" \
       --name "$SMOKE_NAME" \
       --cpu "$SMOKE_CPU" \
@@ -964,6 +990,296 @@ create_environment() {
     die "failed to parse environment ID from cw env create output"
   }
   log "environment id $ENV_ID"
+}
+
+application_secrets_selected() {
+  local phase
+  for phase in "${SMOKE_ONLY_PHASES[@]}"; do
+    [[ "$phase" != application-secrets ]] || return 0
+  done
+  return 1
+}
+
+validate_application_secrets_options() {
+  [[ -z "$SMOKE_EXISTING_ENV_ID" && "$SMOKE_KEEP_ENV" == 0 && "$SMOKE_SKIP_KUBE" == 0 ]] ||
+    die 'application-secrets requires a fresh disposable environment and Kubernetes checks; --existing-env, --keep and --skip-kube are unsupported'
+  [[ "$SMOKE_AUTH_MODE" == api-key && "$ALLOW_GENERIC_CODEWIRE_API_KEY_FOR_SMOKE" == 0 &&
+     -n "${CODEWIRE_DEV_SMOKE_API_KEY:-}" && -n "$EXPECTED_CODEWIRE_SMOKE_USER_EMAIL" ]] ||
+    die 'application-secrets requires the existing dedicated Dev smoke API-key wrapper; no owner OAuth or generic-key fallback'
+  [[ "$ALLOW_NON_DEV" == 0 && -n "$EXPECTED_CODEWIRE_DEV_SERVER_URL" &&
+     "$CODEWIRE_SERVER_URL" == "$EXPECTED_CODEWIRE_DEV_SERVER_URL" ]] ||
+    die 'application-secrets requires the exact configured Dev endpoint'
+  [[ -n "$SANDBOX_NAMESPACE" ]] || die 'application-secrets requires SANDBOX_NAMESPACE'
+  local command
+  for command in jq python3 sha256sum script; do require_cmd "$command"; done
+}
+
+assert_application_artifacts_redacted() {
+  local status
+  # Only synthetic patterns enter this anonymous pipe, never grep argv/files.
+  if grep -Fq -f <(printf '%s\n' "${APP_SECRET_VALUES[@]}") -- "$@"; then
+    die 'application-secret value entered smoke output or metadata; output suppressed'
+  else
+    status=$?
+    [[ "$status" == 1 ]] || die 'application-secret artifact inspection failed'
+  fi
+}
+
+prepare_application_secrets() {
+  local nonce project project_id value index key install startup
+  nonce="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+  [[ "$nonce" =~ ^[0-9a-f]{32}$ ]] || die 'synthetic application identity generation failed'
+  # Use only the already checked dedicated smoke org, never a personal scope.
+  cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-projects-before.json" ||
+    die 'dedicated smoke identity cannot list platform secret projects'
+  cw_with_timeout 30 env --platform list --output json >"$TMPDIR_SMOKE/app-environments-before.json" ||
+    die 'dedicated smoke identity cannot inspect its environment names'
+  jq -e --arg name "$SMOKE_NAME" 'all(.[]; .name != $name)' \
+    "$TMPDIR_SMOKE/app-environments-before.json" >/dev/null ||
+    die 'application smoke environment name already exists; choose a fresh --name'
+  APP_SECRET_VALUES=("cwdevapp${nonce}a" "cwdevapp${nonce}b")
+  for index in 0 1; do
+    project="dev-app-${nonce}-${index}"
+    jq -e --arg name "$project" 'all(.[]; .name != $name)' \
+      "$TMPDIR_SMOKE/app-projects-before.json" >/dev/null || die 'synthetic project name already exists'
+    # Retain exact intent even if the create response is lost after commit.
+    APP_SECRET_PROJECTS+=("$project")
+    cw_with_timeout 30 secrets --platform projects create "$project" >"$TMPDIR_SMOKE/app-create-project-$index.out" \
+      2>"$TMPDIR_SMOKE/app-create-project-$index.err" ||
+      die 'dedicated smoke identity cannot create its disposable secret project'
+    cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-projects.json" ||
+      die 'cannot resolve the created platform secret project'
+    project_id="$(jq -er --arg name "$project" '
+      [.[] | select(.name == $name)] | if length == 1 then .[0].id else error("ambiguous project") end
+      | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
+    ' "$TMPDIR_SMOKE/app-projects.json")" || die 'created application project ID is missing or ambiguous'
+    APP_SECRET_IDS+=("$project_id")
+    value="${APP_SECRET_VALUES[$index]}"
+    APP_SECRET_HASHES+=("$(printf '%s' "$value" | sha256sum | cut -d ' ' -f 1)")
+    for key in DATABASE_URL CW_DEV_PRECEDENCE; do
+      printf '%s' "$value" | cw_with_timeout 30 secrets --platform --project "id:${APP_SECRET_IDS[$index]}" set "$key" \
+        >"$TMPDIR_SMOKE/app-set-$index-$key.out" 2>"$TMPDIR_SMOKE/app-set-$index-$key.err" ||
+        die 'dedicated smoke identity cannot write its synthetic project secret via protected stdin'
+    done
+    cw_with_timeout 30 secrets --platform --project "id:${APP_SECRET_IDS[$index]}" list --output json \
+      >"$TMPDIR_SMOKE/app-keys-$index.json" || die 'cannot inspect write-only application key metadata'
+    jq -e 'map(.key) | sort == ["CW_DEV_PRECEDENCE", "DATABASE_URL"]' \
+      "$TMPDIR_SMOKE/app-keys-$index.json" >/dev/null || die 'application key metadata changed names'
+  done
+  install="set -eu; test \"\$(printf %s \"\$DATABASE_URL\" | sha256sum | cut -d ' ' -f 1)\" = '${APP_SECRET_HASHES[0]}'; test \"\$CW_DEV_PRECEDENCE\" = ordinary-config; test ! -e /workspace/.cw-app-smoke; mkdir /workspace/.cw-app-smoke; printf '1\\n' > /workspace/.cw-app-smoke/install-count; printf 'workspace-preserved\\n' > /workspace/.cw-app-smoke/preserved"
+  # shellcheck disable=SC2016 # Expanded by the managed guest, never this host.
+  startup='set -eu; test "$CW_DEV_PRECEDENCE" = ordinary-config; if test "${DATABASE_URL+x}" = x; then printf %s "$DATABASE_URL" | sha256sum | cut -d " " -f 1; else printf "absent\n"; fi > /workspace/.cw-app-smoke/startup-sha'
+  APP_SECRET_DOCUMENT="$TMPDIR_SMOKE/app-codewire.json"
+  jq -n --arg project "platform:id:${APP_SECRET_IDS[0]}" --arg install "$install" --arg startup "$startup" \
+    '{version:1, working_directory:"/workspace", secrets:{project:$project},
+      environment:{CW_DEV_PRECEDENCE:"ordinary-config"}, install_command:$install, startup_script:$startup}' \
+    >"$APP_SECRET_DOCUMENT"
+  assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-*.json "$TMPDIR_SMOKE"/app-*.out "$TMPDIR_SMOKE"/app-*.err
+}
+
+application_environment_ready() {
+  local project="$1" previous_generation="$2"
+  cw_with_timeout 30 env --platform info "$ENV_ID" --output json \
+    >"$TMPDIR_SMOKE/app-environment.json" 2>"$TMPDIR_SMOKE/app-info.err" || return 1
+  jq -e --arg id "$ENV_ID" --arg project "$project" --argjson previous "$previous_generation" '
+    .id == $id and .state == "running" and .operation_generation > $previous and
+    (.source_selection | type == "object") and (.source_selection.secrets | type == "object") and
+    .source_selection.credentials == null and .source_selection.profile_revision == null and
+    (.source_selection.secrets.project // "") == $project and
+    (.source_selection.secrets.user // null) == null and
+    (.source_selection.secrets.organization // false) == false
+  ' "$TMPDIR_SMOKE/app-environment.json" >/dev/null
+}
+
+capture_application_pod() {
+  local phase="$1" generation="$2" claim_uid
+  claim_uid="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxclaim "$CLAIM_NAME" -o 'jsonpath={.metadata.uid}')"
+  [[ -n "$claim_uid" ]] || die 'application smoke claim identity is unavailable'
+  kubectl_dev -n "$SANDBOX_NAMESPACE" get pod -l "agents.x-k8s.io/claim-uid=$claim_uid" -o json |
+    jq -e --arg claim "$claim_uid" --arg id "$ENV_ID" --arg generation "$generation" --arg phase "$phase" '
+      if (.items | length) != 1 then error("expected one exact workspace Pod") else .items[0] end |
+      select(.metadata.deletionTimestamp == null and .status.phase == "Running" and
+        .metadata.labels["agents.x-k8s.io/claim-uid"] == $claim) |
+      [.spec.containers[] | select(.name == "workspace") | .env[]?] as $env |
+      select(all($env[]; .name != "DATABASE_URL")) |
+      select(if $phase == "clear" then
+        all($env[]; .name != "CODEWIRE_ENVIRONMENT_ID" and
+          .name != "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION" and
+          .name != "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256")
+      else [$env[] | select(.name == "CODEWIRE_ENVIRONMENT_ID") | .value] == [$id] and
+        [$env[] | select(.name == "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION") | .value] == [$generation] and
+        ([$env[] | select(.name == "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256") | .value] |
+          length == 1 and (.[0] | test("^[0-9a-f]{64}$"))) end) |
+      {uid:.metadata.uid, claim_uid:$claim, generation:$generation,
+       volumes:[.spec.volumes[]? | select(.persistentVolumeClaim != null) | {name,claim:.persistentVolumeClaim.claimName}]}
+    ' >"$TMPDIR_SMOKE/app-pod-$phase.json" || die 'application workspace Pod identity or immutable generation is wrong'
+  jq -e '.uid | type == "string" and length > 0' "$TMPDIR_SMOKE/app-pod-$phase.json" >/dev/null ||
+    die 'application workspace Pod identity is missing'
+}
+
+application_guest_check() {
+  local expected="$1"
+  cat <<SCRIPT
+set -eu
+test "\$CW_DEV_PRECEDENCE" = ordinary-config
+test "\$(cat /workspace/.cw-app-smoke/install-count)" = 1
+test "\$(cat /workspace/.cw-app-smoke/preserved)" = workspace-preserved
+if test '$expected' = absent; then test "\${DATABASE_URL+x}" != x; else
+  test "\$(printf %s "\$DATABASE_URL" | sha256sum | cut -d ' ' -f 1)" = '$expected'
+fi
+attempt=0
+while test "\$(cat /workspace/.cw-app-smoke/startup-sha 2>/dev/null || true)" != '$expected'; do
+  attempt=\$((attempt + 1)); test "\$attempt" -lt 100; sleep 0.1
+done
+python3 - <<'PY'
+import json
+from pathlib import Path
+root = Path('/home/codewire/.codewire')
+ordinary = json.loads((root / 'environment.json').read_text())
+assert 'DATABASE_URL' not in ordinary
+assert ordinary['CW_DEV_PRECEDENCE'] == 'ordinary-config'
+sessions = list((root / 'daemon' / 'sessions').glob('*/session.json'))
+assert sessions, 'managed session metadata is missing'
+for path in sessions:
+    session = json.loads(path.read_text())
+    assert all(value.split('=', 1)[0] != 'DATABASE_URL' for value in session['env'])
+PY
+printf 'application-secret-check-ok\\n'
+SCRIPT
+}
+
+run_application_secret_pty() {
+  local guest_script="$1" phase="$2" command
+  printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run "$ENV_ID" -- \
+    /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
+  if ! timeout --foreground --kill-after=5s "$SMOKE_EXEC_TIMEOUT" \
+      env SHELL=/bin/bash script -qefc "$command" "$TMPDIR_SMOKE/app-pty-$phase.log" </dev/null \
+      >"$TMPDIR_SMOKE/app-pty-$phase.out" 2>"$TMPDIR_SMOKE/app-pty-$phase.err"; then
+    die 'application-secret PTY launch failed; output suppressed'
+  fi
+  grep -Eq $'^application-secret-check-ok\r?$' "$TMPDIR_SMOKE/app-pty-$phase.log" ||
+    die 'application-secret PTY did not return its exact child receipt'
+}
+
+assert_application_source_update() {
+  local file="$1" project="$2" generation="$3"
+  jq -es --arg id "$ENV_ID" --arg project "$project" --argjson generation "$generation" '
+    length == 1 and (.[0] |
+      type == "object" and .environment_id == $id and
+      .operation_generation == $generation and .outcome == "restart_required" and
+      (.selection | type == "object" and has("secrets") and has("credentials") and has("profile_revision")) and
+      (.selection.secrets | type == "object") and
+      (.selection.secrets | if has("project") then .project == $project else $project == "" end) and
+      (.selection.secrets | (has("user") | not) or .user == null) and
+      (.selection.secrets | (has("organization") | not) or .organization == false) and
+      .selection.credentials == null and .selection.profile_revision == null)
+  ' "$file" >/dev/null || die 'application source update acknowledgement did not match the exact submitted operation and selection'
+}
+
+run_application_secrets_smoke() {
+  local phase expected project generation=0 previous_uid='' guest_script
+  run_kube_assertions
+  for phase in a b clear; do
+    case "$phase" in
+      a) project="platform:id:${APP_SECRET_IDS[0]}"; expected="${APP_SECRET_HASHES[0]}" ;;
+      b)
+        project="platform:id:${APP_SECRET_IDS[1]}"; expected="${APP_SECRET_HASHES[1]}"
+        if cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" --output json </dev/null \
+            >"$TMPDIR_SMOKE/app-unconfirmed.out" 2>"$TMPDIR_SMOKE/app-unconfirmed.err"; then
+          die 'unconfirmed application source replacement unexpectedly succeeded'
+        fi
+        grep -Fq 'source selection requires --yes for noninteractive or JSON commands; no source change was submitted' \
+          "$TMPDIR_SMOKE/app-unconfirmed.err" || die 'unconfirmed source edit failed for an unexpected reason; output suppressed'
+        application_environment_ready "platform:id:${APP_SECRET_IDS[0]}" 0 || die 'unconfirmed source edit changed selection'
+        [[ "$(jq -r .operation_generation "$TMPDIR_SMOKE/app-environment.json")" == "$generation" ]] ||
+          die 'unconfirmed source edit changed generation'
+        cw_with_timeout 30 env --platform update "$ENV_ID" --secrets "$project" --yes --output json \
+          >"$TMPDIR_SMOKE/app-update-b.json" 2>"$TMPDIR_SMOKE/app-update-b.err" || die 'application source replacement failed'
+        assert_application_source_update "$TMPDIR_SMOKE/app-update-b.json" "$project" "$generation"
+        ;;
+      clear)
+        project=''; expected=absent
+        cw_with_timeout 30 env --platform update "$ENV_ID" --clear-secrets --yes --output json \
+          >"$TMPDIR_SMOKE/app-update-clear.json" 2>"$TMPDIR_SMOKE/app-update-clear.err" || die 'application source clear failed'
+        assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
+        ;;
+    esac
+    wait_until 'current application source generation' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
+      application_environment_ready "$project" "$generation"
+    generation="$(jq -er .operation_generation "$TMPDIR_SMOKE/app-environment.json")"
+    capture_application_pod "$phase" "$generation"
+    if [[ -n "$previous_uid" ]]; then
+      [[ "$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")" != "$previous_uid" ]] || die 'source replacement reused the old Pod'
+      [[ "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -c .volumes "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
+        die 'source replacement changed persistent workspace claims'
+      [[ "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-$phase.json")" == "$(jq -r .claim_uid "$TMPDIR_SMOKE/app-pod-a.json")" ]] ||
+        die 'source replacement changed the exact owned SandboxClaim'
+    fi
+    previous_uid="$(jq -r .uid "$TMPDIR_SMOKE/app-pod-$phase.json")"
+    guest_script="$(application_guest_check "$expected")"
+    cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- /bin/sh -c "$guest_script" \
+      >"$TMPDIR_SMOKE/app-exec-$phase.out" 2>"$TMPDIR_SMOKE/app-exec-$phase.err" || die 'managed application-secret exec failed; output suppressed'
+    grep -qx application-secret-check-ok "$TMPDIR_SMOKE/app-exec-$phase.out" || die 'managed exec omitted application receipt'
+    run_application_secret_pty "$guest_script" "$phase"
+    cw_with_timeout 30 list "$ENV_ID" --output json >"$TMPDIR_SMOKE/app-sessions-$phase.json" || die 'session metadata inspection failed'
+    assert_application_artifacts_redacted "$TMPDIR_SMOKE"/app-*.json "$TMPDIR_SMOKE"/app-*.out "$TMPDIR_SMOKE"/app-*.err "$TMPDIR_SMOKE"/app-pty-*.log "$TMPDIR_SMOKE/create.out"
+  done
+  log 'application project secrets passed install/startup, exec/PTY, replacement/clear and preservation; no personal/provider claim'
+}
+
+application_environment_destroyed() {
+  local state
+  cw_with_timeout 30 env --platform list --all --output json \
+    >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null || return 1
+  # info deliberately resolves only live environments. Retained terminal rows
+  # are visible through list --all; absence is not terminal cleanup proof.
+  state="$(jq -ers --arg id "$ENV_ID" '
+    if length != 1 or (.[0] | type) != "array" then error("expected environment array") else .[0] end |
+    [.[] | select(.id == $id)] |
+    if length == 1 and (.[0].state | type) == "string" then .[0].state
+    else error("expected exact unique owned environment") end
+  ' "$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null)" || return 2
+  [[ "$state" == destroyed ]]
+}
+
+cleanup_application_secrets() {
+  local project project_id selector index status rc=0 deadline
+  if [[ -z "$ENV_ID" && "$APP_SECRET_CREATE_ATTEMPTED" == 1 ]]; then
+    if cw_with_timeout 30 env --platform list --all --output json >"$TMPDIR_SMOKE/app-cleanup-environments.json" 2>/dev/null; then
+      ENV_ID="$(jq -ers --arg name "$SMOKE_NAME" '
+        if length != 1 or (.[0] | type) != "array" then error("expected environment array") else .[0] end |
+        [.[] | select(.name == $name)] |
+        if length == 1 then .[0].id else error("ambiguous owned environment") end |
+        select(type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))' \
+        "$TMPDIR_SMOKE/app-cleanup-environments.json")" || rc=1
+    else rc=1; fi
+  fi
+  if [[ -n "$ENV_ID" ]]; then
+    cw_with_timeout 60 env --platform rm --yes "$ENV_ID" >"$TMPDIR_SMOKE/app-cleanup-env.out" 2>"$TMPDIR_SMOKE/app-cleanup-env.err" || rc=1
+    deadline=$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))
+    while :; do
+      if application_environment_destroyed; then break; else status=$?; fi
+      if [[ "$status" != 1 ]]; then rc=1; break; fi
+      if (( $(seconds_now) >= deadline )); then rc=1; break; fi
+      sleep 5
+    done
+  fi
+  for index in "${!APP_SECRET_PROJECTS[@]}"; do
+    project="${APP_SECRET_PROJECTS[$index]}"
+    project_id="${APP_SECRET_IDS[$index]:-}"
+    selector="$project"
+    [[ -z "$project_id" ]] || selector="id:$project_id"
+    cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null || { rc=1; continue; }
+    jq -e 'type == "array"' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null || { rc=1; continue; }
+    if jq -e --arg name "$project" --arg id "$project_id" \
+        'any(.[]; if $id == "" then .name == $name else .id == $id end)' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null; then
+      cw_with_timeout 30 secrets --platform projects delete "$selector" --yes >"$TMPDIR_SMOKE/app-cleanup-project.out" 2>"$TMPDIR_SMOKE/app-cleanup-project.err" || rc=1
+    fi
+    cw_with_timeout 30 secrets --platform projects list --output json >"$TMPDIR_SMOKE/app-cleanup-projects.json" 2>/dev/null &&
+      jq -e --arg name "$project" --arg id "$project_id" 'type == "array" and all(.[]; .name != $name and .id != $id)' "$TMPDIR_SMOKE/app-cleanup-projects.json" >/dev/null || rc=1
+  done
+  [[ "$rc" == 0 ]] || log 'application smoke cleanup incomplete; exact owned IDs remain in private smoke evidence'
+  return "$rc"
 }
 
 record_environment_artifact() {
@@ -1427,6 +1743,7 @@ assert_pod_shape() {
   kubectl_dev -n "$SANDBOX_NAMESPACE" exec "$POD_NAME" -c workspace -- id >/dev/null
   if [[ "$EXPECTED_DOCKER_MODE" != "none" ]]; then
     if [[ "$EXPECTED_RUNTIME_CLASS" == "confidential" ]]; then
+      # shellcheck disable=SC2016 # The guest shell/awk expand these expressions.
       kubectl_dev -n "$SANDBOX_NAMESPACE" exec "$POD_NAME" -c dind -- sh -ec '
         test -d /workspace/.codewire/docker-root
         ! awk '\''$2 == "/workspace/.codewire/docker-root" && $3 == "ext4" { found = 1 } END { exit found ? 0 : 1 }'\'' /proc/mounts
@@ -1440,6 +1757,7 @@ assert_pod_shape() {
       dind_mount_info=""
       dind_mount_last=""
       for _ in $(seq 1 90); do
+        # shellcheck disable=SC2016 # The guest shell/awk expand these expressions.
         if dind_mount_info="$(kubectl_dev -n "$SANDBOX_NAMESPACE" exec "$POD_NAME" -c dind -- sh -ec '
           line="$(awk '\''$2 == "/var/lib/docker" && $3 == "ext4" { print $1 " " $3; found = 1; exit } END { if (!found) exit 1 }'\'' /proc/mounts)"
           set -- $line
@@ -1557,7 +1875,7 @@ assert_tailnet_peer_relay_discovery_shape() {
 assert_tailnet_direct_udp_discovery_shape() {
   local pod_json="$1"
   local gateway_pod_json="$2"
-  local direct_udp_env endpoint_env direct_udp_service_json direct_udp_services
+  local endpoint_env direct_udp_service_json direct_udp_services
 
   assert_tailnet_peer_relay_discovery_shape "$pod_json" "$gateway_pod_json"
 
@@ -2532,7 +2850,7 @@ run_app_preview_smoke() {
     die "SMOKE_APP_PREVIEW_LABEL must be a DNS-safe label"
 
   local token start_script stop_script port_json port_err rm_json rm_err
-  local preview_url preview_host_port preview_host preview_path preview_body preview_err
+  local preview_url preview_host_port preview_host preview_body preview_err
   local preview_headers preview_status preview_ok preview_failure
   local cleanup_body cleanup_status port_cleanup_ok cleanup_failure
 
@@ -2675,9 +2993,7 @@ SCRIPT
     die "cw env port add returned invalid preview_url=$preview_url"
   preview_host_port="${preview_url#http://}"
   preview_host_port="${preview_host_port#https://}"
-  preview_path="/"
   if [[ "$preview_host_port" == */* ]]; then
-    preview_path="/${preview_host_port#*/}"
     preview_host_port="${preview_host_port%%/*}"
   fi
   preview_host="${preview_host_port%%:*}"
@@ -2740,6 +3056,7 @@ SCRIPT
     cleanup_failure="preview URL still served the deleted app preview port"
   fi
 
+  # shellcheck disable=SC2016 # Expanded only by the managed guest shell.
   stop_script='set -eu
 work=/workspace/codewire-preview-smoke
 pidfile="$work/server.pid"
@@ -3805,6 +4122,12 @@ run_selected_phase() {
       wait_for_cw_run
       run_environment_session_smoke
       ;;
+    application-secrets)
+      run_application_secrets_smoke
+      ;;
+    provider-ssh)
+      run_provider_ssh_smoke
+      ;;
     coco)
       assert_coco_guest_test_resource
       ;;
@@ -3860,7 +4183,11 @@ run_selected_phases() {
 }
 
 main() {
+  if application_secrets_selected; then validate_application_secrets_options; fi
+  if provider_ssh_selected; then validate_provider_ssh_options; fi
   prepare_cli
+  if application_secrets_selected; then prepare_application_secrets; fi
+  if provider_ssh_selected; then prepare_provider_ssh; fi
   if [[ -n "$SMOKE_EXISTING_ENV_ID" ]]; then
     ENV_ID="$SMOKE_EXISTING_ENV_ID"
     SMOKE_KEEP_ENV=1

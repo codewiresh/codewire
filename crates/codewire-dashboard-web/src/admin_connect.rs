@@ -156,6 +156,7 @@ fn transport(state: &AppState, cookie: HeaderValue) -> BrowserTransport {
     BrowserTransport {
         http: state.http.clone(),
         cookie: Some(cookie),
+        origin: None,
     }
 }
 

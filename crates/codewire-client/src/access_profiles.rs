@@ -68,28 +68,6 @@ impl CodewireClient {
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
     }
-
-    pub async fn set_environment_access_profile(
-        &self,
-        request: SetEnvironmentAccessProfileRequest,
-    ) -> Result<SetEnvironmentAccessProfileResponse, ClientError> {
-        self.access_profiles
-            .set_environment_access_profile_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
-
-    pub async fn clear_environment_access_profile(
-        &self,
-        request: ClearEnvironmentAccessProfileRequest,
-    ) -> Result<ClearEnvironmentAccessProfileResponse, ClientError> {
-        self.access_profiles
-            .clear_environment_access_profile_with_options(request, self.auth_options().await?)
-            .await
-            .map(|response| response.into_owned())
-            .map_err(ClientError::from)
-    }
 }
 
 #[cfg(test)]
@@ -111,12 +89,6 @@ mod tests {
         let entry = AccessProfileEntry {
             capability_slot: "codex".into(),
             credential_id: "credential".into(),
-            ..Default::default()
-        };
-        let binding = EnvironmentAccessProfileBinding {
-            environment_id: "environment".into(),
-            access_profile_id: "profile".into(),
-            access_profile_revision: 9_007_199_254_740_993,
             ..Default::default()
         };
         let request = ListAccessProfilesRequest {
@@ -236,54 +208,6 @@ mod tests {
             .await;
         client
             .get_environment_access_profile(request)
-            .await
-            .unwrap();
-        let request = SetEnvironmentAccessProfileRequest {
-            binding: Some(binding.clone()).into(),
-            expected_binding: Some(binding.clone()).into(),
-            confirm_personal_credentials: false,
-            ..Default::default()
-        };
-        Mock::given(method("POST"))
-            .and(path(
-                "/codewire.v1.AccessProfileService/SetEnvironmentAccessProfile",
-            ))
-            .and(header("authorization", "Bearer synthetic-profile-token"))
-            .and(body_bytes(request.encode_to_vec()))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/proto")
-                    .set_body_bytes(SetEnvironmentAccessProfileResponse::default().encode_to_vec()),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        client
-            .set_environment_access_profile(request)
-            .await
-            .unwrap();
-        let request = ClearEnvironmentAccessProfileRequest {
-            expected_binding: Some(binding).into(),
-            ..Default::default()
-        };
-        Mock::given(method("POST"))
-            .and(path(
-                "/codewire.v1.AccessProfileService/ClearEnvironmentAccessProfile",
-            ))
-            .and(header("authorization", "Bearer synthetic-profile-token"))
-            .and(body_bytes(request.encode_to_vec()))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/proto")
-                    .set_body_bytes(
-                        ClearEnvironmentAccessProfileResponse::default().encode_to_vec(),
-                    ),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        client
-            .clear_environment_access_profile(request)
             .await
             .unwrap();
     }

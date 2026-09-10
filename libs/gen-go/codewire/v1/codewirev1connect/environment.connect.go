@@ -60,6 +60,9 @@ const (
 	// EnvironmentServiceStartEnvironmentProcedure is the fully-qualified name of the
 	// EnvironmentService's StartEnvironment RPC.
 	EnvironmentServiceStartEnvironmentProcedure = "/codewire.v1.EnvironmentService/StartEnvironment"
+	// EnvironmentServiceUpdateEnvironmentSourcesProcedure is the fully-qualified name of the
+	// EnvironmentService's UpdateEnvironmentSources RPC.
+	EnvironmentServiceUpdateEnvironmentSourcesProcedure = "/codewire.v1.EnvironmentService/UpdateEnvironmentSources"
 	// EnvironmentServiceProtectEnvironmentProcedure is the fully-qualified name of the
 	// EnvironmentService's ProtectEnvironment RPC.
 	EnvironmentServiceProtectEnvironmentProcedure = "/codewire.v1.EnvironmentService/ProtectEnvironment"
@@ -112,6 +115,10 @@ type EnvironmentServiceClient interface {
 	DeleteEnvironment(context.Context, *connect.Request[v1.DeleteEnvironmentRequest]) (*connect.Response[v1.DeleteEnvironmentResponse], error)
 	StopEnvironment(context.Context, *connect.Request[v1.StopEnvironmentRequest]) (*connect.Response[v1.StopEnvironmentResponse], error)
 	StartEnvironment(context.Context, *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error)
+	// Replaces only application-secret sources and provider-profile selection.
+	// Running environments require explicit restart confirmation; workspace data
+	// is preserved. This is not an arbitrary ProjectSpec update operation.
+	UpdateEnvironmentSources(context.Context, *connect.Request[v1.UpdateEnvironmentSourcesRequest]) (*connect.Response[v1.UpdateEnvironmentSourcesResponse], error)
 	ProtectEnvironment(context.Context, *connect.Request[v1.ProtectEnvironmentRequest]) (*connect.Response[v1.ProtectEnvironmentResponse], error)
 	UnprotectEnvironment(context.Context, *connect.Request[v1.UnprotectEnvironmentRequest]) (*connect.Response[v1.UnprotectEnvironmentResponse], error)
 	CancelEnvironmentDeletion(context.Context, *connect.Request[v1.CancelEnvironmentDeletionRequest]) (*connect.Response[v1.CancelEnvironmentDeletionResponse], error)
@@ -194,6 +201,12 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			httpClient,
 			baseURL+EnvironmentServiceStartEnvironmentProcedure,
 			connect.WithSchema(environmentServiceMethods.ByName("StartEnvironment")),
+			connect.WithClientOptions(opts...),
+		),
+		updateEnvironmentSources: connect.NewClient[v1.UpdateEnvironmentSourcesRequest, v1.UpdateEnvironmentSourcesResponse](
+			httpClient,
+			baseURL+EnvironmentServiceUpdateEnvironmentSourcesProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("UpdateEnvironmentSources")),
 			connect.WithClientOptions(opts...),
 		),
 		protectEnvironment: connect.NewClient[v1.ProtectEnvironmentRequest, v1.ProtectEnvironmentResponse](
@@ -293,6 +306,7 @@ type environmentServiceClient struct {
 	deleteEnvironment             *connect.Client[v1.DeleteEnvironmentRequest, v1.DeleteEnvironmentResponse]
 	stopEnvironment               *connect.Client[v1.StopEnvironmentRequest, v1.StopEnvironmentResponse]
 	startEnvironment              *connect.Client[v1.StartEnvironmentRequest, v1.StartEnvironmentResponse]
+	updateEnvironmentSources      *connect.Client[v1.UpdateEnvironmentSourcesRequest, v1.UpdateEnvironmentSourcesResponse]
 	protectEnvironment            *connect.Client[v1.ProtectEnvironmentRequest, v1.ProtectEnvironmentResponse]
 	unprotectEnvironment          *connect.Client[v1.UnprotectEnvironmentRequest, v1.UnprotectEnvironmentResponse]
 	cancelEnvironmentDeletion     *connect.Client[v1.CancelEnvironmentDeletionRequest, v1.CancelEnvironmentDeletionResponse]
@@ -351,6 +365,11 @@ func (c *environmentServiceClient) StopEnvironment(ctx context.Context, req *con
 // StartEnvironment calls codewire.v1.EnvironmentService.StartEnvironment.
 func (c *environmentServiceClient) StartEnvironment(ctx context.Context, req *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error) {
 	return c.startEnvironment.CallUnary(ctx, req)
+}
+
+// UpdateEnvironmentSources calls codewire.v1.EnvironmentService.UpdateEnvironmentSources.
+func (c *environmentServiceClient) UpdateEnvironmentSources(ctx context.Context, req *connect.Request[v1.UpdateEnvironmentSourcesRequest]) (*connect.Response[v1.UpdateEnvironmentSourcesResponse], error) {
+	return c.updateEnvironmentSources.CallUnary(ctx, req)
 }
 
 // ProtectEnvironment calls codewire.v1.EnvironmentService.ProtectEnvironment.
@@ -429,6 +448,10 @@ type EnvironmentServiceHandler interface {
 	DeleteEnvironment(context.Context, *connect.Request[v1.DeleteEnvironmentRequest]) (*connect.Response[v1.DeleteEnvironmentResponse], error)
 	StopEnvironment(context.Context, *connect.Request[v1.StopEnvironmentRequest]) (*connect.Response[v1.StopEnvironmentResponse], error)
 	StartEnvironment(context.Context, *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error)
+	// Replaces only application-secret sources and provider-profile selection.
+	// Running environments require explicit restart confirmation; workspace data
+	// is preserved. This is not an arbitrary ProjectSpec update operation.
+	UpdateEnvironmentSources(context.Context, *connect.Request[v1.UpdateEnvironmentSourcesRequest]) (*connect.Response[v1.UpdateEnvironmentSourcesResponse], error)
 	ProtectEnvironment(context.Context, *connect.Request[v1.ProtectEnvironmentRequest]) (*connect.Response[v1.ProtectEnvironmentResponse], error)
 	UnprotectEnvironment(context.Context, *connect.Request[v1.UnprotectEnvironmentRequest]) (*connect.Response[v1.UnprotectEnvironmentResponse], error)
 	CancelEnvironmentDeletion(context.Context, *connect.Request[v1.CancelEnvironmentDeletionRequest]) (*connect.Response[v1.CancelEnvironmentDeletionResponse], error)
@@ -507,6 +530,12 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		EnvironmentServiceStartEnvironmentProcedure,
 		svc.StartEnvironment,
 		connect.WithSchema(environmentServiceMethods.ByName("StartEnvironment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	environmentServiceUpdateEnvironmentSourcesHandler := connect.NewUnaryHandler(
+		EnvironmentServiceUpdateEnvironmentSourcesProcedure,
+		svc.UpdateEnvironmentSources,
+		connect.WithSchema(environmentServiceMethods.ByName("UpdateEnvironmentSources")),
 		connect.WithHandlerOptions(opts...),
 	)
 	environmentServiceProtectEnvironmentHandler := connect.NewUnaryHandler(
@@ -612,6 +641,8 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceStopEnvironmentHandler.ServeHTTP(w, r)
 		case EnvironmentServiceStartEnvironmentProcedure:
 			environmentServiceStartEnvironmentHandler.ServeHTTP(w, r)
+		case EnvironmentServiceUpdateEnvironmentSourcesProcedure:
+			environmentServiceUpdateEnvironmentSourcesHandler.ServeHTTP(w, r)
 		case EnvironmentServiceProtectEnvironmentProcedure:
 			environmentServiceProtectEnvironmentHandler.ServeHTTP(w, r)
 		case EnvironmentServiceUnprotectEnvironmentProcedure:
@@ -681,6 +712,10 @@ func (UnimplementedEnvironmentServiceHandler) StopEnvironment(context.Context, *
 
 func (UnimplementedEnvironmentServiceHandler) StartEnvironment(context.Context, *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.StartEnvironment is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) UpdateEnvironmentSources(context.Context, *connect.Request[v1.UpdateEnvironmentSourcesRequest]) (*connect.Response[v1.UpdateEnvironmentSourcesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.UpdateEnvironmentSources is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) ProtectEnvironment(context.Context, *connect.Request[v1.ProtectEnvironmentRequest]) (*connect.Response[v1.ProtectEnvironmentResponse], error) {

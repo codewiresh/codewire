@@ -1036,7 +1036,7 @@ pub(crate) async fn handle_preset_command(
 
 pub(crate) async fn handle_platform_secrets_command(
     globals: &Globals,
-    command: SecretsCommand,
+    command: SecretOperation,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
@@ -1045,20 +1045,20 @@ pub(crate) async fn handle_platform_secrets_command(
     let organizations = organization_client(&platform)?;
 
     match command {
-        SecretsCommand::User { command } => {
+        SecretOperation::User(command) => {
             handle_user_secret_command(&client, command).await?;
         }
-        SecretsCommand::Organization { command } => {
+        SecretOperation::Organization(command) => {
             let orgs = organizations.list_orgs().await.context("list orgs")?;
             let org_id = current_org_id(&platform, &orgs)?;
             handle_org_secret_command(&client, &org_id, command).await?;
         }
-        SecretsCommand::List(args) => {
-            let inventory = platform_secret_inventory(globals).await?;
-            print_secret_inventory(&inventory, args.output)?;
-        }
-        SecretsCommand::Preview(args) => {
+        SecretOperation::Preview(args) => {
             let intent = load_secret_preview_intent(&args.file)?;
+            validate_secret_preview_placement(
+                &intent,
+                super::storage_placement::StoragePlacement::Platform,
+            )?;
             let orgs = organizations.list_orgs().await.context("list orgs")?;
             let org_id = current_org_id(&platform, &orgs)?;
             let secret_project_id = if let Some(project_name) = intent.project.as_deref() {
@@ -1075,14 +1075,19 @@ pub(crate) async fn handle_platform_secrets_command(
                     &org_id,
                     intent.organization,
                     secret_project_id.as_deref(),
-                    intent.user,
+                    intent.user.is_some(),
                     intent.explicit_environment_keys,
                 )
                 .await
                 .context("preview platform workload-secret resolution")?;
             print_secret_resolution("platform", &secrets, args.output)?;
         }
-        SecretsCommand::Project { command } => {
+        SecretOperation::Project { name, command } => {
+            let orgs = organizations.list_orgs().await.context("list orgs")?;
+            let org_id = current_org_id(&platform, &orgs)?;
+            handle_project_secret_command(&client, &org_id, &name, command).await?;
+        }
+        SecretOperation::Projects(command) => {
             let orgs = organizations.list_orgs().await.context("list orgs")?;
             let org_id = current_org_id(&platform, &orgs)?;
             match command {
@@ -1107,73 +1112,25 @@ pub(crate) async fn handle_platform_secrets_command(
                         .list_secret_projects(&org_id)
                         .await
                         .context("list secret projects")?;
-                    if let Some(project_name) = args.project_name.as_deref().and_then(trimmed_str) {
-                        let project = find_secret_project_by_name(&projects, project_name)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("secret project {project_name:?} not found")
-                            })?;
-                        let secrets = client
-                            .list_project_secrets(&org_id, &project.id)
-                            .await
-                            .context("list project secrets")?;
-                        print_secret_metadata_list(
-                            &secrets,
-                            &format!("No secrets in project {project_name:?}."),
-                            args.output,
-                        )?;
-                    } else {
-                        print_secret_project_list(&projects, args.output)?;
-                    }
-                }
-                SecretProjectCommand::Set(args) => {
-                    let project_name = trimmed_required(&args.project, "secret project")?;
-                    let key = trimmed_required(&args.key, "secret key")?;
-                    let project =
-                        load_secret_project_by_name(&client, &org_id, project_name).await?;
-                    let value = prompt_platform_workload_secret_value()?;
-                    client
-                        .set_project_secret(&org_id, &project.id, key, &value)
-                        .await
-                        .context("set secret")?;
-                    eprintln!("Secret {key} set in project {project_name:?}.");
+                    print_secret_project_list(&projects, args.output)?;
                 }
                 SecretProjectCommand::Delete(args) => {
-                    let project_name = trimmed_required(&args.project, "secret project")?;
+                    let project_name = trimmed_required(&args.name, "secret project")?;
                     let project =
                         load_secret_project_by_name(&client, &org_id, project_name).await?;
-                    if let Some(key) = args.key.as_deref().and_then(trimmed_str) {
-                        client
-                            .delete_project_secret(&org_id, &project.id, key)
-                            .await
-                            .context("delete secret")?;
-                        eprintln!("Secret {key} deleted from project {project_name:?}.");
-                    } else {
-                        if !args.yes
-                            && !prompt_confirm_default_yes(&format!(
-                                "Delete secret project {project_name:?} and all its secrets? [Y/n]"
-                            ))?
-                        {
-                            eprintln!("Canceled.");
-                            return Ok(());
-                        }
-                        client
-                            .delete_secret_project(&org_id, &project.id)
-                            .await
-                            .context("delete secret project")?;
-                        eprintln!("Secret project {project_name:?} deleted.");
+                    let target = format!(
+                        "platform secret project {:?} ({}) in organization {}",
+                        project.name, project.id, org_id
+                    );
+                    if !confirm_secret_project_delete(&target, args.yes)? {
+                        eprintln!("Canceled.");
+                        return Ok(());
                     }
-                }
-                SecretProjectCommand::Rename(args) => {
-                    let project_name = trimmed_required(&args.project, "secret project")?;
-                    let old_key = trimmed_required(&args.old_key, "old secret key")?;
-                    let new_key = trimmed_required(&args.new_key, "new secret key")?;
-                    let project =
-                        load_secret_project_by_name(&client, &org_id, project_name).await?;
                     client
-                        .rename_project_secret(&org_id, &project.id, old_key, new_key)
+                        .delete_secret_project(&org_id, &project.id)
                         .await
-                        .context("rename secret")?;
-                    eprintln!("Secret {old_key} renamed to {new_key} in project {project_name:?}.");
+                        .context("delete secret project")?;
+                    eprintln!("Secret project {project_name:?} deleted.");
                 }
             }
         }
@@ -1182,63 +1139,53 @@ pub(crate) async fn handle_platform_secrets_command(
     Ok(())
 }
 
-pub(crate) async fn platform_secret_inventory(
-    globals: &Globals,
-) -> anyhow::Result<Vec<SecretInventoryView>> {
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env);
-    let platform = resolve_platform(globals, &paths, &env)?;
-    let client = SecretClient::new(&platform)?;
-    let organizations = organization_client(&platform)?;
-    let orgs = organizations.list_orgs().await.context("list orgs")?;
-    let org_id = current_org_id(&platform, &orgs)?;
-    let mut inventory = client
-        .list_user_secrets()
-        .await
-        .context("list user secrets")?
-        .into_iter()
-        .map(|secret| platform_secret_inventory_entry("user", None, secret))
-        .collect::<Vec<_>>();
-    inventory.extend(
-        client
-            .list_org_secrets(&org_id)
-            .await
-            .context("list organization secrets")?
-            .into_iter()
-            .map(|secret| platform_secret_inventory_entry("organization", None, secret)),
-    );
-    for project in client
-        .list_secret_projects(&org_id)
-        .await
-        .context("list secret projects")?
-    {
-        inventory.extend(
-            client
-                .list_project_secrets(&org_id, &project.id)
+async fn handle_project_secret_command(
+    client: &SecretClient,
+    org_id: &str,
+    project_name: &str,
+    command: ScopedSecretCommand,
+) -> anyhow::Result<()> {
+    let project = load_secret_project_by_name(client, org_id, project_name).await?;
+    match command {
+        ScopedSecretCommand::List(args) => {
+            let secrets = client
+                .list_project_secrets(org_id, &project.id)
                 .await
-                .context("list project secrets")?
-                .into_iter()
-                .map(|secret| {
-                    platform_secret_inventory_entry("project", Some(project.name.clone()), secret)
-                }),
-        );
+                .context("list project secrets")?;
+            print_secret_metadata_list(
+                &secrets,
+                &format!("No secrets in project {project_name:?}."),
+                args.output,
+            )?;
+        }
+        ScopedSecretCommand::Set(args) => {
+            let key = trimmed_required(&args.key, "secret key")?;
+            let value = prompt_platform_workload_secret_value()?;
+            client
+                .set_project_secret(org_id, &project.id, key, &value)
+                .await
+                .context("set secret")?;
+            eprintln!("Secret {key} set in project {project_name:?}.");
+        }
+        ScopedSecretCommand::Delete(args) => {
+            let key = trimmed_required(&args.key, "secret key")?;
+            client
+                .delete_project_secret(org_id, &project.id, key)
+                .await
+                .context("delete secret")?;
+            eprintln!("Secret {key} deleted from project {project_name:?}.");
+        }
+        ScopedSecretCommand::Rename(args) => {
+            let old_key = trimmed_required(&args.old_key, "old secret key")?;
+            let new_key = trimmed_required(&args.new_key, "new secret key")?;
+            client
+                .rename_project_secret(org_id, &project.id, old_key, new_key)
+                .await
+                .context("rename secret")?;
+            eprintln!("Secret {old_key} renamed to {new_key} in project {project_name:?}.");
+        }
     }
-    Ok(inventory)
-}
-
-fn platform_secret_inventory_entry(
-    scope: &'static str,
-    project: Option<String>,
-    secret: SecretMetadata,
-) -> SecretInventoryView {
-    SecretInventoryView {
-        placement: "platform",
-        scope,
-        project,
-        key: secret.key,
-        created_at: secret.created_at,
-        updated_at: secret.updated_at,
-    }
+    Ok(())
 }
 
 pub(crate) async fn handle_user_secret_command(
@@ -1337,9 +1284,31 @@ pub(crate) async fn load_secret_project_by_name(
         .list_secret_projects(org_id)
         .await
         .context("list secret projects")?;
-    find_secret_project_by_name(&projects, project_name)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("secret project {project_name:?} not found"))
+    resolve_platform_secret_project(&projects, project_name).cloned()
+}
+
+fn resolve_platform_secret_project<'a>(
+    projects: &'a [SecretProject],
+    selector: &str,
+) -> anyhow::Result<&'a SecretProject> {
+    let selector = project_selector_for_placement(
+        selector,
+        super::storage_placement::StoragePlacement::Platform,
+    )?;
+    let mut matches = projects
+        .iter()
+        .filter(|project| match selector.strip_prefix("id:") {
+            Some(id) => project.id == id,
+            None => project.name.eq_ignore_ascii_case(selector),
+        });
+    let project = matches
+        .next()
+        .context("platform secret project was not found in the selected organization")?;
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "platform secret project name is ambiguous; select an exact id"
+    );
+    Ok(project)
 }
 
 pub(crate) fn inspect_config(output: OutputFormat) -> anyhow::Result<()> {

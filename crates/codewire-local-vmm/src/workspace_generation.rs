@@ -142,6 +142,7 @@ impl WorkspaceGenerationRecord {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn validate_for_project(
         &self,
         expected_project_sha256: &str,
@@ -158,14 +159,43 @@ impl WorkspaceGenerationRecord {
         project_spec_json: &[u8],
         project_sha256: &str,
     ) -> Result<(), WorkspaceGenerationError> {
-        self.validate_for_project(project_sha256)?;
-        let project = validate_project_spec(project_spec_json, project_sha256)?;
-        if project.image != self.image.source_reference
-            || self.project_spec_json.as_bytes() != project_spec_json
-        {
+        self.validate()?;
+        let mut project = validate_project_spec(project_spec_json, project_sha256)?;
+        let mut built =
+            validate_project_spec(self.project_spec_json.as_bytes(), &self.project_sha256)?;
+        // Source selection is current environment-operation metadata, not an
+        // instruction to rebuild the installed writable root or its setup and
+        // skill markers. Every other project field remains build-bound.
+        project.secrets = Default::default();
+        project.credentials = None;
+        built.secrets = Default::default();
+        built.credentials = None;
+        if project != built {
             return Err(WorkspaceGenerationError);
         }
         Ok(())
+    }
+
+    /// Adopt this built workspace's non-source intent while retaining the
+    /// currently authorized source selectors. In particular, rolling back a
+    /// workspace must not roll back credential or application-secret choices.
+    /// The immutable built generation, setup hash and skill plan are untouched.
+    pub(crate) fn project_intent_with_current_sources(
+        &self,
+        current_project_json: &[u8],
+        current_project_sha256: &str,
+    ) -> Result<(Vec<u8>, String), WorkspaceGenerationError> {
+        self.validate()?;
+        let current = validate_project_spec(current_project_json, current_project_sha256)?;
+        let mut project =
+            validate_project_spec(self.project_spec_json.as_bytes(), &self.project_sha256)?;
+        project.secrets = current.secrets;
+        project.credentials = current.credentials;
+        let bytes = project
+            .canonical_json()
+            .map_err(|_| WorkspaceGenerationError)?;
+        let sha256 = Sha256Value::calculate(&bytes).to_string();
+        Ok((bytes, sha256))
     }
 
     pub(crate) fn project_spec_json(&self) -> Result<&[u8], WorkspaceGenerationError> {
@@ -349,6 +379,173 @@ mod tests {
         .unwrap();
 
         assert_eq!(constructed, expected);
+    }
+
+    fn selected_current_project(record: &WorkspaceGenerationRecord) -> ProjectSpec {
+        let mut project: ProjectSpec = serde_json::from_str(&record.project_spec_json).unwrap();
+        project.secrets = codewire_project::SecretBindings {
+            project: "platform:id:11111111-1111-4111-8111-111111111111".to_owned(),
+            user: Some(codewire_project::StoragePlacement::Local),
+            organization: true,
+        };
+        project.credentials = Some(codewire_project::CredentialBinding {
+            profile: "local:id:22222222-2222-4222-8222-222222222222".to_owned(),
+        });
+        project
+    }
+
+    #[test]
+    fn source_only_intent_preserves_the_immutable_root_and_skill_plan() {
+        let baseline = record();
+        let mut built: ProjectSpec = serde_json::from_str(&baseline.project_spec_json).unwrap();
+        built.install_command = "printf installed".to_owned();
+        built.agents.tools = vec!["codex".to_owned()];
+        built.skills = vec![SkillSelection {
+            source: SkillSource::User,
+            reference: "rust".to_owned(),
+            agents: vec!["codex".to_owned()],
+        }];
+        let built_json = built.canonical_json().unwrap();
+        let built_sha256 = Sha256Value::calculate(&built_json).to_string();
+        let skill = SkillSnapshot::new(
+            SkillSnapshotSource::User,
+            "user:rust".to_owned(),
+            "rust".to_owned(),
+            "b".repeat(64),
+            "rust",
+            &["codex".to_owned()],
+        )
+        .unwrap();
+        let plan = SkillSnapshotPlan::new(built_sha256.clone(), 3, vec![skill]).unwrap();
+        let record = WorkspaceGenerationRecord::new_with_skill_snapshot(
+            &built_json,
+            built_sha256,
+            baseline.artifact_generation,
+            baseline.image,
+            baseline.root_disk_bytes,
+            Some(plan.clone()),
+        )
+        .unwrap();
+        let before = record.encode_canonical().unwrap();
+        let current = selected_current_project(&record);
+        let current_json = current.canonical_json().unwrap();
+        let current_sha256 = Sha256Value::calculate(&current_json).to_string();
+        assert_ne!(current_sha256, record.project_sha256);
+        record
+            .validate_for_project_intent(&current_json, &current_sha256)
+            .unwrap();
+        assert_eq!(record.encode_canonical().unwrap(), before);
+        assert_eq!(record.skill_snapshot().unwrap(), Some(&plan));
+        assert_eq!(record.project_spec_json().unwrap(), built_json);
+        let (promoted_json, promoted_sha256) = record
+            .project_intent_with_current_sources(&current_json, &current_sha256)
+            .unwrap();
+        assert_eq!(promoted_json, current_json);
+        assert_eq!(promoted_sha256, current_sha256);
+        assert_eq!(record.encode_canonical().unwrap(), before);
+    }
+
+    #[test]
+    fn current_intent_validates_both_hashes_and_rejects_non_source_drift() {
+        let record = record();
+        let current = selected_current_project(&record);
+        let bytes = current.canonical_json().unwrap();
+        let sha256 = Sha256Value::calculate(&bytes).to_string();
+        assert!(
+            record
+                .validate_for_project_intent(&bytes, &"f".repeat(64))
+                .is_err()
+        );
+        assert!(
+            record
+                .project_intent_with_current_sources(&bytes, &"f".repeat(64))
+                .is_err()
+        );
+        let mut noncanonical = bytes.clone();
+        noncanonical.push(b'\n');
+        assert!(
+            record
+                .validate_for_project_intent(
+                    &noncanonical,
+                    &Sha256Value::calculate(&noncanonical).to_string(),
+                )
+                .is_err()
+        );
+        let mut corrupt_built = record.clone();
+        corrupt_built.project_sha256 = "f".repeat(64);
+        assert!(
+            corrupt_built
+                .validate_for_project_intent(&bytes, &sha256)
+                .is_err()
+        );
+        assert!(
+            corrupt_built
+                .project_intent_with_current_sources(&bytes, &sha256)
+                .is_err()
+        );
+        let changes: &[fn(&mut ProjectSpec)] = &[
+            |project| project.image = "registry.example/other:latest".to_owned(),
+            |project| project.working_directory = "/workspace/other".to_owned(),
+            |project| project.install_command = "printf changed-install".to_owned(),
+            |project| project.startup_script = "printf changed-startup".to_owned(),
+            |project| {
+                project
+                    .environment
+                    .insert("PUBLIC_VALUE".into(), "changed".into());
+            },
+            |project| project.agents.tools = vec!["codex".to_owned()],
+            |project| project.resources.memory_mib = Some(16 * 1024),
+            |project| {
+                project.repositories = vec![codewire_project::RepositorySpec {
+                    source: "https://example.test/org/repo.git".to_owned(),
+                    destination: "/workspace/other".to_owned(),
+                    ..Default::default()
+                }]
+            },
+            |project| {
+                project.application_ports = vec![codewire_project::ApplicationPort {
+                    port: 8080,
+                    ..Default::default()
+                }]
+            },
+        ];
+        for change in changes {
+            let mut changed = current.clone();
+            change(&mut changed);
+            let changed_json = changed.canonical_json().unwrap();
+            let changed_sha256 = Sha256Value::calculate(&changed_json).to_string();
+            assert!(
+                record
+                    .validate_for_project_intent(&changed_json, &changed_sha256)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_promotion_uses_built_intent_but_retains_exact_current_sources() {
+        let record = record();
+        let mut current = selected_current_project(&record);
+        current.install_command = "printf newer-workspace-install".to_owned();
+        let current_json = current.canonical_json().unwrap();
+        let current_sha256 = Sha256Value::calculate(&current_json).to_string();
+        assert!(
+            record
+                .validate_for_project_intent(&current_json, &current_sha256)
+                .is_err()
+        );
+        let before = record.encode_canonical().unwrap();
+        let (promoted_json, promoted_sha256) = record
+            .project_intent_with_current_sources(&current_json, &current_sha256)
+            .unwrap();
+        let promoted: ProjectSpec = serde_json::from_slice(&promoted_json).unwrap();
+        assert_eq!(promoted.secrets, current.secrets);
+        assert_eq!(promoted.credentials, current.credentials);
+        assert!(promoted.install_command.is_empty());
+        record
+            .validate_for_project_intent(&promoted_json, &promoted_sha256)
+            .unwrap();
+        assert_eq!(record.encode_canonical().unwrap(), before);
     }
 
     #[test]

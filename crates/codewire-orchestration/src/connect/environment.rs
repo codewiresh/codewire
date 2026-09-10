@@ -35,6 +35,10 @@ use crate::api::environment_resize::{
     ResizeEnvironmentParams, get_resize_operation_core, plan_environment_resize_core,
     resize_environment_core,
 };
+use crate::api::environment_sources::{
+    EnvironmentSourceSelection, EnvironmentSourcesUpdate, EnvironmentSourcesUpdateOutcome,
+    UpdateEnvironmentSourcesBody, update_environment_sources_core,
+};
 use crate::api::environments::{
     Environment, EnvironmentPort, ListEnvironmentsQuery, StartOutcomeCore,
     cancel_environment_deletion_core, delete_environment_core, extend_environment_ttl_core,
@@ -190,6 +194,24 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             poll_interval: poll_interval.into(),
             ..Default::default()
         })
+    }
+
+    async fn update_environment_sources(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::UpdateEnvironmentSourcesRequest>,
+    ) -> ServiceResult<proto::UpdateEnvironmentSourcesResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.to_owned_message();
+        let organization = request.org_id.clone();
+        let environment = request.environment_id.clone();
+        let body =
+            source_update_body(request).map_err(|error| environment_rpc_error(&error, &ctx))?;
+        let result =
+            update_environment_sources_core(&self.state, &user, &organization, &environment, body)
+                .await
+                .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto_source_update(result))
     }
 
     async fn plan_environment_resize(
@@ -663,7 +685,81 @@ fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvi
             None => format!("unknown-enum-value-{}", request.isolation_tier.to_i32()),
         },
         project_spec,
+        expected_profile_revision: request.expected_profile_revision,
+        confirm_personal_credentials: request.confirm_personal_credentials,
+        confirm_personal_secrets: request.confirm_personal_secrets,
     })
+}
+
+fn source_update_body(
+    request: proto::UpdateEnvironmentSourcesRequest,
+) -> AppResult<UpdateEnvironmentSourcesBody> {
+    Ok(UpdateEnvironmentSourcesBody {
+        expected_operation_generation: request.expected_operation_generation,
+        expected: source_selection(request.expected.into_option())?,
+        replacement: source_selection(request.replacement.into_option())?,
+        allow_restart: request.allow_restart,
+        confirm_personal_credentials: request.confirm_personal_credentials,
+        confirm_personal_secrets: request.confirm_personal_secrets,
+    })
+}
+
+fn source_selection(
+    selection: Option<proto::EnvironmentSourceSelection>,
+) -> AppResult<EnvironmentSourceSelection> {
+    let selection = selection.ok_or_else(|| {
+        AppError::BadRequest("expected and replacement source selections are required".into())
+    })?;
+    let spec = codewire_project_proto::from_proto(proto::ProjectSpec {
+        secrets: selection.secrets,
+        credentials: selection.credentials,
+        ..codewire_project_proto::to_proto(codewire_project::ProjectSpec::default())
+    })
+    .map_err(|_| AppError::BadRequest("invalid environment source selection".into()))?;
+    Ok(EnvironmentSourceSelection {
+        secrets: spec.secrets,
+        credentials: spec.credentials,
+        profile_revision: selection.profile_revision,
+    })
+}
+
+fn proto_source_selection(
+    selection: EnvironmentSourceSelection,
+) -> proto::EnvironmentSourceSelection {
+    let spec = codewire_project_proto::to_proto(codewire_project::ProjectSpec {
+        secrets: selection.secrets,
+        credentials: selection.credentials,
+        ..Default::default()
+    });
+    proto::EnvironmentSourceSelection {
+        secrets: spec.secrets,
+        credentials: spec.credentials,
+        profile_revision: selection.profile_revision,
+        ..Default::default()
+    }
+}
+
+fn proto_source_update(
+    update: EnvironmentSourcesUpdate,
+) -> proto::UpdateEnvironmentSourcesResponse {
+    proto::UpdateEnvironmentSourcesResponse {
+        environment_id: update.environment_id,
+        operation_generation: update.operation_generation,
+        selection: Some(proto_source_selection(update.selection)).into(),
+        outcome: match update.outcome {
+            EnvironmentSourcesUpdateOutcome::Unchanged => {
+                proto::EnvironmentSourcesUpdateOutcome::Unchanged
+            }
+            EnvironmentSourcesUpdateOutcome::Stored => {
+                proto::EnvironmentSourcesUpdateOutcome::Stored
+            }
+            EnvironmentSourcesUpdateOutcome::RestartRequired => {
+                proto::EnvironmentSourcesUpdateOutcome::RestartRequired
+            }
+        }
+        .into(),
+        ..Default::default()
+    }
 }
 
 fn proto_prepare_event(
@@ -829,6 +925,9 @@ fn proto_create_request(
         }
         .into(),
         project_spec: Some(codewire_project_proto::to_proto(body.project_spec)).into(),
+        expected_profile_revision: body.expected_profile_revision,
+        confirm_personal_credentials: body.confirm_personal_credentials,
+        confirm_personal_secrets: body.confirm_personal_secrets,
         ..Default::default()
     }
 }
@@ -978,6 +1077,11 @@ fn proto_environment(environment: Environment) -> AppResult<proto::Environment> 
         retry_count: environment.retry_count,
         setup_phase: environment.setup_phase,
         setup_complete: environment.setup_complete,
+        operation_generation: environment.operation_generation,
+        source_selection: environment
+            .source_selection
+            .map(proto_source_selection)
+            .into(),
         setup_error: environment.setup_error.unwrap_or_default(),
         ttl_seconds: environment.ttl_seconds,
         shutdown_at: optional_timestamp(environment.shutdown_at)?,
@@ -1306,6 +1410,117 @@ fn environment_connect_error(
 mod tests {
     use super::*;
     use codewire_server_core::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
+
+    #[test]
+    fn source_update_requires_both_complete_selections_and_preserves_fences() {
+        assert!(source_update_body(proto::UpdateEnvironmentSourcesRequest::default()).is_err());
+        let selection = EnvironmentSourceSelection {
+            credentials: Some(codewire_project::CredentialBinding {
+                profile: "platform:id:6bf8d155-e84c-4fc5-b479-b17022fe41dd".into(),
+            }),
+            profile_revision: Some(3),
+            ..Default::default()
+        };
+        let body = source_update_body(proto::UpdateEnvironmentSourcesRequest {
+            expected_operation_generation: 7,
+            expected: Some(proto_source_selection(selection.clone())).into(),
+            replacement: Some(proto::EnvironmentSourceSelection::default()).into(),
+            confirm_personal_secrets: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(body.expected_operation_generation, 7);
+        assert_eq!(body.expected, selection);
+        assert_eq!(body.replacement, EnvironmentSourceSelection::default());
+        assert!(
+            body.confirm_personal_secrets
+                && !body.confirm_personal_credentials
+                && !body.allow_restart
+        );
+        let unknown = proto::EnvironmentSourceSelection {
+            secrets: Some(proto::ProjectSecretBindings {
+                user: Some(99.into()),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        assert!(source_selection(Some(unknown)).is_err());
+    }
+
+    #[test]
+    fn source_metadata_and_restart_outcomes_never_collapse_into_successful_start() {
+        let mut environment = test_environment("stopped", true);
+        environment
+            .source_selection
+            .as_mut()
+            .unwrap()
+            .secrets
+            .organization = true;
+        let wire = proto_environment(environment).unwrap();
+        assert_eq!(wire.operation_generation, 7);
+        assert!(
+            wire.source_selection
+                .as_option()
+                .unwrap()
+                .secrets
+                .as_option()
+                .unwrap()
+                .organization
+        );
+        let mut unavailable = test_environment("destroyed", true);
+        unavailable.source_selection = None;
+        assert!(
+            proto_environment(unavailable)
+                .unwrap()
+                .source_selection
+                .is_unset()
+        );
+        for (outcome, expected) in [
+            (
+                EnvironmentSourcesUpdateOutcome::Unchanged,
+                proto::EnvironmentSourcesUpdateOutcome::Unchanged,
+            ),
+            (
+                EnvironmentSourcesUpdateOutcome::Stored,
+                proto::EnvironmentSourcesUpdateOutcome::Stored,
+            ),
+            (
+                EnvironmentSourcesUpdateOutcome::RestartRequired,
+                proto::EnvironmentSourcesUpdateOutcome::RestartRequired,
+            ),
+        ] {
+            let wire = proto_source_update(EnvironmentSourcesUpdate {
+                environment_id: "environment".into(),
+                operation_generation: 7,
+                selection: Default::default(),
+                outcome,
+            });
+            assert_eq!(wire.outcome.as_known(), Some(expected));
+            assert_eq!(wire.operation_generation, 7);
+            assert!(wire.selection.as_option().is_some());
+        }
+    }
+
+    #[test]
+    fn create_round_trip_keeps_profile_revision_and_personal_confirmations_distinct() {
+        let request = proto::CreateEnvironmentRequest {
+            project_spec: Some(codewire_project_proto::to_proto(
+                codewire_project::ProjectSpec::default(),
+            ))
+            .into(),
+            expected_profile_revision: Some(3),
+            confirm_personal_credentials: true,
+            confirm_personal_secrets: false,
+            ..Default::default()
+        };
+        let body = create_body(request).unwrap();
+        assert_eq!(body.expected_profile_revision, Some(3));
+        assert!(body.confirm_personal_credentials && !body.confirm_personal_secrets);
+        let wire = proto_create_request(body, "organization");
+        assert_eq!(wire.expected_profile_revision, Some(3));
+        assert!(wire.confirm_personal_credentials && !wire.confirm_personal_secrets);
+    }
 
     #[test]
     fn schema_states_round_trip_without_collapsing_unknown() {
@@ -1696,6 +1911,8 @@ ports: [{port: 3000, label: web, access: public}]
             retry_count: 0,
             setup_phase: 0,
             setup_complete,
+            operation_generation: 7,
+            source_selection: Some(Default::default()),
             setup_error: None,
             ttl_seconds: None,
             shutdown_at: None,

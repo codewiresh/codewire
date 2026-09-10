@@ -14,24 +14,69 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use codewire_orchestration::sandbox::ClaimOpts;
 use codewire_orchestration::sandbox::client::SandboxClient;
 use codewire_orchestration::sandbox::template::{
-    GATEWAY_HOST_KEY_SECRET_KEY, RUNTIME_PROFILE_COMMODITY, TemplateOpts,
-    gateway_host_key_secret_name, gateway_network_policy_name, gateway_service_name,
-    gateway_workload_name, workspace_daemon_network_policy_name, workspace_daemon_service_name,
+    CredentialRuntimeTemplateConfig, GATEWAY_HOST_KEY_SECRET_KEY, RUNTIME_PROFILE_COMMODITY,
+    RUNTIME_PROFILE_RUNC, TemplateOpts, gateway_host_key_secret_name, gateway_network_policy_name,
+    gateway_service_name, gateway_workload_name, render_sandbox_shadow_pool,
+    render_sandbox_template, render_workspace_daemon_service, workspace_daemon_network_policy_name,
+    workspace_daemon_service_name,
+};
+use codewire_orchestration::sandbox::{
+    ClaimOpts, environment_template_name, render_sandbox_claim, shadow_warm_pool_name,
 };
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::Api;
-use serde_json::Value;
+use serde_json::{Value, json};
+
+const RESIZE_TEMPLATE_BASE: &str = "resize-template";
+const RESIZE_FIXTURE_IMAGE: &str = "codewire-gateway:e2e";
+const RESIZE_MARKER_KEY: &str = "codewire.sh/resize-smoke-marker";
+const RESIZE_MARKER_ENV: &str = "CODEWIRE_RESIZE_SMOKE_IDENTITY";
+const RESIZE_MARKER_VALUE: &str = "preserved";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().json().init();
 
     let namespace = std::env::var("CRD_SMOKE_NAMESPACE").unwrap_or_else(|_| "codewire-e2e".into());
+    if let Ok(phase) = std::env::var("CRD_SMOKE_RESIZE_PHASE") {
+        let environment_id = required_resize_environment_id()?;
+        match phase.as_str() {
+            "render" => {
+                let server_namespace = std::env::var("CRD_SMOKE_SERVER_NAMESPACE")
+                    .unwrap_or_else(|_| namespace.clone());
+                let gateway_token = required_resize_capability("CRD_SMOKE_GATEWAY_TOKEN")?;
+                let daemon_auth_token = required_resize_capability("CRD_SMOKE_DAEMON_AUTH_TOKEN")?;
+                let credential_runtime = CredentialRuntimeTemplateConfig::from_env(&namespace)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "resize fixture requires platform credential runtime configuration"
+                        )
+                    })?;
+                let rendered = render_resize_fixture(
+                    &namespace,
+                    &server_namespace,
+                    &environment_id,
+                    &gateway_token,
+                    &daemon_auth_token,
+                    Some(credential_runtime),
+                )?;
+                println!("{}", serde_json::to_string(&rendered)?);
+                return Ok(());
+            }
+            "release" => {
+                let client = SandboxClient::from_env(&namespace).await?;
+                client
+                    .remove_deletion_protection_finalizer(&environment_id)
+                    .await?;
+                return Ok(());
+            }
+            _ => anyhow::bail!("CRD_SMOKE_RESIZE_PHASE must be render or release"),
+        }
+    }
     let client = SandboxClient::from_env(&namespace).await?;
     let gateway_phase = std::env::var("CRD_SMOKE_GATEWAY_PHASE").unwrap_or_else(|_| "full".into());
     anyhow::ensure!(
@@ -161,6 +206,165 @@ async fn main() -> anyhow::Result<()> {
     secret_cleanup_result?;
     println!("gateway companion object round-trip verified — CRD smoke passed");
     Ok(())
+}
+
+fn required_resize_environment_id() -> anyhow::Result<String> {
+    let value = std::env::var("CRD_SMOKE_RESIZE_ENVIRONMENT_ID")
+        .map_err(|_| anyhow::anyhow!("CRD_SMOKE_RESIZE_ENVIRONMENT_ID is required"))?;
+    validate_resize_environment_id(&value)?;
+    Ok(value)
+}
+
+fn validate_resize_environment_id(value: &str) -> anyhow::Result<()> {
+    let parsed = uuid::Uuid::parse_str(value)
+        .map_err(|_| anyhow::anyhow!("resize fixture environment identity must be a UUID"))?;
+    anyhow::ensure!(
+        !parsed.is_nil() && parsed.hyphenated().to_string() == value,
+        "resize fixture environment identity must be a canonical non-nil UUID"
+    );
+    Ok(())
+}
+
+fn required_resize_capability(name: &str) -> anyhow::Result<String> {
+    let value = std::env::var(name).map_err(|_| anyhow::anyhow!("{name} is required"))?;
+    anyhow::ensure!(
+        !value.trim().is_empty() && value.trim() == value,
+        "{name} must be a non-empty canonical capability"
+    );
+    Ok(value)
+}
+
+fn render_resize_fixture(
+    namespace: &str,
+    server_namespace: &str,
+    environment_id: &str,
+    gateway_token: &str,
+    daemon_auth_token: &str,
+    credential_runtime: Option<CredentialRuntimeTemplateConfig>,
+) -> anyhow::Result<Value> {
+    validate_resize_environment_id(environment_id)?;
+    anyhow::ensure!(
+        !namespace.trim().is_empty()
+            && namespace.trim() == namespace
+            && !server_namespace.trim().is_empty()
+            && server_namespace.trim() == server_namespace,
+        "resize fixture namespaces must be non-empty canonical values"
+    );
+    anyhow::ensure!(
+        !gateway_token.trim().is_empty()
+            && gateway_token.trim() == gateway_token
+            && !daemon_auth_token.trim().is_empty()
+            && daemon_auth_token.trim() == daemon_auth_token
+            && gateway_token != daemon_auth_token,
+        "resize fixture requires distinct canonical coordinate and daemon capabilities"
+    );
+
+    let template_name = environment_template_name(RESIZE_TEMPLATE_BASE, environment_id);
+    let shadow_pool_name = shadow_warm_pool_name(&template_name);
+    let opts = TemplateOpts {
+        name: template_name.clone(),
+        image: RESIZE_FIXTURE_IMAGE.into(),
+        image_command: vec!["sleep".into(), "infinity".into()],
+        support_image: RESIZE_FIXTURE_IMAGE.into(),
+        runtime_profile: RUNTIME_PROFILE_RUNC.into(),
+        environment_id: environment_id.into(),
+        organization_id: "org_contract_1".into(),
+        operation_generation: 1,
+        credential_runtime,
+        gateway_token: gateway_token.into(),
+        daemon_auth_token: daemon_auth_token.into(),
+        server_namespace: server_namespace.into(),
+        cpu_millicores: 250,
+        memory_mib: 256,
+        disk_gib: 1,
+        workspace_storage_class: "standard".into(),
+        ..Default::default()
+    };
+    let mut template = render_sandbox_template(namespace, &opts);
+    let pod_labels = template
+        .pointer_mut("/spec/podTemplate/metadata/labels")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("rendered resize template has no Pod labels"))?;
+    pod_labels.insert(RESIZE_MARKER_KEY.into(), RESIZE_MARKER_VALUE.into());
+    let containers = template
+        .pointer_mut("/spec/podTemplate/spec/containers")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("rendered resize template has no containers"))?;
+    let workspace_indexes = containers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, container)| (container["name"] == "workspace").then_some(index))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        workspace_indexes.len() == 1,
+        "rendered resize template requires exactly one workspace container"
+    );
+    let workspace = &mut containers[workspace_indexes[0]];
+    anyhow::ensure!(
+        workspace["image"] == RESIZE_FIXTURE_IMAGE,
+        "rendered resize workspace image changed"
+    );
+    workspace["imagePullPolicy"] = "Never".into();
+    workspace["readinessProbe"] = json!({
+        "tcpSocket": {"port": 7777},
+        "periodSeconds": 1,
+        "timeoutSeconds": 1,
+    });
+    workspace["env"]
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("rendered resize workspace environment is malformed"))?
+        .push(json!({"name": RESIZE_MARKER_ENV, "value": RESIZE_MARKER_VALUE}));
+    let init_containers = template
+        .pointer_mut("/spec/podTemplate/spec/initContainers")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("rendered resize template has no init containers"))?;
+    let daemon_init_indexes = init_containers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, container)| {
+            (container["name"] == "codewire-daemon-init").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        daemon_init_indexes.len() == 1,
+        "rendered resize template requires exactly one daemon init container"
+    );
+    let daemon_init = &mut init_containers[daemon_init_indexes[0]];
+    anyhow::ensure!(
+        daemon_init["image"] == RESIZE_FIXTURE_IMAGE,
+        "rendered resize daemon init image changed"
+    );
+    daemon_init["imagePullPolicy"] = "Never".into();
+
+    let claim = render_sandbox_claim(
+        namespace,
+        &ClaimOpts {
+            environment_id: environment_id.into(),
+            org_id: opts.organization_id.clone(),
+            operation_generation: opts.operation_generation,
+            warm_pool_ref: shadow_pool_name.clone(),
+            template_ref: template_name.clone(),
+            cpu_millicores: opts.cpu_millicores,
+            memory_mib: opts.memory_mib,
+            disk_gib: opts.disk_gib,
+            ..Default::default()
+        },
+    );
+    Ok(json!({
+        "apiVersion": "v1",
+        "kind": "List",
+        "items": [
+            template,
+            render_sandbox_shadow_pool(
+                namespace,
+                &shadow_pool_name,
+                &template_name,
+                environment_id,
+            ),
+            claim,
+            render_workspace_daemon_service(namespace, &opts),
+        ],
+    }))
 }
 
 async fn create_sandbox_claim(
@@ -522,8 +726,33 @@ fn value_contains(value: &Value, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_transient_apiserver_shutdown, resolve_daemon_auth_token, resolve_gateway_token,
+        RESIZE_MARKER_ENV, RESIZE_MARKER_KEY, RESIZE_MARKER_VALUE, RESIZE_TEMPLATE_BASE,
+        is_transient_apiserver_shutdown, render_resize_fixture, resolve_daemon_auth_token,
+        resolve_gateway_token, validate_resize_environment_id,
     };
+
+    const RESIZE_ENV: &str = "00000000-0000-4000-8000-000000000123";
+
+    fn resize_fixture() -> serde_json::Value {
+        render_resize_fixture(
+            "dev-sandboxes",
+            "codewire-e2e",
+            RESIZE_ENV,
+            "synthetic-coordinate-capability",
+            "synthetic-daemon-capability",
+            None,
+        )
+        .unwrap()
+    }
+
+    fn item<'a>(fixture: &'a serde_json::Value, kind: &str) -> &'a serde_json::Value {
+        fixture["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["kind"] == kind)
+            .unwrap()
+    }
 
     #[test]
     fn classifies_only_the_observed_transient_shutdown() {
@@ -559,6 +788,165 @@ mod tests {
         assert_eq!(
             resolve_daemon_auth_token(false, None).unwrap(),
             "daemon-crd-smoke-token"
+        );
+    }
+
+    #[test]
+    fn resize_fixture_uses_owned_hashed_shadow_and_exact_resources() {
+        let fixture = resize_fixture();
+        assert_eq!(fixture["apiVersion"], "v1");
+        assert_eq!(fixture["kind"], "List");
+        assert_eq!(fixture["items"].as_array().unwrap().len(), 4);
+
+        let template = item(&fixture, "SandboxTemplate");
+        let template_name = format!("{RESIZE_TEMPLATE_BASE}-{RESIZE_ENV}");
+        assert_eq!(template["metadata"]["name"], template_name);
+        assert_eq!(
+            template["metadata"]["labels"]["codewire.sh/environment-id"],
+            RESIZE_ENV
+        );
+        let pool = item(&fixture, "SandboxWarmPool");
+        let pool_name = pool["metadata"]["name"].as_str().unwrap();
+        assert_eq!(pool_name.len(), 63);
+        assert_ne!(pool_name, format!("shadow-pool-{template_name}"));
+        assert_eq!(pool["spec"]["replicas"], 0);
+        assert_eq!(pool["spec"]["sandboxTemplateRef"]["name"], template_name);
+        assert_eq!(
+            pool["metadata"]["labels"]["codewire.sh/environment-id"],
+            RESIZE_ENV
+        );
+
+        let claim = item(&fixture, "SandboxClaim");
+        assert_eq!(claim["metadata"]["name"], format!("sandbox-{RESIZE_ENV}"));
+        assert_eq!(claim["spec"]["warmPoolRef"]["name"], pool_name);
+        assert_eq!(
+            claim["metadata"]["finalizers"],
+            serde_json::json!(["codewire.sh/deletion-protection"])
+        );
+        assert_eq!(
+            claim["metadata"]["labels"]["codewire.sh/environment-id"],
+            RESIZE_ENV
+        );
+        assert_eq!(
+            claim["metadata"]["labels"]["codewire.sh/environment-operation-generation"],
+            "1"
+        );
+        let resources = &claim["spec"]["workspaceResources"][0]["resources"];
+        assert_eq!(resources["requests"]["cpu"], "250m");
+        assert_eq!(resources["requests"]["memory"], "256Mi");
+        assert_eq!(resources["requests"]["ephemeral-storage"], "1Gi");
+        assert_eq!(resources["limits"], resources["requests"]);
+
+        let service = item(&fixture, "Service");
+        assert_eq!(
+            service["metadata"]["name"],
+            format!("cw-daemon-{RESIZE_ENV}")
+        );
+        assert_eq!(
+            service["spec"]["selector"]["codewire.sh/environment-id"],
+            RESIZE_ENV
+        );
+        assert_eq!(service["spec"]["selector"]["codewire.sh/type"], "workspace");
+    }
+
+    #[test]
+    fn resize_fixture_keeps_daemon_bootstrap_mounts_and_only_synthetic_identity() {
+        let fixture = resize_fixture();
+        let template = item(&fixture, "SandboxTemplate");
+        assert_eq!(
+            template["spec"]["podTemplate"]["metadata"]["labels"][RESIZE_MARKER_KEY],
+            RESIZE_MARKER_VALUE
+        );
+        let pod_spec = &template["spec"]["podTemplate"]["spec"];
+        let init = pod_spec["initContainers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|container| container["name"] == "codewire-daemon-init")
+            .unwrap();
+        let init_mounts = init["volumeMounts"].as_array().unwrap();
+        assert_eq!(init["image"], "codewire-gateway:e2e");
+        assert_eq!(init["imagePullPolicy"], "Never");
+        for name in ["codewire-bin", "codewire-run"] {
+            assert!(init_mounts.iter().any(|mount| mount["name"] == name));
+        }
+        let workspace = pod_spec["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|container| container["name"] == "workspace")
+            .unwrap();
+        assert_eq!(workspace["image"], "codewire-gateway:e2e");
+        assert_eq!(workspace["imagePullPolicy"], "Never");
+        assert_eq!(
+            workspace["readinessProbe"],
+            serde_json::json!({
+                "tcpSocket":{"port":7777},
+                "periodSeconds":1,
+                "timeoutSeconds":1,
+            })
+        );
+        assert!(
+            workspace["command"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|argument| argument.as_str().is_some_and(|argument| {
+                    argument.contains("__hosted-daemon") && argument.contains("'sleep' 'infinity'")
+                }))
+        );
+        for name in ["workspace", "codewire-bin", "codewire-run"] {
+            assert!(
+                workspace["volumeMounts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|mount| mount["name"] == name)
+            );
+        }
+        assert_eq!(workspace["resources"]["requests"]["cpu"], "250m");
+        assert_eq!(workspace["resources"]["requests"]["memory"], "256Mi");
+        assert_eq!(
+            workspace["resizePolicy"],
+            serde_json::json!([
+                {"resourceName":"cpu","restartPolicy":"NotRequired"},
+                {"resourceName":"memory","restartPolicy":"NotRequired"},
+            ])
+        );
+        assert!(workspace["env"].as_array().unwrap().iter().any(|entry| {
+            entry["name"] == RESIZE_MARKER_ENV && entry["value"] == RESIZE_MARKER_VALUE
+        }));
+        let encoded = serde_json::to_string(&fixture).unwrap();
+        for provider_secret in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GITHUB_TOKEN",
+            "SSH_PRIVATE_KEY",
+        ] {
+            assert!(!encoded.contains(provider_secret));
+        }
+    }
+
+    #[test]
+    fn resize_fixture_rejects_noncanonical_or_ambiguous_identity() {
+        for invalid in [
+            "not-a-uuid",
+            "00000000000040008000000000000123",
+            "00000000-0000-0000-0000-000000000000",
+            "00000000-0000-4000-8000-00000000012A",
+        ] {
+            assert!(validate_resize_environment_id(invalid).is_err());
+        }
+        assert!(
+            render_resize_fixture(
+                "dev-sandboxes",
+                "codewire-e2e",
+                RESIZE_ENV,
+                "same-capability",
+                "same-capability",
+                None,
+            )
+            .is_err()
         );
     }
 }

@@ -138,8 +138,8 @@ spec:
                 port:
                   name: http
 ---
-# Native environment-session bidi stream. TLS+ALPN proves HTTP/2 on the
-# client leg; GRPC retains HTTP/2 from ingress-nginx to orchestration.
+# Native environment-session and owner-credential-delegation bidi streams.
+# TLS+ALPN proves HTTP/2 on the client leg; GRPC retains it to each exact backend.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -169,6 +169,13 @@ spec:
                 name: codewire-orchestration-grpc
                 port:
                   name: grpc
+          - path: /codewire\.v1\.CredentialDelegationService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-credential-service
+                port:
+                  name: http
 ---
 # Connect-RPC path routing (docs/plans/connect-rpc/03, D5) — the e2e twin
 # of base's codewire-connect Ingress. The D8 probe's billing routing proof

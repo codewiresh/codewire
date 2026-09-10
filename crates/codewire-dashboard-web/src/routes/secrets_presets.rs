@@ -565,12 +565,12 @@ async fn bucket_page(
     let (title, description, can_manage) = match bucket {
         "organization" => (
             "Organization Secrets".to_owned(),
-            "Shared credentials available to this organization's Sandboxes.",
+            "Shared application secrets for this organization. Values are never shown in the dashboard.",
             organization.can_admin,
         ),
         "user" => (
-            "User Secrets".to_owned(),
-            "Your personal credentials, available to Sandboxes when selected.",
+            "Personal Secrets".to_owned(),
+            "Your personal application secrets. Values are never shown in the dashboard.",
             true,
         ),
         project_id => {
@@ -585,7 +585,7 @@ async fn bucket_page(
             };
             (
                 project.name,
-                "Credentials grouped for one reusable Sandbox configuration.",
+                "A named collection of application secrets, not a deployment stage. Values are never shown in the dashboard.",
                 organization.can_admin,
             )
         }
@@ -1104,7 +1104,7 @@ mod tests {
         };
         let secret_page = SecretBucketPageView {
             title: "Organization Secrets".into(),
-            description: "Write-only credentials.",
+            description: "Write-only application secrets.",
             bucket: "organization".into(),
             secrets: vec![crate::view::SecretRow {
                 key: "<script>secret-key</script>".into(),

@@ -17,6 +17,7 @@ cd "$ROOT/proto"
   -o ../crates/codewire-admin-proto/codewire_admin_descriptor.bin
 
 "$BUF_BIN" build --as-file-descriptor-set \
+  --path codewire/bridge/v1/bridge.proto \
   --path codewire/console/v1/account.proto \
   --path codewire/console/v1/billing.proto \
   --path codewire/console/v1/environment_setup.proto \
@@ -27,6 +28,7 @@ cd "$ROOT/proto"
   --path codewire/v1/api_key.proto \
   --path codewire/v1/common.proto \
   --path codewire/v1/credential.proto \
+  --path codewire/v1/credential_delegation.proto \
   --path codewire/v1/environment.proto \
   --path codewire/v1/environment_session.proto \
   --path codewire/v1/exec.proto \

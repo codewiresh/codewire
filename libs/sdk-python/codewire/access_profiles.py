@@ -66,14 +66,6 @@ def _profile(value: pb.AccessProfile) -> AccessProfile:
     }
 
 
-def _binding_request(value: EnvironmentAccessProfileBinding) -> pb.EnvironmentAccessProfileBinding:
-    return pb.EnvironmentAccessProfileBinding(
-        environment_id=value["environment_id"],
-        access_profile_id=value["access_profile_id"],
-        access_profile_revision=_revision(value["access_profile_revision"]),
-    )
-
-
 def _binding(value: pb.EnvironmentAccessProfileBinding) -> EnvironmentAccessProfileBinding:
     return {
         "environment_id": value.environment_id,
@@ -161,34 +153,6 @@ class AccessProfiles:
             "binding": _binding(response.binding) if response.HasField("binding") else None,
             "personal_credentials_confirmed": response.personal_credentials_confirmed,
         }
-
-    def set_environment_binding(
-        self, binding: EnvironmentAccessProfileBinding, *,
-        confirm_personal_credentials: bool,
-        expected_binding: EnvironmentAccessProfileBinding | None = None,
-    ) -> EnvironmentAccessProfileBinding:
-        """Absent expected_binding requires no binding; present performs exact CAS.
-
-        Consent is required explicitly for this exact environment/profile/revision.
-        """
-        if type(confirm_personal_credentials) is not bool:
-            raise ValueError("confirm_personal_credentials must be an explicit boolean")
-        request = pb.SetEnvironmentAccessProfileRequest(
-            binding=_binding_request(binding),
-            confirm_personal_credentials=confirm_personal_credentials,
-        )
-        if expected_binding is not None:
-            request.expected_binding.CopyFrom(_binding_request(expected_binding))
-        response = self._context.unary(self._client.set_environment_access_profile, request)
-        if not response.HasField("binding"):
-            raise RuntimeError("access profile response omitted binding")
-        return _binding(response.binding)
-
-    def clear_environment_binding(self, expected_binding: EnvironmentAccessProfileBinding) -> None:
-        self._context.unary(
-            self._client.clear_environment_access_profile,
-            pb.ClearEnvironmentAccessProfileRequest(expected_binding=_binding_request(expected_binding)),
-        )
 
     def close(self) -> None:
         self._client.close()

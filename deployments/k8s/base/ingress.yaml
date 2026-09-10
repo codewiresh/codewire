@@ -192,9 +192,9 @@ spec:
                 port:
                   name: http
 ---
-# Native environment-session bidi stream. This must remain separate from the
-# general Connect Ingress: backend-protocol applies to the whole object, while
-# every ordinary product service remains Connect-only.
+# Native environment-session and owner-credential-delegation bidi streams.
+# Keep their exact per-service backends separate from the general Connect
+# Ingress: backend-protocol applies to this entire native-bidi object.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -227,6 +227,13 @@ spec:
                 name: codewire-orchestration-grpc
                 port:
                   name: grpc
+          - path: /codewire\.v1\.CredentialDelegationService/
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: codewire-credential-service
+                port:
+                  name: http
 ---
 # Routes the OIDC provider paths to codewire-idp (deployed from
 # deployments/k8s/idp). Plain prefix paths: nginx prefers the longest

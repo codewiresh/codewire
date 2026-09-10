@@ -280,6 +280,207 @@ pub(crate) struct SettingsPlaceholderView {
     pub(crate) description: &'static str,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct CredentialChoiceView {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) status: &'static str,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CredentialChoicesView {
+    pub(crate) codex: Vec<CredentialChoiceView>,
+    pub(crate) openai: Vec<CredentialChoiceView>,
+    pub(crate) github: Vec<CredentialChoiceView>,
+    pub(crate) anthropic: Vec<CredentialChoiceView>,
+    pub(crate) ssh: Vec<CredentialChoiceView>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CredentialRowView {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) provider: &'static str,
+    pub(crate) authentication: &'static str,
+    pub(crate) account_hint: String,
+    pub(crate) status: &'static str,
+    pub(crate) status_tone: &'static str,
+    pub(crate) expires: String,
+    pub(crate) generation: u64,
+    pub(crate) ssh_public_key: String,
+    pub(crate) ssh_fingerprint: String,
+    pub(crate) public_key_id: String,
+    pub(crate) api_key: bool,
+    pub(crate) oauth: bool,
+    pub(crate) revoked: bool,
+    pub(crate) oauth_provider: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CredentialProfileEntryView {
+    pub(crate) slot: &'static str,
+    pub(crate) credential: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CredentialProfileRowView {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) revision: u64,
+    pub(crate) entries: Vec<CredentialProfileEntryView>,
+    pub(crate) codex: String,
+    pub(crate) openai: String,
+    pub(crate) github: String,
+    pub(crate) anthropic: String,
+    pub(crate) ssh: String,
+}
+
+pub(crate) struct CredentialSettingsView {
+    pub(crate) credentials: Vec<CredentialRowView>,
+    pub(crate) profiles: Vec<CredentialProfileRowView>,
+    pub(crate) choices: CredentialChoicesView,
+    pub(crate) csrf_token: String,
+    pub(crate) message: String,
+    pub(crate) error: String,
+}
+
+impl fmt::Debug for CredentialSettingsView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialSettingsView")
+            .field("credential_count", &self.credentials.len())
+            .field("profile_count", &self.profiles.len())
+            .field("csrf_token", &redacted(&self.csrf_token))
+            .field("message", &self.message)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CredentialProfileCreateSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) codex: String,
+    #[serde(default)]
+    pub(crate) openai: String,
+    #[serde(default)]
+    pub(crate) github: String,
+    #[serde(default)]
+    pub(crate) anthropic: String,
+    #[serde(default)]
+    pub(crate) ssh: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CredentialProfileUpdateSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) profile_id: String,
+    pub(crate) expected_revision: u64,
+    #[serde(default)]
+    pub(crate) codex: String,
+    #[serde(default)]
+    pub(crate) openai: String,
+    #[serde(default)]
+    pub(crate) github: String,
+    #[serde(default)]
+    pub(crate) anthropic: String,
+    #[serde(default)]
+    pub(crate) ssh: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CredentialProfileDeleteSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) profile_id: String,
+    pub(crate) expected_revision: u64,
+}
+
+// Deliberately not Debug: submitted API-key material must not enter derived
+// diagnostics or a retained form model.
+#[derive(Deserialize)]
+pub(crate) struct CredentialApiKeySubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) provider: String,
+    pub(crate) name: String,
+    pub(crate) value: String,
+    #[serde(default)]
+    pub(crate) expiration_utc: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CredentialSshGenerateSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) expiration_utc: String,
+}
+
+// Deliberately not Debug: private key and passphrase are write-only inputs.
+#[derive(Deserialize)]
+pub(crate) struct CredentialSshImportSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) name: String,
+    pub(crate) private_key: String,
+    #[serde(default)]
+    pub(crate) passphrase: String,
+    #[serde(default)]
+    pub(crate) expiration_utc: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CredentialRenameSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) credential_id: String,
+    pub(crate) expected_revocation_generation: u64,
+    pub(crate) expected_name: String,
+    pub(crate) name: String,
+}
+
+// Deliberately not Debug: replacement API-key material is write-only.
+#[derive(Deserialize)]
+pub(crate) struct CredentialRotateSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) credential_id: String,
+    pub(crate) expected_revocation_generation: u64,
+    pub(crate) value: String,
+    #[serde(default)]
+    pub(crate) expiration_utc: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CredentialRevisionSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) credential_id: String,
+    pub(crate) expected_revocation_generation: u64,
+}
+
+// Deliberately not Debug: the stream may expose a one-time device code only in
+// its no-store response, never through a retained submission diagnostic.
+#[derive(Deserialize)]
+pub(crate) struct CredentialOAuthSubmission {
+    #[serde(rename = "_csrf")]
+    pub(crate) csrf: String,
+    pub(crate) provider: String,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) credential_id: String,
+    #[serde(default)]
+    pub(crate) expected_revocation_generation: Option<u64>,
+    #[serde(default)]
+    pub(crate) confirm_reconnect: String,
+}
+
 #[derive(Debug)]
 pub(crate) struct DashboardView {
     pub(crate) user_name: String,
@@ -431,6 +632,40 @@ pub(crate) struct EnvironmentRow {
     pub(crate) confidential_actions_allowed: bool,
     pub(crate) vscode_url: String,
     pub(crate) ports: Vec<EnvironmentPortRow>,
+    pub(crate) sources: Option<EnvironmentSourcesSummaryView>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentSourcesSummaryView {
+    pub(crate) selection: codewire_proto::codewire::v1::EnvironmentSourceSelection,
+    pub(crate) operation_generation: u64,
+    pub(crate) project: String,
+    pub(crate) organization: bool,
+    pub(crate) personal: bool,
+    pub(crate) profile: String,
+    pub(crate) profile_revision: String,
+}
+
+impl EnvironmentSourcesSummaryView {
+    pub(crate) fn project_id(&self) -> &str {
+        self.project
+            .strip_prefix("platform:id:")
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn profile_id(&self) -> &str {
+        self.profile
+            .strip_prefix("platform:id:")
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentSourcesEditView {
+    pub(crate) environment_id: String,
+    pub(crate) environment_name: String,
+    pub(crate) expected: EnvironmentSourcesSummaryView,
+    pub(crate) fields: EnvironmentSourceFieldsView,
 }
 
 #[derive(Clone, Debug)]
@@ -522,6 +757,42 @@ pub(crate) struct EnvironmentAgentView {
     pub(crate) label: &'static str,
 }
 
+/// Selection metadata only. No application value or provider material belongs
+/// in a form model, including when an upstream selection cannot be loaded.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EnvironmentSourceFieldsView {
+    pub(crate) selection: Option<codewire_proto::codewire::v1::EnvironmentSourceSelection>,
+    pub(crate) personal_selected: bool,
+    pub(crate) organization_selected: bool,
+    pub(crate) projects: Vec<EnvironmentSecretProjectOption>,
+    pub(crate) profiles: Vec<EnvironmentCredentialProfileOption>,
+    pub(crate) project_error: String,
+    pub(crate) profile_error: String,
+    // Readable metadata is not proof that a placement can deliver it. The
+    // mutation adapter enables these only with the corresponding backend path.
+    pub(crate) application_selection_enabled: bool,
+    pub(crate) credential_selection_enabled: bool,
+    pub(crate) personal_credentials_confirmed: bool,
+    pub(crate) personal_secrets_confirmed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentSecretProjectOption {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) selected: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EnvironmentCredentialProfileOption {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) revision: u64,
+    pub(crate) identity_count: usize,
+    pub(crate) bound_revision: bool,
+    pub(crate) selected: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentCreateFormView {
     pub(crate) csrf_token: String,
@@ -544,6 +815,7 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) app_ports: Vec<EnvironmentAppPortFormRow>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
     pub(crate) agents: Vec<EnvironmentAgentView>,
+    pub(crate) sources: EnvironmentSourceFieldsView,
     pub(crate) repo_error: String,
     pub(crate) image_error: String,
     pub(crate) name_error: String,
@@ -584,6 +856,8 @@ impl EnvironmentCreateFormView {
             || !self.disk_error.is_empty()
             || !self.ttl_error.is_empty()
             || !self.form_error.is_empty()
+            || !self.sources.project_error.is_empty()
+            || !self.sources.profile_error.is_empty()
     }
 }
 
@@ -629,6 +903,7 @@ impl EnvironmentPortPanelView {
 pub(crate) struct EnvironmentsPageView {
     pub(crate) environments: Vec<EnvironmentRow>,
     pub(crate) create_form: EnvironmentCreateFormView,
+    pub(crate) source_editor: Option<EnvironmentSourcesEditView>,
     pub(crate) port_panel: Option<EnvironmentPortPanelView>,
     pub(crate) trust_summary: Option<EnvironmentTrustSummaryView>,
     pub(crate) resize_confirmation: Option<EnvironmentResizeConfirmationView>,
@@ -1256,6 +1531,20 @@ mod secret_debug_tests {
         ] {
             assert_value_blind(&diagnostic);
         }
+    }
+
+    #[test]
+    fn credential_settings_debug_redacts_csrf_capability() {
+        let page = CredentialSettingsView {
+            credentials: Vec::new(),
+            profiles: Vec::new(),
+            choices: CredentialChoicesView::default(),
+            csrf_token: MARKER.into(),
+            message: String::new(),
+            error: String::new(),
+        };
+
+        assert_value_blind(&format!("{page:?}"));
     }
 
     #[test]

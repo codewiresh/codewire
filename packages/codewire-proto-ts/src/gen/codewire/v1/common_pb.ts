@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/common.proto.
  */
 export const file_codewire_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("Chhjb2Rld2lyZS92MS9jb21tb24ucHJvdG8SC2NvZGV3aXJlLnYxIicKE1NjYWZmb2xkUGxhY2Vob2xkZXISDAoEbm90ZRgBIAEoCToCGAEiVwoOUmVwb3NpdG9yeVNwZWMSDgoGc291cmNlGAEgASgJEg4KBmJyYW5jaBgCIAEoCRITCgtkZXN0aW5hdGlvbhgDIAEoCRIQCghyZXZpc2lvbhgEIAEoCSI+Cg9BcHBsaWNhdGlvblBvcnQSDAoEcG9ydBgBIAEoBRINCgVsYWJlbBgCIAEoCRIOCgZhY2Nlc3MYAyABKAkiQAoNUHJvamVjdEFnZW50cxIUCgdpbnN0YWxsGAEgASgISACIAQESDQoFdG9vbHMYAiADKAlCCgoIX2luc3RhbGwiawoVUHJvamVjdFNraWxsU2VsZWN0aW9uEi8KBnNvdXJjZRgBIAEoDjIfLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNvdXJjZRIRCglyZWZlcmVuY2UYAiABKAkSDgoGYWdlbnRzGAMgAygJIo4BChBQcm9qZWN0UmVzb3VyY2VzEhsKDmNwdV9taWxsaWNvcmVzGAEgASgNSACIAQESFwoKbWVtb3J5X21pYhgCIAEoBEgBiAEBEhUKCGRpc2tfZ2liGAMgASgESAKIAQFCEQoPX2NwdV9taWxsaWNvcmVzQg0KC19tZW1vcnlfbWliQgsKCV9kaXNrX2dpYiJzChVQcm9qZWN0U2VjcmV0QmluZGluZ3MSDwoHcHJvamVjdBgBIAEoCRIUCgxvcmdhbml6YXRpb24YBCABKAgSDAoEdXNlchgFIAEoCEoECAIQA0oECAMQBFILaW5jbHVkZV9vcmdSDGluY2x1ZGVfdXNlciInChRQcm9qZWN0QWNjZXNzQmluZGluZxIPCgdwcm9maWxlGAEgASgJIqwFCgtQcm9qZWN0U3BlYxIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIOCgZwcmVzZXQYAiABKAkSDQoFaW1hZ2UYAyABKAkSMQoMcmVwb3NpdG9yaWVzGAQgAygLMhsuY29kZXdpcmUudjEuUmVwb3NpdG9yeVNwZWMSGQoRd29ya2luZ19kaXJlY3RvcnkYBSABKAkSFwoPaW5zdGFsbF9jb21tYW5kGAYgASgJEhYKDnN0YXJ0dXBfc2NyaXB0GAcgASgJEj4KC2Vudmlyb25tZW50GAggAygLMikuY29kZXdpcmUudjEuUHJvamVjdFNwZWMuRW52aXJvbm1lbnRFbnRyeRIqCgZhZ2VudHMYCSABKAsyGi5jb2Rld2lyZS52MS5Qcm9qZWN0QWdlbnRzEjIKBnNraWxscxgLIAMoCzIiLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNlbGVjdGlvbhI3ChFhcHBsaWNhdGlvbl9wb3J0cxgMIAMoCzIcLmNvZGV3aXJlLnYxLkFwcGxpY2F0aW9uUG9ydBIwCglyZXNvdXJjZXMYDSABKAsyHS5jb2Rld2lyZS52MS5Qcm9qZWN0UmVzb3VyY2VzEjMKB3NlY3JldHMYDiABKAsyIi5jb2Rld2lyZS52MS5Qcm9qZWN0U2VjcmV0QmluZGluZ3MSMQoGYWNjZXNzGBEgASgLMiEuY29kZXdpcmUudjEuUHJvamVjdEFjY2Vzc0JpbmRpbmcaMgoQRW52aXJvbm1lbnRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBSgQIChALSgQIDxAQSgQIEBARUhFhZ2VudF9lbnZpcm9ubWVudFILY3JlZGVudGlhbHNSDndvcmtzcGFjZV9tb2RlKn4KElByb2plY3RTa2lsbFNvdXJjZRIkCiBQUk9KRUNUX1NLSUxMX1NPVVJDRV9VTlNQRUNJRklFRBAAEiMKH1BST0pFQ1RfU0tJTExfU09VUkNFX1JFUE9TSVRPUlkQARIdChlQUk9KRUNUX1NLSUxMX1NPVVJDRV9VU0VSEAJCrgEKD2NvbS5jb2Rld2lyZS52MUILQ29tbW9uUHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw");
+  fileDesc("Chhjb2Rld2lyZS92MS9jb21tb24ucHJvdG8SC2NvZGV3aXJlLnYxIicKE1NjYWZmb2xkUGxhY2Vob2xkZXISDAoEbm90ZRgBIAEoCToCGAEibAoOUmVwb3NpdG9yeVNwZWMSDgoGc291cmNlGAEgASgJEg4KBmJyYW5jaBgCIAEoCRITCgtkZXN0aW5hdGlvbhgDIAEoCRIQCghyZXZpc2lvbhgEIAEoCRITCgtrbm93bl9ob3N0cxgFIAMoCSI+Cg9BcHBsaWNhdGlvblBvcnQSDAoEcG9ydBgBIAEoBRINCgVsYWJlbBgCIAEoCRIOCgZhY2Nlc3MYAyABKAkiQAoNUHJvamVjdEFnZW50cxIUCgdpbnN0YWxsGAEgASgISACIAQESDQoFdG9vbHMYAiADKAlCCgoIX2luc3RhbGwiawoVUHJvamVjdFNraWxsU2VsZWN0aW9uEi8KBnNvdXJjZRgBIAEoDjIfLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNvdXJjZRIRCglyZWZlcmVuY2UYAiABKAkSDgoGYWdlbnRzGAMgAygJIo4BChBQcm9qZWN0UmVzb3VyY2VzEhsKDmNwdV9taWxsaWNvcmVzGAEgASgNSACIAQESFwoKbWVtb3J5X21pYhgCIAEoBEgBiAEBEhUKCGRpc2tfZ2liGAMgASgESAKIAQFCEQoPX2NwdV9taWxsaWNvcmVzQg0KC19tZW1vcnlfbWliQgsKCV9kaXNrX2dpYiKtAQoVUHJvamVjdFNlY3JldEJpbmRpbmdzEg8KB3Byb2plY3QYASABKAkSFAoMb3JnYW5pemF0aW9uGAQgASgIEjcKBHVzZXIYBiABKA4yJC5jb2Rld2lyZS52MS5Qcm9qZWN0U3RvcmFnZVBsYWNlbWVudEgAiAEBQgcKBV91c2VySgQIAhADSgQIAxAESgQIBRAGUgtpbmNsdWRlX29yZ1IMaW5jbHVkZV91c2VyIisKGFByb2plY3RDcmVkZW50aWFsQmluZGluZxIPCgdwcm9maWxlGAEgASgJIrYFCgtQcm9qZWN0U3BlYxIWCg5zY2hlbWFfdmVyc2lvbhgBIAEoDRIOCgZwcmVzZXQYAiABKAkSDQoFaW1hZ2UYAyABKAkSMQoMcmVwb3NpdG9yaWVzGAQgAygLMhsuY29kZXdpcmUudjEuUmVwb3NpdG9yeVNwZWMSGQoRd29ya2luZ19kaXJlY3RvcnkYBSABKAkSFwoPaW5zdGFsbF9jb21tYW5kGAYgASgJEhYKDnN0YXJ0dXBfc2NyaXB0GAcgASgJEj4KC2Vudmlyb25tZW50GAggAygLMikuY29kZXdpcmUudjEuUHJvamVjdFNwZWMuRW52aXJvbm1lbnRFbnRyeRIqCgZhZ2VudHMYCSABKAsyGi5jb2Rld2lyZS52MS5Qcm9qZWN0QWdlbnRzEjIKBnNraWxscxgLIAMoCzIiLmNvZGV3aXJlLnYxLlByb2plY3RTa2lsbFNlbGVjdGlvbhI3ChFhcHBsaWNhdGlvbl9wb3J0cxgMIAMoCzIcLmNvZGV3aXJlLnYxLkFwcGxpY2F0aW9uUG9ydBIwCglyZXNvdXJjZXMYDSABKAsyHS5jb2Rld2lyZS52MS5Qcm9qZWN0UmVzb3VyY2VzEjMKB3NlY3JldHMYDiABKAsyIi5jb2Rld2lyZS52MS5Qcm9qZWN0U2VjcmV0QmluZGluZ3MSOgoLY3JlZGVudGlhbHMYEiABKAsyJS5jb2Rld2lyZS52MS5Qcm9qZWN0Q3JlZGVudGlhbEJpbmRpbmcaMgoQRW52aXJvbm1lbnRFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBSgQIChALSgQIDxAQSgQIEBARSgQIERASUhFhZ2VudF9lbnZpcm9ubWVudFIGYWNjZXNzUg53b3Jrc3BhY2VfbW9kZSp+ChJQcm9qZWN0U2tpbGxTb3VyY2USJAogUFJPSkVDVF9TS0lMTF9TT1VSQ0VfVU5TUEVDSUZJRUQQABIjCh9QUk9KRUNUX1NLSUxMX1NPVVJDRV9SRVBPU0lUT1JZEAESHQoZUFJPSkVDVF9TS0lMTF9TT1VSQ0VfVVNFUhACKpEBChdQcm9qZWN0U3RvcmFnZVBsYWNlbWVudBIpCiVQUk9KRUNUX1NUT1JBR0VfUExBQ0VNRU5UX1VOU1BFQ0lGSUVEEAASIwofUFJPSkVDVF9TVE9SQUdFX1BMQUNFTUVOVF9MT0NBTBABEiYKIlBST0pFQ1RfU1RPUkFHRV9QTEFDRU1FTlRfUExBVEZPUk0QAkKuAQoPY29tLmNvZGV3aXJlLnYxQgtDb21tb25Qcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z");
 
 /**
  * ScaffoldPlaceholder proved the initial codegen path. It remains deprecated
@@ -65,6 +65,14 @@ export type RepositorySpec = Message<"codewire.v1.RepositorySpec"> & {
    * @generated from field: string revision = 4;
    */
   revision: string;
+
+  /**
+   * Canonical direct public host-key lines. Required for SSH sources and
+   * rejected for every non-SSH source; checkout never imports ambient trust.
+   *
+   * @generated from field: repeated string known_hosts = 5;
+   */
+  knownHosts: string[];
 };
 
 /**
@@ -196,9 +204,11 @@ export type ProjectSecretBindings = Message<"codewire.v1.ProjectSecretBindings">
   organization: boolean;
 
   /**
-   * @generated from field: bool user = 5;
+   * Absence selects no personal values. Presence must specify an origin.
+   *
+   * @generated from field: optional codewire.v1.ProjectStoragePlacement user = 6;
    */
-  user: boolean;
+  user?: ProjectStoragePlacement | undefined;
 };
 
 /**
@@ -209,12 +219,13 @@ export const ProjectSecretBindingsSchema: GenMessage<ProjectSecretBindings> = /*
   messageDesc(file_codewire_v1_common, 6);
 
 /**
- * ProjectAccessBinding selects one scope-qualified access profile. It carries
- * no credential ID, provider material, protected-store reference, or token.
+ * Selects a named provider-identity profile, optionally origin-qualified.
+ * A resolved environment uses an exact platform:id:UUID or local:id:UUID.
+ * No provider material, per-key mapping or delivery policy appears here.
  *
- * @generated from message codewire.v1.ProjectAccessBinding
+ * @generated from message codewire.v1.ProjectCredentialBinding
  */
-export type ProjectAccessBinding = Message<"codewire.v1.ProjectAccessBinding"> & {
+export type ProjectCredentialBinding = Message<"codewire.v1.ProjectCredentialBinding"> & {
   /**
    * @generated from field: string profile = 1;
    */
@@ -222,10 +233,10 @@ export type ProjectAccessBinding = Message<"codewire.v1.ProjectAccessBinding"> &
 };
 
 /**
- * Describes the message codewire.v1.ProjectAccessBinding.
- * Use `create(ProjectAccessBindingSchema)` to create a new message.
+ * Describes the message codewire.v1.ProjectCredentialBinding.
+ * Use `create(ProjectCredentialBindingSchema)` to create a new message.
  */
-export const ProjectAccessBindingSchema: GenMessage<ProjectAccessBinding> = /*@__PURE__*/
+export const ProjectCredentialBindingSchema: GenMessage<ProjectCredentialBinding> = /*@__PURE__*/
   messageDesc(file_codewire_v1_common, 7);
 
 /**
@@ -303,9 +314,9 @@ export type ProjectSpec = Message<"codewire.v1.ProjectSpec"> & {
   secrets?: ProjectSecretBindings | undefined;
 
   /**
-   * @generated from field: codewire.v1.ProjectAccessBinding access = 17;
+   * @generated from field: codewire.v1.ProjectCredentialBinding credentials = 18;
    */
-  access?: ProjectAccessBinding | undefined;
+  credentials?: ProjectCredentialBinding | undefined;
 };
 
 /**
@@ -340,4 +351,30 @@ export enum ProjectSkillSource {
  */
 export const ProjectSkillSourceSchema: GenEnum<ProjectSkillSource> = /*@__PURE__*/
   enumDesc(file_codewire_v1_common, 0);
+
+/**
+ * @generated from enum codewire.v1.ProjectStoragePlacement
+ */
+export enum ProjectStoragePlacement {
+  /**
+   * @generated from enum value: PROJECT_STORAGE_PLACEMENT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: PROJECT_STORAGE_PLACEMENT_LOCAL = 1;
+   */
+  LOCAL = 1,
+
+  /**
+   * @generated from enum value: PROJECT_STORAGE_PLACEMENT_PLATFORM = 2;
+   */
+  PLATFORM = 2,
+}
+
+/**
+ * Describes the enum codewire.v1.ProjectStoragePlacement.
+ */
+export const ProjectStoragePlacementSchema: GenEnum<ProjectStoragePlacement> = /*@__PURE__*/
+  enumDesc(file_codewire_v1_common, 1);
 

@@ -1,18 +1,19 @@
-//! Personal platform profile commands over the shared generated Rust client.
+//! Platform profile metadata over the shared generated Rust client.
+//! The current service is personal-only. Organization selectors fail explicitly
+//! until the owner-aware public contract is composed; no fallback is permitted.
 
 use anyhow::Context as _;
-use codewire_access::{AccessProfileScope, CapabilitySlot};
+use codewire_access::{AccessProfileScope, CredentialAuthKind, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credentials::{
-    ParsedCredentialSelector, ParsedProfileSelector, parse_credential_selector,
-    parse_profile_selector,
+    CredentialOperation, ParsedProfileSelector, parse_profile_selector, supported_profile_slot,
 };
 use super::*;
 
 pub(super) async fn handle_platform_credentials(
     globals: &Globals,
-    command: CredentialsCommand,
+    operation: CredentialOperation,
 ) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env);
@@ -22,9 +23,11 @@ pub(super) async fn handle_platform_credentials(
             .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?,
         platform.token_provider()?,
     )?;
-    match command {
-        CredentialsCommand::Profile { command } => handle_profile(&client, command).await,
-        command => super::platform_credentials::handle(&client, command).await,
+    match operation {
+        CredentialOperation::Profile(command) => handle_profile(&client, command).await,
+        CredentialOperation::Credential(command) => {
+            super::platform_credentials::handle(&client, command).await
+        }
     }
 }
 
@@ -33,85 +36,69 @@ async fn handle_profile(
     command: CredentialProfileCommand,
 ) -> anyhow::Result<()> {
     match command {
-        CredentialProfileCommand::Create(args) => {
-            let response = client
-                .create_access_profile(rpc::CreateAccessProfileRequest {
-                    name: args.name,
-                    ..Default::default()
-                })
-                .await?;
-            let profile = response
-                .access_profile
-                .into_option()
-                .context("platform returned no profile")?;
-            print_profiles(&[profile], OutputFormat::Text)
-        }
         CredentialProfileCommand::List(args) => {
-            let mut profiles = Vec::new();
-            let mut page_token = String::new();
-            let mut cursors = BTreeSet::new();
-            loop {
-                let page = client
-                    .list_access_profiles(rpc::ListAccessProfilesRequest {
-                        page_size: 100,
-                        page_token,
-                        ..Default::default()
-                    })
-                    .await?;
-                profiles.extend(page.access_profiles);
-                if page.next_page_token.is_empty() {
-                    break;
-                }
-                if !cursors.insert(page.next_page_token.clone()) {
-                    anyhow::bail!("platform returned a repeated profile cursor");
-                }
-                page_token = page.next_page_token;
-            }
-            print_profiles(&profiles, args.output)
+            print_profiles(&list_profiles(client).await?, args.output)
         }
         CredentialProfileCommand::Get(args) => print_profiles(
             &[resolve_profile(client, &args.profile, args.revision).await?],
             args.output,
         ),
         CredentialProfileCommand::Set(args) => {
-            let mut profile = resolve_profile(client, &args.profile, None).await?;
-            let slot = CapabilitySlot::parse(args.slot)?.to_string();
-            let credential = match parse_credential_selector(&args.credential)? {
-                ParsedCredentialSelector::Id(id) => id.to_string(),
-                ParsedCredentialSelector::Name(_) => {
-                    super::platform_credentials::resolve(client, &args.credential)
-                        .await?
-                        .id
-                }
-            };
-            profile
-                .entries
-                .retain(|entry| entry.capability_slot != slot);
-            profile.entries.push(rpc::AccessProfileEntry {
-                capability_slot: slot,
-                credential_id: credential,
+            let credential = super::platform_credentials::resolve(client, &args.credential).await?;
+            let kind = platform_authentication_kind(&credential)?;
+            let slot = supported_profile_slot(
+                &args.slot,
+                &ProviderId::parse(&credential.provider)?,
+                kind,
+            )?
+            .to_string();
+            let (profile, name) = profile_for_set(client, &args.profile).await?;
+            let entry = rpc::AccessProfileEntry {
+                capability_slot: slot.clone(),
+                credential_id: credential.id,
                 ..Default::default()
-            });
-            update_profile(client, profile).await
+            };
+            if let Some(mut profile) = profile {
+                profile
+                    .entries
+                    .retain(|entry| entry.capability_slot != slot);
+                profile.entries.push(entry);
+                update_profile(client, profile).await
+            } else {
+                // No empty revision is published first. A failed/uncertain
+                // create is not retried as update or treated as success.
+                let response = client.create_access_profile(rpc::CreateAccessProfileRequest {
+                    name: name.context("new profiles require a name")?,
+                    entries: vec![entry],
+                    ..Default::default()
+                }).await.context("create platform profile with its first selection; inspect before retrying an uncertain result")?;
+                print_profiles(
+                    &[response
+                        .access_profile
+                        .into_option()
+                        .context("platform returned no profile")?],
+                    OutputFormat::Text,
+                )
+            }
         }
         CredentialProfileCommand::Unset(args) => {
             let mut profile = resolve_profile(client, &args.profile, None).await?;
-            let slot = CapabilitySlot::parse(args.slot)?.to_string();
             let before = profile.entries.len();
             profile
                 .entries
-                .retain(|entry| entry.capability_slot != slot);
-            if profile.entries.len() == before {
-                anyhow::bail!("platform profile does not select that capability slot");
-            }
+                .retain(|entry| entry.capability_slot != args.slot);
+            anyhow::ensure!(
+                profile.entries.len() != before,
+                "platform profile does not select that capability slot"
+            );
             update_profile(client, profile).await
         }
         CredentialProfileCommand::Delete(args) => {
             let profile = resolve_profile(client, &args.profile, None).await?;
             if !args.yes
                 && !prompt_confirm_default_no(&format!(
-                    "Delete platform access profile {:?}?",
-                    profile.name
+                    "Delete platform user profile {:?} ({}) at revision {}?",
+                    profile.name, profile.id, profile.revision
                 ))?
             {
                 eprintln!("Canceled.");
@@ -128,66 +115,100 @@ async fn handle_profile(
             Ok(())
         }
         CredentialProfileCommand::Revisions(_) => anyhow::bail!(
-            "inspect a platform revision with profile get PROFILE --revision REVISION"
+            "platform history listing is not supported; use --profile=NAME get --revision REVISION"
         ),
-        CredentialProfileCommand::Bind(args) => {
-            if !args.confirm_personal_credentials {
-                anyhow::bail!(
-                    "binding personal credentials requires --confirm-personal-credentials"
-                );
-            }
-            let environment = canonical_environment(&args.environment)?;
-            let profile = resolve_profile(client, &args.profile, None).await?;
-            let expected = if args.replace {
-                Some(get_binding(client, &environment).await?)
-            } else {
-                None
-            };
-            let binding = rpc::EnvironmentAccessProfileBinding {
-                environment_id: environment,
-                access_profile_id: profile.id,
-                access_profile_revision: profile.revision,
+    }
+}
+
+fn platform_authentication_kind(
+    credential: &rpc::Credential,
+) -> anyhow::Result<CredentialAuthKind> {
+    use rpc::CredentialAuthenticationKind as Kind;
+    if credential.authentication_kind == Kind::Oauth {
+        Ok(CredentialAuthKind::OAuth)
+    } else if credential.authentication_kind == Kind::ApiKey {
+        Ok(CredentialAuthKind::ApiKey)
+    } else if credential.authentication_kind == Kind::AccessToken {
+        Ok(CredentialAuthKind::AccessToken)
+    } else if credential.authentication_kind == Kind::GithubApp {
+        Ok(CredentialAuthKind::GitHubApp)
+    } else if credential.authentication_kind == Kind::SshKey {
+        Ok(CredentialAuthKind::SshKey)
+    } else {
+        anyhow::bail!("platform returned an unsupported credential authentication kind")
+    }
+}
+
+async fn list_profiles(client: &CodewireClient) -> anyhow::Result<Vec<rpc::AccessProfile>> {
+    let mut profiles = Vec::new();
+    let mut page_token = String::new();
+    let mut cursors = BTreeSet::new();
+    loop {
+        let page = client
+            .list_access_profiles(rpc::ListAccessProfilesRequest {
+                page_size: 100,
+                page_token,
                 ..Default::default()
-            };
-            let response = client
-                .set_environment_access_profile(rpc::SetEnvironmentAccessProfileRequest {
-                    binding: Some(binding).into(),
-                    expected_binding: expected.into(),
-                    confirm_personal_credentials: true,
-                    ..Default::default()
-                })
-                .await?;
-            print_binding(
-                &response
-                    .binding
-                    .into_option()
-                    .context("platform returned no binding")?,
-                OutputFormat::Text,
-            )
+            })
+            .await?;
+        profiles.extend(page.access_profiles);
+        if page.next_page_token.is_empty() {
+            return Ok(profiles);
         }
-        CredentialProfileCommand::Binding(args) => {
-            let environment = canonical_environment(&args.environment)?;
-            print_binding(&get_binding(client, &environment).await?, args.output)
+        anyhow::ensure!(
+            cursors.insert(page.next_page_token.clone()),
+            "platform returned a repeated profile cursor"
+        );
+        page_token = page.next_page_token;
+    }
+}
+
+fn profile_selector(selector: &str) -> anyhow::Result<rpc::get_access_profile_request::Selector> {
+    use rpc::get_access_profile_request::Selector;
+    Ok(match parse_profile_selector(selector)? {
+        ParsedProfileSelector::Id(id) => Selector::AccessProfileId(id.to_string()),
+        ParsedProfileSelector::Name(name) => Selector::Name(name.to_string()),
+        ParsedProfileSelector::Reference(reference) => {
+            anyhow::ensure!(
+                reference.scope() == AccessProfileScope::User,
+                "organization platform profiles are not supported by the metadata API yet"
+            );
+            Selector::Name(reference.name().to_string())
         }
-        CredentialProfileCommand::Unbind(args) => {
-            let environment = canonical_environment(&args.environment)?;
-            let binding = get_binding(client, &environment).await?;
-            if !args.yes
-                && !prompt_confirm_default_no(&format!(
-                    "Clear the platform access profile for environment {environment}?"
-                ))?
-            {
-                eprintln!("Canceled.");
-                return Ok(());
-            }
-            client
-                .clear_environment_access_profile(rpc::ClearEnvironmentAccessProfileRequest {
-                    expected_binding: Some(binding).into(),
-                    ..Default::default()
-                })
-                .await?;
-            eprintln!("Platform environment access profile cleared.");
-            Ok(())
+    })
+}
+
+fn optional_profile_by_name<'a>(
+    profiles: &'a [rpc::AccessProfile],
+    name: &str,
+) -> anyhow::Result<Option<&'a rpc::AccessProfile>> {
+    let mut matches = profiles
+        .iter()
+        .filter(|profile| profile.name.eq_ignore_ascii_case(name));
+    let found = matches.next();
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "platform profile name is ambiguous; select an exact id"
+    );
+    Ok(found)
+}
+
+async fn profile_for_set(
+    client: &CodewireClient,
+    selector: &str,
+) -> anyhow::Result<(Option<rpc::AccessProfile>, Option<String>)> {
+    match profile_selector(selector)? {
+        rpc::get_access_profile_request::Selector::AccessProfileId(id) => {
+            Ok((Some(get_exact_profile(client, &id, None).await?), None))
+        }
+        rpc::get_access_profile_request::Selector::Name(name) => {
+            // Only a successful complete listing proves a name is absent.
+            // Authentication, transport, and pagination failures never create.
+            let profiles = list_profiles(client).await?;
+            Ok((
+                optional_profile_by_name(&profiles, &name)?.cloned(),
+                Some(name),
+            ))
         }
     }
 }
@@ -197,40 +218,52 @@ async fn resolve_profile(
     selector: &str,
     revision: Option<u64>,
 ) -> anyhow::Result<rpc::AccessProfile> {
-    let selector = profile_selector(selector)?;
-    let response = client
+    let id = match profile_selector(selector)? {
+        rpc::get_access_profile_request::Selector::AccessProfileId(id) => id,
+        rpc::get_access_profile_request::Selector::Name(name) => {
+            let profiles = list_profiles(client).await?;
+            optional_profile_by_name(&profiles, &name)?
+                .context("platform profile name was not found")?
+                .id
+                .clone()
+        }
+    };
+    get_exact_profile(client, &id, revision).await
+}
+
+async fn get_exact_profile(
+    client: &CodewireClient,
+    id: &str,
+    revision: Option<u64>,
+) -> anyhow::Result<rpc::AccessProfile> {
+    anyhow::ensure!(revision != Some(0), "profile revision must be positive");
+    let profile = client
         .get_access_profile(rpc::GetAccessProfileRequest {
-            selector: Some(selector),
+            selector: Some(rpc::get_access_profile_request::Selector::AccessProfileId(
+                id.to_owned(),
+            )),
             revision,
             ..Default::default()
         })
-        .await?;
-    response
+        .await?
         .access_profile
         .into_option()
-        .context("platform returned no profile")
-}
-
-fn profile_selector(selector: &str) -> anyhow::Result<rpc::get_access_profile_request::Selector> {
-    use rpc::get_access_profile_request::Selector;
-    Ok(match parse_profile_selector(selector)? {
-        ParsedProfileSelector::Id(id) => Selector::AccessProfileId(id.to_string()),
-        ParsedProfileSelector::Name(name) => Selector::Name(name.to_string()),
-        ParsedProfileSelector::Reference(reference) => {
-            if reference.scope() != AccessProfileScope::User {
-                anyhow::bail!("only personal user/ profiles are supported on the platform");
-            }
-            Selector::Name(reference.name().to_string())
-        }
-    })
+        .context("platform returned no profile")?;
+    anyhow::ensure!(
+        profile.id == id
+            && profile.revision > 0
+            && revision.is_none_or(|revision| revision == profile.revision),
+        "platform returned a different profile or revision"
+    );
+    Ok(profile)
 }
 
 async fn update_profile(
     client: &CodewireClient,
     profile: rpc::AccessProfile,
 ) -> anyhow::Result<()> {
-    // Exactly one read/modify/CAS attempt. A conflict is returned to the user;
-    // never refetch and silently overwrite a concurrent owner's change.
+    // Exactly one read/modify/CAS attempt; preserve every other selected slot.
+    // A conflict is returned, never refetched and silently overwritten.
     let response = client
         .update_access_profile(rpc::UpdateAccessProfileRequest {
             access_profile_id: profile.id,
@@ -248,38 +281,13 @@ async fn update_profile(
     )
 }
 
-async fn get_binding(
-    client: &CodewireClient,
-    environment: &str,
-) -> anyhow::Result<rpc::EnvironmentAccessProfileBinding> {
-    let response = client
-        .get_environment_access_profile(rpc::GetEnvironmentAccessProfileRequest {
-            environment_id: environment.to_owned(),
-            ..Default::default()
-        })
-        .await?;
-    response
-        .binding
-        .into_option()
-        .context("platform returned no binding")
-}
-
-fn canonical_environment(value: &str) -> anyhow::Result<String> {
-    let id = uuid::Uuid::parse_str(value)
-        .context("binding commands require an exact environment UUID")?;
-    if id.to_string() != value {
-        anyhow::bail!("environment UUID must be canonical lowercase text");
-    }
-    Ok(id.to_string())
-}
-
 fn print_profiles(profiles: &[rpc::AccessProfile], output: OutputFormat) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(profiles)?),
         OutputFormat::Text => {
             for profile in profiles {
                 println!(
-                    "{}\tuser/{}\trevision {}",
+                    "{}\tplatform:user/{}\trevision {}",
                     profile.id, profile.name, profile.revision
                 );
                 for entry in &profile.entries {
@@ -291,30 +299,14 @@ fn print_profiles(profiles: &[rpc::AccessProfile], output: OutputFormat) -> anyh
     Ok(())
 }
 
-fn print_binding(
-    binding: &rpc::EnvironmentAccessProfileBinding,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(binding)?),
-        OutputFormat::Text => println!(
-            "{}\t{}\trevision {}",
-            binding.environment_id, binding.access_profile_id, binding.access_profile_revision
-        ),
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buffa::Message as _;
     use wiremock::matchers::{body_bytes, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const ENVIRONMENT: &str = "3d6bb495-efac-419f-bf3a-91696e7c7ca4";
     const PROFILE: &str = "d0f68b45-7c8b-43eb-9b8c-62a33b279c88";
-    const REPLACEMENT_PROFILE: &str = "b06643dd-b999-45ac-b0b2-f76cb5aabfe7";
+    const CREDENTIAL: &str = "b419132c-641f-49b7-a7fc-0b7d4a135d63";
     const REVISION: u64 = 9_007_199_254_740_993;
 
     fn client(server: &MockServer) -> CodewireClient {
@@ -326,14 +318,15 @@ mod tests {
         .unwrap()
     }
 
-    async fn expect_success(
+    async fn unary(
         server: &MockServer,
+        service: &str,
         name: &str,
         request: impl buffa::Message,
         response: impl buffa::Message,
     ) {
         Mock::given(method("POST"))
-            .and(path(format!("/codewire.v1.AccessProfileService/{name}")))
+            .and(path(format!("/codewire.v1.{service}/{name}")))
             .and(header(
                 "authorization",
                 "Bearer synthetic-profile-cli-token",
@@ -349,30 +342,45 @@ mod tests {
             .await;
     }
 
-    fn binding() -> rpc::EnvironmentAccessProfileBinding {
-        rpc::EnvironmentAccessProfileBinding {
-            environment_id: ENVIRONMENT.into(),
-            access_profile_id: PROFILE.into(),
-            access_profile_revision: REVISION,
+    fn profile() -> rpc::AccessProfile {
+        rpc::AccessProfile {
+            id: PROFILE.into(),
+            name: "work".into(),
+            revision: REVISION,
+            entries: vec![rpc::AccessProfileEntry {
+                capability_slot: "github".into(),
+                credential_id: "other-existing-credential".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         }
     }
 
-    async fn expect_profile(server: &MockServer) {
-        expect_success(
+    fn set_args() -> CredentialProfileCommand {
+        CredentialProfileCommand::Set(CredentialProfileSetArgs {
+            profile: "user/work".into(),
+            slot: "codex".into(),
+            credential: "name:codex-work".into(),
+        })
+    }
+
+    async fn expect_credential(server: &MockServer) {
+        unary(
             server,
-            "GetAccessProfile",
-            rpc::GetAccessProfileRequest {
-                selector: Some(rpc::get_access_profile_request::Selector::Name(
-                    "work".into(),
+            "CredentialService",
+            "GetCredential",
+            rpc::GetCredentialRequest {
+                selector: Some(rpc::get_credential_request::Selector::Name(
+                    "codex-work".into(),
                 )),
                 ..Default::default()
             },
-            rpc::GetAccessProfileResponse {
-                access_profile: Some(rpc::AccessProfile {
-                    id: PROFILE.into(),
-                    name: "work".into(),
-                    revision: REVISION,
+            rpc::GetCredentialResponse {
+                credential: Some(rpc::Credential {
+                    id: CREDENTIAL.into(),
+                    provider: "openai".into(),
+                    authentication_kind: rpc::CredentialAuthenticationKind::Oauth.into(),
+                    status: rpc::CredentialStatus::Active.into(),
                     ..Default::default()
                 })
                 .into(),
@@ -382,63 +390,136 @@ mod tests {
         .await;
     }
 
+    async fn expect_list(server: &MockServer, profiles: Vec<rpc::AccessProfile>) {
+        unary(
+            server,
+            "AccessProfileService",
+            "ListAccessProfiles",
+            rpc::ListAccessProfilesRequest {
+                page_size: 100,
+                ..Default::default()
+            },
+            rpc::ListAccessProfilesResponse {
+                access_profiles: profiles,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    async fn expect_exact(
+        server: &MockServer,
+        revision: Option<u64>,
+        response: rpc::AccessProfile,
+    ) {
+        unary(
+            server,
+            "AccessProfileService",
+            "GetAccessProfile",
+            rpc::GetAccessProfileRequest {
+                selector: Some(rpc::get_access_profile_request::Selector::AccessProfileId(
+                    PROFILE.into(),
+                )),
+                revision,
+                ..Default::default()
+            },
+            rpc::GetAccessProfileResponse {
+                access_profile: Some(response).into(),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
-    async fn profile_set_resolves_personal_credential_name_before_exact_revision_update() {
+    async fn first_set_creates_one_complete_revision_and_never_binds() {
         let server = MockServer::start().await;
-        expect_profile(&server).await;
-        let credential_id = "b419132c-641f-49b7-a7fc-0b7d4a135d63";
-        Mock::given(method("POST"))
-            .and(path("/codewire.v1.CredentialService/GetCredential"))
-            .and(header(
-                "authorization",
-                "Bearer synthetic-profile-cli-token",
-            ))
-            .and(body_bytes(
-                rpc::GetCredentialRequest {
-                    selector: Some(rpc::get_credential_request::Selector::Name(
-                        "codex-work".into(),
-                    )),
-                    ..Default::default()
-                }
-                .encode_to_vec(),
-            ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/proto")
-                    .set_body_bytes(
-                        rpc::GetCredentialResponse {
-                            credential: Some(rpc::Credential {
-                                id: credential_id.into(),
-                                ..Default::default()
-                            })
-                            .into(),
-                            ..Default::default()
-                        }
-                        .encode_to_vec(),
-                    ),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        expect_success(
+        expect_credential(&server).await;
+        expect_list(&server, vec![]).await;
+        unary(
             &server,
-            "UpdateAccessProfile",
-            rpc::UpdateAccessProfileRequest {
-                access_profile_id: PROFILE.into(),
-                expected_revision: REVISION,
+            "AccessProfileService",
+            "CreateAccessProfile",
+            rpc::CreateAccessProfileRequest {
+                name: "work".into(),
                 entries: vec![rpc::AccessProfileEntry {
-                    capability_slot: CapabilitySlot::codex().to_string(),
-                    credential_id: credential_id.into(),
+                    capability_slot: "codex".into(),
+                    credential_id: CREDENTIAL.into(),
                     ..Default::default()
                 }],
                 ..Default::default()
             },
+            rpc::CreateAccessProfileResponse {
+                access_profile: Some(rpc::AccessProfile {
+                    revision: 1,
+                    ..profile()
+                })
+                .into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        handle_profile(&client(&server), set_args()).await.unwrap();
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn later_set_preserves_other_slots_in_one_exact_revision_cas() {
+        let server = MockServer::start().await;
+        expect_credential(&server).await;
+        expect_list(&server, vec![profile()]).await;
+        let mut entries = profile().entries;
+        entries.push(rpc::AccessProfileEntry {
+            capability_slot: "codex".into(),
+            credential_id: CREDENTIAL.into(),
+            ..Default::default()
+        });
+        unary(
+            &server,
+            "AccessProfileService",
+            "UpdateAccessProfile",
+            rpc::UpdateAccessProfileRequest {
+                access_profile_id: PROFILE.into(),
+                expected_revision: REVISION,
+                entries,
+                ..Default::default()
+            },
             rpc::UpdateAccessProfileResponse {
                 access_profile: Some(rpc::AccessProfile {
-                    id: PROFILE.into(),
-                    name: "work".into(),
                     revision: REVISION + 1,
-                    ..Default::default()
+                    ..profile()
+                })
+                .into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        handle_profile(&client(&server), set_args()).await.unwrap();
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn last_unset_sends_explicit_empty_complete_set() {
+        let server = MockServer::start().await;
+        expect_list(&server, vec![profile()]).await;
+        expect_exact(&server, None, profile()).await;
+        unary(
+            &server,
+            "AccessProfileService",
+            "UpdateAccessProfile",
+            rpc::UpdateAccessProfileRequest {
+                access_profile_id: PROFILE.into(),
+                expected_revision: REVISION,
+                entries: vec![],
+                ..Default::default()
+            },
+            rpc::UpdateAccessProfileResponse {
+                access_profile: Some(rpc::AccessProfile {
+                    revision: REVISION + 1,
+                    entries: vec![],
+                    ..profile()
                 })
                 .into(),
                 ..Default::default()
@@ -447,10 +528,9 @@ mod tests {
         .await;
         handle_profile(
             &client(&server),
-            CredentialProfileCommand::Set(CredentialProfileSetArgs {
-                profile: "user/work".into(),
-                slot: CapabilitySlot::codex().to_string(),
-                credential: "name:codex-work".into(),
+            CredentialProfileCommand::Unset(CredentialProfileSlotArgs {
+                profile: "work".into(),
+                slot: "github".into(),
             }),
         )
         .await
@@ -460,157 +540,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binding_requires_explicit_consent_before_any_network_request() {
-        let server = MockServer::start().await;
-        let error = handle_profile(
-            &client(&server),
-            CredentialProfileCommand::Bind(CredentialProfileBindArgs {
-                profile: "user/work".into(),
-                environment: ENVIRONMENT.into(),
-                confirm_personal_credentials: false,
-                replace: false,
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("--confirm-personal-credentials"));
-        assert!(server.received_requests().await.unwrap().is_empty());
+    async fn failed_or_ambiguous_list_never_creates_a_profile() {
+        for ambiguous in [false, true] {
+            let server = MockServer::start().await;
+            expect_credential(&server).await;
+            if ambiguous {
+                expect_list(
+                    &server,
+                    vec![
+                        profile(),
+                        rpc::AccessProfile {
+                            id: "other-id".into(),
+                            ..profile()
+                        },
+                    ],
+                )
+                .await;
+            } else {
+                Mock::given(method("POST"))
+                    .and(path("/codewire.v1.AccessProfileService/ListAccessProfiles"))
+                    .respond_with(ResponseTemplate::new(503))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            assert!(handle_profile(&client(&server), set_args()).await.is_err());
+            server.verify().await;
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
     }
 
     #[tokio::test]
-    async fn binding_create_and_clear_preserve_exact_observed_revision() {
+    async fn conflict_does_not_refetch_retry_or_create() {
         let server = MockServer::start().await;
-        let client = client(&server);
-        expect_profile(&server).await;
-        expect_success(
-            &server,
-            "SetEnvironmentAccessProfile",
-            rpc::SetEnvironmentAccessProfileRequest {
-                binding: Some(binding()).into(),
-                confirm_personal_credentials: true,
-                ..Default::default()
-            },
-            rpc::SetEnvironmentAccessProfileResponse {
-                binding: Some(binding()).into(),
-                ..Default::default()
-            },
-        )
-        .await;
-        handle_profile(
-            &client,
-            CredentialProfileCommand::Bind(CredentialProfileBindArgs {
-                profile: "user/work".into(),
-                environment: ENVIRONMENT.into(),
-                confirm_personal_credentials: true,
-                replace: false,
-            }),
-        )
-        .await
-        .unwrap();
-        expect_success(
-            &server,
-            "GetEnvironmentAccessProfile",
-            rpc::GetEnvironmentAccessProfileRequest {
-                environment_id: ENVIRONMENT.into(),
-                ..Default::default()
-            },
-            rpc::GetEnvironmentAccessProfileResponse {
-                binding: Some(binding()).into(),
-                personal_credentials_confirmed: true,
-                ..Default::default()
-            },
-        )
-        .await;
-        expect_success(
-            &server,
-            "ClearEnvironmentAccessProfile",
-            rpc::ClearEnvironmentAccessProfileRequest {
-                expected_binding: Some(binding()).into(),
-                ..Default::default()
-            },
-            rpc::ClearEnvironmentAccessProfileResponse::default(),
-        )
-        .await;
-        handle_profile(
-            &client,
-            CredentialProfileCommand::Unbind(CredentialProfileUnbindArgs {
-                environment: ENVIRONMENT.into(),
-                yes: true,
-            }),
-        )
-        .await
-        .unwrap();
-        server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn replacement_reports_conflict_without_refetching_or_retrying() {
-        let server = MockServer::start().await;
-        expect_profile(&server).await;
-        let expected = rpc::EnvironmentAccessProfileBinding {
-            access_profile_id: REPLACEMENT_PROFILE.into(),
-            access_profile_revision: REVISION - 2,
-            ..binding()
-        };
-        expect_success(
-            &server,
-            "GetEnvironmentAccessProfile",
-            rpc::GetEnvironmentAccessProfileRequest {
-                environment_id: ENVIRONMENT.into(),
-                ..Default::default()
-            },
-            rpc::GetEnvironmentAccessProfileResponse {
-                binding: Some(expected.clone()).into(),
-                personal_credentials_confirmed: true,
-                ..Default::default()
-            },
-        )
-        .await;
+        expect_credential(&server).await;
+        expect_list(&server, vec![profile()]).await;
         Mock::given(method("POST"))
             .and(path(
-                "/codewire.v1.AccessProfileService/SetEnvironmentAccessProfile",
+                "/codewire.v1.AccessProfileService/UpdateAccessProfile",
             ))
-            .and(body_bytes(
-                rpc::SetEnvironmentAccessProfileRequest {
-                    binding: Some(binding()).into(),
-                    expected_binding: Some(expected).into(),
-                    confirm_personal_credentials: true,
-                    ..Default::default()
-                }
-                .encode_to_vec(),
-            ))
-            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
-                "code": "already_exists", "message": "conflict"
-            })))
+            .respond_with(ResponseTemplate::new(409))
             .expect(1)
             .mount(&server)
             .await;
+        assert!(handle_profile(&client(&server), set_args()).await.is_err());
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn exact_revision_mismatch_fails_and_id_never_falls_back_to_name() {
+        let server = MockServer::start().await;
+        expect_exact(
+            &server,
+            Some(REVISION),
+            rpc::AccessProfile {
+                revision: REVISION - 1,
+                ..profile()
+            },
+        )
+        .await;
+        assert!(
+            resolve_profile(&client(&server), &format!("id:{PROFILE}"), Some(REVISION))
+                .await
+                .is_err()
+        );
+        server.verify().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn organization_scope_and_unsupported_history_fail_before_network() {
+        let server = MockServer::start().await;
+        assert!(
+            resolve_profile(&client(&server), "organization/work", None)
+                .await
+                .is_err()
+        );
         assert!(
             handle_profile(
                 &client(&server),
-                CredentialProfileCommand::Bind(CredentialProfileBindArgs {
-                    profile: "user/work".into(),
-                    environment: ENVIRONMENT.into(),
-                    confirm_personal_credentials: true,
-                    replace: true,
+                CredentialProfileCommand::Revisions(CredentialProfileSelectorArgs {
+                    profile: "work".into(),
+                    revision: None,
+                    output: OutputFormat::Json,
                 })
             )
             .await
             .is_err()
         );
-        server.verify().await;
-        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
-    fn platform_profile_selectors_are_personal_and_exact() {
+    fn selectors_are_exact_and_scope_aware() {
         assert_eq!(
             profile_selector("user/work").unwrap(),
             rpc::get_access_profile_request::Selector::Name("work".into())
         );
         assert!(profile_selector("organization/work").is_err());
         assert!(profile_selector("id:not-a-uuid").is_err());
-        assert!(canonical_environment("environment-name").is_err());
-        assert!(canonical_environment("3D6BB495-EFAC-419F-BF3A-91696E7C7CA4").is_err());
+        assert!(profile_selector("name:work").is_err());
     }
 }

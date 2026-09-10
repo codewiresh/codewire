@@ -1,7 +1,11 @@
 version: v2
 
 modules:
+  # The private daemon and broker services import only the canonical neutral
+  # bridge frames. Invoke this config from the repository root so both module
+  # paths remain inside Buf's context and resolve the one canonical source.
   - path: proto
+  - path: libs/gateway-proto/proto
 
 lint:
   use:

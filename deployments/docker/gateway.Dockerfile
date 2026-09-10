@@ -10,14 +10,23 @@ FROM codewire-rust-base AS rust-builder
 WORKDIR /src
 COPY deployments/docker/gateway.Cargo.toml ./Cargo.toml
 COPY deployments/docker/gateway.Cargo.lock ./Cargo.lock
+COPY crates/codewire-access ./crates/codewire-access
 COPY crates/codewire-client ./crates/codewire-client
 COPY crates/codewire-credential-bridge ./crates/codewire-credential-bridge
+COPY crates/codewire-credential-broker ./crates/codewire-credential-broker
+COPY crates/codewire-daemon ./crates/codewire-daemon
 COPY crates/codewire-tls ./crates/codewire-tls
 COPY crates/codewire-gateway ./crates/codewire-gateway
 COPY crates/codewire-gateway-proto ./crates/codewire-gateway-proto
+COPY crates/codewire-local-credentials ./crates/codewire-local-credentials
 COPY crates/codewire-netstack ./crates/codewire-netstack
+COPY crates/codewire-platform-credentials ./crates/codewire-platform-credentials
+COPY crates/codewire-project ./crates/codewire-project
+COPY crates/codewire-protected-store ./crates/codewire-protected-store
 COPY crates/codewire-proto ./crates/codewire-proto
+COPY crates/codewire-server-core ./crates/codewire-server-core
 COPY crates/codewire-tailnet ./crates/codewire-tailnet
+COPY crates/codewire-workload-secrets ./crates/codewire-workload-secrets
 COPY proto ./proto
 COPY libs/gateway-proto ./libs/gateway-proto
 ARG CODEWIRE_SCCACHE_MODE=disabled

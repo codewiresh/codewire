@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use codewire_access::{
     AccessProfile, AccessProfileId, AccessProfileName, CapabilitySlot, CredentialId,
-    EnvironmentAccessBinding, EnvironmentId, GrantContext, Owner, OwnerId, Placement,
+    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId,
     builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
@@ -137,7 +137,7 @@ impl AccessProfiles {
             .begin_transaction()
             .await
             .map_err(profile_error)?;
-        let context = authorize_environment(&mut tx, &owner, &environment, false).await?;
+        let context = authorize_environment(&mut tx, &owner, &environment).await?;
         let metadata = self
             .profiles
             .get_binding_metadata_in(&mut tx, &context)
@@ -146,84 +146,6 @@ impl AccessProfiles {
         require_personal_profile(&mut tx, &owner, &metadata.binding.profile_id).await?;
         tx.commit().await.map_err(database_error)?;
         Ok(metadata)
-    }
-
-    pub async fn set_binding(
-        &self,
-        user: &AuthUser,
-        binding: EnvironmentAccessBinding,
-        expected: Option<EnvironmentAccessBinding>,
-        confirm_personal_credentials: bool,
-    ) -> AppResult<EnvironmentAccessBinding> {
-        let owner = personal_owner(user)?;
-        binding.validate().map_err(|_| invalid_binding())?;
-        if !confirm_personal_credentials {
-            return Err(AppError::Precondition(
-                "explicit personal credential confirmation is required".into(),
-            ));
-        }
-        if let Some(expected) = &expected {
-            expected.validate().map_err(|_| invalid_binding())?;
-            if expected.environment_id != binding.environment_id {
-                return Err(invalid_binding());
-            }
-        }
-        // Resolve immutable, same-owner metadata before taking a connection for
-        // the binding transaction. Never acquire a second pooled connection
-        // while holding authority locks; concurrent requests cannot exhaust the
-        // pool while waiting for themselves. Store admission revalidates it.
-        let profile = self
-            .profiles
-            .get_revision(&owner, &binding.profile_id, binding.profile_revision)
-            .await
-            .map_err(profile_error)?;
-        let mut tx = self
-            .profiles
-            .begin_transaction()
-            .await
-            .map_err(profile_error)?;
-        let mut context =
-            authorize_environment(&mut tx, &owner, &binding.environment_id, true).await?;
-        context.authorized_credentials = profile.entries.values().cloned().collect();
-        let result = match expected {
-            Some(expected) => {
-                self.profiles
-                    .replace_binding_in(&mut tx, &context, &expected, binding, Some(owner.id()))
-                    .await
-            }
-            None => {
-                self.profiles
-                    .create_binding_in(&mut tx, &context, binding, Some(owner.id()))
-                    .await
-            }
-        }
-        .map_err(profile_error)?;
-        tx.commit().await.map_err(database_error)?;
-        Ok(result)
-    }
-
-    pub async fn clear_binding(
-        &self,
-        user: &AuthUser,
-        expected: EnvironmentAccessBinding,
-    ) -> AppResult<()> {
-        let owner = personal_owner(user)?;
-        expected.validate().map_err(|_| invalid_binding())?;
-        let mut tx = self
-            .profiles
-            .begin_transaction()
-            .await
-            .map_err(profile_error)?;
-        let context =
-            authorize_environment(&mut tx, &owner, &expected.environment_id, true).await?;
-        // Keep the same global lock order as store admission: environment,
-        // then the profile. Organization-owned profiles are not this API.
-        require_personal_profile(&mut tx, &owner, &expected.profile_id).await?;
-        self.profiles
-            .delete_binding_in(&mut tx, &context, &expected)
-            .await
-            .map_err(profile_error)?;
-        tx.commit().await.map_err(database_error)
     }
 }
 
@@ -274,7 +196,6 @@ async fn authorize_environment(
     tx: &mut Transaction<'_, Postgres>,
     owner: &Owner,
     environment: &EnvironmentId,
-    write: bool,
 ) -> AppResult<GrantContext> {
     // Discover only coordinates, never infer authorization from a creator ACL
     // shortcut. Re-read the exact row after owner locks in the store's order.
@@ -301,17 +222,10 @@ async fn authorize_environment(
             return Err(not_found());
         }
     }
-    let sql = if write {
-        "SELECT environment_operation_generation FROM environments \
+    let sql = "SELECT environment_operation_generation FROM environments \
          WHERE id=$1 AND created_by=$2 AND org_id=$3 AND type='sandbox' \
          AND desired_state<>'destroyed' AND state NOT IN ('destroyed','destroying') \
-         AND deletion_requested_at IS NULL FOR UPDATE"
-    } else {
-        "SELECT environment_operation_generation FROM environments \
-         WHERE id=$1 AND created_by=$2 AND org_id=$3 AND type='sandbox' \
-         AND desired_state<>'destroyed' AND state NOT IN ('destroyed','destroying') \
-         AND deletion_requested_at IS NULL FOR SHARE"
-    };
+         AND deletion_requested_at IS NULL FOR SHARE";
     let generation: i64 = sqlx::query_scalar(sql)
         .bind(environment.as_str())
         .bind(owner.id().as_str())
@@ -338,7 +252,7 @@ async fn authorize_environment(
     Ok(GrantContext {
         environment_id: environment.clone(),
         environment_generation: generation as u64,
-        placement: Placement::Platform,
+        placement: GrantPlacement::Platform,
         user_id: owner.id().clone(),
         organization_id: Some(OwnerId::parse(organization).map_err(|_| unavailable())?),
         allow_personal_credentials: true,
@@ -407,7 +321,7 @@ fn unavailable() -> AppError {
 fn database_error(_: sqlx::Error) -> AppError {
     unavailable()
 }
-fn profile_error(error: PlatformProfileError) -> AppError {
+pub(crate) fn profile_error(error: PlatformProfileError) -> AppError {
     use PlatformProfileError as E;
     match error {
         E::InvalidInput => invalid_profile(),

@@ -48,8 +48,10 @@ for line in sys.stdin:
             completed_id = "foreign-turn"
         else:
             completed_id = turn_id
-        send({"method":"item/completed","params":{"threadId":thread_id,"turnId":completed_id,"item":{"type":"agentMessage","text":"CWCODEX149 kind"}}})
-        turn = {"id":completed_id,"status":"failed" if mode == "failed" else "completed","error":{"message":"synthetic-private-canary"} if mode == "failed" else None}
+        if mode != "authentication-failed":
+            send({"method":"item/completed","params":{"threadId":thread_id,"turnId":completed_id,"item":{"type":"agentMessage","text":"CWCODEX149 kind"}}})
+        failed = mode in ("failed", "authentication-failed")
+        turn = {"id":completed_id,"status":"failed" if failed else "completed","error":{"message":"synthetic-private-canary"} if failed else None}
         # Notifications deliberately precede the request response.
         send({"method":"turn/completed","params":{"threadId":thread_id,"turn":turn}})
         send({"id":request_id,"result":{"turn":{"id":turn_id,"status":"inProgress"}}})
@@ -57,6 +59,33 @@ if mode == "stubborn":
     while True:
         time.sleep(0.01)
 '''
+
+
+class ProjectionTests(unittest.TestCase):
+    def test_current_selected_loopback_configuration(self):
+        with patch.dict(os.environ, {"CODEX_HOME": driver.CODEX_HOME,
+                                     "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}, clear=True):
+            driver.validate_projection()
+
+    def test_missing_wrong_or_unselected_client_is_rejected(self):
+        for values in ({}, {"CODEX_HOME": driver.CODEX_HOME},
+                       {"CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"},
+                       {"CODEX_HOME": driver.CODEX_HOME,
+                        "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:none"},
+                       {"CODEX_HOME": "/synthetic/other-home",
+                        "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}):
+            with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
+                with self.assertRaisesRegex(driver.Failure, "^unexpected_projection$"):
+                    driver.validate_projection()
+
+    def test_no_legacy_ca_override_fallback(self):
+        for value in ("", "/run/codewire-credentials/gateway-roots/ca.crt", "/synthetic/roots"):
+            with self.subTest(value=value), patch.dict(os.environ, {
+                    "CODEX_HOME": driver.CODEX_HOME,
+                    "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex",
+                    "CODEX_CA_CERTIFICATE": value}, clear=True):
+                with self.assertRaisesRegex(driver.Failure, "^unexpected_projection$"):
+                    driver.validate_projection()
 
 
 class ParserTests(unittest.TestCase):
@@ -159,6 +188,21 @@ class ProtocolTests(unittest.TestCase):
                 server.turn(server.thread(), "synthetic")
             self.assertNotIn("canary", str(result.exception))
 
+    def test_expected_exhaustion_requires_failed_terminal_without_success_marker(self):
+        with self.server("authentication-failed") as server:
+            server.initialize()
+            server.turn(server.thread(), "CW_KIND_BROKER_RETRY_EXHAUSTED", expected_failure=True)
+            self.assertEqual(server.phase, "idle")
+            self.assertEqual(len(server.completed), 1)
+            self.assertEqual(server.markers, set())
+
+    def test_exhaustion_cannot_accept_success_or_failed_turn_with_success_output(self):
+        for mode in ("success", "failed"):
+            with self.subTest(mode=mode), self.server(mode) as server:
+                server.initialize()
+                with self.assertRaisesRegex(driver.Failure, "^unexpected_exhaustion_terminal$"):
+                    server.turn(server.thread(), "CW_KIND_BROKER_RETRY_EXHAUSTED", expected_failure=True)
+
     def test_unexpected_server_request_is_denied(self):
         with self.server("server-request") as server:
             server.initialize()
@@ -230,7 +274,7 @@ class DiagnosticTests(unittest.TestCase):
             try:
                 with patch.object(driver, "CODEX_HOME", str(home)), \
                         patch.dict(os.environ, {"CODEX_HOME": str(home),
-                                               "CODEX_CA_CERTIFICATE": driver.ROOTS}, clear=True), \
+                                               "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}, clear=True), \
                         patch.object(driver, "Server", server_factory), signal_guard, \
                         contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                     status = driver.main()
@@ -414,7 +458,7 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class AcceptanceTests(unittest.TestCase):
-    def test_rotation_wait_requires_change_and_expired_cache_without_active_turn(self):
+    def test_rotation_wait_requires_change_and_expired_hosted_epoch_without_active_turn(self):
         clock = [0.0]
         class Idle:
             def pump(self, duration):
@@ -422,8 +466,14 @@ class AcceptanceTests(unittest.TestCase):
         with patch.object(driver.time, "monotonic", lambda: clock[0]), \
                 patch.object(driver, "token_fingerprint", lambda: b"new"):
             driver.observe_rotation(Idle(), b"old", 0.0)
-        self.assertGreater(clock[0], 30)
-        self.assertLess(clock[0], 31)
+        self.assertGreater(clock[0], 600)
+        self.assertLess(clock[0], 601)
+
+    def test_epoch_bound_matches_production_gateway(self):
+        gateway = SOURCE.parents[4] / "crates/codewire-gateway/src/hosted_bridge.rs"
+        self.assertIn("const EPOCH_MAX_LIFETIME: Duration = Duration::from_secs(600);",
+                      gateway.read_text())
+        self.assertEqual(driver.HOSTED_EPOCH_MAX_LIFETIME, 600.0)
 
     def test_unchanged_projection_times_out(self):
         clock = [0.0]
@@ -436,11 +486,11 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertRaisesRegex(driver.Failure, "projected_token_rotation_timeout"):
             driver.observe_rotation(Idle(), b"same", 0.0)
 
-    def workflow(self, native_calls, rotation_calls=2, durations=(0.0, 0.0, 0.0)):
+    def workflow(self, legacy_calls=0, codex_calls=1, durations=(0.0, 0.0, 0.0)):
         calls = []
         clock = [0.0]
         elapsed_by_prompt = dict(zip(
-            ("CW_KIND_ROTATION", "CW_KIND_BROKER_RETRY_ONCE", "CW_KIND_NATIVE_REREAD"),
+            ("CW_KIND_ROTATION", "CW_KIND_BROKER_RETRY_ONCE", "CW_KIND_BROKER_RETRY_EXHAUSTED"),
             durations,
         ))
         class Workflow:
@@ -455,17 +505,16 @@ class AcceptanceTests(unittest.TestCase):
                 if self.threads > 1:
                     self.deadlines.append(deadline)
                 return str(self.threads)
-            def turn(self, thread, prompt, deadline=None):
-                self.inputs.append((thread, prompt))
+            def turn(self, thread, prompt, deadline=None, *, expected_failure=False):
+                self.inputs.append((thread, prompt, expected_failure))
                 if prompt != "CW_KIND_BASELINE":
                     self.deadlines.append(deadline)
-                count = {"CW_KIND_ROTATION": rotation_calls,
-                         "CW_KIND_NATIVE_REREAD": native_calls}.get(prompt, 1)
-                calls.extend([clock[0]] * count)
+                calls.extend([clock[0]] * legacy_calls)
                 clock[0] += elapsed_by_prompt.get(prompt, 0.0)
         workflow = Workflow()
         output = io.StringIO()
         with patch.object(driver, "auth_calls", lambda _: list(calls)), \
+                patch.object(driver, "codex_exec_calls", lambda _: [0.0] * codex_calls), \
                 patch.object(driver.time, "monotonic", lambda: clock[0]), \
                 patch.object(driver, "token_fingerprint", lambda: b"synthetic"), \
                 patch.object(driver, "observe_rotation"), \
@@ -473,33 +522,32 @@ class AcceptanceTests(unittest.TestCase):
             driver.run(workflow, None)
         return workflow, [json.loads(line) for line in output.getvalue().splitlines()]
 
-    def test_exact_retry_counts_and_fresh_thread_markers(self):
-        workflow, events = self.workflow(2, durations=(3.0, 4.0, 5.0))
-        self.assertEqual([thread for thread, _ in workflow.inputs], ["1", "1", "2", "3"])
+    def test_no_legacy_auth_and_fresh_thread_markers_with_failed_exhaustion(self):
+        workflow, events = self.workflow(durations=(3.0, 4.0, 5.0))
+        self.assertEqual([thread for thread, _, _ in workflow.inputs], ["1", "1", "2", "3"])
+        self.assertEqual([failure for _, _, failure in workflow.inputs], [False, False, False, True])
         self.assertEqual([event["event"] for event in events], [
             "baseline_completed", "projected_token_rotated", "rotation_turn_completed",
-            "broker_retry_completed", "native_reread_completed",
+            "broker_retry_completed", "broker_retry_exhausted",
         ])
-        self.assertEqual([event["auth_command_calls"] for event in events[-3:]], [2, 1, 2])
-        self.assertEqual(workflow.deadlines, [driver.CACHE_INTERVAL] * 5)
+        self.assertEqual([event["legacy_auth_commands"] for event in events[-3:]], [0, 0, 0])
+        self.assertEqual(workflow.deadlines, [driver.SCENARIO_TIMEOUT] * 5)
 
-    def test_missing_or_extra_rotation_cache_read_does_not_pass(self):
-        for count in (1, 3):
+    def test_any_legacy_auth_command_or_second_codex_process_is_rejected(self):
+        with self.assertRaisesRegex(driver.Failure, "legacy_auth_command_executed"):
+            self.workflow(legacy_calls=1)
+        for count in (0, 2):
             with self.subTest(count=count), self.assertRaisesRegex(
-                    driver.Failure, "rotation_auth_command_count"):
-                self.workflow(2, rotation_calls=count)
+                    driver.Failure, "unexpected_codex_process_count"):
+                self.workflow(codex_calls=count)
 
-    def test_individually_short_turns_cannot_exceed_shared_cache_interval(self):
-        with self.assertRaisesRegex(driver.Failure, "retry_auth_command_count_or_deadline"):
-            self.workflow(2, durations=(10.0, 10.0, 10.0))
+    def test_individually_short_turns_cannot_exceed_shared_scenario_deadline(self):
+        with self.assertRaisesRegex(driver.Failure, "retry_scenario_deadline"):
+            self.workflow(durations=(10.0, 10.0, 10.0))
 
-    def test_rotation_turn_itself_must_finish_inside_shared_cache_interval(self):
-        with self.assertRaisesRegex(driver.Failure, "rotation_auth_command_count_or_deadline"):
-            self.workflow(2, durations=(driver.CACHE_INTERVAL, 0.0, 0.0))
-
-    def test_missing_native_reread_does_not_pass(self):
-        with self.assertRaisesRegex(driver.Failure, "retry_auth_command_count_or_deadline"):
-            self.workflow(1)
+    def test_rotation_turn_itself_must_finish_inside_shared_scenario_deadline(self):
+        with self.assertRaisesRegex(driver.Failure, "rotation_turn_deadline"):
+            self.workflow(durations=(driver.SCENARIO_TIMEOUT, 0.0, 0.0))
 
 
 if __name__ == "__main__":

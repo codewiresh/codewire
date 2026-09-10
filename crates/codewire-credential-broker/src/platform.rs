@@ -1,11 +1,12 @@
-//! Platform placement adapter for an isolated broker, not a public listener.
+//! Platform credential storage adapter for an isolated broker, not a listener.
 //!
 //! The runtime authority is a trusted, process-local dependency. Its eventual
-//! implementation must authenticate the exact gateway and workload Pod, check
-//! their live UID/deletion state, and resolve owner/policy from current platform
-//! authority. Guest coordinates, a configured token lifetime, or a decoded but
-//! unverified JWT do not establish this authority. No production identity
-//! implementation or activation is provided by this module.
+//! implementation must authenticate either the exact gateway/workload Pods or
+//! the original owner OAuth session delegating to a local runtime, and resolve
+//! current owner/policy from platform authority. The identity variants cannot
+//! substitute for one another. Guest coordinates, a configured token lifetime,
+//! or an unverified JWT do not establish authority. This module authenticates
+//! nobody and does not activate a listener.
 //!
 //! PostgreSQL serializes refresh across replicas. Only durable Start returns a
 //! send permit. A staged result is recoverable bookkeeping, never permission to
@@ -14,6 +15,8 @@
 //! abandonment fence. This adapter creates no detached placement work.
 
 pub mod bridge;
+#[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+mod ssh;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,8 +24,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS,
-    CapabilitySlot, CredentialAuthKind, CredentialMetadata, DerivedGrant, GrantContext,
-    GrantPermission, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS, Placement,
+    CapabilitySlot, CredentialAuthKind, CredentialMetadata, DerivedGrant, EnvironmentAccessBinding,
+    GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
+    Placement,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, OAuthRefreshState, PlatformAccessProfileStore,
@@ -50,11 +54,24 @@ pub struct PlatformPodIdentity {
 /// This deliberately has no wire deserializer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlatformRuntimeSession {
-    gateway: PlatformPodIdentity,
-    workspace: PlatformPodIdentity,
+    identity: RuntimeIdentity,
     context: GrantContext,
     credential_owner: Owner,
     identity_expires_at_unix: u64,
+}
+
+/// Closed process-local authentication bindings. Local coordinates are an
+/// authenticated owner's assertion, never a purported Kubernetes identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeIdentity {
+    Hosted {
+        gateway: PlatformPodIdentity,
+        workspace: PlatformPodIdentity,
+    },
+    OwnerLocal {
+        profile: Option<EnvironmentAccessBinding>,
+        selection_sha256: [u8; 32],
+    },
 }
 
 impl PlatformRuntimeSession {
@@ -70,8 +87,33 @@ impl PlatformRuntimeSession {
         identity_expires_at_unix: u64,
     ) -> Result<Self, PlatformRuntimeError> {
         let session = Self {
-            gateway,
-            workspace,
+            identity: RuntimeIdentity::Hosted { gateway, workspace },
+            context,
+            credential_owner,
+            identity_expires_at_unix,
+        };
+        session.validate()?;
+        Ok(session)
+    }
+
+    /// Bind a trusted owner's explicit platform selection to one local runtime
+    /// operation. Only the owner-OAuth authority may establish this session; the
+    /// constructor checks shape, not authentication, consent or live membership.
+    /// No platform environment row, synthetic Pod, stored grant or second
+    /// lifecycle generation is created. Absence of a profile permits projection
+    /// only, not provider credential access.
+    pub fn owner_local(
+        context: GrantContext,
+        credential_owner: Owner,
+        profile: Option<EnvironmentAccessBinding>,
+        selection_sha256: [u8; 32],
+        identity_expires_at_unix: u64,
+    ) -> Result<Self, PlatformRuntimeError> {
+        let session = Self {
+            identity: RuntimeIdentity::OwnerLocal {
+                profile,
+                selection_sha256,
+            },
             context,
             credential_owner,
             identity_expires_at_unix,
@@ -81,28 +123,57 @@ impl PlatformRuntimeSession {
     }
 
     fn validate(&self) -> Result<(), PlatformRuntimeError> {
-        for pod in [&self.gateway, &self.workspace] {
-            for value in [&pod.namespace, &pod.name] {
-                if value.is_empty()
-                    || value.len() > 253
-                    || !value
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || b".-".contains(&c))
+        match &self.identity {
+            RuntimeIdentity::Hosted { gateway, workspace } => {
+                if gateway == workspace || self.context.placement != GrantPlacement::Platform {
+                    return Err(PlatformRuntimeError::Denied);
+                }
+                for pod in [gateway, workspace] {
+                    for value in [&pod.namespace, &pod.name] {
+                        if value.is_empty()
+                            || value.len() > 253
+                            || !value
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || b".-".contains(&c))
+                        {
+                            return Err(PlatformRuntimeError::Denied);
+                        }
+                    }
+                    if pod.uid.is_nil() {
+                        return Err(PlatformRuntimeError::Denied);
+                    }
+                }
+            }
+            RuntimeIdentity::OwnerLocal {
+                profile,
+                selection_sha256,
+            } => {
+                let canonical_uuid = |value: &str| {
+                    Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
+                };
+                if self.context.placement != GrantPlacement::PlatformToLocal
+                    || !canonical_uuid(self.context.environment_id.as_str())
+                    || self.context.environment_generation > i64::MAX as u64
+                    || *selection_sha256 == [0; 32]
                 {
                     return Err(PlatformRuntimeError::Denied);
                 }
-            }
-            if pod.uid.is_nil() {
-                return Err(PlatformRuntimeError::Denied);
+                match profile {
+                    Some(profile)
+                        if profile.environment_id == self.context.environment_id
+                            && canonical_uuid(profile.profile_id.as_str())
+                            && profile.profile_revision > 0
+                            && profile.profile_revision <= i64::MAX as u64 => {}
+                    None if self.context.authorized_credentials.is_empty() => {}
+                    _ => return Err(PlatformRuntimeError::Denied),
+                }
             }
         }
         let owner_matches = match &self.credential_owner {
             Owner::User(id) => id == &self.context.user_id,
             Owner::Organization(id) => self.context.organization_id.as_ref() == Some(id),
         };
-        if self.gateway == self.workspace
-            || self.context.placement != Placement::Platform
-            || self.context.environment_generation == 0
+        if self.context.environment_generation == 0
             || self.context.organization_id.is_none()
             || !owner_matches
             || self.identity_expires_at_unix <= unix_now()?
@@ -113,10 +184,25 @@ impl PlatformRuntimeSession {
     }
 
     fn same_binding(&self, other: &Self) -> bool {
-        self.gateway == other.gateway
-            && self.workspace == other.workspace
+        self.identity == other.identity
             && self.context == other.context
             && self.credential_owner == other.credential_owner
+    }
+
+    #[cfg(test)]
+    fn gateway_mut(&mut self) -> &mut PlatformPodIdentity {
+        let RuntimeIdentity::Hosted { gateway, .. } = &mut self.identity else {
+            panic!("test requires a hosted session");
+        };
+        gateway
+    }
+
+    #[cfg(test)]
+    fn workspace_mut(&mut self) -> &mut PlatformPodIdentity {
+        let RuntimeIdentity::Hosted { workspace, .. } = &mut self.identity else {
+            panic!("test requires a hosted session");
+        };
+        workspace
     }
 }
 
@@ -137,6 +223,41 @@ pub enum PlatformRuntimeError {
 #[async_trait]
 pub trait PlatformRuntimeAuthority: Send + Sync {
     async fn current_session(&self) -> Result<PlatformRuntimeSession, PlatformRuntimeError>;
+
+    /// Reevaluate an owner's exact explicit profile selection without a hosted
+    /// environment row. The owner-OAuth implementation must compare the entire
+    /// expected session binding and compose the original OAuth token and current
+    /// source authority fences with profile/credential evaluation in one SQL
+    /// transaction. These material-free descriptions are not transferable
+    /// authorization. Hosted authenticators cannot use this path by default.
+    async fn owner_local_grants(
+        &self,
+        _expected: &PlatformRuntimeSession,
+    ) -> Result<Vec<DerivedGrant>, PlatformRuntimeError> {
+        Err(PlatformRuntimeError::Denied)
+    }
+
+    /// Only recipient ciphertext for the sources already bound by the trusted
+    /// authority. An identity-only test adapter remains explicitly deny-only.
+    async fn project_environment(
+        &self,
+        _request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+    ) -> Result<Vec<u8>, PlatformRuntimeError> {
+        Err(PlatformRuntimeError::Denied)
+    }
+
+    /// Fixed-Platform fragment for an authenticated native owner's mixed
+    /// launch. Hosted authorities stay deny-only; this never selects a remote
+    /// source outside the channel's immutable platform selection.
+    async fn project_environment_fragment(
+        &self,
+        _request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+    ) -> Result<
+        codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionComposition,
+        PlatformRuntimeError,
+    > {
+        Err(PlatformRuntimeError::Denied)
+    }
 }
 
 /// One connected runtime identity and its isolated, least-authority stores.
@@ -146,6 +267,8 @@ pub struct PlatformBrokerLeaseProvider<A> {
     instance_id: Uuid,
     credentials: Arc<PlatformCredentialStore>,
     profiles: PlatformAccessProfileStore,
+    #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+    ssh: Option<ssh::Epoch>,
 }
 
 /// Non-cloneable, non-serializable, zeroizing operation material.
@@ -211,6 +334,8 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             instance_id: Uuid::new_v4(),
             credentials,
             profiles,
+            #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+            ssh: None,
         })
     }
 
@@ -237,11 +362,40 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         permission: GrantPermission,
     ) -> Result<Admission, BrokerLeaseError> {
         let session = self.session().await?;
-        let mut grant = self
-            .profiles
-            .evaluate_grants(&session.context)
-            .await
-            .map_err(profile_error)?
+        let grants = match &session.identity {
+            RuntimeIdentity::Hosted { .. } => self
+                .profiles
+                .evaluate_grants(&session.context)
+                .await
+                .map_err(profile_error)?,
+            RuntimeIdentity::OwnerLocal {
+                profile: Some(profile),
+                ..
+            } => {
+                let grants = self
+                    .authority
+                    .owner_local_grants(&session)
+                    .await
+                    .map_err(runtime_error)?;
+                if grants.iter().any(|grant| {
+                    grant.environment_id != session.context.environment_id
+                        || grant.environment_generation != session.context.environment_generation
+                        || grant.profile_id != profile.profile_id
+                        || grant.profile_revision != profile.profile_revision
+                        || !session
+                            .context
+                            .authorized_credentials
+                            .contains(&grant.credential_id)
+                }) {
+                    return Err(BrokerLeaseError::Denied);
+                }
+                grants
+            }
+            RuntimeIdentity::OwnerLocal { profile: None, .. } => {
+                return Err(BrokerLeaseError::Denied);
+            }
+        };
+        let mut grant = grants
             .into_iter()
             .find(|grant| &grant.capability_slot == slot)
             .ok_or(BrokerLeaseError::Denied)?;
@@ -269,7 +423,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             return Err(BrokerLeaseError::Denied);
         }
         // The profile/record reads can wait for SQL locks. Their completion
-        // cannot preserve a Pod identity that was revoked during that wait.
+        // cannot preserve runtime authority that was revoked during that wait.
         let current = self.session().await?;
         grant.expires_at_unix = grant
             .expires_at_unix
@@ -369,10 +523,57 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
 }
 
 #[async_trait]
-impl<A: PlatformRuntimeAuthority> BrokerLeaseProvider for PlatformBrokerLeaseProvider<A> {
+impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrokerLeaseProvider<A> {
     type Lease = PlatformCredentialLease;
     type RefreshReservation = PlatformRefreshReservation;
     type StartedRefresh = PlatformStartedRefresh;
+
+    async fn project_environment_fragment(
+        &self,
+        request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+    ) -> Result<
+        codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionComposition,
+        BrokerLeaseError,
+    > {
+        self.session().await?;
+        let deadline = request.deadline_unix_ms;
+        let result = self
+            .authority
+            .project_environment_fragment(request)
+            .await
+            .map_err(runtime_error)?;
+        self.session().await?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| BrokerLeaseError::Unavailable)?
+            .as_millis();
+        if now >= u128::from(deadline) {
+            return Err(BrokerLeaseError::Denied);
+        }
+        Ok(result)
+    }
+
+    async fn project_environment(
+        &self,
+        request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+    ) -> Result<Vec<u8>, BrokerLeaseError> {
+        self.session().await?;
+        let deadline = request.deadline_unix_ms;
+        let sealed = self
+            .authority
+            .project_environment(request)
+            .await
+            .map_err(runtime_error)?;
+        self.session().await?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| BrokerLeaseError::Unavailable)?
+            .as_millis();
+        if now >= u128::from(deadline) {
+            return Err(BrokerLeaseError::Denied);
+        }
+        Ok(sealed)
+    }
 
     async fn lease_operation(
         &self,
@@ -412,6 +613,18 @@ impl<A: PlatformRuntimeAuthority> BrokerLeaseProvider for PlatformBrokerLeasePro
             permission: after.permission,
             material,
         })
+    }
+
+    #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+    async fn ssh_operation(
+        &self,
+        request: codewire_gateway_proto::codewire::bridge::v1::CredentialSshRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        codewire_gateway_proto::codewire::bridge::v1::credential_ssh_response::Result,
+        BrokerLeaseError,
+    > {
+        self.retained_ssh_operation(request, cancellation).await
     }
 
     async fn begin_credential_refresh(
@@ -633,6 +846,10 @@ impl<A: PlatformRuntimeAuthority> BrokerLeaseProvider for PlatformBrokerLeasePro
     }
 
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
+        #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+        if let Some(ssh) = &self.ssh {
+            ssh.drain().await.map_err(refresh_lease_error)?;
+        }
         // SQL/OpenBao futures are awaited directly. The shared refresh tracker
         // drains Start, provider exchange and terminal publication before here.
         Ok(())
@@ -741,3 +958,6 @@ fn refresh_store_error(error: PlatformCredentialError) -> BrokerRefreshError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod session_tests;

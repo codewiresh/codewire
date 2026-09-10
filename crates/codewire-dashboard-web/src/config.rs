@@ -38,6 +38,7 @@ pub struct Config {
     pub runtime_mode: RuntimeMode,
     pub(crate) public_origin: String,
     pub(crate) api_origin: http::Uri,
+    pub(crate) credential_origin: http::Uri,
     pub(crate) identity_origin_string: String,
     pub(crate) browser_api_origin: String,
     pub(crate) billing_origin: http::Uri,
@@ -61,6 +62,11 @@ impl Config {
         let (api_origin, api_origin_string) = parse_origin(
             "CODEWIRE_API_ORIGIN",
             env::var("CODEWIRE_API_ORIGIN").unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned()),
+        )?;
+        let (credential_origin, _) = parse_origin(
+            "CODEWIRE_CREDENTIAL_ORIGIN",
+            env::var("CODEWIRE_CREDENTIAL_ORIGIN")
+                .context("read required CODEWIRE_CREDENTIAL_ORIGIN")?,
         )?;
         let (_, identity_origin_string) = parse_origin(
             "CODEWIRE_IDENTITY_ORIGIN",
@@ -87,6 +93,7 @@ impl Config {
             runtime_mode,
             public_origin,
             api_origin,
+            credential_origin,
             identity_origin_string,
             browser_api_origin,
             billing_origin,

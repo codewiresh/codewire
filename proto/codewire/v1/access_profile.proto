@@ -3,9 +3,9 @@ syntax = "proto3";
 package codewire.v1;
 
 // AccessProfileService manages the authenticated user's personal platform
-// profiles and exact environment bindings. It never reads provider material.
-// Organization API keys cannot manage this account-scoped resource. Binding
-// also requires current membership and ownership of the exact environment.
+// profiles and inspects exact environment bindings. It never reads provider material.
+// Organization API keys cannot manage this account-scoped resource. Binding changes
+// belong to EnvironmentService.UpdateEnvironmentSources, including managed restart.
 service AccessProfileService {
   rpc ListAccessProfiles(ListAccessProfilesRequest) returns (ListAccessProfilesResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -20,8 +20,6 @@ service AccessProfileService {
   rpc GetEnvironmentAccessProfile(GetEnvironmentAccessProfileRequest) returns (GetEnvironmentAccessProfileResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
-  rpc SetEnvironmentAccessProfile(SetEnvironmentAccessProfileRequest) returns (SetEnvironmentAccessProfileResponse);
-  rpc ClearEnvironmentAccessProfile(ClearEnvironmentAccessProfileRequest) returns (ClearEnvironmentAccessProfileResponse);
 }
 
 // An opaque credential reference for one supported capability. No provider
@@ -107,23 +105,3 @@ message GetEnvironmentAccessProfileResponse {
   // Stored consent only; runtime still checks current identity and authority.
   bool personal_credentials_confirmed = 2;
 }
-
-message SetEnvironmentAccessProfileRequest {
-  EnvironmentAccessProfileBinding binding = 1;
-  // Absent requires no current binding. Present performs an exact CAS.
-  EnvironmentAccessProfileBinding expected_binding = 2;
-  // Explicit consent for this exact environment/profile/revision. The server
-  // derives the confirmer from authentication and independently checks current
-  // ownership and membership. Previous bindings never imply this confirmation.
-  bool confirm_personal_credentials = 3;
-}
-
-message SetEnvironmentAccessProfileResponse {
-  EnvironmentAccessProfileBinding binding = 1;
-}
-
-message ClearEnvironmentAccessProfileRequest {
-  EnvironmentAccessProfileBinding expected_binding = 1;
-}
-
-message ClearEnvironmentAccessProfileResponse {}

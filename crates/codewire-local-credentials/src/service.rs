@@ -5,6 +5,7 @@ use std::future::Future;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use codewire_access::{
     AccessError, AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot,
@@ -14,26 +15,26 @@ use codewire_access::{
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, OsProtectedStore, ProtectedStore, ProtectedStorePersistence,
     ProtectedValue,
+    ssh_material::{SshMaterialError, generate_ed25519, import_openssh},
 };
+use futures::FutureExt as _;
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::broker_channel::{
-    BrokerLeaseAuditLog, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT, serve_broker_lease_channel_with_ready,
+    BrokerChannelRefreshLifetime, BrokerLeaseAuditLog, BrokerLeaseChannelControl,
+    LocalSshOperationRuntime, LocalSshSigner, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT,
+    serve_broker_lease_channel_with_ready,
 };
 use crate::control::v1::local_credential_authority_service_server::{
     LocalCredentialAuthorityService, LocalCredentialAuthorityServiceServer,
 };
 use crate::control::v1::{self, CredentialAuthenticationKind};
-use crate::repository::{
-    LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner, PreparedRepositoryMetadata,
-    RepositoryExecutorError, cleanup_repository_staging, create_repository_staging,
-    prepared_bundle_path, read_prepared_repository, remove_repository_staging,
-    serve_repository_lease_channel_with_ready, validate_repository_lease_request,
-};
+use crate::repository::{LocalRepositoryProcessSpawner, cleanup_repository_staging};
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, bind_owner_only,
     remove_bound_socket,
@@ -48,15 +49,22 @@ use crate::{
 };
 
 const MAX_RPC_MESSAGE_BYTES: usize = MAX_PROTECTED_VALUE_BYTES + 64 * 1024;
-const BROKER_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const BROKER_LOCAL_START_TIMEOUT: Duration = Duration::from_secs(10);
+// One total attempt, including the existing seven-second daemon phase and
+// the connector's original fifteen-second OAuth/admission phase. This does
+// not extend operation deadlines or the existing shutdown bound.
+const BROKER_PLATFORM_START_TIMEOUT: Duration = Duration::from_secs(30);
+const BROKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const BROKER_READY_STABILITY: std::time::Duration = std::time::Duration::from_millis(25);
 const BROKER_RESTART_MIN_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const BROKER_RESTART_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 const BROKER_STABLE_RUNTIME: std::time::Duration = std::time::Duration::from_secs(30);
-const REPOSITORY_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const REPOSITORY_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(310);
-const REPOSITORY_CHANNEL_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 const REPOSITORY_STREAM_CHUNK_BYTES: usize = 48 * 1024;
+const MAX_SSH_ENROLLMENT_WORKERS: u32 = 8;
+const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
+
+mod repository;
+use repository::{PreparedRepository, RepositoryProcessManager, cleanup_repository_ssh_runtimes};
 
 struct AuthorityRpc<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
@@ -64,6 +72,7 @@ struct AuthorityRpc<S: ProtectedStore> {
     repositories: Arc<RepositoryProcessManager<S>>,
     broker_audit: Arc<BrokerLeaseAuditLog>,
     shutdown: watch::Sender<bool>,
+    ssh_enrollment_workers: SshEnrollmentWorkers,
 }
 
 impl<S: ProtectedStore> Clone for AuthorityRpc<S> {
@@ -74,6 +83,91 @@ impl<S: ProtectedStore> Clone for AuthorityRpc<S> {
             repositories: Arc::clone(&self.repositories),
             broker_audit: Arc::clone(&self.broker_audit),
             shutdown: self.shutdown.clone(),
+            ssh_enrollment_workers: self.ssh_enrollment_workers.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SshEnrollmentWorkers {
+    permits: Arc<tokio::sync::Semaphore>,
+    shutdown: watch::Sender<bool>,
+}
+
+struct SshEnrollmentCancellation {
+    shutdown: watch::Receiver<bool>,
+    request: watch::Receiver<bool>,
+}
+
+impl SshEnrollmentCancellation {
+    fn is_cancelled(&self) -> bool {
+        *self.shutdown.borrow() || *self.request.borrow()
+    }
+}
+
+struct SshEnrollmentRequestGuard {
+    cancelled: watch::Sender<bool>,
+}
+
+impl Drop for SshEnrollmentRequestGuard {
+    fn drop(&mut self) {
+        self.cancelled.send_replace(true);
+    }
+}
+
+impl SshEnrollmentWorkers {
+    fn new() -> Self {
+        let (shutdown, _) = watch::channel(false);
+        Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(
+                MAX_SSH_ENROLLMENT_WORKERS as usize,
+            )),
+            shutdown,
+        }
+    }
+
+    async fn run<T>(
+        &self,
+        operation: impl FnOnce(SshEnrollmentCancellation) -> Result<T, Status> + Send + 'static,
+    ) -> Result<T, Status>
+    where
+        T: Send + 'static,
+    {
+        let shutdown = self.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return Err(Status::unavailable(
+                "local SSH credential enrollment is stopping",
+            ));
+        }
+        let permit = Arc::clone(&self.permits)
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("local SSH enrollment workers are busy"))?;
+        if *shutdown.borrow() {
+            return Err(Status::unavailable(
+                "local SSH credential enrollment is stopping",
+            ));
+        }
+        let (request_cancelled, request) = watch::channel(false);
+        let request_guard = SshEnrollmentRequestGuard {
+            cancelled: request_cancelled,
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            operation(SshEnrollmentCancellation { shutdown, request })
+        })
+        .await
+        .map_err(|_| Status::internal("local SSH enrollment worker failed"))?;
+        drop(request_guard);
+        result
+    }
+
+    async fn shutdown(&self) {
+        self.shutdown.send_replace(true);
+        if let Ok(permits) = Arc::clone(&self.permits)
+            .acquire_many_owned(MAX_SSH_ENROLLMENT_WORKERS)
+            .await
+        {
+            drop(permits);
         }
     }
 }
@@ -118,6 +212,8 @@ pub async fn serve_os_local_credential_authority_with_process_spawners(
     config: AuthorityRuntimeConfig,
     broker_spawner: Arc<dyn LocalBrokerProcessSpawner>,
     repository_spawner: Arc<dyn LocalRepositoryProcessSpawner>,
+    ssh_signer: Arc<dyn LocalSshSigner>,
+    platform_connector: Arc<dyn crate::PlatformCredentialConnector>,
 ) -> Result<(), AuthorityRuntimeError> {
     verify_production_process_confinement()?;
     serve_until_with_process_spawners(
@@ -125,8 +221,12 @@ pub async fn serve_os_local_credential_authority_with_process_spawners(
         OsProtectedStore,
         builtin_provider_catalog(),
         std::future::pending(),
-        Some(broker_spawner),
-        Some(repository_spawner),
+        AuthorityRuntimeAdapters {
+            broker_spawner: Some(broker_spawner),
+            repository_spawner: Some(repository_spawner),
+            ssh_signer: Some(ssh_signer),
+            platform_connector: Some(platform_connector),
+        },
     )
     .await
 }
@@ -192,8 +292,25 @@ where
     S: ProtectedStore + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
-    serve_until_with_process_spawners(config, protected_store, catalog, shutdown, spawner, None)
-        .await
+    serve_until_with_process_spawners(
+        config,
+        protected_store,
+        catalog,
+        shutdown,
+        AuthorityRuntimeAdapters {
+            broker_spawner: spawner,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+#[derive(Default)]
+pub(crate) struct AuthorityRuntimeAdapters {
+    pub broker_spawner: Option<Arc<dyn LocalBrokerProcessSpawner>>,
+    pub repository_spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
+    pub ssh_signer: Option<Arc<dyn LocalSshSigner>>,
+    pub platform_connector: Option<Arc<dyn crate::PlatformCredentialConnector>>,
 }
 
 pub(crate) async fn serve_until_with_process_spawners<S, F>(
@@ -201,13 +318,18 @@ pub(crate) async fn serve_until_with_process_spawners<S, F>(
     protected_store: S,
     catalog: ProviderCatalog,
     shutdown: F,
-    broker_spawner: Option<Arc<dyn LocalBrokerProcessSpawner>>,
-    repository_spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
+    adapters: AuthorityRuntimeAdapters,
 ) -> Result<(), AuthorityRuntimeError>
 where
     S: ProtectedStore + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
+    let AuthorityRuntimeAdapters {
+        broker_spawner,
+        repository_spawner,
+        ssh_signer,
+        platform_connector,
+    } = adapters;
     config.prepare_root()?;
     let authority_root = config.root.clone();
     let authority = Arc::new(LocalCredentialAuthority::open(
@@ -217,28 +339,39 @@ where
     )?);
     cleanup_repository_staging(&authority_root)
         .map_err(|_| AuthorityRuntimeError::InvalidPrivatePath)?;
+    cleanup_repository_ssh_runtimes(&authority_root)?;
     // The persistence singleton lock is held before a stale endpoint is ever
     // removed, so a losing process cannot unlink the live authority socket.
     let (incoming, socket_identity) = bind_owner_only(&config)?;
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let broker_audit = Arc::new(BrokerLeaseAuditLog::default());
+    let ssh_runtime = LocalSshOperationRuntime::new(ssh_signer);
     let brokers = Arc::new(BrokerProcessManager::new(
         Arc::clone(&authority),
         broker_spawner,
         Arc::clone(&broker_audit),
+        Arc::clone(&ssh_runtime),
+        platform_connector.clone(),
     ));
     let repositories = Arc::new(RepositoryProcessManager::new(
         Arc::clone(&authority),
         repository_spawner,
         authority_root,
+        ssh_runtime,
+        platform_connector,
     ));
+    let _repository_shutdown = repositories.shutdown_on_drop();
+    let ssh_enrollment_workers = SshEnrollmentWorkers::new();
     let service = AuthorityRpc {
         authority,
         brokers: Arc::clone(&brokers),
-        repositories,
+        repositories: Arc::clone(&repositories),
         broker_audit,
         shutdown: shutdown_tx,
+        ssh_enrollment_workers: ssh_enrollment_workers.clone(),
     };
+    let observed_ssh_enrollment_workers = ssh_enrollment_workers.clone();
+    let observed_repositories = Arc::clone(&repositories);
     let observed_shutdown = async move {
         tokio::select! {
             () = shutdown => {}
@@ -250,6 +383,10 @@ where
                 }
             } => {}
         }
+        // Close repository admission immediately, before waiting for other
+        // owners; a caller's RPC future is not its process cleanup owner.
+        observed_repositories.cancel_all();
+        observed_ssh_enrollment_workers.shutdown().await;
     };
     let result = tonic::transport::Server::builder()
         .add_service(
@@ -260,175 +397,50 @@ where
         .serve_with_incoming_shutdown(incoming, observed_shutdown)
         .await
         .map_err(|_| AuthorityRuntimeError::Serve);
-    brokers.shutdown_all().await;
+    // Tonic may return because its incoming stream ended or service setup
+    // failed without completing the supplied shutdown future. Retain this
+    // owner outside that future so every server return closes admission and
+    // drains detached enrollment workers before authority state is released.
+    repositories.cancel_all();
+    ssh_enrollment_workers.shutdown().await;
+    let repository_cleanup = repositories.shutdown_all().await;
+    let broker_cleanup = brokers.shutdown_all().await;
     let cleanup = remove_bound_socket(&config, &socket_identity);
-    result.and(cleanup)
-}
-
-struct RepositoryProcessManager<S: ProtectedStore> {
-    authority: Arc<LocalCredentialAuthority<S>>,
-    spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
-    authority_root: PathBuf,
-}
-
-impl<S: ProtectedStore + 'static> RepositoryProcessManager<S> {
-    fn new(
-        authority: Arc<LocalCredentialAuthority<S>>,
-        spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
-        authority_root: PathBuf,
-    ) -> Self {
-        Self {
-            authority,
-            spawner,
-            authority_root,
-        }
-    }
-
-    async fn prepare(
-        &self,
-        authorization: RepositoryCredentialLeaseRequest,
-    ) -> Result<PreparedRepository, Status> {
-        validate_repository_lease_request(&authorization)
-            .map_err(|_| Status::invalid_argument("invalid repository preparation request"))?;
-        let authority = Arc::clone(&self.authority);
-        let preflight = authorization.clone();
-        run_blocking(move || authority.admit_repository_credential_operation(&preflight)).await?;
-        let spawner = self.spawner.as_ref().cloned().ok_or_else(|| {
-            Status::unavailable("local repository executor launcher is unavailable")
-        })?;
-        let staging =
-            create_repository_staging(&self.authority_root).map_err(repository_executor_status)?;
-        let cleanup = RepositoryStagingGuard {
-            path: Some(staging.clone()),
-        };
-        let config = LocalRepositoryProcessConfig {
-            request_id: authorization.request_id,
-            staging_directory: staging.clone(),
-        };
-        config
-            .validate()
-            .map_err(|_| Status::invalid_argument("invalid repository preparation request"))?;
-        let (authority_stream, executor_stream) = std::os::unix::net::UnixStream::pair()
-            .map_err(|_| Status::unavailable("local repository executor is unavailable"))?;
-        authority_stream
-            .set_nonblocking(true)
-            .map_err(|_| Status::unavailable("local repository executor is unavailable"))?;
-        let authority_stream = UnixStream::from_std(authority_stream)
-            .map_err(|_| Status::unavailable("local repository executor is unavailable"))?;
-        let mut child = spawner
-            .spawn(&config, executor_stream)
-            .map_err(|_| Status::unavailable("local repository executor is unavailable"))?;
-        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
-        let mut lease_task = tokio::spawn(serve_repository_lease_channel_with_ready(
-            Arc::clone(&self.authority),
-            authority_stream,
-            authorization,
-            ready_tx,
-        ));
-        let mut start_timeout = Box::pin(tokio::time::sleep(REPOSITORY_START_TIMEOUT));
-        let ready = tokio::select! {
-            ready = &mut ready_rx => ready.is_ok(),
-            _ = child.wait() => false,
-            _ = &mut lease_task => false,
-            _ = &mut start_timeout => false,
-        };
-        if !ready {
-            stop_repository_child(&mut child, &mut lease_task).await;
-            return Err(Status::unavailable(
-                "local repository executor failed to start",
-            ));
-        }
-        let mut execution_timeout = Box::pin(tokio::time::sleep(REPOSITORY_EXECUTION_TIMEOUT));
-        let status = tokio::select! {
-            status = child.wait() => {
-                match status {
-                    Ok(status) => status,
-                    Err(_) => {
-                        stop_repository_child(&mut child, &mut lease_task).await;
-                        return Err(Status::unavailable(
-                            "local repository executor is unavailable",
-                        ));
-                    }
-                }
-            }
-            _ = &mut execution_timeout => {
-                stop_repository_child(&mut child, &mut lease_task).await;
-                return Err(Status::deadline_exceeded(
-                    "local repository preparation timed out",
-                ));
-            }
-            _ = &mut lease_task => {
-                match tokio::time::timeout(REPOSITORY_CHANNEL_CLOSE_GRACE, child.wait()).await {
-                    Ok(Ok(status)) => status,
-                    _ => {
-                        stop_repository_child(&mut child, &mut lease_task).await;
-                        return Err(Status::unavailable(
-                            "local repository credential lease is unavailable",
-                        ));
-                    }
-                }
-            }
-        };
-        lease_task.abort();
-        if !status.success() {
-            return Err(Status::unavailable("local repository preparation failed"));
-        }
-        let metadata = read_prepared_repository(&staging).map_err(repository_executor_status)?;
-        let bundle = tokio::fs::File::open(prepared_bundle_path(&staging))
-            .await
-            .map_err(|_| Status::unavailable("local repository output is unavailable"))?;
-        Ok(PreparedRepository {
-            metadata,
-            bundle,
-            _cleanup: cleanup,
-        })
-    }
-}
-
-struct PreparedRepository {
-    metadata: PreparedRepositoryMetadata,
-    bundle: tokio::fs::File,
-    _cleanup: RepositoryStagingGuard,
-}
-
-struct RepositoryStagingGuard {
-    path: Option<PathBuf>,
-}
-
-impl Drop for RepositoryStagingGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take() {
-            let _ = remove_repository_staging(&path);
-        }
-    }
-}
-
-async fn stop_repository_child(
-    child: &mut tokio::process::Child,
-    lease_task: &mut tokio::task::JoinHandle<Result<(), crate::RepositoryLeaseChannelError>>,
-) {
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    lease_task.abort();
-}
-
-fn repository_executor_status(_: RepositoryExecutorError) -> Status {
-    Status::unavailable("local repository preparation failed")
+    result
+        .and(repository_cleanup)
+        .and(broker_cleanup)
+        .and(cleanup)
 }
 
 struct BrokerProcessEntry {
     generation: u64,
+    config: LocalBrokerProcessConfig,
+    projection: Option<crate::LocalEnvironmentProjectionBinding>,
+    platform: Option<crate::PlatformCredentialBinding>,
+    local_profile: Option<EnvironmentAccessBinding>,
     shutdown: watch::Sender<bool>,
     state: watch::Receiver<BrokerProcessState>,
     task: tokio::task::JoinHandle<()>,
+    drain_failed: bool,
 }
 
 struct BrokerEnsureRequest {
     environment_id: EnvironmentId,
     environment_generation: u64,
     environment_name: String,
-    supervisor_socket: PathBuf,
+    runner_socket: PathBuf,
+    projection: Option<crate::LocalEnvironmentProjectionBinding>,
+    platform: Option<crate::PlatformCredentialBinding>,
+    local_profile: Option<EnvironmentAccessBinding>,
 }
+
+type PlatformBrokerBinding = (
+    crate::PlatformCredentialBinding,
+    Arc<dyn crate::PlatformCredentialConnector>,
+);
+
+#[cfg(test)]
+mod platform_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BrokerProcessState {
@@ -441,6 +453,8 @@ struct BrokerProcessManager<S: ProtectedStore> {
     spawner: Option<Arc<dyn LocalBrokerProcessSpawner>>,
     audit: Arc<BrokerLeaseAuditLog>,
     entries: Mutex<HashMap<EnvironmentId, BrokerProcessEntry>>,
+    ssh_runtime: Arc<LocalSshOperationRuntime>,
+    platform_connector: Option<Arc<dyn crate::PlatformCredentialConnector>>,
 }
 
 impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
@@ -448,69 +462,133 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
         authority: Arc<LocalCredentialAuthority<S>>,
         spawner: Option<Arc<dyn LocalBrokerProcessSpawner>>,
         audit: Arc<BrokerLeaseAuditLog>,
+        ssh_runtime: Arc<LocalSshOperationRuntime>,
+        platform_connector: Option<Arc<dyn crate::PlatformCredentialConnector>>,
     ) -> Self {
         Self {
             authority,
             spawner,
             audit,
             entries: Mutex::new(HashMap::new()),
+            ssh_runtime,
+            platform_connector,
         }
     }
 
     async fn ensure(
         &self,
-        request: BrokerEnsureRequest,
+        mut request: BrokerEnsureRequest,
     ) -> Result<EnvironmentBrokerRuntime, Status> {
         // Serialize grant evaluation with entry insertion/removal. Binding
         // mutation commits before calling `stop`, so either this evaluation
         // observes the new binding or that stop observes the inserted entry.
         let mut entries = self.entries.lock().await;
         let authority = Arc::clone(&self.authority);
+        let ssh_runtime = Arc::clone(&self.ssh_runtime);
         let audit = Arc::clone(&self.audit);
         let environment_id = request.environment_id.clone();
         let generation = request.environment_generation;
-        let authentication_kind = run_blocking(move || {
-            let grant = authority
-                .evaluate_environment_grants(&environment_id, generation)?
-                .into_iter()
-                .find(|grant| {
-                    grant.capability_slot == CapabilitySlot::codex()
-                        && grant.permissions.iter().any(|permission| {
-                            permission.operation.as_str() == "responses"
-                                && permission.route.as_str() == "openai-api"
-                        })
-                });
-            let Some(grant) = grant else {
-                return Ok(None);
-            };
-            let credential = authority.get_credential(&grant.credential_id)?;
-            if credential.metadata.provider.as_str() != "openai"
-                || !matches!(
-                    credential.metadata.authentication_kind,
-                    CredentialAuthKind::ApiKey | CredentialAuthKind::OAuth
-                )
-            {
-                return Ok(None);
+        if let Some(binding) = &request.platform {
+            binding.validate()?;
+        }
+        let has_platform = request.platform.is_some();
+        let expected_local_profile = request.local_profile.clone();
+        let platform_profile = request
+            .platform
+            .as_ref()
+            .is_some_and(|binding| binding.selection.profile.is_some());
+        let (http_providers, has_grants, selected_slots, platform_delegated) =
+            run_blocking(move || {
+                let grants = authority.evaluate_selected_environment_grants(
+                    &environment_id,
+                    generation,
+                    expected_local_profile.as_ref(),
+                )?;
+                let local_profile = expected_local_profile.is_some();
+                // Provider profiles select exactly one authority. Application
+                // source placement is independent of that provider selection.
+                if platform_profile && local_profile {
+                    return Err(LocalCredentialError::StaleEnvironmentBinding);
+                }
+                if has_platform && !local_profile {
+                    return Ok((BTreeSet::new(), false, BTreeSet::new(), true));
+                }
+                let has_grants = !grants.is_empty();
+                let mut providers = BTreeSet::new();
+                let mut selected_slots = BTreeSet::new();
+                for grant in grants {
+                    selected_slots.insert(grant.capability_slot.to_string());
+                    let credential = authority.get_credential(&grant.credential_id)?;
+                    if let Some(provider) = codewire_access::HttpProvider::for_credential(
+                        &grant.capability_slot,
+                        &credential.metadata,
+                    ) {
+                        providers.insert(provider);
+                    }
+                }
+                Ok((providers, has_grants, selected_slots, false))
+            })
+            .await?;
+        let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
+            selected_slots.iter().map(String::as_str),
+        )
+        .map_err(|_| Status::failed_precondition("invalid managed client selection"))?;
+        let mut reserved_keys: BTreeSet<String> = clients
+            .reserved_environment_keys()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if selected_slots.contains("github") {
+            reserved_keys.extend(
+                codewire_access::HttpProvider::GitHubOAuth
+                    .reserved_environment_keys()
+                    .iter()
+                    .map(|key| (*key).to_owned()),
+            );
+        }
+        if let Some(platform) = &request.platform {
+            reserved_keys.extend(platform.selection.reserved_keys.iter().cloned());
+        }
+        if let Some(projection) = &request.projection {
+            reserved_keys.extend(projection.selection.reserved_keys.iter().cloned());
+        }
+        if let Some(projection) = request.projection.as_mut() {
+            projection.selection.reserved_keys = reserved_keys.clone();
+            projection.validate().map_err(status_for_error)?;
+        }
+        let platform = request
+            .platform
+            .as_mut()
+            .map(|binding| {
+                binding.selection.reserved_keys = reserved_keys;
+                binding.validate()?;
+                if let Some(local) = &request.projection {
+                    binding.validate_local_projection(local)?;
+                }
+                let connector = self.platform_connector.as_ref().cloned().ok_or_else(|| {
+                    Status::unavailable("native platform credential connector is unavailable")
+                })?;
+                Ok::<_, Status>((binding.clone(), connector))
+            })
+            .transpose()?;
+        if !has_grants && request.projection.is_none() && platform.is_none() {
+            if let Some(existing) = entries.get_mut(&request.environment_id) {
+                stop_broker_entry(existing, &self.ssh_runtime).await?;
             }
-            Ok(Some(credential.metadata.authentication_kind))
-        })
-        .await?;
-        let Some(authentication_kind) = authentication_kind else {
-            if let Some(existing) = entries.remove(&request.environment_id) {
-                stop_broker_entry(existing).await;
-            }
+            entries.remove(&request.environment_id);
             return Ok(EnvironmentBrokerRuntime {
                 environment_id: request.environment_id,
                 environment_generation: request.environment_generation,
                 running: false,
             });
-        };
+        }
         let config = LocalBrokerProcessConfig {
             environment_id: request.environment_id,
             environment_generation: request.environment_generation,
             environment_name: request.environment_name,
-            supervisor_socket: request.supervisor_socket,
-            credential_authentication_kind: authentication_kind,
+            runner_socket: request.runner_socket,
+            http_providers,
+            platform_delegated,
         };
         config
             .validate()
@@ -519,15 +597,27 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
             Status::unavailable("local credential broker launcher is unavailable")
         })?;
 
-        if let Some(existing) = entries.remove(&config.environment_id) {
+        if let Some(existing) = entries.get_mut(&config.environment_id) {
             if existing.generation == config.environment_generation && !existing.task.is_finished()
             {
+                if *existing.shutdown.borrow() {
+                    return Err(Status::unavailable("local credential broker is draining"));
+                }
+                if existing.config != config
+                    || existing.projection != request.projection
+                    || existing.platform != request.platform
+                    || existing.local_profile != request.local_profile
+                {
+                    return Err(Status::failed_precondition(
+                        "broker selection changed within an active environment generation",
+                    ));
+                }
                 let running = *existing.state.borrow() == BrokerProcessState::Running;
-                entries.insert(config.environment_id.clone(), existing);
                 return Ok(broker_runtime(config, running));
             }
-            stop_broker_entry(existing).await;
+            stop_broker_entry(existing, &self.ssh_runtime).await?;
         }
+        entries.remove(&config.environment_id);
 
         let authority = Arc::clone(&self.authority);
         let lifecycle_config = config.clone();
@@ -535,19 +625,28 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
         let (state_tx, mut state_rx) = watch::channel(BrokerProcessState::Starting);
         let task = tokio::spawn(run_broker_lifecycle(
             authority,
+            ssh_runtime,
             spawner,
             lifecycle_config,
             audit,
             shutdown_rx,
             state_tx,
+            request.projection.clone(),
+            platform,
+            request.local_profile.clone(),
         ));
         entries.insert(
             config.environment_id.clone(),
             BrokerProcessEntry {
                 generation: config.environment_generation,
+                config: config.clone(),
+                projection: request.projection,
+                platform: request.platform,
+                local_profile: request.local_profile,
                 shutdown: shutdown_tx,
                 state: state_rx.clone(),
                 task,
+                drain_failed: false,
             },
         );
         // Once admitted, the lifecycle remains authority-owned even when its
@@ -565,26 +664,34 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
         generation: Option<u64>,
     ) -> Result<(), Status> {
         let mut entries = self.entries.lock().await;
-        let Some(entry) = entries.remove(environment_id) else {
+        let Some(entry) = entries.get_mut(environment_id) else {
             return Ok(());
         };
         if generation.is_some_and(|generation| generation != entry.generation) {
-            entries.insert(environment_id.clone(), entry);
             return Err(Status::failed_precondition(
                 "local credential broker generation does not match",
             ));
         }
-        stop_broker_entry(entry).await;
+        stop_broker_entry(entry, &self.ssh_runtime).await?;
+        entries.remove(environment_id);
         Ok(())
     }
 
-    async fn shutdown_all(&self) {
+    async fn shutdown_all(&self) -> Result<(), AuthorityRuntimeError> {
         let entries = {
             let mut entries = self.entries.lock().await;
             entries.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
         };
-        for entry in entries {
-            stop_broker_entry(entry).await;
+        for mut entry in entries {
+            let _ = entry.shutdown.send(true);
+            if !entry.drain_failed {
+                let _ = (&mut entry.task).await;
+            }
+        }
+        if self.ssh_runtime.is_unhealthy() {
+            Err(AuthorityRuntimeError::Serve)
+        } else {
+            Ok(())
         }
     }
 }
@@ -600,7 +707,9 @@ fn broker_runtime(config: LocalBrokerProcessConfig, running: bool) -> Environmen
 async fn wait_for_broker_running(
     state: &mut watch::Receiver<BrokerProcessState>,
 ) -> Result<(), ()> {
-    tokio::time::timeout(BROKER_START_TIMEOUT, async {
+    // This is an honest status snapshot, not the child attempt's lifetime.
+    // A delegated child may still become ready in its separately bounded owner.
+    tokio::time::timeout(BROKER_LOCAL_START_TIMEOUT, async {
         loop {
             if *state.borrow() == BrokerProcessState::Running {
                 return Ok(());
@@ -612,13 +721,19 @@ async fn wait_for_broker_running(
     .map_err(|_| ())?
 }
 
+// Keep the process-owned dependencies and exact lifecycle signals explicit.
+#[allow(clippy::too_many_arguments)]
 async fn run_broker_lifecycle<S: ProtectedStore + 'static>(
     authority: Arc<LocalCredentialAuthority<S>>,
+    ssh_runtime: Arc<LocalSshOperationRuntime>,
     spawner: Arc<dyn LocalBrokerProcessSpawner>,
     config: LocalBrokerProcessConfig,
     audit: Arc<BrokerLeaseAuditLog>,
     mut shutdown: watch::Receiver<bool>,
     state: watch::Sender<BrokerProcessState>,
+    projection: Option<crate::LocalEnvironmentProjectionBinding>,
+    platform: Option<PlatformBrokerBinding>,
+    local_profile: Option<EnvironmentAccessBinding>,
 ) {
     let mut restart_delay = BROKER_RESTART_MIN_DELAY;
     loop {
@@ -628,11 +743,15 @@ async fn run_broker_lifecycle<S: ProtectedStore + 'static>(
         let _ = state.send(BrokerProcessState::Starting);
         match run_one_broker(
             Arc::clone(&authority),
+            Arc::clone(&ssh_runtime),
             Arc::clone(&spawner),
             &config,
             Arc::clone(&audit),
             &mut shutdown,
             &state,
+            projection.clone(),
+            platform.clone(),
+            local_profile.clone(),
         )
         .await
         {
@@ -665,14 +784,27 @@ enum BrokerAttempt {
     Exited { running_for: std::time::Duration },
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_one_broker<S: ProtectedStore + 'static>(
     authority: Arc<LocalCredentialAuthority<S>>,
+    ssh_runtime: Arc<LocalSshOperationRuntime>,
     spawner: Arc<dyn LocalBrokerProcessSpawner>,
     config: &LocalBrokerProcessConfig,
     audit: Arc<BrokerLeaseAuditLog>,
     shutdown: &mut watch::Receiver<bool>,
     state: &watch::Sender<BrokerProcessState>,
+    projection: Option<crate::LocalEnvironmentProjectionBinding>,
+    platform: Option<PlatformBrokerBinding>,
+    local_profile: Option<EnvironmentAccessBinding>,
 ) -> BrokerAttempt {
+    // Capture before spawning the child. Neither handshake phase nor retry
+    // within this attempt can reset this total deadline.
+    let start_deadline = tokio::time::Instant::now()
+        + if platform.is_some() {
+            BROKER_PLATFORM_START_TIMEOUT
+        } else {
+            BROKER_LOCAL_START_TIMEOUT
+        };
     let Ok((authority_stream, broker_stream)) = std::os::unix::net::UnixStream::pair() else {
         return BrokerAttempt::Failed;
     };
@@ -686,69 +818,87 @@ async fn run_one_broker<S: ProtectedStore + 'static>(
         return BrokerAttempt::Failed;
     };
     let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+    let (lease_shutdown, lease_stopped) = watch::channel(false);
+    let lifetime = BrokerChannelRefreshLifetime::new_with_ssh_runtime(authority, ssh_runtime);
     let mut lease_task = tokio::spawn(serve_broker_lease_channel_with_ready(
-        authority,
+        Arc::clone(&lifetime),
         authority_stream,
         config.environment_id.clone(),
         config.environment_generation,
         audit,
-        Some(ready_tx),
+        projection,
+        BrokerLeaseChannelControl {
+            ready: Some(ready_tx),
+            shutdown: Some(lease_stopped),
+            platform,
+            platform_delegated: config.platform_delegated,
+            local_profile,
+        },
     ));
-    let mut start_timeout = Box::pin(tokio::time::sleep(BROKER_START_TIMEOUT));
+    let mut start_timeout = Box::pin(tokio::time::sleep_until(start_deadline));
     let ready = tokio::select! {
         ready = &mut ready_rx => ready.is_ok(),
         _ = child.wait() => {
-            lease_task.abort();
+            close_broker_channel(&lease_shutdown, &mut lease_task, &lifetime).await;
             return BrokerAttempt::Failed;
         }
         _ = &mut lease_task => {
             let _ = child.kill().await;
             let _ = child.wait().await;
+            lifetime.close_and_wait().await;
             return BrokerAttempt::Failed;
         }
         _ = shutdown.changed() => {
-            stop_child_and_channel(&mut child, &mut lease_task).await;
+            stop_child_and_channel(&mut child, &lease_shutdown, &mut lease_task, &lifetime).await;
             return BrokerAttempt::Stopped;
         }
         _ = &mut start_timeout => false,
     };
     if !ready {
-        stop_child_and_channel(&mut child, &mut lease_task).await;
+        stop_child_and_channel(&mut child, &lease_shutdown, &mut lease_task, &lifetime).await;
         return BrokerAttempt::Failed;
     }
 
     let mut stability = Box::pin(tokio::time::sleep(BROKER_READY_STABILITY));
     tokio::select! {
         _ = &mut stability => {}
+        _ = &mut start_timeout => {
+            stop_child_and_channel(&mut child, &lease_shutdown, &mut lease_task, &lifetime).await;
+            return BrokerAttempt::Failed;
+        }
         _ = child.wait() => {
-            lease_task.abort();
+            close_broker_channel(&lease_shutdown, &mut lease_task, &lifetime).await;
             return BrokerAttempt::Failed;
         }
         _ = &mut lease_task => {
             let _ = child.kill().await;
             let _ = child.wait().await;
+            lifetime.close_and_wait().await;
             return BrokerAttempt::Failed;
         }
         _ = shutdown.changed() => {
-            stop_child_and_channel(&mut child, &mut lease_task).await;
+            stop_child_and_channel(&mut child, &lease_shutdown, &mut lease_task, &lifetime).await;
             return BrokerAttempt::Stopped;
         }
     }
-    if state.send(BrokerProcessState::Running).is_err() {
-        stop_child_and_channel(&mut child, &mut lease_task).await;
+    if tokio::time::Instant::now() >= start_deadline
+        || state.send(BrokerProcessState::Running).is_err()
+    {
+        stop_child_and_channel(&mut child, &lease_shutdown, &mut lease_task, &lifetime).await;
         return BrokerAttempt::Stopped;
     }
     let started = tokio::time::Instant::now();
     tokio::select! {
         _ = child.wait() => {
-            lease_task.abort();
+            close_broker_channel(&lease_shutdown, &mut lease_task, &lifetime).await;
         }
         _ = &mut lease_task => {
             let _ = child.kill().await;
             let _ = child.wait().await;
+            lifetime.close_and_wait().await;
         }
         _ = shutdown.changed() => {
-            stop_child_and_channel(&mut child, &mut lease_task).await;
+            stop_child_and_channel(&mut child, &lease_shutdown, &mut lease_task, &lifetime).await;
             return BrokerAttempt::Stopped;
         }
     }
@@ -758,18 +908,47 @@ async fn run_one_broker<S: ProtectedStore + 'static>(
     }
 }
 
-async fn stop_child_and_channel(
+async fn stop_child_and_channel<S: ProtectedStore>(
     child: &mut tokio::process::Child,
+    shutdown: &watch::Sender<bool>,
     lease_task: &mut tokio::task::JoinHandle<Result<(), crate::BrokerLeaseChannelError>>,
+    lifetime: &BrokerChannelRefreshLifetime<S>,
 ) {
     let _ = child.kill().await;
     let _ = child.wait().await;
-    lease_task.abort();
+    close_broker_channel(shutdown, lease_task, lifetime).await;
 }
 
-async fn stop_broker_entry(entry: BrokerProcessEntry) {
+async fn close_broker_channel<S: ProtectedStore>(
+    shutdown: &watch::Sender<bool>,
+    lease_task: &mut tokio::task::JoinHandle<Result<(), crate::BrokerLeaseChannelError>>,
+    lifetime: &BrokerChannelRefreshLifetime<S>,
+) {
+    let _ = shutdown.send(true);
+    let _ = lease_task.await;
+    // A panicked lease task drops its close guard but cannot await workers.
+    // Its manager holds this independent observer until the same drain ends.
+    lifetime.close_and_wait().await;
+}
+
+async fn stop_broker_entry(
+    entry: &mut BrokerProcessEntry,
+    ssh_runtime: &LocalSshOperationRuntime,
+) -> Result<(), Status> {
+    if entry.drain_failed {
+        return Err(Status::unavailable("local credential broker drain failed"));
+    }
     let _ = entry.shutdown.send(true);
-    let _ = entry.task.await;
+    // Cancellation or a timeout must retain the entry and its lifecycle owner:
+    // a retry cannot acknowledge a still-running protected-store worker.
+    let result = tokio::time::timeout(BROKER_DRAIN_TIMEOUT, &mut entry.task)
+        .await
+        .map_err(|_| Status::deadline_exceeded("local credential broker is still draining"))?;
+    if result.is_err() || ssh_runtime.is_unhealthy() {
+        entry.drain_failed = true;
+        return Err(Status::unavailable("local credential broker drain failed"));
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -816,6 +995,63 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         Ok(Response::new(credential_to_proto(record)))
     }
 
+    async fn generate_ssh_credential(
+        &self,
+        request: Request<v1::GenerateSshCredentialRequest>,
+    ) -> Result<Response<v1::Credential>, Status> {
+        let deadline = Instant::now() + SSH_ENROLLMENT_DEADLINE;
+        let request = request.into_inner();
+        let authority = Arc::clone(&self.authority);
+        authority
+            .validate_ssh_enrollment_name(&request.name)
+            .map_err(status_for_access_error)?;
+        validate_ssh_expiry(request.expires_at_unix)?;
+        let record = self
+            .ssh_enrollment_workers
+            .run(move |cancelled| {
+                ssh_enrollment_check(deadline, &cancelled).map_err(status_for_error)?;
+                let prepared = generate_ed25519().map_err(status_for_ssh_material_error)?;
+                authority
+                    .add_ssh_credential(request.name, request.expires_at_unix, prepared, || {
+                        ssh_enrollment_check(deadline, &cancelled)
+                    })
+                    .map_err(status_for_error)
+            })
+            .await?;
+        Ok(Response::new(credential_to_proto(record)))
+    }
+
+    async fn add_ssh_credential(
+        &self,
+        request: Request<v1::AddSshCredentialRequest>,
+    ) -> Result<Response<v1::Credential>, Status> {
+        let deadline = Instant::now() + SSH_ENROLLMENT_DEADLINE;
+        let mut request = request.into_inner();
+        let private_key = Zeroizing::new(mem::take(&mut request.private_key));
+        let passphrase = request.passphrase.take().map(Zeroizing::new);
+        let name = mem::take(&mut request.name);
+        let expires_at_unix = request.expires_at_unix;
+        let authority = Arc::clone(&self.authority);
+        authority
+            .validate_ssh_enrollment_name(&name)
+            .map_err(status_for_access_error)?;
+        validate_ssh_expiry(expires_at_unix)?;
+        let record = self
+            .ssh_enrollment_workers
+            .run(move |cancelled| {
+                ssh_enrollment_check(deadline, &cancelled).map_err(status_for_error)?;
+                let prepared = import_openssh(private_key, passphrase)
+                    .map_err(status_for_ssh_material_error)?;
+                authority
+                    .add_ssh_credential(name, expires_at_unix, prepared, || {
+                        ssh_enrollment_check(deadline, &cancelled)
+                    })
+                    .map_err(status_for_error)
+            })
+            .await?;
+        Ok(Response::new(credential_to_proto(record)))
+    }
+
     async fn list_credentials(
         &self,
         _request: Request<v1::ListCredentialsRequest>,
@@ -855,12 +1091,25 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
     ) -> Result<Response<v1::Credential>, Status> {
         let mut request = request.into_inner();
         let id = credential_id(mem::take(&mut request.credential_id))?;
+        let expected_revocation_generation = request.expected_revocation_generation;
+        if expected_revocation_generation == 0 {
+            return Err(Status::invalid_argument(
+                "expected credential revision must be positive",
+            ));
+        }
         let material = ProtectedValue::new(mem::take(&mut request.material))
             .map_err(|_| Status::invalid_argument("invalid credential material"))?;
         let expires_at_unix = request.expires_at_unix;
+        let account_hint = request.account_hint.take();
         let authority = Arc::clone(&self.authority);
         let record = run_blocking(move || {
-            authority.rotate_credential_material(&id, material, expires_at_unix)
+            authority.rotate_credential_material(
+                &id,
+                expected_revocation_generation,
+                material,
+                expires_at_unix,
+                account_hint,
+            )
         })
         .await?;
         Ok(Response::new(credential_to_proto(record)))
@@ -1254,13 +1503,36 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         request: Request<v1::EnsureEnvironmentBrokerRequest>,
     ) -> Result<Response<v1::EnvironmentBrokerRuntime>, Status> {
         let request = request.into_inner();
+        let selected_environment = environment_id(request.environment_id)?;
+        let local_profile = request
+            .local_profile
+            .map(|profile| {
+                if profile.profile_revision == 0 {
+                    return Err(Status::invalid_argument("invalid local profile revision"));
+                }
+                Ok::<_, Status>(EnvironmentAccessBinding {
+                    environment_id: selected_environment.clone(),
+                    profile_id: profile_id(profile.profile_id)?,
+                    profile_revision: profile.profile_revision,
+                })
+            })
+            .transpose()?;
         let runtime = self
             .brokers
             .ensure(BrokerEnsureRequest {
-                environment_id: environment_id(request.environment_id)?,
+                environment_id: selected_environment,
+                local_profile,
                 environment_generation: request.environment_generation,
                 environment_name: request.environment_name,
-                supervisor_socket: PathBuf::from(request.supervisor_socket),
+                runner_socket: PathBuf::from(request.runner_socket),
+                projection: request
+                    .projection
+                    .map(crate::LocalEnvironmentProjectionBinding::from_proto)
+                    .transpose()?,
+                platform: request
+                    .platform
+                    .map(crate::PlatformCredentialBinding::from_proto)
+                    .transpose()?,
             })
             .await?;
         Ok(Response::new(environment_broker_runtime_to_proto(runtime)))
@@ -1322,8 +1594,13 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             source: request.source,
             branch: request.branch,
             revision: request.revision,
+            known_hosts: request.known_hosts,
         };
-        let prepared = self.repositories.prepare(authorization).await?;
+        let platform = request
+            .platform
+            .map(crate::RepositoryPlatformAccess::from_proto)
+            .transpose()?;
+        let prepared = self.repositories.prepare(authorization, platform).await?;
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         tokio::spawn(stream_prepared_repository(prepared, sender));
         Ok(Response::new(ReceiverStream::new(receiver)))
@@ -1334,7 +1611,34 @@ async fn stream_prepared_repository(
     mut prepared: PreparedRepository,
     sender: tokio::sync::mpsc::Sender<Result<v1::PreparedGitRepositoryChunk, Status>>,
 ) {
+    let mut shutdown = prepared.shutdown.clone();
+    let deadline = prepared.deadline;
+    let result = std::panic::AssertUnwindSafe(async {
+        tokio::select! {
+            biased;
+            () = repository::wait_for_shutdown(&mut shutdown) => {}
+            () = tokio::time::sleep_until(deadline) => {}
+            () = sender.closed() => {}
+            () = write_prepared_repository(&mut prepared, &sender) => {}
+        }
+    })
+    .catch_unwind()
+    .await;
+    if result.is_err() {
+        prepared.latch_failure();
+    }
+    prepared.drain_bundle().await;
+}
+
+async fn write_prepared_repository(
+    prepared: &mut PreparedRepository,
+    sender: &tokio::sync::mpsc::Sender<Result<v1::PreparedGitRepositoryChunk, Status>>,
+) {
     use tokio::io::AsyncReadExt as _;
+
+    let Some(bundle) = prepared.bundle.as_mut() else {
+        return;
+    };
 
     let metadata = v1::PreparedGitRepositoryChunk {
         value: Some(v1::prepared_git_repository_chunk::Value::Metadata(
@@ -1353,7 +1657,7 @@ async fn stream_prepared_repository(
     while remaining > 0 {
         let limit = usize::try_from(remaining.min(buffer.len() as u64))
             .expect("repository stream chunk bound fits usize");
-        let length = match prepared.bundle.read(&mut buffer[..limit]).await {
+        let length = match bundle.read(&mut buffer[..limit]).await {
             Ok(0) | Err(_) => {
                 let _ = sender
                     .send(Err(Status::data_loss(
@@ -1377,7 +1681,7 @@ async fn stream_prepared_repository(
             return;
         }
     }
-    match prepared.bundle.read(&mut buffer[..1]).await {
+    match bundle.read(&mut buffer[..1]).await {
         Ok(0) => {}
         _ => {
             let _ = sender
@@ -1398,6 +1702,46 @@ where
         .await
         .map_err(|_| Status::internal("local credential authority worker failed"))?
         .map_err(status_for_error)
+}
+
+fn ssh_enrollment_check(
+    deadline: Instant,
+    cancelled: &SshEnrollmentCancellation,
+) -> Result<(), LocalCredentialError> {
+    if cancelled.is_cancelled() {
+        Err(LocalCredentialError::SshEnrollmentClosed)
+    } else if Instant::now() >= deadline {
+        Err(LocalCredentialError::SshEnrollmentDeadlineElapsed)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_ssh_expiry(expires_at_unix: Option<u64>) -> Result<(), Status> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Status::internal("local credential authority time is invalid"))?
+        .as_secs();
+    validate_ssh_expiry_at(expires_at_unix, now)
+}
+
+fn validate_ssh_expiry_at(expires_at_unix: Option<u64>, now: u64) -> Result<(), Status> {
+    if expires_at_unix.is_some_and(|value| value <= now || i64::try_from(value).is_err()) {
+        Err(Status::invalid_argument(
+            "SSH credential expiry must be a future Unix timestamp",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn status_for_ssh_material_error(error: SshMaterialError) -> Status {
+    match error {
+        SshMaterialError::EntropyUnavailable => {
+            Status::unavailable("SSH key generation entropy is unavailable")
+        }
+        _ => Status::invalid_argument(error.to_string()),
+    }
 }
 
 fn credential_id(value: String) -> Result<CredentialId, Status> {
@@ -1544,6 +1888,7 @@ fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
         Ok(CredentialAuthenticationKind::ApiKey) => Ok(CredentialAuthKind::ApiKey),
         Ok(CredentialAuthenticationKind::AccessToken) => Ok(CredentialAuthKind::AccessToken),
         Ok(CredentialAuthenticationKind::GithubApp) => Ok(CredentialAuthKind::GitHubApp),
+        Ok(CredentialAuthenticationKind::SshKey) => Ok(CredentialAuthKind::SshKey),
         Ok(CredentialAuthenticationKind::Unspecified) | Err(_) => Err(Status::invalid_argument(
             "invalid credential authentication kind",
         )),
@@ -1556,6 +1901,7 @@ pub(crate) fn auth_kind_to_proto(value: CredentialAuthKind) -> CredentialAuthent
         CredentialAuthKind::ApiKey => CredentialAuthenticationKind::ApiKey,
         CredentialAuthKind::AccessToken => CredentialAuthenticationKind::AccessToken,
         CredentialAuthKind::GitHubApp => CredentialAuthenticationKind::GithubApp,
+        CredentialAuthKind::SshKey => CredentialAuthenticationKind::SshKey,
     }
 }
 
@@ -1595,6 +1941,10 @@ pub(crate) fn credential_to_proto(record: CredentialRecord) -> v1::Credential {
         protected_store_cleanup_pending: record.protected_store_cleanup_pending,
         created_at_unix_ms: record.created_at_unix_ms,
         updated_at_unix_ms: record.updated_at_unix_ms,
+        ssh_public_key: record.metadata.ssh_public_key.map(|key| v1::SshPublicKey {
+            openssh: key.openssh,
+            fingerprint: key.fingerprint,
+        }),
     }
 }
 
@@ -1675,6 +2025,9 @@ fn status_for_access_error(_error: AccessError) -> Status {
 
 fn status_for_error(error: LocalCredentialError) -> Status {
     match error {
+        LocalCredentialError::StaleCredentialRevision => Status::failed_precondition(
+            "local credential revision changed; inspect before retrying",
+        ),
         LocalCredentialError::AlreadyExists => {
             Status::already_exists("local credential record already exists")
         }
@@ -1710,6 +2063,15 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         | LocalCredentialError::CorruptMetadata => {
             Status::failed_precondition("local credential operation cannot be applied")
         }
+        LocalCredentialError::SshCredentialRequiresEnrollment => Status::failed_precondition(
+            "SSH credentials require the dedicated enrollment operation",
+        ),
+        LocalCredentialError::SshEnrollmentClosed => {
+            Status::unavailable("local SSH credential enrollment is stopping")
+        }
+        LocalCredentialError::SshEnrollmentDeadlineElapsed => {
+            Status::deadline_exceeded("local SSH credential enrollment timed out")
+        }
         // AccessError is deliberately material-free and carries the stable
         // provider/profile diagnostic needed to repair a rejected selection.
         LocalCredentialError::Access(error) => Status::failed_precondition(error.to_string()),
@@ -1730,6 +2092,184 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         }
         LocalCredentialError::InvalidDatabasePath | LocalCredentialError::InvalidTime => {
             Status::internal("local credential authority state is invalid")
+        }
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    use codewire_access::builtin_provider_catalog;
+    use codewire_protected_store::EphemeralProtectedStore;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    async fn fixture(
+        task: tokio::task::JoinHandle<()>,
+    ) -> (
+        tempfile::TempDir,
+        BrokerProcessManager<EphemeralProtectedStore>,
+        EnvironmentId,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let authority = Arc::new(
+            LocalCredentialAuthority::open(
+                &directory.path().join("authority"),
+                EphemeralProtectedStore::default(),
+                builtin_provider_catalog(),
+            )
+            .unwrap(),
+        );
+        let manager = BrokerProcessManager::new(
+            authority,
+            None,
+            Arc::new(BrokerLeaseAuditLog::default()),
+            LocalSshOperationRuntime::new(None),
+            None,
+        );
+        let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+        let config = LocalBrokerProcessConfig {
+            environment_id: environment_id.clone(),
+            environment_generation: 7,
+            environment_name: "synthetic".into(),
+            runner_socket: directory.path().join("runner.sock"),
+            http_providers: BTreeSet::new(),
+            platform_delegated: false,
+        };
+        manager.entries.lock().await.insert(
+            environment_id.clone(),
+            BrokerProcessEntry {
+                generation: 7,
+                config,
+                projection: None,
+                platform: None,
+                local_profile: None,
+                shutdown: watch::channel(false).0,
+                state: watch::channel(BrokerProcessState::Running).1,
+                task,
+                drain_failed: false,
+            },
+        );
+        (directory, manager, environment_id)
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_retains_drain_until_exact_lifecycle_finishes() {
+        let (release, pending) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = pending.await;
+        });
+        let (_directory, manager, id) = fixture(task).await;
+        for _ in 0..2 {
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(20),
+                    manager.stop(&id, Some(7))
+                )
+                .await
+                .is_err()
+            );
+            assert!(manager.entries.lock().await.contains_key(&id));
+        }
+        release.send(()).unwrap();
+        manager.stop(&id, Some(7)).await.unwrap();
+        assert!(!manager.entries.lock().await.contains_key(&id));
+        manager.stop(&id, Some(7)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_lifecycle_drain_is_latched_and_never_acknowledged() {
+        let task = tokio::spawn(async {
+            panic!("synthetic lifecycle failure");
+        });
+        let (_directory, manager, id) = fixture(task).await;
+        for _ in 0..2 {
+            assert_eq!(
+                manager.stop(&id, Some(7)).await.unwrap_err().code(),
+                tonic::Code::Unavailable
+            );
+            assert!(manager.entries.lock().await.contains_key(&id));
+        }
+    }
+
+    #[tokio::test]
+    async fn poisoned_ssh_runtime_prevents_successful_broker_stop_acknowledgement() {
+        let task = tokio::spawn(async {});
+        let (_directory, manager, id) = fixture(task).await;
+        manager.ssh_runtime.latch_cleanup_failure();
+
+        assert_eq!(
+            manager.stop(&id, Some(7)).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        let entries = manager.entries.lock().await;
+        assert!(entries.get(&id).unwrap().drain_failed);
+    }
+
+    #[tokio::test]
+    async fn ssh_enrollment_shutdown_with_no_workers_durably_closes_admission() {
+        let workers = SshEnrollmentWorkers::new();
+        workers.shutdown().await;
+        let ran = Arc::new(AtomicBool::new(false));
+        let worker_ran = Arc::clone(&ran);
+        let error = workers
+            .run(move |_| {
+                worker_ran.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outer_ssh_drain_survives_unpolled_shutdown_future_and_is_idempotent() {
+        let workers = SshEnrollmentWorkers::new();
+        let abandoned_workers = workers.clone();
+        let unpolled_server_shutdown = async move {
+            std::future::pending::<()>().await;
+            abandoned_workers.shutdown().await;
+        };
+        drop(unpolled_server_shutdown);
+
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let worker = workers.clone();
+        let operation = tokio::spawn(async move {
+            worker
+                .run(move |cancelled| {
+                    let _ = entered.send(());
+                    while !cancelled.is_cancelled() {
+                        std::thread::yield_now();
+                    }
+                    Err::<(), _>(Status::unavailable("synthetic cancellation"))
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        workers.shutdown().await;
+        assert_eq!(
+            operation.await.unwrap().unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        workers.shutdown().await;
+        assert_eq!(
+            workers.permits.available_permits(),
+            MAX_SSH_ENROLLMENT_WORKERS as usize
+        );
+    }
+
+    #[test]
+    fn ssh_enrollment_expiry_requires_a_representable_future_timestamp() {
+        let now = 2_000_000_000;
+        assert!(validate_ssh_expiry_at(None, now).is_ok());
+        assert!(validate_ssh_expiry_at(Some(now + 1), now).is_ok());
+        for invalid in [0, now - 1, now, u64::MAX] {
+            let error = validate_ssh_expiry_at(Some(invalid), now).unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert_eq!(
+                error.message(),
+                "SSH credential expiry must be a future Unix timestamp"
+            );
         }
     }
 }

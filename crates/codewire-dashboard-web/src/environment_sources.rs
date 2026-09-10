@@ -1,0 +1,480 @@
+//! Read-only platform source options. Hosted pages never probe local stores.
+
+use std::{collections::BTreeSet, time::Duration};
+
+use axum::http::HeaderValue;
+use codewire_proto::codewire::v1::{
+    AccessProfile, AccessProfileServiceClient, ListAccessProfilesRequest,
+    ListSecretProjectsRequest, SecretServiceClient,
+};
+use connectrpc::{ConnectError, client::ClientConfig};
+
+use crate::{
+    state::AppState,
+    transport::BrowserTransport,
+    view::{
+        EnvironmentCredentialProfileOption, EnvironmentSecretProjectOption,
+        EnvironmentSourceFieldsView,
+    },
+};
+
+const PAGE_SIZE: i32 = 100;
+const MAX_PAGES: usize = 10;
+const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn transport(state: &AppState, cookie: HeaderValue) -> BrowserTransport {
+    BrowserTransport {
+        http: state.http.clone(),
+        cookie: Some(cookie),
+        origin: None,
+    }
+}
+
+fn config(state: &AppState) -> ClientConfig {
+    ClientConfig::new(state.api_origin.clone()).with_default_timeout(LOAD_TIMEOUT)
+}
+
+pub(crate) async fn options(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+) -> EnvironmentSourceFieldsView {
+    let (projects, profiles) = tokio::join!(
+        tokio::time::timeout(LOAD_TIMEOUT, projects(state, cookie.clone(), org_id)),
+        tokio::time::timeout(LOAD_TIMEOUT, profiles(state, cookie)),
+    );
+    let mut options = EnvironmentSourceFieldsView {
+        application_selection_enabled: true,
+        credential_selection_enabled: true,
+        ..Default::default()
+    };
+    match projects {
+        Ok(Ok(projects)) => options.projects = projects,
+        _ => {
+            options.project_error =
+                "Project names could not be loaded. Reload before selecting a project.".to_owned()
+        }
+    }
+    match profiles {
+        Ok(Ok(profiles)) => options.profiles = profiles,
+        _ => {
+            options.profile_error =
+                "Credential profiles could not be loaded. Reload before selecting a profile."
+                    .to_owned()
+        }
+    }
+    options
+}
+
+async fn projects(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: &str,
+) -> Result<Vec<EnvironmentSecretProjectOption>, ConnectError> {
+    let client = SecretServiceClient::new(transport(state, cookie), config(state));
+    let mut options = Vec::new();
+    let mut page_token = String::new();
+    let mut seen = BTreeSet::new();
+    for _ in 0..MAX_PAGES {
+        let response = client
+            .list_secret_projects(ListSecretProjectsRequest {
+                org_id: org_id.to_owned(),
+                page_size: PAGE_SIZE,
+                page_token: page_token.clone(),
+                ..Default::default()
+            })
+            .await?
+            .into_owned();
+        if response.secret_projects.len() > PAGE_SIZE as usize {
+            return Err(invalid_options());
+        }
+        for project in response.secret_projects {
+            if crate::environment_source_forms::exact_id(&project.id).is_err()
+                || project.name.is_empty()
+                || !seen.insert(project.id.clone())
+            {
+                return Err(invalid_options());
+            }
+            options.push(EnvironmentSecretProjectOption {
+                id: project.id,
+                name: project.name,
+                selected: false,
+            });
+        }
+        if response.next_page_token.is_empty() {
+            options.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+            return Ok(options);
+        }
+        if response.next_page_token == page_token {
+            return Err(invalid_options());
+        }
+        page_token = response.next_page_token;
+    }
+    // Never show a partial list as if an omitted selection did not exist.
+    Err(invalid_options())
+}
+
+async fn profiles(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Result<Vec<EnvironmentCredentialProfileOption>, ConnectError> {
+    let client = AccessProfileServiceClient::new(transport(state, cookie), config(state));
+    let mut options = Vec::new();
+    let mut page_token = String::new();
+    let mut seen = BTreeSet::new();
+    for _ in 0..MAX_PAGES {
+        let response = client
+            .list_access_profiles(ListAccessProfilesRequest {
+                page_size: PAGE_SIZE,
+                page_token: page_token.clone(),
+                ..Default::default()
+            })
+            .await?
+            .into_owned();
+        if response.access_profiles.len() > PAGE_SIZE as usize {
+            return Err(invalid_options());
+        }
+        for profile in response.access_profiles {
+            if !seen.insert(profile.id.clone()) {
+                return Err(invalid_options());
+            }
+            options.push(profile_option(profile)?);
+        }
+        if response.next_page_token.is_empty() {
+            options.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+            return Ok(options);
+        }
+        if response.next_page_token == page_token {
+            return Err(invalid_options());
+        }
+        page_token = response.next_page_token;
+    }
+    Err(invalid_options())
+}
+
+fn profile_option(
+    profile: AccessProfile,
+) -> Result<EnvironmentCredentialProfileOption, ConnectError> {
+    if crate::environment_source_forms::exact_id(&profile.id).is_err()
+        || profile.name.is_empty()
+        || profile.revision == 0
+        || profile.revision > i64::MAX as u64
+    {
+        return Err(invalid_options());
+    }
+    Ok(EnvironmentCredentialProfileOption {
+        id: profile.id,
+        name: profile.name,
+        revision: profile.revision,
+        identity_count: profile
+            .entries
+            .iter()
+            .map(|entry| &entry.credential_id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        bound_revision: false,
+        selected: false,
+    })
+}
+
+fn invalid_options() -> ConnectError {
+    ConnectError::unavailable("complete source selection metadata is unavailable")
+}
+
+impl EnvironmentSourceFieldsView {
+    pub(crate) fn complete(&self) -> bool {
+        self.application_selection_enabled
+            && self.credential_selection_enabled
+            && self.project_error.is_empty()
+            && self.profile_error.is_empty()
+    }
+
+    /// Preserve an exact prior selection, including an already-bound profile
+    /// revision. New catalog metadata must never silently select a newer revision.
+    pub(crate) fn select(
+        &mut self,
+        selection: &codewire_proto::codewire::v1::EnvironmentSourceSelection,
+    ) {
+        self.select_inner(selection, false);
+    }
+
+    pub(crate) fn select_bound(
+        &mut self,
+        selection: &codewire_proto::codewire::v1::EnvironmentSourceSelection,
+    ) {
+        self.select_inner(selection, true);
+    }
+
+    fn select_inner(
+        &mut self,
+        selection: &codewire_proto::codewire::v1::EnvironmentSourceSelection,
+        already_bound: bool,
+    ) {
+        use crate::environment_source_forms::{exact_reference, validate_selection};
+        if validate_selection(selection).is_err() {
+            self.project_error =
+                "Current source selection is invalid. Reload before editing.".into();
+            self.profile_error = self.project_error.clone();
+            return;
+        }
+        self.selection = Some(selection.clone());
+        let secrets = selection.secrets.as_option().cloned().unwrap_or_default();
+        self.organization_selected = secrets.organization;
+        self.personal_selected = secrets.user.is_some();
+        let project_id = exact_reference(&secrets.project).unwrap_or_default();
+        for project in &mut self.projects {
+            project.selected = project.id == project_id;
+        }
+        if !project_id.is_empty() && !self.projects.iter().any(|project| project.selected) {
+            self.projects.push(EnvironmentSecretProjectOption {
+                id: project_id.into(),
+                name: "Current selected project (unavailable)".into(),
+                selected: true,
+            });
+            // A complete catalog may omit a deleted bound source. Keep its
+            // expected ID so the owner can clear/replace it. A failed catalog
+            // load still carries its error and disables the entire editor.
+            if !already_bound {
+                self.project_error =
+                    "The selected project is unavailable. Reload before editing.".into();
+            }
+        }
+        let profile_id = selection
+            .credentials
+            .as_option()
+            .and_then(|binding| exact_reference(&binding.profile).ok())
+            .unwrap_or_default();
+        for profile in &mut self.profiles {
+            profile.selected =
+                profile.id == profile_id && Some(profile.revision) == selection.profile_revision;
+        }
+        if !profile_id.is_empty() && !self.profiles.iter().any(|profile| profile.selected) {
+            let current_name = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .map(|profile| profile.name.clone());
+            if current_name.is_none() && !already_bound {
+                self.profile_error =
+                    "The selected profile is unavailable. Reload before editing.".into();
+            }
+            self.profiles.push(EnvironmentCredentialProfileOption {
+                id: profile_id.into(),
+                name: current_name
+                    .unwrap_or_else(|| "Current selected profile (unavailable)".into()),
+                revision: selection.profile_revision.unwrap_or_default(),
+                identity_count: 0,
+                bound_revision: true,
+                selected: true,
+            });
+        }
+        // Consent is not inferred from the stored selection.
+    }
+
+    pub(crate) fn retain_submission(&mut self, previous: &Self) {
+        if let Some(selection) = &previous.selection {
+            self.select(selection);
+        }
+        self.personal_secrets_confirmed = previous.personal_secrets_confirmed;
+        self.personal_credentials_confirmed = previous.personal_credentials_confirmed;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use askama::Template;
+
+    use super::*;
+
+    #[derive(Template)]
+    #[template(path = "environment-source-fields.html")]
+    struct SourceFieldsTemplate<'a> {
+        source_fields_id: &'a str,
+        sources: &'a EnvironmentSourceFieldsView,
+    }
+
+    #[test]
+    fn profile_options_keep_exact_revision_without_selecting_it() {
+        let option = profile_option(AccessProfile {
+            id: "6bf8d155-e84c-4fc5-b479-b17022fe41dd".into(),
+            name: "work".into(),
+            revision: 7,
+            ..Default::default()
+        })
+        .expect("valid profile metadata");
+        assert_eq!(option.id, "6bf8d155-e84c-4fc5-b479-b17022fe41dd");
+        assert_eq!(option.name, "work");
+        assert_eq!(option.revision, 7);
+        assert!(!option.selected);
+        assert!(
+            profile_option(AccessProfile {
+                revision: 0,
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn profile_options_reject_noncanonical_ids_and_out_of_range_revisions() {
+        for (id, revision) in [
+            ("profile-id", 7),
+            ("00000000-0000-0000-0000-000000000000", 7),
+            ("6bf8d155-e84c-4fc5-b479-b17022fe41dd", i64::MAX as u64 + 1),
+        ] {
+            assert!(
+                profile_option(AccessProfile {
+                    id: id.into(),
+                    name: "work".into(),
+                    revision,
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn selection_refresh_preserves_the_bound_revision_without_implying_consent() {
+        let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let selection = crate::environment_source_forms::SourceSubmission::parse(
+            format!("credential_profile={id}%407&include_user_secrets=platform").as_bytes(),
+        )
+        .unwrap()
+        .selection;
+        let mut fields = EnvironmentSourceFieldsView {
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            profiles: vec![
+                profile_option(AccessProfile {
+                    id: id.into(),
+                    name: "work".into(),
+                    revision: 8,
+                    ..Default::default()
+                })
+                .unwrap(),
+            ],
+            ..Default::default()
+        };
+        fields.select(&selection);
+        assert!(fields.complete());
+        assert!(!fields.profiles[0].selected);
+        assert!(fields.profiles[1].selected && fields.profiles[1].bound_revision);
+        assert_eq!(fields.profiles[1].revision, 7);
+        assert!(fields.personal_selected);
+        assert!(!fields.personal_credentials_confirmed && !fields.personal_secrets_confirmed);
+        let mut incomplete = EnvironmentSourceFieldsView::default();
+        incomplete.retain_submission(&fields);
+        assert!(!incomplete.complete());
+        assert_eq!(incomplete.selection, fields.selection);
+        assert!(!incomplete.profile_error.is_empty());
+    }
+
+    #[test]
+    fn deleted_bound_source_can_be_cleared_but_incomplete_catalog_cannot_submit() {
+        let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let selected = crate::environment_source_forms::SourceSubmission::parse(
+            format!("secret_project={id}").as_bytes(),
+        )
+        .unwrap()
+        .selection;
+        let mut complete = EnvironmentSourceFieldsView {
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            ..Default::default()
+        };
+        let mut create = complete.clone();
+        create.select(&selected);
+        assert!(!create.complete());
+        complete.select_bound(&selected);
+        assert!(complete.complete());
+        assert!(complete.projects[0].selected);
+        assert_eq!(complete.selection.as_ref(), Some(&selected));
+        let mut unavailable = EnvironmentSourceFieldsView {
+            project_error: "Complete catalog unavailable".into(),
+            ..complete.clone()
+        };
+        unavailable.select_bound(&selected);
+        assert!(!unavailable.complete());
+    }
+
+    #[test]
+    fn metadata_does_not_enable_delivery_or_confirm_provider_access() {
+        let options = EnvironmentSourceFieldsView::default();
+        assert!(!options.application_selection_enabled);
+        assert!(!options.credential_selection_enabled);
+        assert!(!options.personal_credentials_confirmed);
+    }
+
+    #[test]
+    fn create_and_edit_share_value_free_platform_selection_fields() {
+        let sources = EnvironmentSourceFieldsView {
+            personal_selected: true,
+            projects: vec![EnvironmentSecretProjectOption {
+                id: "project-id".into(),
+                name: "<unsafe-project>".into(),
+                selected: true,
+            }],
+            profiles: vec![EnvironmentCredentialProfileOption {
+                id: "profile-id".into(),
+                name: "<unsafe-profile>".into(),
+                revision: 7,
+                identity_count: 2,
+                bound_revision: false,
+                selected: true,
+            }],
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            ..Default::default()
+        };
+        for source_fields_id in ["environment-create", "environment-edit"] {
+            let body = SourceFieldsTemplate {
+                source_fields_id,
+                sources: &sources,
+            }
+            .render()
+            .expect("selection fields");
+            assert!(body.contains(&format!("id=\"{source_fields_id}-secret-project\"")));
+            assert!(body.contains("name=\"include_user_secrets\" value=\"platform\" checked"));
+            assert!(body.contains("value=\"project-id\" selected"));
+            assert!(body.contains("value=\"profile-id@7\" selected"));
+            assert!(body.contains("revision 7"));
+            assert!(!body.contains("<unsafe-"));
+            assert!(!body.contains(" disabled"));
+            assert!(body.contains("name=\"confirm_personal_credentials\" value=\"true\">"));
+            for forbidden in [
+                "secret_value",
+                "private_key",
+                "access_token",
+                "exposed",
+                "stored_exposures",
+                "local:",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "unexpected form surface {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_metadata_disables_selection_without_echoing_upstream_detail() {
+        let sources = EnvironmentSourceFieldsView {
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            project_error: "Project names could not be loaded.".into(),
+            profile_error: "Credential profiles could not be loaded.".into(),
+            ..Default::default()
+        };
+        let body = SourceFieldsTemplate {
+            source_fields_id: "edit",
+            sources: &sources,
+        }
+        .render()
+        .expect("unavailable fields");
+        assert!(body.contains("aria-describedby=\"edit-project-help\" disabled>"));
+        assert!(body.contains("aria-describedby=\"edit-credentials-help\" disabled>"));
+        assert!(body.contains("role=\"alert\">Project names could not be loaded."));
+    }
+}

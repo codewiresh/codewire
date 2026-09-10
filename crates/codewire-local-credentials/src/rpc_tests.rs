@@ -3,7 +3,8 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use codewire_access::{
@@ -14,6 +15,7 @@ use codewire_access::{
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedStorePersistence,
     ProtectedValue,
+    ssh_material::{decode_protected_material, generate_ed25519},
 };
 use tokio::io::AsyncReadExt as _;
 use tokio::net::UnixStream;
@@ -21,6 +23,7 @@ use tokio::sync::oneshot;
 use tokio_stream::StreamExt as _;
 use tonic::Code;
 use tower::ServiceExt as _;
+use zeroize::Zeroizing;
 
 use super::*;
 use crate::control::v1;
@@ -36,6 +39,26 @@ const SECOND_MATERIAL: &[u8] = b"synthetic-oauth-material-bravo";
 #[derive(Clone, Default)]
 struct TestProtectedStore {
     entries: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    put_gate: Arc<TestPutGate>,
+}
+
+#[derive(Default)]
+struct TestPutGate {
+    blocked: Mutex<bool>,
+    changed: Condvar,
+    reached: AtomicUsize,
+    notify: tokio::sync::Notify,
+}
+
+struct TestPutBlock {
+    gate: Arc<TestPutGate>,
+}
+
+impl Drop for TestPutBlock {
+    fn drop(&mut self) {
+        *self.gate.blocked.lock().expect("put gate lock") = false;
+        self.gate.changed.notify_all();
+    }
 }
 
 impl TestProtectedStore {
@@ -46,6 +69,27 @@ impl TestProtectedStore {
             .values()
             .cloned()
             .collect()
+    }
+
+    fn block_puts(&self) -> TestPutBlock {
+        *self.put_gate.blocked.lock().expect("put gate lock") = true;
+        TestPutBlock {
+            gate: Arc::clone(&self.put_gate),
+        }
+    }
+
+    async fn wait_for_put(&self) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let notified = self.put_gate.notify.notified();
+                if self.put_gate.reached.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("protected-store put was not reached");
     }
 }
 
@@ -68,6 +112,21 @@ impl ProtectedStore for TestProtectedStore {
         id: &ProtectedEntryId,
         value: &ProtectedValue,
     ) -> Result<(), ProtectedStoreError> {
+        self.put_gate.reached.fetch_add(1, Ordering::SeqCst);
+        self.put_gate.notify.notify_waiters();
+        let mut blocked = self
+            .put_gate
+            .blocked
+            .lock()
+            .map_err(|_| ProtectedStoreError::Unavailable)?;
+        while *blocked {
+            blocked = self
+                .put_gate
+                .changed
+                .wait(blocked)
+                .map_err(|_| ProtectedStoreError::Unavailable)?;
+        }
+        drop(blocked);
         self.entries
             .lock()
             .map_err(|_| ProtectedStoreError::Unavailable)?
@@ -92,20 +151,27 @@ fn provider(value: &str) -> ProviderId {
 }
 
 fn catalog() -> ProviderCatalog {
-    ProviderCatalog::from_definitions([ProviderDefinition {
-        id: provider("openai"),
-        authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
-        capabilities: BTreeMap::from([(
-            CapabilitySlot::codex(),
-            CapabilityPolicy {
-                authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
-                permissions: BTreeSet::from([GrantPermission {
-                    operation: BrokerOperationId::parse("responses").expect("operation ID"),
-                    route: BrokerRouteId::parse("openai-api").expect("route ID"),
-                }]),
-            },
-        )]),
-    }])
+    ProviderCatalog::from_definitions([
+        ProviderDefinition {
+            id: provider("openai"),
+            authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+            capabilities: BTreeMap::from([(
+                CapabilitySlot::codex(),
+                CapabilityPolicy {
+                    authentication_kinds: BTreeSet::from([CredentialAuthKind::OAuth]),
+                    permissions: BTreeSet::from([GrantPermission {
+                        operation: BrokerOperationId::parse("responses").expect("operation ID"),
+                        route: BrokerRouteId::parse("openai-api").expect("route ID"),
+                    }]),
+                },
+            )]),
+        },
+        ProviderDefinition {
+            id: provider("ssh"),
+            authentication_kinds: BTreeSet::from([CredentialAuthKind::SshKey]),
+            capabilities: BTreeMap::new(),
+        },
+    ])
     .expect("provider catalog")
 }
 
@@ -163,6 +229,11 @@ impl LocalBrokerProcessSpawner for TestBrokerSpawner {
         let environment_generation = config.environment_generation;
         let leased_material = self.leased_material.clone();
         let task = tokio::spawn(async move {
+            let ready = codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeReady {
+                protocol_version: codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                environment_id: environment_id.to_string(),
+                environment_generation,
+            };
             let Ok(mut client) = LocalCredentialBrokerLeaseClient::connect(
                 stream,
                 store,
@@ -173,7 +244,7 @@ impl LocalBrokerProcessSpawner for TestBrokerSpawner {
             else {
                 return;
             };
-            if client.report_ready().await.is_err() {
+            if client.report_ready(ready).await.is_err() {
                 return;
             }
             let Ok(lease) = client
@@ -234,14 +305,14 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
         let marker = config.staging_directory.join("lease-complete");
         let task = tokio::spawn(async move {
             let Ok(mut client) =
-                LocalCredentialRepositoryLeaseClient::connect(stream, store, request_id).await
+                LocalCredentialRepositoryLeaseClient::connect(stream, request_id).await
             else {
                 return;
             };
             if client.report_ready().await.is_err() {
                 return;
             }
-            let Ok(lease) = client.lease().await else {
+            let Ok(lease) = client.lease_github(store).await else {
                 return;
             };
             let _ = leased_material.send(lease.material().to_vec());
@@ -271,9 +342,27 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
     }
 }
 
-fn prepare_test_repository_bundle(staging: &std::path::Path) -> io::Result<String> {
+pub(crate) fn prepare_test_repository_bundle(staging: &std::path::Path) -> io::Result<String> {
+    // These are synthetic repositories. Never consult owner/global Git
+    // configuration, signing agents, templates or hooks for fixture commits.
+    let git = || {
+        let mut command = Command::new("/usr/bin/git");
+        command
+            .env_clear()
+            .env("HOME", staging)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ]);
+        command
+    };
     let repository = staging.join("fixture");
-    let status = Command::new("/usr/bin/git")
+    let status = git()
         .args(["init", "--quiet", "--initial-branch", "main"])
         .arg(&repository)
         .status()?;
@@ -295,16 +384,12 @@ fn prepare_test_repository_bundle(staging: &std::path::Path) -> io::Result<Strin
         ],
         vec!["update-ref", "refs/codewire/source", "HEAD"],
     ] {
-        let status = Command::new("/usr/bin/git")
-            .arg("-C")
-            .arg(&repository)
-            .args(arguments)
-            .status()?;
+        let status = git().arg("-C").arg(&repository).args(arguments).status()?;
         if !status.success() {
             return Err(io::Error::other("prepare fixture repository"));
         }
     }
-    let output = Command::new("/usr/bin/git")
+    let output = git()
         .arg("-C")
         .arg(&repository)
         .args(["rev-parse", "HEAD"])
@@ -317,7 +402,7 @@ fn prepare_test_repository_bundle(staging: &std::path::Path) -> io::Result<Strin
         .trim()
         .to_owned();
     let bundle = staging.join("source.bundle");
-    let status = Command::new("/usr/bin/git")
+    let status = git()
         .arg("-C")
         .arg(&repository)
         .arg("bundle")
@@ -377,8 +462,10 @@ async fn start_server_with_repository_spawner(
             async move {
                 let _ = shutdown_rx.await;
             },
-            None,
-            Some(spawner),
+            crate::service::AuthorityRuntimeAdapters {
+                repository_spawner: Some(spawner),
+                ..Default::default()
+            },
         )
         .await
     });
@@ -396,6 +483,399 @@ async fn connect_when_ready(config: &AuthorityRuntimeConfig) -> LocalCredentialC
             Err(error) => panic!("authority did not become ready: {error}"),
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rotation_rpc_requires_an_exact_positive_revision_and_clears_account_hint() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let (shutdown, task) = start_server(config.clone(), store.clone()).await;
+    let mut client = connect_when_ready(&config).await;
+    let credential = client
+        .add_credential(
+            NewCredential {
+                provider: provider("openai"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "reconnect-codex".into(),
+                account_hint: Some("old@example.test".into()),
+                expires_at_unix: Some(4_102_444_800),
+            },
+            ProtectedValue::from_slice(FIRST_MATERIAL).unwrap(),
+        )
+        .await
+        .unwrap();
+    let profile = client
+        .create_profile(
+            &AccessProfileName::parse("reconnect-profile").unwrap(),
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+        )
+        .await
+        .unwrap();
+    let revoked = client
+        .revoke_credential(&credential.metadata.id)
+        .await
+        .unwrap();
+    for (revision, expected_code) in [
+        (0, Code::InvalidArgument),
+        (
+            credential.metadata.revocation_generation,
+            Code::FailedPrecondition,
+        ),
+    ] {
+        let error = client
+            .rotate_credential_material(
+                &credential.metadata.id,
+                revision,
+                ProtectedValue::from_slice(SECOND_MATERIAL).unwrap(),
+                None,
+                Some("not-committed@example.test".into()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), expected_code);
+        assert!(!error.message().contains("synthetic"));
+        if revision != 0 {
+            assert_eq!(
+                error.message(),
+                "local credential revision changed; inspect before retrying"
+            );
+        }
+        assert_eq!(
+            client
+                .get_credential(&credential.metadata.id)
+                .await
+                .unwrap(),
+            revoked
+        );
+        assert_eq!(store.values(), vec![FIRST_MATERIAL.to_vec()]);
+    }
+    let reconnected = client
+        .rotate_credential_material(
+            &revoked.metadata.id,
+            revoked.metadata.revocation_generation,
+            ProtectedValue::from_slice(SECOND_MATERIAL).unwrap(),
+            revoked.metadata.expires_at_unix,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reconnected.metadata.id, credential.metadata.id);
+    assert_eq!(reconnected.metadata.status, CredentialStatus::Active);
+    assert_eq!(reconnected.metadata.account_hint, None);
+    assert_eq!(
+        reconnected.metadata.expires_at_unix,
+        credential.metadata.expires_at_unix
+    );
+    assert_eq!(
+        reconnected.metadata.revocation_generation,
+        revoked.metadata.revocation_generation + 1
+    );
+    assert_eq!(store.values(), vec![SECOND_MATERIAL.to_vec()]);
+    assert_eq!(
+        client.get_profile(&profile.profile.id).await.unwrap(),
+        profile
+    );
+    assert_eq!(
+        client
+            .list_profile_revisions(&profile.profile.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let request = v1::RotateCredentialMaterialRequest {
+        credential_id: credential.metadata.id.to_string(),
+        expected_revocation_generation: reconnected.metadata.revocation_generation,
+        material: SECOND_MATERIAL.to_vec(),
+        expires_at_unix: None,
+        account_hint: None,
+    };
+    let rendered = format!("{request:?}");
+    assert!(rendered.contains("[REDACTED]"));
+    assert!(!rendered.contains(std::str::from_utf8(SECOND_MATERIAL).unwrap()));
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ssh_enrollment_rpcs_return_only_derived_public_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let (shutdown, task) = start_server(config.clone(), store.clone()).await;
+    let mut client = connect_when_ready(&config).await;
+
+    let generated = client
+        .generate_ssh_credential("generated-ssh".into(), Some(4_102_444_800))
+        .await
+        .unwrap();
+    assert_eq!(generated.metadata.provider, provider("ssh"));
+    assert_eq!(
+        generated.metadata.authentication_kind,
+        CredentialAuthKind::SshKey
+    );
+    assert_eq!(generated.metadata.account_hint, None);
+    assert_eq!(generated.metadata.revocation_generation, 1);
+    let generated_public = generated
+        .metadata
+        .ssh_public_key
+        .as_ref()
+        .expect("generated public key");
+    assert!(generated_public.openssh.starts_with("ssh-ed25519 "));
+    assert!(generated_public.fingerprint.starts_with("SHA256:"));
+
+    let prepared = generate_ed25519().expect("synthetic imported key");
+    let expected_openssh = prepared.public_key().openssh().to_string();
+    let expected_fingerprint = prepared.public_key().fingerprint().to_string();
+    let (_, protected) = prepared.into_parts();
+    let imported_material = decode_protected_material(protected).unwrap();
+    let (private_key, passphrase) = imported_material.into_parts();
+    let imported = client
+        .add_ssh_credential("imported-ssh".into(), private_key, passphrase, None)
+        .await
+        .unwrap();
+    let imported_public = imported
+        .metadata
+        .ssh_public_key
+        .expect("imported public key");
+    assert_eq!(imported_public.openssh, expected_openssh);
+    assert_eq!(imported_public.fingerprint, expected_fingerprint);
+    assert_eq!(store.values().len(), 2);
+
+    let before = store.values();
+    let invalid = client
+        .add_ssh_credential(
+            "invalid-ssh".into(),
+            Zeroizing::new(b"synthetic invalid private key".to_vec()),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.code(), Code::InvalidArgument);
+    assert_eq!(store.values(), before);
+
+    let invalid_name = client
+        .generate_ssh_credential(" invalid-name".into(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(invalid_name.code(), Code::InvalidArgument);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for (name, expiry) in [
+        ("zero", 0),
+        ("past", now.saturating_sub(1)),
+        ("current", now),
+        ("overflow", u64::MAX),
+    ] {
+        let invalid_expiry = client
+            .add_ssh_credential(
+                format!("invalid-expiry-{name}"),
+                Zeroizing::new(b"this invalid key must not be parsed".to_vec()),
+                None,
+                Some(expiry),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(invalid_expiry.code(), Code::InvalidArgument);
+        assert_eq!(
+            invalid_expiry.message(),
+            "SSH credential expiry must be a future Unix timestamp"
+        );
+    }
+    assert_eq!(store.values(), before);
+
+    let generic = client
+        .add_credential(
+            NewCredential {
+                provider: provider("ssh"),
+                authentication_kind: CredentialAuthKind::SshKey,
+                display_name: "generic-ssh".into(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            ProtectedValue::from_slice(b"synthetic generic SSH material").unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(generic.code(), Code::FailedPrecondition);
+    assert_eq!(store.values(), before);
+
+    let private_canary = b"synthetic-private-key-debug-canary";
+    let passphrase_canary = b"synthetic-passphrase-debug-canary";
+    let rendered = format!(
+        "{:?}",
+        v1::AddSshCredentialRequest {
+            name: "debug-ssh".into(),
+            private_key: private_canary.to_vec(),
+            passphrase: Some(passphrase_canary.to_vec()),
+            expires_at_unix: None,
+        }
+    );
+    assert!(rendered.contains("[REDACTED]"));
+    assert!(!rendered.contains(std::str::from_utf8(private_canary).unwrap()));
+    assert!(!rendered.contains(std::str::from_utf8(passphrase_canary).unwrap()));
+
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abandoned_ssh_enrollment_waiter_cannot_cancel_published_journal_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let put_block = store.block_puts();
+    let (shutdown, server) = start_server(config.clone(), store.clone()).await;
+    let mut enrolling = connect_when_ready(&config).await;
+    let request = tokio::spawn(async move {
+        enrolling
+            .generate_ssh_credential("abandoned-ssh".into(), None)
+            .await
+    });
+    store.wait_for_put().await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    drop(put_block);
+
+    let mut observer = connect_when_ready(&config).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let credentials = loop {
+        let credentials = observer.list_credentials().await.unwrap();
+        if !credentials.is_empty() {
+            break credentials;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0].metadata.display_name, "abandoned-ssh");
+    assert_eq!(credentials[0].metadata.provider, provider("ssh"));
+    assert_eq!(store.values().len(), 1);
+
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abandoned_ssh_enrollment_waiter_cancels_before_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let put_block = store.block_puts();
+    let (shutdown, server) = start_server(config.clone(), store.clone()).await;
+    let mut first_client = connect_when_ready(&config).await;
+    let first = tokio::spawn(async move {
+        first_client
+            .generate_ssh_credential("published-first".into(), None)
+            .await
+    });
+    store.wait_for_put().await;
+
+    let mut cancelled_client = connect_when_ready(&config).await;
+    let cancelled = tokio::spawn(async move {
+        cancelled_client
+            .generate_ssh_credential("cancelled-before-publication".into(), None)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    drop(put_block);
+    first.await.unwrap().unwrap();
+
+    let mut observer = connect_when_ready(&config).await;
+    let credentials = observer.list_credentials().await.unwrap();
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0].metadata.display_name, "published-first");
+    assert_eq!(store.values().len(), 1);
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_cancels_ssh_enrollment_waiting_before_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let put_block = store.block_puts();
+    let (shutdown, server) = start_server(config.clone(), store.clone()).await;
+    let mut first_client = connect_when_ready(&config).await;
+    let first = tokio::spawn(async move {
+        first_client
+            .generate_ssh_credential("published-ssh".into(), None)
+            .await
+    });
+    store.wait_for_put().await;
+
+    let mut second_client = connect_when_ready(&config).await;
+    let second = tokio::spawn(async move {
+        second_client
+            .generate_ssh_credential("cancelled-ssh".into(), None)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown.send(()).unwrap();
+    drop(put_block);
+    server.await.unwrap().unwrap();
+    let _ = first.await;
+    let _ = second.await;
+
+    let authority = LocalCredentialAuthority::open(&config.root, store.clone(), catalog()).unwrap();
+    let credentials = authority.list_credentials().unwrap();
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0].metadata.display_name, "published-ssh");
+    assert_eq!(store.values().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ninth_concurrent_ssh_enrollment_fails_fast_without_queued_material() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let put_block = store.block_puts();
+    let (shutdown, server) = start_server(config.clone(), store.clone()).await;
+    let mut clients = Vec::new();
+    for _ in 0..9 {
+        clients.push(connect_when_ready(&config).await);
+    }
+
+    let mut requests = Vec::new();
+    let mut first_client = clients.remove(0);
+    requests.push(tokio::spawn(async move {
+        first_client
+            .generate_ssh_credential("ssh-worker-0".into(), None)
+            .await
+    }));
+    store.wait_for_put().await;
+    for (index, mut client) in clients.drain(..7).enumerate() {
+        requests.push(tokio::spawn(async move {
+            client
+                .generate_ssh_credential(format!("ssh-worker-{}", index + 1), None)
+                .await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let error = clients
+        .pop()
+        .unwrap()
+        .generate_ssh_credential("ssh-worker-overflow".into(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(store.values().len(), 0);
+
+    drop(put_block);
+    for request in requests {
+        request.await.unwrap().unwrap();
+    }
+    assert_eq!(store.values().len(), 8);
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -472,12 +952,20 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
     let rotated = client
         .rotate_credential_material(
             &credential.metadata.id,
+            credential.metadata.revocation_generation,
             ProtectedValue::from_slice(SECOND_MATERIAL).unwrap(),
             Some(4_102_444_801),
+            Some("reconnected@example.test".into()),
         )
         .await
         .unwrap();
     assert_eq!(rotated.metadata.revocation_generation, 2);
+    assert_eq!(rotated.metadata.id, credential.metadata.id);
+    assert_eq!(
+        rotated.metadata.account_hint.as_deref(),
+        Some("reconnected@example.test")
+    );
+    assert_eq!(rotated.metadata.expires_at_unix, Some(4_102_444_801));
     assert_eq!(store.values(), vec![SECOND_MATERIAL.to_vec()]);
     assert_eq!(
         client
@@ -592,6 +1080,8 @@ async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
             "https://github.com/codewire/codewire.git".to_owned(),
             "main".to_owned(),
             String::new(),
+            Vec::new(),
+            None,
         )
         .await
         .unwrap();
@@ -640,8 +1130,14 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
         profile_id: profile.profile.id.clone(),
         profile_revision: profile.profile.revision,
     };
-    let created = client
-        .create_environment_access_binding(&binding)
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    let created = control
+        .ensure_environment_access_binding(
+            &binding,
+            &"user/bound".parse::<AccessProfileReference>().unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(created.binding, binding);
@@ -664,9 +1160,6 @@ async fn owner_only_rpc_persists_exact_bindings_and_returns_material_free_grants
         client.list_environment_access_bindings().await.unwrap(),
         vec![created.clone()]
     );
-    let mut control = LocalCredentialControlClient::connect(&config)
-        .await
-        .unwrap();
     assert_eq!(control.info(), client.info());
     assert_eq!(
         control
@@ -873,7 +1366,7 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(admitted.info().protocol_version, 8);
+    assert_eq!(admitted.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
     drop(admitted);
 
     let client = LocalCredentialClient::connect_or_start_with(&config, |_| {
@@ -881,8 +1374,7 @@ async fn connect_or_start_reuses_the_admitted_authority_without_spawning() {
     })
     .await
     .unwrap();
-    assert_eq!(AUTHORITY_PROTOCOL_VERSION, 8);
-    assert_eq!(client.info().protocol_version, 8);
+    assert_eq!(client.info().protocol_version, AUTHORITY_PROTOCOL_VERSION);
     client.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     drop(shutdown);
@@ -1010,12 +1502,13 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
         .await
         .unwrap();
     let environment_id = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
+    let selected_binding = EnvironmentAccessBinding {
+        environment_id: environment_id.clone(),
+        profile_id: profile.profile.id,
+        profile_revision: profile.profile.revision,
+    };
     owner
-        .create_environment_access_binding(&EnvironmentAccessBinding {
-            environment_id: environment_id.clone(),
-            profile_id: profile.profile.id,
-            profile_revision: profile.profile.revision,
-        })
+        .create_environment_access_binding(&selected_binding)
         .await
         .unwrap();
     let mut control = LocalCredentialControlClient::connect(&config)
@@ -1026,7 +1519,11 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
             &environment_id,
             23,
             "dev",
-            &temp.path().join("runtime/supervisor.sock"),
+            &temp.path().join(format!("runtime/{environment_id}.sock")),
+            EnvironmentBrokerSelection {
+                local_profile: Some(selected_binding),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -1064,8 +1561,8 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
         assert_eq!(launched[0].environment_id, environment_id);
         assert_eq!(launched[0].environment_generation, 23);
         assert_eq!(
-            launched[0].credential_authentication_kind,
-            CredentialAuthKind::OAuth
+            launched[0].http_providers,
+            std::collections::BTreeSet::from([codewire_access::HttpProvider::CodexOAuth])
         );
         assert!(!format!("{:?}", launched[0]).contains("synthetic-oauth-material"));
     }

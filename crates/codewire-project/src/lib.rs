@@ -12,21 +12,40 @@ use thiserror::Error;
 pub use codewire_access::AccessProfileReference;
 
 mod normalize;
+mod platform_projection;
+mod repository;
+mod selection;
+
+#[cfg(test)]
+mod selection_tests;
+
+pub use platform_projection::{
+    PlatformProjectionSelection, PlatformProjectionSelectionError,
+    platform_projection_reserved_keys,
+};
+pub use repository::{
+    RepositorySshHost, canonical_repository_known_hosts, parse_repository_ssh_host,
+};
+pub use selection::{StoragePlacement, StorageReference};
 
 pub const PROJECT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_PROJECT_DOCUMENT_BYTES: usize = 256 * 1024;
 pub const MAX_REPOSITORIES: usize = 64;
+pub const MAX_REPOSITORY_KNOWN_HOSTS: usize = 32;
+pub const MAX_REPOSITORY_KNOWN_HOST_LINE_BYTES: usize = 8 * 1024;
+pub const MAX_REPOSITORY_KNOWN_HOSTS_BYTES: usize = 64 * 1024;
 pub const MAX_ENVIRONMENT_VALUES: usize = 256;
 pub const MAX_APPLICATION_PORTS: usize = 128;
 pub const MAX_AGENTS: usize = 32;
 pub const MAX_SKILLS: usize = 256;
 pub const MAX_LOCAL_MOUNTS: usize = 64;
 /// Environment names reserved for Codewire-owned runtime control channels.
-pub const RESERVED_RUNTIME_ENVIRONMENT_KEYS: [&str; 4] = [
+pub const RESERVED_RUNTIME_ENVIRONMENT_KEYS: [&str; 5] = [
     "CODEWIRE_MESH_URL",
     "CODEWIRE_MESH_AUTH_TOKEN",
     "CODEWIRE_MESH_NETWORK",
     "CODEWIRE_MESH_INVITE_CODE",
+    "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS",
 ];
 /// Maximum key size accepted by canonical project and guest workload boundaries.
 pub const MAX_ENVIRONMENT_KEY_BYTES: usize =
@@ -81,6 +100,7 @@ impl ProjectDocument {
                 field: "ports.host_port",
             });
         }
+        self.spec.ensure_platform_compatible()?;
         Ok(())
     }
 
@@ -117,7 +137,7 @@ pub struct ProjectSpec {
     #[serde(default, skip_serializing_if = "SecretBindings::is_empty")]
     pub secrets: SecretBindings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access: Option<AccessBinding>,
+    pub credentials: Option<CredentialBinding>,
 }
 
 impl Default for ProjectSpec {
@@ -136,12 +156,38 @@ impl Default for ProjectSpec {
             application_ports: Vec::new(),
             resources: ResourceSpec::default(),
             secrets: SecretBindings::default(),
-            access: None,
+            credentials: None,
         }
     }
 }
 
 impl ProjectSpec {
+    /// Reject explicitly local selections before a platform adapter performs I/O.
+    /// Bare names still require exact resolution in the adapter's authority.
+    pub fn ensure_platform_compatible(&self) -> Result<(), ProjectError> {
+        self.validate()?;
+        if self.secrets.user == Some(StoragePlacement::Local) {
+            return Err(ProjectError::PlatformUnsupported {
+                field: "secrets.user",
+            });
+        }
+        if !self.secrets.project.is_empty()
+            && self.secrets.project_reference()?.placement == Some(StoragePlacement::Local)
+        {
+            return Err(ProjectError::PlatformUnsupported {
+                field: "secrets.project",
+            });
+        }
+        if let Some(credentials) = &self.credentials
+            && credentials.reference()?.placement == Some(StoragePlacement::Local)
+        {
+            return Err(ProjectError::PlatformUnsupported {
+                field: "credentials.profile",
+            });
+        }
+        Ok(())
+    }
+
     /// Validate that a typed or persisted spec is already in canonical form.
     /// Parser callers receive this guarantee automatically; protobuf and
     /// stored-row adapters use it to reject malformed typed input.
@@ -164,6 +210,9 @@ pub struct RepositorySpec {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub branch: String,
     pub destination: String,
+    /// Canonical, direct OpenSSH host-key lines for this exact SSH source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_hosts: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,13 +281,18 @@ pub struct SecretBindings {
     pub project: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub organization: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub user: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<StoragePlacement>,
 }
 
 impl SecretBindings {
     pub fn is_empty(&self) -> bool {
-        self.project.is_empty() && !self.organization && !self.user
+        self.project.is_empty() && !self.organization && self.user.is_none()
+    }
+
+    /// Parse origin without choosing an account, owner or fallback store.
+    pub fn project_reference(&self) -> Result<StorageReference<'_>, ProjectError> {
+        StorageReference::project(&self.project)
     }
 }
 
@@ -248,8 +302,15 @@ fn is_false(value: &bool) -> bool {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct AccessBinding {
-    pub profile: AccessProfileReference,
+pub struct CredentialBinding {
+    pub profile: String,
+}
+
+impl CredentialBinding {
+    /// Parse the requested profile without resolving or granting it.
+    pub fn reference(&self) -> Result<StorageReference<'_>, ProjectError> {
+        StorageReference::profile(&self.profile)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -312,7 +373,7 @@ struct RawProject {
     #[serde(default)]
     secrets: Option<RawSecretsBlock>,
     #[serde(default)]
-    access: Option<RawAccessBlock>,
+    credentials: Option<CredentialBinding>,
     #[serde(default)]
     mounts: Vec<RawMountBlock>,
 }
@@ -328,6 +389,8 @@ struct RawRepository {
     branch: String,
     #[serde(default)]
     destination: String,
+    #[serde(default)]
+    known_hosts: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -389,15 +452,9 @@ struct RawSecretsBlock {
     #[serde(default)]
     organization: bool,
     #[serde(default)]
-    user: bool,
+    user: Option<StoragePlacement>,
     #[serde(default)]
     project: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawAccessBlock {
-    profile: AccessProfileReference,
 }
 
 #[derive(Debug, Default, Deserialize)]

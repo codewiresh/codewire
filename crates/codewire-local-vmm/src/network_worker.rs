@@ -103,7 +103,7 @@ const PACKET_QUEUE: usize = 256;
 const MAX_INBOUND_STREAM_FLOWS: usize = 64;
 const NETWORK_MTU: usize = 1_500;
 const DNS_MESSAGE_LIMIT: usize = 1_232;
-const BROKER_TIMEOUT: Duration = Duration::from_secs(2);
+const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const WORKER_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
@@ -497,6 +497,9 @@ pub struct BrokerDnsAnswer {
     pub ttl_seconds: u32,
 }
 
+/// Implementations bound queue admission separately from each transaction.
+/// An outer deadline must not cancel IPC mid-frame after spending its
+/// transaction budget waiting behind an unrelated DNS/TCP operation.
 #[async_trait]
 pub trait EgressBroker: Send + Sync + 'static {
     /// Cheap policy admission before the worker binds an AnyIP listener.
@@ -639,6 +642,7 @@ fn ipc_broker_error(error: BrokerIpcError) -> io::Error {
     let kind = match error {
         BrokerIpcError::Denied => io::ErrorKind::PermissionDenied,
         BrokerIpcError::RemoteUnavailable => io::ErrorKind::ConnectionRefused,
+        BrokerIpcError::SessionBusy => io::ErrorKind::WouldBlock,
         _ => io::ErrorKind::ConnectionAborted,
     };
     io::Error::new(kind, "authenticated egress broker request failed")
@@ -1713,7 +1717,7 @@ async fn dispatch_packets<B: EgressBroker>(
                     IpAddr::V4(GUEST_IP),
                     incoming.guest_port,
                 );
-                let guest = tokio::time::timeout(BROKER_TIMEOUT, stack.connect(destination)).await;
+                let guest = tokio::time::timeout(GUEST_CONNECT_TIMEOUT, stack.connect(destination)).await;
                 let Ok(Ok(mut guest)) = guest else {
                     continue;
                 };
@@ -1733,11 +1737,10 @@ async fn dispatch_packets<B: EgressBroker>(
             if question.source.ip() != IpAddr::V4(GUEST_IP) {
                 continue;
             }
-            let answer =
-                match tokio::time::timeout(BROKER_TIMEOUT, broker.resolve_dns(&question)).await {
-                    Ok(Ok(answer)) => answer,
-                    Ok(Err(_)) | Err(_) => continue,
-                };
+            let answer = match broker.resolve_dns(&question).await {
+                Ok(answer) => answer,
+                Err(_) => continue,
+            };
             let response =
                 build_ipv4_dns_response(&question, answer.answer, answer.ttl_seconds, NETWORK_MTU)
                     .map_err(|_| NetworkWorkerError::Engine)?;
@@ -1781,9 +1784,9 @@ async fn dispatch_packets<B: EgressBroker>(
             source: tcp.source,
             destination: tcp.destination,
         };
-        match tokio::time::timeout(BROKER_TIMEOUT, broker.authorize_tcp(flow)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) | Err(_) => continue,
+        match broker.authorize_tcp(flow).await {
+            Ok(()) => {}
+            Err(_) => continue,
         }
         let listener = match stack.bind_endpoint(tcp.destination).await {
             Ok(listener) => listener,
@@ -1822,8 +1825,8 @@ async fn serve_listener<B: EgressBroker>(mut listener: TcpListener, broker: Arc<
                     source: guest.peer_addr(),
                     destination: guest.local_addr(),
                 };
-                let connected = tokio::time::timeout(BROKER_TIMEOUT, broker.connect_tcp(flow)).await;
-                let Ok(Ok(mut connected)) = connected else { continue; };
+                let connected = broker.connect_tcp(flow).await;
+                let Ok(mut connected) = connected else { continue; };
                 bridges.spawn(async move {
                     let _ = tokio::io::copy_bidirectional(&mut guest, &mut connected).await;
                     let _ = guest.shutdown().await;
@@ -2273,6 +2276,7 @@ mod tests {
         allowed: AtomicUsize,
         connected: AtomicUsize,
         resolved: AtomicUsize,
+        dns_delay: Duration,
         denied: StdMutex<Vec<SocketAddr>>,
     }
 
@@ -2284,6 +2288,7 @@ mod tests {
                 allowed: AtomicUsize::new(0),
                 connected: AtomicUsize::new(0),
                 resolved: AtomicUsize::new(0),
+                dns_delay: Duration::ZERO,
                 denied: StdMutex::new(Vec::new()),
             }
         }
@@ -2323,6 +2328,7 @@ mod tests {
                 return Err(denied());
             }
             self.resolved.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(self.dns_delay).await;
             Ok(BrokerDnsAnswer {
                 answer: DnsAnswer::Ipv4(TEST_DNS_ANSWER),
                 ttl_seconds: 30,
@@ -2638,6 +2644,50 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(2), host)
                 .await
                 .expect("network worker did not fail closed after transport loss")
+                .unwrap(),
+            Err(NetworkWorkerError::FrameIo)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dns_keeps_the_broker_transaction_budget_after_two_seconds() {
+        let (vm_id, generation) = identity();
+        let (host_endpoint, mut guest_endpoint) = duplex(128 * 1024);
+        let mut fixture = FixtureBroker::new(None, None);
+        fixture.dns_delay = Duration::from_millis(2_100);
+        let broker = Arc::new(fixture);
+        let host_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
+        let host = tokio::spawn(run_host_session(
+            host_endpoint,
+            host_key,
+            vm_id,
+            generation,
+            Arc::clone(&broker),
+            || Ok(()),
+        ));
+        let guest_key = NetworkKey::derive(TOKEN, vm_id, generation).unwrap();
+        let mut session =
+            authenticate_guest_endpoint(&mut guest_endpoint, &guest_key, vm_id, generation)
+                .await
+                .unwrap();
+        let query = dns_query_packet(WORKER_IP, 53, TEST_DNS_NAME);
+        write_guest_packet(&mut guest_endpoint, &mut session, &query)
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(4),
+            read_guest_packet(&mut guest_endpoint, &mut session),
+        )
+        .await
+        .expect("valid DNS operation was cancelled by an outer worker deadline")
+        .unwrap();
+        assert_dns_response(&response);
+        assert_eq!(broker.resolved.load(Ordering::Relaxed), 1);
+        drop(guest_endpoint);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), host)
+                .await
+                .unwrap()
                 .unwrap(),
             Err(NetworkWorkerError::FrameIo)
         ));

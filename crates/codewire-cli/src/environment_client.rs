@@ -36,11 +36,11 @@ impl EnvironmentClient {
             })
             .await
             .map_err(display_client_error)?;
-        Ok(response
+        response
             .environments
             .into_iter()
-            .map(legacy_environment)
-            .collect())
+            .map(environment_from_proto)
+            .collect()
     }
 
     pub async fn create_environment(
@@ -53,11 +53,132 @@ impl EnvironmentClient {
             .create_environment(proto_create_environment_request(org_id, request))
             .await
             .map_err(display_client_error)?;
-        response
+        let environment = response
             .environment
             .into_option()
-            .map(legacy_environment)
-            .ok_or_else(|| anyhow::anyhow!("CreateEnvironment returned no environment"))
+            .map(environment_from_proto)
+            .transpose()?
+            .ok_or_else(|| anyhow::anyhow!("CreateEnvironment returned no environment"))?;
+        validate_created_environment(&environment, org_id, request)?;
+        Ok(environment)
+    }
+
+    /// One complete selection CAS. Never refetch or retry a conflict: the
+    /// caller must present a new preview for any changed authority or revision.
+    pub async fn update_environment_sources(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+        request: &UpdateEnvironmentSourcesRequest,
+    ) -> anyhow::Result<EnvironmentSourcesUpdate> {
+        anyhow::ensure!(
+            request.expected_operation_generation > 0,
+            "environment operation generation is missing"
+        );
+        validate_source_selection(&request.expected, true)?;
+        validate_source_selection(&request.replacement, true)?;
+        let response = self
+            .inner
+            .update_environment_sources(rpc::UpdateEnvironmentSourcesRequest {
+                org_id: org_id.to_owned(),
+                environment_id: environment_id.to_owned(),
+                expected_operation_generation: request.expected_operation_generation,
+                expected: Some(source_selection_to_proto(&request.expected)).into(),
+                replacement: Some(source_selection_to_proto(&request.replacement)).into(),
+                allow_restart: request.allow_restart,
+                confirm_personal_credentials: request.confirm_personal_credentials,
+                confirm_personal_secrets: request.confirm_personal_secrets,
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        anyhow::ensure!(
+            response.environment_id == environment_id
+                && response.operation_generation == request.expected_operation_generation,
+            "source update returned a different environment operation"
+        );
+        let selection = response
+            .selection
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("source update omitted its complete selection"))
+            .and_then(source_selection_from_proto)?;
+        anyhow::ensure!(
+            selection == request.replacement,
+            "source update returned a different selection"
+        );
+        let outcome = match response.outcome.as_known() {
+            Some(rpc::EnvironmentSourcesUpdateOutcome::Unchanged) => {
+                EnvironmentSourcesUpdateOutcome::Unchanged
+            }
+            Some(rpc::EnvironmentSourcesUpdateOutcome::Stored) => {
+                EnvironmentSourcesUpdateOutcome::Stored
+            }
+            Some(rpc::EnvironmentSourcesUpdateOutcome::RestartRequired) => {
+                EnvironmentSourcesUpdateOutcome::RestartRequired
+            }
+            _ => anyhow::bail!("source update returned an unsupported outcome"),
+        };
+        Ok(EnvironmentSourcesUpdate {
+            environment_id: response.environment_id,
+            operation_generation: response.operation_generation,
+            selection,
+            outcome,
+        })
+    }
+
+    /// Personal platform metadata only; no provider values or material APIs.
+    pub async fn resolve_credential_profile(
+        &self,
+        selector: &str,
+    ) -> anyhow::Result<rpc::AccessProfile> {
+        let reference = codewire_project::StorageReference::profile(selector)?;
+        anyhow::ensure!(
+            reference.placement != Some(codewire_project::StoragePlacement::Local),
+            "platform environments cannot select local credential profiles"
+        );
+        let selector = if let Some(id) = reference.selector.strip_prefix("id:") {
+            canonical_selection_id(id)?;
+            rpc::get_access_profile_request::Selector::AccessProfileId(id.to_owned())
+        } else {
+            let name = reference
+                .selector
+                .strip_prefix("user/")
+                .unwrap_or(reference.selector);
+            anyhow::ensure!(
+                !name.contains('/'),
+                "organization credential profile resolution is not supported by the platform metadata API yet"
+            );
+            rpc::get_access_profile_request::Selector::Name(name.to_owned())
+        };
+        let expected_id = match &selector {
+            rpc::get_access_profile_request::Selector::AccessProfileId(id) => Some(id.clone()),
+            _ => None,
+        };
+        let expected_name = match &selector {
+            rpc::get_access_profile_request::Selector::Name(name) => Some(name.clone()),
+            _ => None,
+        };
+        let profile = self
+            .inner
+            .get_access_profile(rpc::GetAccessProfileRequest {
+                selector: Some(selector),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?
+            .access_profile
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("platform omitted credential profile metadata"))?;
+        canonical_selection_id(&profile.id)?;
+        anyhow::ensure!(
+            profile.revision > 0
+                && expected_id.as_ref().is_none_or(|id| id == &profile.id)
+                && expected_name
+                    .as_ref()
+                    .is_none_or(|name| name.eq_ignore_ascii_case(&profile.name)),
+            "platform returned a different profile or invalid revision"
+        );
+        Ok(profile)
     }
 
     pub async fn prepare_environment_create(
@@ -121,7 +242,8 @@ impl EnvironmentClient {
         let environment = response
             .environment
             .into_option()
-            .map(legacy_environment)
+            .map(environment_from_proto)
+            .transpose()?
             .ok_or_else(|| anyhow::anyhow!("GetEnvironment returned no environment"))?;
         Ok((environment, poll_interval))
     }
@@ -700,6 +822,25 @@ impl EnvironmentClient {
     }
 }
 
+fn validate_created_environment(
+    environment: &Environment,
+    org_id: &str,
+    request: &CreateEnvironmentRequest,
+) -> anyhow::Result<()> {
+    let expected = EnvironmentSourceSelection {
+        secrets: request.project_spec.secrets.clone(),
+        credentials: request.project_spec.credentials.clone(),
+        profile_revision: request.expected_profile_revision,
+    };
+    validate_source_selection(&expected, true)?;
+    canonical_selection_id(&environment.id)?;
+    anyhow::ensure!(
+        environment.org_id == org_id && environment.source_selection.as_ref() == Some(&expected),
+        "environment creation returned a different organization or source selection"
+    );
+    Ok(())
+}
+
 pub(crate) fn connect_client(config: &ResolvedPlatformConfig) -> anyhow::Result<CodewireClient> {
     let client_config = ClientConfig::new(&config.server_url)?
         .with_user_agent(format!("codewire-cli/{CLI_VERSION}"))?;
@@ -734,6 +875,86 @@ pub struct CreateEnvironmentPortRequest {
     pub access: String,
 }
 
+pub(crate) fn validate_source_selection(
+    selection: &EnvironmentSourceSelection,
+    exact: bool,
+) -> anyhow::Result<()> {
+    let spec = codewire_project::ProjectSpec {
+        secrets: selection.secrets.clone(),
+        credentials: selection.credentials.clone(),
+        ..Default::default()
+    };
+    spec.ensure_platform_compatible()?;
+    anyhow::ensure!(
+        selection.credentials.is_some() == selection.profile_revision.is_some()
+            && selection.profile_revision != Some(0),
+        "credential profile selection requires its exact positive revision"
+    );
+    if exact {
+        for reference in [
+            (!selection.secrets.project.is_empty()).then_some(selection.secrets.project.as_str()),
+            selection
+                .credentials
+                .as_ref()
+                .map(|profile| profile.profile.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let id = reference.strip_prefix("platform:id:").ok_or_else(|| {
+                anyhow::anyhow!("environment source metadata must contain exact platform IDs")
+            })?;
+            canonical_selection_id(id)?;
+        }
+    }
+    Ok(())
+}
+
+fn canonical_selection_id(id: &str) -> anyhow::Result<()> {
+    let parsed =
+        uuid::Uuid::parse_str(id).map_err(|_| anyhow::anyhow!("invalid source metadata ID"))?;
+    anyhow::ensure!(
+        !parsed.is_nil() && parsed.to_string() == id,
+        "source metadata ID must be canonical and non-nil"
+    );
+    Ok(())
+}
+
+fn source_selection_from_proto(
+    value: rpc::EnvironmentSourceSelection,
+) -> anyhow::Result<EnvironmentSourceSelection> {
+    let spec = codewire_project_proto::from_proto(rpc::ProjectSpec {
+        schema_version: codewire_project::PROJECT_SCHEMA_VERSION,
+        working_directory: "/workspace".into(),
+        secrets: value.secrets,
+        credentials: value.credentials,
+        ..Default::default()
+    })?;
+    let selection = EnvironmentSourceSelection {
+        secrets: spec.secrets,
+        credentials: spec.credentials,
+        profile_revision: value.profile_revision,
+    };
+    validate_source_selection(&selection, true)?;
+    Ok(selection)
+}
+
+fn source_selection_to_proto(
+    value: &EnvironmentSourceSelection,
+) -> rpc::EnvironmentSourceSelection {
+    let spec = codewire_project_proto::to_proto(codewire_project::ProjectSpec {
+        secrets: value.secrets.clone(),
+        credentials: value.credentials.clone(),
+        ..Default::default()
+    });
+    rpc::EnvironmentSourceSelection {
+        secrets: spec.secrets,
+        credentials: spec.credentials,
+        profile_revision: value.profile_revision,
+        ..Default::default()
+    }
+}
+
 fn proto_create_environment_request(
     org_id: &str,
     request: &CreateEnvironmentRequest,
@@ -752,6 +973,9 @@ fn proto_create_environment_request(
             request.project_spec.clone(),
         ))
         .into(),
+        expected_profile_revision: request.expected_profile_revision,
+        confirm_personal_credentials: request.confirm_personal_credentials,
+        confirm_personal_secrets: request.confirm_personal_secrets,
         ..Default::default()
     }
 }
@@ -825,6 +1049,9 @@ fn create_environment_request_from_proto(
             }
         },
         project_spec,
+        expected_profile_revision: value.expected_profile_revision,
+        confirm_personal_credentials: value.confirm_personal_credentials,
+        confirm_personal_secrets: value.confirm_personal_secrets,
     })
 }
 
@@ -876,7 +1103,7 @@ pub(crate) fn legacy_environment_daemon_status(
     }
 }
 
-fn legacy_environment(value: rpc::Environment) -> Environment {
+fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment> {
     let state = match value.state.as_known() {
         Some(rpc::EnvironmentState::Unspecified) => "",
         Some(rpc::EnvironmentState::Pending) => "pending",
@@ -907,7 +1134,13 @@ fn legacy_environment(value: rpc::Environment) -> Environment {
         Some(rpc::DesiredState::Resized) => "resized",
         None => "unknown",
     };
-    Environment {
+    Ok(Environment {
+        operation_generation: value.operation_generation,
+        source_selection: value
+            .source_selection
+            .into_option()
+            .map(source_selection_from_proto)
+            .transpose()?,
         id: value.id,
         org_id: value.org_id,
         created_by: value.created_by,
@@ -954,7 +1187,7 @@ fn legacy_environment(value: rpc::Environment) -> Environment {
             .into_option()
             .map(timestamp_to_rfc3339),
         network: empty_to_none(value.network),
-    }
+    })
 }
 
 fn legacy_environment_resize_response(
@@ -966,7 +1199,8 @@ fn legacy_environment_resize_response(
         .map(legacy_environment_resize_operation)
         .ok_or_else(|| anyhow::anyhow!("EnvironmentService returned no resize operation"))?;
     let environment = environment
-        .map(legacy_environment)
+        .map(environment_from_proto)
+        .transpose()?
         .ok_or_else(|| anyhow::anyhow!("EnvironmentService returned no environment"))?;
     Ok((
         EnvironmentResizeResult {
@@ -1235,13 +1469,412 @@ fn proto_duration_to_std(duration: rpc::ProtoDuration) -> Option<Duration> {
 mod tests {
     use std::time::Duration;
 
+    use buffa::Message as _;
+    use wiremock::matchers::{body_bytes, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     use super::*;
+
+    const SOURCE_UPDATE_PATH: &str = "/codewire.v1.EnvironmentService/UpdateEnvironmentSources";
+
+    fn test_client(server: &MockServer) -> EnvironmentClient {
+        EnvironmentClient {
+            inner: CodewireClient::with_http(
+                ClientConfig::new(server.uri()).unwrap(),
+                rpc::StaticTokenProvider::new("synthetic-source-test-token").unwrap(),
+                reqwest::Client::new(),
+            )
+            .unwrap(),
+        }
+    }
+
+    fn selected_sources() -> EnvironmentSourceSelection {
+        EnvironmentSourceSelection {
+            secrets: codewire_project::SecretBindings {
+                project: "platform:id:11111111-1111-4111-8111-111111111111".into(),
+                organization: true,
+                user: Some(codewire_project::StoragePlacement::Platform),
+            },
+            credentials: Some(codewire_project::CredentialBinding {
+                profile: "platform:id:22222222-2222-4222-8222-222222222222".into(),
+            }),
+            profile_revision: Some(9_007_199_254_740_993),
+        }
+    }
+
+    #[test]
+    fn environment_source_metadata_preserves_absence_empty_and_exact_revisions() {
+        let missing = environment_from_proto(rpc::Environment::default()).unwrap();
+        assert_eq!(
+            missing.source_selection, None,
+            "absence is unsupported, not an empty selection"
+        );
+        for selection in [EnvironmentSourceSelection::default(), selected_sources()] {
+            let environment = environment_from_proto(rpc::Environment {
+                operation_generation: 9_007_199_254_740_995,
+                source_selection: Some(source_selection_to_proto(&selection)).into(),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(environment.operation_generation, 9_007_199_254_740_995);
+            assert_eq!(environment.source_selection.as_ref(), Some(&selection));
+            let json = serde_json::to_string(&environment).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Environment>(&json).unwrap(),
+                environment
+            );
+        }
+    }
+
+    #[test]
+    fn create_ack_requires_exact_organization_and_source_selection() {
+        let selection = selected_sources();
+        let request = CreateEnvironmentRequest {
+            project_spec: codewire_project::ProjectSpec {
+                secrets: selection.secrets.clone(),
+                credentials: selection.credentials.clone(),
+                ..Default::default()
+            },
+            expected_profile_revision: selection.profile_revision,
+            ..Default::default()
+        };
+        let acknowledged = Environment {
+            id: "33333333-3333-4333-8333-333333333333".into(),
+            org_id: "org_123".into(),
+            source_selection: Some(selection),
+            ..Default::default()
+        };
+
+        validate_created_environment(&acknowledged, "org_123", &request).unwrap();
+
+        let mut wrong = acknowledged.clone();
+        wrong.source_selection = None;
+        assert!(validate_created_environment(&wrong, "org_123", &request).is_err());
+
+        let mut wrong = acknowledged;
+        wrong.org_id = "org_other".into();
+        assert!(validate_created_environment(&wrong, "org_123", &request).is_err());
+    }
+
+    #[tokio::test]
+    async fn hosted_profile_resolution_uses_only_personal_metadata_and_pins_exact_revision() {
+        let server = MockServer::start().await;
+        let request = rpc::GetAccessProfileRequest {
+            selector: Some(rpc::get_access_profile_request::Selector::Name(
+                "work".into(),
+            )),
+            ..Default::default()
+        };
+        let response = rpc::GetAccessProfileResponse {
+            access_profile: Some(rpc::AccessProfile {
+                id: "22222222-2222-4222-8222-222222222222".into(),
+                name: "work".into(),
+                revision: 9_007_199_254_740_993,
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(path("/codewire.v1.AccessProfileService/GetAccessProfile"))
+            .and(body_bytes(request.encode_to_vec()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(response.encode_to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let profile = test_client(&server)
+            .resolve_credential_profile("platform:user/work")
+            .await
+            .unwrap();
+        assert_eq!(profile.id, "22222222-2222-4222-8222-222222222222");
+        assert_eq!(profile.revision, 9_007_199_254_740_993);
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "no material or alternate-store RPC"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_profile_resolution_rejects_local_and_unsupported_org_before_transport() {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+        for selector in [
+            "local:work",
+            "platform:organization/work",
+            "platform:id:00000000-0000-0000-0000-000000000000",
+        ] {
+            assert!(
+                client.resolve_credential_profile(selector).await.is_err(),
+                "{selector}"
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hosted_profile_resolution_rejects_mismatched_id_or_name_without_fallback() {
+        for selector in [
+            "platform:user/work",
+            "platform:id:22222222-2222-4222-8222-222222222222",
+        ] {
+            let server = MockServer::start().await;
+            let response = rpc::GetAccessProfileResponse {
+                access_profile: Some(rpc::AccessProfile {
+                    id: "33333333-3333-4333-8333-333333333333".into(),
+                    name: "other".into(),
+                    revision: 1,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            };
+            Mock::given(method("POST"))
+                .and(path("/codewire.v1.AccessProfileService/GetAccessProfile"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/proto")
+                        .set_body_bytes(response.encode_to_vec()),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert!(
+                test_client(&server)
+                    .resolve_credential_profile(selector)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn source_selection_rejects_unpinned_noncanonical_and_unknown_metadata() {
+        for reference in [
+            "work",
+            "platform:work",
+            "local:work",
+            "platform:id:00000000-0000-0000-0000-000000000000",
+            "platform:id:AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        ] {
+            let mut selection = selected_sources();
+            selection.credentials.as_mut().unwrap().profile = reference.into();
+            assert!(
+                validate_source_selection(&selection, true).is_err(),
+                "{reference}"
+            );
+        }
+        for revision in [None, Some(0)] {
+            let mut selection = selected_sources();
+            selection.profile_revision = revision;
+            assert!(validate_source_selection(&selection, true).is_err());
+        }
+        let mut selection = selected_sources();
+        selection.credentials = None;
+        assert!(validate_source_selection(&selection, true).is_err());
+        for user in [
+            rpc::ProjectStoragePlacement::Unspecified.into(),
+            rpc::EnumValue::Unknown(99),
+            rpc::ProjectStoragePlacement::Local.into(),
+        ] {
+            assert!(
+                source_selection_from_proto(rpc::EnvironmentSourceSelection {
+                    secrets: Some(rpc::ProjectSecretBindings {
+                        user: Some(user),
+                        ..Default::default()
+                    })
+                    .into(),
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_update_sends_complete_exact_cas_and_explicit_empty_clear_once() {
+        let server = MockServer::start().await;
+        let request = UpdateEnvironmentSourcesRequest {
+            expected_operation_generation: 9_007_199_254_740_995,
+            expected: selected_sources(),
+            replacement: EnvironmentSourceSelection::default(),
+            allow_restart: true,
+            confirm_personal_credentials: false,
+            confirm_personal_secrets: false,
+        };
+        let expected_wire = rpc::UpdateEnvironmentSourcesRequest {
+            org_id: "org_test".into(),
+            environment_id: "env_test".into(),
+            expected_operation_generation: request.expected_operation_generation,
+            expected: Some(source_selection_to_proto(&request.expected)).into(),
+            replacement: Some(source_selection_to_proto(&request.replacement)).into(),
+            allow_restart: true,
+            ..Default::default()
+        };
+        let response = rpc::UpdateEnvironmentSourcesResponse {
+            environment_id: "env_test".into(),
+            operation_generation: request.expected_operation_generation,
+            selection: Some(source_selection_to_proto(&request.replacement)).into(),
+            outcome: rpc::EnvironmentSourcesUpdateOutcome::RestartRequired.into(),
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(path(SOURCE_UPDATE_PATH))
+            .and(header(
+                "authorization",
+                "Bearer synthetic-source-test-token",
+            ))
+            .and(body_bytes(expected_wire.encode_to_vec()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(response.encode_to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let result = test_client(&server)
+            .update_environment_sources("org_test", "env_test", &request)
+            .await
+            .unwrap();
+        assert_eq!(result.selection, EnvironmentSourceSelection::default());
+        assert_eq!(
+            result.operation_generation,
+            request.expected_operation_generation
+        );
+        assert_eq!(
+            result.outcome,
+            EnvironmentSourcesUpdateOutcome::RestartRequired
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn source_update_conflicts_are_not_refetched_or_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(SOURCE_UPDATE_PATH))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(
+                        serde_json::json!({"code": "aborted", "message": "selection changed"}),
+                    ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let request = UpdateEnvironmentSourcesRequest {
+            expected_operation_generation: 7,
+            expected: selected_sources(),
+            replacement: selected_sources(),
+            allow_restart: false,
+            confirm_personal_credentials: true,
+            confirm_personal_secrets: true,
+        };
+        assert!(
+            test_client(&server)
+                .update_environment_sources("org_test", "env_test", &request)
+                .await
+                .is_err()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn source_update_rejects_incomplete_or_mismatched_success_responses() {
+        for mutation in 0..5 {
+            let server = MockServer::start().await;
+            let request = UpdateEnvironmentSourcesRequest {
+                expected_operation_generation: 7,
+                expected: selected_sources(),
+                replacement: selected_sources(),
+                allow_restart: false,
+                confirm_personal_credentials: true,
+                confirm_personal_secrets: true,
+            };
+            let mut response = rpc::UpdateEnvironmentSourcesResponse {
+                environment_id: "env_test".into(),
+                operation_generation: 7,
+                selection: Some(source_selection_to_proto(&request.replacement)).into(),
+                outcome: rpc::EnvironmentSourcesUpdateOutcome::Unchanged.into(),
+                ..Default::default()
+            };
+            match mutation {
+                0 => response.environment_id = "other_environment".into(),
+                1 => response.operation_generation += 1,
+                2 => response.selection = None.into(),
+                3 => {
+                    response.selection = Some(source_selection_to_proto(
+                        &EnvironmentSourceSelection::default(),
+                    ))
+                    .into()
+                }
+                4 => response.outcome = rpc::EnumValue::Unknown(99),
+                _ => unreachable!(),
+            }
+            Mock::given(method("POST"))
+                .and(path(SOURCE_UPDATE_PATH))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/proto")
+                        .set_body_bytes(response.encode_to_vec()),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert!(
+                test_client(&server)
+                    .update_environment_sources("org_test", "env_test", &request)
+                    .await
+                    .is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_update_rejects_invalid_inputs_before_transport() {
+        let server = MockServer::start().await;
+        let mut request = UpdateEnvironmentSourcesRequest {
+            expected_operation_generation: 0,
+            expected: selected_sources(),
+            replacement: selected_sources(),
+            allow_restart: false,
+            confirm_personal_credentials: true,
+            confirm_personal_secrets: true,
+        };
+        let client = test_client(&server);
+        assert!(
+            client
+                .update_environment_sources("org_test", "env_test", &request)
+                .await
+                .is_err()
+        );
+        request.expected_operation_generation = 7;
+        request.replacement.profile_revision = None;
+        assert!(
+            client
+                .update_environment_sources("org_test", "env_test", &request)
+                .await
+                .is_err()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 
     #[test]
     fn environment_connect_adapter_round_trips_the_complete_canonical_project_spec() {
         let request = CreateEnvironmentRequest {
             preset_id: Some("preset_123".to_string()),
             name: Some("builder".to_string()),
+            expected_profile_revision: Some(9_007_199_254_740_993),
+            confirm_personal_credentials: true,
+            confirm_personal_secrets: true,
             project_spec: codewire_project::parse_project_yaml(
                 r#"
 version: 1
@@ -1262,8 +1895,8 @@ ports: [{port: 8080, label: web, access: public}]
 cpu: "2"
 memory: "8Gi"
 disk: "40Gi"
-secrets: {project: development, organization: true, user: true}
-access: {profile: user/work}
+secrets: {project: platform:development, organization: true, user: platform}
+credentials: {profile: platform:user/work}
 "#,
             )
             .unwrap()
@@ -1276,7 +1909,7 @@ access: {profile: user/work}
         .unwrap();
         assert_eq!(round_trip, request);
 
-        let environment = legacy_environment(rpc::Environment {
+        let environment = environment_from_proto(rpc::Environment {
             id: "env_123".into(),
             org_id: "org_123".into(),
             created_by: "user_123".into(),
@@ -1295,7 +1928,8 @@ access: {profile: user/work}
             })
             .into(),
             ..Default::default()
-        });
+        })
+        .unwrap();
         let value = serde_json::to_value(environment).unwrap();
         assert_eq!(value["id"], "env_123");
         assert_eq!(value["org_id"], "org_123");

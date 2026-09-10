@@ -12,6 +12,7 @@ export interface ApplicationPort {
 export interface RepositorySpec {
   branch?: string;
   destination?: string;
+  known_hosts?: string[];
   revision?: string;
   source: string;
 }
@@ -29,17 +30,20 @@ export interface ProjectSkillSelection {
 
 export interface ProjectResources {
   cpu_millicores?: number;
-  memory_mib?: number;
-  disk_gib?: number;
+  memory_mib?: bigint;
+  disk_gib?: bigint;
 }
+
+export type ProjectStoragePlacement = "local" | "platform";
 
 export interface ProjectSecretBindings {
   project?: string;
   organization?: boolean;
-  user?: boolean;
+  /** Presence selects personal values from one explicit storage origin. */
+  user?: ProjectStoragePlacement;
 }
 
-export interface ProjectAccessBinding {
+export interface ProjectCredentialBinding {
   profile: string;
 }
 
@@ -57,7 +61,16 @@ export interface ProjectSpec {
   application_ports?: ApplicationPort[];
   resources?: ProjectResources;
   secrets?: ProjectSecretBindings;
-  access?: ProjectAccessBinding;
+  credentials?: ProjectCredentialBinding;
+}
+
+/** Exact source selection. An empty object means no application-secret source
+ * and no provider-credential profile. */
+export interface EnvironmentSourceSelection {
+  secrets?: ProjectSecretBindings;
+  credentials?: ProjectCredentialBinding;
+  /** Required exactly when credentials is present. */
+  profile_revision?: bigint;
 }
 
 export interface EnvironmentPort {
@@ -105,6 +118,9 @@ export interface EnvironmentData {
   total_running_seconds: number;
   ttl_seconds?: number | null;
   type: string;
+  /** Lossless concurrency coordinate for environment mutations. */
+  operation_generation: bigint;
+  source_selection?: EnvironmentSourceSelection;
 }
 
 export interface EnvironmentResources {
@@ -188,6 +204,30 @@ export interface CreateEnvironmentRequest {
   ttl_seconds?: number | null;
   isolation_tier?: IsolationTier;
   project_spec: ProjectSpec;
+  expected_profile_revision?: bigint;
+  confirm_personal_credentials?: boolean;
+  confirm_personal_secrets?: boolean;
+}
+
+export interface UpdateEnvironmentSourcesRequest {
+  expected_operation_generation: bigint;
+  expected: EnvironmentSourceSelection;
+  replacement: EnvironmentSourceSelection;
+  allow_restart?: boolean;
+  confirm_personal_credentials?: boolean;
+  confirm_personal_secrets?: boolean;
+}
+
+export type EnvironmentSourcesUpdateOutcome =
+  | "unchanged"
+  | "stored"
+  | "restart_required";
+
+export interface EnvironmentSourcesUpdate {
+  environment_id: string;
+  operation_generation: bigint;
+  selection: EnvironmentSourceSelection;
+  outcome: EnvironmentSourcesUpdateOutcome;
 }
 
 export interface CreatePresetRequest {

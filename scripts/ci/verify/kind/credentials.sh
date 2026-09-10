@@ -154,7 +154,7 @@ kind_credential_bootstrap_smoke() (
 )
 
 start_kind_credential_fixture() {
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != build-ci ]; then
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     # A release-image gate must never load or execute a synthetic authority.
     # The dedicated synthetic composition is owned by the services-ci gate.
     log "release-image gate: synthetic credential service is not selected"
@@ -256,23 +256,36 @@ kind_credential_probe() {
     python3 -B -u - "$environment" "$mode" < "$ROOT/scripts/ci/verify/kind/credential_probe.py"
 }
 
-assert_kind_credential_provider_counts() {
-  local baseline="$1" counts
+kind_credential_fixture_events() {
   # This test-only subscriber disables all SQL/HTTP/material diagnostics.
   # Do not turn on a generic debug logger to obtain acceptance evidence.
-  counts="$(kubectl -n "$NS" logs deployment/codewire-credential-service -c credential-service | \
-    jq -Rsc '[split("\n")[] | fromjson? | select(.target == "codewire_kind_credential_fixture") | .fields]')"
+  kubectl -n "$NS" logs deployment/codewire-credential-service -c credential-service | \
+    jq -Rsc '[split("\n")[] | fromjson? | select(.target == "codewire_kind_credential_fixture") | .fields]'
+}
+
+assert_kind_credential_provider_counts() {
+  local baseline="$1" counts
+  counts="$(kind_credential_fixture_events)"
   jq -e --argjson baseline "$baseline" '
-    [.[] | select(.event == "provider_response")] as $responses |
-    [.[] | select(.event == "provider_refresh")] as $refreshes |
-    ([$responses[] | select(.scenario == "baseline") | .status] == [range($baseline) | 200]) and
-    ([$responses[] | select(.scenario == "broker_retry_once") | .status] == [401,200]) and
-    ([$responses[] | select(.scenario == "native_reread") | .status] == [401,401,200]) and
-    ([$refreshes[].refresh_calls] == [1,2]) and
-    ($responses | length == $baseline + 5) and
-    ($responses[-1].response_calls == $baseline + 5 and $responses[-1].refresh_calls == 2)
+    # Keep response and refresh events interleaved. Final totals alone can
+    # hide a refresh before rejection, replay, or the retired third request.
+    # The failed replay is a nonretryable 400 for the stock client. Double-401
+    # forwarding and the broker-only retry bound have separate runtime proof.
+    [.[] | select(.event == "provider_response" or .event == "provider_refresh") |
+      [.event, .scenario, .attempt, .status, .response_calls, .refresh_calls]] as $observed |
+    ($baseline == 2 or $baseline == 3) and
+    ($observed == ([
+      ["provider_response", "baseline", 1, 200, 1, 0],
+      ["provider_response", "baseline", 2, 200, 2, 0],
+      ["provider_response", "broker_retry_once", 1, 401, 3, 0],
+      ["provider_refresh", null, null, null, 3, 1],
+      ["provider_response", "broker_retry_once", 2, 200, 4, 1],
+      ["provider_response", "broker_retry_exhausted", 1, 401, 5, 1],
+      ["provider_refresh", null, null, null, 5, 2],
+      ["provider_response", "broker_retry_exhausted", 2, 400, 6, 2]
+    ] + if $baseline == 3 then [["provider_response", "baseline", 3, 200, 7, 2]] else [] end))
   ' <<<"$counts" >/dev/null || {
-    echo '::error::synthetic provider retry/refresh counts differ from the exact native scenarios' >&2
+    echo '::error::synthetic provider retry/refresh counts differ from the exact hosted scenarios' >&2
     return 1
   }
   kubectl -n "$NS" get pods -l app.kubernetes.io/component=credential-service -o json | jq -e '
@@ -281,13 +294,117 @@ assert_kind_credential_provider_counts() {
   ' >/dev/null || { echo '::error::credential fixture restarted during acceptance' >&2; return 1; }
 }
 
+save_kind_credential_rotation_evidence() (
+  # Save only closed public fixture fields, not arbitrary subscriber fields or
+  # messages. Invalid values become null for diagnosis; the assertions below
+  # still consume the original events and are never relaxed by this projection.
+  umask 077
+  local directory
+  directory="$(mktemp -d "$RUN_DIR/credential-rotation.XXXXXX")" || return $?
+  jq -ce --arg environment "$1" --arg generation "$2" --arg workspace "$3" --arg gateway "$4" '
+    def uuid: if type == "string" and
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+      then . else null end;
+    def count: if type == "number" and . >= 0 and . <= 9007199254740991 and floor == .
+      then . else null end;
+    def boolean: if type == "boolean" then . else null end;
+    def event:
+      if type != "object" then {event:null}
+      elif .event == "bridge_authenticated" then {
+        event, environment_id:(.environment_id | uuid), generation:(.generation | count),
+        workspace_pod_uid:(.workspace_pod_uid | uuid), gateway_pod_uid:(.gateway_pod_uid | uuid),
+        auth_sequence:(.auth_sequence | count), workspace_token_changed:(.workspace_token_changed | boolean)
+      }
+      elif .event == "provider_response" then {
+        event, scenario:(.scenario | if . == "baseline" or . == "broker_retry_once" or
+          . == "broker_retry_exhausted" then . else null end),
+        attempt:(.attempt | count), status:(.status | count | if . >= 100 and . <= 599 then . else null end),
+        response_calls:(.response_calls | count), refresh_calls:(.refresh_calls | count)
+      }
+      elif .event == "provider_refresh" or .event == "provider_totals" then {
+        event, response_calls:(.response_calls | count), refresh_calls:(.refresh_calls | count)
+      }
+      else {event:null} end;
+    if type == "array" and length <= 4096 then {
+      expected:{environment_id:($environment | uuid),
+        generation:($generation | try tonumber catch null | count),
+        workspace_pod_uid:($workspace | uuid), gateway_pod_uid:($gateway | uuid)},
+      events:map(event)
+    } else error("invalid bounded fixture transcript") end
+  ' > "$directory/evidence.pending" 2>/dev/null || {
+    echo '::error::could not preserve bounded credential fixture evidence' >&2
+    return 1
+  }
+  # The closed schemas already bound output; keep an explicit publication cap
+  # so a future projection change cannot silently broaden retained evidence.
+  [ "$(wc -c < "$directory/evidence.pending")" -le 2097152 ] || return 1
+  mv "$directory/evidence.pending" "$directory/evidence.json" || return $?
+  printf '%s\n' "$directory/evidence.json"
+)
+
+assert_kind_credential_rotation() {
+  local environment="$1" generation="$2" workspace_uid="$3" gateway_uid="$4" session="$5" events evidence
+  events="$(kind_credential_fixture_events)" || return $?
+  evidence="$(save_kind_credential_rotation_evidence "$environment" "$generation" \
+    "$workspace_uid" "$gateway_uid" <<<"$events")" || return $?
+  # Authentication is not Ready/admission by itself. Compose the exact live
+  # authenticator transcript with the >600s epoch bound and a successful stock
+  # turn after actual projected-token replacement; never print token digests.
+  jq -es '
+    map(.event) == ["baseline_completed", "projected_token_rotated", "rotation_turn_completed",
+      "broker_retry_completed", "broker_retry_exhausted", "complete"] and
+    .[0].codex_processes == 1 and
+    ([.[0,2,3,4].legacy_auth_commands] == [0,0,0,0]) and
+    .[1].changed == true and .[1].elapsed_ms > 600000 and .[1].elapsed_ms < 720000 and
+    all(.[3,4]; .elapsed_ms >= 0 and .elapsed_ms < 30000) and
+    .[5] == {event:"complete", turns:4, completed:3, failed:1, same_process:true, token_changed:true}
+  ' "$session" >/dev/null || {
+    echo "::error::stock Codex hosted rotation/session evidence is incomplete; fixture record: $evidence" >&2
+    return 1
+  }
+  jq -e --arg environment "$environment" --argjson generation "$generation" \
+    --arg workspace "$workspace_uid" --arg gateway "$gateway_uid" '
+    def uuid: type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    to_entries as $events |
+    [$events[] | select(.value.event == "provider_response" and .value.scenario == "baseline"
+      and .value.attempt == 1 and .value.status == 200)] as $baseline |
+    [$events[] | select(.value.event == "provider_response" and .value.scenario == "baseline"
+      and .value.attempt == 2 and .value.status == 200)] as $rotation |
+    [$events[] | select(.value.event == "bridge_authenticated")] as $all_auth |
+    # A source restart retains its workflow generation but replaces both Pods.
+    # Start at the exact selected identity; earlier unbound probes cannot prove
+    # this journey. Do not filter away any later identity/generation change.
+    [$all_auth[] | select(.value.environment_id == $environment and .value.generation == $generation and
+      .value.workspace_pod_uid == $workspace and .value.gateway_pod_uid == $gateway)] as $selected |
+    [$all_auth[] | select(.value.environment_id == $environment and .key >= $selected[0].key)] as $auth |
+    ($environment | uuid) and ($workspace | uuid) and ($gateway | uuid) and $generation > 0 and
+    ($baseline | length == 1) and ($rotation | length == 1) and
+    $baseline[0].key < $rotation[0].key and ($selected | length >= 2) and
+    $selected[0].key < $baseline[0].key and $selected[0].value.workspace_token_changed == false and
+    ([$all_auth[].value.auth_sequence] == [range(1; ($all_auth | length) + 1)]) and
+    all($all_auth[].value; (.environment_id | uuid) and (.workspace_pod_uid | uuid) and
+      (.gateway_pod_uid | uuid) and (.generation | type == "number") and .generation > 0 and
+      (.workspace_token_changed | type == "boolean")) and
+    all($auth[].value; .environment_id == $environment and .generation == $generation and
+      .workspace_pod_uid == $workspace and .gateway_pod_uid == $gateway and
+      (.workspace_token_changed | type == "boolean")) and
+    $all_auth[0].value.workspace_token_changed == false and
+    any($auth[]; .key < $baseline[0].key) and
+    any($auth[]; .key > $baseline[0].key and .key < $rotation[0].key and
+      .value.workspace_token_changed == true)
+  ' <<<"$events" >/dev/null || {
+    echo "::error::fresh same-identity hosted authentication evidence is incomplete; fixture record: $evidence" >&2
+    return 1
+  }
+}
+
 kind_credential_native_smoke() (
-  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" != build-ci ]; then
+  if [ "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" = prebuilt-release ]; then
     log "release-image gate: synthetic native credential composition is not selected"
     return 0
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
-  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid
+  local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation gateway_uid
   local certificate certificate_uid config_uid after_certificate_uid after_config_uid workspace_image
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
@@ -310,8 +427,8 @@ kind_credential_native_smoke() (
   kind_credential_cli credentials --platform get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "openai" and .[0].status == "CREDENTIAL_STATUS_ACTIVE"' >/dev/null
-  kind_credential_cli credentials --platform profile create "$profile_name"
-  kind_credential_cli credentials --platform profile set "$profile_name" codex "$credential_name"
+  # The first explicit identity selection creates the named profile atomically.
+  kind_credential_cli credentials --platform --profile "$profile_name" set codex "$credential_name"
   # Let the public create path resolve a runnable preset for the exact runtime
   # image. preset_contract_1 is an API contract fixture with no template config.
   environment="$(kind_credential_cli env --platform create --name "$profile_name" \
@@ -322,16 +439,24 @@ kind_credential_native_smoke() (
   kind_credential_probe "$environment" wrong-root
   kind_credential_probe "$environment" missing
   kind_credential_probe "$environment" unbound
-  kind_credential_cli credentials --platform profile bind "$profile_name" \
-    --environment "$environment" --confirm-personal-credentials
+  kind_credential_cli env --platform update "$environment" \
+    --profile "platform:$profile_name" --yes --output json
+  wait_kind_credential_environment "$environment" running
   pod="$(kind_credential_workspace "$environment")"
   pod_uid="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')"
+  generation="$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o json | jq -er '
+    [.spec.containers[] | select(.name == "workspace") | .env[] |
+      select(.name == "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION") | .value] |
+    if length == 1 and (.[0] | test("^[1-9][0-9]*$")) then .[0]
+    else error("expected exact immutable workspace generation") end')"
+  gateway_uid="$(kubectl -n "$SANDBOX_NS" get pods \
+    -l "codewire.sh/environment-id=$environment,codewire.sh/type=gateway" -o json | jq -er '
+      [.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] |
+      if length == 1 then .[0].metadata.uid else error("expected one exact managed gateway") end')"
   kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
-  jq -es '
-    map(.event) == ["baseline_completed", "projected_token_rotated", "rotation_turn_completed",
-      "broker_retry_completed", "native_reread_completed", "complete"]
-  ' "$RUN_DIR/credential-native-session.jsonl" >/dev/null
+  assert_kind_credential_rotation "$environment" "$generation" "$pod_uid" "$gateway_uid" \
+    "$RUN_DIR/credential-native-session.jsonl"
   [ "$(kubectl -n "$SANDBOX_NS" get pod "$pod" -o 'jsonpath={.metadata.uid}')" = "$pod_uid" ] || {
     echo '::error::native Codex rotation proof changed workspace Pod identity' >&2
     return 1
@@ -363,7 +488,7 @@ kind_credential_native_smoke() (
   wait_kind_credential_environment "$environment" destroyed
   kubectl -n "$SANDBOX_NS" wait --for=delete --timeout=120s \
     "certificate/$certificate" "secret/$certificate" "configmap/cw-credential-codex-$environment"
-  kind_credential_cli credentials --platform profile delete "$profile_name" --yes
+  kind_credential_cli credentials --platform --profile "$profile_name" delete --yes
   kind_credential_cli credentials --platform delete "$credential_name" --yes
   log "public synthetic Codex flow, native rotation/retry, revocation and terminal cleanup passed"
 )

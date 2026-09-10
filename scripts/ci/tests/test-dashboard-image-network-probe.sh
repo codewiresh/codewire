@@ -12,6 +12,9 @@ fail() {
 
 bash -n "$VERIFIER"
 
+grep -Fq -- '--env CODEWIRE_CREDENTIAL_ORIGIN=http://127.0.0.1:8086' "$VERIFIER" ||
+  fail 'standalone image smoke omits its isolated required credential origin'
+
 grep -Fq 'docker container inspect "$self_container"' "$VERIFIER" ||
   fail 'verifier cannot detect that its Docker client is attached to DinD'
 grep -Fq -- '--network "container:$smoke_container"' "$VERIFIER" ||

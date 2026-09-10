@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use av_credential_proxy::tunnel_ip_allowed;
-use codewire_access::CredentialAuthKind;
+use codewire_access::HttpProvider;
 use futures::StreamExt as _;
-use http::HeaderMap;
+use http::{HeaderMap, Method};
 use reqwest::redirect::Policy;
 
 use crate::{
@@ -16,6 +16,9 @@ use crate::{
 const OPENAI_HOST: &str = "api.openai.com";
 const CHATGPT_HOST: &str = "chatgpt.com";
 const OPENAI_AUTH_HOST: &str = "auth.openai.com";
+const ANTHROPIC_HOST: &str = "api.anthropic.com";
+const GITHUB_API_HOST: &str = "api.github.com";
+const GITHUB_GIT_HOST: &str = "github.com";
 const OPENAI_PORT: u16 = 443;
 const OPENAI_PATH: &str = "/v1/responses";
 const CHATGPT_CODEX_PATH: &str = "/backend-api/codex/responses";
@@ -26,53 +29,51 @@ const REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESOLVED_ADDRESSES: usize = 16;
 const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
 
-/// Broker-local OpenAI transport. DNS is resolved once per broker process, every
+/// Broker-local selected-provider transport. DNS is resolved once per broker process, every
 /// result is classified before dialing, and the admitted addresses are pinned
 /// into the TLS client so a second resolver lookup cannot rebind the request.
 #[derive(Clone)]
-pub struct OpenAiHttpsTransport {
+pub struct ProviderHttpsTransport {
     client: reqwest::Client,
-    authentication_kind: CredentialAuthKind,
+    selected: BTreeSet<HttpProvider>,
     resolved_address_count: usize,
 }
 
-impl std::fmt::Debug for OpenAiHttpsTransport {
+impl std::fmt::Debug for ProviderHttpsTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("OpenAiHttpsTransport")
-            .field("authentication_kind", &self.authentication_kind)
+            .debug_struct("ProviderHttpsTransport")
+            .field("selected", &self.selected)
             .field("resolved_address_count", &self.resolved_address_count)
             .finish_non_exhaustive()
     }
 }
 
-impl OpenAiHttpsTransport {
+impl ProviderHttpsTransport {
     /// Resolve and classify the fixed provider destination before any
     /// credential lease is requested. The admitted addresses remain pinned for
     /// this broker process, so post-confinement requests perform no DNS I/O.
-    pub async fn resolve(
-        authentication_kind: CredentialAuthKind,
-    ) -> Result<Self, BrokerUpstreamError> {
+    pub async fn resolve(selected: &BTreeSet<HttpProvider>) -> Result<Self, BrokerUpstreamError> {
         // This deliberately uses the calling thread instead of Tokio's
         // blocking resolver pool. Broker launch is bounded by the authority's
         // readiness timeout, and retaining a resolver worker here would leave
         // an already-running thread outside older Landlock thread domains.
-        let hosts: &[&str] = match authentication_kind {
-            CredentialAuthKind::ApiKey => &[OPENAI_HOST],
-            CredentialAuthKind::OAuth => &[CHATGPT_HOST, OPENAI_AUTH_HOST],
-            _ => return Err(BrokerUpstreamError::DestinationDenied),
-        };
+        let hosts = selected_hosts(selected)?;
         let mut resolved_address_count = 0_usize;
         let mut builder = reqwest::Client::builder()
             .https_only(true)
             .no_proxy()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .redirect(Policy::none())
             .referer(false)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .http2_max_header_list_size(MAX_RESPONSE_HEADER_BYTES as u32)
             .pool_max_idle_per_host(0);
-        for host in hosts {
+        for host in &hosts {
             let addresses = (*host, OPENAI_PORT)
                 .to_socket_addrs()
                 .map_err(|_| BrokerUpstreamError::Connect)?;
@@ -86,32 +87,32 @@ impl OpenAiHttpsTransport {
         let client = builder.build().map_err(|_| BrokerUpstreamError::Protocol)?;
         Ok(Self {
             client,
-            authentication_kind,
+            selected: selected.clone(),
             resolved_address_count,
         })
     }
 }
 
 #[async_trait]
-impl BrokerUpstreamTransport for OpenAiHttpsTransport {
+impl BrokerUpstreamTransport for ProviderHttpsTransport {
     async fn execute(
         &self,
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let (method, target, headers, body) = request.into_parts();
-        validate_target(&target, self.authentication_kind)?;
+        validate_target(&target, &method, &self.selected)?;
         let is_refresh =
             target.host_str() == Some(OPENAI_AUTH_HOST) && target.path() == OPENAI_REFRESH_PATH;
         let mut request = self
             .client
-            .request(method, target.as_str())
+            .request(method.clone(), target.as_str())
             .headers(headers)
             .body(body);
         if is_refresh {
             request = request.timeout(REFRESH_REQUEST_TIMEOUT);
         }
         let response = request.send().await.map_err(map_reqwest_error)?;
-        validate_target(response.url(), self.authentication_kind)?;
+        validate_target(response.url(), &method, &self.selected)?;
         let status = response.status();
         let headers = response.headers().clone();
         validate_response_headers(&headers)?;
@@ -122,25 +123,79 @@ impl BrokerUpstreamTransport for OpenAiHttpsTransport {
     }
 }
 
+fn selected_hosts(
+    selected: &BTreeSet<HttpProvider>,
+) -> Result<BTreeSet<&'static str>, BrokerUpstreamError> {
+    if selected.is_empty() {
+        return Err(BrokerUpstreamError::DestinationDenied);
+    }
+    Ok(selected
+        .iter()
+        .flat_map(|provider| match provider {
+            HttpProvider::OpenAiApiKey => &[OPENAI_HOST][..],
+            HttpProvider::CodexOAuth => &[CHATGPT_HOST, OPENAI_AUTH_HOST][..],
+            HttpProvider::AnthropicApiKey => &[ANTHROPIC_HOST][..],
+            HttpProvider::GitHubOAuth => &[GITHUB_API_HOST, GITHUB_GIT_HOST][..],
+        })
+        .copied()
+        .collect())
+}
+
 fn validate_target(
     target: &url::Url,
-    authentication_kind: CredentialAuthKind,
+    method: &Method,
+    selected: &BTreeSet<HttpProvider>,
 ) -> Result<(), BrokerUpstreamError> {
-    let allowed = match authentication_kind {
-        CredentialAuthKind::ApiKey => {
-            target.host_str() == Some(OPENAI_HOST) && target.path() == OPENAI_PATH
+    let allowed = match target.host_str() {
+        Some(OPENAI_HOST) => {
+            selected.contains(&HttpProvider::OpenAiApiKey)
+                && method == Method::POST
+                && target.path() == OPENAI_PATH
+                && target.query().is_none()
         }
-        CredentialAuthKind::OAuth => {
-            (target.host_str() == Some(CHATGPT_HOST) && target.path() == CHATGPT_CODEX_PATH)
-                || (target.host_str() == Some(OPENAI_AUTH_HOST)
-                    && target.path() == OPENAI_REFRESH_PATH)
+        Some(CHATGPT_HOST) => {
+            selected.contains(&HttpProvider::CodexOAuth)
+                && method == Method::POST
+                && target.path() == CHATGPT_CODEX_PATH
+                && target.query().is_none()
+        }
+        Some(OPENAI_AUTH_HOST) => {
+            selected.contains(&HttpProvider::CodexOAuth)
+                && method == Method::POST
+                && target.path() == OPENAI_REFRESH_PATH
+                && target.query().is_none()
+        }
+        Some(ANTHROPIC_HOST) => {
+            selected.contains(&HttpProvider::AnthropicApiKey)
+                && method == Method::POST
+                && matches!(target.path(), "/v1/messages" | "/v1/messages/count_tokens")
+                && matches!(target.query(), None | Some("beta=true"))
+        }
+        Some(GITHUB_API_HOST) => {
+            selected.contains(&HttpProvider::GitHubOAuth)
+                && crate::github::classify_request(
+                    "github-api",
+                    method,
+                    target.path(),
+                    target.query(),
+                )
+                .is_ok()
+        }
+        Some(GITHUB_GIT_HOST) => {
+            selected.contains(&HttpProvider::GitHubOAuth)
+                && crate::github::classify_request(
+                    "github-https",
+                    method,
+                    target.path(),
+                    target.query(),
+                )
+                .is_ok()
         }
         _ => false,
     };
     if target.scheme() != "https"
         || !allowed
         || target.port_or_known_default() != Some(OPENAI_PORT)
-        || target.query().is_some()
         || target.fragment().is_some()
         || !target.username().is_empty()
         || target.password().is_some()
@@ -243,7 +298,7 @@ fn validate_response_headers(headers: &HeaderMap) -> Result<(), BrokerUpstreamEr
     if bytes.is_none_or(|bytes| bytes > MAX_RESPONSE_HEADER_BYTES) {
         return Err(BrokerUpstreamError::ResourceLimit);
     }
-    Ok(())
+    crate::openai::validate_response_encoding(headers).map_err(|_| BrokerUpstreamError::Protocol)
 }
 
 fn map_reqwest_error(error: reqwest::Error) -> BrokerUpstreamError {
@@ -261,25 +316,148 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selected_http_hosts_are_closed_and_empty_selection_never_resolves() {
+        assert_eq!(
+            selected_hosts(&BTreeSet::new()),
+            Err(BrokerUpstreamError::DestinationDenied)
+        );
+        assert_eq!(
+            selected_hosts(&BTreeSet::from([HttpProvider::AnthropicApiKey])).unwrap(),
+            BTreeSet::from(["api.anthropic.com"])
+        );
+        assert_eq!(
+            selected_hosts(&BTreeSet::from([
+                HttpProvider::OpenAiApiKey,
+                HttpProvider::CodexOAuth,
+                HttpProvider::AnthropicApiKey,
+                HttpProvider::GitHubOAuth
+            ]))
+            .unwrap(),
+            BTreeSet::from([
+                "api.openai.com",
+                "chatgpt.com",
+                "auth.openai.com",
+                "api.anthropic.com",
+                "api.github.com",
+                "github.com"
+            ])
+        );
+    }
+
+    #[test]
+    fn multi_provider_destination_policy_requires_selected_host_exact_method_route_and_query() {
+        let selected = BTreeSet::from([
+            HttpProvider::OpenAiApiKey,
+            HttpProvider::AnthropicApiKey,
+            HttpProvider::GitHubOAuth,
+        ]);
+        for (method, target) in [
+            (
+                Method::POST,
+                "https://api.anthropic.com/v1/messages?beta=true",
+            ),
+            (
+                Method::POST,
+                "https://api.anthropic.com/v1/messages/count_tokens",
+            ),
+            (
+                Method::GET,
+                "https://api.github.com/repos/owner/repo/issues?page=2",
+            ),
+            (Method::POST, "https://api.github.com/graphql"),
+            (
+                Method::GET,
+                "https://github.com/owner/repo.git/info/refs?service=git-upload-pack",
+            ),
+            (
+                Method::POST,
+                "https://github.com/owner/repo.git/git-receive-pack",
+            ),
+        ] {
+            assert!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected).is_ok(),
+                "{target}"
+            );
+        }
+        for (method, target) in [
+            (Method::POST, "https://auth.openai.com/oauth/token"),
+            (Method::GET, "https://api.anthropic.com/v1/messages"),
+            (
+                Method::POST,
+                "https://api.anthropic.com/v1/messages?beta=false",
+            ),
+            (
+                Method::POST,
+                "https://api.anthropic.com/v1/messages/batches",
+            ),
+            (
+                Method::GET,
+                "https://api.github.com/repos/owner/repo/actions",
+            ),
+            (
+                Method::GET,
+                "https://api.github.com/user?url=https://evil.test",
+            ),
+            (Method::POST, "https://github.com/owner/repo.git/info/lfs"),
+            (
+                Method::GET,
+                "https://github.com/owner/repo.git/info/refs?service=git-upload-archive",
+            ),
+            (Method::GET, "https://api.github.com.evil.test/user"),
+            (Method::GET, "https://user:password@api.github.com/user"),
+            (Method::GET, "https://api.github.com:444/user"),
+            (Method::GET, "http://api.github.com/user"),
+        ] {
+            assert_eq!(
+                validate_target(&url::Url::parse(target).unwrap(), &method, &selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+    }
+    use crate::openai::response_admission_test_cases::{accepted_encodings, denied_encodings};
+
+    #[test]
+    fn response_admission_transport_rejects_nonidentity_or_ambiguous_encoding() {
+        for headers in denied_encodings() {
+            assert_eq!(
+                validate_response_headers(&headers),
+                Err(BrokerUpstreamError::Protocol),
+                "{headers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_admission_transport_accepts_absent_or_single_identity_encoding() {
+        for headers in accepted_encodings() {
+            assert_eq!(validate_response_headers(&headers), Ok(()), "{headers:?}");
+        }
+    }
+
+    #[test]
     fn destination_is_exact_and_never_redirectable() {
         assert!(
             validate_target(
                 &url::Url::parse("https://api.openai.com/v1/responses").unwrap(),
-                CredentialAuthKind::ApiKey,
+                &Method::POST,
+                &BTreeSet::from([HttpProvider::OpenAiApiKey]),
             )
             .is_ok()
         );
         assert!(
             validate_target(
                 &url::Url::parse("https://chatgpt.com/backend-api/codex/responses").unwrap(),
-                CredentialAuthKind::OAuth,
+                &Method::POST,
+                &BTreeSet::from([HttpProvider::CodexOAuth]),
             )
             .is_ok()
         );
         assert!(
             validate_target(
                 &url::Url::parse("https://auth.openai.com/oauth/token").unwrap(),
-                CredentialAuthKind::OAuth,
+                &Method::POST,
+                &BTreeSet::from([HttpProvider::CodexOAuth]),
             )
             .is_ok()
         );
@@ -294,7 +472,8 @@ mod tests {
             assert_eq!(
                 validate_target(
                     &url::Url::parse(denied).unwrap(),
-                    CredentialAuthKind::ApiKey,
+                    &Method::POST,
+                    &BTreeSet::from([HttpProvider::OpenAiApiKey]),
                 ),
                 Err(BrokerUpstreamError::DestinationDenied),
                 "{denied}"
@@ -308,7 +487,11 @@ mod tests {
             "https://user@auth.openai.com/oauth/token",
         ] {
             assert_eq!(
-                validate_target(&url::Url::parse(denied).unwrap(), CredentialAuthKind::OAuth,),
+                validate_target(
+                    &url::Url::parse(denied).unwrap(),
+                    &Method::POST,
+                    &BTreeSet::from([HttpProvider::CodexOAuth])
+                ),
                 Err(BrokerUpstreamError::DestinationDenied),
                 "{denied}"
             );

@@ -17,6 +17,7 @@ axum = { workspace = true }
 bytes = { workspace = true }
 codewire-client = { workspace = true }
 codewire-credential-bridge = { workspace = true }
+codewire-daemon = { workspace = true }
 codewire-gateway-proto = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-tailnet = { workspace = true }
@@ -48,6 +49,7 @@ zeroize = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["ssh-agent"] }
 rcgen = "0.13"
 boringtun = "0.7"
 chrono = { workspace = true }

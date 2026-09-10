@@ -4,11 +4,12 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as SyncMutex};
 
 use futures::Stream;
 use rand::{RngCore as _, rngs::OsRng};
@@ -51,8 +52,10 @@ const MAXIMUM_GUEST_PROGRESS_FRAMES: usize = 64;
 const RUNNER_WATCH_BUFFER: usize = 8;
 // Bump for every detached-runner behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
-const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 1;
+const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 2;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const GENERATION_ACCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const GENERATION_ACCESS_MAX_BYTES: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct RunnerEntrypointConfig {
@@ -158,6 +161,209 @@ impl RunnerClient {
             .await?
             .into_inner())
     }
+
+    /// Private bootstrap transport for exactly one owned boot, including while
+    /// install is in progress. Callers must discard this general client and
+    /// daemon capability before entering their protected-material domain.
+    pub async fn generation_daemon_access(
+        &mut self,
+        environment_id: Uuid,
+        generation: u64,
+    ) -> Result<v1::DaemonAccess, Status> {
+        if environment_id.is_nil() || generation == 0 {
+            return Err(Status::invalid_argument(
+                "invalid runner generation identity",
+            ));
+        }
+        let mut client = self
+            .inner
+            .clone()
+            .max_decoding_message_size(GENERATION_ACCESS_MAX_BYTES);
+        let access = tokio::time::timeout(
+            GENERATION_ACCESS_TIMEOUT,
+            client.get_generation_daemon_access(v1::GetGenerationDaemonAccessRequest {
+                environment_id: environment_id.to_string(),
+                generation,
+            }),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("runner generation access timed out"))??
+        .into_inner();
+        validate_generation_access(environment_id, generation, &access)?;
+        Ok(access)
+    }
+}
+
+fn validate_generation_access(
+    environment_id: Uuid,
+    generation: u64,
+    access: &v1::DaemonAccess,
+) -> Result<(), Status> {
+    if access.hybrid_socket.len() > GENERATION_ACCESS_MAX_BYTES
+        || access.hybrid_socket.contains('\0')
+        || HybridVsockTarget::new(PathBuf::from(&access.hybrid_socket), access.guest_port).is_err()
+        || codewire_vmm_guest_probe::Seed::new(
+            environment_id,
+            generation,
+            access.guest_port,
+            access.generation_capability.clone(),
+        )
+        .is_err()
+    {
+        return Err(Status::failed_precondition(
+            "invalid runner generation transport",
+        ));
+    }
+    Ok(())
+}
+
+/// A second, short-held lock is intentional: startup retains the lifecycle
+/// mutex while install may need this transport. No VM mutation uses this cell.
+/// Its token is ephemeral and never Debug/serialized except the private reply.
+struct GenerationAccessCell {
+    environment_id: Uuid,
+    current: SyncMutex<Option<PublishedGenerationAccess>>,
+}
+
+struct PublishedGenerationAccess {
+    generation: u64,
+    socket: String,
+    port: u32,
+    token: Zeroizing<String>,
+    liveness: OwnedFd,
+}
+
+struct GenerationAccessGuard {
+    cell: Arc<GenerationAccessCell>,
+    generation: u64,
+}
+
+impl GenerationAccessCell {
+    fn new(environment_id: Uuid) -> Arc<Self> {
+        Arc::new(Self {
+            environment_id,
+            current: SyncMutex::new(None),
+        })
+    }
+
+    fn publish(self: &Arc<Self>, running: &RunningVm) -> Result<GenerationAccessGuard, Status> {
+        if running.vm_id() != self.environment_id {
+            return Err(Status::permission_denied("runner identity mismatch"));
+        }
+        let (socket, port, token) = running.daemon_access_parts();
+        let socket = socket
+            .to_str()
+            .ok_or_else(|| Status::internal("invalid runner transport path"))?;
+        let liveness = running
+            .duplicate_liveness_descriptor()
+            .map_err(|_| Status::internal("observe owned VMM liveness failed"))?;
+        self.install(
+            running.generation(),
+            v1::DaemonAccess {
+                hybrid_socket: socket.to_owned(),
+                guest_port: port,
+                generation_capability: token.to_owned(),
+            },
+            liveness,
+        )
+    }
+
+    fn install(
+        self: &Arc<Self>,
+        generation: u64,
+        access: v1::DaemonAccess,
+        liveness: OwnedFd,
+    ) -> Result<GenerationAccessGuard, Status> {
+        validate_generation_access(self.environment_id, generation, &access)?;
+        if !generation_process_alive(&liveness) {
+            return Err(Status::failed_precondition("runner generation is not live"));
+        }
+        let mut current = self
+            .current
+            .lock()
+            .map_err(|_| Status::unavailable("runner generation access unavailable"))?;
+        if current.is_some() {
+            return Err(Status::failed_precondition(
+                "runner generation access already owned",
+            ));
+        }
+        *current = Some(PublishedGenerationAccess {
+            generation,
+            socket: access.hybrid_socket,
+            port: access.guest_port,
+            token: Zeroizing::new(access.generation_capability),
+            liveness,
+        });
+        Ok(GenerationAccessGuard {
+            cell: Arc::clone(self),
+            generation,
+        })
+    }
+
+    fn get(&self, environment_id: Uuid, generation: u64) -> Result<v1::DaemonAccess, Status> {
+        if environment_id != self.environment_id {
+            return Err(Status::permission_denied("runner identity mismatch"));
+        }
+        if generation == 0 {
+            return Err(Status::invalid_argument(
+                "invalid runner generation identity",
+            ));
+        }
+        let mut current = self
+            .current
+            .lock()
+            .map_err(|_| Status::unavailable("runner generation access unavailable"))?;
+        let access = current
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("runner generation access unavailable"))?;
+        if access.generation != generation {
+            return Err(Status::failed_precondition(
+                "runner generation does not match",
+            ));
+        }
+        if !generation_process_alive(&access.liveness) {
+            *current = None;
+            return Err(Status::failed_precondition("runner generation is not live"));
+        }
+        Ok(v1::DaemonAccess {
+            hybrid_socket: access.socket.clone(),
+            guest_port: access.port,
+            generation_capability: access.token.to_string(),
+        })
+    }
+}
+
+impl GenerationAccessGuard {
+    fn revoke(&self) {
+        let mut current = self
+            .cell
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if current
+            .as_ref()
+            .is_some_and(|access| access.generation == self.generation)
+        {
+            *current = None;
+        }
+    }
+}
+
+impl Drop for GenerationAccessGuard {
+    fn drop(&mut self) {
+        self.revoke();
+    }
+}
+
+fn generation_process_alive(liveness: &OwnedFd) -> bool {
+    let mut descriptor = libc::pollfd {
+        fd: liveness.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one owned pidfd pins the process birth. Zero-timeout poll never
+    // waits on lifecycle state; exit, descriptor errors and interruption deny.
+    unsafe { libc::poll(&mut descriptor, 1, 0) == 0 && descriptor.revents == 0 }
 }
 
 fn runner_protocol_info_rpc_error(status: Status) -> RunnerServiceError {
@@ -306,11 +512,13 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
         generation,
     ));
     let (adoption_tx, mut adoption_rx) = mpsc::channel::<AdoptionRequest>(1);
+    let generation_access = GenerationAccessCell::new(config.environment_id);
     let service = RunnerRpc {
         state: Arc::new(Mutex::new(RunnerState {
             environment_id: config.environment_id,
             artifact_generation: config.artifact_generation,
             runner,
+            generation_access: None,
             running: None,
             generation,
             state: v1::EnvironmentState::Stopped,
@@ -321,6 +529,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
         })),
         adoption: adoption_tx,
         events,
+        generation_access,
     };
     let (incoming, socket_identity) = bind_owner_only(&config.socket)?;
     let server = tokio::spawn(async move {
@@ -344,6 +553,9 @@ struct RunnerState {
     environment_id: Uuid,
     artifact_generation: String,
     runner: CloudHypervisorRunner,
+    // Declared before running so teardown revokes lookup before dropping VM
+    // ownership. During startup its guard stays on the StartVm future stack.
+    generation_access: Option<GenerationAccessGuard>,
     running: Option<RunningVm>,
     generation: u64,
     state: v1::EnvironmentState,
@@ -370,9 +582,29 @@ impl RunnerState {
 
     async fn observe_exit_with_reason(&mut self) -> Result<Option<&'static str>, RunnerError> {
         let Some(running) = self.running.as_mut() else {
+            self.generation_access = None;
             return Ok(None);
         };
-        let exit = running.observe_exit().await?;
+        let exit = running.observe_exit().await;
+        self.record_observed_exit(exit)
+    }
+
+    fn record_observed_exit(
+        &mut self,
+        exit: Result<ExitClass, RunnerError>,
+    ) -> Result<Option<&'static str>, RunnerError> {
+        let exit = match exit {
+            Ok(exit) => exit,
+            Err(error) => {
+                self.generation_access = None;
+                return Err(error);
+            }
+        };
+        if exit != ExitClass::StillRunning {
+            // A failed sidecar can leave the VMM owned for safe later cleanup.
+            // That retained ownership must not keep bootstrap access active.
+            self.generation_access = None;
+        }
         let error_code = runner_exit_error_code(exit);
         match exit {
             ExitClass::StillRunning => Ok(error_code),
@@ -448,6 +680,7 @@ struct RunnerRpc {
     state: Arc<Mutex<RunnerState>>,
     adoption: mpsc::Sender<AdoptionRequest>,
     events: Arc<RunnerEvents>,
+    generation_access: Arc<GenerationAccessCell>,
 }
 
 struct AdoptionRequest {
@@ -567,6 +800,12 @@ impl EnvironmentRunnerService for RunnerRpc {
         let mesh = parse_mesh_attachment(&request)?;
         let direct_shares = parse_direct_shares(&request)?;
         let skill_snapshot_sha256 = parse_skill_snapshot(&request)?;
+        let environment_projection_sha256 = parse_environment_projection(&request)?;
+        let managed_credential_clients =
+            codewire_access::ManagedCredentialClients::decode(&request.managed_credential_clients)
+                .map_err(|_| {
+                    Status::invalid_argument("invalid managed credential client selection")
+                })?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let mut state = self.state.lock().await;
         if !state.adopted {
@@ -610,6 +849,8 @@ impl EnvironmentRunnerService for RunnerRpc {
                 mesh,
                 direct_shares,
                 skill_snapshot_sha256,
+                environment_projection_sha256,
+                managed_credential_clients,
             })
             .await
         {
@@ -654,6 +895,24 @@ impl EnvironmentRunnerService for RunnerRpc {
                 return Err(map_start_error(error));
             }
         };
+        // Publish only after the exact VMM process is owned. If this future is
+        // cancelled, its local guard revokes access before RunningVm drops.
+        let generation_access = match self.generation_access.publish(&running) {
+            Ok(guard) => guard,
+            Err(error) => {
+                let _ = running.stop().await;
+                state.state = v1::EnvironmentState::Error;
+                state.error_code = Some("daemon_access_failed");
+                self.events.publish(
+                    v1::EnvironmentState::Error,
+                    request.generation,
+                    v1::RunnerStage::Error,
+                    None,
+                    Some("daemon_access_failed"),
+                )?;
+                return Err(error);
+            }
+        };
         let worker_executable = std::env::current_exe()
             .ok()
             .and_then(|path| std::fs::canonicalize(path).ok())
@@ -661,6 +920,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let worker_executable = match worker_executable {
             Ok(executable) => executable,
             Err(()) => {
+                generation_access.revoke();
                 let _ = running.stop().await;
                 state.state = v1::EnvironmentState::Error;
                 state.error_code = Some("network_worker_failed");
@@ -683,6 +943,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             )
             .await
         {
+            generation_access.revoke();
             let _ = running.stop().await;
             let error_code = network_start_error_code(&error);
             state.state = v1::EnvironmentState::Error;
@@ -706,6 +967,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         if let Err(error) =
             wait_for_guest_daemon(&mut running, daemon_ready_timeout, &self.events).await
         {
+            generation_access.revoke();
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
             state.error_code = Some("guest_start_failed");
@@ -719,6 +981,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             return Err(error);
         }
         if running.discard_one_boot_inputs().is_err() {
+            generation_access.revoke();
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
             state.error_code = Some("input_cleanup_failed");
@@ -735,13 +998,19 @@ impl EnvironmentRunnerService for RunnerRpc {
         state.state = v1::EnvironmentState::Running;
         state.error_code = None;
         state.running = Some(running);
-        self.events.publish(
+        state.generation_access = Some(generation_access);
+        if let Err(error) = self.events.publish(
             v1::EnvironmentState::Running,
             request.generation,
             v1::RunnerStage::DaemonReady,
             None,
             None,
-        )?;
+        ) {
+            state.generation_access = None;
+            state.state = v1::EnvironmentState::Error;
+            state.error_code = Some("daemon_access_failed");
+            return Err(error);
+        }
         Ok(Response::new(state.info()))
     }
 
@@ -750,6 +1019,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         _request: Request<v1::StopVmRequest>,
     ) -> Result<Response<v1::RunnerInfo>, Status> {
         let mut state = self.state.lock().await;
+        state.generation_access = None;
         state
             .observe_exit()
             .await
@@ -798,6 +1068,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         _request: Request<v1::PrepareRetireRunnerRequest>,
     ) -> Result<Response<v1::PrepareRetireRunnerResponse>, Status> {
         let mut state = self.state.lock().await;
+        state.generation_access = None;
         self.events.publish(
             state.state,
             state.generation,
@@ -886,6 +1157,9 @@ impl EnvironmentRunnerService for RunnerRpc {
             .observe_exit()
             .await
             .map_err(|_| Status::internal("observe VMM state failed"))?;
+        if state.state != v1::EnvironmentState::Running {
+            return Err(Status::failed_precondition("environment is not running"));
+        }
         let running = state
             .running
             .as_ref()
@@ -896,6 +1170,19 @@ impl EnvironmentRunnerService for RunnerRpc {
             guest_port,
             generation_capability: capability.to_owned(),
         }))
+    }
+
+    async fn get_generation_daemon_access(
+        &self,
+        request: Request<v1::GetGenerationDaemonAccessRequest>,
+    ) -> Result<Response<v1::DaemonAccess>, Status> {
+        let request = request.into_inner();
+        let environment_id = parse_environment_id(&request.environment_id)?;
+        // Do not inspect/adopt/reconcile through self.state here. Its mutex is
+        // intentionally held by StartVm until authenticated install completes.
+        self.generation_access
+            .get(environment_id, request.generation)
+            .map(Response::new)
     }
 }
 
@@ -1048,6 +1335,22 @@ fn parse_skill_snapshot(request: &v1::StartVmRequest) -> Result<Option<Sha256Val
             .map(Some)
             .map_err(|_| Status::invalid_argument("invalid skill snapshot digest"))
     }
+}
+
+fn parse_environment_projection(
+    request: &v1::StartVmRequest,
+) -> Result<Option<Sha256Value>, Status> {
+    if request.environment_projection_sha256.is_empty() {
+        return Ok(None);
+    }
+    let digest = Sha256Value::parse_hex(&request.environment_projection_sha256)
+        .map_err(|_| Status::invalid_argument("invalid environment projection digest"))?;
+    if digest.as_bytes() == [0; 32] {
+        return Err(Status::invalid_argument(
+            "invalid environment projection digest",
+        ));
+    }
+    Ok(Some(digest))
 }
 
 fn map_start_error(error: RunnerError) -> Status {
@@ -1407,6 +1710,328 @@ mod tests {
 
     const PROGRESS_TOKEN: &str = "runner-progress-test-token-0123456789abcdef";
 
+    fn bootstrap_access() -> (
+        tempfile::TempDir,
+        std::os::unix::net::UnixListener,
+        v1::DaemonAccess,
+    ) {
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = parent.path().join("vsock.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let access = v1::DaemonAccess {
+            hybrid_socket: socket.to_str().unwrap().into(),
+            guest_port: 7_777,
+            generation_capability: PROGRESS_TOKEN.into(),
+        };
+        (parent, listener, access)
+    }
+
+    fn current_process_liveness() -> OwnedFd {
+        rustix::process::pidfd_open(
+            rustix::process::getpid(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap()
+    }
+
+    fn bootstrap_rpc() -> (tempfile::TempDir, RunnerRpc) {
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let environment_id = Uuid::new_v4();
+        // Metadata-only service fixture: no artifact is executed or VM booted.
+        let artifact = crate::artifact::AdmittedArtifact::for_test("/nonexistent/test-artifact");
+        let runner = CloudHypervisorRunner::from_admitted(
+            parent.path().join("state"),
+            crate::artifact::AdmittedArtifacts {
+                cloud_hypervisor: artifact.clone(),
+                virtiofsd: None,
+                kernel: artifact.clone(),
+                initramfs: artifact,
+            },
+        )
+        .unwrap();
+        let rpc = RunnerRpc {
+            state: Arc::new(Mutex::new(RunnerState {
+                environment_id,
+                artifact_generation: "synthetic".into(),
+                runner,
+                generation_access: None,
+                running: None,
+                generation: 1,
+                state: v1::EnvironmentState::Starting,
+                error_code: None,
+                adopted: true,
+                mesh_data_dir: parent.path().join("mesh"),
+                platform_config_dir: parent.path().join("platform"),
+            })),
+            adoption: mpsc::channel(1).0,
+            events: Arc::new(RunnerEvents::new(environment_id, "synthetic".into(), 1)),
+            generation_access: GenerationAccessCell::new(environment_id),
+        };
+        (parent, rpc)
+    }
+
+    #[test]
+    fn generation_access_is_exact_and_old_guard_cannot_clear_a_new_boot() {
+        let (_parent, _listener, access) = bootstrap_access();
+        let environment_id = Uuid::new_v4();
+        let cell = GenerationAccessCell::new(environment_id);
+        let first = cell
+            .install(1, access.clone(), current_process_liveness())
+            .unwrap();
+        assert!(cell.get(Uuid::new_v4(), 1).is_err());
+        assert!(cell.get(environment_id, 0).is_err());
+        assert!(cell.get(environment_id, 2).is_err());
+        assert_eq!(cell.get(environment_id, 1).unwrap(), access);
+        assert!(
+            cell.install(2, access.clone(), current_process_liveness())
+                .is_err()
+        );
+        first.revoke();
+        let second = cell
+            .install(2, access.clone(), current_process_liveness())
+            .unwrap();
+        drop(first);
+        assert_eq!(cell.get(environment_id, 2).unwrap(), access);
+        assert!(cell.get(environment_id, 1).is_err());
+        drop(second);
+        assert!(cell.get(environment_id, 2).is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_startup_owner_revokes_generation_access() {
+        let (_parent, _listener, access) = bootstrap_access();
+        let environment_id = Uuid::new_v4();
+        let cell = GenerationAccessCell::new(environment_id);
+        let owner = Arc::clone(&cell);
+        let (ready, started) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = owner
+                .install(1, access, current_process_liveness())
+                .unwrap();
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        assert!(cell.get(environment_id, 1).is_ok());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(cell.get(environment_id, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn generation_access_denies_exited_process_before_state_observation() {
+        let (_parent, _listener, access) = bootstrap_access();
+        let environment_id = Uuid::new_v4();
+        let cell = GenerationAccessCell::new(environment_id);
+        let mut child = tokio::process::Command::new("/bin/sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = rustix::process::Pid::from_raw(child.id().unwrap() as i32).unwrap();
+        let descriptor =
+            rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap();
+        let _guard = cell.install(1, access, descriptor).unwrap();
+        assert!(cell.get(environment_id, 1).is_ok());
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        assert!(cell.get(environment_id, 1).is_err());
+        assert!(cell.current.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rpc_and_protocol_info_do_not_wait_for_startup_state_lock() {
+        let (parent, rpc) = bootstrap_rpc();
+        let (_transport_parent, _listener, expected_access) = bootstrap_access();
+        let id = rpc.events.environment_id;
+        let _guard = rpc
+            .generation_access
+            .install(1, expected_access.clone(), current_process_liveness())
+            .unwrap();
+        let socket = parent.path().join("runner.sock");
+        let (incoming, identity) = bind_owner_only(&socket).unwrap();
+        let (shutdown, stopped) = oneshot::channel();
+        let service = rpc.clone();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(EnvironmentRunnerServiceServer::new(service))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        let held = rpc.state.lock().await;
+        let mut client = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            RunnerClient::connect(&socket),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let access = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.generation_daemon_access(id, 1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(access, expected_access);
+        assert!(
+            client
+                .generation_daemon_access(Uuid::new_v4(), 1)
+                .await
+                .is_err()
+        );
+        assert!(client.generation_daemon_access(id, 2).await.is_err());
+        assert!(client.generation_daemon_access(id, 0).await.is_err());
+        // The normal route deliberately remains serialized and readiness-gated.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                rpc.get_daemon_access(Request::new(v1::GetDaemonAccessRequest {}))
+            )
+            .await
+            .is_err()
+        );
+        drop(held);
+        assert!(
+            rpc.get_daemon_access(Request::new(v1::GetDaemonAccessRequest {}))
+                .await
+                .is_err()
+        );
+        drop(client);
+        shutdown.send(()).unwrap();
+        server.await.unwrap();
+        remove_bound_socket(&socket, &identity).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_retire_and_observed_failures_revoke_even_retained_generation_access() {
+        let (_transport_parent, _listener, access) = bootstrap_access();
+        for retire in [false, true] {
+            let (_parent, rpc) = bootstrap_rpc();
+            let id = rpc.events.environment_id;
+            rpc.state.lock().await.generation_access = Some(
+                rpc.generation_access
+                    .install(1, access.clone(), current_process_liveness())
+                    .unwrap(),
+            );
+            // Force an early error before the stop body can complete; revoke
+            // must precede even event publication, not depend on successful stop.
+            rpc.events.sequence.store(u64::MAX, Ordering::Relaxed);
+            if retire {
+                assert!(
+                    rpc.prepare_retire_runner(Request::new(v1::PrepareRetireRunnerRequest {}))
+                        .await
+                        .is_err()
+                );
+            } else {
+                assert!(
+                    rpc.stop_vm(Request::new(v1::StopVmRequest {}))
+                        .await
+                        .is_err()
+                );
+            }
+            assert!(rpc.generation_access.get(id, 1).is_err());
+        }
+        for exit in [
+            Ok(ExitClass::GuestShutdown),
+            Ok(ExitClass::VmmFailure(Some(1))),
+            Ok(ExitClass::DirectShareFailure(Some(1))),
+            Ok(ExitClass::NetworkWorkerFailure(Some(1))),
+            Ok(ExitClass::EgressBrokerFailure(Some(1))),
+            Ok(ExitClass::IngressForwarderFailure),
+            Ok(ExitClass::MeshTransportFailure(Some(1))),
+            Ok(ExitClass::MeshIngressReceiverFailure),
+            Err(RunnerError::Wait),
+        ] {
+            let (_parent, rpc) = bootstrap_rpc();
+            let id = rpc.events.environment_id;
+            let mut state = rpc.state.lock().await;
+            state.generation_access = Some(
+                rpc.generation_access
+                    .install(1, access.clone(), current_process_liveness())
+                    .unwrap(),
+            );
+            // The real state-transition seam covers failures that deliberately
+            // retain an owned VMM for cleanup; it must clear the separate cell.
+            let _ = state.record_observed_exit(exit);
+            assert!(rpc.generation_access.get(id, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn generation_transport_and_projection_digest_are_bounded_and_canonical() {
+        let id = Uuid::new_v4();
+        let (_parent, _listener, access) = bootstrap_access();
+        validate_generation_access(id, 1, &access).unwrap();
+        for invalid in [
+            v1::DaemonAccess {
+                hybrid_socket: "relative.sock".into(),
+                ..access.clone()
+            },
+            v1::DaemonAccess {
+                hybrid_socket: format!("/{}", "x".repeat(GENERATION_ACCESS_MAX_BYTES)),
+                ..access.clone()
+            },
+            v1::DaemonAccess {
+                hybrid_socket: "/invalid\0sock".into(),
+                ..access.clone()
+            },
+            v1::DaemonAccess {
+                guest_port: 0,
+                ..access.clone()
+            },
+            v1::DaemonAccess {
+                generation_capability: "x".repeat(513),
+                ..access.clone()
+            },
+            v1::DaemonAccess {
+                generation_capability: "invalid\ntoken".into(),
+                ..access.clone()
+            },
+        ] {
+            let error = validate_generation_access(id, 1, &invalid).unwrap_err();
+            assert_eq!(error.message(), "invalid runner generation transport");
+            assert!(!error.to_string().contains(PROGRESS_TOKEN));
+        }
+        assert!(
+            parse_environment_projection(&v1::StartVmRequest::default())
+                .unwrap()
+                .is_none()
+        );
+        let digest = "ab".repeat(32);
+        assert_eq!(
+            parse_environment_projection(&v1::StartVmRequest {
+                environment_projection_sha256: digest.clone(),
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap()
+            .to_string(),
+            digest
+        );
+        for invalid in [
+            "0".repeat(64),
+            "A".repeat(64),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64),
+        ] {
+            assert!(
+                parse_environment_projection(&v1::StartVmRequest {
+                    environment_projection_sha256: invalid,
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+    }
+
     async fn read_connect_line(stream: &mut tokio::net::UnixStream) -> String {
         let mut line = Vec::new();
         loop {
@@ -1434,7 +2059,7 @@ mod tests {
         })
         .unwrap();
 
-        for actual in [0, NATIVE_RUNNER_PROTOCOL_VERSION + 1] {
+        for actual in [0, 1, NATIVE_RUNNER_PROTOCOL_VERSION + 1] {
             let error = admit_runner_protocol_info(&v1::RunnerProtocolInfo {
                 protocol_version: actual,
             })

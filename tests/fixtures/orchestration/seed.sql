@@ -47,6 +47,12 @@ WHERE preset_id IN (
        OR id = 'preset_contract_official'
 );
 
+DELETE FROM platform_environment_access_bindings
+WHERE profile_id = '22222222-2222-4222-8222-222222222226';
+
+DELETE FROM platform_access_profiles
+WHERE id = '22222222-2222-4222-8222-222222222226';
+
 DELETE FROM sandbox_template_config
 WHERE preset_id IN (
     SELECT id
@@ -202,12 +208,41 @@ VALUES (
 -- uses one global official preset for cross-organization reads and one active
 -- environment proving the preset-in-use lifecycle error.
 INSERT INTO secret_projects (id, org_id, name, created_at)
+VALUES
+    (
+        'sp_preset_contract_1',
+        'org_apikey_contract_1',
+        'preset-contract-secrets',
+        '2026-07-10 10:04:00'
+    ),
+    (
+        '11111111-1111-4111-8111-111111111115',
+        'org_apikey_contract_1',
+        'wire-contract-project',
+        '2026-07-10 10:04:01'
+    );
+
+-- A deliberately empty personal profile proves source admission and immutable
+-- revision binding without enrolling or reading any credential material.
+BEGIN;
+INSERT INTO platform_access_profiles (
+    id, user_id, name, current_revision, created_at, updated_at
+)
 VALUES (
-    'sp_preset_contract_1',
-    'org_apikey_contract_1',
-    'preset-contract-secrets',
-    '2026-07-10 10:04:00'
+    '22222222-2222-4222-8222-222222222226',
+    'usr_apikey_contract_admin',
+    'wire-contract-empty',
+    1,
+    '2026-07-10 10:04:02',
+    '2026-07-10 10:04:02'
 );
+INSERT INTO platform_access_profile_revisions (profile_id, revision, created_at)
+VALUES (
+    '22222222-2222-4222-8222-222222222226',
+    1,
+    '2026-07-10 10:04:02'
+);
+COMMIT;
 
 INSERT INTO environment_presets (
     id, org_id, name, slug, description, official, language,
@@ -464,6 +499,27 @@ VALUES
         NULL, false, NULL, NULL, '2026-07-10 10:34:00',
         '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb
     );
+
+-- A stopped, setup-independent environment gives the public source mutation
+-- contract a stable operation fence. The test updates metadata only; it does
+-- not claim a running workspace projection or child execution.
+INSERT INTO environments (
+    id, org_id, created_by, type, name, state, desired_state, preset_id,
+    environment_operation_generation, project_spec, created_at
+)
+VALUES (
+    'env_environment_contract_sources',
+    'org_apikey_contract_1',
+    'usr_apikey_contract_admin',
+    'sandbox',
+    'environment-contract-sources',
+    'stopped',
+    'stopped',
+    'preset_contract_in_use',
+    7,
+    '{"schema_version":1,"working_directory":"/workspace","resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":10}}'::jsonb,
+    '2026-07-10 10:34:01'
+);
 
 INSERT INTO environment_resize_operations (
     id, org_id, environment_id, request_id,

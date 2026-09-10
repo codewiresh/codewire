@@ -10,12 +10,13 @@ use portable_pty::{PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tonic::Status;
 use uuid::Uuid;
 
 use crate::Config;
+use crate::credential_bridge::CredentialBridge;
 use crate::env::{build_process_env, default_shell_for};
 use crate::execution::{PreparedProcess, ProcessExecution};
 
@@ -44,6 +45,7 @@ impl std::fmt::Debug for SessionEngine {
 
 struct SessionEngineInner {
     config: Config,
+    credential_bridge: CredentialBridge,
     root: PathBuf,
     initialized: OnceCell<Result<(), String>>,
     sessions: Mutex<BTreeMap<String, Arc<SessionHandle>>>,
@@ -54,6 +56,7 @@ struct SessionHandle {
     metadata: AsyncMutex<PersistedSession>,
     output_index: Mutex<Vec<OutputFrameIndex>>,
     operation: AsyncMutex<()>,
+    launch_cancellation: watch::Sender<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -196,10 +199,11 @@ pub enum SessionError {
 }
 
 impl SessionEngine {
-    pub fn new(config: &Config) -> Self {
+    pub(crate) fn new(config: &Config, credential_bridge: CredentialBridge) -> Self {
         Self {
             inner: Arc::new(SessionEngineInner {
                 config: config.clone(),
+                credential_bridge,
                 root: config.home_root.join(SESSION_DIRECTORY),
                 initialized: OnceCell::new(),
                 sessions: Mutex::new(BTreeMap::new()),
@@ -260,6 +264,7 @@ impl SessionEngine {
             metadata: AsyncMutex::new(persisted),
             output_index: Mutex::new(Vec::new()),
             operation: AsyncMutex::new(()),
+            launch_cancellation: watch::channel(false).0,
         });
         let _operation = handle.operation.lock().await;
         {
@@ -297,6 +302,9 @@ impl SessionEngine {
         self.ensure_initialized().await?;
         validate_session_id(session_id)?;
         let handle = self.handle(session_id)?;
+        // Interrupt a pending projection before waiting for the serial session
+        // operation lock. A queued Stop must not wait for secret delivery.
+        handle.launch_cancellation.send_replace(true);
         let _operation = handle.operation.lock().await;
         self.stop_active(session_id, &handle).await
     }
@@ -340,10 +348,12 @@ impl SessionEngine {
         self.ensure_initialized().await?;
         validate_session_id(session_id)?;
         let handle = self.handle(session_id)?;
+        handle.launch_cancellation.send_replace(true);
         let _operation = handle.operation.lock().await;
         if lock(&self.inner.active).contains_key(session_id) {
             self.stop_active(session_id, &handle).await?;
         }
+        handle.launch_cancellation.send_replace(false);
 
         {
             let mut metadata = handle.metadata.lock().await;
@@ -533,9 +543,17 @@ impl SessionEngine {
             return self.start_pty_process(handle, snapshot).await;
         }
         let command = &snapshot.command;
-        let environment = build_process_env(&self.inner.config, &snapshot.env, &snapshot.term);
-        let mut prepared = match PreparedProcess::prepare(
-            &self.inner.config.process_execution,
+        let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
+        {
+            Ok(environment) => environment,
+            Err(error) => {
+                return self
+                    .record_startup_failure(handle, format!("prepare session environment: {error}"))
+                    .await;
+            }
+        };
+        let mut prepared = match PreparedProcess::prepare_configured(
+            (&self.inner.config, &self.inner.credential_bridge),
             command,
             &snapshot.working_dir,
             &environment,
@@ -563,6 +581,18 @@ impl SessionEngine {
                     .await;
             }
         };
+        let projection = tokio::select! {
+            biased;
+            _ = wait_for_launch_cancellation(&handle) => Err(std::io::Error::other("environment launch cancelled")),
+            result = prepared.project_spawned(child.id()) => result,
+        };
+        if projection.is_err() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return self
+                .record_startup_failure(handle, "environment launch denied or expired".into())
+                .await;
+        }
         let Some(stdin) = child.stdin.take() else {
             let _ = child.kill().await;
             return self
@@ -642,14 +672,25 @@ impl SessionEngine {
         handle: Arc<SessionHandle>,
         snapshot: PersistedSession,
     ) -> Result<v1::SessionRecord, SessionError> {
-        let environment = build_process_env(&self.inner.config, &snapshot.env, &snapshot.term);
+        let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
+        {
+            Ok(environment) => environment,
+            Err(error) => {
+                return self
+                    .record_startup_failure(
+                        handle,
+                        format!("prepare session PTY environment: {error}"),
+                    )
+                    .await;
+            }
+        };
         let size = pty_size(snapshot.width, snapshot.height);
         let pair = native_pty_system()
             .openpty(size)
             .map_err(|error| SessionError::Internal(format!("open session PTY: {error}")))?;
 
-        let mut prepared = match PreparedProcess::prepare(
-            &self.inner.config.process_execution,
+        let mut prepared = match PreparedProcess::prepare_configured(
+            (&self.inner.config, &self.inner.credential_bridge),
             &snapshot.command,
             &snapshot.working_dir,
             &environment,
@@ -679,11 +720,23 @@ impl SessionEngine {
         };
         drop(pair.slave);
 
+        let mut child = crate::execution::PtyLaunchGuard::new(child);
+        let projection = tokio::select! {
+            biased;
+            _ = wait_for_launch_cancellation(&handle) => Err(std::io::Error::other("environment launch cancelled")),
+            result = prepared.project_spawned(child.process_id()) => result,
+        };
+        if projection.is_err() {
+            child.terminate().await;
+            return self
+                .record_startup_failure(handle, "environment launch denied or expired".into())
+                .await;
+        }
+
         let reader = match pair.master.try_clone_reader() {
             Ok(reader) => reader,
             Err(error) => {
-                let mut killer = child.clone_killer();
-                let _ = killer.kill();
+                child.terminate().await;
                 return self
                     .record_startup_failure(handle, format!("clone session PTY reader: {error}"))
                     .await;
@@ -692,8 +745,7 @@ impl SessionEngine {
         let writer = match pair.master.take_writer() {
             Ok(writer) => writer,
             Err(error) => {
-                let mut killer = child.clone_killer();
-                let _ = killer.kill();
+                child.terminate().await;
                 return self
                     .record_startup_failure(handle, format!("take session PTY writer: {error}"))
                     .await;
@@ -719,6 +771,7 @@ impl SessionEngine {
             output_rx,
             reader_thread,
         ));
+        let child = child.release();
         let killer = child.clone_killer();
         let wait_task = tokio::task::spawn_blocking(move || {
             let mut child = child;
@@ -856,6 +909,7 @@ impl SessionEngineInner {
                     metadata: AsyncMutex::new(metadata),
                     output_index: Mutex::new(output_index),
                     operation: AsyncMutex::new(()),
+                    launch_cancellation: watch::channel(false).0,
                 }),
             );
         }
@@ -874,6 +928,11 @@ impl Drop for SessionEngineInner {
             active.task.abort();
         }
     }
+}
+
+async fn wait_for_launch_cancellation(handle: &SessionHandle) {
+    let mut cancellation = handle.launch_cancellation.subscribe();
+    let _ = cancellation.wait_for(|cancelled| *cancelled).await;
 }
 
 async fn monitor_process(monitor: ProcessMonitor) {
@@ -1720,6 +1779,70 @@ pub fn status_from_session_error(error: SessionError) -> Status {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn durable_restart_rejects_explicit_selected_client_collision_before_spawn() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let workspace = temp.path().join("workspace");
+        tokio::fs::create_dir(&home).await.unwrap();
+        tokio::fs::create_dir(&workspace).await.unwrap();
+        let marker = temp.path().join("must-not-spawn");
+        let config = Config {
+            listen_addr: "unused:0".into(),
+            workspace_root: workspace.clone(),
+            home_root: home,
+            auth_token: crate::DaemonAuthToken::new("synthetic-managed-client-test").unwrap(),
+            process_execution: ProcessExecution::Native,
+            credential_bridge: Some(crate::CredentialBridgeConfig {
+                transport: crate::CredentialBridgeTransport::Local,
+                environment_id: uuid::Uuid::from_u128(41),
+                environment_generation: 7,
+                ingress_socket: temp.path().join("unused-credentials.sock"),
+                ingress_uid: 1000,
+                ingress_gid: 1000,
+            }),
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+            launch_projection: Some(crate::LaunchProjectionConfig {
+                selection_sha256: [4; 32],
+                native: Some(crate::NativeLaunchProjectionConfig {
+                    helper_path: temp.path().join("must-not-inspect-helper"),
+                    process_directory: temp.path().join("must-not-inspect-processes"),
+                }),
+            }),
+        };
+        let bridge = CredentialBridge::new(config.credential_bridge.clone());
+        let engine = SessionEngine::new(&config, bridge);
+        let record = engine
+            .launch(v1::LaunchSessionRequest {
+                command: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!("touch {}", marker.display()),
+                ],
+                working_dir: workspace.to_string_lossy().into_owned(),
+                env: vec!["CODEX_HOME=".into()],
+                pty: false,
+                term: String::new(),
+                width: 0,
+                height: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(record.state, v1::SessionLifecycleState::Failed as i32);
+        assert!(record.status_message.contains("managed credential client"));
+        assert!(!marker.exists());
+
+        let restarted = engine.restart(&record.session_id).await.unwrap();
+        assert_eq!(restarted.state, v1::SessionLifecycleState::Failed as i32);
+        assert!(
+            restarted
+                .status_message
+                .contains("managed credential client")
+        );
+        assert!(!marker.exists());
+    }
 
     #[test]
     fn output_frame_header_has_stable_offset_stream_and_length_layout() {

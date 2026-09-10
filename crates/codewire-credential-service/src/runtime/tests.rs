@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use axum::{Router, body::Body};
 use base64::Engine as _;
 use codewire_access::{
-    AccessProfileName, CapabilitySlot, EnvironmentAccessBinding, EnvironmentId, GrantContext,
-    Owner, OwnerId, Placement,
+    AccessProfileName, CapabilitySlot, CredentialAuthKind, EnvironmentAccessBinding, EnvironmentId,
+    GrantContext, GrantPlacement, Owner, OwnerId,
 };
 use codewire_credential_broker::platform::bridge::PlatformBridgeAuthenticationError;
 use codewire_credential_broker::platform::{
@@ -28,8 +28,9 @@ use codewire_credential_broker::{
 };
 use codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
 use codewire_gateway_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
-use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::codewire::bridge::v1;
 use codewire_platform_credentials::{CredentialRecord, OAuthRefreshState};
+use codewire_protected_store::secret_envelope::TestKekProvider;
 use codewire_tls::ClientTlsEndpoint;
 use http::{Request, Response, StatusCode};
 use rcgen::{
@@ -161,6 +162,7 @@ fn rejecting_authenticator(
         Arc::new(KubernetesPlatformBridgeAuthenticator::new(
             client,
             h.pool.clone(),
+            Arc::new(TestKekProvider),
         )),
         calls,
     )
@@ -226,10 +228,19 @@ impl Running {
         let stopped = stop.clone();
         let pool = h.pool.clone();
         let owner = h.owner.clone();
-        let task = tokio::spawn(serve_owned(listeners, pool, owner, bridge, async move {
-            stopped.cancelled().await;
-            Ok(())
-        }));
+        let provider = h.provider.clone();
+        let task = tokio::spawn(serve_owned(
+            listeners,
+            http::HeaderValue::from_static("https://codewire.example"),
+            pool,
+            provider,
+            owner,
+            bridge,
+            async move {
+                stopped.cancelled().await;
+                Ok(())
+            },
+        ));
         Self {
             public,
             private,
@@ -318,7 +329,9 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
         // must still be closed by the runtime's error cleanup path.
         let actual = serve_owned(
             listeners,
+            http::HeaderValue::from_static("https://codewire.example"),
             h.pool.clone(),
+            h.provider.clone(),
             h.owner.clone(),
             bridge.clone(),
             std::future::pending(),
@@ -343,7 +356,7 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
         Ok(())
     }
     .await;
-    bridge.shutdown().await;
+    bridge.shutdown().await.unwrap();
     h.finish(result).await
 }
 
@@ -576,7 +589,7 @@ async fn refresh_fixture(
     let context = GrantContext {
         environment_id: environment,
         environment_generation: 7,
-        placement: Placement::Platform,
+        placement: GrantPlacement::Platform,
         user_id: OwnerId::parse(ALICE)?,
         organization_id: Some(OwnerId::parse("mutation-org")?),
         allow_personal_credentials: true,
@@ -655,6 +668,8 @@ async fn open_refresh(
         .send(v1::CredentialBridgeGuestMessage {
             payload: Some(v1::credential_bridge_guest_message::Payload::Request(
                 v1::CredentialBridgeRequest {
+                    capability_slot: "codex".into(),
+                    route: "openai-api".into(),
                     request_id: Uuid::new_v4().to_string(),
                     method: "POST".into(),
                     path: "/responses".into(),

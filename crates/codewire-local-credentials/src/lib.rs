@@ -14,6 +14,7 @@ mod broker_channel;
 mod broker_process;
 mod client;
 mod control;
+mod platform;
 mod repository;
 mod service;
 mod transport;
@@ -22,21 +23,32 @@ mod workload_secret;
 pub use broker_channel::{
     BrokerCredentialRefreshAdmission, BrokerCredentialRefreshReservation, BrokerLeaseAuditDecision,
     BrokerLeaseAuditEvent, BrokerLeaseChannelError, LocalCredentialBrokerLeaseClient,
+    LocalCredentialDelegationClient, LocalCredentialDelegationOutput,
+    LocalEnvironmentProjectionBinding, LocalSshSignError, LocalSshSignRequest, LocalSshSigner,
     StartedBrokerCredentialRefresh, serve_broker_lease_channel,
 };
 pub use broker_process::{
-    EnvironmentBrokerRuntime, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
-    LocalBrokerSpawnError,
+    EnvironmentBrokerRuntime, EnvironmentBrokerSelection, LocalBrokerProcessConfig,
+    LocalBrokerProcessSpawner, LocalBrokerSpawnError,
 };
 pub use client::{
     AuthorityInfo, LocalCredentialClient, LocalCredentialControlClient, PreparedGitRepository,
 };
+pub use platform::{
+    PlatformCredentialBinding, PlatformCredentialConnector, PlatformCredentialInput,
+    PlatformCredentialOutput,
+};
 pub use repository::{
     LocalCredentialRepositoryLeaseClient, LocalRepositoryGitProcessSpawner,
     LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner, LocalRepositorySpawnError,
-    MAX_GIT_BUNDLE_BYTES, RepositoryCredentialLease, RepositoryExecutorError,
-    RepositoryLeaseChannelError, run_git_credential_helper, run_local_repository_executor,
-    validate_github_https_source,
+    LocalRepositoryTransport, MAX_GIT_BUNDLE_BYTES, REPOSITORY_SSH_RUNTIME_PREFIX,
+    RepositoryCredentialLease, RepositoryExecutorError, RepositoryLeaseChannelError,
+    RepositoryPlatformAccess, RepositorySshCheckoutIntent, SSH_HELPER_BASENAME,
+    SSH_HELPER_HOST_ENV, SSH_HELPER_OWNER_ENV, SSH_HELPER_PORT_ENV, SSH_HELPER_RUNTIME_ENV,
+    run_git_credential_helper, run_git_credential_helper_for_endpoint,
+    run_local_repository_executor, run_local_ssh_repository_executor,
+    run_platform_repository_executor, validate_github_https_source,
+    validate_repository_ssh_runtime_path,
 };
 pub use service::{
     serve_local_credential_authority, serve_os_local_credential_authority,
@@ -45,8 +57,8 @@ pub use service::{
 };
 pub use transport::{AuthorityRuntimeConfig, AuthorityRuntimeError};
 pub use workload_secret::{
-    LocalSecretProject, ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata,
-    WorkloadSecretSelection, WorkloadSecretSource,
+    LocalLaunchSecretSelection, LocalSecretProject, ResolvedWorkloadSecretMetadata,
+    WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,12 +73,13 @@ use codewire_access::{
     AccessProfileScope, BrokerOperationId, BrokerRouteId,
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
-    EnvironmentId, GrantContext, GrantPermission, Owner, OwnerId, Placement, ProviderCatalog,
-    ProviderId, derive_grants, validate_profile_entries,
+    EnvironmentId, GrantContext, GrantPermission, GrantPlacement, Owner, OwnerId, Placement,
+    ProviderCatalog, ProviderId, SshPublicKeyMetadata, derive_grants, validate_profile_entries,
 };
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedStorePersistence,
     ProtectedValue,
+    ssh_material::{PreparedSshCredential, SshAgentMaterial, decode_protected_material},
 };
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
@@ -90,7 +103,8 @@ pub const AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES: [&str; 2] =
 
 const AUTHORITY_LOCK_FILE: &str = "authority.lock";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_4352; // "CWCR"
-const DATABASE_SCHEMA_VERSION: i64 = 3;
+const DATABASE_SCHEMA_VERSION: i64 = 4;
+const PREVIOUS_DATABASE_SCHEMA_VERSION: i64 = 3;
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +165,7 @@ pub struct CredentialOperationLease {
 /// Authority-private admission descriptor sent only over the inherited
 /// authority-to-broker channel. It deliberately contains an integer material
 /// generation rather than protected material or a protected-store reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CredentialOperationAdmission {
     credential: CredentialRecord,
     grant: DerivedGrant,
@@ -215,14 +230,30 @@ pub(crate) struct RepositoryCredentialLeaseRequest {
     pub source: String,
     pub branch: String,
     pub revision: String,
+    pub known_hosts: Vec<String>,
 }
 
-pub(crate) struct RepositoryCredentialAdmission {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepositoryGitHubCredentialAdmission {
     credential: CredentialRecord,
     profile_id: AccessProfileId,
     profile_revision: u64,
     permission: GrantPermission,
     material_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepositorySshCredentialAdmission {
+    credential: CredentialRecord,
+    profile_id: AccessProfileId,
+    profile_revision: u64,
+    material_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RepositoryCredentialAdmission {
+    GitHubOAuth(RepositoryGitHubCredentialAdmission),
+    Ssh(RepositorySshCredentialAdmission),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -407,10 +438,79 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         self.protected_store.persistence()
     }
 
+    pub(crate) fn validate_ssh_enrollment_name(
+        &self,
+        display_name: &str,
+    ) -> Result<(), AccessError> {
+        if display_name.is_empty()
+            || display_name.len() > 256
+            || display_name.trim() != display_name
+            || display_name.chars().any(char::is_control)
+        {
+            return Err(AccessError::InvalidField {
+                field: "credential display name",
+            });
+        }
+        let provider = ProviderId::parse("ssh")?;
+        let definition =
+            self.catalog
+                .get(&provider)
+                .ok_or_else(|| AccessError::ProviderUnavailable {
+                    provider: provider.clone(),
+                })?;
+        if !definition.supports_authentication_kind(CredentialAuthKind::SshKey) {
+            return Err(AccessError::UnsupportedAuthenticationKind {
+                provider,
+                kind: CredentialAuthKind::SshKey,
+            });
+        }
+        Ok(())
+    }
+
     pub fn add_credential(
         &self,
         input: NewCredential,
         material: ProtectedValue,
+    ) -> Result<CredentialRecord, LocalCredentialError> {
+        if input.provider.as_str() == "ssh"
+            || input.authentication_kind == CredentialAuthKind::SshKey
+        {
+            return Err(LocalCredentialError::SshCredentialRequiresEnrollment);
+        }
+        self.add_credential_inner(input, material, None, || Ok(()))
+    }
+
+    pub(crate) fn add_ssh_credential(
+        &self,
+        display_name: String,
+        expires_at_unix: Option<u64>,
+        prepared: PreparedSshCredential,
+        publication_check: impl FnOnce() -> Result<(), LocalCredentialError>,
+    ) -> Result<CredentialRecord, LocalCredentialError> {
+        let (public_key, material) = prepared.into_parts();
+        self.add_credential_inner(
+            NewCredential {
+                provider: ProviderId::parse("ssh")?,
+                authentication_kind: CredentialAuthKind::SshKey,
+                display_name,
+                account_hint: None,
+                expires_at_unix,
+            },
+            material,
+            Some(SshPublicKeyMetadata {
+                openssh: public_key.openssh().to_string(),
+                fingerprint: public_key.fingerprint().to_string(),
+            }),
+            publication_check,
+        )
+    }
+
+    fn add_credential_inner(
+        &self,
+        input: NewCredential,
+        material: ProtectedValue,
+        ssh_public_key: Option<SshPublicKeyMetadata>,
+        publication_check: impl FnOnce() -> Result<(), LocalCredentialError>,
     ) -> Result<CredentialRecord, LocalCredentialError> {
         let provider =
             self.catalog
@@ -435,6 +535,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             authentication_kind: input.authentication_kind,
             display_name: input.display_name,
             account_hint: input.account_hint,
+            ssh_public_key,
             status: CredentialStatus::Active,
             expires_at_unix: input.expires_at_unix,
             revocation_generation: 1,
@@ -451,19 +552,33 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             Ok(Some(_)) => return Err(LocalCredentialError::ProtectedEntryCollision),
             Err(error) => return Err(error.into()),
         }
+        // This is the publication boundary. Enrollment admission, shutdown,
+        // and the original RPC deadline are rechecked while the SQLite
+        // serialization lock is held. Once the pending row exists, journal
+        // disposition must finish even if the RPC waiter disappears.
+        publication_check()?;
         let inserted = connection.execute(
             "INSERT INTO credentials(
                id, provider, authentication_kind, display_name, account_hint,
+               ssh_public_key_openssh, ssh_public_key_fingerprint,
                status, expires_at_unix, revocation_generation,
                material_generation, protected_entry_id, store_persistence, material_state,
                created_at_unix_ms, updated_at_unix_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?12)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14, ?14)",
             params![
                 id.as_str(),
                 metadata.provider.as_str(),
                 auth_kind_to_str(metadata.authentication_kind),
                 metadata.display_name,
                 metadata.account_hint,
+                metadata
+                    .ssh_public_key
+                    .as_ref()
+                    .map(|key| key.openssh.as_str()),
+                metadata
+                    .ssh_public_key
+                    .as_ref()
+                    .map(|key| key.fingerprint.as_str()),
                 status_to_str(metadata.status),
                 expires_at,
                 i64::try_from(metadata.revocation_generation)
@@ -588,11 +703,15 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     /// ID. The old value remains active until the new entry and metadata commit
     /// are durable. Failure to delete the retired entry is journaled and
     /// reported through metadata without making the new value unavailable.
+    /// The caller must supply the exact observed revision. An absent account
+    /// hint clears the previous hint; callers preserving it must pass it back.
     pub fn rotate_credential_material(
         &self,
         id: &CredentialId,
+        expected_revocation_generation: u64,
         material: ProtectedValue,
         expires_at_unix: Option<u64>,
+        account_hint: Option<String>,
     ) -> Result<CredentialRecord, LocalCredentialError> {
         // Hold the refresh-owner lock through every journal and protected-store
         // mutation. A check-then-unlock here would let a broker begin a refresh
@@ -607,8 +726,31 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         }
         let mut connection = self.connection()?;
         let mut current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
+        if current.public.metadata.provider.as_str() == "ssh"
+            || current.public.metadata.authentication_kind == CredentialAuthKind::SshKey
+        {
+            return Err(LocalCredentialError::SshCredentialRequiresEnrollment);
+        }
+        if expected_revocation_generation == 0
+            || current.public.metadata.revocation_generation != expected_revocation_generation
+        {
+            // Even journal reconciliation can delete or promote protected
+            // material. A stale caller has no authority to initiate it.
+            return Err(LocalCredentialError::StaleCredentialRevision);
+        }
+        let mut replacement_metadata = current.public.metadata.clone();
+        replacement_metadata.account_hint = account_hint;
+        replacement_metadata.expires_at_unix = expires_at_unix;
+        replacement_metadata.status = CredentialStatus::Active;
+        replacement_metadata.validate()?;
+        let expires_at = optional_u64_to_i64(expires_at_unix)?;
         reconcile_ready_journal(&connection, &self.protected_store, &current)?;
         current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
+        if current.public.metadata.revocation_generation != expected_revocation_generation {
+            // Recovery may have promoted an abandoned OAuth refresh. Do not
+            // replace that newer result using an earlier confirmation.
+            return Err(LocalCredentialError::StaleCredentialRevision);
+        }
 
         let generation = current
             .public
@@ -650,16 +792,19 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 "UPDATE credentials
                  SET protected_entry_id = ?2, status = 'active', expires_at_unix = ?3,
                      revocation_generation = ?4, material_generation = ?5,
-                     updated_at_unix_ms = ?6
-                 WHERE id = ?1 AND material_state = 'ready'",
+                     updated_at_unix_ms = ?6, account_hint = ?7
+                 WHERE id = ?1 AND material_state = 'ready' AND revocation_generation = ?8",
                 params![
                     id.as_str(),
                     next_entry_id.expose_reference(),
-                    optional_u64_to_i64(expires_at_unix)?,
+                    expires_at,
                     i64::try_from(generation).map_err(|_| LocalCredentialError::CorruptMetadata)?,
                     i64::try_from(material_generation)
                         .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-                    i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?
+                    i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?,
+                    replacement_metadata.account_hint,
+                    i64::try_from(expected_revocation_generation)
+                        .map_err(|_| LocalCredentialError::CorruptMetadata)?
                 ],
             )
             .map_err(database_error)?;
@@ -1120,6 +1265,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         request: &CredentialOperationLeaseRequest,
     ) -> Result<CredentialOperationLease, LocalCredentialError> {
         let admission = self.admit_environment_credential_operation(request)?;
+        deny_generic_ssh_lease(&admission.credential.metadata)?;
         let entry_id = protected_entry_id(
             &admission.credential.metadata.id,
             admission.material_generation,
@@ -1143,6 +1289,43 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     ) -> Result<CredentialOperationAdmission, LocalCredentialError> {
         let connection = self.connection()?;
         self.admit_environment_credential_operation_at(&connection, request)
+    }
+
+    /// The inherited channel selects one exact profile, including explicit
+    /// absence. Binding comparison and grant derivation share the authority
+    /// lock so a concurrent replacement cannot select a different credential.
+    pub(crate) fn admit_selected_environment_credential_operation(
+        &self,
+        request: &CredentialOperationLeaseRequest,
+        expected: Option<&EnvironmentAccessBinding>,
+    ) -> Result<CredentialOperationAdmission, LocalCredentialError> {
+        let connection = self.connection()?;
+        check_selected_environment_binding(&connection, &request.environment_id, expected)?;
+        self.admit_environment_credential_operation_at(&connection, request)
+    }
+
+    pub(crate) fn read_admitted_credential_material(
+        &self,
+        admission: &CredentialOperationAdmission,
+    ) -> Result<ProtectedValue, LocalCredentialError> {
+        let entry_id = protected_entry_id(
+            &admission.credential.metadata.id,
+            admission.material_generation,
+        )?;
+        self.protected_store
+            .get(&entry_id)?
+            .ok_or(LocalCredentialError::CredentialMaterialMissing)
+    }
+
+    pub(crate) fn revalidate_credential_operation(
+        &self,
+        request: &CredentialOperationLeaseRequest,
+        captured: &CredentialOperationAdmission,
+    ) -> Result<(), LocalCredentialError> {
+        if self.admit_environment_credential_operation(request)? != *captured {
+            return Err(LocalCredentialError::CredentialOperationLeaseDenied);
+        }
+        Ok(())
     }
 
     fn admit_environment_credential_operation_at(
@@ -1193,24 +1376,39 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         &self,
         request: &RepositoryCredentialLeaseRequest,
     ) -> Result<RepositoryCredentialAdmission, LocalCredentialError> {
-        if crate::repository::validate_repository_lease_request(request).is_err() {
-            return Err(LocalCredentialError::CredentialOperationLeaseDenied);
-        }
+        let transport = crate::repository::validate_repository_lease_request(request)
+            .map_err(|_| LocalCredentialError::CredentialOperationLeaseDenied)?;
         let connection = self.connection()?;
         let profile =
             load_profile_revision(&connection, &request.profile_id, request.profile_revision)?
                 .profile;
-        let capability_slot = CapabilitySlot::github();
+        let capability_slot = match transport {
+            crate::repository::LocalRepositoryTransport::GitHubOAuth => CapabilitySlot::github(),
+            crate::repository::LocalRepositoryTransport::Ssh => {
+                CapabilitySlot::parse("ssh").expect("canonical SSH capability slot")
+            }
+        };
         let credential_id = profile
             .entries
             .get(&capability_slot)
             .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)?;
         let record =
             load_internal_credential(&connection, credential_id, Some(MaterialState::Ready))?;
-        let permission = GrantPermission {
-            operation: BrokerOperationId::parse("git-fetch")
-                .expect("canonical Git fetch operation ID"),
-            route: BrokerRouteId::parse("github-https").expect("canonical GitHub HTTPS route ID"),
+        let permissions = match transport {
+            crate::repository::LocalRepositoryTransport::GitHubOAuth => vec![GrantPermission {
+                operation: BrokerOperationId::parse("git-fetch")
+                    .expect("canonical Git fetch operation ID"),
+                route: BrokerRouteId::parse("github-https")
+                    .expect("canonical GitHub HTTPS route ID"),
+            }],
+            crate::repository::LocalRepositoryTransport::Ssh => ["ssh-identities", "ssh-sign"]
+                .into_iter()
+                .map(|operation| GrantPermission {
+                    operation: BrokerOperationId::parse(operation)
+                        .expect("canonical SSH operation ID"),
+                    route: BrokerRouteId::parse("ssh-agent").expect("canonical SSH agent route ID"),
+                })
+                .collect(),
         };
         let capability = self
             .catalog
@@ -1220,14 +1418,28 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 capability
                     .authentication_kinds
                     .contains(&record.public.metadata.authentication_kind)
-                    && capability.permissions.contains(&permission)
+                    && permissions
+                        .iter()
+                        .all(|permission| capability.permissions.contains(permission))
             })
             .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)?;
-        debug_assert!(capability.permissions.contains(&permission));
-        if record.public.metadata.provider.as_str() != "github"
-            || record.public.metadata.authentication_kind != CredentialAuthKind::OAuth
-            || record.public.metadata.status != CredentialStatus::Active
-        {
+        debug_assert!(
+            permissions
+                .iter()
+                .all(|permission| capability.permissions.contains(permission))
+        );
+        let exact_credential_kind = match transport {
+            crate::repository::LocalRepositoryTransport::GitHubOAuth => {
+                record.public.metadata.provider.as_str() == "github"
+                    && record.public.metadata.authentication_kind == CredentialAuthKind::OAuth
+            }
+            crate::repository::LocalRepositoryTransport::Ssh => {
+                record.public.metadata.provider.as_str() == "ssh"
+                    && record.public.metadata.authentication_kind == CredentialAuthKind::SshKey
+                    && record.public.metadata.ssh_public_key.is_some()
+            }
+        };
+        if !exact_credential_kind || record.public.metadata.status != CredentialStatus::Active {
             return Err(LocalCredentialError::CredentialInactive);
         }
         if let Some(expires_at) = record.public.metadata.expires_at_unix
@@ -1235,13 +1447,54 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         {
             return Err(LocalCredentialError::CredentialInactive);
         }
-        Ok(RepositoryCredentialAdmission {
-            credential: record.public,
-            profile_id: request.profile_id.clone(),
-            profile_revision: request.profile_revision,
-            permission,
-            material_generation: record.material_generation,
+        Ok(match transport {
+            crate::repository::LocalRepositoryTransport::GitHubOAuth => {
+                RepositoryCredentialAdmission::GitHubOAuth(RepositoryGitHubCredentialAdmission {
+                    credential: record.public,
+                    profile_id: request.profile_id.clone(),
+                    profile_revision: request.profile_revision,
+                    permission: permissions
+                        .into_iter()
+                        .next()
+                        .expect("GitHub admission has one permission"),
+                    material_generation: record.material_generation,
+                })
+            }
+            crate::repository::LocalRepositoryTransport::Ssh => {
+                RepositoryCredentialAdmission::Ssh(RepositorySshCredentialAdmission {
+                    credential: record.public,
+                    profile_id: request.profile_id.clone(),
+                    profile_revision: request.profile_revision,
+                    material_generation: record.material_generation,
+                })
+            }
         })
+    }
+
+    pub(crate) fn revalidate_repository_credential_operation(
+        &self,
+        request: &RepositoryCredentialLeaseRequest,
+        captured: &RepositoryCredentialAdmission,
+    ) -> Result<(), LocalCredentialError> {
+        if self.admit_repository_credential_operation(request)? != *captured {
+            return Err(LocalCredentialError::CredentialOperationLeaseDenied);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_repository_ssh_material(
+        &self,
+        admission: &RepositorySshCredentialAdmission,
+    ) -> Result<SshAgentMaterial, LocalCredentialError> {
+        let entry_id = protected_entry_id(
+            &admission.credential.metadata.id,
+            admission.material_generation,
+        )?;
+        let value = self
+            .protected_store
+            .get(&entry_id)?
+            .ok_or(LocalCredentialError::CredentialMaterialMissing)?;
+        decode_protected_material(value).map_err(|_| LocalCredentialError::CredentialUnavailable)
     }
 
     #[cfg(test)]
@@ -1613,6 +1866,26 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         )
     }
 
+    pub(crate) fn evaluate_selected_environment_grants(
+        &self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        expected: Option<&EnvironmentAccessBinding>,
+    ) -> Result<Vec<DerivedGrant>, LocalCredentialError> {
+        let connection = self.connection()?;
+        check_selected_environment_binding(&connection, environment_id, expected)?;
+        match expected {
+            Some(binding) => derive_local_environment_grants(
+                &connection,
+                binding,
+                environment_generation,
+                &self.owner_id,
+                &self.catalog,
+            ),
+            None => Ok(Vec::new()),
+        }
+    }
+
     fn reconcile(&self) -> Result<(), LocalCredentialError> {
         let connection = self.connection()?;
         let records = load_all_internal_credentials(&connection)?;
@@ -1698,6 +1971,32 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     }
 }
 
+fn check_selected_environment_binding(
+    connection: &Connection,
+    environment_id: &EnvironmentId,
+    expected: Option<&EnvironmentAccessBinding>,
+) -> Result<(), LocalCredentialError> {
+    match load_environment_access_binding(connection, environment_id) {
+        Ok(record) if Some(&record.binding) == expected => Ok(()),
+        Err(LocalCredentialError::EnvironmentBindingNotFound) if expected.is_none() => Ok(()),
+        Ok(_) | Err(LocalCredentialError::EnvironmentBindingNotFound) => {
+            Err(LocalCredentialError::StaleEnvironmentBinding)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn deny_generic_ssh_lease(
+    metadata: &CredentialMetadata,
+) -> Result<(), LocalCredentialError> {
+    if metadata.provider.as_str() == "ssh"
+        || metadata.authentication_kind == CredentialAuthKind::SshKey
+    {
+        return Err(LocalCredentialError::CredentialOperationLeaseDenied);
+    }
+    Ok(())
+}
+
 struct AuthorityLock {
     #[cfg(unix)]
     _file: fs::File,
@@ -1726,9 +2025,30 @@ impl AuthorityLock {
                     .metadata()
                     .map_err(|_| LocalCredentialError::InvalidDatabasePath)?,
             )?;
-            flock(&file, FlockOperation::NonBlockingLockExclusive)
-                .map_err(|_| LocalCredentialError::AlreadyRunning)?;
-            Ok(Self { _file: file })
+            // CLOEXEC still permits a concurrent fork to retain this lock
+            // briefly until exec. Match the supervisor's bounded handoff;
+            // never unlock or take ownership from a live authority.
+            const RETRY_DELAY: Duration = Duration::from_millis(10);
+            const MAX_RETRIES: usize = 25;
+            let mut retries = 0;
+            loop {
+                match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                    Ok(()) => return Ok(Self { _file: file }),
+                    Err(error) if error == rustix::io::Errno::INTR && retries < MAX_RETRIES => {
+                        retries += 1;
+                    }
+                    Err(error)
+                        if error == rustix::io::Errno::WOULDBLOCK && retries < MAX_RETRIES =>
+                    {
+                        retries += 1;
+                        std::thread::sleep(RETRY_DELAY);
+                    }
+                    Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
+                        return Err(LocalCredentialError::AlreadyRunning);
+                    }
+                    Err(_) => return Err(LocalCredentialError::InvalidDatabasePath),
+                }
+            }
         }
     }
 }
@@ -1766,11 +2086,13 @@ fn open_database(root: &Path) -> Result<Connection, LocalCredentialError> {
         validate_private_file(&after)?;
         let initialize = before.is_none() || before == Some(0);
         if !initialize {
-            validate_schema(&connection)?;
+            validate_openable_schema(&connection)?;
         }
         configure_database(&connection)?;
         if initialize {
             initialize_schema(&connection)?;
+        } else {
+            upgrade_schema(&connection)?;
         }
         validate_database(&connection)?;
         Ok(connection)
@@ -1879,6 +2201,9 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
                authentication_kind TEXT NOT NULL,
                display_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                account_hint TEXT NULL,
+               ssh_public_key_openssh TEXT NULL,
+               ssh_public_key_fingerprint TEXT NULL
+                 CHECK((ssh_public_key_openssh IS NULL) = (ssh_public_key_fingerprint IS NULL)),
                status TEXT NOT NULL CHECK(status IN ('active', 'expired', 'refresh_failed', 'revoked')),
                expires_at_unix INTEGER NULL CHECK(expires_at_unix IS NULL OR expires_at_unix >= 0),
                revocation_generation INTEGER NOT NULL CHECK(revocation_generation > 0),
@@ -1979,6 +2304,40 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
 
 fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
     validate_schema_identity(connection)?;
+    validate_schema_tables(connection)?;
+    let ssh_columns: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('credentials')
+             WHERE name IN ('ssh_public_key_openssh', 'ssh_public_key_fingerprint')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    if ssh_columns != 2 {
+        return Err(LocalCredentialError::InvalidDatabase);
+    }
+    Ok(())
+}
+
+fn validate_openable_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(database_error)?;
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(database_error)?;
+    if application_id != DATABASE_APPLICATION_ID
+        || !matches!(
+            schema_version,
+            PREVIOUS_DATABASE_SCHEMA_VERSION | DATABASE_SCHEMA_VERSION
+        )
+    {
+        return Err(LocalCredentialError::UnsupportedSchema);
+    }
+    validate_schema_tables(connection)
+}
+
+fn validate_schema_tables(connection: &Connection) -> Result<(), LocalCredentialError> {
     for table in [
         "authority_metadata",
         "credentials",
@@ -2005,6 +2364,38 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
         }
     }
     Ok(())
+}
+
+fn upgrade_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(database_error)?;
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(database_error)?;
+    if application_id != DATABASE_APPLICATION_ID {
+        return Err(LocalCredentialError::UnsupportedSchema);
+    }
+    match schema_version {
+        DATABASE_SCHEMA_VERSION => validate_schema(connection),
+        PREVIOUS_DATABASE_SCHEMA_VERSION => {
+            validate_schema_tables(connection)?;
+            let transaction = connection.unchecked_transaction().map_err(database_error)?;
+            transaction
+                .execute_batch(
+                    "ALTER TABLE credentials ADD COLUMN ssh_public_key_openssh TEXT NULL;
+                     ALTER TABLE credentials ADD COLUMN ssh_public_key_fingerprint TEXT NULL
+                       CHECK((ssh_public_key_openssh IS NULL) = (ssh_public_key_fingerprint IS NULL));",
+                )
+                .map_err(database_error)?;
+            transaction
+                .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+                .map_err(database_error)?;
+            transaction.commit().map_err(database_error)?;
+            validate_schema(connection)
+        }
+        _ => Err(LocalCredentialError::UnsupportedSchema),
+    }
 }
 
 fn validate_schema_identity(connection: &Connection) -> Result<(), LocalCredentialError> {
@@ -2537,6 +2928,7 @@ fn load_internal_credential(
     let raw = connection
         .query_row(
             "SELECT provider, authentication_kind, display_name, account_hint,
+                    ssh_public_key_openssh, ssh_public_key_fingerprint,
                     status, expires_at_unix, revocation_generation,
                     material_generation, protected_entry_id, store_persistence, material_state,
                     created_at_unix_ms, updated_at_unix_ms,
@@ -2552,23 +2944,25 @@ fn load_internal_credential(
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
                     row.get::<_, String>(10)?,
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, i64>(12)?,
-                    row.get::<_, bool>(13)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, bool>(15)?,
                 ))
             },
         )
         .optional()
         .map_err(database_error)?
         .ok_or(LocalCredentialError::CredentialNotFound)?;
-    let material_state = MaterialState::parse(&raw.10)?;
+    let material_state = MaterialState::parse(&raw.12)?;
     if required_state.is_some_and(|state| material_state != state) {
         return Err(LocalCredentialError::CredentialUnavailable);
     }
@@ -2580,29 +2974,37 @@ fn load_internal_credential(
         authentication_kind: parse_auth_kind(&raw.1)?,
         display_name: raw.2,
         account_hint: raw.3,
-        status: parse_status(&raw.4)?,
-        expires_at_unix: optional_i64_to_u64(raw.5)?,
-        revocation_generation: u64::try_from(raw.6)
+        ssh_public_key: match (raw.4, raw.5) {
+            (Some(openssh), Some(fingerprint)) => Some(SshPublicKeyMetadata {
+                openssh,
+                fingerprint,
+            }),
+            (None, None) => None,
+            _ => return Err(LocalCredentialError::CorruptMetadata),
+        },
+        status: parse_status(&raw.6)?,
+        expires_at_unix: optional_i64_to_u64(raw.7)?,
+        revocation_generation: u64::try_from(raw.8)
             .map_err(|_| LocalCredentialError::CorruptMetadata)?,
     };
     metadata
         .validate()
         .map_err(|_| LocalCredentialError::CorruptMetadata)?;
     let material_generation =
-        u64::try_from(raw.7).map_err(|_| LocalCredentialError::CorruptMetadata)?;
+        u64::try_from(raw.9).map_err(|_| LocalCredentialError::CorruptMetadata)?;
     let active_entry_id =
-        ProtectedEntryId::parse(raw.8).map_err(|_| LocalCredentialError::CorruptMetadata)?;
+        ProtectedEntryId::parse(raw.10).map_err(|_| LocalCredentialError::CorruptMetadata)?;
     if active_entry_id != protected_entry_id(id, material_generation)? {
         return Err(LocalCredentialError::CorruptMetadata);
     }
     Ok(InternalCredentialRecord {
         public: CredentialRecord {
             metadata,
-            persistence: parse_persistence(&raw.9)?,
-            protected_store_cleanup_pending: raw.13,
-            created_at_unix_ms: u64::try_from(raw.11)
+            persistence: parse_persistence(&raw.11)?,
+            protected_store_cleanup_pending: raw.15,
+            created_at_unix_ms: u64::try_from(raw.13)
                 .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-            updated_at_unix_ms: u64::try_from(raw.12)
+            updated_at_unix_ms: u64::try_from(raw.14)
                 .map_err(|_| LocalCredentialError::CorruptMetadata)?,
         },
         material_generation,
@@ -2783,7 +3185,7 @@ fn derive_local_environment_grants(
     let context = GrantContext {
         environment_id: binding.environment_id.clone(),
         environment_generation,
-        placement: Placement::Local,
+        placement: GrantPlacement::Local,
         user_id: owner_id.clone(),
         organization_id: None,
         allow_personal_credentials: false,
@@ -3018,6 +3420,7 @@ fn auth_kind_to_str(kind: CredentialAuthKind) -> &'static str {
         CredentialAuthKind::ApiKey => "api_key",
         CredentialAuthKind::AccessToken => "access_token",
         CredentialAuthKind::GitHubApp => "github_app",
+        CredentialAuthKind::SshKey => "ssh_key",
     }
 }
 
@@ -3027,6 +3430,7 @@ fn parse_auth_kind(value: &str) -> Result<CredentialAuthKind, LocalCredentialErr
         "api_key" => Ok(CredentialAuthKind::ApiKey),
         "access_token" => Ok(CredentialAuthKind::AccessToken),
         "github_app" => Ok(CredentialAuthKind::GitHubApp),
+        "ssh_key" => Ok(CredentialAuthKind::SshKey),
         _ => Err(LocalCredentialError::CorruptMetadata),
     }
 }
@@ -3138,12 +3542,20 @@ pub enum LocalCredentialError {
     CredentialInactive,
     #[error("local credential material is missing from protected storage")]
     CredentialMaterialMissing,
+    #[error("SSH credentials require the dedicated enrollment operation")]
+    SshCredentialRequiresEnrollment,
+    #[error("local SSH credential enrollment admission is closed")]
+    SshEnrollmentClosed,
+    #[error("local SSH credential enrollment deadline elapsed")]
+    SshEnrollmentDeadlineElapsed,
     #[error("local credential operation lease is unavailable")]
     CredentialOperationLeaseDenied,
     #[error("local credential refresh is already in progress")]
     CredentialRefreshInProgress,
     #[error("local credential refresh is stale or invalid")]
     StaleCredentialRefresh,
+    #[error("local credential revision changed or was not supplied")]
+    StaleCredentialRevision,
     #[error("local credential protected entry unexpectedly already exists")]
     ProtectedEntryCollision,
     #[error("local credential is selected by an access profile or environment")]

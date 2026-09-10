@@ -8,7 +8,7 @@
 //! Enrollment adapters validate the provider payload before storage; this
 //! layer validates the explicit provider/authentication-kind catalog and keeps
 //! material opaque rather than guessing its type from a value or key name.
-//! Provider material has no public wire representation. Only a trusted broker
+//! Provider material has no public read/response representation. Only a trusted broker
 //! or enrollment authority may hold [`PlatformCredentialStore`]. A control
 //! service can instead hold [`CredentialMetadataReader`] with a SELECT-only
 //! database role that cannot read the material table and has no KEK provider.
@@ -36,7 +36,10 @@ pub use refresh::{
     OAuthRefreshAttemptInfo, OAuthRefreshState, PreparedOAuthRefresh, PreparedOAuthRefreshResult,
     StartedOAuthRefresh,
 };
-pub use store::{CredentialMetadataReader, PlatformCredentialStore, PreparedCredentialCreation};
+pub use store::{
+    CredentialMetadataReader, PlatformCredentialStore, PreparedCredentialCreation,
+    PreparedCredentialReplacement,
+};
 
 /// Closed, value-blind errors. SQL/provider errors are deliberately discarded:
 /// neither their messages nor their source chains are safe output contracts.

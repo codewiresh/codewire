@@ -8,22 +8,6 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-/// Pretty-prints JSON the way Go's `json.MarshalIndent(v, "", "  ")`
-/// does for a string map: sorted keys (BTreeMap), two-space indent,
-/// and HTML-escaped `&`, `<`, `>` inside strings.
-fn go_marshal_indent(map: &BTreeMap<String, String>) -> String {
-    let v: serde_json::Value = map
-        .iter()
-        .map(|(k, val)| (k.clone(), serde_json::Value::String(val.clone())))
-        .collect::<serde_json::Map<String, serde_json::Value>>()
-        .into();
-    serde_json::to_string_pretty(&v)
-        .expect("string map serializes")
-        .replace('&', "\\u0026")
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-}
-
 fn unused_heredoc_delimiter(prefix: &str, content: &str) -> String {
     let lines = content.lines().collect::<BTreeSet<_>>();
     for index in 0..=lines.len() {
@@ -35,40 +19,32 @@ fn unused_heredoc_delimiter(prefix: &str, content: &str) -> String {
     unreachable!("one more delimiter candidate exists than occupied lines")
 }
 
-/// Mirrors `buildWorkspaceEnvScript`.
+/// Publish ordinary defaults for the daemon, never resolved application values.
+/// The daemon home is fixed, independent of a projected or overridden HOME.
+/// Shell startup files must not reapply defaults above a launch projection.
 pub fn build_workspace_env_script(env_vars: &BTreeMap<String, String>) -> String {
-    let mut environment_sh = String::new();
-    for (key, value) in env_vars {
-        environment_sh.push_str("export ");
-        environment_sh.push_str(key);
-        environment_sh.push('=');
-        environment_sh.push_str(&shell_quote(value));
-        environment_sh.push('\n');
-    }
-    let environment_json = go_marshal_indent(env_vars);
-    let shell_delimiter = unused_heredoc_delimiter("CW_ENVIRONMENT_SH", &environment_sh);
+    workspace_env_script_at(env_vars, "/home/codewire/.codewire")
+}
+
+fn workspace_env_script_at(env_vars: &BTreeMap<String, String>, directory: &str) -> String {
+    let environment_json = serde_json::to_string_pretty(env_vars).expect("string map serializes");
     let json_delimiter = unused_heredoc_delimiter("CW_ENVIRONMENT_JSON", &environment_json);
 
     format!(
         concat!(
             "set -eu\n",
             "umask 077\n",
-            "mkdir -p \"$HOME/.codewire\"\n",
-            "cat > \"$HOME/.codewire/environment.sh\" <<'{shell_delimiter}'\n",
-            "{environment_sh}{shell_delimiter}\n",
-            "cat > \"$HOME/.codewire/environment.json\" <<'{json_delimiter}'\n",
+            "cw_env_dir={directory}\n",
+            "/bin/mkdir -p -- \"$cw_env_dir\"\n",
+            "cw_env_file=$(/usr/bin/mktemp \"$cw_env_dir/.environment.XXXXXXXX\")\n",
+            "trap '/bin/rm -f -- \"$cw_env_file\"' EXIT HUP INT TERM\n",
+            "/bin/cat > \"$cw_env_file\" <<'{json_delimiter}'\n",
             "{environment_json}\n{json_delimiter}\n",
-            "chmod 600 \"$HOME/.codewire/environment.sh\" \"$HOME/.codewire/environment.json\"\n",
-            "for rc in \"$HOME/.profile\" \"$HOME/.bash_profile\" \"$HOME/.bashrc\" \"$HOME/.zshrc\"; do\n",
-            "  touch \"$rc\"\n",
-            "  line='[ -f \"$HOME/.codewire/environment.sh\" ] && . \"$HOME/.codewire/environment.sh\"'\n",
-            "  if ! grep -Fqx \"$line\" \"$rc\"; then\n",
-            "    printf '\\n%s\\n' \"$line\" >> \"$rc\"\n",
-            "  fi\n",
-            "done\n",
+            "/bin/chmod 0600 -- \"$cw_env_file\"\n",
+            "/bin/mv -fT -- \"$cw_env_file\" \"$cw_env_dir/environment.json\"\n",
+            "trap - EXIT HUP INT TERM\n",
         ),
-        shell_delimiter = shell_delimiter,
-        environment_sh = environment_sh,
+        directory = shell_quote(directory),
         json_delimiter = json_delimiter,
         environment_json = environment_json,
     )
@@ -116,8 +92,7 @@ mod tests {
             "after"
         );
         let vars = BTreeMap::from([("PAYLOAD".to_owned(), payload.to_owned())]);
-        let script = build_workspace_env_script(&vars);
-        assert!(script.contains("<<'CW_ENVIRONMENT_SH_1'"));
+        let script = workspace_env_script_at(&vars, home.path().to_str().unwrap());
         assert!(script.contains("<<'CW_ENVIRONMENT_JSON_0'"));
 
         let status = Command::new("/bin/sh")
@@ -133,21 +108,64 @@ mod tests {
             assert!(!home.path().join(marker).exists(), "created {marker}");
         }
 
-        let output = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(". \"$HOME/.codewire/environment.sh\"; printf '%s' \"$PAYLOAD\"")
-            .env_clear()
-            .env("HOME", home.path())
-            .env("PATH", "/usr/bin:/bin")
-            .output()
-            .expect("source generated environment");
-        assert!(output.status.success());
-        assert_eq!(output.stdout, payload.as_bytes());
-
         let json: BTreeMap<String, String> = serde_json::from_slice(
-            &fs::read(home.path().join(".codewire/environment.json")).expect("read generated JSON"),
+            &fs::read(home.path().join("environment.json")).expect("read generated JSON"),
         )
         .expect("parse generated JSON");
         assert_eq!(json, vars);
+        assert!(!script.contains("environment.sh"));
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn ordinary_defaults_replace_with_empty_and_do_not_follow_workload_home() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("daemon's defaults");
+        let decoy = root.path().join("workload-home");
+        for values in [
+            BTreeMap::from([("OLD".into(), "synthetic".into())]),
+            BTreeMap::new(),
+        ] {
+            let status = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &workspace_env_script_at(&values, directory.to_str().unwrap()),
+                ])
+                .env_clear()
+                .env("HOME", &decoy)
+                .env("PATH", "/nonexistent")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let path = directory.join("environment.json");
+            let actual: BTreeMap<String, String> =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(actual, values);
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+            assert!(!decoy.exists());
+        }
+        assert!(!build_workspace_env_script(&BTreeMap::new()).contains("$HOME"));
+    }
+
+    #[test]
+    fn ordinary_defaults_write_failure_is_not_success() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("not-a-directory");
+        fs::write(&directory, b"synthetic existing object").unwrap();
+        let output = Command::new("/bin/sh")
+            .args([
+                "-c",
+                &workspace_env_script_at(&BTreeMap::new(), directory.to_str().unwrap()),
+            ])
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(fs::read(directory).unwrap(), b"synthetic existing object");
     }
 }

@@ -130,6 +130,7 @@ pub trait DaemonClient: Send + Sync {
 pub struct DaemonSessionClient {
     inner: v1::daemon_service_client::DaemonServiceClient<Channel>,
     auth_token: MetadataValue<Ascii>,
+    credential_client: codewire_daemon::client::SessionClient,
 }
 
 pub struct ExecDaemonSession {
@@ -175,13 +176,25 @@ impl DaemonSessionClient {
                 endpoint: endpoint.clone(),
                 source,
             })?;
+        let credential_client = codewire_daemon::client::SessionClient::from_channel(
+            channel.clone(),
+            auth_token.expose_secret(),
+        )
+        .map_err(|_| {
+            DaemonClientError::Unsupported("invalid daemon credential bridge configuration")
+        })?;
         let mut auth_token = MetadataValue::try_from(auth_token.expose_secret())
             .expect("DaemonAuthToken guarantees valid ASCII metadata");
         auth_token.set_sensitive(true);
         Ok(Self {
             inner: v1::daemon_service_client::DaemonServiceClient::new(channel),
             auth_token,
+            credential_client,
         })
+    }
+
+    pub(crate) fn credential_client(&self) -> codewire_daemon::client::SessionClient {
+        self.credential_client.clone()
     }
 
     fn authorize<T>(&self, request: &mut Request<T>) {
@@ -531,6 +544,7 @@ pub fn file_set_stat_request(request: FileSetStatRequest) -> v1::SetStatRequest 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
     use codewire_gateway_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,
     };
@@ -1188,11 +1202,18 @@ mod tests {
 
     #[tonic::async_trait]
     impl DaemonService for RecordingDaemon {
+        async fn poweroff_guest(
+            &self,
+            _request: Request<v1::PoweroffGuestRequest>,
+        ) -> Result<Response<v1::PoweroffGuestResponse>, Status> {
+            Err(Status::unimplemented("fixture unused lifecycle RPC"))
+        }
+
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
         type CredentialBridgeStream =
-            ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
+            ReceiverStream<Result<bridge_v1::CredentialBridgeGuestMessage, Status>>;
 
         async fn get_capabilities(
             &self,
@@ -1210,7 +1231,7 @@ mod tests {
 
         async fn credential_bridge(
             &self,
-            _request: Request<tonic::Streaming<v1::CredentialBridgeHostMessage>>,
+            _request: Request<tonic::Streaming<bridge_v1::CredentialBridgeHostMessage>>,
         ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
             Err(Status::unimplemented("credential bridge"))
         }

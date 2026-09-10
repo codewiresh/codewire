@@ -8,6 +8,7 @@ mod access_profiles;
 mod auth;
 mod config;
 mod coordinator;
+mod credential_delegation;
 mod credentials;
 mod error;
 mod mesh;
@@ -43,6 +44,7 @@ pub use auth::{
 pub use auth::{DesktopOAuthCancellation, DesktopOAuthLogin};
 pub use buffa::EnumValue;
 pub use buffa_types::{Duration as ProtoDuration, Empty as ProtoEmpty, Timestamp};
+pub use codewire_proto::codewire::bridge::v1 as credential_bridge;
 pub use codewire_proto::codewire::console::v1::{
     BillingLimitUsage, BillingLimits, GetBillingOverviewRequest, GetBillingOverviewResponse,
     UsageSummary,
@@ -64,7 +66,8 @@ pub use codewire_proto::codewire::v1::{
     EnvironmentResources, EnvironmentServiceClient as GeneratedEnvironmentServiceClient,
     EnvironmentSession, EnvironmentSessionOutputChunk, EnvironmentSessionOutputStream,
     EnvironmentSessionServiceClient as GeneratedEnvironmentSessionServiceClient,
-    EnvironmentSessionState, EnvironmentState, EnvironmentTrustReport, ExecRequest, ExecResponse,
+    EnvironmentSessionState, EnvironmentSourceSelection, EnvironmentSourcesUpdateOutcome,
+    EnvironmentState, EnvironmentTrustReport, ExecRequest, ExecResponse,
     ExecServiceClient as GeneratedExecServiceClient, ExtendEnvironmentTtlRequest,
     ExtendEnvironmentTtlResponse, FileEntry, FileServiceClient as GeneratedFileServiceClient,
     GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentRequest,
@@ -78,37 +81,40 @@ pub use codewire_proto::codewire::v1::{
     ListOrganizationsResponse, ListPortsRequest, ListPortsResponse, ListPresetsRequest,
     ListPresetsResponse, ListSessionsRequest, ListSessionsResponse, OrgInvitation, OrgRole,
     Organization, OrganizationDeletionState, OrganizationMembership, PlanEnvironmentResizeRequest,
-    PlanEnvironmentResizeResponse, Port, PortAccess, PrepareComplete, Preset, ProjectAccessBinding,
-    ProjectAgents, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
-    ProjectSkillSource, ProjectSpec, ProtectEnvironmentRequest, ProtectEnvironmentResponse,
-    ReadSessionOutputRequest, ReadSessionOutputResponse, RepairEnvironmentDaemonRequest,
-    RepairEnvironmentDaemonResponse, RepoConfig, RepositorySpec, ResizeEnvironmentRequest,
-    ResizeEnvironmentResponse, RestartSessionRequest, RestartSessionResponse,
-    RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, RunRequest, RunResize,
-    RunResponse, RunResponseView, RunStart, SecretMetadata, SecretProject, SetProjectSecretRequest,
-    SetProjectSecretResponse, SetSecretRequest, SetSecretResponse, SetUserSecretRequest,
-    SetUserSecretResponse, StartEnvironmentRequest, StartEnvironmentResponse,
+    PlanEnvironmentResizeResponse, Port, PortAccess, PrepareComplete, Preset, ProjectAgents,
+    ProjectCredentialBinding, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
+    ProjectSkillSource, ProjectSpec, ProjectStoragePlacement, ProtectEnvironmentRequest,
+    ProtectEnvironmentResponse, ReadSessionOutputRequest, ReadSessionOutputResponse,
+    RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, RepoConfig, RepositorySpec,
+    ResizeEnvironmentRequest, ResizeEnvironmentResponse, RestartSessionRequest,
+    RestartSessionResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse,
+    RunRequest, RunResize, RunResponse, RunResponseView, RunStart, SecretMetadata, SecretProject,
+    SetProjectSecretRequest, SetProjectSecretResponse, SetSecretRequest, SetSecretResponse,
+    SetUserSecretRequest, SetUserSecretResponse, StartEnvironmentRequest, StartEnvironmentResponse,
     StopEnvironmentRequest, StopEnvironmentResponse, StopSessionRequest, StopSessionResponse,
     StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest,
     StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse,
-    UpdateApiKeyRequest, UpdateApiKeyResponse, UploadFileHeader, UploadFileRequest,
-    UploadFileResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse,
+    UpdateApiKeyRequest, UpdateApiKeyResponse, UpdateEnvironmentSourcesRequest,
+    UpdateEnvironmentSourcesResponse, UploadFileHeader, UploadFileRequest, UploadFileResponse,
+    WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse,
 };
 pub use codewire_proto::codewire::v1::{
-    AccessProfile, AccessProfileEntry, ClearEnvironmentAccessProfileRequest,
-    ClearEnvironmentAccessProfileResponse, CreateAccessProfileRequest, CreateAccessProfileResponse,
+    AccessProfile, AccessProfileEntry, CreateAccessProfileRequest, CreateAccessProfileResponse,
     DeleteAccessProfileRequest, DeleteAccessProfileResponse, EnvironmentAccessProfileBinding,
     GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest,
     GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse,
-    SetEnvironmentAccessProfileRequest, SetEnvironmentAccessProfileResponse,
     UpdateAccessProfileRequest, UpdateAccessProfileResponse, get_access_profile_request,
 };
 pub use codewire_proto::codewire::v1::{
-    CodexDeviceChallenge, Credential, CredentialAuthenticationKind, CredentialStatus,
-    DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest, EnrollCodexResponse,
-    GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse,
-    RevokeCredentialRequest, RevokeCredentialResponse, enroll_codex_response,
-    get_credential_request,
+    AddApiKeyCredentialRequest, AddApiKeyCredentialResponse, AddSshCredentialRequest,
+    AddSshCredentialResponse, CodexDeviceChallenge, Credential, CredentialAuthenticationKind,
+    CredentialStatus, DeleteCredentialRequest, DeleteCredentialResponse, EnrollCodexRequest,
+    EnrollCodexResponse, EnrollGithubRequest, EnrollGithubResponse, GenerateSshCredentialRequest,
+    GenerateSshCredentialResponse, GetCredentialRequest, GetCredentialResponse,
+    GithubDeviceChallenge, ListCredentialsRequest, ListCredentialsResponse,
+    RenameCredentialRequest, RenameCredentialResponse, RevokeCredentialRequest,
+    RevokeCredentialResponse, RotateApiKeyCredentialRequest, RotateApiKeyCredentialResponse,
+    SshPublicKey, enroll_codex_response, enroll_github_response, get_credential_request,
 };
 pub use codewire_proto::codewire::v1::{
     CreateMeshInviteRequest, CreateMeshInviteResponse, CreateMeshNetworkRequest,
@@ -132,6 +138,10 @@ pub use codewire_proto::codewire::v1::{
     run_request, run_response, stream_logs_response, upload_file_request,
     watch_environment_create_response,
 };
+pub use codewire_proto::codewire::v1::{
+    CredentialDelegationOpen, CredentialDelegationProfile, DelegateCredentialsRequest,
+    DelegateCredentialsResponse, delegate_credentials_request, delegate_credentials_response,
+};
 pub use config::{
     CODEWIRE_API_URL_ENV, CODEWIRE_URL_ENV, ClientConfig, DEFAULT_CODEWIRE_URL,
     DEFAULT_UNARY_TIMEOUT,
@@ -141,6 +151,7 @@ pub use coordinator::{
     COORDINATOR_SETUP_TIMEOUT, CoordinatorPeerSession, Handlers as CoordinatorHandlers,
     MeshCoordinateIdentity, MeshCoordinatorPeerSession, PrimaryCoordinateIdentity,
 };
+pub use credential_delegation::CredentialDelegationStream;
 pub use error::{ClientError, ErrorInfo, ValidationError};
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,
@@ -811,6 +822,19 @@ impl CodewireClient {
     ) -> Result<GetEnvironmentResponse, ClientError> {
         self.environments
             .get_environment_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    /// Replace complete source selections under the exact observed operation
+    /// and selection fence. This method never retries a stale or uncertain edit.
+    pub async fn update_environment_sources(
+        &self,
+        request: UpdateEnvironmentSourcesRequest,
+    ) -> Result<UpdateEnvironmentSourcesResponse, ClientError> {
+        self.environments
+            .update_environment_sources_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)
@@ -1979,6 +2003,71 @@ mod tests {
             .await
             .expect("list environments");
         assert_eq!(response.environments[0].id, "env_123");
+    }
+
+    #[tokio::test]
+    async fn environment_source_update_wrapper_preserves_exact_cas_confirmations_and_empty_presence()
+     {
+        let server = MockServer::start().await;
+        let request = UpdateEnvironmentSourcesRequest {
+            org_id: "org_test".into(),
+            environment_id: "env_test".into(),
+            expected_operation_generation: 9_007_199_254_740_995,
+            expected: Some(EnvironmentSourceSelection {
+                secrets: Some(ProjectSecretBindings {
+                    project: "platform:id:11111111-1111-4111-8111-111111111111".into(),
+                    user: Some(ProjectStoragePlacement::Platform.into()),
+                    organization: true,
+                    ..Default::default()
+                })
+                .into(),
+                credentials: Some(ProjectCredentialBinding {
+                    profile: "platform:id:22222222-2222-4222-8222-222222222222".into(),
+                    ..Default::default()
+                })
+                .into(),
+                profile_revision: Some(9_007_199_254_740_993),
+                ..Default::default()
+            })
+            .into(),
+            replacement: Some(EnvironmentSourceSelection::default()).into(),
+            allow_restart: true,
+            confirm_personal_credentials: true,
+            confirm_personal_secrets: true,
+            ..Default::default()
+        };
+        let expected = UpdateEnvironmentSourcesResponse {
+            environment_id: request.environment_id.clone(),
+            operation_generation: request.expected_operation_generation,
+            selection: Some(EnvironmentSourceSelection::default()).into(),
+            outcome: EnvironmentSourcesUpdateOutcome::RestartRequired.into(),
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(path(
+                "/codewire.v1.EnvironmentService/UpdateEnvironmentSources",
+            ))
+            .and(header("authorization", "Bearer test-token"))
+            .and(header("user-agent", "codewire-client-test/1"))
+            .and(body_bytes(request.encode_to_vec()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(expected.encode_to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let actual = test_client(&server)
+            .await
+            .update_environment_sources(request)
+            .await
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert!(
+            actual.selection.is_set(),
+            "clearing is an explicit empty complete selection"
+        );
     }
 
     #[tokio::test]

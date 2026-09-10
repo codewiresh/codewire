@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x63odewire/v1/common.proto\x12\x0b\x63odewire.v1\"-\n\x13ScaffoldPlaceholder\x12\x12\n\x04note\x18\x01 \x01(\tR\x04note:\x02\x18\x01\"~\n\x0eRepositorySpec\x12\x16\n\x06source\x18\x01 \x01(\tR\x06source\x12\x16\n\x06\x62ranch\x18\x02 \x01(\tR\x06\x62ranch\x12 \n\x0b\x64\x65stination\x18\x03 \x01(\tR\x0b\x64\x65stination\x12\x1a\n\x08revision\x18\x04 \x01(\tR\x08revision\"S\n\x0f\x41pplicationPort\x12\x12\n\x04port\x18\x01 \x01(\x05R\x04port\x12\x14\n\x05label\x18\x02 \x01(\tR\x05label\x12\x16\n\x06\x61\x63\x63\x65ss\x18\x03 \x01(\tR\x06\x61\x63\x63\x65ss\"P\n\rProjectAgents\x12\x1d\n\x07install\x18\x01 \x01(\x08H\x00R\x07install\x88\x01\x01\x12\x14\n\x05tools\x18\x02 \x03(\tR\x05toolsB\n\n\x08_install\"\x86\x01\n\x15ProjectSkillSelection\x12\x37\n\x06source\x18\x01 \x01(\x0e\x32\x1f.codewire.v1.ProjectSkillSourceR\x06source\x12\x1c\n\treference\x18\x02 \x01(\tR\treference\x12\x16\n\x06\x61gents\x18\x03 \x03(\tR\x06\x61gents\"\xb1\x01\n\x10ProjectResources\x12*\n\x0e\x63pu_millicores\x18\x01 \x01(\rH\x00R\rcpuMillicores\x88\x01\x01\x12\"\n\nmemory_mib\x18\x02 \x01(\x04H\x01R\tmemoryMib\x88\x01\x01\x12\x1e\n\x08\x64isk_gib\x18\x03 \x01(\x04H\x02R\x07\x64iskGib\x88\x01\x01\x42\x11\n\x0f_cpu_millicoresB\r\n\x0b_memory_mibB\x0b\n\t_disk_gib\"\x90\x01\n\x15ProjectSecretBindings\x12\x18\n\x07project\x18\x01 \x01(\tR\x07project\x12\"\n\x0corganization\x18\x04 \x01(\x08R\x0corganization\x12\x12\n\x04user\x18\x05 \x01(\x08R\x04userJ\x04\x08\x02\x10\x03J\x04\x08\x03\x10\x04R\x0binclude_orgR\x0cinclude_user\"0\n\x14ProjectAccessBinding\x12\x18\n\x07profile\x18\x01 \x01(\tR\x07profile\"\xe0\x06\n\x0bProjectSpec\x12%\n\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12\x16\n\x06preset\x18\x02 \x01(\tR\x06preset\x12\x14\n\x05image\x18\x03 \x01(\tR\x05image\x12?\n\x0crepositories\x18\x04 \x03(\x0b\x32\x1b.codewire.v1.RepositorySpecR\x0crepositories\x12+\n\x11working_directory\x18\x05 \x01(\tR\x10workingDirectory\x12\'\n\x0finstall_command\x18\x06 \x01(\tR\x0einstallCommand\x12%\n\x0estartup_script\x18\x07 \x01(\tR\rstartupScript\x12K\n\x0b\x65nvironment\x18\x08 \x03(\x0b\x32).codewire.v1.ProjectSpec.EnvironmentEntryR\x0b\x65nvironment\x12\x32\n\x06\x61gents\x18\t \x01(\x0b\x32\x1a.codewire.v1.ProjectAgentsR\x06\x61gents\x12:\n\x06skills\x18\x0b \x03(\x0b\x32\".codewire.v1.ProjectSkillSelectionR\x06skills\x12I\n\x11\x61pplication_ports\x18\x0c \x03(\x0b\x32\x1c.codewire.v1.ApplicationPortR\x10\x61pplicationPorts\x12;\n\tresources\x18\r \x01(\x0b\x32\x1d.codewire.v1.ProjectResourcesR\tresources\x12<\n\x07secrets\x18\x0e \x01(\x0b\x32\".codewire.v1.ProjectSecretBindingsR\x07secrets\x12\x39\n\x06\x61\x63\x63\x65ss\x18\x11 \x01(\x0b\x32!.codewire.v1.ProjectAccessBindingR\x06\x61\x63\x63\x65ss\x1a>\n\x10\x45nvironmentEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01J\x04\x08\n\x10\x0bJ\x04\x08\x0f\x10\x10J\x04\x08\x10\x10\x11R\x11\x61gent_environmentR\x0b\x63redentialsR\x0eworkspace_mode*~\n\x12ProjectSkillSource\x12$\n PROJECT_SKILL_SOURCE_UNSPECIFIED\x10\x00\x12#\n\x1fPROJECT_SKILL_SOURCE_REPOSITORY\x10\x01\x12\x1d\n\x19PROJECT_SKILL_SOURCE_USER\x10\x02\x42\xae\x01\n\x0f\x63om.codewire.v1B\x0b\x43ommonProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x63odewire/v1/common.proto\x12\x0b\x63odewire.v1\"-\n\x13ScaffoldPlaceholder\x12\x12\n\x04note\x18\x01 \x01(\tR\x04note:\x02\x18\x01\"\x9f\x01\n\x0eRepositorySpec\x12\x16\n\x06source\x18\x01 \x01(\tR\x06source\x12\x16\n\x06\x62ranch\x18\x02 \x01(\tR\x06\x62ranch\x12 \n\x0b\x64\x65stination\x18\x03 \x01(\tR\x0b\x64\x65stination\x12\x1a\n\x08revision\x18\x04 \x01(\tR\x08revision\x12\x1f\n\x0bknown_hosts\x18\x05 \x03(\tR\nknownHosts\"S\n\x0f\x41pplicationPort\x12\x12\n\x04port\x18\x01 \x01(\x05R\x04port\x12\x14\n\x05label\x18\x02 \x01(\tR\x05label\x12\x16\n\x06\x61\x63\x63\x65ss\x18\x03 \x01(\tR\x06\x61\x63\x63\x65ss\"P\n\rProjectAgents\x12\x1d\n\x07install\x18\x01 \x01(\x08H\x00R\x07install\x88\x01\x01\x12\x14\n\x05tools\x18\x02 \x03(\tR\x05toolsB\n\n\x08_install\"\x86\x01\n\x15ProjectSkillSelection\x12\x37\n\x06source\x18\x01 \x01(\x0e\x32\x1f.codewire.v1.ProjectSkillSourceR\x06source\x12\x1c\n\treference\x18\x02 \x01(\tR\treference\x12\x16\n\x06\x61gents\x18\x03 \x03(\tR\x06\x61gents\"\xb1\x01\n\x10ProjectResources\x12*\n\x0e\x63pu_millicores\x18\x01 \x01(\rH\x00R\rcpuMillicores\x88\x01\x01\x12\"\n\nmemory_mib\x18\x02 \x01(\x04H\x01R\tmemoryMib\x88\x01\x01\x12\x1e\n\x08\x64isk_gib\x18\x03 \x01(\x04H\x02R\x07\x64iskGib\x88\x01\x01\x42\x11\n\x0f_cpu_millicoresB\r\n\x0b_memory_mibB\x0b\n\t_disk_gib\"\xca\x01\n\x15ProjectSecretBindings\x12\x18\n\x07project\x18\x01 \x01(\tR\x07project\x12\"\n\x0corganization\x18\x04 \x01(\x08R\x0corganization\x12=\n\x04user\x18\x06 \x01(\x0e\x32$.codewire.v1.ProjectStoragePlacementH\x00R\x04user\x88\x01\x01\x42\x07\n\x05_userJ\x04\x08\x02\x10\x03J\x04\x08\x03\x10\x04J\x04\x08\x05\x10\x06R\x0binclude_orgR\x0cinclude_user\"4\n\x18ProjectCredentialBinding\x12\x18\n\x07profile\x18\x01 \x01(\tR\x07profile\"\xef\x06\n\x0bProjectSpec\x12%\n\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12\x16\n\x06preset\x18\x02 \x01(\tR\x06preset\x12\x14\n\x05image\x18\x03 \x01(\tR\x05image\x12?\n\x0crepositories\x18\x04 \x03(\x0b\x32\x1b.codewire.v1.RepositorySpecR\x0crepositories\x12+\n\x11working_directory\x18\x05 \x01(\tR\x10workingDirectory\x12\'\n\x0finstall_command\x18\x06 \x01(\tR\x0einstallCommand\x12%\n\x0estartup_script\x18\x07 \x01(\tR\rstartupScript\x12K\n\x0b\x65nvironment\x18\x08 \x03(\x0b\x32).codewire.v1.ProjectSpec.EnvironmentEntryR\x0b\x65nvironment\x12\x32\n\x06\x61gents\x18\t \x01(\x0b\x32\x1a.codewire.v1.ProjectAgentsR\x06\x61gents\x12:\n\x06skills\x18\x0b \x03(\x0b\x32\".codewire.v1.ProjectSkillSelectionR\x06skills\x12I\n\x11\x61pplication_ports\x18\x0c \x03(\x0b\x32\x1c.codewire.v1.ApplicationPortR\x10\x61pplicationPorts\x12;\n\tresources\x18\r \x01(\x0b\x32\x1d.codewire.v1.ProjectResourcesR\tresources\x12<\n\x07secrets\x18\x0e \x01(\x0b\x32\".codewire.v1.ProjectSecretBindingsR\x07secrets\x12G\n\x0b\x63redentials\x18\x12 \x01(\x0b\x32%.codewire.v1.ProjectCredentialBindingR\x0b\x63redentials\x1a>\n\x10\x45nvironmentEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01J\x04\x08\n\x10\x0bJ\x04\x08\x0f\x10\x10J\x04\x08\x10\x10\x11J\x04\x08\x11\x10\x12R\x11\x61gent_environmentR\x06\x61\x63\x63\x65ssR\x0eworkspace_mode*~\n\x12ProjectSkillSource\x12$\n PROJECT_SKILL_SOURCE_UNSPECIFIED\x10\x00\x12#\n\x1fPROJECT_SKILL_SOURCE_REPOSITORY\x10\x01\x12\x1d\n\x19PROJECT_SKILL_SOURCE_USER\x10\x02*\x91\x01\n\x17ProjectStoragePlacement\x12)\n%PROJECT_STORAGE_PLACEMENT_UNSPECIFIED\x10\x00\x12#\n\x1fPROJECT_STORAGE_PLACEMENT_LOCAL\x10\x01\x12&\n\"PROJECT_STORAGE_PLACEMENT_PLATFORM\x10\x02\x42\xae\x01\n\x0f\x63om.codewire.v1B\x0b\x43ommonProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,26 +36,28 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_SCAFFOLDPLACEHOLDER']._serialized_options = b'\030\001'
   _globals['_PROJECTSPEC_ENVIRONMENTENTRY']._loaded_options = None
   _globals['_PROJECTSPEC_ENVIRONMENTENTRY']._serialized_options = b'8\001'
-  _globals['_PROJECTSKILLSOURCE']._serialized_start=1764
-  _globals['_PROJECTSKILLSOURCE']._serialized_end=1890
+  _globals['_PROJECTSKILLSOURCE']._serialized_start=1875
+  _globals['_PROJECTSKILLSOURCE']._serialized_end=2001
+  _globals['_PROJECTSTORAGEPLACEMENT']._serialized_start=2004
+  _globals['_PROJECTSTORAGEPLACEMENT']._serialized_end=2149
   _globals['_SCAFFOLDPLACEHOLDER']._serialized_start=41
   _globals['_SCAFFOLDPLACEHOLDER']._serialized_end=86
-  _globals['_REPOSITORYSPEC']._serialized_start=88
-  _globals['_REPOSITORYSPEC']._serialized_end=214
-  _globals['_APPLICATIONPORT']._serialized_start=216
-  _globals['_APPLICATIONPORT']._serialized_end=299
-  _globals['_PROJECTAGENTS']._serialized_start=301
-  _globals['_PROJECTAGENTS']._serialized_end=381
-  _globals['_PROJECTSKILLSELECTION']._serialized_start=384
-  _globals['_PROJECTSKILLSELECTION']._serialized_end=518
-  _globals['_PROJECTRESOURCES']._serialized_start=521
-  _globals['_PROJECTRESOURCES']._serialized_end=698
-  _globals['_PROJECTSECRETBINDINGS']._serialized_start=701
-  _globals['_PROJECTSECRETBINDINGS']._serialized_end=845
-  _globals['_PROJECTACCESSBINDING']._serialized_start=847
-  _globals['_PROJECTACCESSBINDING']._serialized_end=895
-  _globals['_PROJECTSPEC']._serialized_start=898
-  _globals['_PROJECTSPEC']._serialized_end=1762
-  _globals['_PROJECTSPEC_ENVIRONMENTENTRY']._serialized_start=1634
-  _globals['_PROJECTSPEC_ENVIRONMENTENTRY']._serialized_end=1696
+  _globals['_REPOSITORYSPEC']._serialized_start=89
+  _globals['_REPOSITORYSPEC']._serialized_end=248
+  _globals['_APPLICATIONPORT']._serialized_start=250
+  _globals['_APPLICATIONPORT']._serialized_end=333
+  _globals['_PROJECTAGENTS']._serialized_start=335
+  _globals['_PROJECTAGENTS']._serialized_end=415
+  _globals['_PROJECTSKILLSELECTION']._serialized_start=418
+  _globals['_PROJECTSKILLSELECTION']._serialized_end=552
+  _globals['_PROJECTRESOURCES']._serialized_start=555
+  _globals['_PROJECTRESOURCES']._serialized_end=732
+  _globals['_PROJECTSECRETBINDINGS']._serialized_start=735
+  _globals['_PROJECTSECRETBINDINGS']._serialized_end=937
+  _globals['_PROJECTCREDENTIALBINDING']._serialized_start=939
+  _globals['_PROJECTCREDENTIALBINDING']._serialized_end=991
+  _globals['_PROJECTSPEC']._serialized_start=994
+  _globals['_PROJECTSPEC']._serialized_end=1873
+  _globals['_PROJECTSPEC_ENVIRONMENTENTRY']._serialized_start=1744
+  _globals['_PROJECTSPEC_ENVIRONMENTENTRY']._serialized_end=1806
 # @@protoc_insertion_point(module_scope)

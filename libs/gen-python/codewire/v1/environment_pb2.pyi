@@ -52,6 +52,13 @@ class IsolationTier(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ISOLATION_TIER_STANDARD: _ClassVar[IsolationTier]
     ISOLATION_TIER_CONFIDENTIAL: _ClassVar[IsolationTier]
 
+class EnvironmentSourcesUpdateOutcome(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNSPECIFIED: _ClassVar[EnvironmentSourcesUpdateOutcome]
+    ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNCHANGED: _ClassVar[EnvironmentSourcesUpdateOutcome]
+    ENVIRONMENT_SOURCES_UPDATE_OUTCOME_STORED: _ClassVar[EnvironmentSourcesUpdateOutcome]
+    ENVIRONMENT_SOURCES_UPDATE_OUTCOME_RESTART_REQUIRED: _ClassVar[EnvironmentSourcesUpdateOutcome]
+
 class EnvironmentResizeOperationState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     ENVIRONMENT_RESIZE_OPERATION_STATE_UNSPECIFIED: _ClassVar[EnvironmentResizeOperationState]
@@ -124,6 +131,10 @@ DESIRED_STATE_RESIZED: DesiredState
 ISOLATION_TIER_UNSPECIFIED: IsolationTier
 ISOLATION_TIER_STANDARD: IsolationTier
 ISOLATION_TIER_CONFIDENTIAL: IsolationTier
+ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNSPECIFIED: EnvironmentSourcesUpdateOutcome
+ENVIRONMENT_SOURCES_UPDATE_OUTCOME_UNCHANGED: EnvironmentSourcesUpdateOutcome
+ENVIRONMENT_SOURCES_UPDATE_OUTCOME_STORED: EnvironmentSourcesUpdateOutcome
+ENVIRONMENT_SOURCES_UPDATE_OUTCOME_RESTART_REQUIRED: EnvironmentSourcesUpdateOutcome
 ENVIRONMENT_RESIZE_OPERATION_STATE_UNSPECIFIED: EnvironmentResizeOperationState
 ENVIRONMENT_RESIZE_OPERATION_STATE_PENDING: EnvironmentResizeOperationState
 ENVIRONMENT_RESIZE_OPERATION_STATE_APPLYING: EnvironmentResizeOperationState
@@ -153,7 +164,7 @@ ENVIRONMENT_DAEMON_STATE_UNHEALTHY: EnvironmentDaemonState
 ENVIRONMENT_DAEMON_STATE_UPGRADE_REQUIRED: EnvironmentDaemonState
 
 class Environment(_message.Message):
-    __slots__ = ("id", "org_id", "created_by", "preset_id", "type", "name", "state", "desired_state", "error_reason", "recoverable", "state_changed_at", "retry_count", "setup_phase", "setup_complete", "setup_error", "ttl_seconds", "shutdown_at", "cpu_millicores", "memory_mb", "disk_gb", "total_running_seconds", "created_at", "started_at", "stopped_at", "destroyed_at", "protected", "deletion_requested_at", "deletion_grace_until", "preset_name", "network", "ports", "isolation_tier")
+    __slots__ = ("id", "org_id", "created_by", "preset_id", "type", "name", "state", "desired_state", "error_reason", "recoverable", "state_changed_at", "retry_count", "setup_phase", "setup_complete", "setup_error", "ttl_seconds", "shutdown_at", "cpu_millicores", "memory_mb", "disk_gb", "total_running_seconds", "created_at", "started_at", "stopped_at", "destroyed_at", "protected", "deletion_requested_at", "deletion_grace_until", "preset_name", "network", "ports", "isolation_tier", "operation_generation", "source_selection")
     ID_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     CREATED_BY_FIELD_NUMBER: _ClassVar[int]
@@ -186,6 +197,8 @@ class Environment(_message.Message):
     NETWORK_FIELD_NUMBER: _ClassVar[int]
     PORTS_FIELD_NUMBER: _ClassVar[int]
     ISOLATION_TIER_FIELD_NUMBER: _ClassVar[int]
+    OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_SELECTION_FIELD_NUMBER: _ClassVar[int]
     id: str
     org_id: str
     created_by: str
@@ -218,7 +231,9 @@ class Environment(_message.Message):
     network: str
     ports: _containers.RepeatedCompositeFieldContainer[_port_pb2.Port]
     isolation_tier: IsolationTier
-    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., created_by: _Optional[str] = ..., preset_id: _Optional[str] = ..., type: _Optional[str] = ..., name: _Optional[str] = ..., state: _Optional[_Union[EnvironmentState, str]] = ..., desired_state: _Optional[_Union[DesiredState, str]] = ..., error_reason: _Optional[str] = ..., recoverable: _Optional[bool] = ..., state_changed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., retry_count: _Optional[int] = ..., setup_phase: _Optional[int] = ..., setup_complete: _Optional[bool] = ..., setup_error: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., shutdown_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., total_running_seconds: _Optional[int] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., stopped_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., destroyed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., protected: _Optional[bool] = ..., deletion_requested_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deletion_grace_until: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., preset_name: _Optional[str] = ..., network: _Optional[str] = ..., ports: _Optional[_Iterable[_Union[_port_pb2.Port, _Mapping]]] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ...) -> None: ...
+    operation_generation: int
+    source_selection: EnvironmentSourceSelection
+    def __init__(self, id: _Optional[str] = ..., org_id: _Optional[str] = ..., created_by: _Optional[str] = ..., preset_id: _Optional[str] = ..., type: _Optional[str] = ..., name: _Optional[str] = ..., state: _Optional[_Union[EnvironmentState, str]] = ..., desired_state: _Optional[_Union[DesiredState, str]] = ..., error_reason: _Optional[str] = ..., recoverable: _Optional[bool] = ..., state_changed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., retry_count: _Optional[int] = ..., setup_phase: _Optional[int] = ..., setup_complete: _Optional[bool] = ..., setup_error: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., shutdown_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., cpu_millicores: _Optional[int] = ..., memory_mb: _Optional[int] = ..., disk_gb: _Optional[int] = ..., total_running_seconds: _Optional[int] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., started_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., stopped_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., destroyed_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., protected: _Optional[bool] = ..., deletion_requested_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., deletion_grace_until: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., preset_name: _Optional[str] = ..., network: _Optional[str] = ..., ports: _Optional[_Iterable[_Union[_port_pb2.Port, _Mapping]]] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., operation_generation: _Optional[int] = ..., source_selection: _Optional[_Union[EnvironmentSourceSelection, _Mapping]] = ...) -> None: ...
 
 class ListEnvironmentsRequest(_message.Message):
     __slots__ = ("org_id", "type", "state", "include_destroyed", "page_size", "page_token")
@@ -247,20 +262,68 @@ class ListEnvironmentsResponse(_message.Message):
     def __init__(self, environments: _Optional[_Iterable[_Union[Environment, _Mapping]]] = ..., next_page_token: _Optional[str] = ..., poll_interval: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class CreateEnvironmentRequest(_message.Message):
-    __slots__ = ("org_id", "preset_id", "name", "ttl_seconds", "isolation_tier", "project_spec")
+    __slots__ = ("org_id", "preset_id", "name", "ttl_seconds", "isolation_tier", "project_spec", "expected_profile_revision", "confirm_personal_credentials", "confirm_personal_secrets")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     PRESET_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     TTL_SECONDS_FIELD_NUMBER: _ClassVar[int]
     ISOLATION_TIER_FIELD_NUMBER: _ClassVar[int]
     PROJECT_SPEC_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_PROFILE_REVISION_FIELD_NUMBER: _ClassVar[int]
+    CONFIRM_PERSONAL_CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    CONFIRM_PERSONAL_SECRETS_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     preset_id: str
     name: str
     ttl_seconds: int
     isolation_tier: IsolationTier
     project_spec: _common_pb2.ProjectSpec
-    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ...) -> None: ...
+    expected_profile_revision: int
+    confirm_personal_credentials: bool
+    confirm_personal_secrets: bool
+    def __init__(self, org_id: _Optional[str] = ..., preset_id: _Optional[str] = ..., name: _Optional[str] = ..., ttl_seconds: _Optional[int] = ..., isolation_tier: _Optional[_Union[IsolationTier, str]] = ..., project_spec: _Optional[_Union[_common_pb2.ProjectSpec, _Mapping]] = ..., expected_profile_revision: _Optional[int] = ..., confirm_personal_credentials: _Optional[bool] = ..., confirm_personal_secrets: _Optional[bool] = ...) -> None: ...
+
+class EnvironmentSourceSelection(_message.Message):
+    __slots__ = ("secrets", "credentials", "profile_revision")
+    SECRETS_FIELD_NUMBER: _ClassVar[int]
+    CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    PROFILE_REVISION_FIELD_NUMBER: _ClassVar[int]
+    secrets: _common_pb2.ProjectSecretBindings
+    credentials: _common_pb2.ProjectCredentialBinding
+    profile_revision: int
+    def __init__(self, secrets: _Optional[_Union[_common_pb2.ProjectSecretBindings, _Mapping]] = ..., credentials: _Optional[_Union[_common_pb2.ProjectCredentialBinding, _Mapping]] = ..., profile_revision: _Optional[int] = ...) -> None: ...
+
+class UpdateEnvironmentSourcesRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id", "expected_operation_generation", "expected", "replacement", "allow_restart", "confirm_personal_credentials", "confirm_personal_secrets")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    EXPECTED_FIELD_NUMBER: _ClassVar[int]
+    REPLACEMENT_FIELD_NUMBER: _ClassVar[int]
+    ALLOW_RESTART_FIELD_NUMBER: _ClassVar[int]
+    CONFIRM_PERSONAL_CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    CONFIRM_PERSONAL_SECRETS_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    expected_operation_generation: int
+    expected: EnvironmentSourceSelection
+    replacement: EnvironmentSourceSelection
+    allow_restart: bool
+    confirm_personal_credentials: bool
+    confirm_personal_secrets: bool
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ..., expected_operation_generation: _Optional[int] = ..., expected: _Optional[_Union[EnvironmentSourceSelection, _Mapping]] = ..., replacement: _Optional[_Union[EnvironmentSourceSelection, _Mapping]] = ..., allow_restart: _Optional[bool] = ..., confirm_personal_credentials: _Optional[bool] = ..., confirm_personal_secrets: _Optional[bool] = ...) -> None: ...
+
+class UpdateEnvironmentSourcesResponse(_message.Message):
+    __slots__ = ("environment_id", "operation_generation", "selection", "outcome")
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    SELECTION_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_FIELD_NUMBER: _ClassVar[int]
+    environment_id: str
+    operation_generation: int
+    selection: EnvironmentSourceSelection
+    outcome: EnvironmentSourcesUpdateOutcome
+    def __init__(self, environment_id: _Optional[str] = ..., operation_generation: _Optional[int] = ..., selection: _Optional[_Union[EnvironmentSourceSelection, _Mapping]] = ..., outcome: _Optional[_Union[EnvironmentSourcesUpdateOutcome, str]] = ...) -> None: ...
 
 class CreateEnvironmentResponse(_message.Message):
     __slots__ = ("environment",)

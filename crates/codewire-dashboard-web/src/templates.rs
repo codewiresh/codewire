@@ -5,11 +5,11 @@ use crate::billing_connect::BillingPageView;
 #[cfg(test)]
 use crate::view::EnvironmentCreateFormView;
 use crate::view::{
-    ApiKeysPageView, AuthFormView, DashboardView, DevicePageView, EnvironmentsPageView,
-    InvitationPageView, MembersPageView, OrganizationContext, OrganizationFormView,
-    OrganizationRow, PresetsPageView, SecretBucketPageView, SecretProjectsPageView,
-    SettingsPageView, SettingsPlaceholderView, SetupTwoFactorView, TerminalPageView,
-    TwoFactorRecoveryView,
+    ApiKeysPageView, AuthFormView, CredentialSettingsView, DashboardView, DevicePageView,
+    EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
+    OrganizationFormView, OrganizationRow, PresetsPageView, SecretBucketPageView,
+    SecretProjectsPageView, SettingsPageView, SettingsPlaceholderView, SetupTwoFactorView,
+    TerminalPageView, TwoFactorRecoveryView,
 };
 
 #[derive(Template)]
@@ -89,6 +89,13 @@ pub(crate) struct InvitationTemplate<'a> {
 pub(crate) struct SettingsTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) settings: &'a SettingsPageView,
+}
+
+#[derive(Template)]
+#[template(path = "settings-credentials.html")]
+pub(crate) struct CredentialSettingsTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) page: &'a CredentialSettingsView,
 }
 
 #[derive(Template)]

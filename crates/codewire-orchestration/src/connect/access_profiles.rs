@@ -5,13 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_proto::codewire::v1::{
-    AccessProfile, AccessProfileEntry, AccessProfileService, ClearEnvironmentAccessProfileRequest,
-    ClearEnvironmentAccessProfileResponse, CreateAccessProfileRequest, CreateAccessProfileResponse,
-    DeleteAccessProfileRequest, DeleteAccessProfileResponse, EnvironmentAccessProfileBinding,
-    GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest,
-    GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse,
-    SetEnvironmentAccessProfileRequest, SetEnvironmentAccessProfileResponse,
-    UpdateAccessProfileRequest, UpdateAccessProfileResponse, get_access_profile_request,
+    AccessProfile, AccessProfileEntry, AccessProfileService, CreateAccessProfileRequest,
+    CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse,
+    EnvironmentAccessProfileBinding, GetAccessProfileRequest, GetAccessProfileResponse,
+    GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse,
+    ListAccessProfilesRequest, ListAccessProfilesResponse, UpdateAccessProfileRequest,
+    UpdateAccessProfileResponse, get_access_profile_request,
 };
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::connect::{auth_user, rpc_app_error};
@@ -19,7 +18,7 @@ use codewire_server_core::{AppError, AppResult};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use sqlx::PgPool;
 
-use crate::access_profiles::{AccessProfiles, ProfileSelector, parse_binding, profile_entries};
+use crate::access_profiles::{AccessProfiles, ProfileSelector, profile_entries};
 
 /// Mount with the ordinary authenticated Connect layer. The service additionally
 /// rejects organization API keys for every account-scoped method.
@@ -170,50 +169,6 @@ impl AccessProfileService for ProfileConnectService {
             ..Default::default()
         })
     }
-
-    async fn set_environment_access_profile(
-        &self,
-        ctx: RequestContext,
-        request: ServiceRequest<'_, SetEnvironmentAccessProfileRequest>,
-    ) -> ServiceResult<SetEnvironmentAccessProfileResponse> {
-        let user = account_user(&ctx)?;
-        let request = request.to_owned_message();
-        let binding = binding_field(request.binding.as_option())
-            .map_err(|error| rpc_app_error(&error, &ctx))?;
-        let expected = request
-            .expected_binding
-            .as_option()
-            .map(|binding| binding_field(Some(binding)))
-            .transpose()
-            .map_err(|error| rpc_app_error(&error, &ctx))?;
-        let binding = bounded(
-            &ctx,
-            self.profiles.set_binding(
-                &user,
-                binding,
-                expected,
-                request.confirm_personal_credentials,
-            ),
-        )
-        .await?;
-        connectrpc::Response::ok(SetEnvironmentAccessProfileResponse {
-            binding: Some(proto_binding(binding)).into(),
-            ..Default::default()
-        })
-    }
-
-    async fn clear_environment_access_profile(
-        &self,
-        ctx: RequestContext,
-        request: ServiceRequest<'_, ClearEnvironmentAccessProfileRequest>,
-    ) -> ServiceResult<ClearEnvironmentAccessProfileResponse> {
-        let user = account_user(&ctx)?;
-        let request = request.to_owned_message();
-        let expected = binding_field(request.expected_binding.as_option())
-            .map_err(|error| rpc_app_error(&error, &ctx))?;
-        bounded(&ctx, self.profiles.clear_binding(&user, expected)).await?;
-        connectrpc::Response::ok(ClearEnvironmentAccessProfileResponse::default())
-    }
 }
 
 fn account_user(ctx: &RequestContext) -> Result<AuthUser, connectrpc::ConnectError> {
@@ -271,16 +226,4 @@ fn proto_binding(
         access_profile_revision: binding.profile_revision,
         ..Default::default()
     }
-}
-
-fn binding_field(
-    binding: Option<&EnvironmentAccessProfileBinding>,
-) -> AppResult<codewire_access::EnvironmentAccessBinding> {
-    let binding = binding
-        .ok_or_else(|| AppError::BadRequest("an exact environment binding is required".into()))?;
-    parse_binding(
-        &binding.environment_id,
-        &binding.access_profile_id,
-        binding.access_profile_revision,
-    )
 }

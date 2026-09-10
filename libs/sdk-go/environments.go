@@ -244,6 +244,60 @@ func (s *EnvironmentService) Start(ctx context.Context, envID string) error {
 	return connectSDKError(err)
 }
 
+// UpdateEnvironmentSources replaces only application-secret sources and the
+// provider-profile selection. The caller supplies the exact current selection
+// and operation generation; running environments restart only when explicitly
+// allowed, and personal source confirmations are never inferred.
+func (s *EnvironmentService) UpdateEnvironmentSources(ctx context.Context, envID string, body UpdateEnvironmentSourcesRequest) (*EnvironmentSourcesUpdate, error) {
+	if err := ensureEnvironmentConverterCoverage(); err != nil {
+		return nil, err
+	}
+	if body.ExpectedOperationGeneration == 0 {
+		return nil, fmt.Errorf("codewire: expected operation generation must be a positive uint64")
+	}
+	orgID, err := s.client.resolveOrgID()
+	if err != nil {
+		return nil, err
+	}
+	expected, err := toProtoEnvironmentSourceSelection(body.Expected)
+	if err != nil {
+		return nil, err
+	}
+	replacement, err := toProtoEnvironmentSourceSelection(body.Replacement)
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.client.environments.UpdateEnvironmentSources(ctx, connect.NewRequest(&codewirev1.UpdateEnvironmentSourcesRequest{
+		OrgId: orgID, EnvironmentId: envID, ExpectedOperationGeneration: body.ExpectedOperationGeneration,
+		Expected: expected, Replacement: replacement, AllowRestart: body.AllowRestart,
+		ConfirmPersonalCredentials: body.ConfirmPersonalCredentials, ConfirmPersonalSecrets: body.ConfirmPersonalSecrets,
+	}))
+	if err != nil {
+		return nil, connectSDKError(err)
+	}
+	if response.Msg.GetSelection() == nil {
+		return nil, fmt.Errorf("codewire: environment sources response omitted selection")
+	}
+	if response.Msg.GetEnvironmentId() != envID {
+		return nil, fmt.Errorf("codewire: environment sources response changed environment identity")
+	}
+	if response.Msg.GetOperationGeneration() == 0 {
+		return nil, fmt.Errorf("codewire: environment sources response omitted operation generation")
+	}
+	selection, err := fromProtoEnvironmentSourceSelection(response.Msg.GetSelection())
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := environmentSourcesUpdateOutcome(response.Msg.GetOutcome())
+	if err != nil {
+		return nil, err
+	}
+	return &EnvironmentSourcesUpdate{
+		EnvironmentID: response.Msg.GetEnvironmentId(), OperationGeneration: response.Msg.GetOperationGeneration(),
+		Selection: *selection, Outcome: outcome,
+	}, nil
+}
+
 // Exec runs a command in the environment and returns the result.
 func (s *EnvironmentService) Exec(ctx context.Context, envID string, body ExecBody) (*ExecResult, error) {
 	orgID, err := s.client.resolveOrgID()

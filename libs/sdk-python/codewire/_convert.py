@@ -22,12 +22,28 @@ _ENVIRONMENT_DESCRIPTOR_FIELDS = {
     22: "created_at", 23: "started_at", 24: "stopped_at",
     25: "destroyed_at", 26: "protected", 27: "deletion_requested_at",
     28: "deletion_grace_until", 29: "preset_name", 30: "network",
-    31: "ports", 32: "isolation_tier",
+    31: "ports", 32: "isolation_tier", 33: "operation_generation",
+    34: "source_selection",
 }
 
 _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds",
-    24: "isolation_tier", 25: "project_spec",
+    24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision",
+    27: "confirm_personal_credentials", 28: "confirm_personal_secrets",
+}
+
+_SOURCE_DESCRIPTOR_FIELDS = {
+    "EnvironmentSourceSelection": {
+        1: "secrets", 2: "credentials", 3: "profile_revision",
+    },
+    "UpdateEnvironmentSourcesRequest": {
+        1: "org_id", 2: "environment_id", 3: "expected_operation_generation",
+        4: "expected", 5: "replacement", 6: "allow_restart",
+        7: "confirm_personal_credentials", 8: "confirm_personal_secrets",
+    },
+    "UpdateEnvironmentSourcesResponse": {
+        1: "environment_id", 2: "operation_generation", 3: "selection", 4: "outcome",
+    },
 }
 
 _PRESET_DESCRIPTOR_FIELDS = {
@@ -48,19 +64,19 @@ _UPDATE_PRESET_DESCRIPTOR_FIELDS = {
 
 _PROJECT_DESCRIPTOR_FIELDS = {
     "RepositorySpec": {
-        1: "source", 2: "branch", 3: "destination", 4: "revision"
+        1: "source", 2: "branch", 3: "destination", 4: "revision", 5: "known_hosts",
     },
     "ApplicationPort": {1: "port", 2: "label", 3: "access"},
     "ProjectAgents": {1: "install", 2: "tools"},
     "ProjectSkillSelection": {1: "source", 2: "reference", 3: "agents"},
     "ProjectResources": {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
-    "ProjectSecretBindings": {1: "project", 4: "organization", 5: "user"},
-    "ProjectAccessBinding": {1: "profile"},
+    "ProjectSecretBindings": {1: "project", 4: "organization", 6: "user"},
+    "ProjectCredentialBinding": {1: "profile"},
     "ProjectSpec": {
         1: "schema_version", 2: "preset", 3: "image", 4: "repositories",
         5: "working_directory", 6: "install_command", 7: "startup_script",
         8: "environment", 9: "agents", 11: "skills",
-        12: "application_ports", 13: "resources", 14: "secrets", 17: "access",
+        12: "application_ports", 13: "resources", 14: "secrets", 18: "credentials",
     },
 }
 
@@ -99,6 +115,8 @@ def environment_to_dict(message: Message) -> dict[str, Any]:
     """Render an environment with REST's state and port-access spellings."""
     assert_environment_converter_coverage()
     value = proto_to_dict(message)
+    if message.HasField("source_selection"):
+        value["source_selection"] = environment_source_selection_to_dict(message.source_selection)
     value["state"] = _enum_suffix(message, "state", "ENVIRONMENT_STATE_")
     value["desired_state"] = _enum_suffix(
         message, "desired_state", "DESIRED_STATE_"
@@ -125,6 +143,12 @@ def assert_environment_converter_coverage() -> None:
         CreateEnvironmentRequest.DESCRIPTOR,
         _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS,
     )
+    from codewire.v1 import environment_pb2
+
+    for message_name, expected in _SOURCE_DESCRIPTOR_FIELDS.items():
+        _assert_descriptor_coverage(
+            message_name, getattr(environment_pb2, message_name).DESCRIPTOR, expected
+        )
 
 
 def assert_project_spec_converter_coverage() -> None:
@@ -225,12 +249,79 @@ def project_spec_from_dict(value: dict[str, Any]) -> Message:
 
     assert_project_spec_converter_coverage()
     payload = deepcopy(value)
+    _prepare_secret_placement(payload)
     for skill in payload.get("skills", []):
         source = skill.get("source")
         if source not in ("repository", "user"):
             raise ValueError("codewire: project skill source must be repository or user")
         skill["source"] = f"PROJECT_SKILL_SOURCE_{source.upper()}"
     return ParseDict(payload, ProjectSpec())
+
+
+def _prepare_secret_placement(payload: dict[str, Any]) -> None:
+    secrets = payload.get("secrets")
+    if secrets is not None and "user" in secrets:
+        placement = secrets["user"]
+        if type(placement) is not str or placement not in ("local", "platform"):
+            raise ValueError("codewire: personal secret placement must be local or platform")
+        secrets["user"] = f"PROJECT_STORAGE_PLACEMENT_{placement.upper()}"
+
+
+def positive_uint64(value: int, name: str) -> int:
+    if type(value) is not int or not 0 < value <= (1 << 64) - 1:
+        raise ValueError(f"codewire: {name} must be a positive uint64 integer")
+    return value
+
+
+def explicit_bool(value: bool, name: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"codewire: {name} must be an explicit boolean")
+    return value
+
+
+def environment_source_selection_from_dict(value: dict[str, Any]) -> Message:
+    """Preserve complete selections, including explicitly empty replacements."""
+    from codewire.v1.environment_pb2 import EnvironmentSourceSelection
+
+    assert_environment_converter_coverage()
+    if type(value) is not dict:
+        raise ValueError("codewire: source selection must be an explicit object")
+    payload = deepcopy(value)
+    _prepare_secret_placement(payload)
+    has_profile = payload.get("credentials") is not None
+    has_revision = payload.get("profile_revision") is not None
+    if has_profile != has_revision:
+        raise ValueError("codewire: profile selection requires its exact revision")
+    if has_revision:
+        payload["profile_revision"] = positive_uint64(
+            payload["profile_revision"], "profile revision"
+        )
+    return ParseDict(payload, EnvironmentSourceSelection())
+
+
+def environment_sources_update_to_dict(message: Message) -> dict[str, Any]:
+    """Render the server's source-update result without inventing readiness."""
+    assert_environment_converter_coverage()
+    if not message.HasField("selection"):
+        raise RuntimeError("source update response omitted selection")
+    if message.outcome not in (1, 2, 3):
+        raise RuntimeError("source update response omitted a recognized outcome")
+    positive_uint64(message.operation_generation, "operation generation")
+    value = proto_to_dict(message)
+    value["selection"] = environment_source_selection_to_dict(message.selection)
+    value["outcome"] = _enum_suffix(
+        message, "outcome", "ENVIRONMENT_SOURCES_UPDATE_OUTCOME_"
+    )
+    return value
+
+
+def environment_source_selection_to_dict(message: Message) -> dict[str, Any]:
+    """Reject partial observed selections instead of returning unusable CAS state."""
+    if message.HasField("credentials") != message.HasField("profile_revision"):
+        raise RuntimeError("source selection requires its exact profile revision")
+    if message.HasField("profile_revision"):
+        positive_uint64(message.profile_revision, "profile revision")
+    return proto_to_dict(message)
 
 
 def project_spec_to_dict(message: Message) -> dict[str, Any]:
@@ -285,5 +376,9 @@ def _field_value(field: FieldDescriptor, value: Any) -> Any:
     if field.type == FieldDescriptor.TYPE_BYTES:
         return bytes(value)
     if field.type == FieldDescriptor.TYPE_ENUM:
+        if field.enum_type.full_name == "codewire.v1.ProjectStoragePlacement":
+            if value not in (1, 2):
+                raise ValueError("codewire: personal secret placement must be local or platform")
+            return "local" if value == 1 else "platform"
         return field.enum_type.values_by_number[int(value)].name.lower()
     return value

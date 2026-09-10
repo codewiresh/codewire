@@ -91,10 +91,13 @@ than claiming that database token revocation does so.
 
 ## Client use
 
-- The dashboard uses connect-es/connect-query with the same-origin session
-  cookie. Generated Mesh product service paths are routed from that same
-  product origin to Mesh; browser JavaScript does not store a user bearer token
-  and Mesh does not own another login/session cookie.
+- The server-rendered dashboard is the existing Rust backend-for-frontend
+  (BFF). Its generated Connect clients forward the canonical browser session
+  to the owning product service. Credential forms also require same-origin
+  and CSRF checks; their mutations use the shared credential service, not a
+  separate dashboard OAuth client. Browser-side product calls remain on the
+  same origin; browser JavaScript does not store a user bearer token and Mesh
+  does not own another login/session cookie.
 - The CLI and rewritten native apps use the shared Rust
   `codewire-client` OAuth implementation and `TokenProvider`. The CLI uses the
   OAuth device grant; clients with a system browser use PKCE.
@@ -109,7 +112,7 @@ than claiming that database token revocation does so.
   and destination data. Environment creation may resolve an already-saved
   canonical repository configuration, but the dashboard does not fetch or
   analyze repository contents. An unknown repository-only request fails
-  closed. Private platform repository access waits for an explicit access
+  closed. Private platform repository access requires an explicit access
   profile and typed platform repository executor; Codewire does not persist,
   inject, or fall back to a raw forge token. Protected local GitHub credential
   enrollment remains a local credential-broker capability and does not create
@@ -117,20 +120,28 @@ than claiming that database token revocation does so.
 
 ## Protocol and error boundaries
 
-### Long-running OAuth-authorized publication
+### Long-running credential publication
 
-An isolated enrollment mount accepts only the existing OAuth user bearer through
-`ConnectAuthLayer::oauth_bearer_only`. Cookies and organization API keys cannot
-substitute for it. Shared authentication can retain an opaque, process-local
-`OAuthBearerAuthority` containing the original token's digest, user, client and
-expiry, never its raw value. This reference is not a new credential flavor.
+The isolated credential-mutation mount accepts either the existing OAuth user
+bearer or the signed-in browser session through
+`ConnectAuthLayer::credential_mutation`. A session request additionally
+requires one unambiguous session cookie, no simultaneous Authorization
+credential, and the exact configured public Origin; dashboard form actions retain
+their existing identity, 2FA, same-Origin and CSRF checks. Organization API
+keys are rejected before lookup. Delegation remains on the separate
+OAuth-bearer-only mount.
+
+Shared authentication retains an opaque, process-local exact original
+authority: OAuth digest/user/client/expiry or session row/digest/user/expiry,
+never either raw credential. This reference is not a new credential flavor.
 
 Before saving a provider credential, recheck that exact original authority and
-hold its user/client/token locks through the same credential transaction. The
-live token must retain `codewire.api`, its exact identity and original expiry;
-its user/client must still exist and the client must remain enabled. A renewed
-login cannot rescue the original operation. Absolute and monotonic deadlines
-remain pinned to initial authentication and the enrollment's original duration.
+hold its locks through the same credential transaction. OAuth retains the
+user/client/token checks. Session authority locks the user and exact live
+session row; later browser validation may slide the stored row but cannot
+extend an already admitted operation. Logout deletes the row and therefore
+fences publication. Absolute and monotonic deadlines remain pinned to initial
+authentication and the operation's original duration.
 Prepare protected material before taking locks, not during the transaction.
 
 Transaction-local PostgreSQL deadlines bound blocked statements and idle lock
@@ -139,6 +150,27 @@ timer still bounds admission; neither timer guarantees a rollback acknowledgemen
 across network loss. Recheck original deadlines before committing. If COMMIT
 may have been issued, a missing reply is an unknown outcome: inspect saved
 metadata before retrying and never automatically revoke possibly stored tokens.
+
+### Local use of platform sources
+
+`CredentialDelegationService` uses that same original owner-OAuth boundary,
+not a new credential flavor. Its first frame selects exact platform sources
+and a profile revision for one native environment operation. The authenticated
+host asserts the native identity; Codewire does not claim independent VM
+attestation. Cookies, organization API keys and purported Pod identities are
+not substitutes for the original OAuth authority.
+
+Each admission rechecks that original token plus current owner, organization,
+membership, source and profile authority. Provider operations remain inside the
+platform broker. Application values leave only as recipient-bound ciphertext.
+No platform environment row, stored delegation or provider credential copy is
+created for the local VM. Connection expiry cannot extend the original token;
+reconnection requires fresh admission and never replays an old operation.
+The public TLS leg uses native gRPC and the direct h2c leg uses Connect under
+the same OAuth-only mount. Both share the existing broker capacity and drain.
+The host sends Open and the matching Ready, then waits within one bounded setup
+deadline for the exact admitted-selection reply. A successful send or HTTP 200
+is not admission. Subsequent admission replies are protocol errors.
 
 ### Kubernetes Pod identity
 

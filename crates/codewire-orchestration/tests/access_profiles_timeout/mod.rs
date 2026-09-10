@@ -39,7 +39,7 @@ async fn set_session_timeouts(
     Ok(())
 }
 
-async fn released_backend(h: &Harness, pid: i32) -> Result<()> {
+async fn released_backend(h: &Harness, request_pool: &PgPool, pid: i32) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             // Observe the exact request backend, not an unrelated spare pool
@@ -52,7 +52,7 @@ async fn released_backend(h: &Harness, pid: i32) -> Result<()> {
             .bind(pid)
             .fetch_one(&h.db)
             .await?;
-            if released && h.service_pool.num_idle() == h.service_pool.size() as usize {
+            if released && request_pool.num_idle() == request_pool.size() as usize {
                 return Ok::<_, anyhow::Error>(());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -137,11 +137,18 @@ async fn public_profile_timeouts_release_waiting_backends_and_preserve_session_s
     let h = Harness::create().await?;
     let result = async {
         let profile = h.rpc.create("timeout-binding", CREDENTIAL).await?;
-        let selection = binding(&profile);
+        let selection = source_binding(&profile);
         assert_local_settings_do_not_leak(&h).await?;
+        sqlx::query("UPDATE environments SET state='stopped',desired_state='stopped' WHERE id=$1")
+            .bind(ENV).execute(&h.db).await?;
+        let source_pool = PgPoolOptions::new().max_connections(1)
+            .connect_with((*h.db.connect_options()).clone()).await?;
+        let source_role: String = sqlx::query_scalar("SELECT current_user::text")
+            .fetch_one(&source_pool).await?;
 
         // Cover both transaction ownership paths: profile store create and
-        // orchestration-composed binding authorization. Both requests take
+        // direct source-admission authorization (not a retired HTTP route).
+        // Both operations take
         // owner locks before encountering their deliberately held row barrier.
         for binding_path in [false, true] {
             let mut blocker = h.db.begin().await?;
@@ -156,24 +163,33 @@ async fn public_profile_timeouts_release_waiting_backends_and_preserve_session_s
                     .bind(CREDENTIAL).fetch_one(&mut *blocker).await?;
             }
             let rpc = h.rpc.clone();
-            let request = if binding_path {
-                set(&selection, None, true)
-            } else {
-                json!({"name":"must-not-publish","entries":entries(CREDENTIAL)})
-            };
-            let method = if binding_path { "SetEnvironmentAccessProfile" } else { "CreateAccessProfile" };
-            let pending = spawn(async move { rpc.call(method, Auth::Alice, request).await });
-            let pids = blocked_service(&h.db, &h.role, holder, 1).await?;
+            let pool = source_pool.clone();
+            let selected = selection.clone();
+            let pending = spawn(async move {
+                if binding_path {
+                    let request = source_replacement(Default::default(), selected);
+                    let error = admit_sources(&pool, &source_actor(ALICE), ENV, &request).await.unwrap_err();
+                    ensure!(matches!(error, codewire_server_core::AppError::ServiceUnavailable(_)));
+                    ensure!(!error.to_string().contains("synthetic"));
+                } else {
+                    let response = rpc.call("CreateAccessProfile", Auth::Alice,
+                        json!({"name":"must-not-publish","entries":entries(CREDENTIAL)})).await?;
+                    ensure!(response.0 == StatusCode::SERVICE_UNAVAILABLE);
+                    ensure!(response.1["code"] == "unavailable");
+                    ensure!(!response.1.to_string().contains("synthetic"));
+                }
+                Ok(())
+            });
+            let role = if binding_path { &source_role } else { &h.role };
+            let pids = blocked_service(&h.db, role, holder, 1).await?;
             let waiter = *pids.first().context("missing blocked request backend")?;
-            let response = joined(pending).await?;
-            ensure!(response.0 == StatusCode::SERVICE_UNAVAILABLE);
-            ensure!(response.1["code"] == "unavailable");
-            ensure!(!response.1.to_string().contains("synthetic"));
+            joined(pending).await?;
 
             // Do not release the barrier to make cleanup succeed. Old code's
             // Rust-only timeout returns the same HTTP error but leaves this
             // exact backend, pool connection and earlier owner locks waiting.
-            released_backend(&h, waiter).await?;
+            let request_pool = if binding_path { &source_pool } else { &h.service_pool };
+            released_backend(&h, request_pool, waiter).await?;
             assert_released_locks(&h.db, binding_path).await?;
             let still_holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
                 .fetch_one(&mut *blocker).await?;
@@ -186,6 +202,7 @@ async fn public_profile_timeouts_release_waiting_backends_and_preserve_session_s
             h.rpc.ok("ListAccessProfiles", Auth::Alice, json!({})).await?;
             blocker.rollback().await?;
         }
+        source_pool.close().await;
         Ok(())
     }.await;
     h.finish(result).await

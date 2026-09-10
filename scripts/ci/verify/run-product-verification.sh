@@ -167,6 +167,7 @@ run_policy_core() {
   scripts/ci/tests/test-setup-kubeconfig.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-select-verification.sh
+  scripts/ci/tests/test-service-ssh-image-verifier.sh
   scripts/ci/tests/test-shellcheck-policy-domain.sh
   scripts/ci/tests/test-go-source-ownership.sh
   scripts/ci/tests/test-rust-owned-fixtures.sh
@@ -183,6 +184,8 @@ run_policy_core() {
   scripts/ci/tests/test-dashboard-image-network-probe.sh
   scripts/ci/tests/test-workspace-agent-contract.sh
   scripts/ci/tests/test-workspace-image-verify-workflow.sh
+  scripts/ci/tests/test-build-kind-smokes.sh
+  python3 -B scripts/ci/tests/test-kind-build-artifacts.py
   scripts/ci/tests/test-openbao-only-secret-authority.sh
   scripts/ci/tests/test-preflight-openbao-native-secrets.sh
   scripts/ci/tests/test-sync-local-secrets.sh
@@ -452,6 +455,7 @@ run_runtime_confidential() {
 run_runtime_dev_smoke() {
   scripts/runtime/tests/test-provision-dev-smoke-user.sh
   scripts/runtime/tests/test-smoke-dev-commodity.sh
+  scripts/runtime/tests/test-local-platform-sources-smoke.sh
 }
 
 run_rust() {

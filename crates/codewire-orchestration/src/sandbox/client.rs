@@ -59,12 +59,44 @@ pub struct WorkspacePodIdentity {
     pub uid: String,
 }
 
+/// Exact owned Sandbox whose current suspension the controller completed.
+/// Constructed only by the suspension observation; callers retain it through
+/// old-Pod absence, bootstrap refresh, and conditional resume.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WorkspaceSandboxIdentity {
+    name: String,
+    uid: String,
+}
+
+impl WorkspaceSandboxIdentity {
+    fn require_match(&self, sandbox: &DynamicObject) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            sandbox.metadata.name.as_deref() == Some(self.name.as_str())
+                && sandbox.metadata.uid.as_deref() == Some(self.uid.as_str()),
+            "workspace Sandbox is not the observed suspended runtime"
+        );
+        Ok(())
+    }
+}
+
 /// Exact controller-owned objects observed before metadata publication. This
 /// contains no token and confers no credential authority.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RuntimeIdentityObservation {
     sandbox_uid: String,
     pod: WorkspacePodIdentity,
+}
+
+impl RuntimeIdentityObservation {
+    pub fn pod(&self) -> &WorkspacePodIdentity {
+        &self.pod
+    }
+}
+
+struct WorkspaceBootstrapSnapshot {
+    pool: DynamicObject,
+    template: DynamicObject,
+    sandbox: DynamicObject,
 }
 
 struct RuntimeIdentitySnapshot {
@@ -157,6 +189,400 @@ mod runtime_identity_tests;
 #[cfg(test)]
 #[path = "client_cleanup_tests.rs"]
 mod cleanup_tests;
+
+#[cfg(test)]
+#[path = "client/workspace_bootstrap_tests.rs"]
+mod workspace_bootstrap_tests;
+
+const WORKSPACE_BOOTSTRAP_KEYS: [&str; 4] = [
+    "CODEWIRE_ENVIRONMENT_ID",
+    "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
+    "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",
+    super::template::MANAGED_CREDENTIAL_CLIENTS_ENV,
+];
+
+fn workspace_owned_environment_keys() -> BTreeSet<String> {
+    let mut keys: BTreeSet<_> = WORKSPACE_BOOTSTRAP_KEYS
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    keys.extend(
+        codewire_access::ManagedCredentialClients::from_profile_slots([
+            "codex",
+            "openai",
+            "anthropic",
+            "ssh",
+        ])
+        .expect("closed slots")
+        .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
+        .environment
+        .into_keys(),
+    );
+    // Public roots previously rendered by this same owned workspace bootstrap.
+    // They must not persist when the stock client uses the loopback route.
+    keys.insert("CODEX_CA_CERTIFICATE".into());
+    keys
+}
+
+fn workspace_bootstrap_values(opts: &TemplateOpts) -> anyhow::Result<BTreeMap<String, String>> {
+    anyhow::ensure!(
+        !opts.environment_id.is_empty()
+            && opts.environment_id.trim() == opts.environment_id
+            && !opts.organization_id.is_empty()
+            && opts.operation_generation > 0
+            && opts.name.ends_with(&format!("-{}", opts.environment_id)),
+        "workspace bootstrap authority is incomplete"
+    );
+    let Some(digest) = opts.projection_selection_sha256 else {
+        anyhow::ensure!(
+            opts.managed_credential_clients == Default::default(),
+            "managed credential clients have no selected bootstrap"
+        );
+        return Ok(BTreeMap::new());
+    };
+    anyhow::ensure!(
+        digest != [0; 32] && opts.credential_runtime.is_some(),
+        "workspace bootstrap selection has no runtime trust"
+    );
+    let mut expected = BTreeMap::from([
+        (
+            WORKSPACE_BOOTSTRAP_KEYS[0].to_owned(),
+            opts.environment_id.clone(),
+        ),
+        (
+            WORKSPACE_BOOTSTRAP_KEYS[1].to_owned(),
+            opts.operation_generation.to_string(),
+        ),
+        (
+            WORKSPACE_BOOTSTRAP_KEYS[2].to_owned(),
+            digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        ),
+        (
+            WORKSPACE_BOOTSTRAP_KEYS[3].to_owned(),
+            opts.managed_credential_clients.encode().to_owned(),
+        ),
+    ]);
+    expected.extend(
+        opts.managed_credential_clients
+            .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
+            .environment,
+    );
+    Ok(expected)
+}
+
+fn workspace_container(containers: &[Value]) -> anyhow::Result<(usize, &Value)> {
+    let mut workspace = containers.iter().enumerate().filter(|(_, container)| {
+        container.get("name").and_then(Value::as_str) == Some("workspace")
+    });
+    match (workspace.next(), workspace.next()) {
+        (Some(container), None) => Ok(container),
+        _ => anyhow::bail!("runtime object requires exactly one workspace container"),
+    }
+}
+
+fn workspace_environment(container: &Value) -> anyhow::Result<&[Value]> {
+    match container.get("env") {
+        None => Ok(&[]),
+        Some(Value::Array(env)) => Ok(env),
+        _ => anyhow::bail!("workspace environment is malformed"),
+    }
+}
+
+fn bootstrap_environment_matches(env: &[Value], expected: &BTreeMap<String, String>) -> bool {
+    let mut seen = BTreeSet::new();
+    let owned = workspace_owned_environment_keys();
+    for entry in env {
+        let Some(name) = entry.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        if owned.contains(name)
+            && (!seen.insert(name)
+                || !entry.get("valueFrom").is_none_or(Value::is_null)
+                || entry.get("value").and_then(Value::as_str)
+                    != expected.get(name).map(String::as_str)
+                || !expected.contains_key(name))
+        {
+            return false;
+        }
+    }
+    seen.len() == expected.len()
+}
+
+fn bootstrap_template_matches(
+    object: &DynamicObject,
+    expected: &BTreeMap<String, String>,
+) -> anyhow::Result<bool> {
+    let containers = object
+        .data
+        .pointer("/spec/podTemplate/spec/containers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("runtime object has no containers"))?;
+    let (_, container) = workspace_container(containers)?;
+    Ok(bootstrap_environment_matches(
+        workspace_environment(container)?,
+        expected,
+    ))
+}
+
+/// JSON Patch modifies only the owned entries, not the surrounding env array.
+/// UID/RV tests bind the validated incarnation and every array index. No retry
+/// substitutes another object's version after a conflict.
+fn workspace_bootstrap_patch(
+    object: &DynamicObject,
+    expected: &BTreeMap<String, String>,
+    recovery: Option<&Value>,
+    clients: &Value,
+) -> anyhow::Result<Option<Patch<()>>> {
+    let env_matches = bootstrap_template_matches(object, expected)?;
+    let mut changes = workspace_client_changes(&object.data, clients, "/spec/podTemplate/spec")?;
+    if let Some(recovery) = recovery {
+        let kernel = recovery
+            .pointer("/spec/podTemplate/metadata/annotations")
+            .and_then(|annotations| annotations.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY))
+            .ok_or_else(|| anyhow::anyhow!("confidential recovery annotation is unavailable"))?;
+        let annotations = "/spec/podTemplate/metadata/annotations";
+        if object
+            .data
+            .pointer(annotations)
+            .and_then(|values| values.get(KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY))
+            != Some(kernel)
+        {
+            anyhow::ensure!(
+                object
+                    .data
+                    .pointer("/spec/podTemplate/metadata")
+                    .is_some_and(Value::is_object),
+                "workspace metadata is unavailable"
+            );
+            if let Some(current) = object.data.pointer(annotations) {
+                anyhow::ensure!(current.is_object(), "workspace annotations are malformed");
+                let key = KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY
+                    .replace('~', "~0")
+                    .replace('/', "~1");
+                changes.push(serde_json::json!({"op":"add", "path":format!("{annotations}/{key}"), "value":kernel}));
+            } else {
+                changes.push(serde_json::json!({"op":"add", "path":annotations, "value":{KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY:kernel}}));
+            }
+        }
+        let policy = "/spec/podTemplate/spec/securityContext/fsGroupChangePolicy";
+        let expected_policy = recovery
+            .pointer(policy)
+            .ok_or_else(|| anyhow::anyhow!("confidential recovery policy is unavailable"))?;
+        if object.data.pointer(policy) != Some(expected_policy) {
+            anyhow::ensure!(
+                object
+                    .data
+                    .pointer("/spec/podTemplate/spec/securityContext")
+                    .is_some_and(Value::is_object),
+                "workspace security context is unavailable"
+            );
+            changes.push(serde_json::json!({"op":"add", "path":policy, "value":expected_policy}));
+        }
+    }
+    if env_matches && changes.is_empty() {
+        return Ok(None);
+    }
+    let uid = object
+        .metadata
+        .uid
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap object has no UID"))?;
+    let version = object
+        .metadata
+        .resource_version
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap object has no resource version"))?;
+    let containers = object
+        .data
+        .pointer("/spec/podTemplate/spec/containers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("runtime object has no containers"))?;
+    let (index, container) = workspace_container(containers)?;
+    let env = workspace_environment(container)?;
+    anyhow::ensure!(
+        env.iter()
+            .all(|entry| entry.get("name").and_then(Value::as_str).is_some()),
+        "workspace environment is malformed"
+    );
+    let path = format!("/spec/podTemplate/spec/containers/{index}/env");
+    let mut patch = vec![
+        serde_json::json!({"op":"test", "path":"/metadata/uid", "value":uid}),
+        serde_json::json!({"op":"test", "path":"/metadata/resourceVersion", "value":version}),
+    ];
+    if !env_matches && container.get("env").is_none() {
+        patch.push(serde_json::json!({"op":"add", "path":path, "value":[]}));
+    }
+    for (index, entry) in env.iter().enumerate().rev().filter(|_| !env_matches) {
+        if entry
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| workspace_owned_environment_keys().contains(name))
+        {
+            patch.push(serde_json::json!({"op":"remove", "path":format!("{path}/{index}")}));
+        }
+    }
+    for (name, value) in expected.iter().filter(|_| !env_matches) {
+        patch.push(serde_json::json!({"op":"add", "path":format!("{path}/-"), "value":{"name":name,"value":value}}));
+    }
+    patch.extend(changes);
+    Ok(Some(Patch::Json(serde_json::from_value(Value::Array(
+        patch,
+    ))?)))
+}
+
+const WORKSPACE_CLIENT_VOLUMES: [&str; 2] = ["credential-codex-config", "credential-codex-home"];
+
+/// Reconcile named machine-owned entries without replacing their surrounding
+/// arrays. Array indices are protected by the outer object's UID/RV tests.
+fn workspace_client_named_changes(
+    data: &Value,
+    path: &str,
+    expected: &[Value],
+    changes: &mut Vec<Value>,
+) -> anyhow::Result<()> {
+    let current = match data.pointer(path) {
+        None => &[][..],
+        Some(Value::Array(values)) => values.as_slice(),
+        _ => anyhow::bail!("workspace client bootstrap array is malformed"),
+    };
+    anyhow::ensure!(
+        current
+            .iter()
+            .all(|entry| entry.get("name").and_then(Value::as_str).is_some()),
+        "workspace client bootstrap entry is malformed"
+    );
+    let owned = |entry: &&Value| {
+        entry
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| WORKSPACE_CLIENT_VOLUMES.contains(&name))
+    };
+    let current_owned: Vec<_> = current.iter().filter(owned).collect();
+    let desired: Vec<_> = expected.iter().filter(owned).collect();
+    if current_owned.len() == desired.len()
+        && current_owned
+            .iter()
+            .map(|entry| entry["name"].as_str().expect("validated entry name"))
+            .collect::<BTreeSet<_>>()
+            .len()
+            == current_owned.len()
+        && current_owned.iter().all(|entry| desired.contains(entry))
+    {
+        return Ok(());
+    }
+    if data.pointer(path).is_none() {
+        changes.push(serde_json::json!({"op":"add","path":path,"value":[]}));
+    }
+    for (index, entry) in current.iter().enumerate().rev() {
+        if owned(&entry) {
+            changes.push(serde_json::json!({"op":"remove","path":format!("{path}/{index}")}));
+        }
+    }
+    for entry in desired {
+        changes.push(serde_json::json!({"op":"add","path":format!("{path}/-"),"value":entry}));
+    }
+    Ok(())
+}
+
+fn workspace_client_changes(
+    data: &Value,
+    clients: &Value,
+    spec_path: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let spec = data
+        .pointer(spec_path)
+        .ok_or_else(|| anyhow::anyhow!("workspace spec is unavailable"))?;
+    let containers = spec
+        .get("containers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("workspace containers are unavailable"))?;
+    let (workspace_index, _) = workspace_container(containers)?;
+    let init_containers = spec
+        .get("initContainers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap init is unavailable"))?;
+    let mut init = init_containers
+        .iter()
+        .enumerate()
+        .filter(|(_, container)| container["name"] == "codewire-daemon-init");
+    let (init_index, current_init) = init
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("workspace bootstrap init is unavailable"))?;
+    anyhow::ensure!(
+        init.next().is_none(),
+        "workspace bootstrap init is duplicated"
+    );
+    let mut changes = Vec::new();
+    for (path, expected) in [
+        (format!("{spec_path}/volumes"), &clients["volumes"]),
+        (
+            format!("{spec_path}/containers/{workspace_index}/volumeMounts"),
+            &clients["volumeMounts"],
+        ),
+        (
+            format!("{spec_path}/initContainers/{init_index}/volumeMounts"),
+            &clients["init"]["volumeMounts"],
+        ),
+    ] {
+        workspace_client_named_changes(
+            data,
+            &path,
+            expected.as_array().expect("rendered client array"),
+            &mut changes,
+        )?;
+    }
+    if current_init.get("command") != Some(&clients["init"]["command"]) {
+        changes.push(serde_json::json!({"op":"add","path":format!("{spec_path}/initContainers/{init_index}/command"),"value":clients["init"]["command"]}));
+    }
+    Ok(changes)
+}
+
+fn require_bootstrap_object(
+    object: &DynamicObject,
+    namespace: &str,
+    name: &str,
+    kind: &str,
+) -> anyhow::Result<()> {
+    runtime_object_uid(&object.metadata, namespace, name)?;
+    anyhow::ensure!(
+        object.types.as_ref().is_some_and(|types| types.api_version
+            == super::EXTENSIONS_API_VERSION
+            && types.kind == kind),
+        "workspace bootstrap object type does not match"
+    );
+    Ok(())
+}
+
+fn sandbox_suspension_observed(sandbox: &DynamicObject) -> bool {
+    let Some(generation) = sandbox
+        .metadata
+        .generation
+        .filter(|generation| *generation > 0)
+    else {
+        return false;
+    };
+    let Some(conditions) = sandbox
+        .data
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let mut suspended = conditions
+        .iter()
+        .filter(|condition| condition.get("type").and_then(Value::as_str) == Some("Suspended"));
+    sandbox
+        .data
+        .pointer("/spec/operatingMode")
+        .and_then(Value::as_str)
+        == Some("Suspended")
+        && matches!((suspended.next(), suspended.next()), (Some(condition), None)
+            if condition.get("status").and_then(Value::as_str) == Some("True")
+                && condition.get("reason").and_then(Value::as_str) == Some("PodTerminated")
+                && condition.get("observedGeneration").and_then(Value::as_i64) == Some(generation))
+}
 
 fn runtime_object_uid<'a>(
     metadata: &'a ObjectMeta,
@@ -946,12 +1372,12 @@ impl SandboxClient {
         Ok(())
     }
 
-    async fn read_claim_runtime_identity(
+    async fn read_owned_claim_sandbox(
         &self,
         opts: &ClaimOpts,
         expected_claim_name: &str,
         expected_claim_uid: &str,
-    ) -> anyhow::Result<RuntimeIdentitySnapshot> {
+    ) -> anyhow::Result<(DynamicObject, DynamicObject)> {
         let claim = self
             .claims
             .get(expected_claim_name)
@@ -983,7 +1409,7 @@ impl SandboxClient {
                     && types.kind == "Sandbox"),
             "runtime identity Sandbox type does not match"
         );
-        let sandbox_uid = runtime_object_uid(&sandbox.metadata, &self.namespace, sandbox_name)?;
+        runtime_object_uid(&sandbox.metadata, &self.namespace, sandbox_name)?;
         require_runtime_controller(
             &sandbox.metadata,
             super::EXTENSIONS_API_VERSION,
@@ -991,6 +1417,48 @@ impl SandboxClient {
             expected_claim_name,
             expected_claim_uid,
         )?;
+        Ok((claim, sandbox))
+    }
+
+    /// Controller-observed suspension is independent of source metadata. The
+    /// caller still waits for every previously observed Pod UID to disappear,
+    /// retaining this exact Sandbox identity for refresh and resume.
+    pub async fn workspace_suspension_observed(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<Option<WorkspaceSandboxIdentity>> {
+        let (_, sandbox) = self
+            .read_owned_claim_sandbox(opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        Ok(
+            sandbox_suspension_observed(&sandbox).then(|| WorkspaceSandboxIdentity {
+                name: sandbox.metadata.name.expect("validated Sandbox name"),
+                uid: sandbox.metadata.uid.expect("validated Sandbox UID"),
+            }),
+        )
+    }
+
+    async fn read_claim_runtime_identity(
+        &self,
+        opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<RuntimeIdentitySnapshot> {
+        let (claim, sandbox) = self
+            .read_owned_claim_sandbox(opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        let sandbox_name = sandbox
+            .metadata
+            .name
+            .as_deref()
+            .expect("validated Sandbox name");
+        let sandbox_uid = sandbox
+            .metadata
+            .uid
+            .as_deref()
+            .expect("validated Sandbox UID");
         let pod_name = sandbox
             .metadata
             .annotations
@@ -1024,6 +1492,301 @@ impl SandboxClient {
             pod,
             observation,
         })
+    }
+
+    async fn read_workspace_bootstrap(
+        &self,
+        opts: &TemplateOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<WorkspaceBootstrapSnapshot> {
+        workspace_bootstrap_values(opts)?;
+        let claim_opts = ClaimOpts {
+            environment_id: opts.environment_id.clone(),
+            org_id: opts.organization_id.clone(),
+            operation_generation: opts.operation_generation,
+            ..Default::default()
+        };
+        let (claim, sandbox) = self
+            .read_owned_claim_sandbox(&claim_opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        let pool_name = super::shadow_warm_pool_name(&opts.name);
+        anyhow::ensure!(
+            claim
+                .data
+                .pointer("/spec/warmPoolRef/name")
+                .and_then(Value::as_str)
+                == Some(pool_name.as_str()),
+            "workspace bootstrap Claim does not select its environment shadow"
+        );
+        // A later cold allocation must not overwrite the immutable bootstrap
+        // with a competing claim-level environment override.
+        if let Some(overrides) = claim.data.pointer("/spec/env") {
+            let overrides = overrides
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("workspace Claim overrides are malformed"))?;
+            anyhow::ensure!(
+                !overrides.iter().any(|entry| matches!(
+                    entry.get("containerName").and_then(Value::as_str),
+                    None | Some("" | "workspace")
+                ) && entry
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| workspace_owned_environment_keys().contains(name))),
+                "workspace bootstrap cannot be overridden by the Claim"
+            );
+        }
+        let pool = self
+            .warm_pools()
+            .get(&pool_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace environment shadow is unavailable"))?;
+        require_bootstrap_object(&pool, &self.namespace, &pool_name, "SandboxWarmPool")?;
+        anyhow::ensure!(
+            pool.metadata
+                .labels
+                .as_ref()
+                .is_some_and(
+                    |labels| labels.get(LABEL_ENV_ID) == Some(&opts.environment_id)
+                        && labels.get(LABEL_TYPE).map(String::as_str)
+                            == Some("sandbox-claim-shadow")
+                )
+                && pool.data.pointer("/spec/replicas").and_then(Value::as_i64) == Some(0)
+                && pool
+                    .data
+                    .pointer("/spec/sandboxTemplateRef/name")
+                    .and_then(Value::as_str)
+                    == Some(opts.name.as_str()),
+            "workspace shadow does not own the zero-replica environment template"
+        );
+        let template = self
+            .templates()
+            .get(&opts.name)
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace environment template is unavailable"))?;
+        require_bootstrap_object(&template, &self.namespace, &opts.name, "SandboxTemplate")?;
+        anyhow::ensure!(
+            template
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(LABEL_ENV_ID))
+                == Some(&opts.environment_id),
+            "workspace template belongs to another environment"
+        );
+        Ok(WorkspaceBootstrapSnapshot {
+            pool,
+            template,
+            sandbox,
+        })
+    }
+
+    /// Refresh only environment-owned bootstrap fields in the private template
+    /// and its allocated Sandbox. Works while suspended without a Pod. The
+    /// caller holds the existing environment-row publication fence, and owns
+    /// suspension/replacement; this never mutates a live Pod's environment.
+    pub async fn reconcile_workspace_bootstrap(
+        &self,
+        opts: &TemplateOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        expected_sandbox: &WorkspaceSandboxIdentity,
+    ) -> anyhow::Result<()> {
+        let expected = workspace_bootstrap_values(opts)?;
+        let before = self
+            .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        expected_sandbox.require_match(&before.sandbox)?;
+        anyhow::ensure!(
+            sandbox_suspension_observed(&before.sandbox),
+            "workspace bootstrap refresh requires current controller-completed suspension"
+        );
+        let recovery = if opts.runtime_profile_spec().profile
+            == super::template::RUNTIME_PROFILE_CONFIDENTIAL
+        {
+            Some(rendered_runtime_recovery_patch(&self.namespace, opts)?.1)
+        } else {
+            None
+        };
+        let clients = super::template::render_workspace_client_bootstrap(opts);
+        let patches = [
+            (
+                &before.template,
+                self.templates(),
+                workspace_bootstrap_patch(
+                    &before.template,
+                    &expected,
+                    recovery.as_ref(),
+                    &clients,
+                )?,
+            ),
+            (
+                &before.sandbox,
+                self.sandboxes(),
+                workspace_bootstrap_patch(&before.sandbox, &expected, recovery.as_ref(), &clients)?,
+            ),
+        ];
+        if opts
+            .managed_credential_clients
+            .contains(codewire_access::ManagedCredentialClient::Codex)
+        {
+            // A newly selected Codex init mount must exist before resume; waiting
+            // for gateway/Pod readiness first would deadlock on its ConfigMap.
+            self.ensure_credential_bootstrap(opts).await?;
+        }
+        for (object, api, patch) in patches {
+            let Some(patch) = patch else {
+                continue;
+            };
+            let name = object
+                .metadata
+                .name
+                .as_deref()
+                .expect("validated runtime name");
+            let updated = api
+                .patch(name, &PatchParams::default(), &patch)
+                .await
+                .map_err(|_| anyhow::anyhow!("workspace bootstrap update was not admitted"))?;
+            anyhow::ensure!(
+                runtime_object_uid(&updated.metadata, &self.namespace, name)?
+                    == object
+                        .metadata
+                        .uid
+                        .as_deref()
+                        .expect("validated runtime UID"),
+                "workspace bootstrap object was replaced during publication"
+            );
+            anyhow::ensure!(
+                workspace_bootstrap_patch(&updated, &expected, recovery.as_ref(), &clients)?
+                    .is_none(),
+                "workspace bootstrap update did not converge"
+            );
+        }
+        let after = self
+            .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        expected_sandbox.require_match(&after.sandbox)?;
+        // Refresh itself can advance metadata.generation. The prior completed
+        // suspension is retained by exact identity and unchanged mode, not by
+        // pretending its condition acknowledges this new template generation.
+        anyhow::ensure!(
+            after
+                .sandbox
+                .data
+                .pointer("/spec/operatingMode")
+                .and_then(Value::as_str)
+                == Some("Suspended"),
+            "workspace Sandbox resumed during bootstrap publication"
+        );
+        anyhow::ensure!(
+            before.pool.metadata.uid == after.pool.metadata.uid
+                && before.template.metadata.uid == after.template.metadata.uid
+                && before.sandbox.metadata.uid == after.sandbox.metadata.uid,
+            "workspace bootstrap ownership changed during publication"
+        );
+        for object in [&after.template, &after.sandbox] {
+            anyhow::ensure!(
+                workspace_bootstrap_patch(object, &expected, recovery.as_ref(), &clients)?
+                    .is_none(),
+                "workspace bootstrap publication is no longer current"
+            );
+        }
+        Ok(())
+    }
+
+    /// Read the actual Pod's immutable tuple, not mutable association labels or
+    /// template intent. A different Pod/owner is an identity error; stale or
+    /// duplicate bootstrap entries return false for lifecycle-owned recovery.
+    pub async fn workspace_bootstrap_matches(
+        &self,
+        opts: &TemplateOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        expected_pod: &WorkspacePodIdentity,
+    ) -> anyhow::Result<bool> {
+        let expected = workspace_bootstrap_values(opts)?;
+        let before = self
+            .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        let sandbox_name = before
+            .sandbox
+            .metadata
+            .name
+            .as_deref()
+            .expect("validated Sandbox name");
+        let pod_name = before
+            .sandbox
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("agents.x-k8s.io/pod-name"))
+            .map(String::as_str)
+            .unwrap_or(sandbox_name);
+        anyhow::ensure!(
+            expected_pod.name == pod_name && !expected_pod.uid.is_empty(),
+            "workspace bootstrap Pod is not the observed runtime"
+        );
+        let pod = self
+            .pods()
+            .get(pod_name)
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace bootstrap Pod is unavailable"))?;
+        anyhow::ensure!(
+            runtime_object_uid(&pod.metadata, &self.namespace, pod_name)? == expected_pod.uid,
+            "workspace bootstrap Pod was replaced"
+        );
+        require_runtime_controller(
+            &pod.metadata,
+            "agents.x-k8s.io/v1beta1",
+            "Sandbox",
+            sandbox_name,
+            before
+                .sandbox
+                .metadata
+                .uid
+                .as_deref()
+                .expect("validated Sandbox UID"),
+        )?;
+        let spec = pod
+            .spec
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("workspace Pod has no spec"))?;
+        let containers = serde_json::to_value(&spec.containers)?;
+        let (_, container) =
+            workspace_container(containers.as_array().expect("serialized containers array"))?;
+        let clients = super::template::render_workspace_client_bootstrap(opts);
+        let pod_data = serde_json::json!({"spec":spec});
+        let matches = bootstrap_environment_matches(workspace_environment(container)?, &expected)
+            && workspace_client_changes(&pod_data, &clients, "/spec")?.is_empty();
+        let after = self
+            .read_workspace_bootstrap(opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        anyhow::ensure!(
+            before.pool.metadata.uid == after.pool.metadata.uid
+                && before.template.metadata.uid == after.template.metadata.uid
+                && before.sandbox.metadata.uid == after.sandbox.metadata.uid,
+            "workspace bootstrap ownership changed during observation"
+        );
+        let current_pod_name = after
+            .sandbox
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("agents.x-k8s.io/pod-name"))
+            .map(String::as_str)
+            .unwrap_or(
+                after
+                    .sandbox
+                    .metadata
+                    .name
+                    .as_deref()
+                    .expect("validated Sandbox name"),
+            );
+        anyhow::ensure!(
+            current_pod_name == expected_pod.name,
+            "workspace bootstrap Pod association changed during observation"
+        );
+        Ok(matches)
     }
 
     /// Capture the currently owned Sandbox/Pod UIDs, including the controller's
@@ -1588,6 +2351,148 @@ impl SandboxClient {
             "update Sandbox {name} operatingMode did not return the current live target"
         );
         tracing::info!(name, replicas, mode, "set Sandbox operating mode");
+        Ok(())
+    }
+
+    /// Request suspension only for the current exact Claim-owned Sandbox.
+    /// This does not certify controller completion or Pod absence; callers
+    /// obtain that separate, opaque identity from the suspension observer.
+    pub async fn suspend_workspace(
+        &self,
+        claim_opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+    ) -> anyhow::Result<()> {
+        let (_, sandbox) = self
+            .read_owned_claim_sandbox(claim_opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        self.set_workspace_operating_mode(
+            claim_opts,
+            expected_claim_name,
+            expected_claim_uid,
+            &sandbox,
+            0,
+        )
+        .await
+    }
+
+    /// Change operating mode on the exact Claim-owned suspended incarnation.
+    /// Unlike generic scale operations this completes a captured suspension /
+    /// bootstrap sequence, so concurrent spec changes must reject publication.
+    /// The caller owns the environment mutation fence and old/all-Pod absence.
+    pub async fn set_replicas_for_identity(
+        &self,
+        claim_opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        expected_sandbox: &WorkspaceSandboxIdentity,
+        replicas: i64,
+    ) -> anyhow::Result<()> {
+        let (_, sandbox) = self
+            .read_owned_claim_sandbox(claim_opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        expected_sandbox.require_match(&sandbox)?;
+        self.set_workspace_operating_mode(
+            claim_opts,
+            expected_claim_name,
+            expected_claim_uid,
+            &sandbox,
+            replicas,
+        )
+        .await
+    }
+
+    /// The object is supplied only by the exact owned-chain readers above.
+    /// Keep one UID/version-fenced writer for initial suspend and pinned resume.
+    async fn set_workspace_operating_mode(
+        &self,
+        claim_opts: &ClaimOpts,
+        expected_claim_name: &str,
+        expected_claim_uid: &str,
+        sandbox: &DynamicObject,
+        replicas: i64,
+    ) -> anyhow::Result<()> {
+        let name = sandbox
+            .metadata
+            .name
+            .as_deref()
+            .expect("validated Sandbox name");
+        let uid = runtime_object_uid(&sandbox.metadata, &self.namespace, name)?;
+        let resource_version = sandbox
+            .metadata
+            .resource_version
+            .as_deref()
+            .filter(|version| !version.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("workspace Sandbox has no resource version"))?;
+        let mode = if replicas <= 0 {
+            "Suspended"
+        } else {
+            "Running"
+        };
+        anyhow::ensure!(
+            sandbox.data.get("spec").is_some_and(Value::is_object),
+            "workspace Sandbox has no spec"
+        );
+        let mut operations = vec![
+            serde_json::json!({"op":"test","path":"/metadata/uid","value":uid}),
+            serde_json::json!({"op":"test","path":"/metadata/resourceVersion","value":resource_version}),
+        ];
+        if replicas > 0 {
+            anyhow::ensure!(
+                sandbox
+                    .data
+                    .pointer("/spec/operatingMode")
+                    .and_then(Value::as_str)
+                    == Some("Suspended"),
+                "workspace resume requires the observed Sandbox to remain suspended"
+            );
+            operations.push(
+                serde_json::json!({"op":"test","path":"/spec/operatingMode","value":"Suspended"}),
+            );
+        }
+        operations.push(serde_json::json!({"op":"add","path":"/spec/operatingMode","value":mode}));
+        let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
+        let updated = self
+            .sandboxes()
+            .patch(name, &PatchParams::default(), &patch)
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace operating mode update was not admitted"))?;
+        anyhow::ensure!(
+            runtime_object_uid(&updated.metadata, &self.namespace, name)? == uid,
+            "workspace Sandbox was replaced during operating mode publication"
+        );
+        require_runtime_controller(
+            &updated.metadata,
+            super::EXTENSIONS_API_VERSION,
+            "SandboxClaim",
+            expected_claim_name,
+            expected_claim_uid,
+        )?;
+        anyhow::ensure!(
+            updated
+                .data
+                .pointer("/spec/operatingMode")
+                .and_then(Value::as_str)
+                == Some(mode),
+            "workspace operating mode update did not converge"
+        );
+        // A Claim replacement/rebind can race the cross-object read. Never
+        // acknowledge it as completing the original authority's sequence.
+        let (_, after) = self
+            .read_owned_claim_sandbox(claim_opts, expected_claim_name, expected_claim_uid)
+            .await?;
+        anyhow::ensure!(
+            runtime_object_uid(&after.metadata, &self.namespace, name)? == uid,
+            "workspace Sandbox ownership changed during operating mode publication"
+        );
+        anyhow::ensure!(
+            after
+                .data
+                .pointer("/spec/operatingMode")
+                .and_then(Value::as_str)
+                == Some(mode),
+            "workspace operating mode is no longer current"
+        );
         Ok(())
     }
 

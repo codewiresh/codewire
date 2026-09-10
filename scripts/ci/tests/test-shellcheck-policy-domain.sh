@@ -151,7 +151,6 @@ case "${FAKE_SHELLCHECK_MODE:-baseline}" in
       {comments: (
         findings(2; "scripts/ci/select/select-verification.sh"; 2221) +
         findings(2; "scripts/ci/select/select-verification.sh"; 2222) +
-        findings(2; "scripts/runtime/dev/smoke-dev-commodity.sh"; 2034) +
         findings(9; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 1090) +
         findings(12; "scripts/runtime/tests/test-smoke-dev-commodity.sh"; 2034)
       )}
@@ -173,7 +172,7 @@ FAKE_SHELLCHECK
 chmod +x "$fake_shellcheck"
 
 run_checker() {
-  env \
+  env -u SHELLCHECK_TIMEOUT_SECONDS \
     FAKE_SHELLCHECK_LOG="$fake_log" \
     SHELLCHECK_BIN="$fake_shellcheck" \
     "$@" \
@@ -185,6 +184,8 @@ baseline_output="$(run_checker 2>&1)" \
   || fail 'matching fake ShellCheck baseline was rejected'
 grep -Fq 'ShellCheck analysis: start (' <<<"$baseline_output" \
   || fail 'ShellCheck start timing is absent'
+grep -Fq 'timeout_seconds=300)' <<<"$baseline_output" \
+  || fail 'ShellCheck default deadline does not allow bounded full-analysis headroom'
 grep -Eq 'ShellCheck analysis: finish \(status=1 elapsed_seconds=[0-9]+\)' \
   <<<"$baseline_output" || fail 'ShellCheck finish timing is absent'
 grep -Fq 'ShellCheck warning ratchet: OK' <<<"$baseline_output" \

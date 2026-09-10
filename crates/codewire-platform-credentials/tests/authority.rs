@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use codewire_access::{
     AccessProfile, AccessProfileName, CapabilitySlot, CredentialAuthKind as Kind, CredentialId,
-    EnvironmentAccessBinding, EnvironmentId, GrantContext, Owner, Placement,
+    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner,
     builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
@@ -97,7 +97,7 @@ async fn environment(
     Ok(GrantContext {
         environment_id: EnvironmentId::parse(id)?,
         environment_generation: 7,
-        placement: Placement::Platform,
+        placement: GrantPlacement::Platform,
         user_id: user.id().clone(),
         organization_id: Some(org.id().clone()),
         allow_personal_credentials: true,

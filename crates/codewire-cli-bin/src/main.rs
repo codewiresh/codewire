@@ -1,4 +1,33 @@
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .next()
+        .as_deref()
+        .is_some_and(codewire_cli::is_local_git_ssh_helper)
+    {
+        if codewire_cli::run_local_git_ssh_helper(std::env::args_os().skip(1).collect()).is_err() {
+            eprintln!("repository SSH failed");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__hosted-exec")
+    {
+        std::process::exit(codewire_cli::run_hosted_exec_from(std::env::args_os()));
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__environment-launch")
+    {
+        if codewire_cli::run_environment_launcher_from(std::env::args_os()).is_err() {
+            eprintln!("environment launch failed");
+            std::process::exit(1);
+        }
+        return;
+    }
     let network_worker = std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == "__native-network-worker");

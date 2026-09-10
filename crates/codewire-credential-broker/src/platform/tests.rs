@@ -1,6 +1,9 @@
 //! Real restricted PostgreSQL plus synthetic, process-local runtime identity.
 //! No Kubernetes, provider network, ambient configuration or real credentials.
 
+#[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+mod ssh;
+
 #[path = "../../../codewire-platform-credentials/tests/support/mod.rs"]
 #[allow(dead_code)]
 pub(super) mod support;
@@ -14,7 +17,7 @@ use anyhow::{Context, Result, ensure};
 use base64::Engine as _;
 use codewire_access::{
     AccessProfile, AccessProfileName, CredentialStatus, EnvironmentAccessBinding, EnvironmentId,
-    OwnerId, builtin_provider_catalog,
+    GrantPlacement, OwnerId, builtin_provider_catalog,
 };
 use sqlx::PgPool;
 use tokio::sync::Notify;
@@ -116,7 +119,7 @@ fn context() -> GrantContext {
     GrantContext {
         environment_id: EnvironmentId::parse("synthetic-environment").unwrap(),
         environment_generation: 7,
-        placement: Placement::Platform,
+        placement: GrantPlacement::Platform,
         user_id: OwnerId::parse("synthetic-owner").unwrap(),
         organization_id: Some(OwnerId::parse("synthetic-org").unwrap()),
         allow_personal_credentials: true,
@@ -368,10 +371,10 @@ fn session_shape_requires_two_exact_pods_platform_scope_and_finite_live_identity
     ] {
         let mut invalid = valid.clone();
         match attack {
-            "nil gateway" => invalid.gateway.uid = Uuid::nil(),
-            "nil workspace" => invalid.workspace.uid = Uuid::nil(),
-            "same pod" => invalid.workspace = invalid.gateway.clone(),
-            "local" => invalid.context.placement = Placement::Local,
+            "nil gateway" => invalid.gateway_mut().uid = Uuid::nil(),
+            "nil workspace" => invalid.workspace_mut().uid = Uuid::nil(),
+            "same pod" => *invalid.workspace_mut() = invalid.gateway_mut().clone(),
+            "local" => invalid.context.placement = GrantPlacement::Local,
             "generation" => invalid.context.environment_generation = 0,
             "organization" => invalid.context.organization_id = None,
             "owner" => {
@@ -394,8 +397,8 @@ fn runtime_binding_includes_both_pod_uids_and_exact_owner_policy() {
     for attack in ["gateway", "workspace", "generation", "user", "policy"] {
         let mut changed = valid.clone();
         match attack {
-            "gateway" => changed.gateway.uid = Uuid::new_v4(),
-            "workspace" => changed.workspace.uid = Uuid::new_v4(),
+            "gateway" => changed.gateway_mut().uid = Uuid::new_v4(),
+            "workspace" => changed.workspace_mut().uid = Uuid::new_v4(),
             "generation" => changed.context.environment_generation += 1,
             "user" => changed.context.user_id = OwnerId::parse("another-user").unwrap(),
             "policy" => changed.context.allow_personal_credentials = false,
@@ -572,8 +575,8 @@ async fn unwrap_rechecks_authenticated_gateway_workspace_policy_and_identity_exp
             });
             f.provider.unwrap_gate.wait().await?;
             f.authority.change(|session| match mutation {
-                "gateway" => session.gateway.uid = Uuid::new_v4(),
-                "workspace" => session.workspace.uid = Uuid::new_v4(),
+                "gateway" => session.gateway_mut().uid = Uuid::new_v4(),
+                "workspace" => session.workspace_mut().uid = Uuid::new_v4(),
                 "policy" => session.context.authorized_credentials.clear(),
                 "expiry" => session.identity_expires_at_unix = 0,
                 _ => unreachable!(),
@@ -637,7 +640,7 @@ async fn start_rechecks_runtime_and_profile_after_durable_transition_before_retu
                 "stop" => f.stop().await?,
                 "workspace" => f
                     .authority
-                    .change(|session| session.workspace.uid = Uuid::new_v4()),
+                    .change(|session| session.workspace_mut().uid = Uuid::new_v4()),
                 "expiry" => f
                     .authority
                     .change(|session| session.identity_expires_at_unix = 0),
@@ -733,7 +736,7 @@ async fn final_lease_and_started_admission_recheck_pod_identity_after_sql_lock_w
             }
             wait_for_database_blocker(&f.db.pool, pid).await?;
             f.authority
-                .change(|session| session.workspace.uid = Uuid::new_v4());
+                .change(|session| session.workspace_mut().uid = Uuid::new_v4());
             holder.commit().await?;
             ensure!(
                 finish_task(operation).await? == Err("Denied".into()),
@@ -1058,12 +1061,14 @@ async fn shared_shutdown_drains_platform_publication_after_guest_and_session_los
             async move {
                 broker
                     .execute(
-                        codewire_gateway_proto::daemon::v1::CredentialBridgeRequest {
+                        codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeRequest {
+                            capability_slot: "codex".into(),
+                            route: "openai-api".into(),
                             request_id: Uuid::new_v4().to_string(),
                             method: "POST".into(),
                             path: "/responses".into(),
                             headers: vec![
-                                codewire_gateway_proto::daemon::v1::CredentialHttpHeader {
+                                codewire_gateway_proto::codewire::bridge::v1::CredentialHttpHeader {
                                     name: "content-type".into(),
                                     value: b"application/json".to_vec(),
                                 },

@@ -11,10 +11,11 @@ type ApplicationPort struct {
 
 // RepositorySpec configures an additional repository checked out during setup.
 type RepositorySpec struct {
-	Branch      *string `json:"branch,omitempty"`
-	Destination *string `json:"destination,omitempty"`
-	Revision    *string `json:"revision,omitempty"`
-	Source      string  `json:"source"`
+	Branch      *string  `json:"branch,omitempty"`
+	Destination *string  `json:"destination,omitempty"`
+	KnownHosts  []string `json:"known_hosts,omitempty"`
+	Revision    *string  `json:"revision,omitempty"`
+	Source      string   `json:"source"`
 }
 
 // ProjectAgents configures canonical setup-time agent intent.
@@ -37,71 +38,88 @@ type ProjectResources struct {
 	DiskGib       *uint64 `json:"disk_gib,omitempty"`
 }
 
+// ProjectStoragePlacement identifies the origin of selected personal values.
+type ProjectStoragePlacement string
+
+const (
+	ProjectStoragePlacementLocal    ProjectStoragePlacement = "local"
+	ProjectStoragePlacementPlatform ProjectStoragePlacement = "platform"
+)
+
 // ProjectSecretBindings selects workload-secret scopes without carrying values.
 type ProjectSecretBindings struct {
-	Project      string `json:"project,omitempty"`
-	Organization bool   `json:"organization,omitempty"`
-	User         bool   `json:"user,omitempty"`
+	Project      string                   `json:"project,omitempty"`
+	Organization bool                     `json:"organization,omitempty"`
+	User         *ProjectStoragePlacement `json:"user,omitempty"`
 }
 
-// ProjectAccessBinding selects one scope-qualified access profile.
-type ProjectAccessBinding struct {
+// ProjectCredentialBinding selects one scope-qualified credential profile.
+type ProjectCredentialBinding struct {
 	Profile string `json:"profile"`
 }
 
 // ProjectSpec is the versioned placement-neutral codewire.yaml model.
 type ProjectSpec struct {
-	SchemaVersion    uint32                  `json:"schema_version"`
-	Preset           string                  `json:"preset,omitempty"`
-	Image            string                  `json:"image,omitempty"`
-	Repositories     []RepositorySpec        `json:"repositories,omitempty"`
-	WorkingDirectory string                  `json:"working_directory"`
-	InstallCommand   string                  `json:"install_command,omitempty"`
-	StartupScript    string                  `json:"startup_script,omitempty"`
-	Environment      map[string]string       `json:"environment,omitempty"`
-	Agents           *ProjectAgents          `json:"agents,omitempty"`
-	Skills           []ProjectSkillSelection `json:"skills,omitempty"`
-	ApplicationPorts []ApplicationPort       `json:"application_ports,omitempty"`
-	Resources        *ProjectResources       `json:"resources,omitempty"`
-	Secrets          *ProjectSecretBindings  `json:"secrets,omitempty"`
-	Access           *ProjectAccessBinding   `json:"access,omitempty"`
+	SchemaVersion    uint32                    `json:"schema_version"`
+	Preset           string                    `json:"preset,omitempty"`
+	Image            string                    `json:"image,omitempty"`
+	Repositories     []RepositorySpec          `json:"repositories,omitempty"`
+	WorkingDirectory string                    `json:"working_directory"`
+	InstallCommand   string                    `json:"install_command,omitempty"`
+	StartupScript    string                    `json:"startup_script,omitempty"`
+	Environment      map[string]string         `json:"environment,omitempty"`
+	Agents           *ProjectAgents            `json:"agents,omitempty"`
+	Skills           []ProjectSkillSelection   `json:"skills,omitempty"`
+	ApplicationPorts []ApplicationPort         `json:"application_ports,omitempty"`
+	Resources        *ProjectResources         `json:"resources,omitempty"`
+	Secrets          *ProjectSecretBindings    `json:"secrets,omitempty"`
+	Credentials      *ProjectCredentialBinding `json:"credentials,omitempty"`
+}
+
+// EnvironmentSourceSelection is the complete value-free source selection.
+type EnvironmentSourceSelection struct {
+	Secrets         *ProjectSecretBindings    `json:"secrets,omitempty"`
+	Credentials     *ProjectCredentialBinding `json:"credentials,omitempty"`
+	ProfileRevision *uint64                   `json:"profile_revision,omitempty"`
 }
 
 // EnvironmentData is the SDK-owned public representation of an environment.
 type EnvironmentData struct {
-	Schema              *string            `json:"$schema,omitempty"`
-	CpuMillicores       int64              `json:"cpu_millicores"`
-	CreatedAt           string             `json:"created_at"`
-	CreatedBy           string             `json:"created_by"`
-	DeletionGraceUntil  *string            `json:"deletion_grace_until,omitempty"`
-	DeletionRequestedAt *string            `json:"deletion_requested_at,omitempty"`
-	DesiredState        string             `json:"desired_state"`
-	DestroyedAt         *string            `json:"destroyed_at,omitempty"`
-	DiskGb              int64              `json:"disk_gb"`
-	ErrorReason         *string            `json:"error_reason,omitempty"`
-	Id                  string             `json:"id"`
-	IsolationTier       string             `json:"isolation_tier"`
-	MemoryMb            int64              `json:"memory_mb"`
-	Name                *string            `json:"name,omitempty"`
-	Network             *string            `json:"network,omitempty"`
-	OrgId               string             `json:"org_id"`
-	Ports               *[]EnvironmentPort `json:"ports,omitempty"`
-	PresetId            *string            `json:"preset_id,omitempty"`
-	PresetName          *string            `json:"preset_name,omitempty"`
-	Protected           bool               `json:"protected"`
-	Recoverable         bool               `json:"recoverable"`
-	RetryCount          int64              `json:"retry_count"`
-	SetupComplete       bool               `json:"setup_complete"`
-	SetupError          *string            `json:"setup_error,omitempty"`
-	SetupPhase          int64              `json:"setup_phase"`
-	ShutdownAt          *string            `json:"shutdown_at,omitempty"`
-	StartedAt           *string            `json:"started_at,omitempty"`
-	State               string             `json:"state"`
-	StateChangedAt      string             `json:"state_changed_at"`
-	StoppedAt           *string            `json:"stopped_at,omitempty"`
-	TotalRunningSeconds int64              `json:"total_running_seconds"`
-	TtlSeconds          *int64             `json:"ttl_seconds,omitempty"`
-	Type                string             `json:"type"`
+	Schema              *string                     `json:"$schema,omitempty"`
+	CpuMillicores       int64                       `json:"cpu_millicores"`
+	CreatedAt           string                      `json:"created_at"`
+	CreatedBy           string                      `json:"created_by"`
+	DeletionGraceUntil  *string                     `json:"deletion_grace_until,omitempty"`
+	DeletionRequestedAt *string                     `json:"deletion_requested_at,omitempty"`
+	DesiredState        string                      `json:"desired_state"`
+	DestroyedAt         *string                     `json:"destroyed_at,omitempty"`
+	DiskGb              int64                       `json:"disk_gb"`
+	ErrorReason         *string                     `json:"error_reason,omitempty"`
+	Id                  string                      `json:"id"`
+	IsolationTier       string                      `json:"isolation_tier"`
+	MemoryMb            int64                       `json:"memory_mb"`
+	Name                *string                     `json:"name,omitempty"`
+	Network             *string                     `json:"network,omitempty"`
+	OrgId               string                      `json:"org_id"`
+	OperationGeneration uint64                      `json:"operation_generation"`
+	Ports               *[]EnvironmentPort          `json:"ports,omitempty"`
+	PresetId            *string                     `json:"preset_id,omitempty"`
+	PresetName          *string                     `json:"preset_name,omitempty"`
+	Protected           bool                        `json:"protected"`
+	Recoverable         bool                        `json:"recoverable"`
+	RetryCount          int64                       `json:"retry_count"`
+	SetupComplete       bool                        `json:"setup_complete"`
+	SetupError          *string                     `json:"setup_error,omitempty"`
+	SetupPhase          int64                       `json:"setup_phase"`
+	ShutdownAt          *string                     `json:"shutdown_at,omitempty"`
+	StartedAt           *string                     `json:"started_at,omitempty"`
+	State               string                      `json:"state"`
+	StateChangedAt      string                      `json:"state_changed_at"`
+	StoppedAt           *string                     `json:"stopped_at,omitempty"`
+	SourceSelection     *EnvironmentSourceSelection `json:"source_selection,omitempty"`
+	TotalRunningSeconds int64                       `json:"total_running_seconds"`
+	TtlSeconds          *int64                      `json:"ttl_seconds,omitempty"`
+	Type                string                      `json:"type"`
 }
 
 // EnvironmentResources is a complete environment compute/storage allocation.
@@ -157,11 +175,42 @@ type EnvironmentResizeOperation struct {
 
 // CreateEnvironmentBody configures environment creation.
 type CreateEnvironmentBody struct {
-	PresetId      *string     `json:"preset_id,omitempty"`
-	Name          *string     `json:"name,omitempty"`
-	TtlSeconds    *int64      `json:"ttl_seconds,omitempty"`
-	IsolationTier *string     `json:"isolation_tier,omitempty"`
-	ProjectSpec   ProjectSpec `json:"project_spec"`
+	PresetId                   *string     `json:"preset_id,omitempty"`
+	Name                       *string     `json:"name,omitempty"`
+	TtlSeconds                 *int64      `json:"ttl_seconds,omitempty"`
+	IsolationTier              *string     `json:"isolation_tier,omitempty"`
+	ProjectSpec                ProjectSpec `json:"project_spec"`
+	ExpectedProfileRevision    *uint64     `json:"expected_profile_revision,omitempty"`
+	ConfirmPersonalCredentials bool        `json:"confirm_personal_credentials,omitempty"`
+	ConfirmPersonalSecrets     bool        `json:"confirm_personal_secrets,omitempty"`
+}
+
+// UpdateEnvironmentSourcesRequest replaces only an environment's complete
+// application-secret and credential-profile source selection.
+type UpdateEnvironmentSourcesRequest struct {
+	ExpectedOperationGeneration uint64                     `json:"expected_operation_generation"`
+	Expected                    EnvironmentSourceSelection `json:"expected"`
+	Replacement                 EnvironmentSourceSelection `json:"replacement"`
+	AllowRestart                bool                       `json:"allow_restart,omitempty"`
+	ConfirmPersonalCredentials  bool                       `json:"confirm_personal_credentials,omitempty"`
+	ConfirmPersonalSecrets      bool                       `json:"confirm_personal_secrets,omitempty"`
+}
+
+// EnvironmentSourcesUpdateOutcome is the server's source replacement result.
+type EnvironmentSourcesUpdateOutcome string
+
+const (
+	EnvironmentSourcesUpdateOutcomeUnchanged       EnvironmentSourcesUpdateOutcome = "unchanged"
+	EnvironmentSourcesUpdateOutcomeStored          EnvironmentSourcesUpdateOutcome = "stored"
+	EnvironmentSourcesUpdateOutcomeRestartRequired EnvironmentSourcesUpdateOutcome = "restart_required"
+)
+
+// EnvironmentSourcesUpdate is the exact source selection after an update.
+type EnvironmentSourcesUpdate struct {
+	EnvironmentID       string                          `json:"environment_id"`
+	OperationGeneration uint64                          `json:"operation_generation"`
+	Selection           EnvironmentSourceSelection      `json:"selection"`
+	Outcome             EnvironmentSourcesUpdateOutcome `json:"outcome"`
 }
 
 // ExecBody configures command execution in an environment.

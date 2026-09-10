@@ -58,6 +58,7 @@ where
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut tasks = JoinSet::new();
     let mut ingress = None;
+    let mut hosted_relay = None;
     tokio::pin!(shutdown);
     let result = {
         let serve = run_gateway_services(
@@ -67,6 +68,7 @@ where
             shutdown_rx,
             &mut tasks,
             &mut ingress,
+            &mut hosted_relay,
         );
         tokio::pin!(serve);
         tokio::select! {
@@ -80,9 +82,28 @@ where
     // path. Cancel credential workers BEFORE waiting for graceful HTTP bodies;
     // otherwise an active streaming response can deadlock shutdown.
     let _ = shutdown_tx.send(true);
+    let cleanup = drain_gateway_workers(ingress, &mut hosted_relay, &mut tasks).await;
+    cleanup?;
+    result
+}
+
+async fn drain_gateway_workers(
+    ingress: Option<CredentialIngress>,
+    hosted_relay: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+    tasks: &mut JoinSet<Result<()>>,
+) -> Result<()> {
     if let Some(ingress) = ingress {
         ingress.shutdown().await;
     }
+    // This owner is deliberately outside the abortable listener set. Its
+    // completion includes BOTH outgoing tonic producers and its request pump.
+    let relay_result = match hosted_relay.take() {
+        Some(relay) => relay
+            .await
+            .context("hosted credential relay owner failed")
+            .and_then(|result| result),
+        None => Ok(()),
+    };
     // Give listeners their normal graceful exit after credential calls drain.
     // Unresponsive non-credential clients cannot retain the runtime forever.
     if timeout(Duration::from_secs(5), async {
@@ -93,7 +114,7 @@ where
     {
         tasks.shutdown().await;
     }
-    result
+    relay_result
 }
 
 async fn run_gateway_services(
@@ -103,6 +124,7 @@ async fn run_gateway_services(
     shutdown_rx: watch::Receiver<bool>,
     tasks: &mut JoinSet<Result<()>>,
     ingress_owner: &mut Option<CredentialIngress>,
+    hosted_relay: &mut Option<tokio::task::JoinHandle<Result<()>>>,
 ) -> Result<()> {
     let credential_readiness = if let Some(credentials) = config.credentials.as_ref() {
         let (ingress, listener) = prepare_credentials(credentials).await?;
@@ -131,6 +153,16 @@ async fn run_gateway_services(
     .await?;
     let host_key = host_key::load_or_create(&config.host_key_path)
         .with_context(|| format!("load host key {}", config.host_key_path))?;
+
+    if let Some(credentials) = config.credentials.as_ref()
+        && let Some(bridge) = credentials.hosted_bridge()?
+    {
+        *hosted_relay = Some(tokio::spawn(crate::hosted_bridge::run(
+            bridge,
+            daemon_client.credential_client(),
+            shutdown_rx.clone(),
+        )));
+    }
 
     let ssh_addr = ssh_listener
         .local_addr()
@@ -216,6 +248,17 @@ async fn run_gateway_services(
     let mut accept_shutdown_rx = shutdown_rx.clone();
     loop {
         tokio::select! {
+            result = async {
+                match hosted_relay.as_mut() {
+                    Some(relay) => relay.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                *hosted_relay = None;
+                result.context("hosted credential relay owner failed")??;
+                if *shutdown_rx.borrow() { return Ok(()); }
+                anyhow::bail!("hosted credential relay stopped unexpectedly");
+            }
             changed = accept_shutdown_rx.changed() => {
                 let _ = changed;
                 return Ok(());
@@ -673,6 +716,7 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     mod credentials;
+    use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
     use codewire_gateway_proto::daemon::v1::daemon_service_server::{
         DaemonService, DaemonServiceServer,
     };
@@ -686,6 +730,46 @@ mod tests {
     use tonic::transport::Server;
     use tonic::{Request, Response, Status};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn shutdown_awaits_dedicated_relay_owner_and_preserves_drain_failure() {
+        let (release, released) = oneshot::channel();
+        let relay = tokio::spawn(async move {
+            released.await.unwrap();
+            Err(anyhow::anyhow!(
+                "hosted credential bridge transport did not drain"
+            ))
+        });
+        let cleanup = tokio::spawn(async move {
+            let mut relay = Some(relay);
+            let mut listeners = JoinSet::new();
+            let result = drain_gateway_workers(None, &mut relay, &mut listeners).await;
+            assert!(relay.is_none());
+            result
+        });
+        tokio::task::yield_now().await;
+        assert!(!cleanup.is_finished());
+        release.send(()).unwrap();
+        let result = timeout(Duration::from_secs(1), cleanup)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.unwrap_err().to_string().contains("did not drain"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_convert_relay_join_failure_to_success() {
+        let mut relay = Some(tokio::spawn(async {
+            panic!("synthetic relay owner failure");
+            #[allow(unreachable_code)]
+            Ok(())
+        }));
+        assert!(
+            drain_gateway_workers(None, &mut relay, &mut JoinSet::new())
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn gateway_runtime_serves_ssh_and_readyz_until_shutdown() {
@@ -918,11 +1002,18 @@ mod tests {
 
     #[tonic::async_trait]
     impl DaemonService for MinimalDaemon {
+        async fn poweroff_guest(
+            &self,
+            _request: Request<v1::PoweroffGuestRequest>,
+        ) -> Result<Response<v1::PoweroffGuestResponse>, Status> {
+            Err(Status::unimplemented("fixture unused lifecycle RPC"))
+        }
+
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
         type CredentialBridgeStream =
-            ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
+            ReceiverStream<Result<bridge_v1::CredentialBridgeGuestMessage, Status>>;
 
         async fn get_capabilities(
             &self,
@@ -940,7 +1031,7 @@ mod tests {
 
         async fn credential_bridge(
             &self,
-            _request: Request<tonic::Streaming<v1::CredentialBridgeHostMessage>>,
+            _request: Request<tonic::Streaming<bridge_v1::CredentialBridgeHostMessage>>,
         ) -> Result<Response<Self::CredentialBridgeStream>, Status> {
             Err(Status::unimplemented("credential bridge"))
         }

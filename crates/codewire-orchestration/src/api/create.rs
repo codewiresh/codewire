@@ -16,7 +16,7 @@ use codewire_server_core::org_deletion::{
 use codewire_server_core::{AppError, AppResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use super::ApiState;
 use super::environments::{
@@ -45,6 +45,12 @@ pub struct CreateEnvironmentBody {
     #[serde(default)]
     #[schemars(with = "serde_json::Value")]
     pub project_spec: codewire_project::ProjectSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_profile_revision: Option<u64>,
+    #[serde(default)]
+    pub confirm_personal_credentials: bool,
+    #[serde(default)]
+    pub confirm_personal_secrets: bool,
 }
 
 /// Mirrors `api.Preset` (the slice the create flow consumes; the full
@@ -117,19 +123,19 @@ fn secret_source_selection(project: bool, organization: bool, user: bool) -> App
         StatusCode::BAD_REQUEST,
         "secret_delivery_pending",
         format!(
-            "secret source {field} requires an explicit protected delivery mode that is not available for platform environments"
+            "application-secret source {field} is not yet available for platform environment delivery"
         ),
     ))
 }
 
-/// Platform secret selection remains fail-closed until the typed platform
-/// grant and broker data plane is available. Exposed environment values are a
-/// separate, explicit part of `ProjectSpec.environment`.
+/// Stored defaults cannot select application-secret authority. Explicit create
+/// requests are resolved and admitted transactionally after the environment row
+/// is inserted.
 pub(crate) fn ensure_no_secret_delivery(spec: &codewire_project::ProjectSpec) -> AppResult<()> {
     secret_source_selection(
         !spec.secrets.project.is_empty(),
         spec.secrets.organization,
-        spec.secrets.user,
+        spec.secrets.user.is_some(),
     )
 }
 
@@ -139,7 +145,20 @@ fn ensure_no_preset_secret_delivery(preset: &Preset) -> AppResult<()> {
 
 /// Validate the one canonical request representation.
 pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> AppResult<()> {
-    body.project_spec.validate().map_err(invalid_project_spec)?;
+    body.project_spec
+        .ensure_platform_compatible()
+        .map_err(invalid_project_spec)?;
+    if body
+        .expected_profile_revision
+        .is_some_and(|revision| revision == 0 || revision > i64::MAX as u64)
+        || (body.project_spec.credentials.is_none() && body.expected_profile_revision.is_some())
+    {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_profile_revision",
+            "profile revision requires a selected credential profile and a positive revision",
+        ));
+    }
     if body
         .preset_id
         .as_deref()
@@ -158,7 +177,7 @@ pub(crate) fn apply_project_spec_defaults(body: &mut CreateEnvironmentBody) -> A
             "preset_id and project_spec.preset are mutually exclusive",
         ));
     }
-    ensure_no_secret_delivery(&body.project_spec)
+    Ok(())
 }
 
 /// Fill omitted canonical fields without creating a second representation.
@@ -213,7 +232,7 @@ pub(crate) fn merge_project_spec_defaults(
     // Secret sources and provider capability are authority, not convenience
     // defaults. Detection, repository configuration, and presets may fill
     // workload configuration, but only the explicit environment request may
-    // select stored-secret sources or an access profile. Omission therefore
+    // select stored-secret sources or a credential profile. Omission therefore
     // remains no secret selection and no provider capability.
     explicit.validate().map_err(invalid_project_spec)
 }
@@ -230,8 +249,6 @@ pub(crate) fn ensure_current_platform_runtime_support(
         Some("repositories.revision")
     } else if !spec.skills.is_empty() {
         Some("skills")
-    } else if spec.access.is_some() {
-        Some("access")
     } else {
         let destinations = codewire_project::validate_repository_destinations(
             spec.repositories
@@ -541,7 +558,7 @@ async fn find_or_create_preset_by_image(
 
 struct InsertEnvironmentParams<'a> {
     org_id: &'a str,
-    created_by: &'a str,
+    user: &'a AuthUser,
     preset_id: &'a str,
     env_type: &'a str,
     name: Option<String>,
@@ -550,14 +567,14 @@ struct InsertEnvironmentParams<'a> {
     disk_gb: i32,
     isolation_tier: &'a str,
     ttl_seconds: Option<i32>,
-    project_spec: &'a codewire_project::ProjectSpec,
+    body: &'a CreateEnvironmentBody,
 }
 
 async fn insert_environment(
     pool: &PgPool,
     p: InsertEnvironmentParams<'_>,
 ) -> AppResult<Environment> {
-    let project_spec = serde_json::to_value(p.project_spec).map_err(|error| {
+    let project_spec = serde_json::to_value(&p.body.project_spec).map_err(|error| {
         tracing::error!(%error, "serialize environment project spec");
         coded(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -589,13 +606,21 @@ async fn insert_environment(
          FROM ins e
          {ENV_SELECT_JOINS}"#
     );
-    let mut transaction = pool.begin().await?;
+    let profiles = codewire_platform_credentials::PlatformAccessProfileStore::new(
+        pool.clone(),
+        codewire_access::builtin_provider_catalog(),
+    );
+    let mut transaction = profiles
+        .begin_transaction()
+        .await
+        .map_err(crate::access_profiles::profile_error)?;
+    super::environment_sources::lock_source_owners_in(&mut transaction, p.user, p.org_id).await?;
     if p.isolation_tier == "confidential" {
         reserve_confidential_capacity(&mut transaction, p.org_id).await?;
     }
     let row = sqlx::query(&sql)
         .bind(p.org_id)
-        .bind(p.created_by)
+        .bind(&p.user.user_id)
         .bind(preset_id)
         .bind(p.env_type)
         .bind(&name)
@@ -608,8 +633,28 @@ async fn insert_environment(
         .bind(project_spec)
         .fetch_one(&mut *transaction)
         .await?;
+    let environment_id: String = row.try_get("id")?;
+    let mut admitted = p.body.clone();
+    super::environment_sources::admit_create_sources_in(
+        &mut transaction,
+        &profiles,
+        p.user,
+        p.org_id,
+        &environment_id,
+        &mut admitted,
+    )
+    .await?;
+    // Admission has resolved exact source IDs and created the immutable profile
+    // pin. Only this final, same-transaction read describes the published row.
+    let sql =
+        format!("SELECT {ENV_SELECT_COLS} FROM environments e {ENV_SELECT_JOINS} WHERE e.id=$1");
+    let row = sqlx::query(&sql)
+        .bind(&environment_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    let environment = scan_environment(&row)?;
     transaction.commit().await?;
-    Ok(scan_environment(&row)?)
+    Ok(environment)
 }
 
 /// Checks the catalog entitlement and concurrent capacity while holding an
@@ -881,7 +926,6 @@ pub(crate) async fn create_environment_core(
             merge_project_spec_defaults(&mut body.project_spec, &preset.project_spec)?;
             apply_environment_resource_defaults(&mut body.project_spec);
             body.project_spec.validate().map_err(invalid_project_spec)?;
-            ensure_no_secret_delivery(&body.project_spec)?;
             ensure_current_platform_runtime_support(&body)?;
             validate_environment_repository_mounts(&body.project_spec.repositories)?;
 
@@ -914,7 +958,7 @@ pub(crate) async fn create_environment_core(
                 pool,
                 InsertEnvironmentParams {
                     org_id,
-                    created_by: &user.user_id,
+                    user,
                     preset_id: &preset.id,
                     env_type: "sandbox",
                     name: body.name.clone(),
@@ -923,20 +967,10 @@ pub(crate) async fn create_environment_core(
                     disk_gb: disk_gib,
                     isolation_tier,
                     ttl_seconds: ttl,
-                    project_spec: &body.project_spec,
+                    body: &body,
                 },
             )
             .await?;
-
-            // Auto-grant owner access to the creator (best-effort, like Go).
-            let _ = sqlx::query(
-                r#"INSERT INTO environment_access (environment_id, user_id, permission, granted_by)
-           VALUES ($1, $2, 'owner', $2)"#,
-            )
-            .bind(&env.id)
-            .bind(&user.user_id)
-            .execute(pool)
-            .await;
 
             if trigger_environment(state, &env.id, "create").await.is_err() {
                 dispatch_ambiguous.store(true, Ordering::Release);
@@ -1059,7 +1093,7 @@ ports: [{port: 8080, label: api, access: private}]
 cpu: "4"
 memory: "16Gi"
 disk: "40Gi"
-access: {profile: user/work}
+credentials: {profile: user/work}
 "#,
         )
         .unwrap()
@@ -1083,14 +1117,14 @@ access: {profile: user/work}
         assert_eq!(explicit.resources.cpu_millicores, Some(1_000));
         assert_eq!(explicit.resources.memory_mib, Some(16 * 1_024));
         assert_eq!(explicit.resources.disk_gib, Some(40));
-        assert!(explicit.access.is_none());
+        assert!(explicit.credentials.is_none());
         explicit.validate().unwrap();
     }
 
     #[test]
     fn stored_defaults_cannot_grant_provider_access() {
         let access_default = codewire_project::parse_project_yaml(
-            "image: ghcr.io/example/workspace:1\naccess: {profile: user/work}\n",
+            "image: ghcr.io/example/workspace:1\ncredentials: {profile: user/work}\n",
         )
         .unwrap()
         .spec;
@@ -1098,23 +1132,26 @@ access: {profile: user/work}
         for source in ["saved repository configuration", "preset"] {
             let mut merged = codewire_project::ProjectSpec::default();
             merge_project_spec_defaults(&mut merged, &access_default).unwrap();
-            assert!(merged.access.is_none(), "{source} granted provider access");
+            assert!(
+                merged.credentials.is_none(),
+                "{source} granted provider access"
+            );
         }
 
         let explicit_access =
-            codewire_project::parse_project_yaml("access: {profile: organization/approved}\n")
+            codewire_project::parse_project_yaml("credentials: {profile: organization/approved}\n")
                 .unwrap()
                 .spec;
         let mut requested = explicit_access.clone();
         merge_project_spec_defaults(&mut requested, &codewire_project::ProjectSpec::default())
             .unwrap();
-        assert_eq!(requested.access, explicit_access.access);
+        assert_eq!(requested.credentials, explicit_access.credentials);
     }
 
     #[test]
     fn defaults_cannot_select_stored_secret_sources() {
         let secret_defaults = codewire_project::parse_project_yaml(
-            "secrets: {user: true, organization: true, project: development}\n",
+            "secrets: {user: platform, organization: true, project: development}\n",
         )
         .unwrap()
         .spec;
@@ -1130,7 +1167,7 @@ access: {profile: user/work}
         }
 
         let explicit_secrets =
-            codewire_project::parse_project_yaml("secrets: {user: true, project: explicit}\n")
+            codewire_project::parse_project_yaml("secrets: {user: platform, project: explicit}\n")
                 .unwrap()
                 .spec;
         let mut requested = explicit_secrets.clone();
@@ -1156,24 +1193,21 @@ access: {profile: user/work}
     }
 
     #[test]
-    fn canonical_secret_sources_fail_closed_without_disclosing_bindings() {
+    fn explicit_canonical_secret_sources_pass_initial_validation() {
         for yaml in [
-            "secrets: {project: nested-project-secret-value}\n",
+            "secrets: {project: platform:development}\n",
             "secrets: {organization: true}\n",
-            "secrets: {user: true}\n",
+            "secrets: {user: platform}\n",
         ] {
             let mut body = CreateEnvironmentBody {
                 project_spec: codewire_project::parse_project_yaml(yaml).unwrap().spec,
                 ..Default::default()
             };
-            assert_secret_delivery_pending(
-                apply_project_spec_defaults(&mut body).unwrap_err(),
-                Some("nested-project-secret-value"),
-            );
+            apply_project_spec_defaults(&mut body).unwrap();
         }
 
         ensure_no_secret_delivery(
-            &codewire_project::parse_project_yaml("secrets: {organization: false, user: false}\n")
+            &codewire_project::parse_project_yaml("secrets: {organization: false}\n")
                 .unwrap()
                 .spec,
         )
@@ -1228,11 +1262,10 @@ access: {profile: user/work}
     }
 
     #[test]
-    fn represented_project_features_fail_closed_until_the_platform_runtime_owns_them() {
+    fn represented_unsupported_project_features_fail_closed() {
         for yaml in [
             "repositories: [{source: https://example.test/app.git, revision: deadbeef}]\n",
             "skills: [{source: repository, path: .agents/skills/rust}]\n",
-            "access: {profile: user/work}\n",
             "repositories: [{source: https://example.test/app.git}]\nworking_directory: /workspace/app/subdir\n",
         ] {
             let spec = codewire_project::parse_project_yaml(yaml).unwrap().spec;
@@ -1252,6 +1285,15 @@ access: {profile: user/work}
                 "unexpected result for {yaml:?}: {error}"
             );
         }
+        let credentials =
+            codewire_project::parse_project_yaml("credentials: {profile: platform:user/work}\n")
+                .unwrap()
+                .spec;
+        ensure_current_platform_runtime_support(&CreateEnvironmentBody {
+            project_spec: credentials,
+            ..Default::default()
+        })
+        .unwrap();
     }
 
     #[test]
@@ -1732,7 +1774,7 @@ access: {profile: user/work}
 repositories:
   - source: https://example.test/org/app.git
     revision: deadbeef
-access: {profile: user/work}
+credentials: {profile: user/work}
 "#,
         )
         .unwrap()
@@ -1740,7 +1782,7 @@ access: {profile: user/work}
         let value = serde_json::to_value(project_spec).unwrap();
 
         assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["access"]["profile"], "user/work");
+        assert_eq!(value["credentials"]["profile"], "user/work");
         let encoded = value.to_string();
         for forbidden in ["host_path", "token", "secret_value", "backend_socket"] {
             assert!(!encoded.contains(forbidden), "unexpected {forbidden}");
@@ -1754,6 +1796,9 @@ access: {profile: user/work}
         assert_eq!(
             properties.keys().map(String::as_str).collect::<Vec<_>>(),
             [
+                "confirm_personal_credentials",
+                "confirm_personal_secrets",
+                "expected_profile_revision",
                 "isolation_tier",
                 "name",
                 "preset_id",

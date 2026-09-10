@@ -23,7 +23,10 @@ use uuid::Uuid;
 use crate::host_port::{HostPortBinding, validate_canonical_host_port_bindings};
 use crate::linux::path::{PathError, PrivateRoot};
 use crate::mesh_ingress::MeshAttachment;
-use crate::supervisor::{EnvironmentRecord, RunnerRecord, StoredEnvironmentState, SupervisorState};
+use crate::supervisor::{
+    EnvironmentRecord, PlatformSourceAuthority, RunnerRecord, StoredEnvironmentState,
+    SupervisorState,
+};
 use crate::workspace_generation::WorkspaceGenerationRecord;
 use crate::workspace_plan::WorkspacePlan;
 
@@ -32,7 +35,7 @@ const DATABASE_WAL_FILE: &str = "supervisor.db-wal";
 const DATABASE_SHM_FILE: &str = "supervisor.db-shm";
 const HOST_REBOOT_WORKSPACE_TRANSITIONS_KEY: &str = "host_reboot_workspace_transitions";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_564d; // "CWVM"
-const DATABASE_SCHEMA_VERSION: i64 = 10;
+const DATABASE_SCHEMA_VERSION: i64 = 11;
 // A create journal entry contains the exact canonical project JSON so replay
 // never has to reread a mutable codewire.yaml. The source document itself is
 // bounded to 256 KiB; this higher bound covers JSON string escaping.
@@ -49,7 +52,7 @@ pub(crate) enum OperationKind {
     Restart,
     UpdateWorkspace,
     RollbackWorkspace,
-    ApplyEnvironmentAccess,
+    UpdateEnvironmentSources,
     Delete,
     GrowDisk,
     Reconcile,
@@ -64,7 +67,7 @@ impl OperationKind {
             Self::Restart => "restart",
             Self::UpdateWorkspace => "update_workspace",
             Self::RollbackWorkspace => "rollback_workspace",
-            Self::ApplyEnvironmentAccess => "apply_environment_access",
+            Self::UpdateEnvironmentSources => "update_environment_sources",
             Self::Delete => "delete",
             Self::GrowDisk => "grow_disk",
             Self::Reconcile => "reconcile",
@@ -79,7 +82,7 @@ impl OperationKind {
             "restart" => Some(Self::Restart),
             "update_workspace" => Some(Self::UpdateWorkspace),
             "rollback_workspace" => Some(Self::RollbackWorkspace),
-            "apply_environment_access" => Some(Self::ApplyEnvironmentAccess),
+            "update_environment_sources" => Some(Self::UpdateEnvironmentSources),
             "delete" => Some(Self::Delete),
             "grow_disk" => Some(Self::GrowDisk),
             "reconcile" => Some(Self::Reconcile),
@@ -453,7 +456,7 @@ impl SupervisorStore {
                     access_profile_reference, access_profile_id, access_profile_revision, \
                     runner_json, active_artifact_generation, staging_artifact_generation, \
                     active_workspace_generation_json, staging_workspace_generation_json, \
-                    rollback_workspace_generation_json \
+                    rollback_workspace_generation_json, platform_source_authority_json \
              FROM environments ORDER BY name",
         )?;
         let rows = statement.query_map([], |row| {
@@ -480,6 +483,7 @@ impl SupervisorStore {
                 row.get::<_, Option<Vec<u8>>>(19)?,
                 row.get::<_, Option<Vec<u8>>>(20)?,
                 row.get::<_, Option<Vec<u8>>>(21)?,
+                row.get::<_, Option<Vec<u8>>>(22)?,
             ))
         })?;
         let mut environments = BTreeMap::new();
@@ -508,6 +512,7 @@ impl SupervisorStore {
                 active_workspace_generation_json,
                 staging_workspace_generation_json,
                 rollback_workspace_generation_json,
+                platform_source_authority_json,
             ) = row?;
             let id_text = id;
             let id = parse_uuid(&id_text)?;
@@ -546,6 +551,16 @@ impl SupervisorStore {
                     .map_err(|_| SupervisorStoreError::InvalidState)?,
                 project_spec_json: Some(project_spec_json),
                 project_spec_sha256: Some(project_spec_sha256),
+                platform_source_authority: platform_source_authority_json
+                    .map(|bytes| {
+                        let authority: PlatformSourceAuthority = serde_json::from_slice(&bytes)
+                            .map_err(|_| SupervisorStoreError::InvalidState)?;
+                        authority
+                            .validate()
+                            .map_err(|_| SupervisorStoreError::InvalidState)?;
+                        Ok::<_, SupervisorStoreError>(authority)
+                    })
+                    .transpose()?,
                 access_profile: access_profile_reference
                     .map(|reference| reference.parse::<AccessProfileReference>())
                     .transpose()
@@ -668,8 +683,36 @@ impl SupervisorStore {
         transaction.execute(
             "UPDATE operations \
              SET phase = 'interrupted', error_code = 'host_reboot' \
-             WHERE phase NOT IN ('completed', 'failed', 'interrupted')",
+             WHERE phase NOT IN ('completed', 'failed', 'interrupted')
+               AND kind != 'update_environment_sources'",
             [],
+        )?;
+        // Source metadata and its checkpoint commit in one transaction. A host
+        // reboot destroys runtime, not this exact intent: repeat stop/CAS while
+        // the old selection is authoritative, otherwise restart only from the
+        // already committed target. All other operation kinds stay interrupted.
+        let source_effect_count =
+            u32::try_from(crate::lifecycle::effects(OperationKind::UpdateEnvironmentSources).len())
+                .map_err(|_| SupervisorStoreError::InvalidOperation)?;
+        let source_commit_checkpoint =
+            crate::lifecycle::source_reboot_checkpoint(source_effect_count)
+                .map_err(|_| SupervisorStoreError::InvalidOperation)?;
+        let invalid_source_checkpoint: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE kind = 'update_environment_sources'
+             AND phase NOT IN ('completed', 'failed', 'interrupted') AND checkpoint > ?1)",
+            [source_effect_count],
+            |row| row.get(0),
+        )?;
+        if invalid_source_checkpoint {
+            return Err(SupervisorStoreError::InvalidOperation);
+        }
+        transaction.execute(
+            "UPDATE operations
+             SET checkpoint = CASE WHEN checkpoint < ?1 THEN 0 ELSE ?1 END,
+                 phase = 'effect_applied', result_json = NULL, error_code = NULL
+             WHERE kind = 'update_environment_sources'
+               AND phase NOT IN ('completed', 'failed', 'interrupted')",
+            [source_commit_checkpoint],
         )?;
         transaction.execute(
             "UPDATE supervisor_metadata SET value = ?1 WHERE key = 'host_boot_id'",
@@ -835,6 +878,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            active_workspace_generation_json BLOB NULL,
            staging_workspace_generation_json BLOB NULL,
            rollback_workspace_generation_json BLOB NULL,
+           platform_source_authority_json BLOB NULL,
            CHECK (
              (access_profile_reference IS NULL AND access_profile_id IS NULL AND access_profile_revision IS NULL) OR
              (access_profile_reference IS NOT NULL AND access_profile_id IS NOT NULL AND access_profile_revision > 0)
@@ -869,7 +913,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), SupervisorStoreError
            updated_unix_ms INTEGER NOT NULL
          ) STRICT;
          PRAGMA application_id = 1129797197;
-         PRAGMA user_version = 10;
+         PRAGMA user_version = 11;
          COMMIT;",
     )?;
     validate_schema(connection)
@@ -915,6 +959,7 @@ fn validate_schema(connection: &Connection) -> Result<(), SupervisorStoreError> 
         "access_profile_reference",
         "access_profile_id",
         "access_profile_revision",
+        "platform_source_authority_json",
         "active_workspace_generation_json",
         "staging_workspace_generation_json",
         "rollback_workspace_generation_json",
@@ -982,6 +1027,16 @@ fn write_state(
         let rollback_workspace_generation_json =
             encode_workspace_generation(environment.rollback_workspace_generation.as_ref())?;
         let encoded_access = encode_access_binding(environment)?;
+        let platform_source_authority_json = environment
+            .platform_source_authority
+            .as_ref()
+            .map(|authority| {
+                authority
+                    .validate()
+                    .map_err(|_| SupervisorStoreError::InvalidState)?;
+                serde_json::to_vec(authority).map_err(|_| SupervisorStoreError::InvalidState)
+            })
+            .transpose()?;
         let disk_bytes = i64::try_from(environment.disk_bytes)
             .map_err(|_| SupervisorStoreError::InvalidState)?;
         let docker_disk_bytes = i64::try_from(environment.docker_disk_bytes)
@@ -1001,8 +1056,8 @@ fn write_state(
                project_spec_json, project_spec_sha256, access_profile_reference,
                access_profile_id, access_profile_revision,
                active_workspace_generation_json, staging_workspace_generation_json,
-               rollback_workspace_generation_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+               rollback_workspace_generation_json, platform_source_authority_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                desired_state = excluded.desired_state,
@@ -1025,7 +1080,8 @@ fn write_state(
                access_profile_revision = excluded.access_profile_revision,
                active_workspace_generation_json = excluded.active_workspace_generation_json,
                staging_workspace_generation_json = excluded.staging_workspace_generation_json,
-               rollback_workspace_generation_json = excluded.rollback_workspace_generation_json",
+               rollback_workspace_generation_json = excluded.rollback_workspace_generation_json,
+               platform_source_authority_json = excluded.platform_source_authority_json",
             params![
                 environment.id.to_string(),
                 &environment.name,
@@ -1050,6 +1106,7 @@ fn write_state(
                 active_workspace_generation_json,
                 staging_workspace_generation_json,
                 rollback_workspace_generation_json,
+                platform_source_authority_json,
             ],
         )?;
         transaction.execute(
@@ -1733,6 +1790,7 @@ mod tests {
             project_spec_sha256: Some(project_spec_sha256),
             access_profile: None,
             access_binding: None,
+            platform_source_authority: None,
             runner,
             active_artifact_generation: Some("c".repeat(64)),
             staging_artifact_generation: None,
@@ -1909,6 +1967,186 @@ mod tests {
     }
 
     #[test]
+    fn host_reboot_resumes_only_pending_source_operations_at_the_derived_commit_boundary() {
+        for checkpoint in 0..=9 {
+            let (_parent, root) = root();
+            let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+            let expected = state(environment(StoredEnvironmentState::Running, Some("boot-a")));
+            let environment_id = expected.environments["dev"].id;
+            store.replace_state(&expected).unwrap();
+            let mut source = store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(environment_id),
+                    OperationKind::UpdateEnvironmentSources,
+                    &serde_json::json!({"name": "dev", "fixture": "source-reboot"}),
+                )
+                .unwrap();
+            for _ in 0..checkpoint {
+                source = store
+                    .advance_operation(
+                        source.operation_id,
+                        source.checkpoint,
+                        OperationPhase::EffectApplied,
+                        None,
+                        None,
+                    )
+                    .unwrap();
+            }
+            let mut others = Vec::new();
+            for kind in [
+                OperationKind::Create,
+                OperationKind::Start,
+                OperationKind::Stop,
+                OperationKind::Restart,
+                OperationKind::UpdateWorkspace,
+                OperationKind::RollbackWorkspace,
+                OperationKind::Delete,
+                OperationKind::GrowDisk,
+                OperationKind::Reconcile,
+            ] {
+                others.push(
+                    store
+                        .begin_operation(
+                            Uuid::new_v4(),
+                            Some(environment_id),
+                            kind,
+                            &serde_json::json!({"name": "dev"}),
+                        )
+                        .unwrap(),
+                );
+            }
+            drop(store);
+            let (store, loaded) = SupervisorStore::open_for_boot(&root, "boot-b").unwrap();
+            let resumed = store
+                .operation_by_request(source.request_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(resumed.operation_id, source.operation_id);
+            assert_eq!(resumed.payload, source.payload);
+            assert_eq!(
+                resumed.checkpoint,
+                crate::lifecycle::source_reboot_checkpoint(checkpoint).unwrap()
+            );
+            assert_eq!(resumed.phase, OperationPhase::EffectApplied);
+            assert!(resumed.error_code.is_none());
+            assert_eq!(
+                loaded.environments["dev"].generation,
+                expected.environments["dev"].generation
+            );
+            assert_eq!(
+                loaded.environments["dev"].project_spec_json,
+                expected.environments["dev"].project_spec_json
+            );
+            assert_eq!(
+                loaded.environments["dev"].state,
+                StoredEnvironmentState::Stopped
+            );
+            assert!(loaded.environments["dev"].runner.is_none());
+            for other in others {
+                let interrupted = store
+                    .operation_by_request(other.request_id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(interrupted.phase, OperationPhase::Interrupted);
+                assert_eq!(interrupted.checkpoint, other.checkpoint);
+                assert_eq!(interrupted.error_code.as_deref(), Some("host_reboot"));
+            }
+            assert_eq!(store.pending_operations().unwrap(), vec![resumed]);
+        }
+    }
+
+    #[test]
+    fn host_reboot_never_rewinds_terminal_source_operations_or_accepts_retired_kind() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let mut terminal = Vec::new();
+        for phase in [
+            OperationPhase::Completed,
+            OperationPhase::Failed,
+            OperationPhase::Interrupted,
+        ] {
+            let operation = store
+                .begin_operation(
+                    Uuid::new_v4(),
+                    Some(Uuid::new_v4()),
+                    OperationKind::UpdateEnvironmentSources,
+                    &serde_json::json!({"name": "dev"}),
+                )
+                .unwrap();
+            terminal.push(
+                store
+                    .advance_operation(
+                        operation.operation_id,
+                        operation.checkpoint,
+                        phase,
+                        (phase == OperationPhase::Completed)
+                            .then_some(&serde_json::json!({"name":"dev"})),
+                        if phase == OperationPhase::Completed {
+                            None
+                        } else {
+                            Some("fixture_terminal")
+                        },
+                    )
+                    .unwrap(),
+            );
+        }
+        drop(store);
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-b").unwrap();
+        for operation in terminal {
+            assert_eq!(
+                store
+                    .operation_by_request(operation.request_id)
+                    .unwrap()
+                    .unwrap(),
+                operation
+            );
+        }
+        assert_eq!(OperationKind::parse("apply_environment_access"), None);
+    }
+
+    #[test]
+    fn host_reboot_rejects_source_checkpoint_outside_its_effect_plan_atomically() {
+        let (_parent, root) = root();
+        let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
+        let expected = state(environment(StoredEnvironmentState::Running, Some("boot-a")));
+        store.replace_state(&expected).unwrap();
+        let mut operation = store
+            .begin_operation(
+                Uuid::new_v4(),
+                Some(expected.environments["dev"].id),
+                OperationKind::UpdateEnvironmentSources,
+                &serde_json::json!({"name": "dev"}),
+            )
+            .unwrap();
+        for _ in 0..10 {
+            operation = store
+                .advance_operation(
+                    operation.operation_id,
+                    operation.checkpoint,
+                    OperationPhase::EffectApplied,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            store.reconcile_host_boot("boot-b"),
+            Err(SupervisorStoreError::InvalidOperation)
+        ));
+        assert_eq!(store.metadata("host_boot_id").as_deref(), Some("boot-a"));
+        assert_eq!(
+            store
+                .operation_by_request(operation.request_id)
+                .unwrap()
+                .unwrap(),
+            operation
+        );
+        let (_, retained) = SupervisorStore::inspect(&root).unwrap();
+        assert_eq!(retained, expected);
+    }
+
+    #[test]
     fn database_reopen_on_another_boot_stops_every_environment() {
         let (_parent, root) = root();
         let (store, _) = SupervisorStore::open_for_boot(&root, "boot-a").unwrap();
@@ -2053,8 +2291,8 @@ mod tests {
         let mut environment = environment(StoredEnvironmentState::Stopped, None);
         let mut project: codewire_project::ProjectSpec =
             serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
-        project.access = Some(codewire_project::AccessBinding {
-            profile: "user/work".parse().unwrap(),
+        project.credentials = Some(codewire_project::CredentialBinding {
+            profile: "local:id:11111111-1111-4111-8111-111111111111".into(),
         });
         let project_spec_json = project.canonical_json().unwrap();
         environment.project_spec_sha256 = Some(format!(
@@ -2064,7 +2302,7 @@ mod tests {
         environment.project_spec_json = Some(project_spec_json);
         let binding = EnvironmentAccessBinding {
             environment_id: EnvironmentId::parse(environment.id.to_string()).unwrap(),
-            profile_id: AccessProfileId::parse("profile-work").unwrap(),
+            profile_id: AccessProfileId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
             profile_revision: 7,
         };
         environment.access_profile = Some("user/work".parse().unwrap());

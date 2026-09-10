@@ -8,7 +8,7 @@ use codewire_access::{
     AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
     CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId,
-    GrantPermission, Owner, OwnerId, Placement, ProviderId,
+    GrantPermission, Owner, OwnerId, Placement, ProviderId, SshPublicKeyMetadata,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
@@ -16,11 +16,12 @@ use codewire_protected_store::{
 use codewire_workload_secrets::validate_workload_secret_key;
 use tonic::Status;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::broker_channel::MAX_BROKER_LEASE_AUDIT_LIST_LIMIT;
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
-use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector, validate_github_https_source};
+use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
 use crate::service::auth_kind_to_proto;
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError, connect_owner_only,
@@ -316,6 +317,44 @@ impl LocalCredentialClient {
             .map(tonic::Response::into_inner)
     }
 
+    pub async fn generate_ssh_credential(
+        &mut self,
+        name: String,
+        expires_at_unix: Option<u64>,
+    ) -> Result<CredentialRecord, Status> {
+        credential_from_proto(
+            self.inner
+                .generate_ssh_credential(v1::GenerateSshCredentialRequest {
+                    name,
+                    expires_at_unix,
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
+    pub async fn add_ssh_credential(
+        &mut self,
+        name: String,
+        mut private_key: Zeroizing<Vec<u8>>,
+        mut passphrase: Option<Zeroizing<Vec<u8>>>,
+        expires_at_unix: Option<u64>,
+    ) -> Result<CredentialRecord, Status> {
+        credential_from_proto(
+            self.inner
+                .add_ssh_credential(v1::AddSshCredentialRequest {
+                    name,
+                    private_key: std::mem::take(&mut *private_key),
+                    passphrase: passphrase
+                        .as_mut()
+                        .map(|value| std::mem::take(&mut **value)),
+                    expires_at_unix,
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
     pub async fn list_credentials(&mut self) -> Result<Vec<CredentialRecord>, Status> {
         self.inner
             .list_credentials(v1::ListCredentialsRequest {})
@@ -355,15 +394,19 @@ impl LocalCredentialClient {
     pub async fn rotate_credential_material(
         &mut self,
         id: &CredentialId,
+        expected_revocation_generation: u64,
         material: ProtectedValue,
         expires_at_unix: Option<u64>,
+        account_hint: Option<String>,
     ) -> Result<CredentialRecord, Status> {
         credential_from_proto(
             self.inner
                 .rotate_credential_material(v1::RotateCredentialMaterialRequest {
                     credential_id: id.to_string(),
+                    expected_revocation_generation,
                     material: material.expose_secret().to_vec(),
                     expires_at_unix,
+                    account_hint,
                 })
                 .await?
                 .into_inner(),
@@ -781,6 +824,25 @@ impl LocalCredentialControlClient {
         self.info
     }
 
+    /// Read material-free client-slot metadata from an exact immutable profile
+    /// revision. This reuses the authority's existing metadata RPC and exposes
+    /// no credential material or profile mutation to lifecycle callers.
+    pub async fn get_profile_revision(
+        &mut self,
+        id: &AccessProfileId,
+        revision: u64,
+    ) -> Result<AccessProfileRevisionRecord, Status> {
+        profile_revision_from_proto(
+            self.inner
+                .get_access_profile_revision(v1::GetAccessProfileRevisionRequest {
+                    profile_id: id.to_string(),
+                    revision,
+                })
+                .await?
+                .into_inner(),
+        )
+    }
+
     pub async fn resolve_workload_secret_metadata(
         &mut self,
         selection: WorkloadSecretSelection,
@@ -807,6 +869,7 @@ impl LocalCredentialControlClient {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare_git_repository(
         &mut self,
         request_id: Uuid,
@@ -815,17 +878,25 @@ impl LocalCredentialControlClient {
         source: String,
         branch: String,
         revision: String,
+        known_hosts: Vec<String>,
+        platform: Option<crate::RepositoryPlatformAccess>,
     ) -> Result<PreparedGitRepository, Status> {
-        if request_id.is_nil()
-            || profile_revision == 0
-            || validate_github_https_source(&source).is_err()
-            || (!branch.is_empty() && !valid_git_selector(&branch))
-            || (!revision.is_empty() && !valid_git_selector(&revision))
-            || (!branch.is_empty() && !revision.is_empty())
-        {
+        let authorization = crate::RepositoryCredentialLeaseRequest {
+            request_id,
+            profile_id: profile_id.clone(),
+            profile_revision,
+            source: source.clone(),
+            branch: branch.clone(),
+            revision: revision.clone(),
+            known_hosts: known_hosts.clone(),
+        };
+        if crate::repository::validate_repository_lease_request(&authorization).is_err() {
             return Err(Status::invalid_argument(
                 "invalid repository preparation request",
             ));
+        }
+        if let Some(platform) = &platform {
+            platform.validate(&authorization)?;
         }
         let mut stream = self
             .inner
@@ -836,6 +907,8 @@ impl LocalCredentialControlClient {
                 source,
                 branch,
                 revision,
+                known_hosts,
+                platform: platform.map(crate::RepositoryPlatformAccess::into_proto),
             })
             .await?
             .into_inner();
@@ -1074,21 +1147,46 @@ impl LocalCredentialControlClient {
         environment_id: &EnvironmentId,
         environment_generation: u64,
         environment_name: &str,
-        supervisor_socket: &Path,
+        runner_socket: &Path,
+        selection: crate::EnvironmentBrokerSelection,
     ) -> Result<EnvironmentBrokerRuntime, Status> {
         if environment_generation == 0 {
             return Err(Status::invalid_argument(
                 "invalid local credential broker request",
             ));
         }
-        let supervisor_socket = broker_supervisor_socket(supervisor_socket)?;
+        let runner_socket = broker_runner_socket(runner_socket)?;
+        let crate::EnvironmentBrokerSelection {
+            local_profile,
+            projection,
+            platform,
+        } = selection;
+        if local_profile.as_ref().is_some_and(|binding| {
+            binding.environment_id != *environment_id || binding.profile_revision == 0
+        }) {
+            return Err(Status::invalid_argument("invalid local provider selection"));
+        }
+        if let Some(binding) = platform.as_ref() {
+            binding.validate()?;
+        }
+        if let Some(binding) = projection.as_ref() {
+            binding
+                .validate()
+                .map_err(|_| Status::invalid_argument("invalid local projection"))?;
+        }
         let response = self
             .inner
             .ensure_environment_broker(v1::EnsureEnvironmentBrokerRequest {
                 environment_id: environment_id.to_string(),
                 environment_generation,
                 environment_name: environment_name.to_owned(),
-                supervisor_socket: supervisor_socket.to_owned(),
+                runner_socket: runner_socket.to_owned(),
+                projection: projection.map(crate::LocalEnvironmentProjectionBinding::into_proto),
+                platform: platform.map(crate::PlatformCredentialBinding::into_proto),
+                local_profile: local_profile.map(|binding| v1::BrokerLocalProfileSelection {
+                    profile_id: binding.profile_id.to_string(),
+                    profile_revision: binding.profile_revision,
+                }),
             })
             .await?
             .into_inner();
@@ -1125,7 +1223,7 @@ impl LocalCredentialControlClient {
     }
 }
 
-fn broker_supervisor_socket(path: &Path) -> Result<&str, Status> {
+fn broker_runner_socket(path: &Path) -> Result<&str, Status> {
     if !path.is_absolute() {
         return Err(Status::invalid_argument(
             "invalid local credential broker request",
@@ -1268,6 +1366,10 @@ pub(crate) fn credential_from_proto(value: v1::Credential) -> Result<CredentialR
         authentication_kind: auth_kind_from_proto(value.authentication_kind)?,
         display_name: value.display_name,
         account_hint: value.account_hint,
+        ssh_public_key: value.ssh_public_key.map(|key| SshPublicKeyMetadata {
+            openssh: key.openssh,
+            fingerprint: key.fingerprint,
+        }),
         status: status_from_proto(value.status)?,
         expires_at_unix: value.expires_at_unix,
         revocation_generation: value.revocation_generation,
@@ -1488,6 +1590,7 @@ fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
         Ok(CredentialAuthenticationKind::ApiKey) => Ok(CredentialAuthKind::ApiKey),
         Ok(CredentialAuthenticationKind::AccessToken) => Ok(CredentialAuthKind::AccessToken),
         Ok(CredentialAuthenticationKind::GithubApp) => Ok(CredentialAuthKind::GitHubApp),
+        Ok(CredentialAuthenticationKind::SshKey) => Ok(CredentialAuthKind::SshKey),
         Ok(CredentialAuthenticationKind::Unspecified) | Err(_) => Err(Status::data_loss(
             "local credential authority returned invalid metadata",
         )),
@@ -1579,9 +1682,9 @@ mod tests {
     }
 
     #[test]
-    fn broker_supervisor_socket_never_uses_a_lossy_wire_identity() {
+    fn broker_runner_socket_never_uses_a_lossy_wire_identity() {
         assert_eq!(
-            broker_supervisor_socket(Path::new("/run/user/1000/codewire/supervisor.sock")).unwrap(),
+            broker_runner_socket(Path::new("/run/user/1000/codewire/supervisor.sock")).unwrap(),
             "/run/user/1000/codewire/supervisor.sock"
         );
         let non_utf8 = PathBuf::from(OsString::from_vec(
@@ -1590,7 +1693,7 @@ mod tests {
         let mut bytes = non_utf8.into_os_string().into_vec();
         bytes.insert(1, 0xff);
         let non_utf8 = PathBuf::from(OsString::from_vec(bytes));
-        assert!(broker_supervisor_socket(&non_utf8).is_err());
-        assert!(broker_supervisor_socket(Path::new("relative/supervisor.sock")).is_err());
+        assert!(broker_runner_socket(&non_utf8).is_err());
+        assert!(broker_runner_socket(Path::new("relative/supervisor.sock")).is_err());
     }
 }

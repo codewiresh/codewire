@@ -60,6 +60,35 @@ for retired_ssh_surface in \
     fail "base image retains retired raw SSH surface: $retired_ssh_surface"
   fi
 done
+# The shared native/Dev SSH target is prepared by the workspace build, never by
+# the base runtime or a live package transaction during environment creation.
+workspace_dockerfile="$ROOT/images/workspace/Dockerfile"
+stock_ssh="$ROOT/scripts/ci/verify/stock-ssh-workload.sh"
+# Workspace cw compiles the same schemas as product images, including the
+# standard debug_redact field option unsupported by Bookworm's protoc.
+grep -qF 'https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \
+  "$workspace_dockerfile" || fail 'workspace builder lacks the shared pinned protobuf compiler'
+grep -qF 'ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7' \
+  "$workspace_dockerfile" || fail 'workspace protobuf compiler checksum is not pinned'
+grep -qxF 'ENV PROTOC=/opt/protoc/bin/protoc' "$workspace_dockerfile" ||
+  fail 'workspace cw build does not select the pinned protobuf compiler'
+# shellcheck disable=SC2016 # Match the literal Dockerfile build argument.
+grep -qxF 'FROM ${BASE_IMAGE_REF} AS stock-ssh-fixture' "$workspace_dockerfile" ||
+  fail 'workspace SSH fixture does not inherit the exact verified base'
+grep -qF 'download openssh-server=1:9.6p1-3ubuntu13.18 libwrap0=7.6.q-33' "$workspace_dockerfile" ||
+  fail 'workspace SSH fixture package versions are not pinned'
+grep -qF 'APT::Update::Error-Mode=any' "$workspace_dockerfile" ||
+  fail 'SSH artifact preparation tolerates partial package-index failures'
+# shellcheck disable=SC2016 # Match the literal package loop, not this test's environment.
+grep -qF 'dpkg-deb --extract "$package" /out' "$workspace_dockerfile" ||
+  fail 'SSH artifact preparation no longer uses inert extraction'
+grep -qxF 'COPY --from=stock-ssh-fixture /out/ /opt/codewire/fixtures/openssh/' "$workspace_dockerfile" ||
+  fail 'workspace does not ship the prepared SSH artifact'
+grep -qxF "readonly SERVER_ROOT='/opt/codewire/fixtures/openssh'" "$stock_ssh" ||
+  fail 'SSH smoke does not use the image artifact'
+if grep -Eq 'apt-get|dpkg-deb|snapshot\.ubuntu\.com|curl|wget' "$stock_ssh"; then
+  fail 'SSH smoke retains a runtime package download or extraction dependency'
+fi
 if grep -qE '(^|[[:space:]])cw[[:space:]]+node([[:space:]]|$)' "$ENTRYPOINT"; then
   fail 'base image still starts the duplicate legacy Codewire node runtime'
 fi

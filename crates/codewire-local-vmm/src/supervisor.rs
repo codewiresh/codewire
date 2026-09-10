@@ -4,6 +4,10 @@
 //! and socket identities are persisted, but daemon capabilities and workload
 //! credentials never are.
 
+mod bootstrap;
+mod sources;
+pub(crate) use sources::PlatformSourceAuthority;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -61,7 +65,7 @@ use crate::mesh_ingress::{
 };
 use crate::oci::{
     ContentStore, ContentStoreError, RegistryReference, RegistryReferenceError, RegistryResolver,
-    RegistryResolverError, ResolvedDescriptor, Sha256Digest,
+    RegistryResolverError, ResolvedDescriptor, ResolvedImage, Sha256Digest,
 };
 use crate::runner_service::{RunnerClient, RunnerServiceError};
 use crate::setup_pack::{SetupPackError, SetupPackRequest, ensure_setup_pack};
@@ -88,7 +92,7 @@ use crate::workspace_plan::{
 pub(crate) const SUPERVISOR_STATE_SCHEMA: u32 = 3;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible.
-const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 1;
+const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 5;
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
 const SUPERVISOR_INFO_TIMEOUT: Duration = Duration::from_secs(3);
@@ -120,7 +124,10 @@ struct CredentialBrokerEnsureRequest {
     environment_id: EnvironmentId,
     environment_generation: u64,
     environment_name: String,
-    supervisor_socket: PathBuf,
+    runner_socket: PathBuf,
+    projection: Option<codewire_local_credentials::LocalEnvironmentProjectionBinding>,
+    platform: Option<codewire_local_credentials::PlatformCredentialBinding>,
+    local_profile: Option<EnvironmentAccessBinding>,
     enabled: bool,
 }
 
@@ -535,32 +542,17 @@ impl NativeSupervisorClient {
         self.follow_environment_operation(operation, name).await
     }
 
-    pub async fn apply_access(
+    /// Update only the source selections, waiting on the existing durable operation stream.
+    pub async fn update_environment_sources(
         &mut self,
-        name: &str,
-        environment_id: &str,
-        target: Option<(&str, &str, u64)>,
-    ) -> Result<v1::Environment, Status> {
-        let (access_profile, access_profile_id, access_profile_revision, clear) = match target {
-            Some((reference, profile_id, revision)) => {
-                (reference.to_owned(), profile_id.to_owned(), revision, false)
-            }
-            None => (String::new(), String::new(), 0, true),
-        };
+        request: v1::UpdateEnvironmentSourcesRequest,
+    ) -> Result<v1::Operation, Status> {
         let operation = self
             .inner
-            .apply_environment_access(v1::ApplyEnvironmentAccessRequest {
-                name: name.to_owned(),
-                request_id: Uuid::new_v4().to_string(),
-                environment_id: environment_id.to_owned(),
-                access_profile,
-                access_profile_id,
-                access_profile_revision,
-                clear,
-            })
+            .update_environment_sources(request)
             .await?
             .into_inner();
-        self.follow_environment_operation(operation, name).await
+        self.follow_operation(operation).await
     }
 
     pub async fn delete(&mut self, name: &str) -> Result<v1::DeleteEnvironmentResponse, Status> {
@@ -792,6 +784,8 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         operation_progress: operation_progress.clone(),
         _lock: lock,
     };
+    #[cfg(feature = "synthetic-oci-input-smoke")]
+    core.admit_synthetic_workspace_image_pin()?;
     core.recover_host_reboot_workspace_transitions()?;
     core.reconcile_exposing_runners_for_startup().await?;
     let service = SupervisorRpc {
@@ -921,6 +915,8 @@ pub(crate) struct EnvironmentRecord {
     pub(crate) access_profile: Option<AccessProfileReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) access_binding: Option<EnvironmentAccessBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) platform_source_authority: Option<PlatformSourceAuthority>,
     pub(crate) runner: Option<RunnerRecord>,
     #[serde(default)]
     pub(crate) active_artifact_generation: Option<String>,
@@ -955,6 +951,16 @@ impl EnvironmentRecord {
             generation: self.generation,
             selected,
             project_spec_sha256: self.project_spec_sha256.clone().unwrap_or_default(),
+            project_spec_json: self.project_spec_json.clone().unwrap_or_default(),
+            access_profile_id: self
+                .access_binding
+                .as_ref()
+                .map(|binding| binding.profile_id.to_string())
+                .unwrap_or_default(),
+            platform_source_authority: self
+                .platform_source_authority
+                .as_ref()
+                .map(PlatformSourceAuthority::proto),
             workspace_plan_sha256: self.workspace_plan.sha256().unwrap_or_default(),
             workspace_input_count: u32::try_from(self.workspace_plan.inputs.len())
                 .unwrap_or_default(),
@@ -981,7 +987,10 @@ impl EnvironmentRecord {
             skill_snapshot_count: skill_snapshot
                 .and_then(|snapshot| u32::try_from(snapshot.skills().len()).ok())
                 .unwrap_or_default(),
-            requires_credential_authority: self.access_profile.is_some(),
+            requires_credential_authority: self.access_profile.is_some()
+                || project
+                    .as_ref()
+                    .is_some_and(|project| !project.secrets.is_empty()),
             host_ports: host_ports_to_proto(&self.host_ports),
             mesh: mesh_attachment_to_proto(self.mesh.as_ref()),
             error_code: self
@@ -1018,8 +1027,8 @@ impl EnvironmentRecord {
                 return Err(SupervisorError::InvalidState);
             }
         }
-        let next_project_json = staging.project_spec_json()?.to_vec();
-        let next_project_sha256 = staging.project_sha256.clone();
+        let (next_project_json, next_project_sha256) = staging
+            .project_intent_with_current_sources(current_project_json, current_project_sha256)?;
         let staging_artifact_fallback = self
             .staging_artifact_generation
             .as_deref()
@@ -1066,8 +1075,17 @@ impl EnvironmentRecord {
         if workspace_storage_generation(active)? != workspace_storage_generation(staging)? {
             return Err(SupervisorError::InvalidState);
         }
-        let next_project_json = staging.project_spec_json()?.to_vec();
-        let next_project_sha256 = staging.project_sha256.clone();
+        let current_project_json = self
+            .project_spec_json
+            .as_deref()
+            .ok_or(SupervisorError::InvalidState)?;
+        let current_project_sha256 = self
+            .project_spec_sha256
+            .as_deref()
+            .ok_or(SupervisorError::InvalidState)?;
+        active.validate_for_project_intent(current_project_json, current_project_sha256)?;
+        let (next_project_json, next_project_sha256) = staging
+            .project_intent_with_current_sources(current_project_json, current_project_sha256)?;
         let next_artifact_generation = staging.artifact_generation()?.to_owned();
         if next_artifact_generation != staging_artifact_fallback {
             return Err(SupervisorError::InvalidState);
@@ -1420,7 +1438,20 @@ fn orphan_inventory_response(
                 .map(|runner| (format!("{}.sock", environment.id), runner.socket.clone()))
         })
         .collect();
-    let content_blobs = referenced_content_blobs(state)?
+    let retained_content = referenced_content_blobs(state)?;
+    #[cfg(feature = "synthetic-oci-input-smoke")]
+    let retained_content = {
+        let mut retained_content = retained_content;
+        let engine = root.open_private_directory(Path::new("engine"), 0o700)?;
+        let content = ContentStore::create(&engine)?;
+        if let Some(image) = crate::oci::load_synthetic_image_pin(&engine, &content)
+            .map_err(|_| SupervisorError::InvalidState)?
+        {
+            retain_image_content(&mut retained_content, &image)?;
+        }
+        retained_content
+    };
+    let content_blobs = retained_content
         .into_iter()
         .map(|(digest, size)| (digest.hex().to_owned(), size))
         .collect();
@@ -1461,10 +1492,58 @@ struct SupervisorCore {
     _lock: SupervisorLock,
 }
 
+async fn resolve_workspace_image(
+    reference: &RegistryReference,
+    content: &ContentStore,
+    pinned: Option<ResolvedImage>,
+) -> Result<ResolvedImage, SupervisorError> {
+    if let Some(image) = pinned {
+        if image.source_reference != reference.original() {
+            return Err(SupervisorError::InvalidState);
+        }
+        image.verify_cached(content)?;
+        return Ok(image);
+    }
+    Ok(RegistryResolver::new(content)?
+        .resolve_anonymous(reference)
+        .await?)
+}
+
 impl SupervisorCore {
     fn save(&self) -> Result<(), SupervisorError> {
         self.store.replace_state(&self.state)?;
         Ok(())
+    }
+
+    #[cfg(feature = "synthetic-oci-input-smoke")]
+    fn synthetic_workspace_image_pin(&self) -> Result<Option<ResolvedImage>, SupervisorError> {
+        let engine = PrivateRoot::open(&self.config.engine_root())?;
+        let content = ContentStore::create(&engine)?;
+        crate::oci::load_synthetic_image_pin(&engine, &content)
+            .map_err(|_| SupervisorError::InvalidState)
+    }
+
+    #[cfg(feature = "synthetic-oci-input-smoke")]
+    fn admit_synthetic_workspace_image_pin(&mut self) -> Result<(), SupervisorError> {
+        let _ = self.synthetic_workspace_image_pin()?;
+        Ok(())
+    }
+
+    fn matching_synthetic_workspace_image(
+        &self,
+        reference: &RegistryReference,
+    ) -> Result<Option<ResolvedImage>, SupervisorError> {
+        #[cfg(feature = "synthetic-oci-input-smoke")]
+        {
+            Ok(self
+                .synthetic_workspace_image_pin()?
+                .filter(|image| image.source_reference == reference.original()))
+        }
+        #[cfg(not(feature = "synthetic-oci-input-smoke"))]
+        {
+            let _ = reference;
+            Ok(None)
+        }
     }
 
     fn selected(&self, name: &str) -> bool {
@@ -1502,18 +1581,50 @@ impl SupervisorCore {
         else {
             return Ok(());
         };
+        let project: codewire_project::ProjectSpec =
+            serde_json::from_slice(&request.project_spec_json)
+                .map_err(|_| SupervisorError::InvalidRequest)?;
+        if sources::profile_placement(&project)?
+            == Some(codewire_project::StoragePlacement::Platform)
+        {
+            // Platform pins never enter the local profile foreign key. Their
+            // launch authority comes from fresh platform delegation instead.
+            return Ok(());
+        }
         self.access_control_client()
             .await?
             .ensure_environment_access_binding(&binding, &reference)
             .await
             .map(|_| ())
-            .map_err(credential_control_error)
+            .map_err(|status| match status.code() {
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Unknown => {
+                    SupervisorError::CredentialAuthorityUnavailable
+                }
+                code => SupervisorError::EnvironmentAccessBindingRejected(code),
+            })
     }
 
     async fn require_environment_access(&mut self, name: &str) -> Result<(), SupervisorError> {
         let Some(expected) = self.environment(name)?.access_binding.clone() else {
             return Ok(());
         };
+        let project: codewire_project::ProjectSpec = serde_json::from_slice(
+            self.environment(name)?
+                .project_spec_json
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?,
+        )
+        .map_err(|_| SupervisorError::InvalidState)?;
+        if sources::profile_placement(&project)?
+            == Some(codewire_project::StoragePlacement::Platform)
+        {
+            // Metadata configures native clients only. Actual guest Ready is
+            // required before the parent opens fresh authenticated delegation;
+            // its live platform admission never consults the local profile DB.
+            sources::platform::managed_clients(self.environment(name)?)?
+                .ok_or(SupervisorError::EnvironmentAccessUnavailable)?;
+            return Ok(());
+        }
         let current = self
             .access_control_client()
             .await?
@@ -1526,6 +1637,61 @@ impl SupervisorCore {
         Ok(())
     }
 
+    /// Capture only client-slot metadata from the exact selected revision.
+    /// This configures clients; each broker request still evaluates live grants.
+    async fn managed_credential_clients_for_boot(
+        &mut self,
+        environment: &EnvironmentRecord,
+    ) -> Result<codewire_access::ManagedCredentialClients, SupervisorError> {
+        let project: codewire_project::ProjectSpec = serde_json::from_slice(
+            environment
+                .project_spec_json
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?,
+        )
+        .map_err(|_| SupervisorError::InvalidState)?;
+        // The existing native agent home owns skills/session state even when
+        // no credential profile is selected. It is not provider authority.
+        if project.environment.contains_key("CODEX_HOME") {
+            return Err(SupervisorError::InvalidRequest);
+        }
+        if let Some(clients) = sources::platform::managed_clients(environment)? {
+            return Ok(clients);
+        }
+        let Some(expected) = &environment.access_binding else {
+            return Ok(codewire_access::ManagedCredentialClients::default());
+        };
+        if sources::profile_placement(&project)? != Some(codewire_project::StoragePlacement::Local)
+        {
+            return Err(SupervisorError::EnvironmentAccessUnavailable);
+        }
+        let mut authority = self.access_control_client().await?;
+        let binding = authority
+            .get_environment_access_binding(&expected.environment_id)
+            .await
+            .map_err(credential_control_error)?;
+        if &binding.binding != expected {
+            return Err(SupervisorError::EnvironmentAccessUnavailable);
+        }
+        let revision = authority
+            .get_profile_revision(&expected.profile_id, expected.profile_revision)
+            .await
+            .map_err(credential_control_error)?;
+        if revision.profile.id != expected.profile_id
+            || revision.profile.revision != expected.profile_revision
+        {
+            return Err(SupervisorError::EnvironmentAccessUnavailable);
+        }
+        let clients = codewire_access::ManagedCredentialClients::from_profile_slots(
+            revision.profile.entries.keys().map(|slot| slot.as_str()),
+        )
+        .map_err(|_| SupervisorError::EnvironmentAccessUnavailable)?;
+        clients
+            .check_collisions(project.environment.keys().map(String::as_str))
+            .map_err(|_| SupervisorError::EnvironmentAccessUnavailable)?;
+        Ok(clients)
+    }
+
     async fn stop_environment_broker_if_present(
         &mut self,
         environment: &EnvironmentRecord,
@@ -1533,17 +1699,23 @@ impl SupervisorCore {
         if environment.generation == 0 {
             return Ok(());
         }
+        let project: codewire_project::ProjectSpec = serde_json::from_slice(
+            environment
+                .project_spec_json
+                .as_deref()
+                .ok_or(SupervisorError::InvalidState)?,
+        )
+        .map_err(|_| SupervisorError::InvalidState)?;
+        if environment.access_profile.is_none() && project.secrets.is_empty() {
+            return Ok(());
+        }
         let Ok(environment_id) = access_environment_id(environment.id) else {
             return Err(SupervisorError::InvalidState);
         };
-        let mut client = match self.access_control_client().await {
-            Ok(client) => client,
-            // The authority owns every broker as a child with a parent-death
-            // signal. If the authority itself is unavailable, no surviving
-            // managed broker can keep serving this environment.
-            Err(SupervisorError::CredentialAuthorityUnavailable) => return Ok(()),
-            Err(error) => return Err(error),
-        };
+        // A failed socket connection is not evidence that the authority and
+        // its children died. Require the exact generation's drain acknowledgement
+        // before replacing its sources or claiming managed cleanup completed.
+        let mut client = self.access_control_client().await?;
         client
             .stop_environment_broker(&environment_id, Some(environment.generation))
             .await
@@ -1613,6 +1785,7 @@ impl SupervisorCore {
     async fn prepare_create_workspace_plan(
         &mut self,
         request: &v1::CreateEnvironmentRequest,
+        environment_id: Uuid,
     ) -> Result<WorkspacePlan, SupervisorError> {
         let project: codewire_project::ProjectSpec =
             serde_json::from_slice(&request.project_spec_json)
@@ -1637,12 +1810,19 @@ impl SupervisorCore {
         let mut inputs = if project.repositories.is_empty() {
             Vec::new()
         } else {
+            let platform = sources::platform::repository_binding(
+                request,
+                &project,
+                environment_id,
+                &self.config.platform_config_dir,
+            )?;
             let credential_access = create_request_access_selection(request, &project)?.map(
                 |(profile_id, profile_revision, _)| RepositoryCredentialAccess {
                     request_id: Uuid::parse_str(&request.request_id)
                         .expect("validated create request ID"),
                     profile_id,
                     profile_revision,
+                    platform,
                 },
             );
             prepare_repository_plan(
@@ -1740,9 +1920,8 @@ impl SupervisorCore {
         let reference = RegistryReference::parse(&project.image)?;
         let engine = PrivateRoot::open(&self.config.engine_root())?;
         let content = ContentStore::create(&engine)?;
-        let image = RegistryResolver::new(&content)?
-            .resolve_anonymous(&reference)
-            .await?;
+        let pinned = self.matching_synthetic_workspace_image(&reference)?;
+        let image = resolve_workspace_image(&reference, &content, pinned).await?;
         let skill_snapshot = self
             .spawn_skill_snapshot_resolution(name, &project, &project_sha256, 1, None)?
             .await
@@ -1818,9 +1997,8 @@ impl SupervisorCore {
             let artifact_generation = self.admit_current_artifact_generation().await?;
             let engine = PrivateRoot::open(&self.config.engine_root())?;
             let content = ContentStore::create(&engine)?;
-            let image = RegistryResolver::new(&content)?
-                .resolve_anonymous(&reference)
-                .await?;
+            let pinned = self.matching_synthetic_workspace_image(&reference)?;
+            let image = resolve_workspace_image(&reference, &content, pinned).await?;
             (artifact_generation, image, DEFAULT_OCI_ROOT_DISK_BYTES)
         };
         let plan_generation = match self
@@ -1951,6 +2129,10 @@ impl SupervisorCore {
 
     fn collect_unreferenced_content(&mut self) -> Result<(), SupervisorError> {
         let mut retained = referenced_content_blobs(&self.state)?;
+        #[cfg(feature = "synthetic-oci-input-smoke")]
+        if let Some(image) = self.synthetic_workspace_image_pin()? {
+            retain_image_content(&mut retained, &image)?;
+        }
         for operation in self.store.pending_operations()? {
             if operation.kind != OperationKind::Create {
                 continue;
@@ -2158,6 +2340,12 @@ impl SupervisorCore {
                                 != Some(request.project_spec_sha256.as_str())
                             || environment.access_profile != expected_access_profile
                             || environment.access_binding != expected_access_binding
+                            || environment.platform_source_authority
+                                != request
+                                    .platform_source_authority
+                                    .as_ref()
+                                    .map(PlatformSourceAuthority::from_proto)
+                                    .transpose()?
                             || &environment.workspace_plan != workspace_plan
                         {
                             return Err(SupervisorError::AlreadyExists(request.name.clone()));
@@ -2184,6 +2372,11 @@ impl SupervisorCore {
                                 project_spec_sha256: Some(request.project_spec_sha256.clone()),
                                 access_profile: expected_access_profile.clone(),
                                 access_binding: expected_access_binding.clone(),
+                                platform_source_authority: request
+                                    .platform_source_authority
+                                    .as_ref()
+                                    .map(PlatformSourceAuthority::from_proto)
+                                    .transpose()?,
                                 runner: None,
                                 active_artifact_generation: Some(artifact_generation),
                                 staging_artifact_generation: None,
@@ -2448,35 +2641,8 @@ impl SupervisorCore {
                 self.complete_operation(&operation, &result)?;
                 continue;
             }
-            if operation.kind == OperationKind::ApplyEnvironmentAccess {
-                let operation = match self.apply_environment_access(name, &operation).await {
-                    Ok(operation) => operation,
-                    Err(SupervisorError::CredentialAuthorityUnavailable) if recovering => {
-                        // The authority is intentionally not spawned by the
-                        // supervisor. Keep the exact transition pending until
-                        // an owner-side CLI operation admits the authority.
-                        return Err(SupervisorError::CredentialAuthorityUnavailable);
-                    }
-                    Err(SupervisorError::CredentialAuthorityUnavailable) => {
-                        self.fail_operation(&operation, "credential_authority_unavailable")?;
-                        continue;
-                    }
-                    Err(SupervisorError::EnvironmentAccessUnavailable) => {
-                        self.fail_operation(&operation, "environment_access_conflict")?;
-                        continue;
-                    }
-                    Err(_) => {
-                        self.fail_operation(&operation, "environment_access_apply_failed")?;
-                        continue;
-                    }
-                };
-                let result = self
-                    .state
-                    .environments
-                    .get(name)
-                    .map(environment_operation_result)
-                    .ok_or(SupervisorError::InvalidState)?;
-                self.complete_operation(&operation, &result)?;
+            if operation.kind == OperationKind::UpdateEnvironmentSources {
+                self.execute_source_operation(&operation).await?;
                 continue;
             }
             if operation.kind == OperationKind::Reconcile {
@@ -3256,10 +3422,56 @@ impl SupervisorCore {
         })
         .await
         .map_err(|_| SupervisorError::WorkspaceGenerationProvisionTask)??;
+        let projection_environment = sources::projection_environment_for_boot(&environment)?;
+        let managed_credential_clients = self
+            .managed_credential_clients_for_boot(&projection_environment)
+            .await?;
+        let broker_request =
+            self.credential_broker_request_for_environment(&projection_environment, generation)?;
+        let environment_projection_sha256 =
+            if broker_request.projection.is_some() || broker_request.platform.is_some() {
+                projection_environment
+                    .project_spec_sha256
+                    .clone()
+                    .ok_or(SupervisorError::InvalidState)?
+            } else {
+                String::new()
+            };
+        let start_request = v1::StartVmRequest {
+            environment_id: environment.id.to_string(),
+            generation,
+            vsock_cid: allocate_vsock_cid(environment.id),
+            daemon_vsock_port: DAEMON_VSOCK_PORT,
+            state_disk_bytes: environment.disk_bytes,
+            docker_disk_bytes: environment.docker_disk_bytes,
+            vcpus: u32::from(environment.vcpus),
+            memory_mib: environment.memory_mib,
+            root_generation: workspace.root_generation,
+            root_disk_bytes: workspace.root_disk_bytes,
+            setup_total_bytes: workspace.setup_total_bytes,
+            setup_header_sha256: workspace.setup_header_sha256,
+            setup_root_generation: workspace.setup_root_generation,
+            host_ports: host_ports_to_proto(&environment.host_ports),
+            mesh: mesh_attachment_to_proto(environment.mesh.as_ref()),
+            direct_shares: direct_share_attachments_to_proto(&environment.workspace_plan)?,
+            skill_snapshot_sha256: workspace.skill_snapshot_sha256,
+            environment_projection_sha256,
+            managed_credential_clients: managed_credential_clients.encode().to_owned(),
+        };
         let runner_events = client
             .watch(environment.id)
             .await
             .map_err(|_| SupervisorError::RunnerUnavailable)?;
+        let broker_events = if broker_request.enabled {
+            Some(
+                client
+                    .watch(environment.id)
+                    .await
+                    .map_err(|_| SupervisorError::RunnerUnavailable)?,
+            )
+        } else {
+            None
+        };
         let progress = self.operation_progress.clone();
         let artifact_generation = expected_artifact_generation.clone();
         let mut relay = tokio::spawn(relay_runner_start_events(
@@ -3274,27 +3486,34 @@ impl SupervisorCore {
                 progress,
             },
         ));
-        let start = client
-            .start(v1::StartVmRequest {
-                environment_id: environment.id.to_string(),
-                generation,
-                vsock_cid: allocate_vsock_cid(environment.id),
-                daemon_vsock_port: DAEMON_VSOCK_PORT,
-                state_disk_bytes: environment.disk_bytes,
-                docker_disk_bytes: environment.docker_disk_bytes,
-                vcpus: u32::from(environment.vcpus),
-                memory_mib: environment.memory_mib,
-                root_generation: workspace.root_generation,
-                root_disk_bytes: workspace.root_disk_bytes,
-                setup_total_bytes: workspace.setup_total_bytes,
-                setup_header_sha256: workspace.setup_header_sha256,
-                setup_root_generation: workspace.setup_root_generation,
-                host_ports: host_ports_to_proto(&environment.host_ports),
-                mesh: mesh_attachment_to_proto(environment.mesh.as_ref()),
-                direct_shares: direct_share_attachments_to_proto(&environment.workspace_plan)?,
-                skill_snapshot_sha256: workspace.skill_snapshot_sha256,
-            })
-            .await;
+        // Broker startup must proceed while the runner waits for install and
+        // startup. Its owner-only runner seam does not take either lifecycle
+        // mutex; the immutable selection is admitted before either future.
+        let (start, broker) = tokio::join!(client.start(start_request), async {
+            if let Some(events) = broker_events {
+                bootstrap::wait_for_broker_bootstrap(
+                    events,
+                    environment.id,
+                    generation,
+                    &expected_artifact_generation,
+                )
+                .await?;
+            }
+            ensure_credential_broker(broker_request).await
+        },);
+        let start = match broker {
+            Ok(_) => start,
+            Err(error) => {
+                let _ = client.stop().await;
+                Err(Status::unavailable(error.to_string()))
+            }
+        };
+        if start.is_err() {
+            let mut failed_generation = environment.clone();
+            failed_generation.generation = generation;
+            self.stop_environment_broker_if_present(&failed_generation)
+                .await?;
+        }
         let relay_result = match tokio::time::timeout(RUNNER_EVENT_DRAIN_TIMEOUT, &mut relay).await
         {
             Ok(Ok(result)) => result,
@@ -3912,69 +4131,6 @@ impl SupervisorCore {
         Ok(operation)
     }
 
-    async fn apply_environment_access(
-        &mut self,
-        name: &str,
-        operation: &OperationRecord,
-    ) -> Result<OperationRecord, SupervisorError> {
-        let transition = environment_access_transition(operation, self.environment(name)?)?;
-        let environment_id = access_environment_id(
-            operation
-                .environment_id
-                .ok_or(SupervisorError::InvalidState)?,
-        )?;
-        self.reconcile_active_environment_before_protected_effect(name)
-            .await?;
-        let mut operation = operation.clone();
-        while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
-            match effect {
-                LifecycleEffect::ApplyEnvironmentAccess => {
-                    let expected = transition
-                        .expected
-                        .as_ref()
-                        .map(|selection| &selection.binding);
-                    let target = transition
-                        .target
-                        .as_ref()
-                        .map(|selection| (&selection.binding, &selection.reference));
-                    self.access_control_client()
-                        .await?
-                        .apply_environment_access_binding(&environment_id, expected, target)
-                        .await
-                        .map_err(credential_control_error)?;
-                    operation = self.checkpoint_operation(&operation)?;
-                }
-                LifecycleEffect::RecordEnvironmentAccess => {
-                    let current = environment_access_selection(self.environment(name)?)?;
-                    if current != transition.target {
-                        if current != transition.expected {
-                            return Err(SupervisorError::InvalidState);
-                        }
-                        let mut next_state = self.state.clone();
-                        let environment = next_state
-                            .environments
-                            .get_mut(name)
-                            .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
-                        environment.access_profile = transition
-                            .target
-                            .as_ref()
-                            .map(|selection| selection.reference.clone());
-                        environment.access_binding = transition
-                            .target
-                            .as_ref()
-                            .map(|selection| selection.binding.clone());
-                        operation = self.checkpoint_state_operation(&operation, next_state)?;
-                    } else {
-                        operation =
-                            self.checkpoint_state_operation(&operation, self.state.clone())?;
-                    }
-                }
-                _ => return Err(SupervisorError::InvalidState),
-            }
-        }
-        Ok(operation)
-    }
-
     async fn abort_workspace_transition(
         &mut self,
         operation: &OperationRecord,
@@ -4183,13 +4339,43 @@ impl SupervisorCore {
         {
             return Err(SupervisorError::NotRunning);
         }
+        self.credential_broker_request_for_environment(environment, environment.generation)
+    }
+
+    fn credential_broker_request_for_environment(
+        &self,
+        environment: &EnvironmentRecord,
+        generation: u64,
+    ) -> Result<CredentialBrokerEnsureRequest, SupervisorError> {
+        if generation == 0 {
+            return Err(SupervisorError::InvalidState);
+        }
+        let mut platform =
+            sources::platform::broker_binding(environment, &self.config.platform_config_dir)?;
+        if let Some(binding) = platform.as_mut() {
+            sources::platform::resolve_config_directory(binding)?;
+        }
+        let projection = sources::local_launch_projection(environment)?;
+        let local_profile = if platform
+            .as_ref()
+            .is_some_and(|binding| binding.selection.profile.is_some())
+        {
+            None
+        } else {
+            environment.access_binding.clone()
+        };
         Ok(CredentialBrokerEnsureRequest {
             authority: self.config.credential_authority_config(),
             environment_id: access_environment_id(environment.id)?,
-            environment_generation: environment.generation,
+            environment_generation: generation,
             environment_name: environment.name.clone(),
-            supervisor_socket: self.config.supervisor_socket(),
-            enabled: environment.access_binding.is_some(),
+            runner_socket: self.config.runner_socket(environment.id),
+            enabled: environment.access_binding.is_some()
+                || projection.is_some()
+                || platform.is_some(),
+            projection,
+            platform,
+            local_profile,
         })
     }
 }
@@ -4212,7 +4398,12 @@ async fn ensure_credential_broker(
             &request.environment_id,
             request.environment_generation,
             &request.environment_name,
-            &request.supervisor_socket,
+            &request.runner_socket,
+            codewire_local_credentials::EnvironmentBrokerSelection {
+                local_profile: request.local_profile,
+                projection: request.projection,
+                platform: request.platform,
+            },
         )
         .await
         .map_err(credential_control_error)
@@ -4316,7 +4507,14 @@ impl LocalSupervisorService for SupervisorRpc {
                 operation
             }
             None => {
-                let workspace_plan = match core.prepare_create_workspace_plan(&request).await {
+                // Allocate the eventual environment identity before repository
+                // preparation. Successful preparation journals this SAME ID;
+                // failure abandons it and keeps offline replay unchanged.
+                let environment_id = Uuid::new_v4();
+                let workspace_plan = match core
+                    .prepare_create_workspace_plan(&request, environment_id)
+                    .await
+                {
                     Ok(workspace_plan) => workspace_plan,
                     Err(error) => {
                         // A multi-repository preparation can admit an earlier
@@ -4329,7 +4527,8 @@ impl LocalSupervisorService for SupervisorRpc {
                 };
                 let payload =
                     create_operation_payload(&request, &workspace_plan).map_err(Status::from)?;
-                begin_create_operation(&core.store, request_id, &payload).map_err(Status::from)?
+                begin_create_operation(&core.store, request_id, environment_id, &payload)
+                    .map_err(Status::from)?
             }
         };
         let payload_matches = create_request_from_operation(&operation)
@@ -4623,11 +4822,23 @@ impl LocalSupervisorService for SupervisorRpc {
             .generation
             .checked_add(1)
             .ok_or_else(|| Status::internal("local generation overflow"))?;
+        let current_project_json = environment
+            .project_spec_json
+            .as_deref()
+            .ok_or_else(|| Status::internal("current project intent is unavailable"))?;
+        let current_project_sha256 = environment
+            .project_spec_sha256
+            .as_deref()
+            .ok_or_else(|| Status::internal("current project intent is unavailable"))?;
+        active
+            .validate_for_project_intent(current_project_json, current_project_sha256)
+            .map_err(SupervisorError::from)
+            .map_err(Status::from)?;
         let payload = serde_json::json!({
             "name": name,
-            "project_spec_json": std::str::from_utf8(active.project_spec_json().map_err(SupervisorError::from).map_err(Status::from)?)
+            "project_spec_json": std::str::from_utf8(current_project_json)
                 .map_err(|_| Status::internal("workspace project is not UTF-8"))?,
-            "project_spec_sha256": active.project_sha256,
+            "project_spec_sha256": current_project_sha256,
             "prior_storage_generation": prior_storage_generation,
             "target_generation": target_generation,
             "was_running": environment.state == StoredEnvironmentState::Running,
@@ -4789,64 +5000,11 @@ impl LocalSupervisorService for SupervisorRpc {
         Ok(Response::new(response))
     }
 
-    async fn apply_environment_access(
+    async fn update_environment_sources(
         &self,
-        request: Request<v1::ApplyEnvironmentAccessRequest>,
+        request: Request<v1::UpdateEnvironmentSourcesRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
-        let request = request.into_inner();
-        if !valid_environment_name(&request.name) {
-            return Err(Status::invalid_argument("invalid environment name"));
-        }
-        let request_id = parse_request_id(&request.request_id).map_err(Status::from)?;
-        let expected_environment_id = parse_optional_environment_id(&request.environment_id)
-            .map_err(Status::from)?
-            .ok_or_else(|| Status::invalid_argument("environment ID is required"))?;
-        let mut core = self.core.lock().await;
-        core.replay_pending_operations()
-            .await
-            .map_err(Status::from)?;
-        let environment = core
-            .environment(&request.name)
-            .map_err(Status::from)?
-            .clone();
-        require_expected_environment(&environment, Some(expected_environment_id))?;
-        let target = apply_environment_access_request_target(&request, environment.id)
-            .map_err(Status::from)?;
-        let existing = core
-            .store
-            .operation_by_request(request_id)
-            .map_err(SupervisorError::from)
-            .map_err(Status::from)?;
-        let operation = if let Some(operation) = existing {
-            let transition = environment_access_transition(&operation, &environment)
-                .map_err(|_| Status::aborted("local lifecycle request ID collision"))?;
-            if transition.target != target {
-                return Err(Status::aborted("local lifecycle request ID collision"));
-            }
-            operation
-        } else {
-            let expected = environment_access_selection(&environment).map_err(Status::from)?;
-            let payload = apply_environment_access_operation_payload(
-                &request.name,
-                expected.as_ref(),
-                target.as_ref(),
-            );
-            core.store
-                .begin_operation(
-                    request_id,
-                    Some(environment.id),
-                    OperationKind::ApplyEnvironmentAccess,
-                    &payload,
-                )
-                .map_err(SupervisorError::from)
-                .map_err(Status::from)?
-        };
-        let response = operation_proto(&operation)?;
-        drop(core);
-        if !operation.phase.terminal() {
-            self.schedule_operation_worker(false);
-        }
-        Ok(Response::new(response))
+        self.admit_source_update(request.into_inner()).await
     }
 
     async fn delete_environment(
@@ -5282,7 +5440,7 @@ fn operation_proto(operation: &OperationRecord) -> Result<v1::Operation, Status>
         OperationKind::Restart => v1::OperationKind::Restart,
         OperationKind::UpdateWorkspace => v1::OperationKind::UpdateWorkspace,
         OperationKind::RollbackWorkspace => v1::OperationKind::RollbackWorkspace,
-        OperationKind::ApplyEnvironmentAccess => v1::OperationKind::ApplyEnvironmentAccess,
+        OperationKind::UpdateEnvironmentSources => v1::OperationKind::UpdateEnvironmentSources,
         OperationKind::Delete => v1::OperationKind::Delete,
         OperationKind::GrowDisk => v1::OperationKind::GrowDisk,
         OperationKind::Reconcile => v1::OperationKind::Reconcile,
@@ -5396,8 +5554,9 @@ fn operation_stage(operation: &OperationRecord) -> Result<v1::OperationStage, St
         LifecycleEffect::StageRollbackGeneration => v1::OperationStage::StageRollbackGeneration,
         LifecycleEffect::RestoreDesiredPower => v1::OperationStage::RestoreDesiredPower,
         LifecycleEffect::RecordWorkspaceTransition => v1::OperationStage::RecordWorkspaceTransition,
-        LifecycleEffect::ApplyEnvironmentAccess => v1::OperationStage::ApplyEnvironmentAccess,
-        LifecycleEffect::RecordEnvironmentAccess => v1::OperationStage::RecordEnvironmentAccess,
+        LifecycleEffect::ApplySourceAccessBinding => v1::OperationStage::ApplySourceAccessBinding,
+        LifecycleEffect::RecordEnvironmentSources => v1::OperationStage::RecordEnvironmentSources,
+        LifecycleEffect::RecordSourceOutcome => v1::OperationStage::RecordSourceOutcome,
         LifecycleEffect::PrepareDelete => v1::OperationStage::PrepareDelete,
         LifecycleEffect::MoveToTrash => v1::OperationStage::MoveToTrash,
         LifecycleEffect::RevokeEnvironmentAccess => v1::OperationStage::RevokeEnvironmentAccess,
@@ -5857,8 +6016,6 @@ fn validate_project_intent(
         || format!("{:x}", Sha256::digest(canonical_json)) != expected_sha256
         || spec.image.is_empty()
         || !spec.preset.is_empty()
-        || !spec.install_command.is_empty()
-        || !spec.startup_script.is_empty()
         || spec.agents.install == Some(true)
     {
         return Err(());
@@ -5878,24 +6035,13 @@ fn create_request_access_selection(
     request: &v1::CreateEnvironmentRequest,
     project: &codewire_project::ProjectSpec,
 ) -> Result<Option<(AccessProfileId, u64, AccessProfileReference)>, SupervisorError> {
-    match (
-        project.access.as_ref(),
-        request.access_profile_id.is_empty(),
+    sources::validate_source_metadata(
+        project,
+        &request.access_profile_id,
         request.access_profile_revision,
-    ) {
-        (None, true, 0) => Ok(None),
-        (Some(access), false, revision)
-            if revision > 0 && access.profile.scope() == AccessProfileScope::User =>
-        {
-            Ok(Some((
-                AccessProfileId::parse(request.access_profile_id.clone())
-                    .map_err(|_| SupervisorError::InvalidRequest)?,
-                revision,
-                access.profile.clone(),
-            )))
-        }
-        _ => Err(SupervisorError::InvalidRequest),
-    }
+        &request.access_profile_reference,
+        request.platform_source_authority.as_ref(),
+    )
 }
 
 fn create_request_access_binding(
@@ -5933,183 +6079,51 @@ fn environment_uses_access_profile(
 }
 
 fn environment_access_metadata_valid(environment: &EnvironmentRecord) -> bool {
-    match (
+    let Some(json) = environment.project_spec_json.as_deref() else {
+        return false;
+    };
+    let Some(sha256) = environment.project_spec_sha256.as_deref() else {
+        return false;
+    };
+    if validate_project_intent(json, sha256, None).is_err() {
+        return false;
+    }
+    let Ok(project) = serde_json::from_slice::<codewire_project::ProjectSpec>(json) else {
+        return false;
+    };
+    let (profile_id, revision, reference) = match (
         environment.access_profile.as_ref(),
         environment.access_binding.as_ref(),
     ) {
-        (None, None) => true,
+        (None, None) => (String::new(), 0, String::new()),
         (Some(reference), Some(binding)) => {
-            reference.scope() == AccessProfileScope::User
-                && binding.validate().is_ok()
-                && access_environment_id(environment.id).is_ok_and(|environment_id| {
+            if binding.validate().is_err()
+                || !access_environment_id(environment.id).is_ok_and(|environment_id| {
                     environment_id.as_str() == binding.environment_id.as_str()
                 })
+            {
+                return false;
+            }
+            (
+                binding.profile_id.to_string(),
+                binding.profile_revision,
+                reference.to_string(),
+            )
         }
-        _ => false,
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ExactEnvironmentAccess {
-    reference: AccessProfileReference,
-    binding: EnvironmentAccessBinding,
-}
-
-fn environment_access_selection(
-    environment: &EnvironmentRecord,
-) -> Result<Option<ExactEnvironmentAccess>, SupervisorError> {
-    if !environment_access_metadata_valid(environment) {
-        return Err(SupervisorError::InvalidState);
-    }
-    Ok(environment
-        .access_profile
+        _ => return false,
+    };
+    let authority = environment
+        .platform_source_authority
         .as_ref()
-        .zip(environment.access_binding.as_ref())
-        .map(|(reference, binding)| ExactEnvironmentAccess {
-            reference: reference.clone(),
-            binding: binding.clone(),
-        }))
-}
-
-fn apply_environment_access_request_target(
-    request: &v1::ApplyEnvironmentAccessRequest,
-    environment_id: Uuid,
-) -> Result<Option<ExactEnvironmentAccess>, SupervisorError> {
-    if request.clear {
-        if !request.access_profile.is_empty()
-            || !request.access_profile_id.is_empty()
-            || request.access_profile_revision != 0
-        {
-            return Err(SupervisorError::InvalidRequest);
-        }
-        return Ok(None);
-    }
-    if request.access_profile.is_empty()
-        || request.access_profile_id.is_empty()
-        || request.access_profile_revision == 0
-    {
-        return Err(SupervisorError::InvalidRequest);
-    }
-    let reference = request
-        .access_profile
-        .parse::<AccessProfileReference>()
-        .map_err(|_| SupervisorError::InvalidRequest)?;
-    if reference.scope() != AccessProfileScope::User {
-        return Err(SupervisorError::InvalidRequest);
-    }
-    let binding = EnvironmentAccessBinding {
-        environment_id: access_environment_id(environment_id)?,
-        profile_id: AccessProfileId::parse(request.access_profile_id.clone())
-            .map_err(|_| SupervisorError::InvalidRequest)?,
-        profile_revision: request.access_profile_revision,
-    };
-    binding
-        .validate()
-        .map_err(|_| SupervisorError::InvalidRequest)?;
-    Ok(Some(ExactEnvironmentAccess { reference, binding }))
-}
-
-fn environment_access_selection_value(
-    selection: Option<&ExactEnvironmentAccess>,
-) -> serde_json::Value {
-    selection.map_or(serde_json::Value::Null, |selection| {
-        serde_json::json!({
-            "reference": selection.reference.to_string(),
-            "profile_id": selection.binding.profile_id.to_string(),
-            "profile_revision": selection.binding.profile_revision,
-        })
-    })
-}
-
-fn apply_environment_access_operation_payload(
-    name: &str,
-    expected: Option<&ExactEnvironmentAccess>,
-    target: Option<&ExactEnvironmentAccess>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "name": name,
-        "expected": environment_access_selection_value(expected),
-        "target": environment_access_selection_value(target),
-    })
-}
-
-fn parse_environment_access_selection(
-    value: &serde_json::Value,
-    environment_id: Uuid,
-) -> Result<Option<ExactEnvironmentAccess>, SupervisorError> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    let fields = value
-        .as_object()
-        .filter(|fields| fields.len() == 3)
-        .ok_or(SupervisorError::InvalidState)?;
-    let reference = fields
-        .get("reference")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(SupervisorError::InvalidState)?
-        .parse::<AccessProfileReference>()
-        .map_err(|_| SupervisorError::InvalidState)?;
-    if reference.scope() != AccessProfileScope::User {
-        return Err(SupervisorError::InvalidState);
-    }
-    let profile_id = fields
-        .get("profile_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(SupervisorError::InvalidState)
-        .and_then(|id| {
-            AccessProfileId::parse(id.to_owned()).map_err(|_| SupervisorError::InvalidState)
-        })?;
-    let profile_revision = fields
-        .get("profile_revision")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|revision| *revision > 0)
-        .ok_or(SupervisorError::InvalidState)?;
-    let binding = EnvironmentAccessBinding {
-        environment_id: access_environment_id(environment_id)?,
-        profile_id,
-        profile_revision,
-    };
-    binding
-        .validate()
-        .map_err(|_| SupervisorError::InvalidState)?;
-    Ok(Some(ExactEnvironmentAccess { reference, binding }))
-}
-
-struct EnvironmentAccessTransition {
-    expected: Option<ExactEnvironmentAccess>,
-    target: Option<ExactEnvironmentAccess>,
-}
-
-fn environment_access_transition(
-    operation: &OperationRecord,
-    environment: &EnvironmentRecord,
-) -> Result<EnvironmentAccessTransition, SupervisorError> {
-    if operation.kind != OperationKind::ApplyEnvironmentAccess
-        || operation.environment_id != Some(environment.id)
-    {
-        return Err(SupervisorError::InvalidState);
-    }
-    let fields = operation
-        .payload
-        .as_object()
-        .filter(|fields| fields.len() == 3)
-        .ok_or(SupervisorError::InvalidState)?;
-    if fields.get("name").and_then(serde_json::Value::as_str) != Some(environment.name.as_str()) {
-        return Err(SupervisorError::InvalidState);
-    }
-    Ok(EnvironmentAccessTransition {
-        expected: parse_environment_access_selection(
-            fields
-                .get("expected")
-                .ok_or(SupervisorError::InvalidState)?,
-            environment.id,
-        )?,
-        target: parse_environment_access_selection(
-            fields.get("target").ok_or(SupervisorError::InvalidState)?,
-            environment.id,
-        )?,
-    })
+        .map(PlatformSourceAuthority::proto);
+    sources::validate_source_metadata(
+        &project,
+        &profile_id,
+        revision,
+        &reference,
+        authority.as_ref(),
+    )
+    .is_ok()
 }
 
 fn delete_operation_revoke_access(
@@ -6183,14 +6197,25 @@ fn parse_request_id(value: &str) -> Result<Uuid, SupervisorError> {
 fn begin_create_operation(
     store: &SupervisorStore,
     request_id: Uuid,
+    environment_id: Uuid,
     payload: &serde_json::Value,
 ) -> Result<OperationRecord, SupervisorError> {
+    if request_id.is_nil() || environment_id.is_nil() {
+        return Err(SupervisorError::InvalidRequest);
+    }
     match store.operation_by_request(request_id)? {
-        Some(operation) => Ok(operation),
+        Some(operation)
+            if operation.kind == OperationKind::Create
+                && operation.environment_id == Some(environment_id)
+                && operation.payload == *payload =>
+        {
+            Ok(operation)
+        }
+        Some(_) => Err(SupervisorStoreError::RequestCollision.into()),
         None => store
             .begin_operation(
                 request_id,
-                Some(Uuid::new_v4()),
+                Some(environment_id),
                 OperationKind::Create,
                 payload,
             )
@@ -6211,6 +6236,11 @@ fn create_operation_payload(
     let host_ports = host_ports_from_proto(&request.host_ports)?;
     let mesh = mesh_attachment_from_proto(request.mesh.as_ref())?;
     workspace_plan.validate()?;
+    let platform_source_authority = request
+        .platform_source_authority
+        .as_ref()
+        .map(PlatformSourceAuthority::from_proto)
+        .transpose()?;
     Ok(serde_json::json!({
         "name": request.name,
         "source_path": request.source_path,
@@ -6225,6 +6255,8 @@ fn create_operation_payload(
         "mesh": mesh,
         "access_profile_id": request.access_profile_id,
         "access_profile_revision": request.access_profile_revision,
+        "access_profile_reference": request.access_profile_reference,
+        "platform_source_authority": platform_source_authority,
         "workspace_plan": workspace_plan,
     }))
 }
@@ -6238,7 +6270,7 @@ fn create_request_from_operation(
     let fields = operation
         .payload
         .as_object()
-        .filter(|fields| fields.len() == 14)
+        .filter(|fields| fields.len() == 16)
         .ok_or(SupervisorError::InvalidState)?;
     let name = fields
         .get("name")
@@ -6345,6 +6377,19 @@ fn create_request_from_operation(
         mesh: mesh_attachment_to_proto(mesh.as_ref()),
         access_profile_id,
         access_profile_revision,
+        access_profile_reference: fields
+            .get("access_profile_reference")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(SupervisorError::InvalidState)?
+            .to_owned(),
+        platform_source_authority: serde_json::from_value::<Option<PlatformSourceAuthority>>(
+            fields
+                .get("platform_source_authority")
+                .cloned()
+                .ok_or(SupervisorError::InvalidState)?,
+        )
+        .map_err(|_| SupervisorError::InvalidState)?
+        .map(|authority| authority.proto()),
     };
     validate_create(&request)?;
     validate_request_workspace_plan(&request, &project, &workspace_plan)
@@ -6600,24 +6645,26 @@ fn prepare_workspace_boot(
 fn reject_undeliverable_workload_secrets(
     project: &codewire_project::ProjectSpec,
 ) -> Result<(), SupervisorError> {
-    if project.secrets.is_empty() {
-        Ok(())
-    } else {
-        Err(SupervisorError::WorkloadSecretDeliveryUnavailable)
-    }
+    sources::platform::requires_platform_authority(project).map(|_| ())
 }
 
 fn reject_environment_workload_secrets(
     environment: &EnvironmentRecord,
 ) -> Result<(), SupervisorError> {
-    let project: codewire_project::ProjectSpec = serde_json::from_slice(
-        environment
-            .project_spec_json
-            .as_deref()
-            .ok_or(SupervisorError::InvalidState)?,
-    )
-    .map_err(|_| SupervisorError::InvalidState)?;
-    reject_undeliverable_workload_secrets(&project)
+    let project_json = environment
+        .project_spec_json
+        .as_deref()
+        .ok_or(SupervisorError::InvalidState)?;
+    let project_sha256 = environment
+        .project_spec_sha256
+        .as_deref()
+        .ok_or(SupervisorError::InvalidState)?;
+    validate_project_intent(project_json, project_sha256, None)
+        .map_err(|_| SupervisorError::InvalidState)?;
+    let project: codewire_project::ProjectSpec =
+        serde_json::from_slice(project_json).map_err(|_| SupervisorError::InvalidState)?;
+    reject_undeliverable_workload_secrets(&project)?;
+    sources::platform::managed_clients(environment).map(|_| ())
 }
 
 fn validate_environment_workload_secret_delivery(
@@ -6644,10 +6691,9 @@ fn validate_environment_workload_secret_delivery(
                 .ok_or(SupervisorError::InvalidState)?,
         )?;
     }
-    let project: codewire_project::ProjectSpec =
-        serde_json::from_slice(workspace.project_spec_json()?)
-            .map_err(|_| SupervisorError::InvalidState)?;
-    reject_undeliverable_workload_secrets(&project)
+    // Built setup metadata may intentionally retain an older selection. Only
+    // current environment intent determines this boot's required delivery.
+    reject_environment_workload_secrets(environment)
 }
 
 fn reject_workspace_transition_workload_secrets(
@@ -6683,7 +6729,12 @@ fn reject_workspace_transition_workload_secrets(
     };
     let project: codewire_project::ProjectSpec =
         serde_json::from_slice(project_json).map_err(|_| SupervisorError::InvalidState)?;
-    reject_undeliverable_workload_secrets(&project)
+    if matches!(parameters.intent, WorkspaceTransitionIntent::Update { .. }) {
+        // Preserve rejection of an undeliverable proposed source before any
+        // staging. Exact source equality is checked at transition admission.
+        reject_undeliverable_workload_secrets(&project)?;
+    }
+    reject_environment_workload_secrets(environment)
 }
 
 fn runner_artifact_identity_matches(recorded: &str, reported: &str) -> bool {
@@ -6814,15 +6865,26 @@ fn referenced_content_blobs(
         ];
         for generation in generations.into_iter().flatten() {
             generation.validate()?;
-            retain_content_descriptor(&mut retained, &generation.image.source)?;
-            retain_content_descriptor(&mut retained, &generation.image.manifest)?;
-            retain_content_descriptor(&mut retained, &generation.image.config)?;
-            for layer in &generation.image.layers {
-                retain_content_descriptor(&mut retained, &layer.descriptor)?;
-            }
+            retain_image_content(&mut retained, &generation.image)?;
         }
     }
     Ok(retained)
+}
+
+fn retain_image_content(
+    retained: &mut BTreeMap<Sha256Digest, u64>,
+    image: &ResolvedImage,
+) -> Result<(), SupervisorError> {
+    image
+        .validate_metadata()
+        .map_err(|_| SupervisorError::InvalidState)?;
+    retain_content_descriptor(retained, &image.source)?;
+    retain_content_descriptor(retained, &image.manifest)?;
+    retain_content_descriptor(retained, &image.config)?;
+    for layer in &image.layers {
+        retain_content_descriptor(retained, &layer.descriptor)?;
+    }
+    Ok(())
 }
 
 fn retain_workspace_plan_content(
@@ -7312,15 +7374,21 @@ fn validate_workspace_transition_start(
     if workspace_storage_generation(active)? != parameters.prior_storage_generation {
         return Err(SupervisorError::InvalidState);
     }
-    let target_project_json = match &parameters.intent {
+    let (target_project_json, target_project_sha256) = match &parameters.intent {
         WorkspaceTransitionIntent::Update {
-            project_spec_json, ..
-        } => project_spec_json.as_slice(),
-        WorkspaceTransitionIntent::Rollback { .. } => environment
-            .rollback_workspace_generation
-            .as_ref()
-            .ok_or(SupervisorError::InvalidState)?
-            .project_spec_json()?,
+            project_spec_json,
+            project_spec_sha256,
+        } => (project_spec_json.as_slice(), project_spec_sha256.as_str()),
+        WorkspaceTransitionIntent::Rollback { .. } => {
+            let rollback = environment
+                .rollback_workspace_generation
+                .as_ref()
+                .ok_or(SupervisorError::InvalidState)?;
+            (
+                rollback.project_spec_json()?,
+                rollback.project_sha256.as_str(),
+            )
+        }
     };
     let target_project: codewire_project::ProjectSpec =
         serde_json::from_slice(target_project_json).map_err(|_| SupervisorError::InvalidState)?;
@@ -7329,18 +7397,28 @@ fn validate_workspace_transition_start(
             .active_workspace_generation
             .as_ref()
             .ok_or(SupervisorError::InvalidState)?;
-        if active.project_spec_json()? != target_project_json
-            || active.skill_snapshot()?.is_none()
-            || target_project.skills.is_empty()
-        {
+        active.validate_for_project_intent(target_project_json, target_project_sha256)?;
+        if active.skill_snapshot()?.is_none() || target_project.skills.is_empty() {
             return Err(SupervisorError::InvalidState);
         }
     }
-    if matches!(parameters.intent, WorkspaceTransitionIntent::Update { .. })
-        && target_project.access.as_ref().map(|access| &access.profile)
-            != environment.access_profile.as_ref()
-    {
-        return Err(SupervisorError::InvalidState);
+    let current_project_json = environment
+        .project_spec_json
+        .as_deref()
+        .ok_or(SupervisorError::InvalidState)?;
+    let current_project_sha256 = environment
+        .project_spec_sha256
+        .as_deref()
+        .ok_or(SupervisorError::InvalidState)?;
+    active.validate_for_project_intent(current_project_json, current_project_sha256)?;
+    if matches!(parameters.intent, WorkspaceTransitionIntent::Update { .. }) {
+        let current: codewire_project::ProjectSpec = serde_json::from_slice(current_project_json)
+            .map_err(|_| SupervisorError::InvalidState)?;
+        if target_project.secrets != current.secrets
+            || target_project.credentials != current.credentials
+        {
+            return Err(SupervisorError::InvalidState);
+        }
     }
     if let WorkspaceTransitionIntent::Rollback {
         rollback_storage_generation,
@@ -7517,6 +7595,7 @@ impl From<SupervisorError> for Status {
             | SupervisorError::OperationTerminal
             | SupervisorError::ArtifactGenerationChanged
             | SupervisorError::EnvironmentAccessUnavailable
+            | SupervisorError::EnvironmentAccessBindingRejected(_)
             | SupervisorError::WorkloadSecretDeliveryUnavailable => {
                 Status::failed_precondition(error.to_string())
             }
@@ -7565,6 +7644,8 @@ pub enum SupervisorError {
     WorkloadSecretDeliveryUnavailable,
     #[error("local environment access binding is unavailable")]
     EnvironmentAccessUnavailable,
+    #[error("local credential profile binding was rejected ({0})")]
+    EnvironmentAccessBindingRejected(tonic::Code),
     #[error("local environment {0:?} was not found")]
     NotFound(String),
     #[error("local environment is not running")]
@@ -7666,6 +7747,20 @@ pub enum SupervisorError {
 // or owner paths. The existing operation error_code is the diagnostic surface.
 fn create_failure_code(error: &SupervisorError) -> &'static str {
     match error {
+        SupervisorError::CredentialAuthorityUnavailable => {
+            "create_credential_authority_unavailable"
+        }
+        SupervisorError::EnvironmentAccessUnavailable => "create_access_unavailable",
+        SupervisorError::EnvironmentAccessBindingRejected(code) => match code {
+            tonic::Code::InvalidArgument => "create_access_binding_invalid",
+            tonic::Code::NotFound => "create_access_binding_not_found",
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
+                "create_access_binding_denied"
+            }
+            tonic::Code::FailedPrecondition => "create_access_binding_precondition",
+            tonic::Code::DataLoss => "create_access_binding_metadata",
+            _ => "create_access_binding_rejected",
+        },
         SupervisorError::RegistryResolver(error) => match error {
             RegistryResolverError::Client => "create_registry_client",
             RegistryResolverError::Transport => "create_registry_transport",
@@ -7811,7 +7906,7 @@ mod tests {
         (generation, kernel.sha256)
     }
 
-    fn test_workspace_generation(
+    pub(super) fn test_workspace_generation(
         project_spec_json: &[u8],
         project_sha256: &str,
         seed: &[u8],
@@ -7921,6 +8016,7 @@ mod tests {
             project_spec_sha256: Some(project_spec_sha256),
             access_profile: None,
             access_binding: None,
+            platform_source_authority: None,
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,
@@ -7949,6 +8045,20 @@ mod tests {
             serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
         project.secrets = secrets;
         project.environment = environment_values;
+        if project.secrets.organization
+            || project.secrets.user == Some(codewire_project::StoragePlacement::Platform)
+            || project.secrets.project.starts_with("platform:")
+        {
+            environment.platform_source_authority = Some(
+                sources::PlatformSourceAuthority::from_proto(&v1::PlatformSourceAuthority {
+                    server_url: "https://codewire.example".into(),
+                    organization_id: "synthetic-org".into(),
+                    user_id: "synthetic-user".into(),
+                    profile_slots: Vec::new(),
+                })
+                .unwrap(),
+            );
+        }
         let project_spec_json = project.canonical_json().unwrap();
         let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         environment.project_spec_json = Some(project_spec_json.clone());
@@ -8013,6 +8123,14 @@ mod tests {
         let environment = core.environment_mut("dev").unwrap();
         environment.access_profile = Some("user/work".parse().unwrap());
         environment.access_binding = Some(binding.clone());
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        project.credentials = Some(codewire_project::CredentialBinding {
+            profile: format!("local:id:{}", binding.profile_id),
+        });
+        let json = project.canonical_json().unwrap();
+        environment.project_spec_sha256 = Some(format!("{:x}", Sha256::digest(&json)));
+        environment.project_spec_json = Some(json);
         environment.validate("dev").unwrap();
         core.save().unwrap();
         binding
@@ -8022,8 +8140,8 @@ mod tests {
         let mut environment = project_environment();
         let mut project: codewire_project::ProjectSpec =
             serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
-        project.access = Some(codewire_project::AccessBinding {
-            profile: "user/work".parse().unwrap(),
+        project.credentials = Some(codewire_project::CredentialBinding {
+            profile: "local:id:11111111-1111-4111-8111-111111111111".into(),
         });
         let project_spec_json = project.canonical_json().unwrap();
         environment.project_spec_sha256 = Some(format!(
@@ -8034,7 +8152,7 @@ mod tests {
         environment.access_profile = Some("user/work".parse().unwrap());
         environment.access_binding = Some(EnvironmentAccessBinding {
             environment_id: access_environment_id(environment.id).unwrap(),
-            profile_id: AccessProfileId::parse("profile-work").unwrap(),
+            profile_id: AccessProfileId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
             profile_revision: 7,
         });
         environment.validate("dev").unwrap();
@@ -8179,7 +8297,7 @@ mod tests {
         }
     }
 
-    fn spawn_test_supervisor_server(
+    pub(super) fn spawn_test_supervisor_server(
         socket: &Path,
         service: SupervisorRpc,
     ) -> (
@@ -8292,6 +8410,13 @@ mod tests {
         async fn get_daemon_access(
             &self,
             _request: Request<v1::GetDaemonAccessRequest>,
+        ) -> Result<Response<v1::DaemonAccess>, Status> {
+            self.unexpected_use()
+        }
+
+        async fn get_generation_daemon_access(
+            &self,
+            _request: Request<v1::GetGenerationDaemonAccessRequest>,
         ) -> Result<Response<v1::DaemonAccess>, Status> {
             self.unexpected_use()
         }
@@ -8730,6 +8855,397 @@ mod tests {
         assert!(validate_workspace_transition_start(&environment, &parameters).is_err());
     }
 
+    fn set_test_current_project(
+        environment: &mut EnvironmentRecord,
+        project: &codewire_project::ProjectSpec,
+    ) {
+        let bytes = project.canonical_json().unwrap();
+        environment.project_spec_sha256 = Some(format!("{:x}", Sha256::digest(&bytes)));
+        environment.project_spec_json = Some(bytes);
+    }
+
+    fn test_selectors() -> (
+        codewire_project::SecretBindings,
+        Option<codewire_project::CredentialBinding>,
+    ) {
+        (
+            codewire_project::SecretBindings {
+                project: "local:id:11111111-1111-4111-8111-111111111111".to_owned(),
+                user: Some(codewire_project::StoragePlacement::Local),
+                organization: false,
+            },
+            Some(codewire_project::CredentialBinding {
+                profile: "local:id:22222222-2222-4222-8222-222222222222".to_owned(),
+            }),
+        )
+    }
+
+    fn workspace_with_test_skills(
+        environment: &mut EnvironmentRecord,
+    ) -> WorkspaceGenerationRecord {
+        let baseline = test_workspace_generation(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            b"installed-skills",
+        );
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        project.install_command = "printf installed".to_owned();
+        project.agents.tools = vec!["codex".to_owned()];
+        project.skills = vec![codewire_project::SkillSelection {
+            source: codewire_project::SkillSource::User,
+            reference: "rust".to_owned(),
+            agents: vec!["codex".to_owned()],
+        }];
+        set_test_current_project(environment, &project);
+        let skill = codewire_vmm_guest_probe::SkillSnapshot::new(
+            codewire_vmm_guest_probe::SkillSnapshotSource::User,
+            "user:rust".to_owned(),
+            "rust".to_owned(),
+            "c".repeat(64),
+            "rust",
+            &["codex".to_owned()],
+        )
+        .unwrap();
+        let plan = codewire_vmm_guest_probe::SkillSnapshotPlan::new(
+            environment.project_spec_sha256.clone().unwrap(),
+            3,
+            vec![skill],
+        )
+        .unwrap();
+        WorkspaceGenerationRecord::new_with_skill_snapshot(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.clone().unwrap(),
+            baseline.artifact_generation,
+            baseline.image,
+            baseline.root_disk_bytes,
+            Some(plan),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn workspace_update_and_rollback_preserve_current_sources_without_mutating_built_records() {
+        let mut environment = project_environment();
+        let mut historical: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        historical.secrets.project = "local:id:33333333-3333-4333-8333-333333333333".to_owned();
+        historical.credentials = Some(codewire_project::CredentialBinding {
+            profile: "local:id:44444444-4444-4444-8444-444444444444".to_owned(),
+        });
+        set_test_current_project(&mut environment, &historical);
+        let active = test_workspace_generation(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            b"active",
+        );
+        let active_bytes = active.encode_canonical().unwrap();
+        let mut current: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        (current.secrets, current.credentials) = test_selectors();
+        set_test_current_project(&mut environment, &current);
+        environment.active_workspace_generation = Some(active.clone());
+        environment.access_profile = Some("user/current".parse().unwrap());
+        environment.access_binding = Some(EnvironmentAccessBinding {
+            environment_id: access_environment_id(environment.id).unwrap(),
+            profile_id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+            profile_revision: 7,
+        });
+        let selected_profile = environment.access_profile.clone();
+        let selected_binding = environment.access_binding.clone();
+        let mut target = current.clone();
+        target.install_command = "printf newer-install".to_owned();
+        let target_json = target.canonical_json().unwrap();
+        let target_sha256 = format!("{:x}", Sha256::digest(&target_json));
+        let staging = test_workspace_generation(&target_json, &target_sha256, b"staging");
+        let staging_bytes = staging.encode_canonical().unwrap();
+        environment.staging_workspace_generation = Some(staging.clone());
+        environment.promote_staging_workspace_generation().unwrap();
+        let after: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        assert_eq!(after, target);
+        assert_eq!(environment.access_profile, selected_profile);
+        assert_eq!(environment.access_binding, selected_binding);
+        assert_eq!(
+            environment
+                .active_workspace_generation
+                .as_ref()
+                .unwrap()
+                .encode_canonical()
+                .unwrap(),
+            staging_bytes
+        );
+        assert_eq!(
+            environment
+                .rollback_workspace_generation
+                .as_ref()
+                .unwrap()
+                .encode_canonical()
+                .unwrap(),
+            active_bytes
+        );
+
+        // A later source-CAS clears both selectors. Rolling back the root may
+        // restore old install intent, but cannot restore either old selector.
+        current = target;
+        current.secrets = Default::default();
+        current.credentials = None;
+        set_test_current_project(&mut environment, &current);
+        environment.access_profile = None;
+        environment.access_binding = None;
+        environment
+            .stage_rollback_workspace_generation(
+                &workspace_storage_generation(&staging).unwrap(),
+                &workspace_storage_generation(&active).unwrap(),
+            )
+            .unwrap();
+        environment.promote_staging_workspace_generation().unwrap();
+        let after: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        assert!(after.install_command.is_empty());
+        assert!(after.secrets.is_empty());
+        assert!(after.credentials.is_none());
+        assert!(environment.access_profile.is_none());
+        assert!(environment.access_binding.is_none());
+        assert_eq!(
+            environment
+                .active_workspace_generation
+                .as_ref()
+                .unwrap()
+                .encode_canonical()
+                .unwrap(),
+            active_bytes
+        );
+        assert_eq!(
+            environment
+                .rollback_workspace_generation
+                .as_ref()
+                .unwrap()
+                .encode_canonical()
+                .unwrap(),
+            staging_bytes
+        );
+        active
+            .validate_for_project_intent(
+                environment.project_spec_json.as_deref().unwrap(),
+                environment.project_spec_sha256.as_deref().unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_no_boot_completion_retains_source_only_current_intent() {
+        let mut environment = project_environment();
+        let built = test_workspace_generation(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            b"same-root",
+        );
+        let built_bytes = built.encode_canonical().unwrap();
+        let mut current: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        (current.secrets, current.credentials) = test_selectors();
+        set_test_current_project(&mut environment, &current);
+        let current_json = environment.project_spec_json.clone();
+        let current_sha256 = environment.project_spec_sha256.clone();
+        environment.active_workspace_generation = Some(built.clone());
+        environment.staging_workspace_generation = Some(built);
+        environment
+            .finish_staging_workspace_update_without_boot()
+            .unwrap();
+        assert_eq!(environment.project_spec_json, current_json);
+        assert_eq!(environment.project_spec_sha256, current_sha256);
+        assert_eq!(
+            environment
+                .active_workspace_generation
+                .as_ref()
+                .unwrap()
+                .encode_canonical()
+                .unwrap(),
+            built_bytes
+        );
+        assert!(environment.staging_workspace_generation.is_none());
+    }
+
+    #[test]
+    fn workspace_source_drift_requires_the_dedicated_source_cas() {
+        let mut environment = project_environment();
+        environment.active_workspace_generation = Some(test_workspace_generation(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            b"active",
+        ));
+        let mut current: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        (current.secrets, current.credentials) = test_selectors();
+        set_test_current_project(&mut environment, &current);
+        let changes: &[fn(&mut codewire_project::ProjectSpec)] = &[
+            |project| project.secrets.user = None,
+            |project| project.secrets.project.clear(),
+            |project| project.secrets.organization = true,
+            |project| project.credentials = None,
+        ];
+        for change in changes {
+            let mut target = current.clone();
+            change(&mut target);
+            let target_json = target.canonical_json().unwrap();
+            let target_sha256 = format!("{:x}", Sha256::digest(&target_json));
+            let operation = test_workspace_transition_operation(
+                &environment,
+                OperationKind::UpdateWorkspace,
+                workspace_update_payload(&environment, &target_json, &target_sha256, false),
+                0,
+            );
+            let parameters = workspace_transition_parameters(&operation, &environment).unwrap();
+            assert!(validate_workspace_transition_start(&environment, &parameters).is_err());
+        }
+        let current_json = environment.project_spec_json.as_deref().unwrap();
+        let current_sha256 = environment.project_spec_sha256.as_deref().unwrap();
+        let operation = test_workspace_transition_operation(
+            &environment,
+            OperationKind::UpdateWorkspace,
+            workspace_update_payload(&environment, current_json, current_sha256, false),
+            0,
+        );
+        let parameters = workspace_transition_parameters(&operation, &environment).unwrap();
+        validate_workspace_transition_start(&environment, &parameters).unwrap();
+    }
+
+    #[test]
+    fn skill_refresh_allows_only_source_divergence_from_the_built_intent() {
+        let mut environment = project_environment();
+        let built = workspace_with_test_skills(&mut environment);
+        let plan = built.skill_snapshot().unwrap().cloned();
+        environment.active_workspace_generation = Some(built.clone());
+        let mut current: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        (current.secrets, current.credentials) = test_selectors();
+        set_test_current_project(&mut environment, &current);
+        let mut payload = workspace_update_payload(
+            &environment,
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            false,
+        );
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("refresh_skills".to_owned(), true.into());
+        let operation = test_workspace_transition_operation(
+            &environment,
+            OperationKind::UpdateWorkspace,
+            payload,
+            0,
+        );
+        let parameters = workspace_transition_parameters(&operation, &environment).unwrap();
+        validate_workspace_transition_start(&environment, &parameters).unwrap();
+        assert_eq!(
+            environment
+                .active_workspace_generation
+                .as_ref()
+                .unwrap()
+                .skill_snapshot()
+                .unwrap(),
+            plan.as_ref()
+        );
+        let mut drift = current;
+        drift.install_command = "printf unapproved-install-change".to_owned();
+        let drift_json = drift.canonical_json().unwrap();
+        let drift_sha256 = format!("{:x}", Sha256::digest(&drift_json));
+        let mut payload = workspace_update_payload(&environment, &drift_json, &drift_sha256, false);
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("refresh_skills".to_owned(), true.into());
+        let operation = test_workspace_transition_operation(
+            &environment,
+            OperationKind::UpdateWorkspace,
+            payload,
+            0,
+        );
+        let parameters = workspace_transition_parameters(&operation, &environment).unwrap();
+        assert!(validate_workspace_transition_start(&environment, &parameters).is_err());
+    }
+
+    #[tokio::test]
+    async fn skill_refresh_replay_uses_current_intent_after_a_source_only_change() {
+        let mut environment = project_environment();
+        let mut historical: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        historical.secrets.project = "local:id:11111111-1111-4111-8111-111111111111".to_owned();
+        set_test_current_project(&mut environment, &historical);
+        let built = workspace_with_test_skills(&mut environment);
+        environment.active_workspace_generation = Some(built.clone());
+        let mut current: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        current.secrets = Default::default();
+        set_test_current_project(&mut environment, &current);
+        let mut payload = workspace_update_payload(
+            &environment,
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            false,
+        );
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("refresh_skills".to_owned(), true.into());
+        assert_ne!(
+            environment.project_spec_sha256.as_deref(),
+            Some(built.project_sha256.as_str())
+        );
+        let environment_id = environment.id;
+        let request_id = Uuid::new_v4();
+        let (_parent, core) = test_supervisor_core(environment);
+        // A terminal synthetic operation proves request/payload identity
+        // without scheduling a runner, registry read or skill-material read.
+        let operation = core
+            .store
+            .begin_operation(
+                request_id,
+                Some(environment_id),
+                OperationKind::UpdateWorkspace,
+                &payload,
+            )
+            .unwrap();
+        let result = environment_operation_result(core.environment("dev").unwrap());
+        core.store
+            .advance_operation(
+                operation.operation_id,
+                operation.checkpoint,
+                OperationPhase::Completed,
+                Some(&result),
+                None,
+            )
+            .unwrap();
+        let service = test_supervisor_service(core);
+        let response = service
+            .refresh_environment_skills(Request::new(v1::EnvironmentSelector {
+                name: "dev".to_owned(),
+                request_id: request_id.to_string(),
+                environment_id: environment_id.to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.operation_id, operation.operation_id.to_string());
+        assert_eq!(response.phase, v1::OperationPhase::Completed as i32);
+        let core = service.core.lock().await;
+        assert_eq!(
+            core.store
+                .operation_by_request(request_id)
+                .unwrap()
+                .unwrap()
+                .payload,
+            payload
+        );
+        assert_eq!(
+            core.environment("dev").unwrap().active_workspace_generation,
+            Some(built)
+        );
+        assert!(!core.config.credential_authority_root.exists());
+    }
+
     #[test]
     fn workspace_update_cannot_change_the_bound_access_profile() {
         let mut environment = project_environment();
@@ -8742,8 +9258,8 @@ mod tests {
         ));
         let mut next_project: codewire_project::ProjectSpec =
             serde_json::from_slice(&project_json).unwrap();
-        next_project.access = Some(codewire_project::AccessBinding {
-            profile: "user/work".parse().unwrap(),
+        next_project.credentials = Some(codewire_project::CredentialBinding {
+            profile: "local:id:22222222-2222-4222-8222-222222222222".to_owned(),
         });
         let next_project_json = next_project.canonical_json().unwrap();
         let next_project_sha256 = format!("{:x}", Sha256::digest(&next_project_json));
@@ -8767,75 +9283,74 @@ mod tests {
         assert!(validate_workspace_transition_start(&environment, &parameters).is_err());
     }
 
-    #[tokio::test]
-    async fn workspace_update_rejects_a_secret_binding_before_staging() {
-        let mut environment = project_environment();
+    #[test]
+    fn workspace_update_enforces_exact_source_equality_before_staging() {
+        let environment = project_environment_with_secret_selection(
+            codewire_project::SecretBindings {
+                user: Some(codewire_project::StoragePlacement::Platform),
+                project: format!("local:id:{}", Uuid::new_v4()),
+                ..Default::default()
+            },
+            BTreeMap::new(),
+        );
+        let original = environment.clone();
         let active_project_json = environment.project_spec_json.clone().unwrap();
         let active_project_sha256 = environment.project_spec_sha256.clone().unwrap();
-        let active = test_workspace_generation(
-            &active_project_json,
-            &active_project_sha256,
-            b"active-before-secret-update",
-        );
-        environment.active_workspace_generation = Some(active.clone());
         let mut target_project: codewire_project::ProjectSpec =
             serde_json::from_slice(&active_project_json).unwrap();
-        target_project.secrets.user = true;
+        target_project.secrets.project = format!("local:id:{}", Uuid::new_v4());
         let target_project_json = target_project.canonical_json().unwrap();
         let target_project_sha256 = format!("{:x}", Sha256::digest(&target_project_json));
-        let payload = workspace_update_payload(
-            &environment,
-            &target_project_json,
-            &target_project_sha256,
-            false,
-        );
-        let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
-        let credential_root = core.config.credential_authority_root.clone();
-        let operation = core
-            .store
-            .begin_operation(
-                Uuid::new_v4(),
-                Some(environment_id),
+        let changed = workspace_transition_parameters(
+            &test_workspace_transition_operation(
+                &environment,
                 OperationKind::UpdateWorkspace,
-                &payload,
-            )
-            .unwrap();
-
-        let error = core
-            .workspace_transition("dev", &operation)
-            .await
-            .unwrap_err();
-
+                workspace_update_payload(
+                    &environment,
+                    &target_project_json,
+                    &target_project_sha256,
+                    false,
+                ),
+                0,
+            ),
+            &environment,
+        )
+        .unwrap();
+        reject_workspace_transition_workload_secrets(&environment, &changed).unwrap();
         assert!(matches!(
-            error,
-            SupervisorError::WorkloadSecretDeliveryUnavailable
+            validate_workspace_transition_start(&environment, &changed),
+            Err(SupervisorError::InvalidState)
         ));
-        let pending = core
-            .store
-            .operation_by_request(operation.request_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(pending.checkpoint, 0);
-        let environment = core.environment("dev").unwrap();
-        assert_eq!(environment.active_workspace_generation, Some(active));
+
+        let unchanged = workspace_transition_parameters(
+            &test_workspace_transition_operation(
+                &environment,
+                OperationKind::UpdateWorkspace,
+                workspace_update_payload(
+                    &environment,
+                    &active_project_json,
+                    &active_project_sha256,
+                    false,
+                ),
+                0,
+            ),
+            &environment,
+        )
+        .unwrap();
+        reject_workspace_transition_workload_secrets(&environment, &unchanged).unwrap();
+        validate_workspace_transition_start(&environment, &unchanged).unwrap();
+
+        assert_eq!(environment, original);
         assert!(environment.staging_workspace_generation.is_none());
-        assert!(!credential_root.exists());
     }
 
-    #[tokio::test]
-    async fn workspace_rollback_rejects_a_secret_binding_before_staging() {
+    #[test]
+    fn workspace_rollback_uses_valid_current_mixed_sources_and_rejects_missing_authority() {
         let mut environment = project_environment();
-        let active_project_json = environment.project_spec_json.clone().unwrap();
-        let active_project_sha256 = environment.project_spec_sha256.clone().unwrap();
-        let active = test_workspace_generation(
-            &active_project_json,
-            &active_project_sha256,
-            b"active-before-secret-rollback",
-        );
+        let original_project_json = environment.project_spec_json.clone().unwrap();
         let mut rollback_project: codewire_project::ProjectSpec =
-            serde_json::from_slice(&active_project_json).unwrap();
-        rollback_project.secrets.project = "project-secrets".to_owned();
+            serde_json::from_slice(&original_project_json).unwrap();
+        rollback_project.secrets.user = Some(codewire_project::StoragePlacement::Local);
         let rollback_project_json = rollback_project.canonical_json().unwrap();
         let rollback_project_sha256 = format!("{:x}", Sha256::digest(&rollback_project_json));
         let rollback = test_workspace_generation(
@@ -8843,43 +9358,73 @@ mod tests {
             &rollback_project_sha256,
             b"secret-rollback",
         );
-        environment.active_workspace_generation = Some(active.clone());
+        let mut current: codewire_project::ProjectSpec =
+            serde_json::from_slice(&original_project_json).unwrap();
+        current.secrets.user = Some(codewire_project::StoragePlacement::Platform);
+        current.secrets.project = format!("local:id:{}", Uuid::new_v4());
+        set_test_current_project(&mut environment, &current);
+        let active_project_json = environment.project_spec_json.clone().unwrap();
+        let active_project_sha256 = environment.project_spec_sha256.clone().unwrap();
+        environment.active_workspace_generation = Some(test_workspace_generation(
+            &active_project_json,
+            &active_project_sha256,
+            b"active-before-secret-rollback",
+        ));
         environment.rollback_workspace_generation = Some(rollback.clone());
+        environment.platform_source_authority =
+            project_environment_with_secret_selection(current.secrets.clone(), BTreeMap::new())
+                .platform_source_authority;
         environment.validate("dev").unwrap();
         let payload = workspace_rollback_payload(&environment, false);
-        let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
-        let credential_root = core.config.credential_authority_root.clone();
-        let operation = core
-            .store
-            .begin_operation(
-                Uuid::new_v4(),
-                Some(environment_id),
+        let parameters = workspace_transition_parameters(
+            &test_workspace_transition_operation(
+                &environment,
                 OperationKind::RollbackWorkspace,
-                &payload,
+                payload,
+                0,
+            ),
+            &environment,
+        )
+        .unwrap();
+        let original = environment.clone();
+        reject_workspace_transition_workload_secrets(&environment, &parameters).unwrap();
+        validate_workspace_transition_start(&environment, &parameters).unwrap();
+
+        let mut staged = environment.clone();
+        staged
+            .stage_rollback_workspace_generation(
+                &parameters.prior_storage_generation,
+                match &parameters.intent {
+                    WorkspaceTransitionIntent::Rollback {
+                        rollback_storage_generation,
+                    } => rollback_storage_generation,
+                    _ => unreachable!(),
+                },
             )
             .unwrap();
+        assert_eq!(staged.project_spec_json, original.project_spec_json);
+        assert_eq!(staged.project_spec_sha256, original.project_spec_sha256);
+        assert_eq!(staged.staging_workspace_generation, Some(rollback));
+        assert!(staged.rollback_workspace_generation.is_none());
+        let boot = sources::projection_environment_for_boot(&staged).unwrap();
+        let boot_project: codewire_project::ProjectSpec =
+            serde_json::from_slice(boot.project_spec_json.as_deref().unwrap()).unwrap();
+        assert_eq!(boot_project.secrets, current.secrets);
 
-        let error = core
-            .workspace_transition("dev", &operation)
-            .await
-            .unwrap_err();
-
+        let mut missing_authority = original.clone();
+        missing_authority.platform_source_authority = None;
         assert!(matches!(
-            error,
-            SupervisorError::WorkloadSecretDeliveryUnavailable
+            reject_workspace_transition_workload_secrets(&missing_authority, &parameters),
+            Err(SupervisorError::EnvironmentAccessUnavailable)
         ));
-        let pending = core
-            .store
-            .operation_by_request(operation.request_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(pending.checkpoint, 0);
-        let environment = core.environment("dev").unwrap();
-        assert_eq!(environment.active_workspace_generation, Some(active));
-        assert_eq!(environment.rollback_workspace_generation, Some(rollback));
-        assert!(environment.staging_workspace_generation.is_none());
-        assert!(!credential_root.exists());
+        assert_eq!(
+            missing_authority.project_spec_json,
+            original.project_spec_json
+        );
+        assert_eq!(
+            missing_authority.rollback_workspace_generation,
+            original.rollback_workspace_generation
+        );
     }
 
     #[tokio::test]
@@ -9031,6 +9576,86 @@ mod tests {
             Some(old_project_json.as_slice())
         );
         environment.validate("dev").unwrap();
+    }
+
+    #[test]
+    fn boot_projection_tracks_incoming_workspace_and_current_sources_through_promotion() {
+        for rollback in [false, true] {
+            let mut environment = project_environment_with_secret_selection(
+                codewire_project::SecretBindings {
+                    user: Some(codewire_project::StoragePlacement::Local),
+                    ..Default::default()
+                },
+                BTreeMap::from([("OLD_KEY".into(), "old-ordinary-value".into())]),
+            );
+            let original_json = environment.project_spec_json.clone();
+            let original_hash = environment.project_spec_sha256.clone();
+            let mut incoming: codewire_project::ProjectSpec =
+                serde_json::from_slice(original_json.as_ref().unwrap()).unwrap();
+            incoming.environment =
+                BTreeMap::from([("NEW_KEY".into(), "new-ordinary-value".into())]);
+            // Saved workspace metadata may predate a source change. Neither a
+            // rebuild nor rollback may revive its old source selection.
+            incoming.secrets = Default::default();
+            let json = incoming.canonical_json().unwrap();
+            let hash = format!("{:x}", Sha256::digest(&json));
+            let generation = test_workspace_generation(&json, &hash, b"incoming");
+            if rollback {
+                environment.rollback_workspace_generation = Some(generation);
+                let active_storage = workspace_storage_generation(
+                    environment.active_workspace_generation.as_ref().unwrap(),
+                )
+                .unwrap();
+                let rollback_storage = workspace_storage_generation(
+                    environment.rollback_workspace_generation.as_ref().unwrap(),
+                )
+                .unwrap();
+                environment
+                    .stage_rollback_workspace_generation(&active_storage, &rollback_storage)
+                    .unwrap();
+            } else {
+                environment.staging_workspace_generation = Some(generation);
+            }
+            let boot = sources::projection_environment_for_boot(&environment).unwrap();
+            assert_eq!(environment.project_spec_json, original_json);
+            assert_eq!(environment.project_spec_sha256, original_hash);
+            let binding = sources::local_launch_projection(&boot).unwrap().unwrap();
+            assert!(binding.selection.user);
+            assert_eq!(
+                binding.selection.overridden_keys,
+                BTreeSet::from(["NEW_KEY".into()])
+            );
+            assert_ne!(boot.project_spec_sha256, original_hash);
+            environment.promote_staging_workspace_generation().unwrap();
+            assert_eq!(environment.project_spec_json, boot.project_spec_json);
+            assert_eq!(environment.project_spec_sha256, boot.project_spec_sha256);
+            assert_eq!(
+                sources::local_launch_projection(&environment).unwrap(),
+                Some(binding)
+            );
+        }
+    }
+
+    #[test]
+    fn platform_profile_routing_requires_exact_metadata_not_a_local_fallback() {
+        let mut project: codewire_project::ProjectSpec =
+            serde_json::from_slice(project_environment().project_spec_json.as_ref().unwrap())
+                .unwrap();
+        project.credentials = Some(codewire_project::CredentialBinding {
+            profile: "platform:id:11111111-1111-4111-8111-111111111111".into(),
+        });
+        assert!(project.secrets.is_empty());
+        reject_undeliverable_workload_secrets(&project).unwrap();
+        assert!(
+            sources::validate_source_metadata(
+                &project,
+                "11111111-1111-4111-8111-111111111111",
+                7,
+                "user/work",
+                None
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -9712,19 +10337,132 @@ mod tests {
         assert!(!engine.path().join("content").exists());
     }
 
+    #[test]
+    fn source_only_changes_reuse_the_admitted_root_setup_and_skill_identity() {
+        let engine = tempfile::tempdir().unwrap();
+        fs::set_permissions(engine.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let mut environment = project_environment();
+        let built = workspace_with_test_skills(&mut environment);
+        let built_bytes = built.encode_canonical().unwrap();
+        let skill_sha256 = built
+            .skill_snapshot()
+            .unwrap()
+            .unwrap()
+            .sha256()
+            .unwrap()
+            .to_string();
+        let storage_generation = workspace_storage_generation(&built).unwrap();
+        let root = crate::generation::ensure_empty_root_generation(
+            engine.path(),
+            environment.id,
+            &storage_generation,
+            built.root_disk_bytes,
+        )
+        .unwrap();
+        let identity = root.identity;
+        let modified = fs::metadata(&root.path).unwrap().modified().unwrap();
+        environment.active_workspace_generation = Some(built.clone());
+        let mut current: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        (current.secrets, current.credentials) = test_selectors();
+        set_test_current_project(&mut environment, &current);
+        for state in [
+            StoredEnvironmentState::Stopped,
+            StoredEnvironmentState::Running,
+        ] {
+            environment.state = state;
+            let boot =
+                prepare_workspace_boot(engine.path(), engine.path(), &[], &environment).unwrap();
+            assert_eq!(boot.root_generation, storage_generation);
+            assert_eq!(boot.skill_snapshot_sha256, skill_sha256);
+            assert!(boot.setup_root_generation.is_empty());
+            assert!(boot.setup_header_sha256.is_empty());
+            assert_eq!(boot.setup_total_bytes, 0);
+            assert_eq!(
+                crate::linux::state::StateDiskIdentity::capture(&root.path).unwrap(),
+                identity
+            );
+            assert_eq!(
+                fs::metadata(&root.path).unwrap().modified().unwrap(),
+                modified
+            );
+            assert_eq!(
+                environment
+                    .active_workspace_generation
+                    .as_ref()
+                    .unwrap()
+                    .encode_canonical()
+                    .unwrap(),
+                built_bytes
+            );
+        }
+        assert!(!engine.path().join("content").exists());
+    }
+
+    #[test]
+    fn boot_and_rollback_delivery_checks_use_current_not_historical_sources() {
+        let mut environment = project_environment();
+        let empty = test_workspace_generation(
+            environment.project_spec_json.as_deref().unwrap(),
+            environment.project_spec_sha256.as_deref().unwrap(),
+            b"empty-built-sources",
+        );
+        let mut selected: codewire_project::ProjectSpec =
+            serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
+        selected.secrets.user = Some(codewire_project::StoragePlacement::Platform);
+        let selected_json = selected.canonical_json().unwrap();
+        let selected_sha256 = format!("{:x}", Sha256::digest(&selected_json));
+        let historical =
+            test_workspace_generation(&selected_json, &selected_sha256, b"historical-sources");
+        environment.active_workspace_generation = Some(empty.clone());
+        environment.rollback_workspace_generation = Some(historical.clone());
+        let parameters = workspace_transition_parameters(
+            &test_workspace_transition_operation(
+                &environment,
+                OperationKind::RollbackWorkspace,
+                workspace_rollback_payload(&environment, false),
+                0,
+            ),
+            &environment,
+        )
+        .unwrap();
+        // Historical selectors are metadata, not current delivery authority.
+        reject_workspace_transition_workload_secrets(&environment, &parameters).unwrap();
+        validate_workspace_transition_start(&environment, &parameters).unwrap();
+        environment.staging_workspace_generation = Some(historical.clone());
+        validate_environment_workload_secret_delivery(&environment, true).unwrap();
+        environment.active_workspace_generation = Some(historical);
+        validate_environment_workload_secret_delivery(&environment, false).unwrap();
+
+        set_test_current_project(&mut environment, &selected);
+        environment.active_workspace_generation = Some(empty);
+        for staging in [false, true] {
+            assert!(matches!(
+                validate_environment_workload_secret_delivery(&environment, staging),
+                Err(SupervisorError::EnvironmentAccessUnavailable),
+            ));
+        }
+        let mut corrupt = environment;
+        corrupt.project_spec_sha256 = Some("f".repeat(64));
+        assert!(matches!(
+            validate_environment_workload_secret_delivery(&corrupt, true),
+            Err(SupervisorError::InvalidState),
+        ));
+    }
+
     #[tokio::test]
-    async fn native_create_rejects_each_workload_secret_source_before_state_mutation() {
+    async fn native_create_rejects_each_unpinned_platform_source_before_state_mutation() {
         for (index, secrets) in [
             codewire_project::SecretBindings {
                 organization: true,
                 ..Default::default()
             },
             codewire_project::SecretBindings {
-                project: "project-secrets".to_owned(),
+                project: "platform:id:11111111-1111-4111-8111-111111111111".to_owned(),
                 ..Default::default()
             },
             codewire_project::SecretBindings {
-                user: true,
+                user: Some(codewire_project::StoragePlacement::Platform),
                 ..Default::default()
             },
         ]
@@ -9750,6 +10488,8 @@ mod tests {
                 mesh: None,
                 access_profile_id: String::new(),
                 access_profile_revision: 0,
+                access_profile_reference: String::new(),
+                platform_source_authority: None,
             };
             let (_parent, core) = test_supervisor_core(project_environment());
             let credential_root = core.config.credential_authority_root.clone();
@@ -9760,11 +10500,7 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-            assert_eq!(
-                error.message(),
-                "native local workload-secret delivery is unavailable"
-            );
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
             let core = service.core.lock().await;
             assert!(
                 core.store
@@ -9778,40 +10514,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_start_rejects_an_undeliverable_secret_without_journaling() {
+    async fn native_start_journals_admitted_mixed_sources_before_runtime_authority() {
         let environment = project_environment_with_secret_selection(
             codewire_project::SecretBindings {
-                user: true,
+                user: Some(codewire_project::StoragePlacement::Platform),
+                project: format!("local:id:{}", Uuid::new_v4()),
                 ..Default::default()
             },
             BTreeMap::new(),
         );
         let environment_id = environment.id;
+        let expected_generation = environment.generation.checked_add(1).unwrap();
         let (_parent, core) = test_supervisor_core(environment);
         let credential_root = core.config.credential_authority_root.clone();
         let service = test_supervisor_service(core);
+        service.worker_running.store(true, Ordering::Release);
         let request_id = Uuid::new_v4();
 
-        let error = service
+        let submitted = service
             .start_environment(Request::new(v1::EnvironmentSelector {
                 name: "dev".to_owned(),
                 request_id: request_id.to_string(),
                 environment_id: environment_id.to_string(),
             }))
             .await
-            .unwrap_err();
+            .unwrap()
+            .into_inner();
 
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-        assert_eq!(
-            error.message(),
-            "native local workload-secret delivery is unavailable"
-        );
+        assert_eq!(submitted.kind, v1::OperationKind::Start as i32);
+        assert_eq!(submitted.phase, v1::OperationPhase::Intent as i32);
+        assert_eq!(submitted.checkpoint, 0);
         let core = service.core.lock().await;
-        assert!(
-            core.store
-                .operation_by_request(request_id)
-                .unwrap()
-                .is_none()
+        let pending = core
+            .store
+            .operation_by_request(request_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.request_id, request_id);
+        assert_eq!(pending.environment_id, Some(environment_id));
+        assert_eq!(pending.kind, OperationKind::Start);
+        assert_eq!(pending.phase, OperationPhase::Intent);
+        assert_eq!(pending.checkpoint, 0);
+        assert_eq!(
+            pending.payload,
+            serde_json::json!({"name": "dev", "generation": expected_generation})
+        );
+        assert_eq!(pending.operation_id.to_string(), submitted.operation_id);
+        assert_eq!(
+            supervisor_effect(pending.kind, pending.checkpoint).unwrap(),
+            Some(LifecycleEffect::RequireEnvironmentAccess)
         );
         assert_eq!(
             core.environment("dev").unwrap().state,
@@ -9821,26 +10572,28 @@ mod tests {
     }
 
     #[test]
-    fn every_workload_secret_source_is_rejected_at_the_boot_boundary() {
+    fn platform_sources_are_admitted_at_boot_with_exact_material_free_binding() {
         for secrets in [
             codewire_project::SecretBindings {
                 organization: true,
                 ..Default::default()
             },
             codewire_project::SecretBindings {
-                project: "project-secrets".to_owned(),
+                project: "platform:id:11111111-1111-4111-8111-111111111111".to_owned(),
                 ..Default::default()
             },
             codewire_project::SecretBindings {
-                user: true,
+                user: Some(codewire_project::StoragePlacement::Platform),
                 ..Default::default()
             },
         ] {
             let environment = project_environment_with_secret_selection(secrets, BTreeMap::new());
-            assert!(matches!(
-                validate_environment_workload_secret_delivery(&environment, false),
-                Err(SupervisorError::WorkloadSecretDeliveryUnavailable)
-            ));
+            validate_environment_workload_secret_delivery(&environment, false).unwrap();
+            assert!(
+                sources::platform::broker_binding(&environment, Path::new("/synthetic/config"))
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 
@@ -9854,7 +10607,33 @@ mod tests {
     }
 
     #[test]
-    fn environment_proto_requires_the_credential_authority_only_for_access_profiles() {
+    fn local_application_sources_are_admitted_with_original_key_precedence_and_no_profile() {
+        for secrets in [
+            codewire_project::SecretBindings {
+                user: Some(codewire_project::StoragePlacement::Local),
+                ..Default::default()
+            },
+            codewire_project::SecretBindings {
+                project: "local:id:11111111-1111-4111-8111-111111111111".into(),
+                ..Default::default()
+            },
+        ] {
+            let environment = project_environment_with_secret_selection(
+                secrets,
+                BTreeMap::from([("EXPLICIT".into(), "ordinary-value".into())]),
+            );
+            validate_environment_workload_secret_delivery(&environment, false).unwrap();
+            let projection = sources::local_launch_projection(&environment)
+                .unwrap()
+                .unwrap();
+            assert!(projection.selection.overridden_keys.contains("EXPLICIT"));
+            assert!(environment.access_binding.is_none());
+            assert!(environment.proto(false).requires_credential_authority);
+        }
+    }
+
+    #[test]
+    fn environment_proto_requires_the_authority_for_selected_sources_or_profiles() {
         assert!(
             !project_environment()
                 .proto(false)
@@ -9871,16 +10650,16 @@ mod tests {
                 ..Default::default()
             },
             codewire_project::SecretBindings {
-                project: "project-secrets".to_owned(),
+                project: "local:id:11111111-1111-4111-8111-111111111111".to_owned(),
                 ..Default::default()
             },
             codewire_project::SecretBindings {
-                user: true,
+                user: Some(codewire_project::StoragePlacement::Local),
                 ..Default::default()
             },
         ] {
             assert!(
-                !project_environment_with_secret_selection(secrets, BTreeMap::new())
+                project_environment_with_secret_selection(secrets, BTreeMap::new())
                     .proto(false)
                     .requires_credential_authority
             );
@@ -9935,7 +10714,7 @@ mod tests {
         };
         state.validate().unwrap();
         let encoded = serde_json::to_string(&state).unwrap().to_ascii_lowercase();
-        assert!(encoded.contains("profile-work"));
+        assert!(encoded.contains("11111111-1111-4111-8111-111111111111"));
         assert!(!encoded.contains("token"));
         assert!(!encoded.contains("credential"));
         assert!(!encoded.contains("capability"));
@@ -9948,7 +10727,7 @@ mod tests {
         validate_project_intent(&bytes, &digest, Some((2, 16 * 1024, disk_bytes))).unwrap();
 
         let mut selected: codewire_project::ProjectSpec = serde_json::from_slice(&bytes).unwrap();
-        selected.secrets.user = true;
+        selected.secrets.user = Some(codewire_project::StoragePlacement::Local);
         selected
             .environment
             .insert("EXPLICIT".into(), "wins".into());
@@ -9988,6 +10767,30 @@ mod tests {
     }
 
     #[test]
+    fn canonical_project_setup_is_admitted_but_still_digest_bound() {
+        let (bytes, _) = project_intent(2, 16 * 1024, 20);
+        let mut project: codewire_project::ProjectSpec = serde_json::from_slice(&bytes).unwrap();
+        project.install_command = "printf install".to_owned();
+        project.startup_script = "printf startup".to_owned();
+        let bytes = project.canonical_json().unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        validate_project_intent(
+            &bytes,
+            &digest,
+            Some((2, 16 * 1024, 20 * 1024 * 1024 * 1024)),
+        )
+        .unwrap();
+        project.startup_script = "printf changed".to_owned();
+        assert!(
+            validate_project_intent(&project.canonical_json().unwrap(), &digest, None).is_err()
+        );
+        project.agents.install = Some(true);
+        let bytes = project.canonical_json().unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        assert!(validate_project_intent(&bytes, &digest, None).is_err());
+    }
+
+    #[test]
     fn stored_creation_intent_remains_valid_after_runtime_resource_resize() {
         let mut environment = project_environment();
         let creation_intent = environment.project_spec_json.clone().unwrap();
@@ -10012,9 +10815,11 @@ mod tests {
             label: "app".to_owned(),
             access: String::new(),
         }];
-        project.access = Some(codewire_project::AccessBinding {
-            profile: "user/work".parse().unwrap(),
+        project.credentials = Some(codewire_project::CredentialBinding {
+            profile: "local:id:11111111-1111-4111-8111-111111111111".into(),
         });
+        project.install_command = "printf install".to_owned();
+        project.startup_script = "printf startup".to_owned();
         let project_spec_json = project.canonical_json().unwrap();
         let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
         let request = v1::CreateEnvironmentRequest {
@@ -10041,8 +10846,10 @@ mod tests {
                 guest_ports: vec![3_000],
                 auth_source: v1::MeshEnrollmentAuthSource::StandaloneLocal as i32,
             }),
-            access_profile_id: "profile-work".to_owned(),
+            access_profile_id: "11111111-1111-4111-8111-111111111111".to_owned(),
             access_profile_revision: 7,
+            access_profile_reference: "user/work".to_owned(),
+            platform_source_authority: None,
         };
         validate_create(&request).unwrap();
         let mut incomplete = request.clone();
@@ -10089,62 +10896,12 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(binding.environment_id.as_str(), environment_id.to_string());
-        assert_eq!(binding.profile_id.as_str(), "profile-work");
+        assert_eq!(
+            binding.profile_id.as_str(),
+            "11111111-1111-4111-8111-111111111111"
+        );
         assert_eq!(binding.profile_revision, 7);
         assert_eq!(reference.to_string(), "user/work");
-    }
-
-    #[test]
-    fn access_apply_request_requires_one_exact_local_selection_or_clear() {
-        let environment_id = Uuid::new_v4();
-        let request = v1::ApplyEnvironmentAccessRequest {
-            name: "dev".to_owned(),
-            request_id: Uuid::new_v4().to_string(),
-            environment_id: environment_id.to_string(),
-            access_profile: "user/work".to_owned(),
-            access_profile_id: "profile-work".to_owned(),
-            access_profile_revision: 2,
-            clear: false,
-        };
-        let target = apply_environment_access_request_target(&request, environment_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(target.reference.to_string(), "user/work");
-        assert_eq!(target.binding.profile_revision, 2);
-
-        let mut invalid = request.clone();
-        invalid.access_profile_revision = 0;
-        assert!(matches!(
-            apply_environment_access_request_target(&invalid, environment_id),
-            Err(SupervisorError::InvalidRequest)
-        ));
-        let mut invalid = request.clone();
-        invalid.access_profile = "organization/work".to_owned();
-        assert!(matches!(
-            apply_environment_access_request_target(&invalid, environment_id),
-            Err(SupervisorError::InvalidRequest)
-        ));
-        let mut invalid = request.clone();
-        invalid.clear = true;
-        assert!(matches!(
-            apply_environment_access_request_target(&invalid, environment_id),
-            Err(SupervisorError::InvalidRequest)
-        ));
-
-        let cleared = v1::ApplyEnvironmentAccessRequest {
-            name: "dev".to_owned(),
-            request_id: Uuid::new_v4().to_string(),
-            environment_id: environment_id.to_string(),
-            access_profile: String::new(),
-            access_profile_id: String::new(),
-            access_profile_revision: 0,
-            clear: true,
-        };
-        assert!(
-            apply_environment_access_request_target(&cleared, environment_id)
-                .unwrap()
-                .is_none()
-        );
     }
 
     #[test]
@@ -10268,6 +11025,8 @@ mod tests {
             mesh: None,
             access_profile_id: String::new(),
             access_profile_revision: 0,
+            access_profile_reference: String::new(),
+            platform_source_authority: None,
         };
         validate_create(&request).unwrap();
         let workspace_plan = WorkspacePlan::from_inputs(vec![WorkspaceInput::local(
@@ -10346,10 +11105,15 @@ mod tests {
             mesh: None,
             access_profile_id: String::new(),
             access_profile_revision: 0,
+            access_profile_reference: String::new(),
+            platform_source_authority: None,
         };
         validate_create(&request).unwrap();
         let (_parent, mut core) = test_supervisor_core(project_environment());
-        let plan = core.prepare_create_workspace_plan(&request).await.unwrap();
+        let plan = core
+            .prepare_create_workspace_plan(&request, Uuid::new_v4())
+            .await
+            .unwrap();
 
         assert_eq!(plan.inputs.len(), 1);
         assert!(matches!(
@@ -10402,10 +11166,15 @@ mod tests {
             mesh: None,
             access_profile_id: String::new(),
             access_profile_revision: 0,
+            access_profile_reference: String::new(),
+            platform_source_authority: None,
         };
         validate_create(&request).unwrap();
         let (_parent, mut core) = test_supervisor_core(project_environment());
-        let plan = core.prepare_create_workspace_plan(&request).await.unwrap();
+        let plan = core
+            .prepare_create_workspace_plan(&request, Uuid::new_v4())
+            .await
+            .unwrap();
 
         assert_eq!(plan.inputs.len(), 1);
         assert!(matches!(
@@ -10474,8 +11243,10 @@ mod tests {
             }],
             host_ports: Vec::new(),
             mesh: None,
-            access_profile_id: "profile-work".to_owned(),
+            access_profile_id: "11111111-1111-4111-8111-111111111111".to_owned(),
             access_profile_revision: 7,
+            access_profile_reference: "user/work".to_owned(),
+            platform_source_authority: None,
         };
         validate_create(&request).unwrap();
         let (_parent, mut core) = test_supervisor_core(project_environment());
@@ -10542,6 +11313,8 @@ mod tests {
             mesh: None,
             access_profile_id: String::new(),
             access_profile_revision: 0,
+            access_profile_reference: String::new(),
+            platform_source_authority: None,
         };
         let (_parent, mut core) = test_supervisor_core(environment);
         let operation = core
@@ -10555,7 +11328,7 @@ mod tests {
             .unwrap();
         let runner_socket = core.config.runner_socket(environment_id);
         let (runner_socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(1));
+            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(2));
         let (attached_environment_id, process_identity) =
             attach_test_runner_process(&mut core, runner_socket_identity);
         assert_eq!(attached_environment_id, environment_id);
@@ -10771,7 +11544,7 @@ mod tests {
         let (_parent, mut core) = test_supervisor_core(environment);
         let runner_socket = core.config.runner_socket(environment_id);
         let (runner_socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(1));
+            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(2));
         let (attached_environment_id, process_identity) =
             attach_test_runner_process(&mut core, runner_socket_identity);
         assert_eq!(attached_environment_id, environment_id);
@@ -11019,12 +11792,25 @@ mod tests {
         let (store, _) = SupervisorStore::open(&root).unwrap();
         let request_id = Uuid::new_v4();
         let payload = serde_json::json!({"name": "dev"});
+        let environment_id = Uuid::new_v4();
 
-        let first = begin_create_operation(&store, request_id, &payload).unwrap();
-        let retried = begin_create_operation(&store, request_id, &payload).unwrap();
+        let first = begin_create_operation(&store, request_id, environment_id, &payload).unwrap();
+        let retried = begin_create_operation(&store, request_id, environment_id, &payload).unwrap();
 
         assert_eq!(retried, first);
-        assert!(first.environment_id.is_some());
+        assert_eq!(first.environment_id, Some(environment_id));
+        for (changed_id, changed_payload) in [
+            (Uuid::new_v4(), payload.clone()),
+            (environment_id, serde_json::json!({"name": "other"})),
+        ] {
+            assert!(matches!(
+                begin_create_operation(&store, request_id, changed_id, &changed_payload),
+                Err(SupervisorError::Store(
+                    SupervisorStoreError::RequestCollision
+                ))
+            ));
+        }
+        assert!(begin_create_operation(&store, request_id, Uuid::nil(), &payload).is_err());
     }
 
     #[test]
@@ -11248,12 +12034,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn broker_stop_does_not_treat_missing_authority_as_proven_child_death() {
+        let (_parent, mut core) = test_supervisor_core(project_environment_with_access());
+        let environment = core.environment("dev").unwrap().clone();
+        assert!(environment.generation > 0);
+        assert!(matches!(
+            core.stop_environment_broker_if_present(&environment).await,
+            Err(SupervisorError::CredentialAuthorityUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn broker_stop_accepts_exact_authority_ack_without_changing_profile_binding() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let (mut authority, server) = start_test_credential_authority(&core).await;
+        let binding = bind_test_environment_access(&mut core, &mut authority).await;
+        let environment = core.environment("dev").unwrap().clone();
+        core.stop_environment_broker_if_present(&environment)
+            .await
+            .unwrap();
+        assert_eq!(
+            authority
+                .get_environment_access_binding(&binding.environment_id)
+                .await
+                .unwrap()
+                .binding,
+            binding
+        );
+        drop(authority);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn client_bootstrap_requires_the_exact_profile_binding_without_material_access() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let empty = core.environment("dev").unwrap().clone();
+        assert_eq!(
+            core.managed_credential_clients_for_boot(&empty)
+                .await
+                .unwrap(),
+            Default::default()
+        );
+        let (mut authority, server) = start_test_credential_authority(&core).await;
+        let binding = bind_test_environment_access(&mut core, &mut authority).await;
+        let environment = core.environment("dev").unwrap().clone();
+        assert_eq!(
+            core.managed_credential_clients_for_boot(&environment)
+                .await
+                .unwrap(),
+            Default::default()
+        );
+        let mut wrong = environment.clone();
+        wrong.access_binding.as_mut().unwrap().profile_revision = binding.profile_revision + 1;
+        assert!(matches!(
+            core.managed_credential_clients_for_boot(&wrong).await,
+            Err(SupervisorError::EnvironmentAccessUnavailable)
+        ));
+        let mut platform = environment.clone();
+        let mut spec: codewire_project::ProjectSpec =
+            serde_json::from_slice(platform.project_spec_json.as_deref().unwrap()).unwrap();
+        spec.credentials.as_mut().unwrap().profile = format!("platform:id:{}", binding.profile_id);
+        set_test_current_project(&mut platform, &spec);
+        assert!(matches!(
+            core.managed_credential_clients_for_boot(&platform).await,
+            Err(SupervisorError::EnvironmentAccessUnavailable)
+        ));
+        drop(authority);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn bound_environment_fails_closed_when_the_authority_is_unavailable() {
         let environment = project_environment_with_access();
         let public = environment.proto(true);
         assert_eq!(public.access_profile, "user/work");
         assert_eq!(public.access_profile_revision, 7);
-        assert!(!format!("{public:?}").contains("profile-work"));
+        assert_eq!(
+            public.access_profile_id,
+            "11111111-1111-4111-8111-111111111111"
+        );
         let (_parent, mut core) = test_supervisor_core(environment);
 
         assert!(matches!(
@@ -11267,316 +12128,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn access_apply_checkpoint_records_and_clears_exact_binding_without_workspace_rebuild() {
-        let environment = project_environment_with_access();
-        let environment_id = environment.id;
-        let project_spec_json = environment.project_spec_json.clone();
-        let project_spec_sha256 = environment.project_spec_sha256.clone();
-        let expected = environment_access_selection(&environment).unwrap().unwrap();
-        let target = ExactEnvironmentAccess {
-            reference: "user/personal".parse().unwrap(),
-            binding: EnvironmentAccessBinding {
-                environment_id: access_environment_id(environment_id).unwrap(),
-                profile_id: AccessProfileId::parse("profile-personal").unwrap(),
-                profile_revision: 3,
-            },
-        };
-        let (_parent, mut core) = test_supervisor_core(environment);
-        let payload =
-            apply_environment_access_operation_payload("dev", Some(&expected), Some(&target));
-        let operation = begin_and_advance_test_operation(
-            &core.store,
-            environment_id,
-            OperationKind::ApplyEnvironmentAccess,
-            &payload,
-            1,
-        );
-
-        let operation = core
-            .apply_environment_access("dev", &operation)
-            .await
-            .unwrap();
-        assert_eq!(operation.checkpoint, 2);
-        let environment = core.environment("dev").unwrap();
-        assert_eq!(environment.access_profile.as_ref(), Some(&target.reference));
-        assert_eq!(environment.access_binding.as_ref(), Some(&target.binding));
-        assert_eq!(environment.project_spec_json, project_spec_json);
-        assert_eq!(environment.project_spec_sha256, project_spec_sha256);
-        environment.validate("dev").unwrap();
-
-        let payload = apply_environment_access_operation_payload("dev", Some(&target), None);
-        let operation = begin_and_advance_test_operation(
-            &core.store,
-            environment_id,
-            OperationKind::ApplyEnvironmentAccess,
-            &payload,
-            1,
-        );
-        core.apply_environment_access("dev", &operation)
-            .await
-            .unwrap();
-        let environment = core.environment("dev").unwrap();
-        assert!(environment.access_profile.is_none());
-        assert!(environment.access_binding.is_none());
-        assert_eq!(environment.project_spec_json, project_spec_json);
-        assert_eq!(environment.project_spec_sha256, project_spec_sha256);
-        environment.validate("dev").unwrap();
-    }
-
-    #[tokio::test]
-    async fn access_apply_rejects_running_or_starting_state_without_an_exact_runner() {
-        for state in [
-            StoredEnvironmentState::Running,
-            StoredEnvironmentState::Starting,
-        ] {
-            let mut environment = project_environment_with_access();
-            environment.state = state;
-            let environment_id = environment.id;
-            let expected = environment_access_selection(&environment).unwrap().unwrap();
-            let (_parent, mut core) = test_supervisor_core(environment);
-            let payload = apply_environment_access_operation_payload("dev", Some(&expected), None);
-            let operation = core
-                .store
-                .begin_operation(
-                    Uuid::new_v4(),
-                    Some(environment_id),
-                    OperationKind::ApplyEnvironmentAccess,
-                    &payload,
-                )
-                .unwrap();
-
-            assert!(matches!(
-                core.apply_environment_access("dev", &operation).await,
-                Err(SupervisorError::NotRunning)
-            ));
-
-            let pending = core
-                .store
-                .operation_by_request(operation.request_id)
-                .unwrap()
-                .unwrap();
-            assert_eq!(pending.checkpoint, 0);
-            let environment = core.environment("dev").unwrap();
-            assert_eq!(
-                environment.state,
-                if state == StoredEnvironmentState::Running {
-                    StoredEnvironmentState::Error
-                } else {
-                    StoredEnvironmentState::Starting
-                }
-            );
-            assert!(environment.runner.is_none());
-            assert!(environment.access_binding.is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn access_apply_reconciles_a_dead_runner_before_mutating_authority() {
-        let environment = project_environment_with_access();
-        let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
-        let (mut authority, authority_server) = start_test_credential_authority(&core).await;
-        let binding = bind_test_environment_access(&mut core, &mut authority).await;
-        let socket = core.config.runner_socket(environment_id);
-        let (socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(1));
-        let recorded_socket = socket_identity.clone();
-        let (attached_environment_id, process_identity) =
-            attach_test_runner_process(&mut core, socket_identity);
-        assert_eq!(attached_environment_id, environment_id);
-        let mut child = core.children.remove(&environment_id).unwrap();
-        core.live_runners.remove(&environment_id).unwrap();
-        child.kill().unwrap();
-        child.wait().unwrap();
-        let expected = environment_access_selection(core.environment("dev").unwrap())
-            .unwrap()
-            .unwrap();
-        let payload = apply_environment_access_operation_payload("dev", Some(&expected), None);
-        let operation = core
-            .store
-            .begin_operation(
-                Uuid::new_v4(),
-                Some(environment_id),
-                OperationKind::ApplyEnvironmentAccess,
-                &payload,
-            )
-            .unwrap();
-
-        let completed = core
-            .apply_environment_access("dev", &operation)
-            .await
-            .unwrap();
-
-        assert_eq!(completed.checkpoint, 2);
-        let environment = core.environment("dev").unwrap();
-        assert_eq!(environment.state, StoredEnvironmentState::Error);
-        assert!(environment.runner.is_none());
-        assert!(environment.access_binding.is_none());
-        assert!(environment.access_profile.is_none());
-        assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            authority
-                .get_environment_access_binding(&binding.environment_id)
-                .await
-                .unwrap_err()
-                .code(),
-            tonic::Code::NotFound
-        );
-        assert!(matches!(
-            LiveProcess::recover(&process_identity),
-            Err(RecoveryError::ProcessExited | RecoveryError::ReadProcess(_))
-        ));
-
-        shutdown_tx.send(()).unwrap();
-        runner_server.await.unwrap();
-        remove_bound_socket(&socket, &recorded_socket).unwrap();
-        drop(authority);
-        authority_server.abort();
-        let _ = authority_server.await;
-    }
-
-    #[tokio::test]
-    async fn replaying_access_apply_quarantines_an_unsafe_runner_before_authority_mutation() {
-        let source = tempfile::tempdir().unwrap();
-        let source = fs::canonicalize(source.path()).unwrap();
-        let mut environment = project_environment_with_access();
-        environment.workspace_plan = direct_workspace_plan(&source);
-        let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
-        core.config.credential_authority_root = source.join("new-credential-authority");
-        let (mut authority, authority_server) = start_test_credential_authority(&core).await;
-        let binding = bind_test_environment_access(&mut core, &mut authority).await;
-        let socket = core.config.runner_socket(environment_id);
-        let (socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(1));
-        let (attached_environment_id, process_identity) =
-            attach_test_runner_process(&mut core, socket_identity);
-        assert_eq!(attached_environment_id, environment_id);
-        let mut detached_child = core.children.remove(&environment_id).unwrap();
-        core.live_runners.remove(&environment_id).unwrap();
-        let expected = environment_access_selection(core.environment("dev").unwrap())
-            .unwrap()
-            .unwrap();
-        let payload = apply_environment_access_operation_payload("dev", Some(&expected), None);
-        let operation = core
-            .store
-            .begin_operation(
-                Uuid::new_v4(),
-                Some(environment_id),
-                OperationKind::ApplyEnvironmentAccess,
-                &payload,
-            )
-            .unwrap();
-
-        core.replay_pending_operations().await.unwrap();
-
-        let failed = core
-            .store
-            .operation_by_request(operation.request_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(failed.phase, OperationPhase::Failed);
-        assert_eq!(failed.checkpoint, 1);
-        assert_eq!(
-            failed.error_code.as_deref(),
-            Some("environment_access_apply_failed")
-        );
-        let environment = core.environment("dev").unwrap();
-        assert_eq!(environment.state, StoredEnvironmentState::Error);
-        assert!(environment.runner.is_none());
-        assert!(!core.live_runners.contains_key(&environment_id));
-        assert!(!core.children.contains_key(&environment_id));
-        assert!(!socket.exists());
-        assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            authority
-                .get_environment_access_binding(&binding.environment_id)
-                .await
-                .unwrap()
-                .binding,
-            binding
-        );
-        assert!(matches!(
-            LiveProcess::recover(&process_identity),
-            Err(RecoveryError::ProcessExited | RecoveryError::ReadProcess(_))
-        ));
-        let _ = detached_child.wait().unwrap();
-
-        shutdown_tx.send(()).unwrap();
-        runner_server.await.unwrap();
-        drop(authority);
-        authority_server.abort();
-        let _ = authority_server.await;
-    }
-
-    #[tokio::test]
-    async fn stopped_access_apply_preserves_an_idle_runner_with_a_newly_forbidden_share() {
-        let source = tempfile::tempdir().unwrap();
-        let source = fs::canonicalize(source.path()).unwrap();
-        let mut environment = project_environment_with_access();
-        environment.workspace_plan = direct_workspace_plan(&source);
-        let environment_id = environment.id;
-        let (_parent, mut core) = test_supervisor_core(environment);
-        core.config.credential_authority_root = source.join("new-credential-authority");
-        let (mut authority, authority_server) = start_test_credential_authority(&core).await;
-        let binding = bind_test_environment_access(&mut core, &mut authority).await;
-        let socket = core.config.runner_socket(environment_id);
-        let (socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(1));
-        let (attached_environment_id, process_identity) =
-            attach_test_runner_process(&mut core, socket_identity);
-        assert_eq!(attached_environment_id, environment_id);
-        core.environment_mut("dev").unwrap().state = StoredEnvironmentState::Stopped;
-        core.save().unwrap();
-        let expected = environment_access_selection(core.environment("dev").unwrap())
-            .unwrap()
-            .unwrap();
-        let payload = apply_environment_access_operation_payload("dev", Some(&expected), None);
-        let operation = core
-            .store
-            .begin_operation(
-                Uuid::new_v4(),
-                Some(environment_id),
-                OperationKind::ApplyEnvironmentAccess,
-                &payload,
-            )
-            .unwrap();
-
-        let completed = core
-            .apply_environment_access("dev", &operation)
-            .await
-            .unwrap();
-
-        assert_eq!(completed.checkpoint, 2);
-        let environment = core.environment("dev").unwrap();
-        assert_eq!(environment.state, StoredEnvironmentState::Stopped);
-        assert!(environment.runner.is_some());
-        assert!(environment.access_binding.is_none());
-        assert!(environment.access_profile.is_none());
-        assert!(core.live_runners.contains_key(&environment_id));
-        assert!(core.children.contains_key(&environment_id));
-        assert!(socket.exists());
-        assert_eq!(useful_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            authority
-                .get_environment_access_binding(&binding.environment_id)
-                .await
-                .unwrap_err()
-                .code(),
-            tonic::Code::NotFound
-        );
-        assert!(LiveProcess::recover(&process_identity).is_ok());
-
-        core.terminate_recorded_runner("dev").await.unwrap();
-        core.mark_runner_dead("dev").unwrap();
-        shutdown_tx.send(()).unwrap();
-        runner_server.await.unwrap();
-        drop(authority);
-        authority_server.abort();
-        let _ = authority_server.await;
-    }
-
-    #[tokio::test]
     async fn credential_broker_rpc_quarantines_an_unsafe_runner_before_authority_use() {
         let source = tempfile::tempdir().unwrap();
         let source = fs::canonicalize(source.path()).unwrap();
@@ -11586,7 +12137,7 @@ mod tests {
         let (_parent, mut core) = test_supervisor_core(environment);
         let socket = core.config.runner_socket(environment_id);
         let (socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(1));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(2));
         let (attached_environment_id, process_identity) =
             attach_test_runner_process(&mut core, socket_identity);
         assert_eq!(attached_environment_id, environment_id);
@@ -11659,7 +12210,7 @@ mod tests {
         let (_parent, mut core) = test_supervisor_core(environment);
         let socket = core.config.runner_socket(environment_id);
         let (socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(1));
+            spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(2));
         let recorded_socket = socket_identity.clone();
         let (attached_environment_id, process_identity) =
             attach_test_runner_process(&mut core, socket_identity);
@@ -11847,7 +12398,7 @@ mod tests {
             let (runner_socket_identity, useful_calls, shutdown_tx, runner_server) =
                 spawn_test_runner_protocol_server(
                     &runner_socket,
-                    TestRunnerProtocolReply::Version(1),
+                    TestRunnerProtocolReply::Version(2),
                 );
             let recorded_runner_socket = runner_socket_identity.clone();
             let (attached_environment_id, process_identity) =
@@ -11925,7 +12476,7 @@ mod tests {
         fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let runner_socket = core.config.runner_socket(environment_id);
         let (runner_socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(1));
+            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(2));
         let (attached_environment_id, process_identity) =
             attach_test_runner_process(&mut core, runner_socket_identity);
         assert_eq!(attached_environment_id, environment_id);
@@ -12015,7 +12566,7 @@ mod tests {
         fs::set_permissions(_parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let runner_socket = core.config.runner_socket(environment_id);
         let (runner_socket_identity, useful_calls, shutdown_tx, runner_server) =
-            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(1));
+            spawn_test_runner_protocol_server(&runner_socket, TestRunnerProtocolReply::Version(2));
         let (attached_environment_id, process_identity) =
             attach_test_runner_process(&mut core, runner_socket_identity);
         assert_eq!(attached_environment_id, environment_id);
@@ -12083,7 +12634,7 @@ mod tests {
 
         let unsafe_socket = core.config.runner_socket(unsafe_environment_id);
         let (unsafe_socket_identity, unsafe_calls, unsafe_shutdown, unsafe_server) =
-            spawn_test_runner_protocol_server(&unsafe_socket, TestRunnerProtocolReply::Version(1));
+            spawn_test_runner_protocol_server(&unsafe_socket, TestRunnerProtocolReply::Version(2));
         let (attached_unsafe_id, unsafe_process_identity) =
             attach_named_test_runner_process(&mut core, "z-unsafe", unsafe_socket_identity);
         assert_eq!(attached_unsafe_id, unsafe_environment_id);
@@ -12172,51 +12723,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovering_access_apply_waits_for_the_owner_authority_without_losing_intent() {
-        let environment = project_environment_with_access();
-        let environment_id = environment.id;
-        let expected = environment_access_selection(&environment).unwrap().unwrap();
-        let target = ExactEnvironmentAccess {
-            reference: "user/personal".parse().unwrap(),
-            binding: EnvironmentAccessBinding {
-                environment_id: access_environment_id(environment_id).unwrap(),
-                profile_id: AccessProfileId::parse("profile-personal").unwrap(),
-                profile_revision: 3,
-            },
-        };
-        let (_parent, mut core) = test_supervisor_core(environment);
-        let payload =
-            apply_environment_access_operation_payload("dev", Some(&expected), Some(&target));
-        let operation = core
-            .store
-            .begin_operation(
-                Uuid::new_v4(),
-                Some(environment_id),
-                OperationKind::ApplyEnvironmentAccess,
-                &payload,
-            )
-            .unwrap();
-
-        assert!(matches!(
-            core.replay_pending_operations().await,
-            Err(SupervisorError::CredentialAuthorityUnavailable)
-        ));
-        let pending = core
-            .store
-            .operation_by_request(operation.request_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(pending.phase, OperationPhase::Intent);
-        assert_eq!(pending.checkpoint, 0);
-        assert_eq!(
-            environment_access_selection(core.environment("dev").unwrap())
-                .unwrap()
-                .unwrap(),
-            expected
-        );
-    }
-
-    #[tokio::test]
     async fn recovering_start_waits_for_the_owner_authority_without_losing_intent() {
         let environment = project_environment_with_access();
         let environment_id = environment.id;
@@ -12269,8 +12775,10 @@ mod tests {
             local_mounts: Vec::new(),
             host_ports: Vec::new(),
             mesh: None,
-            access_profile_id: "profile-work".to_owned(),
+            access_profile_id: "11111111-1111-4111-8111-111111111111".to_owned(),
             access_profile_revision: 7,
+            access_profile_reference: "user/work".to_owned(),
+            platform_source_authority: None,
         };
         let payload = create_operation_payload(&request, &workspace_plan).unwrap();
         let (_parent, mut core) = test_supervisor_core(environment);
@@ -12647,7 +13155,7 @@ mod tests {
                 .config
                 .runner_socket(core.environment("dev").unwrap().id);
             let (socket_identity, useful_calls, shutdown_tx, server) =
-                spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(1));
+                spawn_test_runner_protocol_server(&socket, TestRunnerProtocolReply::Version(2));
             let recorded_socket = socket_identity.clone();
             let (environment_id, process_identity) =
                 attach_test_runner_process(&mut core, socket_identity);
@@ -13172,6 +13680,83 @@ mod tests {
         assert!(!artifact_blobs.join(format!("r-{stale_kernel}")).exists());
     }
 
+    #[cfg(feature = "synthetic-oci-input-smoke")]
+    #[tokio::test]
+    async fn synthetic_image_pin_reopens_matches_exactly_and_survives_precreate_collection() {
+        let (_parent, mut core) = test_supervisor_core(project_environment());
+        let engine = PrivateRoot::open(&core.config.engine_root()).unwrap();
+        let image = crate::oci::install_test_synthetic_image_pin(&engine).await;
+        let exact = RegistryReference::parse(&image.source_reference).unwrap();
+        let ordinary =
+            RegistryReference::parse("registry.example/codewire/workspace:latest").unwrap();
+        let same_digest_other_repository = RegistryReference::parse(&format!(
+            "registry.example/other/workspace@{}",
+            image.source.digest
+        ))
+        .unwrap();
+
+        core.admit_synthetic_workspace_image_pin().unwrap();
+        assert_eq!(
+            core.matching_synthetic_workspace_image(&exact).unwrap(),
+            Some(image.clone())
+        );
+        assert_eq!(
+            core.matching_synthetic_workspace_image(&ordinary).unwrap(),
+            None
+        );
+        assert_eq!(
+            core.matching_synthetic_workspace_image(&same_digest_other_repository)
+                .unwrap(),
+            None
+        );
+
+        let content = ContentStore::create(&engine).unwrap();
+        let stale_bytes = bytes::Bytes::from_static(b"stale pre-create content");
+        let stale_digest = test_digest(&stale_bytes);
+        content
+            .admit_bytes(&stale_digest, stale_bytes.clone())
+            .await
+            .unwrap();
+
+        core.collect_unreferenced_content().unwrap();
+
+        for descriptor in [&image.source, &image.manifest, &image.config] {
+            assert!(
+                content
+                    .contains_verified(&descriptor.digest, descriptor.size)
+                    .unwrap()
+            );
+        }
+        for layer in &image.layers {
+            assert!(
+                content
+                    .contains_verified(&layer.descriptor.digest, layer.descriptor.size)
+                    .unwrap()
+            );
+        }
+        assert!(
+            !content
+                .contains_verified(&stale_digest, stale_bytes.len() as u64)
+                .unwrap()
+        );
+        let inventory =
+            orphan_inventory_response(&core.root, &core.state, &BTreeSet::new()).unwrap();
+        assert!(
+            inventory
+                .orphans
+                .iter()
+                .all(|orphan| orphan.kind != "oci_content")
+        );
+
+        // The supervisor keeps no in-memory pin; a second admission and match
+        // exercise the same verified disk reopen used after a process restart.
+        core.admit_synthetic_workspace_image_pin().unwrap();
+        assert_eq!(
+            core.matching_synthetic_workspace_image(&exact).unwrap(),
+            Some(image)
+        );
+    }
+
     #[tokio::test]
     async fn content_collection_retains_bundles_owned_by_pending_creates() {
         let (_parent, mut core) = test_supervisor_core(project_environment());
@@ -13197,6 +13782,7 @@ mod tests {
                 revision: String::new(),
                 branch: "main".to_owned(),
                 destination: "/workspace/app".to_owned(),
+                known_hosts: Vec::new(),
             }],
             working_directory: "/workspace/app".to_owned(),
             resources: codewire_project::ResourceSpec {
@@ -13224,6 +13810,8 @@ mod tests {
             mesh: None,
             access_profile_id: String::new(),
             access_profile_revision: 0,
+            access_profile_reference: String::new(),
+            platform_source_authority: None,
         };
         let workspace_plan = WorkspacePlan {
             schema_version: 1,
@@ -13280,6 +13868,26 @@ mod tests {
     fn create_failure_codes_are_closed_and_discard_opaque_error_details() {
         const CANARY: &str = "synthetic-create-failure-secret-must-not-escape";
         let cases = [
+            (
+                SupervisorError::CredentialAuthorityUnavailable,
+                "create_credential_authority_unavailable",
+            ),
+            (
+                SupervisorError::EnvironmentAccessUnavailable,
+                "create_access_unavailable",
+            ),
+            (
+                SupervisorError::EnvironmentAccessBindingRejected(tonic::Code::NotFound),
+                "create_access_binding_not_found",
+            ),
+            (
+                SupervisorError::EnvironmentAccessBindingRejected(tonic::Code::FailedPrecondition),
+                "create_access_binding_precondition",
+            ),
+            (
+                SupervisorError::EnvironmentAccessBindingRejected(tonic::Code::DataLoss),
+                "create_access_binding_metadata",
+            ),
             (
                 SupervisorError::RegistryResolver(RegistryResolverError::Transport),
                 "create_registry_transport",
@@ -13463,6 +14071,7 @@ mod tests {
             project_spec_sha256: Some(project_spec_sha256),
             access_profile: None,
             access_binding: None,
+            platform_source_authority: None,
             runner: None,
             active_artifact_generation: Some("b".repeat(64)),
             staging_artifact_generation: None,

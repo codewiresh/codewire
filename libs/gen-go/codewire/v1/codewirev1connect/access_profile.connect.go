@@ -51,12 +51,6 @@ const (
 	// AccessProfileServiceGetEnvironmentAccessProfileProcedure is the fully-qualified name of the
 	// AccessProfileService's GetEnvironmentAccessProfile RPC.
 	AccessProfileServiceGetEnvironmentAccessProfileProcedure = "/codewire.v1.AccessProfileService/GetEnvironmentAccessProfile"
-	// AccessProfileServiceSetEnvironmentAccessProfileProcedure is the fully-qualified name of the
-	// AccessProfileService's SetEnvironmentAccessProfile RPC.
-	AccessProfileServiceSetEnvironmentAccessProfileProcedure = "/codewire.v1.AccessProfileService/SetEnvironmentAccessProfile"
-	// AccessProfileServiceClearEnvironmentAccessProfileProcedure is the fully-qualified name of the
-	// AccessProfileService's ClearEnvironmentAccessProfile RPC.
-	AccessProfileServiceClearEnvironmentAccessProfileProcedure = "/codewire.v1.AccessProfileService/ClearEnvironmentAccessProfile"
 )
 
 // AccessProfileServiceClient is a client for the codewire.v1.AccessProfileService service.
@@ -67,8 +61,6 @@ type AccessProfileServiceClient interface {
 	UpdateAccessProfile(context.Context, *connect.Request[v1.UpdateAccessProfileRequest]) (*connect.Response[v1.UpdateAccessProfileResponse], error)
 	DeleteAccessProfile(context.Context, *connect.Request[v1.DeleteAccessProfileRequest]) (*connect.Response[v1.DeleteAccessProfileResponse], error)
 	GetEnvironmentAccessProfile(context.Context, *connect.Request[v1.GetEnvironmentAccessProfileRequest]) (*connect.Response[v1.GetEnvironmentAccessProfileResponse], error)
-	SetEnvironmentAccessProfile(context.Context, *connect.Request[v1.SetEnvironmentAccessProfileRequest]) (*connect.Response[v1.SetEnvironmentAccessProfileResponse], error)
-	ClearEnvironmentAccessProfile(context.Context, *connect.Request[v1.ClearEnvironmentAccessProfileRequest]) (*connect.Response[v1.ClearEnvironmentAccessProfileResponse], error)
 }
 
 // NewAccessProfileServiceClient constructs a client for the codewire.v1.AccessProfileService
@@ -121,31 +113,17 @@ func NewAccessProfileServiceClient(httpClient connect.HTTPClient, baseURL string
 			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
-		setEnvironmentAccessProfile: connect.NewClient[v1.SetEnvironmentAccessProfileRequest, v1.SetEnvironmentAccessProfileResponse](
-			httpClient,
-			baseURL+AccessProfileServiceSetEnvironmentAccessProfileProcedure,
-			connect.WithSchema(accessProfileServiceMethods.ByName("SetEnvironmentAccessProfile")),
-			connect.WithClientOptions(opts...),
-		),
-		clearEnvironmentAccessProfile: connect.NewClient[v1.ClearEnvironmentAccessProfileRequest, v1.ClearEnvironmentAccessProfileResponse](
-			httpClient,
-			baseURL+AccessProfileServiceClearEnvironmentAccessProfileProcedure,
-			connect.WithSchema(accessProfileServiceMethods.ByName("ClearEnvironmentAccessProfile")),
-			connect.WithClientOptions(opts...),
-		),
 	}
 }
 
 // accessProfileServiceClient implements AccessProfileServiceClient.
 type accessProfileServiceClient struct {
-	listAccessProfiles            *connect.Client[v1.ListAccessProfilesRequest, v1.ListAccessProfilesResponse]
-	getAccessProfile              *connect.Client[v1.GetAccessProfileRequest, v1.GetAccessProfileResponse]
-	createAccessProfile           *connect.Client[v1.CreateAccessProfileRequest, v1.CreateAccessProfileResponse]
-	updateAccessProfile           *connect.Client[v1.UpdateAccessProfileRequest, v1.UpdateAccessProfileResponse]
-	deleteAccessProfile           *connect.Client[v1.DeleteAccessProfileRequest, v1.DeleteAccessProfileResponse]
-	getEnvironmentAccessProfile   *connect.Client[v1.GetEnvironmentAccessProfileRequest, v1.GetEnvironmentAccessProfileResponse]
-	setEnvironmentAccessProfile   *connect.Client[v1.SetEnvironmentAccessProfileRequest, v1.SetEnvironmentAccessProfileResponse]
-	clearEnvironmentAccessProfile *connect.Client[v1.ClearEnvironmentAccessProfileRequest, v1.ClearEnvironmentAccessProfileResponse]
+	listAccessProfiles          *connect.Client[v1.ListAccessProfilesRequest, v1.ListAccessProfilesResponse]
+	getAccessProfile            *connect.Client[v1.GetAccessProfileRequest, v1.GetAccessProfileResponse]
+	createAccessProfile         *connect.Client[v1.CreateAccessProfileRequest, v1.CreateAccessProfileResponse]
+	updateAccessProfile         *connect.Client[v1.UpdateAccessProfileRequest, v1.UpdateAccessProfileResponse]
+	deleteAccessProfile         *connect.Client[v1.DeleteAccessProfileRequest, v1.DeleteAccessProfileResponse]
+	getEnvironmentAccessProfile *connect.Client[v1.GetEnvironmentAccessProfileRequest, v1.GetEnvironmentAccessProfileResponse]
 }
 
 // ListAccessProfiles calls codewire.v1.AccessProfileService.ListAccessProfiles.
@@ -178,17 +156,6 @@ func (c *accessProfileServiceClient) GetEnvironmentAccessProfile(ctx context.Con
 	return c.getEnvironmentAccessProfile.CallUnary(ctx, req)
 }
 
-// SetEnvironmentAccessProfile calls codewire.v1.AccessProfileService.SetEnvironmentAccessProfile.
-func (c *accessProfileServiceClient) SetEnvironmentAccessProfile(ctx context.Context, req *connect.Request[v1.SetEnvironmentAccessProfileRequest]) (*connect.Response[v1.SetEnvironmentAccessProfileResponse], error) {
-	return c.setEnvironmentAccessProfile.CallUnary(ctx, req)
-}
-
-// ClearEnvironmentAccessProfile calls
-// codewire.v1.AccessProfileService.ClearEnvironmentAccessProfile.
-func (c *accessProfileServiceClient) ClearEnvironmentAccessProfile(ctx context.Context, req *connect.Request[v1.ClearEnvironmentAccessProfileRequest]) (*connect.Response[v1.ClearEnvironmentAccessProfileResponse], error) {
-	return c.clearEnvironmentAccessProfile.CallUnary(ctx, req)
-}
-
 // AccessProfileServiceHandler is an implementation of the codewire.v1.AccessProfileService service.
 type AccessProfileServiceHandler interface {
 	ListAccessProfiles(context.Context, *connect.Request[v1.ListAccessProfilesRequest]) (*connect.Response[v1.ListAccessProfilesResponse], error)
@@ -197,8 +164,6 @@ type AccessProfileServiceHandler interface {
 	UpdateAccessProfile(context.Context, *connect.Request[v1.UpdateAccessProfileRequest]) (*connect.Response[v1.UpdateAccessProfileResponse], error)
 	DeleteAccessProfile(context.Context, *connect.Request[v1.DeleteAccessProfileRequest]) (*connect.Response[v1.DeleteAccessProfileResponse], error)
 	GetEnvironmentAccessProfile(context.Context, *connect.Request[v1.GetEnvironmentAccessProfileRequest]) (*connect.Response[v1.GetEnvironmentAccessProfileResponse], error)
-	SetEnvironmentAccessProfile(context.Context, *connect.Request[v1.SetEnvironmentAccessProfileRequest]) (*connect.Response[v1.SetEnvironmentAccessProfileResponse], error)
-	ClearEnvironmentAccessProfile(context.Context, *connect.Request[v1.ClearEnvironmentAccessProfileRequest]) (*connect.Response[v1.ClearEnvironmentAccessProfileResponse], error)
 }
 
 // NewAccessProfileServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -247,18 +212,6 @@ func NewAccessProfileServiceHandler(svc AccessProfileServiceHandler, opts ...con
 		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
-	accessProfileServiceSetEnvironmentAccessProfileHandler := connect.NewUnaryHandler(
-		AccessProfileServiceSetEnvironmentAccessProfileProcedure,
-		svc.SetEnvironmentAccessProfile,
-		connect.WithSchema(accessProfileServiceMethods.ByName("SetEnvironmentAccessProfile")),
-		connect.WithHandlerOptions(opts...),
-	)
-	accessProfileServiceClearEnvironmentAccessProfileHandler := connect.NewUnaryHandler(
-		AccessProfileServiceClearEnvironmentAccessProfileProcedure,
-		svc.ClearEnvironmentAccessProfile,
-		connect.WithSchema(accessProfileServiceMethods.ByName("ClearEnvironmentAccessProfile")),
-		connect.WithHandlerOptions(opts...),
-	)
 	return "/codewire.v1.AccessProfileService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AccessProfileServiceListAccessProfilesProcedure:
@@ -273,10 +226,6 @@ func NewAccessProfileServiceHandler(svc AccessProfileServiceHandler, opts ...con
 			accessProfileServiceDeleteAccessProfileHandler.ServeHTTP(w, r)
 		case AccessProfileServiceGetEnvironmentAccessProfileProcedure:
 			accessProfileServiceGetEnvironmentAccessProfileHandler.ServeHTTP(w, r)
-		case AccessProfileServiceSetEnvironmentAccessProfileProcedure:
-			accessProfileServiceSetEnvironmentAccessProfileHandler.ServeHTTP(w, r)
-		case AccessProfileServiceClearEnvironmentAccessProfileProcedure:
-			accessProfileServiceClearEnvironmentAccessProfileHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -308,12 +257,4 @@ func (UnimplementedAccessProfileServiceHandler) DeleteAccessProfile(context.Cont
 
 func (UnimplementedAccessProfileServiceHandler) GetEnvironmentAccessProfile(context.Context, *connect.Request[v1.GetEnvironmentAccessProfileRequest]) (*connect.Response[v1.GetEnvironmentAccessProfileResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.AccessProfileService.GetEnvironmentAccessProfile is not implemented"))
-}
-
-func (UnimplementedAccessProfileServiceHandler) SetEnvironmentAccessProfile(context.Context, *connect.Request[v1.SetEnvironmentAccessProfileRequest]) (*connect.Response[v1.SetEnvironmentAccessProfileResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.AccessProfileService.SetEnvironmentAccessProfile is not implemented"))
-}
-
-func (UnimplementedAccessProfileServiceHandler) ClearEnvironmentAccessProfile(context.Context, *connect.Request[v1.ClearEnvironmentAccessProfileRequest]) (*connect.Response[v1.ClearEnvironmentAccessProfileResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.AccessProfileService.ClearEnvironmentAccessProfile is not implemented"))
 }

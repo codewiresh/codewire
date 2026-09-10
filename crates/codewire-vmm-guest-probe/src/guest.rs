@@ -2,7 +2,7 @@ use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixDatagram, UnixStream};
@@ -62,6 +62,10 @@ use crate::{
     SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan,
 };
 
+mod bootstrap;
+use bootstrap::{BootstrapChild, BootstrapParent};
+use codewire_daemon::execution::BootstrapPhase;
+
 pub const INIT_PATH: &str = "/init";
 pub const STATE_MOUNT_PATH: &str = "/state";
 pub const ROOT_MOUNT_PATH: &str = "/generation";
@@ -97,6 +101,8 @@ const ROOT_MERGED_PATH: &str = "/generation/merged";
 const CONTAINER_CONTROL_PATH: &str = "/run/codewire/container";
 const CONTAINER_IDENTITY_PATH: &str = "/run/codewire/container/identity.json";
 const CONTAINER_MACHINE_ID_PATH: &str = "/run/codewire/container/machine-id";
+const CONTAINER_HOSTNAME: &str = "codewire";
+const CONTAINER_HOSTS_PATH: &str = "/run/codewire/container/hosts";
 const CONTAINER_RESOLV_CONF_PATH: &str = "/run/codewire/container/resolv.conf";
 const CONTAINER_POWEROFF_SOCKET: &str = "/run/codewire/container/poweroff.sock";
 const DOCKER_DATA_PATH: &str = "/var/lib/docker";
@@ -113,10 +119,13 @@ const CREDENTIAL_INGRESS_SOCKET: &str = "/run/codewire/container/credential.sock
 const CONTAINER_CONTROL_DESTINATION: &str = "/run/codewire-host";
 const CONTAINER_IDENTITY_DESTINATION: &str = "/run/codewire-host/identity.json";
 const CONTAINER_MACHINE_ID_DESTINATION: &str = "/etc/machine-id";
+const CONTAINER_HOSTS_DESTINATION: &str = "/etc/hosts";
 const CONTAINER_RESOLV_CONF_DESTINATION: &str = "/etc/resolv.conf";
 const CONTAINER_POWEROFF_DESTINATION: &str = "/run/codewire-host/poweroff.sock";
 const CONTAINER_CREDENTIAL_SOCKET: &str = "/run/codewire-host/credential.sock";
-const INSTALL_STATE_PATH: &str = "/state/codewire/workspace-install.state";
+// Completion belongs to the extant root, not the shared workspace/home disk.
+// Rebuilding a lost root must install again; an intact rollback root must not.
+const INSTALL_STATE_PATH: &str = "/generation/install.state";
 const CONTAINER_INSTALL_STATE_PATH: &str = "/run/codewire-runtime/install.state";
 const PERSISTENT_PROBE_PATH: &str = "/state/probe";
 const CONTAINER_PROBE_DESTINATION: &str = "/run/codewire-probe";
@@ -211,6 +220,10 @@ const WORKSPACE_FAILURE_FRAMES: &[(&[u8], &str)] = &[
     (
         b"CWFAIL1 workspace-workload-failed\n",
         "workspace-workload-failed",
+    ),
+    (
+        b"CWFAIL1 workspace-startup-failed\n",
+        "workspace-startup-failed",
     ),
     (
         b"CWFAIL1 workspace-credential-forwarder-failed\n",
@@ -376,11 +389,14 @@ pub fn run_init() -> Result<()> {
     } else {
         require_persisted_workspace_plan(load_workspace_plan()?)?
     };
+    let plan = plan
+        .with_managed_credential_clients(seed.managed_credential_clients())
+        .context("apply this boot's selected client configuration")?;
     create_dir(Path::new("/run/codewire"), 0o700)?;
     persist_active_workspace_plan(&plan)?;
     record_boot_stage("workspace-plan-ready")?;
     normalize_initial_persistent_ownership(&plan)?;
-    prepare_codex_projection(&plan)?;
+    prepare_codex_projection(&plan, seed.managed_credential_clients())?;
     record_boot_stage("ownership-ready")?;
     prepare_install_state()?;
     let poweroff = prepare_container_control(&seed, &plan.identity)?;
@@ -423,20 +439,31 @@ pub fn run_init() -> Result<()> {
     } else {
         None
     };
-    let workspace = spawn_workspace_container(&plan)?;
+    // The broker transport must exist before install/image/startup can ask the
+    // final child launcher for a projection. Terminal progress remains after
+    // all of that startup and the durable install acknowledgement.
+    let mut daemon = DaemonStartGuard(Some(spawn_daemon()?));
+    let workspace = spawn_workspace_container(
+        &plan,
+        seed.environment_projection_sha256().is_some(),
+        daemon.0.as_mut().expect("daemon start child is present"),
+    )?;
     record_boot_stage("workspace-running")?;
 
-    let daemon = spawn_daemon()?;
     record_boot_stage("daemon-started")?;
+    let daemon = daemon.0.take().expect("daemon start child is present");
     supervise_guest(daemon, workspace, network.into_child()?, docker, poweroff)
 }
 
 fn require_persisted_workspace_plan(plan: Option<WorkspacePlan>) -> Result<WorkspacePlan> {
-    plan.ok_or_else(|| {
+    let plan = plan.ok_or_else(|| {
         anyhow::anyhow!(
             "guest boot has neither an OCI setup binding nor an exact persisted workspace plan"
         )
-    })
+    })?;
+    plan.require_ordinary()
+        .context("persisted workspace plan must not contain active client state")?;
+    Ok(plan)
 }
 
 pub async fn run_daemon() -> Result<()> {
@@ -462,6 +489,7 @@ pub async fn run_daemon() -> Result<()> {
         home_root: PathBuf::from(&plan.identity.home),
         auth_token: codewire_daemon::DaemonAuthToken::new(seed.auth_token())
             .context("validate guest daemon auth token")?,
+        managed_credential_clients: seed.managed_credential_clients(),
         process_execution: codewire_daemon::execution::ProcessExecution::Runc(
             codewire_daemon::execution::RuncExecution {
                 helper_path: PathBuf::from(INIT_PATH),
@@ -475,7 +503,14 @@ pub async fn run_daemon() -> Result<()> {
                 additional_gids: plan.identity.additional_gids.clone(),
             },
         ),
+        launch_projection: seed.environment_projection_sha256().map(|selection| {
+            codewire_daemon::LaunchProjectionConfig {
+                selection_sha256: selection.as_bytes(),
+                native: None,
+            }
+        }),
         credential_bridge: Some(codewire_daemon::CredentialBridgeConfig {
+            transport: codewire_daemon::CredentialBridgeTransport::Local,
             environment_id: seed.vm_id(),
             environment_generation: seed.generation(),
             ingress_socket: PathBuf::from(CREDENTIAL_INGRESS_SOCKET),
@@ -1249,6 +1284,33 @@ pub fn run_runc_exec(container_id: &OsStr, process_spec: &Path) -> Result<()> {
     );
     fs::remove_file(process_spec).context("unlink private runc process specification")?;
 
+    // Keep the process JSON away from FD 3, the sole descriptor preserved
+    // into a projected workspace-exec. Open the rendezvous only here, after
+    // portable-pty has performed its close-fds pre-exec cleanup.
+    let duplicate = unsafe { libc::fcntl(process.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 4) };
+    ensure!(duplicate >= 4, "duplicate runc process descriptor");
+    let process = {
+        drop(process);
+        unsafe { File::from_raw_fd(duplicate) }
+    };
+    let socket_path = process_spec.with_extension("sock");
+    let projection_channel = match fs::symlink_metadata(&socket_path) {
+        Ok(_) => Some(
+            codewire_workload_secrets::launcher::connect_to_parent(&socket_path)
+                .context("connect private environment launcher")?,
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("inspect private environment launcher"),
+    };
+    if let Some(channel) = &projection_channel {
+        let source = channel.as_raw_fd();
+        if source != 3 && unsafe { libc::dup2(source, 3) } == -1 {
+            return Err(io::Error::last_os_error()).context("inherit environment launcher channel");
+        }
+        if unsafe { libc::fcntl(3, libc::F_SETFD, 0) } == -1 {
+            return Err(io::Error::last_os_error()).context("inherit environment launcher channel");
+        }
+    }
     let descriptor = process.as_raw_fd();
     ensure!(
         descriptor > libc::STDERR_FILENO,
@@ -1258,15 +1320,18 @@ pub fn run_runc_exec(container_id: &OsStr, process_spec: &Path) -> Result<()> {
         return Err(io::Error::last_os_error()).context("inherit runc process descriptor");
     }
     let descriptor_path = format!("/proc/self/fd/{descriptor}");
-    let arguments = [
+    let mut arguments = vec![
         RUNC_PATH,
         "--root",
         RUNC_STATE_PATH,
         "exec",
         "--process",
         descriptor_path.as_str(),
-        WORKSPACE_CONTAINER_ID,
     ];
+    if projection_channel.is_some() {
+        arguments.extend(["--preserve-fds", "1"]);
+    }
+    arguments.push(WORKSPACE_CONTAINER_ID);
     let arguments = arguments
         .iter()
         .map(|argument| CString::new(*argument).context("runc argument contains NUL"))
@@ -1347,40 +1412,56 @@ pub fn run_workspace_init() -> Result<()> {
     }
     POWEROFF_REQUESTED.store(false, Ordering::Release);
 
-    if let Err(error) = run_workspace_install(&plan) {
-        return fail_workspace_init("workspace-install-failed", error);
-    }
+    let deadline = Instant::now() + WORKSPACE_START_TIMEOUT;
+    let bootstrap = match BootstrapChild::receive(deadline) {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => return fail_workspace_init("workspace-confinement-failed", error),
+    };
+    ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
     let mut credential_forwarder = match spawn_credential_forwarder(&plan) {
         Ok(forwarder) => forwarder,
         Err(error) => return fail_workspace_init("workspace-credential-forwarder-failed", error),
     };
+    if let Err(error) = run_workspace_install(&plan, deadline, &bootstrap)
+        .and_then(|()| acknowledge_workspace_install(&plan, deadline))
+    {
+        return fail_workspace_init("workspace-install-failed", error);
+    }
     if !plan.workload_args.is_empty() {
-        let _workload = match spawn_workspace_process(
-            &plan,
-            &plan.workload_args,
-            &plan.workload_cwd,
-            "start image workload",
-        ) {
-            Ok(workload) => workload,
-            Err(error) => return fail_workspace_init("workspace-workload-failed", error),
-        };
+        ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
+        let _workload =
+            match bootstrap
+                .channel(BootstrapPhase::Image, deadline)
+                .and_then(|channel| {
+                    spawn_workspace_process_with_projection(
+                        &plan,
+                        &plan.workload_args,
+                        &plan.workload_cwd,
+                        "start image workload",
+                        channel,
+                        deadline,
+                    )
+                }) {
+                Ok(workload) => workload,
+                Err(error) => return fail_workspace_init("workspace-workload-failed", error),
+            };
     }
-    if !plan.startup_script.is_empty() {
-        let arguments = vec![
-            plan.identity.shell.clone(),
-            "-lc".to_owned(),
-            plan.startup_script.clone(),
-        ];
-        if let Err(error) = spawn_workspace_process(
-            &plan,
-            &arguments,
-            &plan.session_cwd,
-            "start workspace startup script",
-        ) {
-            eprintln!("workspace startup script warning: {error:#}");
-        }
-    }
+    // Startup runs in the background once per actual container boot, not per
+    // daemon session or supervisor adoption. Spawn success is not application
+    // readiness, and this PID 1 does not restart an exited application.
+    ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
+    let _startup = match start_workspace_script(&plan, |plan, arguments, directory, action| {
+        let channel = bootstrap.channel(BootstrapPhase::Startup, deadline)?;
+        spawn_workspace_process_with_projection(
+            plan, arguments, directory, action, channel, deadline,
+        )
+    }) {
+        Ok(startup) => startup,
+        Err(error) => return fail_workspace_init("workspace-startup-failed", error),
+    };
+    ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
     publish_workspace_readiness(&plan)?;
+    drop(bootstrap);
 
     loop {
         if POWEROFF_REQUESTED.load(Ordering::Acquire) {
@@ -1690,7 +1771,11 @@ fn read_container_workspace_plan() -> Result<WorkspacePlan> {
     );
     let bytes = read_bounded(Path::new(CONTAINER_PLAN_PATH), MAX_PLAN_BYTES + 1)
         .context("read container workspace execution plan")?;
-    WorkspacePlan::decode(&bytes).context("validate container workspace execution plan")
+    let plan =
+        WorkspacePlan::decode(&bytes).context("validate container workspace execution plan")?;
+    plan.require_active()
+        .context("container workspace execution plan must bind installation intent")?;
+    Ok(plan)
 }
 
 fn fail_workspace_init<T>(stage: &'static str, error: anyhow::Error) -> Result<T> {
@@ -1714,33 +1799,15 @@ fn publish_workspace_failure(stage: &'static str) -> Result<()> {
     stream.flush().context("flush trusted workspace failure")
 }
 
-fn run_workspace_install(plan: &WorkspacePlan) -> Result<()> {
-    if plan.install_command.is_empty() {
-        return Ok(());
-    }
-    let expected = install_completion(plan)?;
-    let metadata = fs::symlink_metadata(CONTAINER_INSTALL_STATE_PATH)
-        .context("inspect trusted workspace install state")?;
-    ensure!(
-        metadata.file_type().is_file()
-            && metadata.uid() == 0
-            && metadata.gid() == 0
-            && metadata.permissions().mode() & 0o777 == 0o400
-            && metadata.nlink() == 1
-            && metadata.len() > 0
-            && metadata.len() <= WORKSPACE_READY_LIMIT as u64,
-        "trusted workspace install state is invalid"
-    );
-    let actual = read_bounded(
-        Path::new(CONTAINER_INSTALL_STATE_PATH),
-        WORKSPACE_READY_LIMIT + 1,
-    )
-    .context("read trusted workspace install state")?;
-    ensure!(
-        valid_install_state(&actual),
-        "trusted workspace install state is invalid"
-    );
-    if actual == expected {
+fn run_workspace_install(
+    plan: &WorkspacePlan,
+    deadline: Instant,
+    bootstrap: &BootstrapChild,
+) -> Result<()> {
+    ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
+    if !workspace_install_required(Path::new(CONTAINER_INSTALL_STATE_PATH), plan)?
+        || plan.install_command.is_empty()
+    {
         return Ok(());
     }
 
@@ -1749,22 +1816,110 @@ fn run_workspace_install(plan: &WorkspacePlan) -> Result<()> {
         "-lc".to_owned(),
         plan.install_command.clone(),
     ];
-    let mut child = spawn_workspace_process(
+    let channel = bootstrap.channel(BootstrapPhase::Install, deadline)?;
+    let child = spawn_workspace_process_with_projection(
         plan,
         &arguments,
         &plan.session_cwd,
         "start workspace install command",
+        channel,
+        deadline,
     )?;
-    let status = child.wait().context("wait for workspace install command")?;
-    ensure!(status.success(), "workspace install command failed");
+    wait_workspace_install(child, deadline, &POWEROFF_REQUESTED)
+}
+
+fn ensure_workspace_start_active(deadline: Instant, canceled: &AtomicBool) -> Result<()> {
+    ensure!(
+        !canceled.load(Ordering::Acquire),
+        "workspace startup was canceled"
+    );
+    ensure!(Instant::now() < deadline, "workspace startup timed out");
     Ok(())
 }
 
-fn spawn_workspace_process(
+fn wait_workspace_install(
+    mut child: std::process::Child,
+    deadline: Instant,
+    canceled: &AtomicBool,
+) -> Result<()> {
+    let result = (|| {
+        loop {
+            ensure_workspace_start_active(deadline, canceled)?;
+            if let Some(status) = child
+                .try_wait()
+                .context("observe workspace install command")?
+            {
+                ensure_workspace_start_active(deadline, canceled)?;
+                ensure!(status.success(), "workspace install command failed");
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    })();
+    // The shell and ordinary descendants use their own process group. On any
+    // failure, kill that exact group and reap the shell within the existing
+    // stop bound. An unkillable task fails container startup; the outer guard
+    // then tears down the entire runc/PID namespace rather than reporting Ready.
+    if result.is_err() {
+        stop_workspace_install(&mut child)?;
+    }
+    result
+}
+
+fn stop_workspace_install(child: &mut std::process::Child) -> Result<()> {
+    let pid = libc::pid_t::try_from(child.id()).context("workspace install PID is invalid")?;
+    ensure!(pid > 1, "workspace install PID is invalid");
+    let killed = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if killed == -1 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+        return Err(io::Error::last_os_error()).context("stop workspace install process group");
+    }
+    let deadline = Instant::now() + WORKSPACE_STOP_TIMEOUT;
+    loop {
+        if child
+            .try_wait()
+            .context("reap workspace install command")?
+            .is_some()
+        {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "workspace install cleanup timed out"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn start_workspace_script<T>(
+    plan: &WorkspacePlan,
+    spawn: impl FnOnce(&WorkspacePlan, &[String], &str, &'static str) -> Result<T>,
+) -> Result<Option<T>> {
+    if plan.startup_script.is_empty() {
+        return Ok(None);
+    }
+    let arguments = vec![
+        plan.identity.shell.clone(),
+        "-lc".to_owned(),
+        plan.startup_script.clone(),
+    ];
+    spawn(
+        plan,
+        &arguments,
+        &plan.session_cwd,
+        "start workspace startup script",
+    )
+    .map(Some)
+}
+
+/// Bootstrap owner supplies an already-authorized private channel, not values.
+/// The final workspace-exec (after identity/capability drop) owns the recipient.
+fn spawn_workspace_process_with_projection(
     plan: &WorkspacePlan,
     arguments: &[String],
     working_directory: &str,
     action: &'static str,
+    projection_channel: Option<UnixStream>,
+    deadline: Instant,
 ) -> Result<std::process::Child> {
     let (program, remaining) = arguments
         .split_first()
@@ -1775,10 +1930,36 @@ fn spawn_workspace_process(
     );
     let working_directory = CString::new(working_directory.as_bytes())
         .context("workspace process directory contains NUL")?;
-    let mut command = Command::new(program);
+    let status = projection_channel
+        .as_ref()
+        .map(|_| UnixStream::pair())
+        .transpose()?;
+    // Keep source descriptors above both fixed destinations, independent of
+    // allocation order and of std::process's own exec-error descriptor.
+    let projection_descriptor = projection_channel
+        .as_ref()
+        .map(|channel| rustix::io::fcntl_dupfd_cloexec(channel, 5))
+        .transpose()?;
+    let status_descriptor = status
+        .as_ref()
+        .map(|(_, writer)| rustix::io::fcntl_dupfd_cloexec(writer, 5))
+        .transpose()?;
+    let mut command = if projection_channel.is_some() {
+        let mut command = Command::new(CONTAINER_INIT_PATH);
+        command.args([
+            "workspace-exec",
+            "--projection-fd=3",
+            "--projection-status-fd=4",
+        ]);
+        command.arg(program);
+        command
+    } else {
+        Command::new(program)
+    };
     command
         .args(remaining)
         .env_clear()
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1796,8 +1977,21 @@ fn spawn_workspace_process(
         .iter()
         .map(|gid| *gid as libc::gid_t)
         .collect::<Vec<_>>();
+    let projection_fd = projection_descriptor.as_ref().map(AsRawFd::as_raw_fd);
+    let status_fd = status_descriptor.as_ref().map(AsRawFd::as_raw_fd);
     unsafe {
         command.pre_exec(move || {
+            if let Some(descriptor) = projection_fd
+                && ((descriptor != 3 && libc::dup2(descriptor, 3) == -1)
+                    || libc::fcntl(3, libc::F_SETFD, 0) == -1)
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if let Some(descriptor) = status_fd
+                && (libc::dup2(descriptor, 4) == -1 || libc::fcntl(4, libc::F_SETFD, 0) == -1)
+            {
+                return Err(io::Error::last_os_error());
+            }
             if libc::setgroups(additional_gids.len(), additional_gids.as_ptr()) == -1
                 || libc::setgid(gid as libc::gid_t) == -1
                 || libc::setuid(uid as libc::uid_t) == -1
@@ -1816,7 +2010,15 @@ fn spawn_workspace_process(
             Ok(())
         });
     }
-    command.spawn().with_context(|| action)
+    let mut child = command.spawn().with_context(|| action)?;
+    drop(projection_channel);
+    drop(projection_descriptor);
+    drop(status_descriptor);
+    if let Some((status, writer)) = status {
+        drop(writer);
+        bootstrap::wait_exec_status(&mut child, status, deadline)?;
+    }
+    Ok(child)
 }
 
 fn spawn_credential_forwarder(plan: &WorkspacePlan) -> Result<std::process::Child> {
@@ -1988,12 +2190,10 @@ fn clear_process_capabilities() -> io::Result<()> {
 }
 
 fn install_completion(plan: &WorkspacePlan) -> Result<Vec<u8>> {
-    let bytes = plan.encode().context("encode workspace install identity")?;
-    Ok(format!(
-        "codewire-workspace-install-v1 {}\n",
-        Sha256Value::calculate(&bytes)
-    )
-    .into_bytes())
+    let identity = plan
+        .installation_identity()
+        .context("validate workspace install identity")?;
+    Ok(format!("codewire-workspace-install-v1 {}\n", identity).into_bytes())
 }
 
 fn valid_install_state(bytes: &[u8]) -> bool {
@@ -2017,6 +2217,54 @@ fn workspace_ready_message(plan: &WorkspacePlan) -> Result<Vec<u8>> {
         .encode()
         .context("encode workspace readiness identity")?;
     Ok(format!("CWREADY1 {}\n", Sha256Value::calculate(&bytes)).into_bytes())
+}
+
+fn workspace_install_acknowledgement(plan: &WorkspacePlan) -> Result<Vec<u8>> {
+    Ok(format!("CWINSTALLED1 {}\n", Sha256Value::calculate(&plan.encode()?)).into_bytes())
+}
+
+fn acknowledge_workspace_install(plan: &WorkspacePlan, deadline: Instant) -> Result<()> {
+    // Keep the original private descriptor for final Ready/failure. The clone
+    // is close-on-exec too; no image command may participate in this handshake.
+    let descriptor = unsafe { BorrowedFd::borrow_raw(WORKSPACE_READY_FD) }
+        .try_clone_to_owned()
+        .context("borrow trusted workspace readiness channel")?;
+    let mut stream = UnixStream::from(descriptor);
+    let stat = rustix::fs::fstat(&stream).context("inspect workspace readiness descriptor")?;
+    ensure!(
+        RustixFileType::from_raw_mode(stat.st_mode) == RustixFileType::Socket,
+        "workspace readiness descriptor is not a socket"
+    );
+    exchange_workspace_install_acknowledgement(&mut stream, plan, deadline, &POWEROFF_REQUESTED)
+}
+
+fn exchange_workspace_install_acknowledgement(
+    stream: &mut UnixStream,
+    plan: &WorkspacePlan,
+    deadline: Instant,
+    canceled: &AtomicBool,
+) -> Result<()> {
+    ensure_workspace_start_active(deadline, canceled)?;
+    stream
+        .set_nonblocking(true)
+        .context("bound workspace install acknowledgement channel")?;
+    stream
+        .write_all(&install_completion(plan)?)
+        .context("publish trusted workspace install completion")?;
+    let expected = workspace_install_acknowledgement(plan)?;
+    let mut received = Vec::with_capacity(expected.len());
+    loop {
+        ensure_workspace_start_active(deadline, canceled)?;
+        match advance_workspace_readiness(stream, &expected, &mut received)? {
+            WorkspaceReadiness::Pending => thread::sleep(Duration::from_millis(20)),
+            WorkspaceReadiness::Ready => {
+                return ensure_workspace_start_active(deadline, canceled);
+            }
+            WorkspaceReadiness::Failed(_) => {
+                bail!("trusted workspace install was not acknowledged")
+            }
+        }
+    }
 }
 
 fn confine_workspace_readiness_descriptor() -> Result<()> {
@@ -2058,12 +2306,28 @@ pub fn run_workspace_exec(command: Vec<OsString>) -> Result<()> {
         unsafe { libc::getpid() } != 1,
         "workspace exec trampoline must not be container PID 1"
     );
+    let projected = command
+        .first()
+        .is_some_and(|argument| argument == "--projection-fd=3");
+    let command = if projected {
+        &command[1..]
+    } else {
+        &command[..]
+    };
+    let has_status = projected
+        && command
+            .first()
+            .is_some_and(|argument| argument == "--projection-status-fd=4");
+    let command = if has_status { &command[1..] } else { command };
     ensure!(
         !command.is_empty() && !command[0].is_empty(),
         "workspace exec command is empty"
     );
     let parent = unsafe { libc::getppid() };
-    ensure!(parent != 1, "workspace exec lost its runc parent");
+    ensure!(
+        projected || parent != 1,
+        "workspace exec lost its runc parent"
+    );
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1 {
         return Err(io::Error::last_os_error()).context("bind workspace exec to its runc parent");
     }
@@ -2071,6 +2335,29 @@ pub fn run_workspace_exec(command: Vec<OsString>) -> Result<()> {
         unsafe { libc::getppid() } == parent,
         "workspace exec runc parent changed during admission"
     );
+
+    if projected {
+        ensure!(
+            unsafe { libc::fcntl(3, libc::F_GETFD) } >= 0,
+            "environment launcher channel is absent"
+        );
+        // Consume the sole inherited private channel; shared framing closes it
+        // before the target command inherits its intended application values.
+        let channel = unsafe { UnixStream::from_raw_fd(3) };
+        if has_status {
+            ensure!(
+                unsafe { libc::fcntl(4, libc::F_GETFD) } >= 0,
+                "environment launcher status channel is absent"
+            );
+            let status = unsafe { UnixStream::from_raw_fd(4) };
+            return codewire_workload_secrets::launcher::exec_from_channel_with_status(
+                channel, command, status,
+            )
+            .context("execute projected bootstrap process");
+        }
+        return codewire_workload_secrets::launcher::exec_from_channel(channel, command)
+            .context("execute projected workspace process");
+    }
 
     let arguments = command
         .iter()
@@ -2241,15 +2528,25 @@ fn verify_setup_header(
 }
 
 fn persist_workspace_plan(plan: &WorkspacePlan) -> Result<()> {
+    persist_workspace_plan_at(Path::new(WORKSPACE_PLAN_PATH), plan)
+}
+
+fn persist_workspace_plan_at(path: &Path, plan: &WorkspacePlan) -> Result<()> {
+    plan.require_ordinary()
+        .context("persist only the ordinary workspace plan")?;
     let bytes = plan.encode().context("encode sealed workspace plan")?;
-    ensure_exact_bytes(Path::new(WORKSPACE_PLAN_PATH), &bytes, 0o400)
-        .context("publish sealed workspace plan")
+    ensure_exact_bytes(path, &bytes, 0o400).context("publish sealed workspace plan")
 }
 
 fn persist_active_workspace_plan(plan: &WorkspacePlan) -> Result<()> {
+    persist_active_workspace_plan_at(Path::new(ACTIVE_WORKSPACE_PLAN_PATH), plan)
+}
+
+fn persist_active_workspace_plan_at(path: &Path, plan: &WorkspacePlan) -> Result<()> {
+    plan.require_active()
+        .context("active workspace plan must bind installation intent")?;
     let bytes = Zeroizing::new(plan.encode().context("encode active workspace plan")?);
-    ensure_exact_bytes(Path::new(ACTIVE_WORKSPACE_PLAN_PATH), &bytes, 0o400)
-        .context("publish active workspace plan")
+    ensure_exact_bytes(path, &bytes, 0o400).context("publish active workspace plan")
 }
 
 fn load_active_workspace_plan() -> Result<WorkspacePlan> {
@@ -2269,7 +2566,10 @@ fn load_active_workspace_plan() -> Result<WorkspacePlan> {
         read_bounded(Path::new(ACTIVE_WORKSPACE_PLAN_PATH), MAX_PLAN_BYTES + 1)
             .context("read active workspace plan")?,
     );
-    WorkspacePlan::decode(&bytes).context("validate active workspace plan")
+    let plan = WorkspacePlan::decode(&bytes).context("validate active workspace plan")?;
+    plan.require_active()
+        .context("active workspace plan must bind installation intent")?;
+    Ok(plan)
 }
 
 fn load_workspace_plan() -> Result<Option<WorkspacePlan>> {
@@ -2290,9 +2590,8 @@ fn load_workspace_plan() -> Result<Option<WorkspacePlan>> {
     );
     let bytes = read_bounded(Path::new(WORKSPACE_PLAN_PATH), MAX_PLAN_BYTES + 1)
         .context("read sealed workspace plan")?;
-    WorkspacePlan::decode(&bytes)
-        .map(Some)
-        .context("validate sealed workspace plan")
+    let plan = WorkspacePlan::decode(&bytes).context("validate sealed workspace plan")?;
+    require_persisted_workspace_plan(Some(plan)).map(Some)
 }
 
 fn mount_direct_shares(seed: &Seed) -> Result<()> {
@@ -2999,27 +3298,54 @@ fn create_state_layout() -> Result<()> {
 }
 
 fn prepare_install_state() -> Result<()> {
-    let path = Path::new(INSTALL_STATE_PATH);
+    prepare_install_state_at(Path::new(INSTALL_STATE_PATH))
+}
+
+fn read_install_state(path: &Path) -> Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .context("open trusted workspace install state")?;
+    let metadata = file
+        .metadata()
+        .context("inspect trusted workspace install state")?;
+    ensure!(
+        metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.gid() == unsafe { libc::getegid() }
+            && metadata.permissions().mode() & 0o777 == 0o400
+            && metadata.nlink() == 1
+            && metadata.len() > 0
+            && metadata.len() <= WORKSPACE_READY_LIMIT as u64,
+        "trusted workspace install state is invalid"
+    );
+    let mut state = Vec::with_capacity(WORKSPACE_READY_LIMIT);
+    file.take((WORKSPACE_READY_LIMIT + 1) as u64)
+        .read_to_end(&mut state)
+        .context("read trusted workspace install state")?;
+    ensure!(
+        valid_install_state(&state),
+        "trusted workspace install state is invalid"
+    );
+    Ok(state)
+}
+
+fn workspace_install_required(path: &Path, plan: &WorkspacePlan) -> Result<bool> {
+    let actual = read_install_state(path)?;
+    if actual == install_completion(plan)? {
+        return Ok(false);
+    }
+    ensure!(
+        actual == PENDING_INSTALL_STATE,
+        "workspace install state does not match its generation plan"
+    );
+    Ok(true)
+}
+
+fn prepare_install_state_at(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            ensure!(
-                metadata.file_type().is_file()
-                    && metadata.uid() == unsafe { libc::geteuid() }
-                    && metadata.gid() == unsafe { libc::getegid() }
-                    && metadata.permissions().mode() & 0o777 == 0o400
-                    && metadata.nlink() == 1
-                    && metadata.len() > 0
-                    && metadata.len() <= WORKSPACE_READY_LIMIT as u64,
-                "trusted workspace install state is invalid"
-            );
-            let state = read_bounded(path, WORKSPACE_READY_LIMIT + 1)
-                .context("read trusted workspace install state")?;
-            ensure!(
-                valid_install_state(&state),
-                "trusted workspace install state is invalid"
-            );
-            Ok(())
-        }
+        Ok(_) => read_install_state(path).map(|_| ()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             write_durable(path, PENDING_INSTALL_STATE, 0o400)
                 .context("initialize trusted workspace install state")
@@ -3028,19 +3354,52 @@ fn prepare_install_state() -> Result<()> {
     }
 }
 
-fn publish_install_completion(plan: &WorkspacePlan) -> Result<()> {
+fn publish_install_completion_at(path: &Path, plan: &WorkspacePlan) -> Result<()> {
     let expected = install_completion(plan)?;
-    let actual = read_bounded(Path::new(INSTALL_STATE_PATH), WORKSPACE_READY_LIMIT + 1)
-        .context("read trusted workspace install state before promotion")?;
-    if actual == expected {
+    if !workspace_install_required(path, plan)? {
         return Ok(());
     }
-    ensure!(
-        valid_install_state(&actual),
-        "trusted workspace install state is invalid"
-    );
-    write_durable(Path::new(INSTALL_STATE_PATH), &expected, 0o400)
-        .context("publish trusted workspace install completion")
+    // This returns only after the marker AND parent directory are synced. A
+    // lost acknowledgement can safely rediscover this exact plan on reboot.
+    // Failure before the durable write may repeat install side effects; this
+    // is not an exactly-once or rollback promise for workspace/home contents.
+    write_durable(path, &expected, 0o400).context("publish trusted workspace install completion")
+}
+
+fn sync_install_filesystem(path: &Path) -> Result<()> {
+    let filesystem = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .context("open workspace install filesystem for sync")?;
+    if unsafe { libc::syncfs(filesystem.as_raw_fd()) } == -1 {
+        return Err(io::Error::last_os_error()).context("sync workspace install filesystem");
+    }
+    Ok(())
+}
+
+fn complete_workspace_install(
+    marker: &Path,
+    plan: &WorkspacePlan,
+    deadline: Instant,
+    canceled: &AtomicBool,
+    mut sync_filesystem: impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    ensure_workspace_start_active(deadline, canceled)?;
+    if workspace_install_required(marker, plan)? {
+        // Order completed foreground installation writes on the owned root
+        // and workspace/home filesystems before the success marker. This does
+        // not promise durability for external services, direct shares, Docker,
+        // or background writers the installer leaves running. syncfs can wait
+        // in the kernel; a late return never receives a success acknowledgement.
+        for filesystem in [ROOT_MOUNT_PATH, STATE_MOUNT_PATH] {
+            ensure_workspace_start_active(deadline, canceled)?;
+            sync_filesystem(Path::new(filesystem))?;
+        }
+        ensure_workspace_start_active(deadline, canceled)?;
+        publish_install_completion_at(marker, plan)?;
+    }
+    ensure_workspace_start_active(deadline, canceled)
 }
 
 /// Convergently translate the shared workspace/home owner when a generation
@@ -3147,11 +3506,18 @@ fn valid_workspace_owner_marker(bytes: &[u8]) -> bool {
     canonical_id(uid) && canonical_id(gid)
 }
 
-fn prepare_codex_projection(plan: &WorkspacePlan) -> Result<()> {
-    prepare_codex_projection_at(Path::new(PERSISTENT_CODEX_HOME_PATH), plan)
+fn prepare_codex_projection(
+    plan: &WorkspacePlan,
+    clients: codewire_access::ManagedCredentialClients,
+) -> Result<()> {
+    prepare_codex_projection_at(Path::new(PERSISTENT_CODEX_HOME_PATH), plan, clients)
 }
 
-fn prepare_codex_projection_at(root: &Path, plan: &WorkspacePlan) -> Result<()> {
+fn prepare_codex_projection_at(
+    root: &Path,
+    plan: &WorkspacePlan,
+    clients: codewire_access::ManagedCredentialClients,
+) -> Result<()> {
     let metadata = fs::symlink_metadata(root).context("inspect persistent Codex home")?;
     ensure!(
         metadata.file_type().is_dir()
@@ -3160,11 +3526,20 @@ fn prepare_codex_projection_at(root: &Path, plan: &WorkspacePlan) -> Result<()> 
             && metadata.permissions().mode() & 0o777 == 0o700,
         "persistent Codex home is invalid"
     );
-    let projection = codewire_access::CodexProviderProjection::for_loopback_port(
-        codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
-    )
-    .context("derive credential-free Codex provider projection")?;
     let path = root.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+    let Some(projection) = clients
+        .for_placement(codewire_access::ManagedCredentialClientPlacement::Native)
+        .codex
+    else {
+        // This exact managed config is Codewire-owned. Unlink never follows a
+        // workload-created symlink, and preserves all other Codex state/skills.
+        match fs::remove_file(&path) {
+            Ok(()) => File::open(root)?.sync_all()?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("clear managed Codex configuration"),
+        }
+        return Ok(());
+    };
     write_durable(&path, projection.config_toml().as_bytes(), 0o600)
         .context("publish credential-free Codex provider projection")?;
     lchown(&path, plan.identity.uid, plan.identity.gid)?;
@@ -3307,6 +3682,7 @@ fn prepare_container_control(
         0o444,
     )
     .context("publish environment-specific machine identity")?;
+    publish_container_hosts(Path::new(CONTAINER_HOSTS_PATH))?;
     write_durable(
         Path::new(CONTAINER_RESOLV_CONF_PATH),
         format!("nameserver {NETWORK_GATEWAY_ADDRESS}\noptions attempts:1 timeout:1\n").as_bytes(),
@@ -3341,6 +3717,20 @@ fn prepare_container_control(
         .set_nonblocking(true)
         .context("make guest poweroff socket nonblocking")?;
     Ok(socket)
+}
+
+fn publish_container_hosts(path: &Path) -> Result<()> {
+    // OCI sets the hostname but does not synthesize /etc/hosts. The runtime
+    // owns both this name and the isolated interface address; resolving the
+    // container's own identity must not consume an upstream DNS transaction.
+    // No provider names, host-machine entries, or image-supplied aliases cross
+    // this boundary.
+    let (address, _) = NETWORK_GUEST_ADDRESS
+        .split_once('/')
+        .expect("the guest interface address includes its prefix");
+    let hosts = format!("127.0.0.1 localhost\n{address} {CONTAINER_HOSTNAME}\n");
+    write_durable(path, hosts.as_bytes(), 0o444)
+        .context("publish isolated workspace hostname mapping")
 }
 
 fn prepare_docker_runtime(seed: &Seed, workspace_identity: &WorkspaceIdentity) -> Result<()> {
@@ -3879,7 +4269,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             "noNewPrivileges": true
         },
         "root": { "path": "../merged", "readonly": false },
-        "hostname": "codewire",
+        "hostname": CONTAINER_HOSTNAME,
         "mounts": [
             { "destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"] },
             { "destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "strictatime", "mode=755", "size=65536k"] },
@@ -3891,6 +4281,7 @@ fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
             { "destination": CONTAINER_PLAN_PATH, "type": "none", "source": ACTIVE_WORKSPACE_PLAN_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_INSTALL_STATE_PATH, "type": "none", "source": INSTALL_STATE_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_MACHINE_ID_DESTINATION, "type": "none", "source": CONTAINER_MACHINE_ID_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": CONTAINER_HOSTS_DESTINATION, "type": "none", "source": CONTAINER_HOSTS_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": CONTAINER_RESOLV_CONF_DESTINATION, "type": "none", "source": CONTAINER_RESOLV_CONF_PATH, "options": ["bind", "ro", "nosuid", "nodev", "noexec"] },
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=256m"] },
             { "destination": WORKSPACE_PATH, "type": "none", "source": PERSISTENT_WORKSPACE_PATH, "options": ["rbind", "rw", "nosuid", "nodev"] },
@@ -4080,11 +4471,14 @@ impl Drop for WorkspaceStartGuard {
     }
 }
 
-fn spawn_workspace_container(plan: &WorkspacePlan) -> Result<std::process::Child> {
+fn spawn_workspace_container(
+    plan: &WorkspacePlan,
+    projection_required: bool,
+    daemon: &mut std::process::Child,
+) -> Result<std::process::Child> {
     prepare_runc_log()?;
     let runc_stderr = prepare_runc_stderr()?;
     record_boot_stage("runc-launching")?;
-    let expected_readiness = workspace_ready_message(plan)?;
     let (mut readiness, readiness_writer) =
         UnixStream::pair().context("create trusted workspace readiness channel")?;
     readiness
@@ -4131,14 +4525,30 @@ fn spawn_workspace_container(plan: &WorkspacePlan) -> Result<std::process::Child
     record_boot_stage("runc-running")?;
     drop(readiness_writer);
     let deadline = Instant::now() + WORKSPACE_START_TIMEOUT;
-    let mut readiness_bytes = Vec::with_capacity(expected_readiness.len());
+    let mut protocol = WorkspaceStartupProtocol::new(plan, sync_install_filesystem)?;
+    let bootstrap = BootstrapParent::new(projection_required, daemon.id());
+    bootstrap.prelude(&mut readiness, deadline)?;
+    protocol.bootstrap = Some(bootstrap);
     loop {
+        ensure!(
+            daemon
+                .try_wait()
+                .context("observe bootstrap daemon")?
+                .is_none(),
+            "daemon exited during workspace startup"
+        );
+        if let Err(error) = ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED) {
+            record_boot_stage("workspace-readiness-timeout")?;
+            return Err(error);
+        }
         validate_runc_log()?;
         validate_runc_stderr()?;
-        let readiness_state = match advance_workspace_readiness(
+        let readiness_state = match protocol.advance(
             &mut readiness,
-            &expected_readiness,
-            &mut readiness_bytes,
+            plan,
+            Path::new(INSTALL_STATE_PATH),
+            deadline,
+            &POWEROFF_REQUESTED,
         ) {
             Ok(state) => state,
             Err(error) => {
@@ -4149,7 +4559,10 @@ fn spawn_workspace_container(plan: &WorkspacePlan) -> Result<std::process::Child
         match readiness_state {
             WorkspaceReadiness::Pending => {}
             WorkspaceReadiness::Ready if workspace_container_is_running()? => {
-                publish_install_completion(plan)?;
+                ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
+                if let Some(bootstrap) = &protocol.bootstrap {
+                    bootstrap.finish(deadline)?;
+                }
                 return Ok(child.finish());
             }
             WorkspaceReadiness::Ready => {}
@@ -4173,6 +4586,64 @@ fn spawn_workspace_container(plan: &WorkspacePlan) -> Result<std::process::Child
             bail!("sealed runc workspace startup timed out");
         }
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+struct WorkspaceStartupProtocol {
+    bootstrap: Option<BootstrapParent>,
+    install: Vec<u8>,
+    acknowledgement: Vec<u8>,
+    ready: Vec<u8>,
+    received: Vec<u8>,
+    installed: bool,
+    sync_filesystem: fn(&Path) -> Result<()>,
+}
+
+impl WorkspaceStartupProtocol {
+    fn new(plan: &WorkspacePlan, sync_filesystem: fn(&Path) -> Result<()>) -> Result<Self> {
+        Ok(Self {
+            bootstrap: None,
+            install: install_completion(plan)?,
+            acknowledgement: workspace_install_acknowledgement(plan)?,
+            ready: workspace_ready_message(plan)?,
+            received: Vec::with_capacity(WORKSPACE_READY_LIMIT),
+            installed: false,
+            sync_filesystem,
+        })
+    }
+
+    fn advance(
+        &mut self,
+        stream: &mut UnixStream,
+        plan: &WorkspacePlan,
+        marker: &Path,
+        deadline: Instant,
+        canceled: &AtomicBool,
+    ) -> Result<WorkspaceReadiness> {
+        ensure_workspace_start_active(deadline, canceled)?;
+        if self.received.is_empty()
+            && let Some(bootstrap) = &mut self.bootstrap
+            && bootstrap.advance(stream, deadline)?
+        {
+            return Ok(WorkspaceReadiness::Pending);
+        }
+        let expected = if self.installed {
+            &self.ready
+        } else {
+            &self.install
+        };
+        let state = advance_workspace_readiness(stream, expected, &mut self.received)?;
+        if state == WorkspaceReadiness::Ready && !self.installed {
+            complete_workspace_install(marker, plan, deadline, canceled, self.sync_filesystem)?;
+            ensure_workspace_start_active(deadline, canceled)?;
+            stream
+                .write_all(&self.acknowledgement)
+                .context("acknowledge durable workspace install completion")?;
+            self.installed = true;
+            self.received.clear();
+            return Ok(WorkspaceReadiness::Pending);
+        }
+        Ok(state)
     }
 }
 
@@ -4416,6 +4887,15 @@ fn wait_for_bounded_child_output(
             return Ok(None);
         }
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+struct DaemonStartGuard(Option<std::process::Child>);
+impl Drop for DaemonStartGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            stop_daemon(child);
+        }
     }
 }
 
@@ -5083,6 +5563,7 @@ mod tests {
                 .to_owned(),
             project_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 .to_owned(),
+            installation_plan_sha256: None,
             identity: WorkspaceIdentity {
                 username: "root".to_owned(),
                 home: "/root".to_owned(),
@@ -5172,13 +5653,15 @@ mod tests {
         plan.identity.uid = unsafe { libc::geteuid() };
         plan.identity.gid = unsafe { libc::getegid() };
         let config = codex_home.join(codewire_access::CODEX_CONFIG_FILE_NAME);
+        let clients =
+            codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap();
         let expected = codewire_access::CodexProviderProjection::for_loopback_port(
             codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT,
         )
         .unwrap()
         .into_config_toml();
 
-        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        prepare_codex_projection_at(&codex_home, &plan, clients).unwrap();
         assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
         let metadata = fs::symlink_metadata(&config).unwrap();
         assert!(metadata.file_type().is_file());
@@ -5192,17 +5675,31 @@ mod tests {
         fs::write(&outside, b"outside-sentinel").unwrap();
         fs::remove_file(&config).unwrap();
         std::os::unix::fs::symlink(&outside, &config).unwrap();
-        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        prepare_codex_projection_at(&codex_home, &plan, clients).unwrap();
         assert_eq!(fs::read(&outside).unwrap(), b"outside-sentinel");
         assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
         assert!(fs::symlink_metadata(&config).unwrap().file_type().is_file());
 
-        prepare_codex_projection_at(&codex_home, &plan).unwrap();
+        prepare_codex_projection_at(&codex_home, &plan, clients).unwrap();
         assert_eq!(fs::read(&config).unwrap(), expected.as_bytes());
 
+        let other_state = codex_home.join("history.jsonl");
+        fs::write(&other_state, b"preserve-workload-history").unwrap();
+        prepare_codex_projection_at(&codex_home, &plan, Default::default()).unwrap();
+        assert!(!config.exists());
+        assert_eq!(
+            fs::read(&other_state).unwrap(),
+            b"preserve-workload-history"
+        );
+        prepare_codex_projection_at(&codex_home, &plan, Default::default()).unwrap();
+        std::os::unix::fs::symlink(&outside, &config).unwrap();
+        prepare_codex_projection_at(&codex_home, &plan, Default::default()).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-sentinel");
+        assert!(fs::symlink_metadata(&config).is_err());
+        prepare_codex_projection_at(&codex_home, &plan, clients).unwrap();
         fs::remove_file(&config).unwrap();
         fs::create_dir(&config).unwrap();
-        assert!(prepare_codex_projection_at(&codex_home, &plan).is_err());
+        assert!(prepare_codex_projection_at(&codex_home, &plan, clients).is_err());
         assert!(fs::symlink_metadata(&config).unwrap().file_type().is_dir());
     }
 
@@ -5260,6 +5757,42 @@ mod tests {
         ] {
             assert!(!runc_helper_environment_is_admitted(&rejected));
         }
+    }
+
+    #[test]
+    fn workspace_hosts_contains_only_runtime_owned_local_names() {
+        let temporary = TempDir::new().unwrap();
+        let path = temporary.path().join("hosts");
+        publish_container_hosts(&path).unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"127.0.0.1 localhost\n192.0.2.2 codewire\n"
+        );
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o444);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.nlink(), 1);
+    }
+
+    #[test]
+    fn workspace_hostname_has_a_runtime_owned_read_only_hosts_mapping() {
+        let plan = test_workspace_plan();
+        let config: serde_json::Value =
+            serde_json::from_slice(&workspace_oci_config(&plan).unwrap()).unwrap();
+        assert_eq!(config["hostname"], "codewire");
+        let hosts = config["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["destination"] == "/etc/hosts")
+            .expect("the runtime hostname must resolve without upstream DNS");
+        assert_eq!(hosts["source"], "/run/codewire/container/hosts");
+        assert_eq!(hosts["type"], "none");
+        assert_eq!(
+            hosts["options"],
+            serde_json::json!(["bind", "ro", "nosuid", "nodev", "noexec"])
+        );
     }
 
     #[test]
@@ -5412,6 +5945,24 @@ mod tests {
             require_persisted_workspace_plan(Some(plan.clone())).unwrap(),
             plan
         );
+        let active = plan
+            .clone()
+            .with_managed_credential_clients(codewire_access::ManagedCredentialClients::default())
+            .unwrap();
+        assert!(require_persisted_workspace_plan(Some(active.clone())).is_err());
+        let temporary = TempDir::new().unwrap();
+        let ordinary_path = temporary.path().join("ordinary.json");
+        let active_path = temporary.path().join("active.json");
+        assert!(persist_workspace_plan_at(&ordinary_path, &active).is_err());
+        assert!(persist_active_workspace_plan_at(&active_path, &plan).is_err());
+        assert!(!ordinary_path.exists());
+        assert!(!active_path.exists());
+        persist_workspace_plan_at(&ordinary_path, &plan).unwrap();
+        persist_active_workspace_plan_at(&active_path, &active).unwrap();
+        assert!(persist_workspace_plan_at(&ordinary_path, &active).is_err());
+        assert!(persist_active_workspace_plan_at(&active_path, &plan).is_err());
+        assert_eq!(fs::read(ordinary_path).unwrap(), plan.encode().unwrap());
+        assert_eq!(fs::read(active_path).unwrap(), active.encode().unwrap());
     }
 
     #[test]
@@ -5440,7 +5991,9 @@ mod tests {
         plan.startup_script = "attacker-startup-canary".to_owned();
         let ready = workspace_ready_message(&plan).unwrap();
         let install = install_completion(&plan).unwrap();
-        for message in [&ready, &install] {
+        let acknowledgement = workspace_install_acknowledgement(&plan).unwrap();
+        for message in [&ready, &install, &acknowledgement] {
+            assert!(message.len() <= WORKSPACE_READY_LIMIT);
             let message = std::str::from_utf8(message).unwrap();
             assert!(!message.contains("attacker-install-canary"));
             assert!(!message.contains("attacker-startup-canary"));
@@ -5478,6 +6031,695 @@ mod tests {
         assert!(!valid_workspace_owner_marker(
             b"codewire-workspace-owner-v1\n"
         ));
+    }
+
+    #[test]
+    fn workspace_install_identity_survives_selected_client_update_and_clear() {
+        let ordinary = test_workspace_plan();
+        let selected = ordinary
+            .clone()
+            .with_managed_credential_clients(
+                codewire_access::ManagedCredentialClients::from_profile_slots([
+                    "codex",
+                    "openai",
+                    "anthropic",
+                    "ssh",
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        let cleared = ordinary
+            .clone()
+            .with_managed_credential_clients(codewire_access::ManagedCredentialClients::default())
+            .unwrap();
+        let changed_selection = ordinary
+            .clone()
+            .with_managed_credential_clients(
+                codewire_access::ManagedCredentialClients::from_profile_slots(["ssh"]).unwrap(),
+            )
+            .unwrap();
+        for (first, next) in [
+            (&selected, &cleared),
+            (&cleared, &selected),
+            (&selected, &changed_selection),
+        ] {
+            let temporary = TempDir::new().unwrap();
+            let marker = temporary.path().join("install.state");
+            prepare_install_state_at(&marker).unwrap();
+            publish_install_completion_at(&marker, first).unwrap();
+            let original = fs::read(&marker).unwrap();
+            assert!(
+                !workspace_install_required(&marker, next)
+                    .expect("client selection does not change the installed ordinary plan")
+            );
+            complete_workspace_install(
+                &marker,
+                next,
+                Instant::now() + Duration::from_secs(1),
+                &AtomicBool::new(false),
+                |_| panic!("source-only change must not repeat installation sync"),
+            )
+            .unwrap();
+            assert_eq!(fs::read(&marker).unwrap(), original);
+            assert_ne!(
+                workspace_ready_message(first).unwrap(),
+                workspace_ready_message(next).unwrap()
+            );
+            assert_ne!(
+                workspace_install_acknowledgement(first).unwrap(),
+                workspace_install_acknowledgement(next).unwrap()
+            );
+            for (old, expected) in [
+                (
+                    workspace_ready_message(first).unwrap(),
+                    workspace_ready_message(next).unwrap(),
+                ),
+                (
+                    workspace_install_acknowledgement(first).unwrap(),
+                    workspace_install_acknowledgement(next).unwrap(),
+                ),
+            ] {
+                let (mut reader, mut writer) = UnixStream::pair().unwrap();
+                reader.set_nonblocking(true).unwrap();
+                writer.write_all(&old).unwrap();
+                assert!(
+                    advance_workspace_readiness(&mut reader, &expected, &mut Vec::new()).is_err()
+                );
+            }
+        }
+        assert_eq!(
+            install_completion(&selected).unwrap(),
+            install_completion(&ordinary).unwrap()
+        );
+        for change in 0..5 {
+            let mut changed = ordinary.clone();
+            match change {
+                0 => {
+                    changed
+                        .environment
+                        .push("DECLARED=changed-project-value".into());
+                    changed.explicit_environment_keys.push("DECLARED".into());
+                }
+                1 => changed.install_command = "changed installation".into(),
+                2 => changed.startup_script = "changed startup".into(),
+                3 => changed.root_generation = "c".repeat(64),
+                4 => changed.project_sha256 = "d".repeat(64),
+                _ => unreachable!(),
+            }
+            let changed = changed
+                .with_managed_credential_clients(
+                    codewire_access::ManagedCredentialClients::default(),
+                )
+                .unwrap();
+            let temporary = TempDir::new().unwrap();
+            let marker = temporary.path().join("install.state");
+            prepare_install_state_at(&marker).unwrap();
+            publish_install_completion_at(&marker, &selected).unwrap();
+            let original = fs::read(&marker).unwrap();
+            assert!(workspace_install_required(&marker, &changed).is_err());
+            assert!(publish_install_completion_at(&marker, &changed).is_err());
+            assert_eq!(fs::read(&marker).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn workspace_install_completion_is_private_to_each_intact_generation() {
+        let temporary = TempDir::new().unwrap();
+        let first = temporary.path().join("first/install.state");
+        let second = temporary.path().join("second/install.state");
+        fs::create_dir(first.parent().unwrap()).unwrap();
+        fs::create_dir(second.parent().unwrap()).unwrap();
+        let mut plan = test_workspace_plan();
+        plan.install_command = "printf install".to_owned();
+        prepare_install_state_at(&first).unwrap();
+        assert!(workspace_install_required(&first, &plan).unwrap());
+        publish_install_completion_at(&first, &plan).unwrap();
+        for _ in 0..2 {
+            // Stop/start and crash-after-ack recovery keep this same root.
+            prepare_install_state_at(&first).unwrap();
+            assert!(!workspace_install_required(&first, &plan).unwrap());
+            publish_install_completion_at(&first, &plan).unwrap();
+        }
+        // A new or reconstructed root cannot inherit the shared state's old
+        // completion. Returning to an intact prior root retains its completion.
+        prepare_install_state_at(&second).unwrap();
+        assert!(workspace_install_required(&second, &plan).unwrap());
+        assert!(!workspace_install_required(&first, &plan).unwrap());
+        let metadata = fs::symlink_metadata(&first).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o400);
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(INSTALL_STATE_PATH, "/generation/install.state");
+        plan.startup_script = "different-plan-canary".to_owned();
+        let error = workspace_install_required(&first, &plan).unwrap_err();
+        assert!(!format!("{error:#}").contains("different-plan-canary"));
+        assert!(publish_install_completion_at(&first, &plan).is_err());
+    }
+
+    #[test]
+    fn workspace_install_marker_rejects_links_writable_files_and_untrusted_bytes() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("install.state");
+        prepare_install_state_at(&marker).unwrap();
+        let link = temporary.path().join("link");
+        std::os::unix::fs::symlink(&marker, &link).unwrap();
+        assert!(prepare_install_state_at(&link).is_err());
+        assert!(workspace_install_required(&link, &test_workspace_plan()).is_err());
+        let hardlink = temporary.path().join("hardlink");
+        fs::hard_link(&marker, &hardlink).unwrap();
+        assert!(read_install_state(&marker).is_err());
+        fs::remove_file(&hardlink).unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_install_state(&marker).is_err());
+        for bytes in [
+            b"marker-canary\n".as_slice(),
+            &[b'x'; WORKSPACE_READY_LIMIT + 1],
+        ] {
+            write_durable(&marker, bytes, 0o400).unwrap();
+            let error = read_install_state(&marker).unwrap_err();
+            assert!(!format!("{error:#}").contains("marker-canary"));
+        }
+    }
+
+    #[test]
+    fn workspace_install_filesystems_are_synced_before_marker_and_not_again_on_restart() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("install.state");
+        let plan = test_workspace_plan();
+        prepare_install_state_at(&marker).unwrap();
+        let mut synced = Vec::new();
+        complete_workspace_install(
+            &marker,
+            &plan,
+            Instant::now() + Duration::from_secs(1),
+            &AtomicBool::new(false),
+            |path| {
+                assert!(workspace_install_required(&marker, &plan)?);
+                synced.push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            synced,
+            [PathBuf::from("/generation"), PathBuf::from("/state")]
+        );
+        assert!(!workspace_install_required(&marker, &plan).unwrap());
+        complete_workspace_install(
+            &marker,
+            &plan,
+            Instant::now() + Duration::from_secs(1),
+            &AtomicBool::new(false),
+            |_| panic!("completed root must not reinstall or resync"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn workspace_install_sync_failure_or_cancellation_leaves_pending() {
+        for fail_at in [0, 1] {
+            let temporary = TempDir::new().unwrap();
+            let marker = temporary.path().join("install.state");
+            let plan = test_workspace_plan();
+            prepare_install_state_at(&marker).unwrap();
+            let mut calls = 0;
+            let result = complete_workspace_install(
+                &marker,
+                &plan,
+                Instant::now() + Duration::from_secs(1),
+                &AtomicBool::new(false),
+                |_| {
+                    let current = calls;
+                    calls += 1;
+                    ensure!(current != fail_at, "closed sync failure");
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(calls, fail_at + 1);
+            assert!(workspace_install_required(&marker, &plan).unwrap());
+        }
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("install.state");
+        let plan = test_workspace_plan();
+        prepare_install_state_at(&marker).unwrap();
+        let canceled = AtomicBool::new(false);
+        let mut calls = 0;
+        assert!(
+            complete_workspace_install(
+                &marker,
+                &plan,
+                Instant::now() + Duration::from_secs(1),
+                &canceled,
+                |_| {
+                    calls += 1;
+                    canceled.store(true, Ordering::Release);
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(calls, 1);
+        assert!(workspace_install_required(&marker, &plan).unwrap());
+    }
+
+    #[test]
+    fn workspace_install_failed_sync_sends_no_success_ack() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("install.state");
+        let plan = test_workspace_plan();
+        prepare_install_state_at(&marker).unwrap();
+        let mut protocol =
+            WorkspaceStartupProtocol::new(&plan, |_| anyhow::bail!("closed sync failure")).unwrap();
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent.set_nonblocking(true).unwrap();
+        child.set_nonblocking(true).unwrap();
+        child
+            .write_all(&install_completion(&plan).unwrap())
+            .unwrap();
+        assert!(
+            protocol
+                .advance(
+                    &mut parent,
+                    &plan,
+                    &marker,
+                    Instant::now() + Duration::from_secs(1),
+                    &AtomicBool::new(false)
+                )
+                .is_err()
+        );
+        assert!(workspace_install_required(&marker, &plan).unwrap());
+        assert_eq!(
+            child.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn workspace_install_ack_follows_durable_completion_and_precedes_ready() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("install.state");
+        prepare_install_state_at(&marker).unwrap();
+        let plan = test_workspace_plan();
+        let mut protocol = WorkspaceStartupProtocol::new(&plan, |_| Ok(())).unwrap();
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent.set_nonblocking(true).unwrap();
+        child
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let canceled = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let completion = install_completion(&plan).unwrap();
+        child.write_all(&completion[..10]).unwrap();
+        assert_eq!(
+            protocol
+                .advance(&mut parent, &plan, &marker, deadline, &canceled)
+                .unwrap(),
+            WorkspaceReadiness::Pending
+        );
+        assert!(workspace_install_required(&marker, &plan).unwrap());
+        child.write_all(&completion[10..]).unwrap();
+        assert_eq!(
+            protocol
+                .advance(&mut parent, &plan, &marker, deadline, &canceled)
+                .unwrap(),
+            WorkspaceReadiness::Pending
+        );
+        assert!(!workspace_install_required(&marker, &plan).unwrap());
+        let expected = workspace_install_acknowledgement(&plan).unwrap();
+        let mut received = vec![0; expected.len()];
+        child.read_exact(&mut received).unwrap();
+        assert_eq!(received, expected);
+        assert!(protocol.installed);
+        child
+            .write_all(&workspace_ready_message(&plan).unwrap())
+            .unwrap();
+        assert_eq!(
+            protocol
+                .advance(&mut parent, &plan, &marker, deadline, &canceled)
+                .unwrap(),
+            WorkspaceReadiness::Ready
+        );
+    }
+
+    #[test]
+    fn workspace_install_ack_is_not_sent_when_persistence_fails() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("missing");
+        let plan = test_workspace_plan();
+        let mut protocol = WorkspaceStartupProtocol::new(&plan, |_| Ok(())).unwrap();
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent.set_nonblocking(true).unwrap();
+        child.set_nonblocking(true).unwrap();
+        child
+            .write_all(&install_completion(&plan).unwrap())
+            .unwrap();
+        assert!(
+            protocol
+                .advance(
+                    &mut parent,
+                    &plan,
+                    &marker,
+                    Instant::now() + Duration::from_secs(1),
+                    &AtomicBool::new(false)
+                )
+                .is_err()
+        );
+        assert!(!protocol.installed);
+        assert_eq!(
+            child.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn workspace_install_parent_cancellation_or_deadline_sends_no_ack_and_keeps_pending() {
+        for canceled in [false, true] {
+            let temporary = TempDir::new().unwrap();
+            let marker = temporary.path().join("install.state");
+            prepare_install_state_at(&marker).unwrap();
+            let plan = test_workspace_plan();
+            let mut protocol = WorkspaceStartupProtocol::new(&plan, |_| Ok(())).unwrap();
+            let (mut parent, mut child) = UnixStream::pair().unwrap();
+            parent.set_nonblocking(true).unwrap();
+            child.set_nonblocking(true).unwrap();
+            child
+                .write_all(&install_completion(&plan).unwrap())
+                .unwrap();
+            let deadline = if canceled {
+                Instant::now() + Duration::from_secs(1)
+            } else {
+                Instant::now()
+            };
+            assert!(
+                protocol
+                    .advance(
+                        &mut parent,
+                        &plan,
+                        &marker,
+                        deadline,
+                        &AtomicBool::new(canceled)
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                child.read(&mut [0; 1]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert!(workspace_install_required(&marker, &plan).unwrap());
+        }
+    }
+
+    #[test]
+    fn workspace_startup_spawn_failure_does_not_replay_completed_install_on_restart() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("install.state");
+        let mut plan = test_workspace_plan();
+        plan.install_command = "printf install".to_owned();
+        plan.startup_script = "printf startup".to_owned();
+        prepare_install_state_at(&marker).unwrap();
+        let mut protocol = WorkspaceStartupProtocol::new(&plan, |_| Ok(())).unwrap();
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent.set_nonblocking(true).unwrap();
+        child
+            .write_all(&install_completion(&plan).unwrap())
+            .unwrap();
+        protocol
+            .advance(
+                &mut parent,
+                &plan,
+                &marker,
+                Instant::now() + Duration::from_secs(1),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(
+            start_workspace_script::<()>(&plan, |_, _, _, _| anyhow::bail!("closed spawn failure"))
+                .is_err()
+        );
+        let failure = WORKSPACE_FAILURE_FRAMES
+            .iter()
+            .find(|(_, stage)| *stage == "workspace-startup-failed")
+            .unwrap();
+        child.write_all(failure.0).unwrap();
+        assert_eq!(
+            protocol
+                .advance(
+                    &mut parent,
+                    &plan,
+                    &marker,
+                    Instant::now() + Duration::from_secs(1),
+                    &AtomicBool::new(false)
+                )
+                .unwrap(),
+            WorkspaceReadiness::Failed("workspace-startup-failed")
+        );
+        prepare_install_state_at(&marker).unwrap();
+        assert!(!workspace_install_required(&marker, &plan).unwrap());
+    }
+
+    #[test]
+    fn workspace_install_protocol_rejects_early_ready_wrong_plan_and_replayed_completion() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("install.state");
+        prepare_install_state_at(&marker).unwrap();
+        let plan = test_workspace_plan();
+        let mut different = plan.clone();
+        different.install_command = "wrong-plan-canary".to_owned();
+        for invalid in [
+            workspace_ready_message(&plan).unwrap(),
+            install_completion(&different).unwrap(),
+        ] {
+            let mut protocol = WorkspaceStartupProtocol::new(&plan, |_| Ok(())).unwrap();
+            let (mut parent, mut child) = UnixStream::pair().unwrap();
+            parent.set_nonblocking(true).unwrap();
+            child.write_all(&invalid).unwrap();
+            let error = protocol
+                .advance(
+                    &mut parent,
+                    &plan,
+                    &marker,
+                    Instant::now() + Duration::from_secs(1),
+                    &AtomicBool::new(false),
+                )
+                .unwrap_err();
+            assert!(!format!("{error:#}").contains("wrong-plan-canary"));
+            assert!(workspace_install_required(&marker, &plan).unwrap());
+        }
+        let mut protocol = WorkspaceStartupProtocol::new(&plan, |_| Ok(())).unwrap();
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let canceled = AtomicBool::new(false);
+        child
+            .write_all(&install_completion(&plan).unwrap())
+            .unwrap();
+        protocol
+            .advance(&mut parent, &plan, &marker, deadline, &canceled)
+            .unwrap();
+        child
+            .write_all(&install_completion(&plan).unwrap())
+            .unwrap();
+        assert!(
+            protocol
+                .advance(&mut parent, &plan, &marker, deadline, &canceled)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn workspace_install_ack_loss_retains_durable_completion_without_claiming_ready() {
+        let temporary = TempDir::new().unwrap();
+        let marker = temporary.path().join("install.state");
+        prepare_install_state_at(&marker).unwrap();
+        let plan = test_workspace_plan();
+        let mut protocol = WorkspaceStartupProtocol::new(&plan, |_| Ok(())).unwrap();
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent.set_nonblocking(true).unwrap();
+        child
+            .write_all(&install_completion(&plan).unwrap())
+            .unwrap();
+        child.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(
+            protocol
+                .advance(
+                    &mut parent,
+                    &plan,
+                    &marker,
+                    Instant::now() + Duration::from_secs(1),
+                    &AtomicBool::new(false)
+                )
+                .is_err()
+        );
+        assert!(!protocol.installed);
+        assert!(!workspace_install_required(&marker, &plan).unwrap());
+    }
+
+    #[test]
+    fn workspace_install_exchange_requires_exact_ack_and_obeys_cancellation_and_deadline() {
+        let plan = test_workspace_plan();
+        for reply in [
+            workspace_ready_message(&plan).unwrap(),
+            b"ack-canary\n".to_vec(),
+            Vec::new(),
+        ] {
+            let (mut parent, mut child) = UnixStream::pair().unwrap();
+            parent.write_all(&reply).unwrap();
+            parent.shutdown(std::net::Shutdown::Write).unwrap();
+            let error = exchange_workspace_install_acknowledgement(
+                &mut child,
+                &plan,
+                Instant::now() + Duration::from_secs(1),
+                &AtomicBool::new(false),
+            )
+            .unwrap_err();
+            assert!(!format!("{error:#}").contains("ack-canary"));
+        }
+        for (deadline, canceled) in [
+            (Instant::now(), false),
+            (Instant::now() + Duration::from_secs(1), true),
+        ] {
+            let (mut parent, mut child) = UnixStream::pair().unwrap();
+            parent.set_nonblocking(true).unwrap();
+            assert!(
+                exchange_workspace_install_acknowledgement(
+                    &mut child,
+                    &plan,
+                    deadline,
+                    &AtomicBool::new(canceled)
+                )
+                .is_err()
+            );
+            assert_eq!(
+                parent.read(&mut [0; 1]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent
+            .write_all(&workspace_install_acknowledgement(&plan).unwrap())
+            .unwrap();
+        exchange_workspace_install_acknowledgement(
+            &mut child,
+            &plan,
+            Instant::now() + Duration::from_secs(1),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let mut completion = vec![0; install_completion(&plan).unwrap().len()];
+        parent.read_exact(&mut completion).unwrap();
+        assert_eq!(completion, install_completion(&plan).unwrap());
+    }
+
+    #[test]
+    fn workspace_install_wait_reaps_success_and_reports_closed_failure() {
+        for (script, expected_success) in [
+            ("exit 0", true),
+            ("printf install-output-canary; exit 7", false),
+        ] {
+            let child = Command::new("/bin/sh")
+                .args(["-c", script])
+                .env_clear()
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let result = wait_workspace_install(
+                child,
+                Instant::now() + Duration::from_secs(2),
+                &AtomicBool::new(false),
+            );
+            assert_eq!(result.is_ok(), expected_success);
+            if let Err(error) = result {
+                assert!(!format!("{error:#}").contains("install-output-canary"));
+            }
+            assert_eq!(
+                unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_install_timeout_and_cancellation_kill_and_reap_the_exact_process_group() {
+        for canceled in [false, true] {
+            let child = Command::new("/bin/sh")
+                .args(["-c", "trap '' TERM; /bin/sleep 60 & wait"])
+                .env_clear()
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let start = Instant::now();
+            let result = wait_workspace_install(
+                child,
+                start + Duration::from_millis(60),
+                &AtomicBool::new(canceled),
+            );
+            assert!(result.is_err());
+            assert!(start.elapsed() < Duration::from_secs(2));
+            assert_eq!(
+                unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_startup_spawns_per_boot_without_a_readiness_or_restart_promise() {
+        let mut plan = test_workspace_plan();
+        assert!(
+            start_workspace_script::<()>(&plan, |_, _, _, _| panic!(
+                "empty startup must not spawn"
+            ))
+            .unwrap()
+            .is_none()
+        );
+        plan.startup_script = "printf startup-canary".to_owned();
+        let mut spawns = 0;
+        for _boot in 0..2 {
+            assert_eq!(
+                start_workspace_script(&plan, |received, args, cwd, _| {
+                    assert_eq!(received, &plan);
+                    assert_eq!(
+                        args,
+                        [
+                            plan.identity.shell.clone(),
+                            "-lc".to_owned(),
+                            plan.startup_script.clone()
+                        ]
+                    );
+                    assert_eq!(cwd, plan.session_cwd);
+                    spawns += 1;
+                    Ok("background child")
+                })
+                .unwrap(),
+                Some("background child")
+            );
+        }
+        assert_eq!(spawns, 2);
+        let error =
+            start_workspace_script::<()>(&plan, |_, _, _, _| anyhow::bail!("closed spawn failure"))
+                .unwrap_err();
+        assert!(!format!("{error:#}").contains("startup-canary"));
+        assert!(
+            WORKSPACE_FAILURE_FRAMES
+                .iter()
+                .any(|(_, stage)| *stage == "workspace-startup-failed")
+        );
     }
 
     #[test]

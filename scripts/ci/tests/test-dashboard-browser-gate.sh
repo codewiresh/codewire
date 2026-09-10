@@ -8,6 +8,7 @@ PLAYWRIGHT_CONFIG="$ROOT/apps/dashboard/playwright.config.ts"
 ENVIRONMENTS="$ROOT/apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts"
 SECRETS_PRESETS="$ROOT/apps/dashboard/e2e/ssr-dashboard.secrets-presets.ssr.ts"
 GOVERNANCE="$ROOT/apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts"
+CREDENTIALS="$ROOT/apps/dashboard/e2e/ssr-dashboard.credentials.ssr.ts"
 INTEGRATED="$ROOT/scripts/ci/verify/kind/suites/integrated.sh"
 COMMON="$ROOT/scripts/ci/verify/kind/common.sh"
 BROWSER_RUNTIME="$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
@@ -203,6 +204,14 @@ grep -Fq 'page.waitForURL(`${ssrUrl}${bucketPath}?message=secret-renamed`)' \
   "$SECRETS_PRESETS" || fail 'secret rename does not wait for redirect completion'
 grep -Fq 'page.waitForURL(`${ssrUrl}${bucketPath}?message=secret-deleted`)' \
   "$SECRETS_PRESETS" || fail 'secret deletion does not wait for redirect completion'
+grep -Fq 'PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE !== "1"' "$CREDENTIALS" ||
+  fail 'managed credential browser journey is not fixture-only'
+grep -Fq 'responseBody.indexOf("ABCD-EFGH")' "$CREDENTIALS" ||
+  fail 'managed credential browser journey does not prove challenge-before-commit ordering'
+grep -Fq 'PLAYWRIGHT_KIND_CREDENTIAL_FIXTURE="$credential_fixture"' "$COMMON" ||
+  fail 'Kind browser wrapper does not overwrite the credential fixture selection'
+grep -Fq 'runtime::kind::serve_kind_credential_fixture' "$COMMON" ||
+  fail 'Kind browser wrapper does not verify the selected synthetic credential runtime'
 
 grep -Fq 'creates, runs, exposes a port, stops, starts, and destroys through real Kind' \
   "$ENVIRONMENTS" || fail 'real environment lifecycle browser proof is missing'

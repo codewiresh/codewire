@@ -5,7 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use codewire_access::{
-    AccessProfile, EnvironmentId, GrantContext, Owner, OwnerId, Placement, builtin_provider_catalog,
+    AccessProfile, EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId, Placement,
+    builtin_provider_catalog,
 };
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator,
@@ -16,6 +17,8 @@ use codewire_credential_broker::platform::{
 use codewire_platform_credentials::{
     PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError,
 };
+use codewire_project::PlatformProjectionSelection;
+use codewire_protected_store::secret_envelope::KekProvider;
 use codewire_server_core::pod_identity::{
     KubernetesPodIdentityVerifier, PodIdentityError, PodIdentityPurpose, VerifiedPodIdentity,
 };
@@ -29,6 +32,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::objects::{Lineage, gateway_environment, live_pod, validate_lineage, verified_shape};
+use crate::projection::{self, ProjectionMetadata};
 
 pub(crate) const WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization-bin";
 const ASCII_WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization";
@@ -49,10 +53,11 @@ pub struct KubernetesPlatformBridgeAuthenticator {
     pool: PgPool,
     gateway_verifier: KubernetesPodIdentityVerifier,
     workspace_verifier: KubernetesPodIdentityVerifier,
+    provider: Arc<dyn KekProvider>,
 }
 
 impl KubernetesPlatformBridgeAuthenticator {
-    pub fn new(client: Client, pool: PgPool) -> Self {
+    pub fn new(client: Client, pool: PgPool, provider: Arc<dyn KekProvider>) -> Self {
         Self {
             gateway_verifier: KubernetesPodIdentityVerifier::new(
                 Some(client.clone()),
@@ -64,6 +69,7 @@ impl KubernetesPlatformBridgeAuthenticator {
             ),
             client,
             pool,
+            provider,
         }
     }
 }
@@ -89,6 +95,7 @@ impl PlatformBridgeAuthenticator for KubernetesPlatformBridgeAuthenticator {
             let authority = AuthoritySource {
                 client: self.client.clone(),
                 pool: self.pool.clone(),
+                provider: self.provider.clone(),
                 profiles: PlatformAccessProfileStore::new(
                     self.pool.clone(),
                     builtin_provider_catalog(),
@@ -113,13 +120,20 @@ impl PlatformBridgeAuthenticator for KubernetesPlatformBridgeAuthenticator {
 /// initial database/profile/controller selection. No public constructor, wire
 /// deserializer, credential value or protected-material cache exists.
 pub struct KubernetesPlatformRuntimeAuthority {
-    authority: AuthoritySource,
-    identities: Identities,
-    initial: Resolved,
+    pub(crate) authority: AuthoritySource,
+    pub(crate) identities: Identities,
+    pub(crate) initial: Resolved,
 }
 
 #[async_trait]
 impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
+    async fn project_environment(
+        &self,
+        request: codewire_gateway_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+    ) -> Result<Vec<u8>, Error> {
+        self.project(request).await
+    }
+
     async fn current_session(&self) -> Result<PlatformRuntimeSession, Error> {
         let current = self
             .identities
@@ -133,7 +147,7 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
     }
 }
 
-struct Identities {
+pub(crate) struct Identities {
     gateway: VerifiedPodIdentity,
     workspace: VerifiedPodIdentity,
     expires_at_unix: u64,
@@ -168,14 +182,17 @@ impl Identities {
         })
     }
 
-    fn ensure_live(&self) -> Result<(), Error> {
+    pub(crate) fn ensure_live(&self) -> Result<(), Error> {
         if Instant::now() >= self.deadline || unix_now()? >= self.expires_at_unix {
             return Err(Error::Denied);
         }
         Ok(())
     }
 
-    async fn bounded<T>(&self, work: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+    pub(crate) async fn bounded<T>(
+        &self,
+        work: impl Future<Output = Result<T, Error>>,
+    ) -> Result<T, Error> {
         self.ensure_live()?;
         let deadline = self.deadline.min(Instant::now() + AUTHORITY_TIMEOUT);
         let result = tokio::time::timeout_at(deadline, work).await;
@@ -184,9 +201,10 @@ impl Identities {
     }
 }
 
-struct AuthoritySource {
+pub(crate) struct AuthoritySource {
     client: Client,
-    pool: PgPool,
+    pub(crate) pool: PgPool,
+    pub(crate) provider: Arc<dyn KekProvider>,
     profiles: PlatformAccessProfileStore,
 }
 
@@ -202,66 +220,101 @@ pub(crate) struct Scope {
     pub(crate) pod_name: String,
     pub(crate) member_id: String,
     pub(crate) member_role: String,
-    pub(crate) profile_id: String,
-    pub(crate) profile_revision: i64,
-    pub(crate) confirmed_by: String,
+    pub(crate) profile_id: Option<String>,
+    pub(crate) profile_revision: Option<i64>,
+    pub(crate) confirmed_by: Option<String>,
+    pub(crate) profile_user: Option<String>,
+    pub(crate) profile_organization: Option<String>,
 }
 
 impl Scope {
     fn context(&self) -> Result<GrantContext, Error> {
-        if self.generation <= 0
-            || self.profile_revision <= 0
-            || self.confirmed_by != self.creator
-            || self.member_id.is_empty()
-            || self.member_role.is_empty()
-        {
+        if self.generation <= 0 || self.member_id.is_empty() || self.member_role.is_empty() {
             return Err(Error::Denied);
         }
         Ok(GrantContext {
             environment_id: EnvironmentId::parse(&self.environment_id)
                 .map_err(|_| Error::Denied)?,
             environment_generation: self.generation as u64,
-            placement: Placement::Platform,
+            placement: GrantPlacement::Platform,
             user_id: OwnerId::parse(&self.creator).map_err(|_| Error::Denied)?,
             organization_id: Some(OwnerId::parse(&self.organization).map_err(|_| Error::Denied)?),
-            allow_personal_credentials: true,
+            allow_personal_credentials: self.profile_user.as_deref() == Some(&self.creator)
+                && self.confirmed_by.as_deref() == Some(&self.creator),
             authorized_credentials: BTreeSet::new(),
         })
+    }
+
+    fn owner(&self) -> Result<Owner, Error> {
+        match (
+            &self.profile_id,
+            self.profile_revision,
+            &self.profile_user,
+            &self.profile_organization,
+            &self.confirmed_by,
+        ) {
+            (None, None, None, None, None) => Ok(Owner::User(
+                OwnerId::parse(&self.creator).map_err(|_| Error::Denied)?,
+            )),
+            (Some(_), Some(revision), Some(user), None, Some(confirmed))
+                if revision > 0 && user == &self.creator && confirmed == &self.creator =>
+            {
+                Ok(Owner::User(
+                    OwnerId::parse(user).map_err(|_| Error::Denied)?,
+                ))
+            }
+            (Some(_), Some(revision), None, Some(org), None)
+                if revision > 0 && org == &self.organization =>
+            {
+                Ok(Owner::Organization(
+                    OwnerId::parse(org).map_err(|_| Error::Denied)?,
+                ))
+            }
+            _ => Err(Error::Denied),
+        }
     }
 }
 
 #[derive(PartialEq, Eq)]
-struct Resolved {
+pub(crate) struct Resolved {
     session: PlatformRuntimeSession,
-    scope: Scope,
-    binding: PlatformBindingMetadata,
-    profile: AccessProfile,
+    pub(crate) scope: Scope,
+    pub(crate) metadata: ProjectionMetadata,
+    pub(crate) selection: PlatformProjectionSelection,
+    binding: Option<PlatformBindingMetadata>,
+    profile: Option<AccessProfile>,
     lineage: Lineage,
 }
+
+// The exact same scope query is used inside projection capture/final locks.
+// Membership remains mandatory even for the creator. Optional provider binding
+// does not relax environment state, generation or backend/Pod identity.
+pub(crate) const SCOPE_QUERY: &str = "SELECT e.id AS environment_id,e.created_by AS creator,e.org_id AS organization, \
+     e.environment_operation_generation AS generation,s.namespace,s.sandbox_claim_name AS claim_name, \
+     s.sandbox_claim_uid AS claim_uid,s.pod_name,m.id AS member_id,m.role AS member_role, \
+     b.profile_id,b.profile_revision,b.personal_owner_confirmed_by AS confirmed_by, \
+     p.user_id AS profile_user,p.organization_id AS profile_organization \
+     FROM public.environments e \
+     JOIN public.users u ON u.id=e.created_by \
+     JOIN public.organizations o ON o.id=e.org_id AND o.deletion_state='active' \
+     JOIN public.org_members m ON m.org_id=e.org_id AND m.user_id=e.created_by \
+     JOIN public.sandbox_environment_backend s ON s.environment_id=e.id \
+     LEFT JOIN public.platform_environment_access_bindings b ON b.environment_id=e.id \
+     LEFT JOIN public.platform_access_profiles p ON p.id=b.profile_id \
+     WHERE e.id=$1 AND e.type='sandbox' AND e.state='running' AND e.desired_state='started' \
+     AND e.deletion_requested_at IS NULL AND e.environment_operation_generation>0 \
+     AND s.sandbox_claim_name IS NOT NULL AND s.sandbox_claim_uid IS NOT NULL AND s.pod_name IS NOT NULL";
 
 impl AuthoritySource {
     async fn scope(&self, environment: &str) -> Result<Scope, Error> {
         // Membership is an INNER JOIN, never the public environment API's
         // creator shortcut. Incomplete backend or consent never infers scope.
-        sqlx::query_as(
-            "SELECT e.id AS environment_id,e.created_by AS creator,e.org_id AS organization, \
-             e.environment_operation_generation AS generation,s.namespace,s.sandbox_claim_name AS claim_name, \
-             s.sandbox_claim_uid AS claim_uid,s.pod_name,m.id AS member_id,m.role AS member_role, \
-             b.profile_id,b.profile_revision,b.personal_owner_confirmed_by AS confirmed_by \
-             FROM public.environments e \
-             JOIN public.users u ON u.id=e.created_by \
-             JOIN public.organizations o ON o.id=e.org_id AND o.deletion_state='active' \
-             JOIN public.org_members m ON m.org_id=e.org_id AND m.user_id=e.created_by \
-             JOIN public.sandbox_environment_backend s ON s.environment_id=e.id \
-             JOIN public.platform_environment_access_bindings b ON b.environment_id=e.id \
-             JOIN public.platform_access_profiles p ON p.id=b.profile_id \
-                AND p.user_id=e.created_by AND p.organization_id IS NULL \
-             WHERE e.id=$1 AND e.type='sandbox' AND e.state='running' AND e.desired_state='started' \
-             AND e.deletion_requested_at IS NULL AND e.environment_operation_generation>0 \
-             AND s.sandbox_claim_name IS NOT NULL AND s.sandbox_claim_uid IS NOT NULL \
-             AND s.pod_name IS NOT NULL AND b.personal_owner_confirmed_by=e.created_by",
-        ).bind(environment).fetch_optional(&self.pool).await
-            .map_err(|_| Error::Unavailable)?.ok_or(Error::Denied)
+        sqlx::query_as(SCOPE_QUERY)
+            .bind(environment)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| Error::Unavailable)?
+            .ok_or(Error::Denied)
     }
 
     async fn resolve(&self, identities: &Identities) -> Result<Resolved, Error> {
@@ -277,59 +330,82 @@ impl AuthoritySource {
             return Err(Error::Denied);
         }
         let mut context = scope.context()?;
-        let owner = Owner::User(context.user_id.clone());
-        let binding = self
-            .profiles
-            .get_binding_metadata(&context)
-            .await
-            .map_err(profile_error)?;
-        if binding.binding.profile_id.as_str() != scope.profile_id
-            || binding.binding.profile_revision != scope.profile_revision as u64
-            || binding.personal_owner_confirmed_by.as_ref() != Some(&context.user_id)
-        {
-            return Err(Error::Denied);
-        }
-        let profile = self
-            .profiles
-            .get_revision(
-                &owner,
-                &binding.binding.profile_id,
-                binding.binding.profile_revision,
-            )
-            .await
-            .map_err(profile_error)?;
-        if profile.owner != owner
-            || profile.placement != Placement::Platform
-            || profile.entries.is_empty()
-            || profile.entries.len() > 64
-        {
-            return Err(Error::Denied);
-        }
-        let ids: Vec<String> = profile
-            .entries
-            .values()
-            .map(ToString::to_string)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let owned: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM public.platform_credentials WHERE user_id=$1 \
-             AND organization_id IS NULL AND id=ANY($2)",
+        let owner = scope.owner()?;
+        let metadata = projection::metadata(&self.pool, &environment).await?;
+        let (binding, profile) = if scope.profile_id.is_some() {
+            let binding = self
+                .profiles
+                .get_binding_metadata(&context)
+                .await
+                .map_err(profile_error)?;
+            if Some(binding.binding.profile_id.as_str()) != scope.profile_id.as_deref()
+                || Some(binding.binding.profile_revision as i64) != scope.profile_revision
+                || binding
+                    .personal_owner_confirmed_by
+                    .as_ref()
+                    .map(OwnerId::as_str)
+                    != scope.confirmed_by.as_deref()
+            {
+                return Err(Error::Denied);
+            }
+            let profile = self
+                .profiles
+                .get_revision(
+                    &owner,
+                    &binding.binding.profile_id,
+                    binding.binding.profile_revision,
+                )
+                .await
+                .map_err(profile_error)?;
+            if profile.owner != owner
+                || profile.placement != Placement::Platform
+                || profile.entries.is_empty()
+                || profile.entries.len() > 64
+            {
+                return Err(Error::Denied);
+            }
+            let ids: Vec<String> = profile
+                .entries
+                .values()
+                .map(ToString::to_string)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let owned: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM public.platform_credentials WHERE \
+             ((user_id=$1 AND organization_id IS NULL) OR (organization_id=$2 AND user_id IS NULL)) \
+             AND id=ANY($3) AND status='active' \
+             AND (expires_at_unix IS NULL OR expires_at_unix>extract(epoch FROM clock_timestamp()))",
         )
-        .bind(&scope.creator)
+        .bind(match &owner { Owner::User(id) => Some(id.as_str()), _ => None })
+        .bind(match &owner { Owner::Organization(id) => Some(id.as_str()), _ => None })
         .bind(&ids)
         .fetch_all(&self.pool)
         .await
         .map_err(|_| Error::Unavailable)?;
-        if owned.into_iter().collect::<BTreeSet<_>>() != ids.into_iter().collect() {
-            return Err(Error::Denied);
-        }
-        context.authorized_credentials = profile.entries.values().cloned().collect();
+            if owned.into_iter().collect::<BTreeSet<_>>() != ids.into_iter().collect() {
+                return Err(Error::Denied);
+            }
+            context.authorized_credentials = profile.entries.values().cloned().collect();
+            (Some(binding), Some(profile))
+        } else {
+            (None, None)
+        };
+        let reserved_keys = codewire_project::platform_projection_reserved_keys(
+            profile
+                .iter()
+                .flat_map(|profile| profile.entries.keys())
+                .map(|slot| slot.as_str()),
+        )
+        .map_err(|_| Error::Denied)?;
+        let selection = metadata.selection(&scope, reserved_keys)?;
         let lineage =
             validate_lineage(&self.client, &scope, &gateway, &identities.workspace).await?;
         // No profile/Kube await follows the final database scope reread. A
         // different binding with identical entry IDs still changes Scope.
-        if self.scope(&environment).await? != scope {
+        if self.scope(&environment).await? != scope
+            || projection::metadata(&self.pool, &environment).await? != metadata
+        {
             return Err(Error::Denied);
         }
         identities.ensure_live()?;
@@ -343,6 +419,8 @@ impl AuthoritySource {
         Ok(Resolved {
             session,
             scope,
+            metadata,
+            selection,
             binding,
             profile,
             lineage,

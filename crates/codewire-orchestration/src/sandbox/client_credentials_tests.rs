@@ -24,6 +24,11 @@ fn opts() -> TemplateOpts {
         gateway_token: "synthetic-coordinate".into(),
         daemon_auth_token: "synthetic-daemon".into(),
         credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic(NS)),
+        managed_credential_clients: codewire_access::ManagedCredentialClients::from_profile_slots(
+            ["codex"],
+        )
+        .unwrap(),
+        projection_selection_sha256: Some([0xab; 32]),
         ..Default::default()
     }
 }

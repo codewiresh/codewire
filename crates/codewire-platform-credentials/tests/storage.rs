@@ -2,6 +2,10 @@
 //! Run explicitly with --ignored; an absent TEST_DATABASE_URL is a failure.
 //! These tests prove storage CAS, not external OAuth refresh serialization.
 
+#[path = "storage/lifecycle.rs"]
+mod lifecycle;
+#[path = "storage/ssh.rs"]
+mod ssh;
 mod support;
 
 use std::error::Error as _;
@@ -18,6 +22,114 @@ use codewire_platform_credentials::{
 };
 use codewire_server_core::org_deletion::begin_organization_deletion;
 use support::*;
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn prepared_reconnect_preserves_identity_deadline_and_atomically_publishes_hint() -> Result<()>
+{
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let owner = db.user("reconnect-owner").await?;
+        let other = db.user("reconnect-other").await?;
+        let provider = Arc::new(SyntheticKek::default());
+        let (pool, _) = db.broker_pool().await?;
+        let store = codewire_platform_credentials::PlatformCredentialStore::new(
+            pool.clone(),
+            provider.clone(),
+            builtin_provider_catalog(),
+        );
+        let mut registration = registration("Canonical Name", Kind::OAuth);
+        registration.expires_at_unix = Some(4_000_000_000);
+        let original = store
+            .create(&owner, registration, &value(OLD_VALUE))
+            .await?;
+        let prepared = store
+            .prepare_replacement(
+                &owner,
+                &original,
+                &value(NEW_VALUE),
+                Some("new-account".into()),
+            )
+            .await?;
+        let calls = provider.generate_calls.load(Ordering::SeqCst);
+        let mut tx = pool.begin().await?;
+        let staged = store.replace_prepared_in(&mut tx, &owner, prepared).await?;
+        ensure!(
+            provider.generate_calls.load(Ordering::SeqCst) == calls,
+            "publication performed protected provider work under locks"
+        );
+        ensure!(store.record(&owner, &original.metadata.id).await? == original);
+        ensure!(staged.metadata.display_name == original.metadata.display_name);
+        ensure!(staged.metadata.expires_at_unix == original.metadata.expires_at_unix);
+        ensure!(staged.metadata.account_hint.as_deref() == Some("new-account"));
+        tx.rollback().await?;
+        ensure!(store.record(&owner, &original.metadata.id).await? == original);
+        ensure!(
+            store
+                .read_for_broker(&owner, &original.metadata.id, original.version)
+                .await?
+                .expose_secret()
+                == OLD_VALUE
+        );
+
+        let prepared = store
+            .prepare_replacement(&owner, &original, &value(NEW_VALUE), None)
+            .await?;
+        let mut tx = pool.begin().await?;
+        ensure!(
+            store.replace_prepared_in(&mut tx, &other, prepared).await == Err(Error::InvalidInput)
+        );
+        tx.rollback().await?;
+
+        let prepared = store
+            .prepare_replacement(
+                &owner,
+                &original,
+                &value(NEW_VALUE),
+                Some("new-account".into()),
+            )
+            .await?;
+        let stale = store
+            .prepare_replacement(
+                &owner,
+                &original,
+                &value(OLD_VALUE),
+                Some("stale-account".into()),
+            )
+            .await?;
+        let mut tx = pool.begin().await?;
+        let next = store.replace_prepared_in(&mut tx, &owner, prepared).await?;
+        tx.commit().await?;
+        ensure!(
+            next.version
+                == CredentialVersion {
+                    revocation_generation: 2,
+                    material_generation: 2
+                }
+        );
+        ensure!(next.metadata.account_hint.as_deref() == Some("new-account"));
+        ensure!(
+            next.metadata.display_name == original.metadata.display_name
+                && next.metadata.expires_at_unix == original.metadata.expires_at_unix
+        );
+        ensure!(
+            store
+                .read_for_broker(&owner, &next.metadata.id, next.version)
+                .await?
+                .expose_secret()
+                == NEW_VALUE
+        );
+        let mut tx = pool.begin().await?;
+        ensure!(
+            store.replace_prepared_in(&mut tx, &owner, stale).await == Err(Error::StaleVersion)
+        );
+        tx.rollback().await?;
+        ensure!(store.record(&owner, &next.metadata.id).await? == next);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
 
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
@@ -976,7 +1088,9 @@ async fn paused_preparation_cannot_resurrect_after_revoke_or_organization_deleti
             .execute(&db.pool)
             .await?;
         provider.generate_gate.release();
-        ensure!(tokio::time::timeout(TIMEOUT, task).await?? == Err(Error::Expired));
+        // This fixture mutates metadata without advancing its version; the
+        // full-record fence detects that before checking elapsed wall expiry.
+        ensure!(tokio::time::timeout(TIMEOUT, task).await?? == Err(Error::CorruptRecord));
         let after_expiry = store.record(&owner, &refresh.metadata.id).await?;
         ensure!(after_expiry.version == refresh.version);
         ensure!(

@@ -53,6 +53,48 @@ pub enum CredentialAuthKind {
     ApiKey,
     AccessToken,
     GitHubApp,
+    SshKey,
+}
+
+/// Public registration information, derived from validated private material by
+/// the credential authority. This type performs bounded shape checks only;
+/// it neither parses private keys nor establishes a matching signing identity.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SshPublicKeyMetadata {
+    pub openssh: String,
+    pub fingerprint: String,
+}
+
+impl SshPublicKeyMetadata {
+    pub fn validate(&self) -> Result<(), AccessError> {
+        let invalid = || AccessError::InvalidField {
+            field: "SSH public key metadata",
+        };
+        let encoded = self
+            .openssh
+            .strip_prefix("ssh-ed25519 ")
+            .or_else(|| self.openssh.strip_prefix("ssh-rsa "))
+            .ok_or_else(invalid)?;
+        let base64 = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/');
+        let unpadded = encoded.trim_end_matches('=');
+        if self.openssh.len() > 4096
+            || encoded.len() < 20
+            || !encoded.len().is_multiple_of(4)
+            || encoded.len() - unpadded.len() > 2
+            || !unpadded.bytes().all(base64)
+        {
+            return Err(invalid());
+        }
+        let digest = self
+            .fingerprint
+            .strip_prefix("SHA256:")
+            .ok_or_else(invalid)?;
+        if digest.len() != 43 || !digest.bytes().all(base64) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -77,6 +119,8 @@ pub struct CredentialMetadata {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_public_key: Option<SshPublicKeyMetadata>,
     pub status: CredentialStatus,
     /// Hard deadline for credential use, including refresh. OAuth access-token
     /// expiry is a separate provider detail inside the protected material.
@@ -90,6 +134,25 @@ impl CredentialMetadata {
         validate_label(&self.display_name, "credential display name")?;
         if let Some(hint) = &self.account_hint {
             validate_label(hint, "credential account hint")?;
+        }
+        if self.provider.as_str() == "ssh"
+            || self.authentication_kind == CredentialAuthKind::SshKey
+            || self.ssh_public_key.is_some()
+        {
+            if self.provider.as_str() != "ssh"
+                || self.authentication_kind != CredentialAuthKind::SshKey
+                || self.account_hint.is_some()
+            {
+                return Err(AccessError::InvalidField {
+                    field: "SSH credential metadata",
+                });
+            }
+            self.ssh_public_key
+                .as_ref()
+                .ok_or(AccessError::InvalidField {
+                    field: "SSH public key metadata",
+                })?
+                .validate()?;
         }
         if self.revocation_generation == 0 {
             return Err(AccessError::ZeroGeneration {
@@ -154,6 +217,79 @@ pub struct GrantPermission {
 pub struct CapabilityPolicy {
     pub authentication_kinds: BTreeSet<CredentialAuthKind>,
     pub permissions: BTreeSet<GrantPermission>,
+}
+
+/// Closed HTTP destination families selected from an authenticated profile.
+/// This is routing metadata, not a credential lease or authorization proof.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpProvider {
+    OpenAiApiKey,
+    CodexOAuth,
+    AnthropicApiKey,
+    GitHubOAuth,
+}
+
+impl HttpProvider {
+    /// Environment names owned by the selected provider's workload adapter.
+    /// These are collision guards, not inference of a value's secret type.
+    pub fn reserved_environment_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::OpenAiApiKey | Self::CodexOAuth => {
+                &["CODEX_HOME", "OPENAI_BASE_URL", "OPENAI_API_KEY"]
+            }
+            Self::AnthropicApiKey => &[
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ],
+            Self::GitHubOAuth => &[
+                "GH_HOST",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+            ],
+        }
+    }
+
+    /// Fixed token for the private broker launch contract, never a hostname.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiApiKey => "openai-api-key",
+            Self::CodexOAuth => "codex-oauth",
+            Self::AnthropicApiKey => "anthropic-api-key",
+            Self::GitHubOAuth => "github-oauth",
+        }
+    }
+
+    /// Decode only a supported private launch token.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "openai-api-key" => Some(Self::OpenAiApiKey),
+            "codex-oauth" => Some(Self::CodexOAuth),
+            "anthropic-api-key" => Some(Self::AnthropicApiKey),
+            "github-oauth" => Some(Self::GitHubOAuth),
+            _ => None,
+        }
+    }
+
+    /// Resolve only the named, supported slot/provider/form combinations.
+    /// Callers separately validate owner, placement, status, revisions and expiry.
+    pub fn for_credential(slot: &CapabilitySlot, credential: &CredentialMetadata) -> Option<Self> {
+        match (
+            slot.as_str(),
+            credential.provider.as_str(),
+            credential.authentication_kind,
+        ) {
+            ("codex" | "openai", "openai", CredentialAuthKind::ApiKey) => Some(Self::OpenAiApiKey),
+            ("codex", "openai", CredentialAuthKind::OAuth) => Some(Self::CodexOAuth),
+            ("anthropic", "anthropic", CredentialAuthKind::ApiKey) => Some(Self::AnthropicApiKey),
+            ("github", "github", CredentialAuthKind::OAuth) => Some(Self::GitHubOAuth),
+            _ => None,
+        }
+    }
 }
 
 impl CapabilityPolicy {

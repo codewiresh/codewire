@@ -33,6 +33,8 @@ spec:
               value: https://codewire.sh
             - name: CODEWIRE_API_ORIGIN
               value: http://codewire-orchestration:8084
+            - name: CODEWIRE_CREDENTIAL_ORIGIN
+              value: http://codewire-credential-service:8086
             - name: CODEWIRE_IDENTITY_ORIGIN
               value: http://codewire-idp:8091
             - name: CODEWIRE_BILLING_ORIGIN

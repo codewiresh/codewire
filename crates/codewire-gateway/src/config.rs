@@ -45,6 +45,7 @@ pub const DOCKER_PROXY_SOCK_ENV: &str = "CODEWIRE_DOCKER_PROXY_SOCK";
 pub const DOCKER_UPSTREAM_SOCK_ENV: &str = "CODEWIRE_DOCKER_UPSTREAM_SOCK";
 
 pub const ENVIRONMENT_OPERATION_GENERATION_ENV: &str = "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION";
+pub use codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV;
 pub const CREDENTIAL_HTTPS_AUTHORITY_ENV: &str = "CODEWIRE_CREDENTIAL_HTTPS_AUTHORITY";
 pub const CREDENTIAL_HTTPS_LISTEN_ADDR_ENV: &str = "CODEWIRE_CREDENTIAL_HTTPS_LISTEN_ADDR";
 pub const CREDENTIAL_GATEWAY_TOKEN_FILE_ENV: &str = "CODEWIRE_CREDENTIAL_GATEWAY_TOKEN_FILE";
@@ -79,6 +80,7 @@ pub struct CredentialRuntimeConfig {
     tls_key_file: PathBuf,
     broker_https_origin: String,
     broker_tls_roots_file: PathBuf,
+    hosted_projection_sha256: Option<[u8; 32]>,
 }
 
 impl fmt::Debug for CredentialRuntimeConfig {
@@ -90,6 +92,20 @@ impl fmt::Debug for CredentialRuntimeConfig {
 }
 
 impl CredentialRuntimeConfig {
+    pub(crate) fn hosted_bridge(
+        &self,
+    ) -> Result<Option<crate::hosted_bridge::HostedBridgeConfig>, ConfigError> {
+        if self.hosted_projection_sha256.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(crate::hosted_bridge::HostedBridgeConfig::new(
+            self.environment_id,
+            self.operation_generation,
+            self.gateway_token_file.clone(),
+            self.broker_endpoint()?,
+        )))
+    }
+
     pub(crate) fn server_tls(&self) -> Result<ServerTlsFiles, ConfigError> {
         ServerTlsFiles::new(self.tls_cert_file.clone(), self.tls_key_file.clone())
             .map_err(|_| ConfigError::InvalidCredentialRuntime)
@@ -117,13 +133,37 @@ impl CredentialRuntimeConfig {
     }
 
     fn from_getenv<F: Fn(&str) -> Option<String>>(getenv: &F) -> Result<Option<Self>, ConfigError> {
+        let hosted_projection_sha256 = getenv(HOSTED_PROJECTION_SHA256_ENV)
+            .map(|digest| {
+                if digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(ConfigError::InvalidCredentialRuntime);
+                }
+                let mut bytes = [0; 32];
+                for (index, byte) in bytes.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&digest[index * 2..index * 2 + 2], 16)
+                        .map_err(|_| ConfigError::InvalidCredentialRuntime)?;
+                }
+                if bytes == [0; 32] {
+                    return Err(ConfigError::InvalidCredentialRuntime);
+                }
+                Ok(bytes)
+            })
+            .transpose()?;
         // ENVIRONMENT_ID is also used by SSH/Mesh. Its presence alone must not
         // activate credential delivery or require any credential transport.
         if CREDENTIAL_ENV_GROUP
             .iter()
             .all(|name| getenv(name).is_none())
         {
-            return Ok(None);
+            return if hosted_projection_sha256.is_none() {
+                Ok(None)
+            } else {
+                Err(ConfigError::InvalidCredentialRuntime)
+            };
         }
         let required = |name| -> Result<String, ConfigError> {
             let value = getenv(name).ok_or(ConfigError::InvalidCredentialRuntime)?;
@@ -162,6 +202,7 @@ impl CredentialRuntimeConfig {
             Ok(path)
         };
         let config = Self {
+            hosted_projection_sha256,
             environment_id,
             operation_generation,
             https_authority: required(CREDENTIAL_HTTPS_AUTHORITY_ENV)?,

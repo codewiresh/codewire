@@ -67,6 +67,7 @@ def assert_credential_service(
             "seccompProfile: type: RuntimeDefault",
             "name: CREDENTIAL_DATABASE_URL valueFrom: secretKeyRef: key: url name: codewire-credential-database",
             "name: CREDENTIAL_CODEX_EXECUTABLE value: /usr/local/bin/codex",
+            "name: CREDENTIAL_GITHUB_EXECUTABLE value: /usr/local/bin/gh",
             "name: CREDENTIAL_RUNTIME_DIR value: /run/codewire-credentials",
             "name: broker-tls secret: defaultMode: 288 secretName: codewire-credential-broker-tls",
             "emptyDir: medium: Memory sizeLimit: 64Mi name: enrollment-runtime",
@@ -102,7 +103,9 @@ def assert_credential_service(
     if policy and compact(top_level_block(policy, "spec")) != (
         "spec: ingress: - from: - namespaceSelector: matchLabels: "
         f"kubernetes.io/metadata.name: {ingress_namespace} podSelector: matchLabels: "
-        f"app.kubernetes.io/name: {ingress_app} ports: - port: 8086 protocol: TCP "
+        f"app.kubernetes.io/name: {ingress_app} "
+        "- podSelector: matchLabels: app.kubernetes.io/component: dashboard "
+        "app.kubernetes.io/name: codewire ports: - port: 8086 protocol: TCP "
         "- from: - namespaceSelector: matchLabels: "
         f"kubernetes.io/metadata.name: {sandbox} podSelector: matchLabels: "
         "app.kubernetes.io/managed-by: codewire app.kubernetes.io/name: codewire-gateway "
@@ -110,7 +113,7 @@ def assert_credential_service(
         "podSelector: matchLabels: app.kubernetes.io/component: credential-service "
         "app.kubernetes.io/name: codewire policyTypes: - Ingress"
     ):
-        failures.append(f"{label}: credential ingress must separate the public edge and managed gateways")
+        failures.append(f"{label}: credential ingress must separate the public edge/same-namespace dashboard and managed gateways")
 
 
 def credential_service_self_test(resources: list[str], target: dict[str, str]) -> None:
@@ -124,11 +127,25 @@ def credential_service_self_test(resources: list[str], target: dict[str, str]) -
         ("Deployment", "codewire-credential-service", "secretKeyRef:", "envFrom:", "unexpected secret input"),
         ("Deployment", "codewire-credential-service", "name: codewire-credential-database",
          "name: codewire-secrets", "CREDENTIAL_DATABASE_URL"),
+        ("Deployment", "codewire-credential-service", "CREDENTIAL_GITHUB_EXECUTABLE",
+         "MISSING_GITHUB_EXECUTABLE", "CREDENTIAL_GITHUB_EXECUTABLE"),
+        ("Deployment", "codewire-credential-service", "/usr/local/bin/gh",
+         "/untrusted/bin/gh", "CREDENTIAL_GITHUB_EXECUTABLE"),
         ("Deployment", "codewire-credential-service", "startupProbe:", "missingProbe:", "startupProbe"),
         ("Certificate", "codewire-credential-broker", "isCA: false", "isCA: true", "exact DNS"),
         ("Certificate", "codewire-credential-broker", ".prod.svc.cluster.local", ".foreign.svc.cluster.local", "exact DNS"),
         ("NetworkPolicy", "codewire-credential-service", "codewire.sh/type: gateway", "codewire.sh/type: workspace", "managed gateways"),
         ("NetworkPolicy", "codewire-credential-service", "port: 9443", "port: 8086", "managed gateways"),
+        ("NetworkPolicy", "codewire-credential-service", "app.kubernetes.io/component: dashboard",
+         "app.kubernetes.io/component: coordinator", "same-namespace dashboard"),
+        ("NetworkPolicy", "codewire-credential-service", "port: 8086", "port: 9443", "managed gateways"),
+        ("NetworkPolicy", "codewire-credential-service",
+         "    - podSelector:\n        matchLabels:\n          app.kubernetes.io/component: dashboard",
+         "    - namespaceSelector: {}\n      podSelector:\n        matchLabels:\n          app.kubernetes.io/component: dashboard",
+         "same-namespace dashboard"),
+        ("NetworkPolicy", "codewire-credential-service",
+         "    - podSelector:\n        matchLabels:\n          app.kubernetes.io/component: dashboard\n          app.kubernetes.io/name: codewire",
+         "    - podSelector: {}", "same-namespace dashboard"),
     ]:
         changed = []
         matched = False

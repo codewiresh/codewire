@@ -18,7 +18,7 @@ service LocalSupervisorService {
   rpc RestartEnvironment(EnvironmentSelector) returns (Operation);
   rpc RefreshEnvironmentSkills(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
-  rpc ApplyEnvironmentAccess(ApplyEnvironmentAccessRequest) returns (Operation);
+  rpc UpdateEnvironmentSources(UpdateEnvironmentSourcesRequest) returns (Operation);
   rpc DeleteEnvironment(EnvironmentSelector) returns (Operation);
   rpc GetOperation(GetOperationRequest) returns (Operation);
   rpc WatchOperation(WatchOperationRequest) returns (stream Operation);
@@ -50,6 +50,9 @@ service EnvironmentRunnerService {
   // never removes environment storage; only the supervisor may tombstone it.
   rpc PrepareRetireRunner(PrepareRetireRunnerRequest) returns (PrepareRetireRunnerResponse);
   rpc GetDaemonAccess(GetDaemonAccessRequest) returns (DaemonAccess);
+  // Owner-only startup seam. Never waits on the main runner state mutex and
+  // never admits a different or dead generation. Normal access stays Ready-only.
+  rpc GetGenerationDaemonAccess(GetGenerationDaemonAccessRequest) returns (DaemonAccess);
 }
 
 message GetRunnerProtocolInfoRequest {}
@@ -78,7 +81,9 @@ enum OperationKind {
   OPERATION_KIND_DELETE = 7;
   OPERATION_KIND_GROW_DISK = 8;
   OPERATION_KIND_RECONCILE = 9;
-  OPERATION_KIND_APPLY_ENVIRONMENT_ACCESS = 10;
+  reserved 10;
+  reserved "OPERATION_KIND_APPLY_ENVIRONMENT_ACCESS";
+  OPERATION_KIND_UPDATE_ENVIRONMENT_SOURCES = 11;
 }
 
 enum OperationPhase {
@@ -123,8 +128,13 @@ enum OperationStage {
   OPERATION_STAGE_BIND_ENVIRONMENT_ACCESS = 26;
   OPERATION_STAGE_REVOKE_ENVIRONMENT_ACCESS = 27;
   OPERATION_STAGE_REQUIRE_ENVIRONMENT_ACCESS = 28;
-  OPERATION_STAGE_APPLY_ENVIRONMENT_ACCESS = 29;
-  OPERATION_STAGE_RECORD_ENVIRONMENT_ACCESS = 30;
+  reserved 29;
+  reserved "OPERATION_STAGE_APPLY_ENVIRONMENT_ACCESS";
+  reserved 30;
+  reserved "OPERATION_STAGE_RECORD_ENVIRONMENT_ACCESS";
+  OPERATION_STAGE_RECORD_ENVIRONMENT_SOURCES = 31;
+  OPERATION_STAGE_RECORD_SOURCE_OUTCOME = 32;
+  OPERATION_STAGE_APPLY_SOURCE_ACCESS_BINDING = 33;
 }
 
 message Operation {
@@ -197,13 +207,51 @@ message CreateEnvironmentRequest {
   // persists only this status-visible metadata; setup authority remains in an
   // isolated host process and never enters this API.
   MeshAttachment mesh = 12;
-  // Material-free exact revision resolved from project_spec_json.access.profile.
+  // Material-free exact revision resolved from project_spec_json.credentials.profile.
   // Both fields are empty/zero when the project selects no credential access.
   string access_profile_id = 13;
   uint64 access_profile_revision = 14;
   // Dedicated guest-local Docker data disk. Zero disables Docker for this
   // environment; nonzero values are whole-MiB ext4 disk sizes.
   uint64 docker_disk_bytes = 15;
+  // Scope/name metadata for the exact resolved ID, verified against authority
+  // history before binding. Never used as a fallback identity lookup.
+  string access_profile_reference = 16;
+  PlatformSourceAuthority platform_source_authority = 17;
+}
+
+// Authenticated storage identity pinned at selection time, not mutable CLI
+// defaults. Fresh launch delegation must recheck this user/org/server tuple;
+// it is not a token, an environment credential, or hardware attestation.
+message PlatformSourceAuthority {
+  string server_url = 1;
+  string organization_id = 2;
+  string user_id = 3;
+  // Exact material-free capability slots from the explicitly selected current
+  // profile revision. Empty for no profile, a local profile, or an empty
+  // platform profile. The supervisor persists this immutable selection; it
+  // never infers client routing from environment variable names.
+  repeated string profile_slots = 4;
+}
+
+// Narrow source edit. All non-source ProjectSpec fields must remain byte-for-
+// byte equivalent after canonicalization; this is not a general config update.
+message UpdateEnvironmentSourcesRequest {
+  string name = 1;
+  string request_id = 2;
+  string expected_environment_id = 3;
+  uint64 expected_generation = 4;
+  string expected_project_spec_sha256 = 5;
+  string expected_access_profile_id = 6;
+  uint64 expected_access_profile_revision = 7;
+  bytes project_spec_json = 8;
+  string project_spec_sha256 = 9;
+  string access_profile_id = 10;
+  uint64 access_profile_revision = 11;
+  string access_profile_reference = 12;
+  bool allow_restart = 13;
+  PlatformSourceAuthority expected_platform_source_authority = 14;
+  PlatformSourceAuthority platform_source_authority = 15;
 }
 
 message HostPortBinding {
@@ -267,20 +315,6 @@ message ResizeEnvironmentRequest {
   string public_disruption_policy = 8;
 }
 
-message ApplyEnvironmentAccessRequest {
-  string name = 1;
-  string request_id = 2;
-  // Stable identity precondition so delete-and-recreate cannot redirect an
-  // access mutation by name.
-  string environment_id = 3;
-  // Material-free exact target resolved by the local credential authority.
-  // Set all three target fields, or set clear=true with all three empty/zero.
-  string access_profile = 4;
-  string access_profile_id = 5;
-  uint64 access_profile_revision = 6;
-  bool clear = 7;
-}
-
 message Environment {
   string id = 1;
   string name = 2;
@@ -320,6 +354,11 @@ message Environment {
   // the local credential authority for an access profile or protected secret
   // selection.
   bool requires_credential_authority = 24;
+  // Owner-only canonical configuration/selection metadata, never resolved
+  // application values. Used to construct an exact source-update CAS.
+  bytes project_spec_json = 25;
+  string access_profile_id = 26;
+  PlatformSourceAuthority platform_source_authority = 27;
 }
 
 message ListEnvironmentsRequest {}
@@ -472,6 +511,12 @@ message StartVmRequest {
   uint64 docker_disk_bytes = 17;
   reserved 18, 19, 20;
   reserved "workload_secret_total_bytes", "workload_secret_sha256", "workload_secret_entry_count";
+  // Current canonical environment source selection, never a built-root value
+  // file. Empty means no application-secret projection is selected.
+  string environment_projection_sha256 = 21;
+  // Closed material-free client selection from the exact pinned profile.
+  // Explicit v1:none is required when no managed credential client is selected.
+  string managed_credential_clients = 22;
 }
 
 message DirectShareAttachment {
@@ -497,3 +542,8 @@ message GrowStateDiskResponse {
 message PrepareRetireRunnerRequest {}
 message PrepareRetireRunnerResponse {}
 message GetDaemonAccessRequest {}
+
+message GetGenerationDaemonAccessRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+}

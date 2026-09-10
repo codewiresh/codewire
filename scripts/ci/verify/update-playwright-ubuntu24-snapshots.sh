@@ -14,6 +14,10 @@ readonly KUBE_CONTEXT='kind-codewire'
 readonly KUBE_NAMESPACE='default'
 readonly PLAYWRIGHT_BASE_URL='http://127.0.0.1:8080'
 readonly DATABASE_URL='postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable'
+readonly PREPARED_KIND_CONTEXT='kind-codewire-e2e-ci'
+readonly PREPARED_KIND_NAMESPACE='codewire-e2e'
+readonly PREPARED_KIND_PLAYWRIGHT_BASE_URL='http://127.0.0.1:8090'
+readonly PREPARED_KIND_DATABASE_URL='postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable'
 readonly SNAPSHOT_RELATIVE_DIR='apps/dashboard/e2e'
 
 SNAPSHOT_CLEANUP_RUN_ROOT=''
@@ -21,14 +25,20 @@ SNAPSHOT_CLEANUP_RUNTIME_PARENT=''
 SNAPSHOT_CLEANUP_DOCKER_CONFIG=''
 SNAPSHOT_CLEANUP_CONTAINER_CIDFILE=''
 SNAPSHOT_CLEANUP_SNAPSHOT_DIR=''
+SNAPSHOT_CLEANUP_PROFILE='default'
 SNAPSHOT_CLEANUP_PID="$$"
 
 usage() {
   cat <<'EOF'
-Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH
+Usage: update-playwright-ubuntu24-snapshots.sh --chromium-archive ABSOLUTE_PATH [--prepared-kind-management-secrets-mobile]
 
 Regenerate the five affected dashboard snapshots whose checked-in suffix is
 ubuntu24-cft145. The local Kind stack must already be running through `make up`.
+
+With --prepared-kind-management-secrets-mobile, regenerate only the two mobile
+Secrets snapshots and the mobile Security settings snapshot against the
+already-running codewire-e2e-ci Kind topology. This profile never creates,
+deploys, or forwards that topology and does not qualify the full runtime suite.
 
 The Chromium archive must be chrome-linux64.zip for version 145.0.7632.6 with
 the checksum pinned by scripts/ci/install-pinned-playwright-chromium.sh.
@@ -61,13 +71,28 @@ isolated_docker_client() (
 )
 
 expected_snapshots() {
-  cat <<'EOF'
+  case "${1:-default}" in
+    default)
+      cat <<'EOF'
 ssr-dashboard.environments.ssr.ts-snapshots/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
 ssr-dashboard.environments.ssr.ts-snapshots/environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
 ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
 ssr-dashboard.read.ssr.ts-snapshots/dashboard-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png
 EOF
+      ;;
+    prepared-kind-management-secrets-mobile)
+      cat <<'EOF'
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-secrets-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-secret-bucket-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+ssr-dashboard.management-visual.ssr.ts-snapshots/management-security-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png
+EOF
+      ;;
+    *)
+      fail "unknown snapshot profile: $1"
+      return 2
+      ;;
+  esac
 }
 
 retired_snapshots() {
@@ -133,7 +158,7 @@ snapshot_run_cleanup() {
   if [ -n "$SNAPSHOT_CLEANUP_SNAPSHOT_DIR" ]; then
     while IFS= read -r relative; do
       rm -f -- "$(snapshot_temporary_path "$SNAPSHOT_CLEANUP_SNAPSHOT_DIR" "$relative")"
-    done < <(expected_snapshots)
+    done < <(expected_snapshots "$SNAPSHOT_CLEANUP_PROFILE")
   fi
   case "$SNAPSHOT_CLEANUP_RUN_ROOT" in
     "$SNAPSHOT_CLEANUP_RUNTIME_PARENT"/codewire-playwright-snapshots.*)
@@ -175,18 +200,12 @@ read_container_id() {
 }
 
 is_expected_snapshot() {
-  case "$1" in
-    ssr-dashboard.environments.ssr.ts-snapshots/environments-create-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png|\
-    ssr-dashboard.environments.ssr.ts-snapshots/environments-create-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png|\
-    ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png|\
-    ssr-dashboard.management-visual.ssr.ts-snapshots/management-settings-mobile-dashboard-ssr-mobile-ubuntu24-cft145.png|\
-    ssr-dashboard.read.ssr.ts-snapshots/dashboard-desktop-dashboard-ssr-desktop-ubuntu24-cft145.png)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  local profile="$1" candidate="$2" expected
+
+  while IFS= read -r expected; do
+    [ "$candidate" = "$expected" ] && return 0
+  done < <(expected_snapshots "$profile")
+  return 1
 }
 
 renderer_deb_manifest() {
@@ -304,7 +323,8 @@ validate_png() {
 }
 
 validate_snapshot_stage() {
-  local baseline="$1" stage="$2" relative unexpected unapproved=''
+  local baseline="$1" stage="$2" profile="${3:-default}"
+  local relative unexpected unapproved=''
   local paths_file
 
   unexpected="$(find "$stage" -mindepth 1 ! -type d ! -type f -print -quit)"
@@ -322,7 +342,7 @@ validate_snapshot_stage() {
   while IFS= read -r relative; do
     if [ ! -f "$baseline/$relative" ] || [ ! -f "$stage/$relative" ] ||
         ! cmp -s "$baseline/$relative" "$stage/$relative"; then
-      if ! is_expected_snapshot "$relative"; then
+      if ! is_expected_snapshot "$profile" "$relative"; then
         unapproved="$relative"
         break
       fi
@@ -336,21 +356,105 @@ validate_snapshot_stage() {
 
   while IFS= read -r relative; do
     validate_png "$stage/$relative"
-  done < <(expected_snapshots)
+  done < <(expected_snapshots "$profile")
 }
 
 promote_snapshots() {
-  local stage="$1" target="$2" relative temporary
+  local stage="$1" target="$2" profile="${3:-default}" relative temporary
 
   while IFS= read -r relative; do
     mkdir -p "$target/$(dirname "$relative")"
     temporary="$(snapshot_temporary_path "$target" "$relative")"
     install -m 0644 "$stage/$relative" "$temporary"
-  done < <(expected_snapshots)
+  done < <(expected_snapshots "$profile")
   while IFS= read -r relative; do
     temporary="$(snapshot_temporary_path "$target" "$relative")"
     mv -f "$temporary" "$target/$relative"
-  done < <(expected_snapshots)
+  done < <(expected_snapshots "$profile")
+}
+
+snapshot_profile_context() {
+  case "$1" in
+    default) printf '%s\n' "$KUBE_CONTEXT" ;;
+    prepared-kind-management-secrets-mobile) printf '%s\n' "$PREPARED_KIND_CONTEXT" ;;
+    *) fail "unknown snapshot profile: $1"; return 2 ;;
+  esac
+}
+
+snapshot_profile_namespace() {
+  case "$1" in
+    default) printf '%s\n' "$KUBE_NAMESPACE" ;;
+    prepared-kind-management-secrets-mobile) printf '%s\n' "$PREPARED_KIND_NAMESPACE" ;;
+    *) fail "unknown snapshot profile: $1"; return 2 ;;
+  esac
+}
+
+snapshot_profile_origin() {
+  case "$1" in
+    default) printf '%s\n' "$PLAYWRIGHT_BASE_URL" ;;
+    prepared-kind-management-secrets-mobile) printf '%s\n' "$PREPARED_KIND_PLAYWRIGHT_BASE_URL" ;;
+    *) fail "unknown snapshot profile: $1"; return 2 ;;
+  esac
+}
+
+snapshot_profile_database_url() {
+  case "$1" in
+    default) printf '%s\n' "$DATABASE_URL" ;;
+    prepared-kind-management-secrets-mobile) printf '%s\n' "$PREPARED_KIND_DATABASE_URL" ;;
+    *) fail "unknown snapshot profile: $1"; return 2 ;;
+  esac
+}
+
+validate_snapshot_topology() {
+  local profile="$1" docker_config="$2"
+  local kube_context namespace expected_origin cluster deployment actual_origin dashboard_image
+
+  kube_context="$(snapshot_profile_context "$profile")"
+  namespace="$(snapshot_profile_namespace "$profile")"
+  expected_origin="$(snapshot_profile_origin "$profile")"
+  cluster="${kube_context#kind-}"
+  if ! isolated_docker_client "$docker_config" kind get clusters | grep -Fxq "$cluster"; then
+    if [ "$profile" = default ]; then
+      fail 'local Kind cluster codewire is not running; run make up first'
+    else
+      fail "required prepared Kind cluster is not running: $cluster"
+    fi
+    return 1
+  fi
+  for deployment in codewire-dashboard codewire-idp codewire-orchestration; do
+    kubectl --context "$kube_context" -n "$namespace" rollout status \
+      "deployment/$deployment" --timeout=120s || {
+        fail "required dashboard dependency is not Ready: deployment/$deployment"
+        return 1
+      }
+  done
+  if [ "$profile" = prepared-kind-management-secrets-mobile ]; then
+    kubectl --context "$kube_context" -n "$namespace" rollout status \
+      deployment/codewire-credential-service --timeout=120s || {
+        fail 'required dashboard dependency is not Ready: deployment/codewire-credential-service'
+        return 1
+      }
+    dashboard_image="$(kubectl --context "$kube_context" -n "$namespace" get \
+      deployment/codewire-dashboard \
+      -o 'jsonpath={.spec.template.spec.containers[0].image}')" || {
+        fail 'could not read the prepared Kind dashboard image'
+        return 1
+      }
+    [ "$dashboard_image" = codewire-dashboard:e2e ] || {
+      fail "prepared Kind dashboard image mismatch: expected codewire-dashboard:e2e, found ${dashboard_image:-missing}"
+      return 1
+    }
+  fi
+  actual_origin="$(kubectl --context "$kube_context" -n "$namespace" get \
+    deployment/codewire-dashboard \
+    -o 'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="CODEWIRE_PUBLIC_ORIGIN")].value}')" || {
+      fail 'could not read the dashboard public origin'
+      return 1
+    }
+  [ "$actual_origin" = "$expected_origin" ] || {
+    fail "dashboard origin mismatch: expected $expected_origin, found ${actual_origin:-missing}"
+    return 1
+  }
 }
 
 assert_kubectl_not_invoked() {
@@ -486,7 +590,8 @@ main() {
   local source_tree dependency_environment snapshot_dir snapshot_baseline snapshot_stage target_manifest
   local tracked_paths current_tracked_paths source_fingerprint projection_fingerprint
   local renderer_log renderer_iid renderer_image_id container_cidfile container_id
-  local actual_origin stale_count bun_bin
+  local snapshot_profile='default' kube_context namespace playwright_base_url database_url
+  local stale_count bun_bin
   local docker_status=0 relative
   local lock_fd=''
 
@@ -499,6 +604,14 @@ main() {
         }
         chromium_archive="$2"
         shift 2
+        ;;
+      --prepared-kind-management-secrets-mobile)
+        [ "$snapshot_profile" = default ] || {
+          fail '--prepared-kind-management-secrets-mobile may be specified only once'
+          return 2
+        }
+        snapshot_profile='prepared-kind-management-secrets-mobile'
+        shift
         ;;
       --help|-h)
         usage
@@ -526,12 +639,16 @@ main() {
   done
   validate_chromium_archive "$chromium_archive"
   bun_bin="$(command -v bun)"
+  kube_context="$(snapshot_profile_context "$snapshot_profile")"
+  namespace="$(snapshot_profile_namespace "$snapshot_profile")"
+  playwright_base_url="$(snapshot_profile_origin "$snapshot_profile")"
+  database_url="$(snapshot_profile_database_url "$snapshot_profile")"
 
   snapshot_dir="$ROOT/$SNAPSHOT_RELATIVE_DIR"
   [ -d "$snapshot_dir" ] || fail "snapshot directory is missing: $snapshot_dir"
   while IFS= read -r relative; do
     [ -f "$snapshot_dir/$relative" ] || fail "required baseline is missing: $relative"
-  done < <(expected_snapshots)
+  done < <(expected_snapshots "$snapshot_profile")
   validate_snapshot_worktree "$ROOT" "$SNAPSHOT_RELATIVE_DIR"
 
   runtime_parent="$(prepare_private_runtime_directory "${XDG_RUNTIME_DIR:-}")"
@@ -557,6 +674,7 @@ main() {
   SNAPSHOT_CLEANUP_DOCKER_CONFIG="$docker_config"
   SNAPSHOT_CLEANUP_CONTAINER_CIDFILE="$container_cidfile"
   SNAPSHOT_CLEANUP_SNAPSHOT_DIR="$snapshot_dir"
+  SNAPSHOT_CLEANUP_PROFILE="$snapshot_profile"
   trap snapshot_run_cleanup EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
@@ -582,7 +700,7 @@ main() {
     # Requiring Playwright to recreate every allowlisted file prevents a
     # renamed or newly skipped test from silently retaining a stale baseline.
     rm -f -- "$snapshot_stage/$relative"
-  done < <(expected_snapshots) >"$target_manifest"
+  done < <(expected_snapshots "$snapshot_profile") >"$target_manifest"
   existing_tracked_paths "$ROOT" >"$tracked_paths"
   source_fingerprint="$(tracked_source_archive_sha256 "$ROOT" "$tracked_paths")"
   copy_tracked_source "$source_tree" "$tracked_paths"
@@ -593,25 +711,15 @@ main() {
   [ "$(tracked_source_archive_sha256 "$source_tree" "$tracked_paths")" = "$source_fingerprint" ] ||
     fail 'isolated dependency installation modified tracked source content'
 
-  if ! isolated_docker_client "$docker_config" kind get clusters | grep -Fxq codewire; then
-    fail 'local Kind cluster codewire is not running; run make up first'
-    return 1
-  fi
-  for deployment in codewire-dashboard codewire-idp codewire-orchestration; do
-    kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" rollout status \
-      "deployment/$deployment" --timeout=120s
-  done
-  actual_origin="$(kubectl --context "$KUBE_CONTEXT" -n "$KUBE_NAMESPACE" get \
-    deployment/codewire-dashboard \
-    -o 'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="CODEWIRE_PUBLIC_ORIGIN")].value}')"
-  [ "$actual_origin" = "$PLAYWRIGHT_BASE_URL" ] ||
-    fail "dashboard origin mismatch: expected $PLAYWRIGHT_BASE_URL, found ${actual_origin:-missing}"
+  validate_snapshot_topology "$snapshot_profile" "$docker_config"
 
-  env -u STATE_DIR KUBE_CONTEXT="$KUBE_CONTEXT" NAMESPACE="$KUBE_NAMESPACE" \
-    "$ROOT/scripts/dev/kind/kind-forwards.sh" start postgres
-  curl --disable --fail --silent --show-error "$PLAYWRIGHT_BASE_URL/login" >/dev/null
-  PGPASSFILE=/dev/null psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' >/dev/null
-  stale_count="$(PGPASSFILE=/dev/null psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc \
+  if [ "$snapshot_profile" = default ]; then
+    env -u STATE_DIR KUBE_CONTEXT="$kube_context" NAMESPACE="$namespace" \
+      "$ROOT/scripts/dev/kind/kind-forwards.sh" start postgres
+  fi
+  curl --disable --fail --silent --show-error "$playwright_base_url/login" >/dev/null
+  PGPASSFILE=/dev/null psql -X "$database_url" -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' >/dev/null
+  stale_count="$(PGPASSFILE=/dev/null psql -X "$database_url" -v ON_ERROR_STOP=1 -Atqc \
     "SELECT COUNT(*) FROM environments e JOIN organizations o ON o.id = e.org_id WHERE o.slug LIKE 'e2e-%';")"
   stale_count="$(tr -d '[:space:]' <<<"$stale_count")"
   [ "$stale_count" = 0 ] ||
@@ -649,11 +757,12 @@ main() {
       --env http_proxy= --env https_proxy= --env all_proxy= \
       --env NO_PROXY=localhost,127.0.0.1 \
       --env CI=1 \
+      --env CODEWIRE_PLAYWRIGHT_SNAPSHOT_PROFILE="$snapshot_profile" \
       --env CODEWIRE_PLAYWRIGHT_SNAPSHOT_ENV="$SNAPSHOT_ENVIRONMENT" \
       --env CODEWIRE_PLAYWRIGHT_ENVIRONMENTS_FIXTURE_RUN_ID="$FIXTURE_RUN_ID" \
-      --env DATABASE_URL="$DATABASE_URL" \
-      --env SERVER_URL="$PLAYWRIGHT_BASE_URL" \
-      --env PLAYWRIGHT_BASE_URL="$PLAYWRIGHT_BASE_URL" \
+      --env DATABASE_URL="$database_url" \
+      --env SERVER_URL="$playwright_base_url" \
+      --env PLAYWRIGHT_BASE_URL="$playwright_base_url" \
       --env PATH="$RENDERER_PATH" \
       --workdir /workspace --entrypoint /bin/bash "$renderer_image_id" \
       -euo pipefail -c '
@@ -674,16 +783,33 @@ main() {
         source /workspace/scripts/ci/verify/playwright-browser-runtime.sh
         export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$chromium"
         prepare_playwright_browser_runtime "$chromium" /workspace
-        ./apps/dashboard/node_modules/.bin/playwright test \
-          --config apps/dashboard/playwright.config.ts \
-          --project=dashboard-ssr-desktop \
-          --project=dashboard-ssr-mobile \
-          apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
-          apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts \
-          apps/dashboard/e2e/ssr-dashboard.read.ssr.ts \
-          --grep "renders server-owned create options and resources with no browser service caller|keeps environment create and inventory usable on mobile|renders account, security, and session surfaces in the selected context|renders the shared console shell and operational overview" \
-          --output /tmp/codewire-run/test-results \
-          --update-snapshots=changed --retries=0 --workers=1 --reporter=line
+        case "$CODEWIRE_PLAYWRIGHT_SNAPSHOT_PROFILE" in
+          default)
+            ./apps/dashboard/node_modules/.bin/playwright test \
+              --config apps/dashboard/playwright.config.ts \
+              --project=dashboard-ssr-desktop \
+              --project=dashboard-ssr-mobile \
+              apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts \
+              apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts \
+              apps/dashboard/e2e/ssr-dashboard.read.ssr.ts \
+              --grep "renders server-owned create options and resources with no browser service caller|keeps environment create and inventory usable on mobile|renders account, security, and session surfaces in the selected context|renders the shared console shell and operational overview" \
+              --output /tmp/codewire-run/test-results \
+              --update-snapshots=changed --retries=0 --workers=1 --reporter=line
+            ;;
+          prepared-kind-management-secrets-mobile)
+            ./apps/dashboard/node_modules/.bin/playwright test \
+              --config apps/dashboard/playwright.config.ts \
+              --project=dashboard-ssr-mobile \
+              apps/dashboard/e2e/ssr-dashboard.management-visual.ssr.ts \
+              --grep "renders every organization management surface without page overflow|renders account, security, and session surfaces in the selected context" \
+              --output /tmp/codewire-run/test-results \
+              --update-snapshots=changed --retries=0 --workers=1 --reporter=line
+            ;;
+          *)
+            printf "unknown snapshot profile: %s\n" "$CODEWIRE_PLAYWRIGHT_SNAPSHOT_PROFILE" >&2
+            exit 98
+            ;;
+        esac
       ' 2>&1 | tee "$renderer_log"
   docker_status="${PIPESTATUS[0]}"
   set -e
@@ -692,7 +818,7 @@ main() {
   [ "$docker_status" -eq 0 ] || fail "snapshot renderer exited with status $docker_status"
   container_id="$(read_container_id "$container_cidfile")"
   [ -n "$container_id" ] || fail 'Docker did not record the snapshot renderer container ID'
-  validate_snapshot_stage "$snapshot_baseline" "$snapshot_stage"
+  validate_snapshot_stage "$snapshot_baseline" "$snapshot_stage" "$snapshot_profile"
   existing_tracked_paths "$ROOT" >"$current_tracked_paths"
   cmp -s "$tracked_paths" "$current_tracked_paths" ||
     fail 'the tracked source set changed while snapshots were rendered'
@@ -700,10 +826,10 @@ main() {
     fail 'tracked source content changed while snapshots were rendered'
   sha256sum --check --strict --status "$target_manifest" ||
     fail 'a target snapshot changed concurrently; refusing promotion'
-  promote_snapshots "$snapshot_stage" "$snapshot_dir"
+  promote_snapshots "$snapshot_stage" "$snapshot_dir" "$snapshot_profile"
 
   printf '[playwright-snapshots] updated %s snapshots with %s\n' \
-    "$(expected_snapshots | wc -l | tr -d '[:space:]')" "$SNAPSHOT_ENVIRONMENT"
+    "$(expected_snapshots "$snapshot_profile" | wc -l | tr -d '[:space:]')" "$SNAPSHOT_ENVIRONMENT"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

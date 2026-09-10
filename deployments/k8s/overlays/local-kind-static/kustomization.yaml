@@ -27,6 +27,10 @@ images:
     newTag: local
 
 patches:
+  - path: credential-service-origin-patch.yaml
+    target:
+      kind: Deployment
+      name: codewire-credential-service
   - path: configmap-patch.yaml
     target:
       kind: ConfigMap

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Managed Kind only: one stock Codex process, four completed synthetic turns.
+"""Managed Kind only: one stock Codex process, three successes and one denial.
 
 The caller pipes this file into the actual workspace's python3. There are no
 provider/token/config overrides. Protocol is pinned to Codex 0.149.0 commit
@@ -28,7 +28,6 @@ import time
 
 CODEX = "/opt/codewire/agents/npm/bin/codex"
 CODEX_HOME = "/run/codewire-codex/home"
-ROOTS = "/run/codewire-credentials/gateway-roots/ca.crt"
 TOKEN = "/run/codewire-credentials/workspace/token"
 MARKER = "CWCODEX149 kind"
 MAX_LINE = 1024 * 1024
@@ -37,7 +36,12 @@ MAX_TRACE = 1024 * 1024
 MAX_STDERR_DIAGNOSTIC = 4096
 RPC_TIMEOUT = 60.0
 ROTATION_TIMEOUT = 720.0
-CACHE_INTERVAL = 30.0
+# The production hosted gateway expires each epoch after at most 600 seconds.
+# Waiting strictly beyond that bound after baseline completion cannot reuse
+# baseline's epoch. Host-side authenticated admission logs prove fresh tokens;
+# time or the changed file by itself is not sufficient acceptance evidence.
+HOSTED_EPOCH_MAX_LIFETIME = 600.0
+SCENARIO_TIMEOUT = 30.0
 SHUTDOWN_GRACE = 5.0
 
 
@@ -135,18 +139,29 @@ def successful_exec_calls(trace, prefix):
 
 
 def auth_calls(trace):
-    """Count only successful exact fixed-command execve calls, never buffers."""
+    """Negative assertion: selected loopback clients never invoke legacy auth."""
     return successful_exec_calls(
         trace, f'execve("/bin/cat", ["/bin/cat", "{TOKEN}"], ')
 
 
+def codex_exec_calls(trace):
+    prefix = f'execve("{CODEX}", ["{CODEX}", "app-server", "--stdio", "--strict-config"], '
+    return successful_exec_calls(trace, prefix)
+
+
 def codex_exec_succeeded(trace):
     # This proves only exec of the pinned launcher, not a working app-server.
-    prefix = f'execve("{CODEX}", ["{CODEX}", "app-server", "--stdio", "--strict-config"], '
     try:
-        return bool(successful_exec_calls(trace, prefix))
+        return bool(codex_exec_calls(trace))
     except Failure:
         return None
+
+
+def validate_process_trace(trace):
+    if len(codex_exec_calls(trace)) != 1:
+        raise Failure("unexpected_codex_process_count")
+    if auth_calls(trace):
+        raise Failure("legacy_auth_command_executed")
 
 
 class Server:
@@ -339,7 +354,7 @@ class Server:
             raise Failure("unexpected_model_provider")
         return thread_id
 
-    def turn(self, thread_id, prompt, deadline=None):
+    def turn(self, thread_id, prompt, deadline=None, *, expected_failure=False):
         self.phase = "turn_start"
         deadline = deadline if deadline is not None else time.monotonic() + RPC_TIMEOUT
         result = self.request("turn/start", {
@@ -352,10 +367,20 @@ class Server:
         self.phase = "turn_completion"
         self.until(lambda: key in self.completed, deadline)
         completed = self.completed[key]
-        if completed.get("status") != "completed" or completed.get("error") is not None:
-            raise Failure("turn_failed")
-        if key not in self.markers:
-            raise Failure("missing_synthetic_output")
+        if expected_failure:
+            # The host verifies the exact 401 -> refresh -> 400 transcript;
+            # double-401 forwarding is separate broker unit proof. Require a
+            # real failed terminal here, not an RPC
+            # timeout, interrupted turn, or successful third request.
+            if (completed.get("status") != "failed"
+                    or not isinstance(completed.get("error"), dict)
+                    or not completed["error"] or key in self.markers):
+                raise Failure("unexpected_exhaustion_terminal")
+        else:
+            if completed.get("status") != "completed" or completed.get("error") is not None:
+                raise Failure("turn_failed")
+            if key not in self.markers:
+                raise Failure("missing_synthetic_output")
         self.phase = "idle"
 
     def close(self):
@@ -383,11 +408,11 @@ def observe_rotation(server, initial, baseline_completed):
     server.phase = "token_rotation"
     deadline = time.monotonic() + ROTATION_TIMEOUT
     while True:
-        changed = token_fingerprint() != initial
-        if changed and time.monotonic() - baseline_completed > CACHE_INTERVAL:
-            return
         if time.monotonic() >= deadline:
             raise Failure("projected_token_rotation_timeout")
+        changed = token_fingerprint() != initial
+        if changed and time.monotonic() - baseline_completed > HOSTED_EPOCH_MAX_LIFETIME:
+            return
         server.pump(0.25)
 
 
@@ -399,42 +424,44 @@ def run(server, trace):
     # Snapshot AFTER completion: a replacement during initial thread setup
     # must not masquerade as rotation during the deliberately idle interval.
     initial = token_fingerprint()
-    baseline_calls = len(auth_calls(trace))
-    if baseline_calls < 1:
-        raise Failure("missing_initial_auth_command")
-    emit("baseline_completed", auth_command_calls=baseline_calls)
+    validate_process_trace(trace)
+    emit("baseline_completed", codex_processes=1, legacy_auth_commands=0)
     observe_rotation(server, initial, baseline_completed)
     emit("projected_token_rotated", changed=True,
          elapsed_ms=int((time.monotonic() - baseline_completed) * 1000))
-    # Pinned Codex has separate shared model-catalog and per-thread request
-    # auth caches. Second-turn pre-compaction refreshes the expired catalog
-    # cache before the request refreshes its own. Keep all remaining work in
-    # one cache interval so fresh threads cannot refresh the catalog again.
-    deadline = time.monotonic() + CACHE_INTERVAL
-    before = len(auth_calls(trace))
+    # The same stock process continues through the new hosted epoch. The
+    # remaining original deadlines bound the entire retry/exhaustion journey,
+    # not a removed Codex auth-command cache. No harness request is replayed.
+    deadline = time.monotonic() + SCENARIO_TIMEOUT
     server.turn(thread_id, "CW_KIND_ROTATION", deadline)
-    calls = len(auth_calls(trace)) - before
-    if calls != 2 or not time.monotonic() < deadline:
-        raise Failure("rotation_auth_command_count_or_deadline")
-    emit("rotation_turn_completed", auth_command_calls=calls)
+    validate_process_trace(trace)
+    if not time.monotonic() < deadline:
+        raise Failure("rotation_turn_deadline")
+    emit("rotation_turn_completed", legacy_auth_commands=0)
 
-    for prompt, event, expected in (
-        ("CW_KIND_BROKER_RETRY_ONCE", "broker_retry_completed", 1),
-        ("CW_KIND_NATIVE_REREAD", "native_reread_completed", 2),
+    for prompt, event, expected_failure in (
+        ("CW_KIND_BROKER_RETRY_ONCE", "broker_retry_completed", False),
+        ("CW_KIND_BROKER_RETRY_EXHAUSTED", "broker_retry_exhausted", True),
     ):
-        before = len(auth_calls(trace))
         started = time.monotonic()
         # Fresh threads avoid interpreting an earlier test marker retained in
         # conversation history as the current synthetic provider scenario.
         thread_id = server.thread(deadline)
-        server.turn(thread_id, prompt, deadline)
-        observed = auth_calls(trace)[before:]
+        server.turn(thread_id, prompt, deadline, expected_failure=expected_failure)
+        validate_process_trace(trace)
         elapsed = time.monotonic() - started
-        if len(observed) != expected or not time.monotonic() < deadline:
-            raise Failure("retry_auth_command_count_or_deadline")
-        if expected == 2 and not 0 <= observed[1] - observed[0] < CACHE_INTERVAL:
-            raise Failure("native_reread_cache_deadline")
-        emit(event, auth_command_calls=len(observed), elapsed_ms=int(elapsed * 1000))
+        if not time.monotonic() < deadline:
+            raise Failure("retry_scenario_deadline")
+        emit(event, legacy_auth_commands=0, elapsed_ms=int(elapsed * 1000))
+
+
+def validate_projection():
+    # Selected Codex uses the daemon-owned loopback route. The gateway's public
+    # roots are not a Codex environment override, even when that mount exists.
+    if (os.environ.get("CODEX_HOME") != CODEX_HOME
+            or os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS") != "v1:codex"
+            or "CODEX_CA_CERTIFICATE" in os.environ):
+        raise Failure("unexpected_projection")
 
 
 def main():
@@ -447,8 +474,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        if os.environ.get("CODEX_HOME") != CODEX_HOME or os.environ.get("CODEX_CA_CERTIFICATE") != ROOTS:
-            raise Failure("unexpected_projection")
+        validate_projection()
         if Path(CODEX_HOME).resolve() != Path(CODEX_HOME):
             raise Failure("unexpected_home_path")
         with tempfile.TemporaryDirectory(prefix="kind-session-", dir=CODEX_HOME) as scratch:
@@ -491,7 +517,7 @@ def main():
     except Exception:
         emit("failed", stage=stage, reason="driver_failure", **diagnostics)
     if success:
-        emit("complete", turns=4, same_process=True, token_changed=True)
+        emit("complete", turns=4, completed=3, failed=1, same_process=True, token_changed=True)
     return 0 if success else 1
 
 

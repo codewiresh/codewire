@@ -243,6 +243,9 @@ mod tests {
         TemplateOpts {
             environment_id: "be31063a-8ec8-46d5-aa17-75cda1729370".into(),
             credential_runtime: Some(CredentialRuntimeTemplateConfig::synthetic("dev-sandboxes")),
+            managed_credential_clients:
+                codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
+            projection_selection_sha256: Some([0xab; 32]),
             ..commodity_opts()
         }
     }
@@ -282,7 +285,9 @@ mod tests {
         let text = config["data"]["config.toml"].as_str().unwrap();
         assert_eq!(
             text,
-            codewire_access::CodexProviderProjection::for_platform_gateway(&dns)
+            opts.managed_credential_clients
+                .for_placement(codewire_access::ManagedCredentialClientPlacement::Platform)
+                .codex
                 .unwrap()
                 .config_toml()
         );
@@ -300,10 +305,137 @@ mod tests {
     }
 
     #[test]
-    fn credential_mounts_and_identities_are_separate_for_workspace_gateway_and_init() {
-        use codewire_access::{
-            CODEX_PLATFORM_HOME, CODEX_PLATFORM_ROOTS_FILE, CODEX_PLATFORM_TOKEN_FILE,
+    fn hosted_provider_loopback_is_not_exposed_by_workspace_templates_or_services() {
+        for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL] {
+            let mut opts = credential_opts();
+            opts.runtime_profile = profile.into();
+            let template = render_sandbox_template("dev-sandboxes", &opts);
+            let spec = &template["spec"]["podTemplate"]["spec"];
+            assert!(!spec["hostNetwork"].as_bool().unwrap_or(false));
+            for group in ["containers", "initContainers"] {
+                for container in spec[group].as_array().into_iter().flatten() {
+                    for port in container["ports"].as_array().into_iter().flatten() {
+                        assert_ne!(port["containerPort"], 38081);
+                        assert_ne!(port["hostPort"], 38081);
+                    }
+                }
+            }
+            for service in [
+                render_workspace_daemon_service("dev-sandboxes", &opts),
+                render_gateway_service("dev-sandboxes", &opts),
+            ] {
+                for port in service["spec"]["ports"].as_array().unwrap() {
+                    for key in ["port", "targetPort", "nodePort"] {
+                        assert_ne!(port[key], 38081);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hosted_projection_bootstrap_binds_both_peers_and_private_process_directory() {
+        for profile in [RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL] {
+            let mut opts = credential_opts();
+            opts.runtime_profile = profile.into();
+            opts.projection_selection_sha256 = Some([0xab; 32]);
+            let template = render_sandbox_template("dev-sandboxes", &opts);
+            let workspace = &template["spec"]["podTemplate"]["spec"];
+            let gateway = render_gateway_deployment("dev-sandboxes", &opts);
+            for env in [
+                &workspace["containers"][0]["env"],
+                &gateway["spec"]["template"]["spec"]["containers"][0]["env"],
+            ] {
+                for (name, value) in [
+                    (
+                        codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV,
+                        "ab".repeat(32),
+                    ),
+                    (
+                        codewire_daemon::config::ENVIRONMENT_ID_ENV,
+                        opts.environment_id.clone(),
+                    ),
+                    (
+                        codewire_daemon::config::ENVIRONMENT_GENERATION_ENV,
+                        "7".into(),
+                    ),
+                ] {
+                    let matching: Vec<_> = env
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|entry| entry["name"] == name)
+                        .collect();
+                    assert_eq!(matching, vec![&json!({"name":name,"value":value})]);
+                }
+            }
+            assert_eq!(workspace["securityContext"]["runAsUser"], 1000);
+            assert_eq!(workspace["securityContext"]["runAsGroup"], 1000);
+            let init = &workspace["initContainers"][0];
+            assert!(init.get("securityContext").is_none());
+            let command = init["command"][2].as_str().unwrap();
+            assert!(command.contains(
+                "umask 077; mkdir -p /codewire/run/processes && chmod 0700 /codewire/run/processes"
+            ));
+            assert!(
+                init["volumeMounts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|mount| mount
+                        == &json!({"name":"codewire-run","mountPath":"/codewire/run"}))
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_projection_generation_and_selection_change_both_bootstraps() {
+        let mut opts = credential_opts();
+        opts.projection_selection_sha256 = Some([0xab; 32]);
+        let rendered = |opts: &TemplateOpts| {
+            (
+                render_sandbox_template("dev-sandboxes", opts),
+                render_gateway_deployment("dev-sandboxes", opts),
+            )
         };
+        let original = rendered(&opts);
+        opts.operation_generation += 1;
+        let generation = rendered(&opts);
+        assert_ne!(original.0, generation.0);
+        assert_ne!(original.1, generation.1);
+        opts.projection_selection_sha256 = Some([0xcd; 32]);
+        let selection = rendered(&opts);
+        assert_ne!(generation.0, selection.0);
+        assert_ne!(generation.1, selection.1);
+        opts.projection_selection_sha256 = None;
+        opts.managed_credential_clients = Default::default();
+        let cleared = rendered(&opts);
+        for value in [cleared.0, cleared.1] {
+            assert!(
+                !value
+                    .to_string()
+                    .contains(codewire_daemon::config::HOSTED_PROJECTION_SHA256_ENV)
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_projection_cannot_render_without_runtime_trust() {
+        let opts = TemplateOpts {
+            projection_selection_sha256: Some([0xab; 32]),
+            ..commodity_opts()
+        };
+        assert!(
+            std::panic::catch_unwind(|| render_sandbox_template("dev-sandboxes", &opts)).is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| render_gateway_deployment("dev-sandboxes", &opts)).is_err()
+        );
+    }
+
+    #[test]
+    fn credential_mounts_and_identities_are_separate_for_workspace_gateway_and_init() {
+        use codewire_access::{CODEX_PLATFORM_HOME, CODEX_PLATFORM_TOKEN_FILE};
         use codewire_gateway_proto::{
             CREDENTIAL_GATEWAY_TOKEN_AUDIENCE, CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
         };
@@ -349,9 +481,10 @@ mod tests {
         }
         let init = &workspace["initContainers"][0];
         let init_mounts = init["volumeMounts"].as_array().unwrap();
-        assert_eq!(init_mounts.len(), 3);
+        assert_eq!(init_mounts.len(), 4);
         for name in [
             "codewire-bin",
+            "codewire-run",
             "credential-codex-config",
             "credential-codex-home",
         ] {
@@ -374,18 +507,13 @@ mod tests {
             json!({"medium":"Memory","sizeLimit":"256Mi"})
         );
         let ws = &workspace["containers"][0];
-        for (name, value) in [
-            ("CODEX_HOME", CODEX_PLATFORM_HOME),
-            ("CODEX_CA_CERTIFICATE", CODEX_PLATFORM_ROOTS_FILE),
-        ] {
-            assert!(
-                ws["env"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry == &json!({"name":name,"value":value}))
-            );
-        }
+        assert!(
+            ws["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == &json!({"name":"CODEX_HOME","value":CODEX_PLATFORM_HOME}))
+        );
         assert!(
             ws["volumeMounts"]
                 .as_array()
@@ -464,8 +592,10 @@ mod tests {
     }
 
     #[test]
-    fn credential_generation_rolls_gateway_but_not_public_bootstrap_or_workspace() {
+    fn unselected_runtime_generation_rolls_gateway_but_not_public_bootstrap_or_workspace() {
         let mut opts = credential_opts();
+        opts.managed_credential_clients = Default::default();
+        opts.projection_selection_sha256 = None;
         let before = (
             render_sandbox_template("dev-sandboxes", &opts),
             render_credential_codex_config("dev-sandboxes", &opts),
@@ -513,6 +643,83 @@ mod tests {
                 assert!(!encoded.contains(absent));
             }
         }
+    }
+
+    #[test]
+    fn only_exact_selected_clients_render_environment_codex_config_and_mounts() {
+        use codewire_access::{
+            ManagedCredentialClient, ManagedCredentialClientPlacement, ManagedCredentialClients,
+        };
+        for slots in [
+            vec![],
+            vec!["github"],
+            vec!["codex"],
+            vec!["openai"],
+            vec!["anthropic"],
+            vec!["ssh"],
+            vec!["codex", "openai", "anthropic", "ssh"],
+        ] {
+            let mut opts = credential_opts();
+            opts.managed_credential_clients =
+                ManagedCredentialClients::from_profile_slots(slots).unwrap();
+            let rendered = render_sandbox_template("dev-sandboxes", &opts);
+            let spec = &rendered["spec"]["podTemplate"]["spec"];
+            let environment = spec["containers"][0]["env"].as_array().unwrap();
+            let expected = opts
+                .managed_credential_clients
+                .for_placement(ManagedCredentialClientPlacement::Platform);
+            for (name, value) in &expected.environment {
+                assert!(environment.contains(&json!({"name":name,"value":value})));
+            }
+            let all_keys = ManagedCredentialClients::from_profile_slots([
+                "codex",
+                "openai",
+                "anthropic",
+                "ssh",
+            ])
+            .unwrap()
+            .for_placement(ManagedCredentialClientPlacement::Platform)
+            .environment;
+            for name in all_keys
+                .keys()
+                .filter(|name| !expected.environment.contains_key(*name))
+            {
+                assert!(!environment.iter().any(|entry| entry["name"] == *name));
+            }
+            assert!(environment.contains(
+                &json!({"name":MANAGED_CREDENTIAL_CLIENTS_ENV,"value":opts.managed_credential_clients.encode()})
+            ));
+            let codex = opts
+                .managed_credential_clients
+                .contains(ManagedCredentialClient::Codex);
+            assert_eq!(
+                render_credential_codex_config("dev-sandboxes", &opts).is_some(),
+                codex
+            );
+            for field in [
+                &spec["volumes"],
+                &spec["containers"][0]["volumeMounts"],
+                &spec["initContainers"][0]["volumeMounts"],
+            ] {
+                assert_eq!(field.to_string().contains("credential-codex-home"), codex);
+            }
+            assert_eq!(
+                spec["initContainers"][0]["command"]
+                    .to_string()
+                    .contains("/codewire/codex-bootstrap/config.toml"),
+                codex
+            );
+        }
+        let mut opts = credential_opts();
+        opts.managed_credential_clients = Default::default();
+        opts.projection_selection_sha256 = None;
+        let unselected = render_sandbox_template("dev-sandboxes", &opts);
+        assert!(
+            !unselected
+                .to_string()
+                .contains(MANAGED_CREDENTIAL_CLIENTS_ENV)
+        );
+        assert!(!unselected.to_string().contains("credential-codex"));
     }
 
     #[test]
@@ -1147,7 +1354,9 @@ mod tests {
         let managed_workspace = &managed_spec["containers"][0];
         let managed_command = managed_workspace["command"][2].as_str().unwrap();
         assert!(managed_command.contains("while [ ! -x /codewire/bin/cw ]"));
-        assert!(managed_command.contains("exec /codewire/bin/cw __hosted-daemon"));
+        assert!(managed_command.contains("/codewire/bin/cw __hosted-daemon & daemon_pid=$!"));
+        assert!(!managed_command.contains("exec /codewire/bin/cw __hosted-daemon"));
+        assert!(managed_command.contains("wait \"$daemon_pid\"; status=$?;"));
         assert!(!managed_command.contains("nohup cw node"));
         assert!(
             managed_workspace["env"]
@@ -1229,6 +1438,130 @@ mod tests {
             .unwrap();
         assert!(command.contains("'/bin/custom entrypoint'"));
         assert!(command.contains("'literal $(touch /tmp/not-run) '\\''quote'\\'''"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_workspace_supervisor_is_the_daemon_parent_and_preserves_exit_status() {
+        for status in [0, 7] {
+            let command = super::workspace::managed_workspace_supervisor_command(
+                "",
+                "",
+                &format!("sh -c 'printf \"%s\\n\" \"$PPID\"; exit {status}'"),
+            );
+            let child = tokio::process::Command::new("/bin/sh")
+                .args(["-c", &command])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let supervisor_pid = child.id().unwrap();
+            let output =
+                tokio::time::timeout(std::time::Duration::from_secs(3), child.wait_with_output())
+                    .await
+                    .expect("managed daemon exits")
+                    .unwrap();
+            assert_eq!(output.status.code(), Some(status));
+            assert_eq!(
+                std::str::from_utf8(&output.stdout).unwrap().trim(),
+                supervisor_pid.to_string(),
+            );
+            assert!(supervisor_pid > 1);
+        }
+    }
+
+    /// The fixture is not namespace PID 1: killing its shell alone would leave
+    /// the synthetic daemon alive on assertion panic or timeout. Keep its own
+    /// process group until every output pipe has closed and the shell is reaped.
+    #[cfg(unix)]
+    struct SupervisorFixture {
+        child: tokio::process::Child,
+        group: u32,
+        drained: bool,
+    }
+
+    #[cfg(unix)]
+    impl Drop for SupervisorFixture {
+        fn drop(&mut self) {
+            if !self.drained {
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", "--", &format!("-{}", self.group)])
+                    .env_clear()
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                // Child's kill-on-drop retains Tokio's direct-child reaper.
+                // Any remaining descendants were killed as part of the group.
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_workspace_supervisor_forwards_termination_and_reaps_daemon() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
+
+        for (signal, expected_status) in [("-TERM", 143), ("-INT", 130)] {
+            let command = super::workspace::managed_workspace_supervisor_command(
+                "",
+                "",
+                "sh -c 'trap \"printf stopped; exit 0\" TERM; printf \"ready\\n\"; while :; do sleep 0.1; done'",
+            );
+            let child = tokio::process::Command::new("/bin/sh")
+                .args(["-c", &command])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .process_group(0)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let mut fixture = SupervisorFixture {
+                group: child.id().unwrap(),
+                child,
+                drained: false,
+            };
+            assert!(fixture.group > 1);
+            let mut stdout = BufReader::new(fixture.child.stdout.take().unwrap());
+            let mut ready = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stdout.read_line(&mut ready),
+            )
+            .await
+            .expect("daemon ready")
+            .unwrap();
+            assert_eq!(ready, "ready\n");
+            assert!(
+                tokio::process::Command::new("/bin/kill")
+                    .args([signal, &fixture.group.to_string()])
+                    .env_clear()
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            let mut stopped = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                stdout.read_to_string(&mut stopped),
+            )
+            .await
+            .expect("daemon output reaches EOF")
+            .unwrap();
+            let status =
+                tokio::time::timeout(std::time::Duration::from_secs(3), fixture.child.wait())
+                    .await
+                    .expect("supervisor drains daemon")
+                    .unwrap();
+            fixture.drained = true;
+            assert_eq!(status.code(), Some(expected_status));
+            assert_eq!(stopped, "stopped");
+        }
     }
 
     #[cfg(unix)]

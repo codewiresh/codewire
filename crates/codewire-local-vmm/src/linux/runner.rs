@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use codewire_daemon::client::{SessionClient, v1 as daemon_v1};
+use codewire_daemon::client::SessionClient;
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_vmm_guest_probe::{
     DirectSharePlan, GUEST_NETWORK_VSOCK_PORT, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage,
     NetworkKey, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed,
-    SetupBinding, Sha256Value, guest::CONTAINER_INIT_PATH,
+    SetupBinding, Sha256Value,
 };
 use futures::FutureExt as _;
 use rand::{RngCore, rngs::OsRng};
@@ -69,8 +69,8 @@ use crate::network_worker::{
 };
 
 use super::confinement::{
-    install_identity_preserving_setgroups_filter, lock_exec_process_privileges,
-    lock_process_privileges, prepare_virtiofsd_filesystem_domain,
+    PreparedFilesystemDomain, install_identity_preserving_setgroups_filter,
+    lock_exec_process_privileges, lock_process_privileges, prepare_virtiofsd_filesystem_domain,
 };
 use super::path::{FileIdentity, PathError, PrivateRoot, current_uid, set_socket_private};
 use super::preflight::{PreflightError, PreflightReport, preflight};
@@ -82,7 +82,10 @@ use super::state::{
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
-const GUEST_POWEROFF_TIMEOUT: Duration = Duration::from_secs(10);
+// Guest cleanup can drain daemon, workspace, Docker and network for five
+// seconds each before sync/reboot. One overall bound includes RPC dispatch.
+const GUEST_POWEROFF_TIMEOUT: Duration = Duration::from_secs(30);
+const GUEST_POWEROFF_DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const NETWORK_WORKER_RETRY_DELAY: Duration = Duration::from_millis(50);
@@ -125,6 +128,8 @@ pub struct CreateVmRequest {
     pub mesh: Option<MeshAttachment>,
     pub direct_shares: Vec<DirectShareRequest>,
     pub skill_snapshot_sha256: Option<Sha256Value>,
+    pub environment_projection_sha256: Option<Sha256Value>,
+    pub managed_credential_clients: codewire_access::ManagedCredentialClients,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +237,11 @@ impl CloudHypervisorRunner {
         } else {
             seed
         };
+        let seed = match request.environment_projection_sha256 {
+            Some(selection) => seed.with_environment_projection_sha256(selection),
+            None => seed,
+        };
+        let seed = seed.with_managed_credential_clients(request.managed_credential_clients);
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
 
@@ -996,6 +1006,14 @@ impl RunningVm {
         )
     }
 
+    /// A wait-only duplicate of this exact owned process birth, used by the
+    /// private runner bootstrap access cell without taking lifecycle locks.
+    pub(crate) fn duplicate_liveness_descriptor(&self) -> Result<OwnedFd, RunnerError> {
+        self.process
+            .duplicate_wait_descriptor()
+            .map_err(RunnerError::from)
+    }
+
     pub(crate) fn progress_access_parts(&self) -> (&HybridVsockTarget, &str) {
         (&self.hybrid, self.token.as_str())
     }
@@ -1402,12 +1420,18 @@ impl RunningVm {
     }
 
     async fn stop_vmm(&mut self) -> Result<ExitClass, RunnerError> {
-        // Ask trusted guest init to stop the daemon, sync the persistent state
-        // filesystem, and power off. Keep the transient response stream alive
-        // until the VMM exits so transport cancellation cannot kill the
-        // poweroff helper before it signals PID 1.
-        if let Ok(_poweroff_stream) = self.request_guest_poweroff().await
-            && self.process.wait_exited(GUEST_POWEROFF_TIMEOUT).await?
+        // Credential access is already revoked. The fixed private lifecycle
+        // RPC must not need a workload projection to reach trusted guest init.
+        // A successful poweroff can close gRPC before the ACK: always observe
+        // the exact VMM exit before escalating, even after dispatch ambiguity.
+        let process = &self.process;
+        if observe_guest_poweroff(
+            self.request_guest_poweroff(),
+            |remaining| async move { process.wait_exited(remaining).await.map_err(Into::into) },
+            GUEST_POWEROFF_TIMEOUT,
+            GUEST_POWEROFF_DISPATCH_TIMEOUT,
+        )
+        .await?
         {
             return self.wait_reaped().await;
         }
@@ -1454,16 +1478,10 @@ impl RunningVm {
         }
     }
 
-    async fn request_guest_poweroff(
-        &self,
-    ) -> Result<tonic::Streaming<daemon_v1::ExecMessage>, RunnerError> {
+    async fn request_guest_poweroff(&self) -> Result<(), RunnerError> {
         self.daemon_client()
             .await?
-            .exec_transient(daemon_v1::ExecStartRequest {
-                command: guest_poweroff_command(),
-                working_dir: "/".to_owned(),
-                env: Vec::new(),
-            })
+            .poweroff_guest()
             .await
             .map_err(|_| RunnerError::GuestPoweroff)
     }
@@ -3489,8 +3507,24 @@ fn prepare_isolated_child_pair(
     Ok(())
 }
 
-fn guest_poweroff_command() -> Vec<String> {
-    vec![CONTAINER_INIT_PATH.to_owned(), "poweroff".to_owned()]
+async fn observe_guest_poweroff<D, W, F>(
+    dispatch: D,
+    wait: W,
+    overall_timeout: Duration,
+    dispatch_timeout: Duration,
+) -> Result<bool, RunnerError>
+where
+    D: std::future::Future<Output = Result<(), RunnerError>>,
+    W: FnOnce(Duration) -> F,
+    F: std::future::Future<Output = Result<bool, RunnerError>>,
+{
+    let deadline = tokio::time::Instant::now() + overall_timeout;
+    let _ = tokio::time::timeout_at(
+        deadline.min(tokio::time::Instant::now() + dispatch_timeout),
+        dispatch,
+    )
+    .await;
+    wait(deadline.saturating_duration_since(tokio::time::Instant::now())).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4114,6 +4148,19 @@ fn direct_share_process(
         share.request.mount.read_only(),
     )
     .map_err(|_| RunnerError::VirtiofsdConfinement)?;
+    direct_share_process_with_domain(executable, share, working_directory, filesystem_domain)
+}
+
+fn direct_share_process_with_domain(
+    executable: &Path,
+    share: &PreparedDirectShare,
+    working_directory: &Path,
+    filesystem_domain: PreparedFilesystemDomain,
+) -> Result<tokio::process::Command, RunnerError> {
+    let source_fd = share.admitted.descriptor().as_raw_fd();
+    if source_fd < DIRECT_SHARE_SOURCE_FD {
+        return Err(RunnerError::DirectShareChanged);
+    }
     let expected_parent_pid = unsafe { libc::getpid() };
     let host_uid = current_uid();
     let host_gid = unsafe { libc::getegid() };
@@ -4172,6 +4219,12 @@ fn direct_share_process(
             if libc::getppid() != expected_parent_pid {
                 return Err(io::Error::from_raw_os_error(libc::ECHILD));
             }
+            // The prepared ruleset can itself occupy FD 3. Apply it before
+            // dup2 replaces that descriptor with the admitted source. The
+            // kernel retains the restriction after its ruleset FD is closed.
+            lock_exec_process_privileges()?;
+            install_identity_preserving_setgroups_filter()?;
+            filesystem_domain.restrict_self()?;
             if source_fd != DIRECT_SHARE_SOURCE_FD
                 && libc::dup2(source_fd, DIRECT_SHARE_SOURCE_FD) == -1
             {
@@ -4189,9 +4242,6 @@ fn direct_share_process(
             {
                 return Err(io::Error::last_os_error());
             }
-            lock_exec_process_privileges()?;
-            install_identity_preserving_setgroups_filter()?;
-            filesystem_domain.restrict_self()?;
             Ok(())
         });
     }
@@ -4554,6 +4604,8 @@ mod tests {
             mesh: None,
             direct_shares: Vec::new(),
             skill_snapshot_sha256: None,
+            environment_projection_sha256: None,
+            managed_credential_clients: codewire_access::ManagedCredentialClients::default(),
         }
     }
 
@@ -5159,13 +5211,51 @@ mod tests {
         assert!(encode_developer_egress_broker_bootstrap(Uuid::new_v4(), 1, &key).is_ok());
     }
 
-    #[test]
-    fn guest_poweroff_uses_the_sealed_container_helper() {
-        assert_eq!(
-            guest_poweroff_command(),
-            vec![CONTAINER_INIT_PATH.to_owned(), "poweroff".to_owned()]
+    #[tokio::test]
+    async fn guest_poweroff_observes_exact_exit_even_after_missing_or_failed_ack() {
+        for dispatch_ok in [true, false] {
+            for exited in [true, false] {
+                let observed = std::cell::Cell::new(false);
+                assert_eq!(
+                    observe_guest_poweroff(
+                        async {
+                            if dispatch_ok {
+                                Ok(())
+                            } else {
+                                Err(RunnerError::GuestPoweroff)
+                            }
+                        },
+                        |remaining| {
+                            observed.set(true);
+                            assert!(remaining <= Duration::from_secs(1));
+                            async move { Ok(exited) }
+                        },
+                        Duration::from_secs(1),
+                        Duration::from_millis(10),
+                    )
+                    .await
+                    .unwrap(),
+                    exited
+                );
+                assert!(observed.get());
+            }
+        }
+        let observed = std::cell::Cell::new(false);
+        assert!(
+            observe_guest_poweroff(
+                std::future::pending(),
+                |remaining| {
+                    observed.set(true);
+                    assert!(remaining <= Duration::from_millis(990));
+                    async { Ok(true) }
+                },
+                Duration::from_secs(1),
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap()
         );
-        assert_ne!(guest_poweroff_command()[0], "/init");
+        assert!(observed.get());
     }
 
     #[test]
@@ -5735,6 +5825,115 @@ mod tests {
             .expect("confined fixture exceeded its deadline")
             .unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn direct_share_ruleset_fd3_is_restricted_before_source_remap() {
+        const CHILD_MODE: &str = "CW_SYNTHETIC_DIRECT_SHARE_FD3";
+        const TEST_NAME: &str =
+            "linux::runner::tests::direct_share_ruleset_fd3_is_restricted_before_source_remap";
+        if std::env::var_os(CHILD_MODE).is_some() {
+            // Only this env-cleared, single-test subprocess changes descriptor
+            // allocation. Never reserve/close FD 3 in the parallel test host.
+            let reserved = fs::File::open("/dev/null").unwrap();
+            assert_eq!(reserved.as_raw_fd(), DIRECT_SHARE_SOURCE_FD);
+            let source = tempfile::tempdir().unwrap();
+            let source_path = fs::canonicalize(source.path()).unwrap();
+            let admitted = admit_direct_share(&source_path, &[]).unwrap();
+            assert!(admitted.descriptor().as_raw_fd() > DIRECT_SHARE_SOURCE_FD);
+            let request = DirectShareRequest::new(
+                source_path.clone(),
+                admitted.identity().clone(),
+                DirectShareMount::for_index(0, "/workspace/source", true).unwrap(),
+            )
+            .unwrap();
+            let private = tempfile::tempdir().unwrap();
+            fs::set_permissions(private.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let share = PreparedDirectShare {
+                request,
+                admitted,
+                socket: private.path().join("share-00.sock"),
+            };
+            let executable = fs::canonicalize("/usr/bin/true").unwrap();
+            drop(reserved);
+            let domain = prepare_virtiofsd_filesystem_domain(
+                share.admitted.descriptor().as_raw_fd(),
+                private.path(),
+                &executable,
+                true,
+            )
+            .unwrap();
+            assert_eq!(domain.descriptor_for_test(), DIRECT_SHARE_SOURCE_FD);
+            let mut command =
+                direct_share_process_with_domain(&executable, &share, private.path(), domain)
+                    .unwrap();
+            let arguments = command.as_std().get_args().collect::<Vec<_>>();
+            assert!(
+                arguments
+                    .iter()
+                    .any(|argument| *argument == "/proc/self/fd/3/")
+            );
+            assert!(
+                !arguments
+                    .iter()
+                    .any(|argument| *argument == source_path.as_os_str())
+            );
+            assert_eq!(command.as_std().get_envs().count(), 0);
+            // Synchronous spawn is intentional: a Tokio reactor must not take
+            // the deliberately free FD 3 before ruleset preparation.
+            let status = command
+                .as_std_mut()
+                .status()
+                .expect("FD3 ruleset must enter confinement before remapping the source");
+            assert!(status.success());
+            return;
+        }
+
+        use std::os::unix::process::CommandExt as _;
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env_clear()
+            .env(CHILD_MODE, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // SAFETY: the syscall changes only the fork child's descriptor flags;
+        // stdio remains intact, and the exec-error pipe stays open until exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::syscall(
+                    libc::SYS_close_range,
+                    3_u32,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("isolated FD3 confinement fixture exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "isolated FD3 fixture failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

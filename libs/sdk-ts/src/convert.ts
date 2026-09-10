@@ -6,12 +6,13 @@ import {
 } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
 import {
   ApplicationPortSchema,
-  ProjectAccessBindingSchema,
   ProjectAgentsSchema,
+  ProjectCredentialBindingSchema,
   ProjectResourcesSchema,
   ProjectSecretBindingsSchema,
   ProjectSkillSelectionSchema,
   ProjectSkillSource,
+  ProjectStoragePlacement,
   ProjectSpecSchema,
   RepositorySpecSchema,
   type ApplicationPort as ProtoApplicationPort,
@@ -21,15 +22,21 @@ import {
 import {
   CreateEnvironmentRequestSchema,
   DesiredState,
+  EnvironmentSourceSelectionSchema,
+  EnvironmentSourcesUpdateOutcome,
   EnvironmentResizeDisruptionPolicy,
   EnvironmentResizeExecutionMode,
   EnvironmentResizeOperationState,
   EnvironmentSchema,
   EnvironmentState,
   IsolationTier as ProtoIsolationTier,
+  UpdateEnvironmentSourcesRequestSchema,
+  UpdateEnvironmentSourcesResponseSchema,
   type Environment as ProtoEnvironment,
+  type EnvironmentSourceSelection as ProtoEnvironmentSourceSelection,
   type EnvironmentResizeOperation as ProtoEnvironmentResizeOperation,
   type EnvironmentResizePlan as ProtoEnvironmentResizePlan,
+  type UpdateEnvironmentSourcesResponse as ProtoUpdateEnvironmentSourcesResponse,
 } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import type { ExecResponse } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
 import {
@@ -62,6 +69,8 @@ import type {
   CreatePortRequest,
   CreatePresetRequest,
   EnvironmentData,
+  EnvironmentSourceSelection,
+  EnvironmentSourcesUpdate,
   EnvironmentResizeOperation,
   EnvironmentPort,
   ExecRequest,
@@ -70,12 +79,14 @@ import type {
   IsolationTier,
   ListEnvironmentsParams,
   ProjectSkillSelection,
+  ProjectStoragePlacement as SdkProjectStoragePlacement,
   ProjectSpec,
   ResolvedWorkloadSecretMetadata,
   SecretMetadata,
   SecretProject,
   PresetData,
   UpdatePresetRequest,
+  UpdateEnvironmentSourcesRequest,
   WorkloadSecretSource,
 } from "./types.js";
 
@@ -130,12 +141,30 @@ function uint32(name: string, value: number | undefined): number | undefined {
   return value;
 }
 
-function uint64(name: string, value: number | undefined): bigint | undefined {
+function uint64(
+  name: string,
+  value: bigint | undefined,
+  positive = false,
+): bigint | undefined {
   if (value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`codewire: ${name} is outside the API safe integer range`);
+  if (
+    typeof value !== "bigint" ||
+    value < (positive ? 1n : 0n) ||
+    value > 0xffff_ffff_ffff_ffffn
+  ) {
+    throw new Error(
+      `codewire: ${name} must be ${positive ? "a positive " : "a "}uint64 bigint`,
+    );
   }
-  return BigInt(value);
+  return value;
+}
+
+function explicitBoolean(name: string, value: boolean | undefined): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new Error(`codewire: ${name} must be an explicit boolean`);
+  }
+  return value;
 }
 
 function mapEnvironmentState(state: EnvironmentState): string {
@@ -316,12 +345,19 @@ function fromProtoApplicationPorts(
 
 function fromProtoRepositorySpecs(
   value: ProtoRepositorySpec[],
-): Array<{ branch?: string; destination?: string; revision?: string; source: string }> | undefined {
+): Array<{
+  branch?: string;
+  destination?: string;
+  known_hosts?: string[];
+  revision?: string;
+  source: string;
+}> | undefined {
   return value.length === 0
     ? undefined
     : value.map((repo) => ({
         branch: optionalString(repo.branch),
         destination: optionalString(repo.destination),
+        known_hosts: repo.knownHosts.length ? [...repo.knownHosts] : undefined,
         revision: optionalString(repo.revision),
         source: repo.source,
       }));
@@ -343,6 +379,7 @@ function toProtoRepositorySpecs(
   return (value ?? []).map((repo) => ({
     branch: repo.branch ?? "",
     destination: repo.destination ?? "",
+    knownHosts: [...(repo.known_hosts ?? [])],
     revision: repo.revision ?? "",
     source: repo.source,
   }));
@@ -377,18 +414,20 @@ function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec 
     resources: value.resources
       ? {
           cpu_millicores: value.resources.cpuMillicores,
-          memory_mib: value.resources.memoryMib === undefined ? undefined : Number(value.resources.memoryMib),
-          disk_gib: value.resources.diskGib === undefined ? undefined : Number(value.resources.diskGib),
+          memory_mib: value.resources.memoryMib,
+          disk_gib: value.resources.diskGib,
         }
       : undefined,
     secrets: value.secrets
       ? {
           project: optionalString(value.secrets.project),
           organization: value.secrets.organization,
-          user: value.secrets.user,
+          user: value.secrets.user === undefined
+            ? undefined
+            : fromProtoStoragePlacement(value.secrets.user),
         }
       : undefined,
-    access: value.access ? { profile: value.access.profile } : undefined,
+    credentials: value.credentials ? { profile: value.credentials.profile } : undefined,
   };
 }
 
@@ -428,12 +467,46 @@ function toProtoProjectSpec(value: ProjectSpec | undefined) {
     secrets: value.secrets
       ? {
           project: value.secrets.project ?? "",
-          organization: value.secrets.organization ?? false,
-          user: value.secrets.user ?? false,
+          organization: value.secrets.organization === undefined
+            ? false
+            : explicitBoolean(
+                "project secrets.organization",
+                value.secrets.organization,
+              ),
+          user: value.secrets.user === undefined
+            ? undefined
+            : toProtoStoragePlacement(value.secrets.user),
         }
       : undefined,
-    access: value.access ? { profile: value.access.profile } : undefined,
+    credentials: value.credentials ? { profile: value.credentials.profile } : undefined,
   };
+}
+
+function fromProtoStoragePlacement(
+  value: ProjectStoragePlacement,
+): SdkProjectStoragePlacement {
+  switch (value) {
+    case ProjectStoragePlacement.LOCAL:
+      return "local";
+    case ProjectStoragePlacement.PLATFORM:
+      return "platform";
+    case ProjectStoragePlacement.UNSPECIFIED:
+    default:
+      throw new Error("codewire: personal secret storage placement is unspecified");
+  }
+}
+
+function toProtoStoragePlacement(
+  value: SdkProjectStoragePlacement,
+): ProjectStoragePlacement {
+  switch (value) {
+    case "local":
+      return ProjectStoragePlacement.LOCAL;
+    case "platform":
+      return ProjectStoragePlacement.PLATFORM;
+    default:
+      throw new Error("codewire: personal secret storage placement must be local or platform");
+  }
 }
 
 function optionalUpdateString(value: string | null | undefined): string | undefined {
@@ -472,6 +545,137 @@ export function fromProtoCreateAPIKeyResponse(
   return { ...fromProtoAPIKey(value.apiKey), key: value.key };
 }
 
+export function fromProtoEnvironmentSourceSelection(
+  value: ProtoEnvironmentSourceSelection,
+): EnvironmentSourceSelection {
+  const secrets = value.secrets
+    ? {
+        project: optionalString(value.secrets.project),
+        organization: value.secrets.organization,
+        user: value.secrets.user === undefined
+          ? undefined
+          : fromProtoStoragePlacement(value.secrets.user),
+      }
+    : undefined;
+  const credentials = value.credentials
+    ? { profile: value.credentials.profile }
+    : undefined;
+  const profileRevision = uint64(
+    "source selection profile_revision",
+    value.profileRevision,
+    true,
+  );
+  if ((credentials === undefined) !== (profileRevision === undefined)) {
+    throw new Error(
+      "codewire: source selection requires credentials and profile_revision together",
+    );
+  }
+  if (
+    (secrets?.project && !canonicalPlatformId(secrets.project)) ||
+    (credentials && !canonicalPlatformId(credentials.profile))
+  ) {
+    throw new Error(
+      "codewire: environment source selection contains a non-canonical platform reference",
+    );
+  }
+  return {
+    secrets,
+    credentials,
+    profile_revision: profileRevision,
+  };
+}
+
+export function toProtoEnvironmentSourceSelection(
+  value: EnvironmentSourceSelection,
+) {
+  const profileRevision = uint64(
+    "source selection profile_revision",
+    value.profile_revision,
+    true,
+  );
+  if ((value.credentials === undefined) !== (profileRevision === undefined)) {
+    throw new Error(
+      "codewire: source selection requires credentials and profile_revision together",
+    );
+  }
+  return {
+    secrets: value.secrets
+      ? {
+          project: value.secrets.project ?? "",
+          organization: value.secrets.organization === undefined
+            ? false
+            : explicitBoolean(
+                "source selection secrets.organization",
+                value.secrets.organization,
+              ),
+          user: value.secrets.user === undefined
+            ? undefined
+            : toProtoStoragePlacement(value.secrets.user),
+        }
+      : undefined,
+    credentials: value.credentials
+      ? { profile: value.credentials.profile }
+      : undefined,
+    profileRevision,
+  };
+}
+
+function canonicalPlatformId(value: string | undefined): boolean {
+  if (!value?.startsWith("platform:id:")) return false;
+  const id = value.slice("platform:id:".length);
+  return (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id) &&
+    id !== "00000000-0000-0000-0000-000000000000"
+  );
+}
+
+function resolvedReferenceAcknowledges(
+  actual: string | undefined,
+  requested: string | undefined,
+): boolean {
+  if (!requested) return actual === undefined;
+  if (!canonicalPlatformId(actual)) return false;
+  return requested.startsWith("platform:id:") ? actual === requested : true;
+}
+
+export function environmentSourceSelectionAcknowledges(
+  actual: EnvironmentSourceSelection,
+  requested: EnvironmentSourceSelection,
+): boolean {
+  // The server omits structurally empty secret bindings when encoding a selection.
+  const actualSecrets = actual.secrets ?? {};
+  const requestedSecrets = requested.secrets ?? {};
+  if (
+    !resolvedReferenceAcknowledges(
+      optionalString(actualSecrets.project),
+      optionalString(requestedSecrets.project),
+    ) ||
+    (actualSecrets.organization ?? false) !== (requestedSecrets.organization ?? false) ||
+    actualSecrets.user !== requestedSecrets.user
+  ) {
+    return false;
+  }
+  return (
+    (actual.credentials === undefined) === (requested.credentials === undefined) &&
+    (actual.credentials === undefined ||
+      resolvedReferenceAcknowledges(
+        actual.credentials.profile,
+        requested.credentials?.profile,
+      )) &&
+    actual.profile_revision === requested.profile_revision
+  );
+}
+
+export function createEnvironmentSourceSelection(
+  body: CreateEnvironmentRequest,
+): EnvironmentSourceSelection {
+  return {
+    secrets: body.project_spec.secrets,
+    credentials: body.project_spec.credentials,
+    profile_revision: body.expected_profile_revision,
+  };
+}
+
 export function fromProtoEnvironment(value: ProtoEnvironment): EnvironmentData {
   return {
     cpu_millicores: value.cpuMillicores,
@@ -506,6 +710,53 @@ export function fromProtoEnvironment(value: ProtoEnvironment): EnvironmentData {
     total_running_seconds: value.totalRunningSeconds,
     ttl_seconds: value.ttlSeconds,
     type: value.type,
+    operation_generation: value.operationGeneration,
+    source_selection: value.sourceSelection
+      ? fromProtoEnvironmentSourceSelection(value.sourceSelection)
+      : undefined,
+  };
+}
+
+export function fromProtoEnvironmentSourcesUpdate(
+  value: ProtoUpdateEnvironmentSourcesResponse,
+  expectedEnvironmentId: string,
+  expectedOperationGeneration: bigint,
+  expectedSelection: EnvironmentSourceSelection,
+): EnvironmentSourcesUpdate {
+  if (!value.selection) {
+    throw new Error("environment sources response omitted selection");
+  }
+  const selection = fromProtoEnvironmentSourceSelection(value.selection);
+  if (
+    value.environmentId !== expectedEnvironmentId ||
+    value.operationGeneration !== expectedOperationGeneration ||
+    value.operationGeneration === 0n ||
+    !environmentSourceSelectionAcknowledges(selection, expectedSelection)
+  ) {
+    throw new Error(
+      "environment sources response did not acknowledge the exact environment operation and replacement",
+    );
+  }
+  const outcome = (() => {
+    switch (value.outcome) {
+      case EnvironmentSourcesUpdateOutcome.UNCHANGED:
+        return "unchanged" as const;
+      case EnvironmentSourcesUpdateOutcome.STORED:
+        return "stored" as const;
+      case EnvironmentSourcesUpdateOutcome.RESTART_REQUIRED:
+        return "restart_required" as const;
+      case EnvironmentSourcesUpdateOutcome.UNSPECIFIED:
+      default:
+        throw new Error(
+          `codewire: unknown environment sources outcome ${value.outcome}`,
+        );
+    }
+  })();
+  return {
+    environment_id: value.environmentId,
+    operation_generation: value.operationGeneration,
+    selection,
+    outcome,
   };
 }
 
@@ -681,6 +932,8 @@ export function toProtoCreateEnvironmentRequest(
 ) {
   const projectSpec = toProtoProjectSpec(body.project_spec);
   if (!projectSpec) throw new Error("codewire: project_spec is required");
+  // Validate the profile/revision pair and source origins before transport.
+  toProtoEnvironmentSourceSelection(createEnvironmentSourceSelection(body));
   return {
     orgId,
     presetId: body.preset_id ?? undefined,
@@ -688,6 +941,51 @@ export function toProtoCreateEnvironmentRequest(
     ttlSeconds: int32("ttl_seconds", body.ttl_seconds),
     isolationTier: toProtoIsolationTier(body.isolation_tier),
     projectSpec,
+    expectedProfileRevision: uint64(
+      "expected_profile_revision",
+      body.expected_profile_revision,
+      true,
+    ),
+    confirmPersonalCredentials: explicitBoolean(
+      "confirm_personal_credentials",
+      body.confirm_personal_credentials,
+    ),
+    confirmPersonalSecrets: explicitBoolean(
+      "confirm_personal_secrets",
+      body.confirm_personal_secrets,
+    ),
+  };
+}
+
+export function toProtoUpdateEnvironmentSourcesRequest(
+  orgId: string,
+  environmentId: string,
+  body: UpdateEnvironmentSourcesRequest,
+) {
+  if (!body.expected || !body.replacement) {
+    throw new Error(
+      "codewire: expected and replacement source selections are required",
+    );
+  }
+  return {
+    orgId,
+    environmentId,
+    expectedOperationGeneration: uint64(
+      "expected_operation_generation",
+      body.expected_operation_generation,
+      true,
+    )!,
+    expected: toProtoEnvironmentSourceSelection(body.expected),
+    replacement: toProtoEnvironmentSourceSelection(body.replacement),
+    allowRestart: explicitBoolean("allow_restart", body.allow_restart),
+    confirmPersonalCredentials: explicitBoolean(
+      "confirm_personal_credentials",
+      body.confirm_personal_credentials,
+    ),
+    confirmPersonalSecrets: explicitBoolean(
+      "confirm_personal_secrets",
+      body.confirm_personal_secrets,
+    ),
   };
 }
 
@@ -791,7 +1089,7 @@ export function assertAPIKeyConverterCoverage(): void {
 /** Throws when a future runtime proto field has no owned SDK conversion. */
 export function assertRuntimeConverterCoverage(): void {
   assertDescriptorCoverage("repository spec", RepositorySpecSchema.fields, new Map([
-    [1, "source"], [2, "branch"], [3, "destination"], [4, "revision"],
+    [1, "source"], [2, "branch"], [3, "destination"], [4, "revision"], [5, "known_hosts"],
   ]));
   assertDescriptorCoverage("application port", ApplicationPortSchema.fields, new Map([
     [1, "port"], [2, "label"], [3, "access"],
@@ -806,19 +1104,28 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "cpu_millicores"], [2, "memory_mib"], [3, "disk_gib"],
   ]));
   assertDescriptorCoverage("project secrets", ProjectSecretBindingsSchema.fields, new Map([
-    [1, "project"], [4, "organization"], [5, "user"],
+    [1, "project"], [4, "organization"], [6, "user"],
   ]));
-  assertDescriptorCoverage("project access", ProjectAccessBindingSchema.fields, new Map([
+  assertDescriptorCoverage("project credentials", ProjectCredentialBindingSchema.fields, new Map([
     [1, "profile"],
   ]));
   assertDescriptorCoverage("project spec", ProjectSpecSchema.fields, new Map([
-    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [17, "access"],
+    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [18, "credentials"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
-    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"],
+    [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"],
   ]));
   assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
-    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"],
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"],
+  ]));
+  assertDescriptorCoverage("environment source selection", EnvironmentSourceSelectionSchema.fields, new Map([
+    [1, "secrets"], [2, "credentials"], [3, "profile_revision"],
+  ]));
+  assertDescriptorCoverage("update environment sources request", UpdateEnvironmentSourcesRequestSchema.fields, new Map([
+    [1, "org_id"], [2, "environment_id"], [3, "expected_operation_generation"], [4, "expected"], [5, "replacement"], [6, "allow_restart"], [7, "confirm_personal_credentials"], [8, "confirm_personal_secrets"],
+  ]));
+  assertDescriptorCoverage("update environment sources response", UpdateEnvironmentSourcesResponseSchema.fields, new Map([
+    [1, "environment_id"], [2, "operation_generation"], [3, "selection"], [4, "outcome"],
   ]));
   assertDescriptorCoverage("environment port", PortSchema.fields, new Map([
     [1, "id"], [2, "environment_id"], [3, "port"], [4, "label"], [5, "access"], [6, "preview_url"], [7, "created_at"],

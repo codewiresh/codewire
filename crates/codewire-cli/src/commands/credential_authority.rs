@@ -18,6 +18,9 @@ use codewire_local_credentials::{
 
 use super::{LocalCredentialAuthorityArgs, LocalCredentialAuthorityProbeArgs};
 
+mod platform;
+mod ssh;
+
 const LOCAL_CREDENTIAL_ROOT_ENV: &str = "CODEWIRE_LOCAL_CREDENTIAL_ROOT";
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
@@ -43,9 +46,19 @@ pub(crate) async fn run_local_credential_authority(
         executable: config.executable.clone(),
         authority_root: config.root.clone(),
     });
-    serve_os_local_credential_authority_with_process_spawners(config, spawner.clone(), spawner)
-        .await
-        .context("run local credential authority")
+    let signer = Arc::new(ssh::LocalSshAgentAdapter::new(config.root.clone()));
+    let result = serve_os_local_credential_authority_with_process_spawners(
+        config,
+        spawner.clone(),
+        spawner,
+        signer.clone(),
+        Arc::new(platform::NativePlatformCredentialConnector),
+    )
+    .await;
+    // Always drain an initialized owner, including authority-server failure.
+    // An ordinary non-SSH authority never initializes tools or staging.
+    signer.shutdown().await.context("drain local SSH signer")?;
+    result.context("run local credential authority")
 }
 
 pub(crate) async fn run_local_credential_authority_probe(
@@ -180,14 +193,8 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
             .arg(config.environment_generation.to_string())
             .arg("--environment-name")
             .arg(&config.environment_name)
-            .arg("--supervisor-socket")
-            .arg(&config.supervisor_socket)
-            .arg("--credential-authentication-kind")
-            .arg(match config.credential_authentication_kind {
-                codewire_access::CredentialAuthKind::ApiKey => "api-key",
-                codewire_access::CredentialAuthKind::OAuth => "oauth",
-                _ => return Err(LocalBrokerSpawnError::InvalidConfiguration),
-            })
+            .arg("--runner-socket")
+            .arg(&config.runner_socket)
             .env_clear()
             .envs(allowed_environment)
             .current_dir(&self.authority_root)
@@ -195,6 +202,12 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        for provider in &config.http_providers {
+            command.arg("--http-provider").arg(provider.as_str());
+        }
+        if config.platform_delegated {
+            command.arg("--platform-delegated");
+        }
         // SAFETY: this post-fork hook uses scalar libc operations only. It
         // transfers one authority-created socket to fixed FD 3, marks every
         // other inherited descriptor close-on-exec, removes capabilities,
@@ -246,10 +259,35 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             return Err(LocalRepositorySpawnError::InvalidConfiguration);
         }
         let parent_pid = unsafe { libc::getpid() };
-        let allowed_environment = authority_environment(|name| env::var_os(name));
+        // SSH uses the inherited signing channel and explicit public runtime
+        // path only. Do not give its executor the Secret Service bus context.
+        let allowed_environment = match config.transport {
+            codewire_local_credentials::LocalRepositoryTransport::GitHubOAuth
+                if config.platform_delegated =>
+            {
+                // Only the helper's private runtime directory. No Secret
+                // Service bus, owner HOME, agent socket or provider context.
+                authority_environment(|name| {
+                    if name == "XDG_RUNTIME_DIR" {
+                        env::var_os(name)
+                    } else {
+                        None
+                    }
+                })
+            }
+            codewire_local_credentials::LocalRepositoryTransport::GitHubOAuth => {
+                authority_environment(|name| env::var_os(name))
+            }
+            codewire_local_credentials::LocalRepositoryTransport::Ssh => Vec::new(),
+        };
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("__local-git-repository-executor")
+            .arg("--transport")
+            .arg(match config.transport {
+                codewire_local_credentials::LocalRepositoryTransport::GitHubOAuth => "github-oauth",
+                codewire_local_credentials::LocalRepositoryTransport::Ssh => "ssh",
+            })
             .arg("--authority-fd")
             .arg("3")
             .arg("--request-id")
@@ -263,6 +301,19 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        if config.platform_delegated {
+            command.arg("--platform-delegated");
+        }
+        if config.transport == codewire_local_credentials::LocalRepositoryTransport::Ssh {
+            let runtime = config
+                .ssh_runtime_directory
+                .as_ref()
+                .ok_or(LocalRepositorySpawnError::InvalidConfiguration)?;
+            command.arg("--ssh-runtime-directory").arg(runtime);
+            // The existing preparation owner drains this inherited lifetime
+            // pipe, discarding diagnostics, before acknowledging cleanup.
+            command.stderr(Stdio::piped());
+        }
         // SAFETY: this post-fork hook transfers one authority-created socket
         // to FD 3 and applies the same capability-empty, no-new-privileges,
         // non-dumpable, parent-bound confinement as the long-lived broker.
@@ -334,7 +385,7 @@ fn valid_runtime_dir(value: &OsStr) -> bool {
         })
 }
 
-fn confine_spawned_process() -> io::Result<()> {
+pub(super) fn confine_spawned_process() -> io::Result<()> {
     let header = LinuxCapabilityHeader {
         version: LINUX_CAPABILITY_VERSION_3,
         pid: 0,

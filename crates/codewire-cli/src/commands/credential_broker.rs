@@ -1,23 +1,26 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::path::Path;
 
 use anyhow::Context as _;
-use codewire_access::{CredentialAuthKind, EnvironmentId};
+use codewire_access::{EnvironmentId, HttpProvider};
 #[cfg(not(feature = "local-broker-synthetic-smoke"))]
-use codewire_credential_broker::OpenAiHttpsTransport;
+use codewire_credential_broker::ProviderHttpsTransport;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
 use codewire_credential_broker::{
-    OpenAiBroker, admit_credential_bridge, run_admitted_credential_bridge,
+    BrokerBridgeError, CredentialBridgeRelayOutput, OpenAiBroker, admit_credential_bridge,
+    run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
 };
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalCredentialBrokerLeaseClient,
+    LocalCredentialDelegationClient,
 };
-use codewire_local_vmm::control::v1::EnvironmentState;
-use codewire_local_vmm::hybrid_vsock::connect_daemon;
-use codewire_local_vmm::supervisor::NativeSupervisorClient;
+use codewire_local_vmm::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
+use codewire_local_vmm::runner_service::RunnerClient;
 use codewire_protected_store::ConnectedOsProtectedStore;
+use futures::StreamExt as _;
 use uuid::Uuid;
 
 use super::LocalCredentialBrokerArgs;
@@ -38,16 +41,23 @@ pub(crate) async fn run_local_credential_broker(
         !environment_uuid.is_nil() && args.environment_generation > 0,
         "invalid broker environment identity"
     );
-    let _credential_authentication_kind = match args.credential_authentication_kind.as_str() {
-        "api-key" => CredentialAuthKind::ApiKey,
-        "oauth" => CredentialAuthKind::OAuth,
-        _ => anyhow::bail!("invalid broker credential authentication kind"),
-    };
+    let mut http_providers = BTreeSet::new();
+    for name in &args.http_providers {
+        let provider = HttpProvider::parse(name).context("invalid broker HTTP provider")?;
+        anyhow::ensure!(
+            http_providers.insert(provider),
+            "duplicate broker HTTP provider"
+        );
+    }
     anyhow::ensure!(
-        args.supervisor_socket.is_absolute()
-            && args.supervisor_socket.file_name().and_then(OsStr::to_str)
-                == Some("supervisor.sock"),
-        "invalid broker supervisor endpoint"
+        !args.platform_delegated || http_providers.is_empty(),
+        "platform relay cannot select local provider transport"
+    );
+    anyhow::ensure!(
+        args.runner_socket.is_absolute()
+            && args.runner_socket.file_name().and_then(OsStr::to_str)
+                == Some(format!("{environment_uuid}.sock").as_str()),
+        "invalid broker runner endpoint"
     );
 
     // SAFETY: FD 3 is created by the authority immediately before exec and is
@@ -60,29 +70,35 @@ pub(crate) async fn run_local_credential_broker(
         .context("prepare broker authority channel")?;
     let authority_stream = tokio::net::UnixStream::from_std(authority_stream)
         .context("admit broker authority channel")?;
-    let mut supervisor = NativeSupervisorClient::connect(&args.supervisor_socket)
+    let mut runner = RunnerClient::connect(&args.runner_socket)
         .await
-        .context("connect broker to local supervisor")?;
-    let environment = supervisor
-        .get(&args.environment_name)
-        .await
-        .context("resolve broker environment")?;
-    anyhow::ensure!(
-        environment.id == args.environment_id
-            && environment.generation == args.environment_generation
-            && environment.state == EnvironmentState::Running as i32,
-        "broker environment generation is unavailable"
-    );
-    let access = supervisor
-        .daemon_access(&args.environment_name)
+        .context("connect broker to private runner")?;
+    let access = runner
+        .generation_daemon_access(environment_uuid, args.environment_generation)
         .await
         .context("resolve broker daemon transport")?;
-    let daemon = connect_daemon(
-        Path::new(&access.hybrid_socket),
+    // The supervisor observed authenticated runc-launching progress, which
+    // follows spawning the early daemon. Its listener may still be binding.
+    // Keep one exact socket identity and one deadline across transport-only
+    // retries; no provider material or authenticated Open has been used yet.
+    let target = HybridVsockTarget::new(
+        Path::new(&access.hybrid_socket).to_owned(),
         access.guest_port,
-        &access.generation_capability,
     )
+    .context("admit broker daemon endpoint")?;
+    let daemon = tokio::time::timeout(std::time::Duration::from_secs(7), async {
+        loop {
+            match target.connect_daemon(&access.generation_capability).await {
+                Ok(daemon) => break Ok(daemon),
+                Err(HybridVsockError::Channel) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => break Err(error),
+            }
+        }
+    })
     .await
+    .context("broker daemon transport readiness timed out")?
     .context("connect broker to guest daemon")?;
     let bridge = daemon
         .open_credential_bridge(environment_uuid, args.environment_generation)
@@ -92,16 +108,55 @@ pub(crate) async fn run_local_credential_broker(
         .await
         .context("authenticate guest credential bridge")?;
     // The broker needs only the admitted bridge from this point onward. Do not
-    // retain general supervisor or daemon clients inside the credential-bearing
+    // retain general runner or daemon clients inside the credential-bearing
     // runtime domain.
     drop(daemon);
-    drop(supervisor);
-    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
-    let upstream = OpenAiHttpsTransport::resolve(_credential_authentication_kind)
+    drop(runner);
+    if args.platform_delegated {
+        // The original guest Ready is retained in `bridge`. This branch has
+        // no provider DNS, protected-store connection, or raw lease provider.
+        // The only authority endpoint is the parent's inherited FD3 channel.
+        apply_broker_landlock_confinement().context("confine platform credential relay")?;
+        let mut delegation = LocalCredentialDelegationClient::connect(
+            authority_stream,
+            environment_id,
+            args.environment_generation,
+        )
         .await
-        .context("resolve credential broker provider endpoint")?;
+        .context("connect platform credential relay authority")?;
+        apply_broker_seccomp_confinement().context("seal platform credential relay")?;
+        return run_admitted_credential_bridge_relay(bridge, move |ready, input| async move {
+            let output = delegation
+                .delegate_credentials(ready, input)
+                .await
+                .map_err(|_| BrokerBridgeError::Unavailable)?;
+            // The exact private admission was consumed only after the parent
+            // verified the exact public selection echo. HTTP headers alone
+            // never make this native broker ready.
+            delegation
+                .report_ready()
+                .await
+                .map_err(|_| BrokerBridgeError::Unavailable)?;
+            Ok(
+                Box::pin(output.map(|frame| frame.map_err(|_| BrokerBridgeError::Unavailable)))
+                    as CredentialBridgeRelayOutput,
+            )
+        })
+        .await
+        .context("run platform credential relay");
+    }
+    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
+    let upstream = if http_providers.is_empty() {
+        None
+    } else {
+        Some(
+            ProviderHttpsTransport::resolve(&http_providers)
+                .await
+                .context("resolve credential broker provider endpoint")?,
+        )
+    };
     #[cfg(feature = "local-broker-synthetic-smoke")]
-    let upstream = SyntheticOpenAiSmokeTransport;
+    let upstream = (!http_providers.is_empty()).then_some(SyntheticOpenAiSmokeTransport);
     apply_broker_landlock_confinement().context("confine credential broker filesystem")?;
     let protected_store =
         ConnectedOsProtectedStore::connect().context("connect broker protected store")?;
@@ -115,7 +170,7 @@ pub(crate) async fn run_local_credential_broker(
     .context("connect broker lease authority")?;
     apply_broker_seccomp_confinement().context("seal credential broker runtime")?;
     leases
-        .report_ready()
+        .report_ready(bridge.ready().clone())
         .await
         .context("complete broker launch handshake")?;
     let broker = OpenAiBroker::new(leases, upstream)

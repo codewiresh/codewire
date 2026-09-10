@@ -89,6 +89,7 @@ mod linux {
     use async_trait::async_trait;
     use codewire_daemon::client::{SessionClient, SessionClientError, v1};
     use codewire_gateway_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT;
+    use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
     use codewire_local_vmm::ch_api::VmInfo;
     use codewire_local_vmm::generation::{RootGenerationDisk, ensure_empty_root_generation};
     use codewire_local_vmm::host_port::HostPortBinding;
@@ -1310,6 +1311,8 @@ mod linux {
             mesh: None,
             direct_shares: Vec::new(),
             skill_snapshot_sha256: None,
+            environment_projection_sha256: None,
+            managed_credential_clients: codewire_access::ManagedCredentialClients::default(),
         }
     }
 
@@ -2330,7 +2333,8 @@ mod linux {
             .await
             .map_err(|_| failure("credential bridge readiness timed out"))??
             .ok_or_else(|| failure("credential bridge ended before readiness"))?;
-        let Some(v1::credential_bridge_guest_message::Payload::Ready(ready)) = ready.payload else {
+        let Some(bridge_v1::credential_bridge_guest_message::Payload::Ready(ready)) = ready.payload
+        else {
             return Err(failure("credential bridge did not begin with readiness"));
         };
         if ready.protocol_version != codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
@@ -2367,7 +2371,8 @@ mod linux {
             .await
             .map_err(|_| failure("credential bridge request timed out"))??
             .ok_or_else(|| failure("credential bridge ended before request"))?;
-        let Some(v1::credential_bridge_guest_message::Payload::Request(request)) = request.payload
+        let Some(bridge_v1::credential_bridge_guest_message::Payload::Request(request)) =
+            request.payload
         else {
             return Err(failure(
                 "credential bridge emitted an unexpected request frame",
@@ -2393,23 +2398,23 @@ mod linux {
         }
 
         bridge
-            .send_response_start(v1::CredentialBridgeResponseStart {
+            .send_response_start(bridge_v1::CredentialBridgeResponseStart {
                 request_id: request.request_id.clone(),
                 status_code: 200,
-                headers: vec![v1::CredentialHttpHeader {
+                headers: vec![bridge_v1::CredentialHttpHeader {
                     name: "content-type".to_owned(),
                     value: b"text/plain".to_vec(),
                 }],
             })
             .await?;
         bridge
-            .send_response_body(v1::CredentialBridgeResponseBody {
+            .send_response_body(bridge_v1::CredentialBridgeResponseBody {
                 request_id: request.request_id.clone(),
                 data: b"CWCREDS1 synthetic\n".to_vec(),
             })
             .await?;
         bridge
-            .send_response_end(v1::CredentialBridgeResponseEnd {
+            .send_response_end(bridge_v1::CredentialBridgeResponseEnd {
                 request_id: request.request_id,
             })
             .await?;

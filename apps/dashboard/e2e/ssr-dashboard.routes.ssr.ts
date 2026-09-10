@@ -149,6 +149,30 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await expect(page.locator('input[name="_csrf"]')).not.toHaveCount(0);
   });
 
+  test("credential settings expose write-only enrollment and identity-only profile forms", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop credential settings contract");
+    const response = await page.goto("/settings/credentials/");
+    expect(response?.status()).toBe(200);
+    await expect(page.getByRole("heading", { name: "Credentials", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Connect provider account" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Add API key" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Add SSH identity" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Credential inventory" })).toBeVisible();
+    await expect(page.locator('form[action="/settings/credentials/_actions/profiles/create"]')).toHaveCount(1);
+    const connectCard = page.locator("section", {
+      has: page.getByRole("heading", { name: "Connect provider account", exact: true }),
+    });
+    await expect(connectCard.locator('form[action$="/credentials/oauth/enroll"]')).toHaveCount(1);
+    await expect(page.locator('form[action$="/credentials/api-key/add"]')).toHaveCount(1);
+    await expect(page.locator('form[action$="/credentials/ssh/generate"]')).toHaveCount(1);
+    await expect(page.locator('form[action$="/credentials/ssh/import"]')).toHaveCount(1);
+    const protectedInputs = page.locator('input[type="password"]');
+    await expect(protectedInputs).toHaveCount(2);
+    await expect(protectedInputs.nth(0)).toHaveValue("");
+    await expect(protectedInputs.nth(1)).toHaveValue("");
+    await expect(page.locator('textarea[name="private_key"]')).toHaveValue("");
+  });
+
   test("clean console routes redirect canonically and legacy paths stay retired", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop clean-route contract");
     await page.goto("/dashboard/");
@@ -187,6 +211,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
     test.skip(!!isMobile, "desktop account contract");
     for (const [route, heading] of [
       ["/settings/", "Account"],
+      ["/settings/credentials/", "Credentials"],
       ["/settings/security/", "Security settings"],
       ["/settings/sessions/", "Active sessions"],
     ] as const) {
@@ -199,7 +224,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
   test("global routes preserve only an accessible organization context", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop global-context contract");
 
-    for (const route of ["/settings/", "/settings/security/", "/settings/sessions/"]) {
+    for (const route of ["/settings/", "/settings/credentials/", "/settings/security/", "/settings/sessions/"]) {
       const response = await page.goto(`${route}?org=${cleanRoutesOrgSlug}`);
       expect(response?.status()).toBe(200);
       await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(
@@ -217,6 +242,7 @@ test.describe("server-rendered public, auth, and account routes", () => {
 
     for (const route of [
       "/settings/?org=not-a-member",
+      "/settings/credentials/?org=not-a-member",
       "/settings/security/?org=not-a-member",
       "/settings/sessions/?org=not-a-member",
       "/admin/?org=not-a-member",
