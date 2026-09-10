@@ -960,6 +960,8 @@ run_paths_case tag push refs/tags/v1.2.3 false \
 all_product='contracts contracts_proto database deploy edge_kind go_consumer_interop go_support go_tailnet kind policy policy_shell release runtime_confidential runtime_dev_smoke rust rust_curated_locks rust_workspace sdk_go sdk_python sdk_ts security security_dev_smoke_auth security_go security_idp_kek security_js service_apikey_smoke service_billing service_connectcore service_coordinator service_idp service_integration service_nats service_orchestration service_temporal transport transport_derp_contract transport_pkg_codewire_coordinator transport_pkg_codewire_daemon transport_pkg_codewire_derp transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_mesh transport_pkg_codewire_netstack transport_pkg_codewire_tailnet transport_pkg_codewire_udp_relay transport_pkg_codewire_vmm_guest_probe web'
 run_present_paths_case dashboard_watch pull_request refs/pull/2002/head false \
   "$policy" scripts/dev/dashboard-watch.py
+run_present_paths_case macos_developer_loop pull_request refs/pull/2064/head false \
+  "$policy" scripts/dev/macos-cli.py scripts/dev/test-macos-cli.py
 run_present_paths_case dashboard_watch_unlisted pull_request refs/pull/2003/head false \
   "$all_product" scripts/dev/unlisted-dashboard-helper.py
 if grep -Fq 'scripts/ci/cache/*.sh' "$SELECTOR"; then

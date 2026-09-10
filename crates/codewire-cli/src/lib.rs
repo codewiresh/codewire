@@ -36,10 +36,12 @@ use organization_client::{
     CreateInvitationRequest, CreateOrgRequest, CreatePresetRequest, OrgWithRole,
     OrganizationClient, OrganizationDeletionOutcome, OrganizationDeletionStart, Preset,
 };
+#[cfg(target_os = "linux")]
+use presentation::EnvironmentDaemonRepair;
 use presentation::{
-    CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonRepair,
-    EnvironmentDaemonStatus, EnvironmentLog, EnvironmentResizeResources, EnvironmentTrustReport,
-    ExtendTtlRequest, GrantEnvironmentAccessRequest, PrepareEnvironmentRequest, StatusResponse,
+    CreateEnvironmentRequest, Environment, EnvironmentAccessGrant, EnvironmentDaemonStatus,
+    EnvironmentLog, EnvironmentResizeResources, EnvironmentTrustReport, ExtendTtlRequest,
+    GrantEnvironmentAccessRequest, PrepareEnvironmentRequest, StatusResponse,
 };
 use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, SecretProject};
 
