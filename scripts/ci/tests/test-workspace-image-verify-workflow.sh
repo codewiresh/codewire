@@ -19,6 +19,14 @@ fail() {
 [[ -x "$VERIFY" ]] || fail 'workspace-image verification script is not executable'
 [[ -x "$HELPER" ]] || fail 'local Buildx image helper is missing'
 [[ -x "$AGENT_CONTRACT" ]] || fail 'workspace agent contract is missing'
+last_context_reinclude="$(grep -n '^!' "$ROOT/.dockerignore" | tail -1 | cut -d: -f1)"
+for generated_python in '**/__pycache__' '**/*.pyc' '**/*.pyo'; do
+  grep -Fxq "$generated_python" "$ROOT/.dockerignore" ||
+    fail "workspace Docker context does not exclude generated Python input: $generated_python"
+  ignore_line="$(grep -nFx "$generated_python" "$ROOT/.dockerignore" | cut -d: -f1)"
+  [[ "$ignore_line" -gt "$last_context_reinclude" ]] ||
+    fail "generated Python exclusion is overridden by a later Docker context re-inclusion: $generated_python"
+done
 workspace_job="$(awk '
   $0 == "  workspace-image:" { capture = 1 }
   capture && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  workspace-image:" { exit }
