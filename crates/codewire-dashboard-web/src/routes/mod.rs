@@ -79,6 +79,12 @@ pub(crate) fn router() -> Router<AppState> {
         .route(DASHBOARD_PATH, get(dashboard::dashboard))
         .route("/admin", get(slash_redirect))
         .route("/admin/", get(admin::overview))
+        .route("/admin/accounts", get(slash_redirect))
+        .route("/admin/accounts/", get(admin::accounts))
+        .route(
+            "/admin/accounts/_actions/enabled",
+            post(admin::set_account_enabled),
+        )
         .route("/admin/audit", get(slash_redirect))
         .route("/admin/audit/", get(admin::audit))
         .route("/admin/billing", get(slash_redirect))

@@ -344,7 +344,7 @@ pub async fn check_expired_trials(pool: &PgPool, email: &EmailClient) -> anyhow:
             tracing::error!(org_id, error = %e, "billing: failed to update org billing status");
         }
 
-        // Match Go: a missing Resend key disables the email path entirely.
+        // An absent SES sender projection disables the email path entirely.
         if email.is_configured() {
             let owner_email: Option<(String,)> = sqlx::query_as(SELECT_OWNER_EMAIL)
                 .bind(&org_id)

@@ -14,6 +14,7 @@ pub(crate) struct AppState {
     pub(crate) inline_docs_io: bool,
     pub(crate) confidential_storage_enabled: bool,
     pub(crate) confidential_admin_only: bool,
+    pub(crate) turnstile_site_key: String,
     pub(crate) http: reqwest::Client,
     pub(crate) credential_http: reqwest::Client,
 }
@@ -31,6 +32,7 @@ impl AppState {
             inline_docs_io: config.runtime_mode == RuntimeMode::CurrentThread,
             confidential_storage_enabled: config.confidential_storage_enabled,
             confidential_admin_only: config.confidential_admin_only,
+            turnstile_site_key: config.turnstile_site_key,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()

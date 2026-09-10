@@ -12,6 +12,11 @@ configMapGenerator:
   - name: codewire-config
     envs:
       - config.env
+  # This ConfigMap is intentionally separate from codewire-config, which many
+  # services import with envFrom. The only public consumer is the dashboard.
+  - name: codewire-dashboard-public-config
+    literals:
+      - TURNSTILE_SITE_KEY=
 
 labels:
   - pairs:

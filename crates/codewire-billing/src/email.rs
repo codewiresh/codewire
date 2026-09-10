@@ -1,25 +1,12 @@
-//! Billing emails via the Resend API.
+//! Billing emails via the shared transactional-email provider.
 //!
 //! Owns payment receipt, payment-failed, and trial-ending messages.
 
-use serde::Serialize;
-
-const DEFAULT_BASE_URL: &str = "https://api.resend.com";
-const FROM: &str = "Codewire <ops@example.invalid>";
+use codewire_email::EmailClient as DeliveryEmailClient;
 
 #[derive(Clone)]
 pub struct EmailClient {
-    api_key: String,
-    base_url: String,
-    http: reqwest::Client,
-}
-
-#[derive(Serialize)]
-struct ResendRequest<'a> {
-    from: &'a str,
-    to: [&'a str; 1],
-    subject: &'a str,
-    html: &'a str,
+    delivery: DeliveryEmailClient,
 }
 
 /// Receipt email payload — mirrors `email.ReceiptData`.
@@ -40,52 +27,25 @@ pub struct ReceiptData {
 }
 
 impl EmailClient {
-    /// `api_key` empty -> emails disabled. Callers usually check
-    /// [`Self::is_configured`] like the Go `resendAPIKey != ""` guards, and
-    /// `Self::send` also no-ops so a missed guard cannot perform external
-    /// network I/O in CI or local test runs.
-    pub fn new(api_key: impl Into<String>) -> Self {
-        Self {
-            api_key: api_key.into(),
-            base_url: DEFAULT_BASE_URL.to_string(),
-            http: reqwest::Client::new(),
-        }
+    /// Builds the billing sender from the selected delivery configuration.
+    pub async fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            delivery: DeliveryEmailClient::from_env().await?,
+        })
     }
 
-    /// Test seam: point at a wiremock server.
-    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = base_url.into();
-        self
+    pub fn disabled() -> Self {
+        Self {
+            delivery: DeliveryEmailClient::disabled(),
+        }
     }
 
     pub fn is_configured(&self) -> bool {
-        !self.api_key.is_empty()
+        self.delivery.is_configured()
     }
 
     async fn send(&self, to: &str, subject: &str, html: &str) -> anyhow::Result<()> {
-        if !self.is_configured() {
-            tracing::debug!("billing email disabled; skipping send");
-            return Ok(());
-        }
-
-        let resp = self
-            .http
-            .post(format!("{}/emails", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&ResendRequest {
-                from: FROM,
-                to: [to],
-                subject,
-                html,
-            })
-            .send()
-            .await?;
-        if resp.status().as_u16() >= 400 {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("resend API error {status}: {body}");
-        }
-        Ok(())
+        self.delivery.send_html(to, subject, html).await
     }
 
     /// Mirrors `email.SendPaymentReceipt`.
@@ -242,15 +202,17 @@ mod tests {
 
     #[tokio::test]
     async fn unconfigured_client_reports_disabled() {
-        let c = EmailClient::new("");
+        let c = EmailClient::disabled();
         assert!(!c.is_configured());
     }
 
     #[tokio::test]
-    async fn unconfigured_client_skips_sends() {
-        let c = EmailClient::new("").with_base_url("http://127.0.0.1:9");
-        c.send_trial_expired("owner@example.com")
-            .await
-            .expect("disabled email sends should no-op");
+    async fn unconfigured_client_reports_unavailable_delivery() {
+        let c = EmailClient::disabled();
+        let error = c.send_trial_expired("owner@example.com").await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "transactional email delivery is not configured"
+        );
     }
 }

@@ -71,10 +71,6 @@ secret_args=(
   --from-literal=STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET"
 )
 
-if [ -n "${RESEND_API_KEY:-}" ]; then
-  secret_args+=(--from-literal=RESEND_API_KEY="$RESEND_API_KEY")
-fi
-
 kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" create secret generic codewire-local-secrets \
   --dry-run=client \
   -o yaml \

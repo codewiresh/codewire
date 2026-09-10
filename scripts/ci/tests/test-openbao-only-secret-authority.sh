@@ -235,7 +235,7 @@ kubectl kustomize deployments/k8s/overlays/local-kind >"$render_root/local-kind.
 kubectl kustomize deployments/k8s/overlays/local-kind-static >"$render_root/local-kind-static.yaml"
 kubectl kustomize deployments/k8s/overlays/production >"$render_root/production.yaml"
 yq ea -o=json -I=0 \
-  'select(.kind == "ConfigMap") | .data' \
+  'select(.kind == "ConfigMap" and (.metadata.name | test("^codewire-config-"))) | .data' \
   "$render_root/dev.yaml" >"$render_root/dev-config.json"
 yq ea -o=json -I=0 \
   'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
@@ -263,7 +263,7 @@ yq ea -o=json -I=0 \
   tests/e2e/kind/credential-fixture-config.yaml \
   >"$render_root/kind-credential-config.json"
 yq ea -o=json -I=0 \
-  'select(.kind == "ConfigMap") | .data' \
+  'select(.kind == "ConfigMap" and (.metadata.name | test("^codewire-config-"))) | .data' \
   "$render_root/production.yaml" >"$render_root/production-config.json"
 
 jq -e '

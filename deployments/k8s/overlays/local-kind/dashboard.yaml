@@ -33,6 +33,12 @@ spec:
               value: "http://codewire-billing:8081"
             - name: CODEWIRE_BROWSER_API_ORIGIN
               value: "http://127.0.0.1:8080"
+            - name: TURNSTILE_SITE_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-dashboard-public-config
+                  key: TURNSTILE_SITE_KEY
+                  optional: true
           ports:
             - containerPort: 5173
           securityContext:

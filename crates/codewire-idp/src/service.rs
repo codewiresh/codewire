@@ -34,10 +34,12 @@ pub struct IdpConfig {
     pub issuer: String,
     /// Base URL of the login UI (`{frontend}/login`).
     pub frontend_url: String,
-    /// Resend API key for transactional auth emails. Empty disables delivery.
-    pub resend_api_key: String,
-    /// Signup invite policy. An absent/blank hash list explicitly leaves
-    /// signup open; configured hashes require a matching invite code.
+    /// Cloudflare Turnstile secret for server-side access-request validation.
+    /// An absent value leaves production signup fail-closed until it is
+    /// delivered through the approved secret path.
+    pub turnstile_secret_key: String,
+    /// Signup invite policy. An absent/blank hash list routes signup through
+    /// access review; configured hashes permit immediate access.
     pub signup_invite_policy: SignupInvitePolicy,
     /// Scopes advertised in discovery.
     pub scopes_supported: Vec<String>,
@@ -50,8 +52,8 @@ impl fmt::Debug for IdpConfig {
             .field("issuer", &self.issuer)
             .field("frontend_url", &self.frontend_url)
             .field(
-                "resend_api_key_configured",
-                &!self.resend_api_key.is_empty(),
+                "turnstile_secret_key_configured",
+                &!self.turnstile_secret_key.is_empty(),
             )
             .field("signup_invite_policy", &self.signup_invite_policy)
             .field("scopes_supported", &self.scopes_supported)
@@ -92,14 +94,14 @@ impl IdpConfig {
         })?;
         let frontend_url = pick(&["FRONTEND_URL", "CODEWIRE_API_URL"], &mut value)
             .unwrap_or_else(|| issuer.clone());
-        let resend_api_key = pick(&["RESEND_API_KEY"], &mut value).unwrap_or_default();
+        let turnstile_secret_key = pick(&["TURNSTILE_SECRET_KEY"], &mut value).unwrap_or_default();
         let signup_invite_policy = SignupInvitePolicy::from_sha256_hashes(
             value("IDP_SIGNUP_INVITE_CODE_HASHES").as_deref(),
         )?;
         Ok(Self {
             issuer,
             frontend_url,
-            resend_api_key,
+            turnstile_secret_key,
             signup_invite_policy,
             scopes_supported: vec![
                 "openid".into(),
@@ -232,18 +234,18 @@ mod tests {
     use super::{IdpConfig, SignupInvitePolicy};
 
     #[test]
-    fn config_debug_redacts_resend_api_key() {
+    fn config_debug_redacts_turnstile_secret() {
         let cfg = IdpConfig {
             issuer: "https://issuer.example".into(),
             frontend_url: "https://app.example".into(),
-            resend_api_key: "resend-secret-marker".into(),
+            turnstile_secret_key: "turnstile-secret-marker".into(),
             signup_invite_policy: SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
         };
 
         let diagnostic = format!("{cfg:?}");
-        assert!(!diagnostic.contains("resend-secret-marker"));
-        assert!(diagnostic.contains("resend_api_key_configured: true"));
+        assert!(!diagnostic.contains("turnstile-secret-marker"));
+        assert!(diagnostic.contains("turnstile_secret_key_configured: true"));
     }
 
     #[test]
@@ -265,7 +267,7 @@ mod tests {
 
         assert_eq!(cfg.issuer, "http://127.0.0.1:8080");
         assert_eq!(cfg.frontend_url, "http://frontend.example");
-        assert_eq!(cfg.resend_api_key, "");
+        assert_eq!(cfg.turnstile_secret_key, "");
         assert!(!cfg.signup_invite_policy.is_configured());
         assert!(
             cfg.scopes_supported
@@ -291,7 +293,7 @@ mod tests {
 
         assert_eq!(cfg.issuer, "http://codewire-server:8080");
         assert_eq!(cfg.frontend_url, "http://codewire-server:8080");
-        assert_eq!(cfg.resend_api_key, "");
+        assert_eq!(cfg.turnstile_secret_key, "");
         assert!(!cfg.signup_invite_policy.is_configured());
     }
 

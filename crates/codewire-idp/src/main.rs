@@ -73,6 +73,7 @@ async fn serve() -> anyhow::Result<()> {
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
     let idp_cfg = codewire_idp::IdpConfig::from_env()?;
+    let email = codewire_email::EmailClient::from_env().await?;
     let signing_keyring = codewire_idp::SigningKekKeyring::from_env()?;
 
     // Seed built-in public clients. Existing registrations converge their
@@ -103,15 +104,24 @@ async fn serve() -> anyhow::Result<()> {
     // Session-core credential auth (`/api/auth/{sign-up,sign-in,sign-out,
     // get-session}`). Cookies are `Secure` only for HTTPS frontends.
     let secure = idp_cfg.frontend_url.starts_with("https");
-    let session_auth = codewire_idp::auth_session::router(
+    let session_auth = codewire_idp::auth_session::router_with_signup_delivery(
         pool.clone(),
         secure,
         idp_cfg.signup_invite_policy.clone(),
+        idp_cfg.frontend_url.clone(),
+        email.clone(),
+        idp_cfg.turnstile_secret_key.clone(),
     );
     let email_password = codewire_idp::email_password::router(
         pool.clone(),
         idp_cfg.frontend_url.clone(),
-        idp_cfg.resend_api_key.clone(),
+        email.clone(),
+        auth_state.clone(),
+    );
+    let access_admin = codewire_idp::access_admin::router(
+        pool.clone(),
+        idp_cfg.frontend_url.clone(),
+        email,
         auth_state.clone(),
     );
     let two_factor = codewire_idp::two_factor::router(
@@ -128,6 +138,7 @@ async fn serve() -> anyhow::Result<()> {
         .merge(device_verification)
         .merge(session_auth)
         .merge(email_password)
+        .merge(access_admin)
         .merge(two_factor);
 
     tracing::info!(

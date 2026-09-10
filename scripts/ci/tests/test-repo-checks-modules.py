@@ -22,6 +22,8 @@ from repo_policy import (  # noqa: E402 - dispatcher directory is the import roo
     production,
     proto,
     source_classification,
+    ses_security,
+    turnstile_security,
 )
 
 
@@ -67,6 +69,16 @@ COMMANDS = {
     "idp-signing-kek-isolation": (
         idp_security.check_idp_signing_kek_isolation,
         "idp signing KEK isolation: static OK",
+        False,
+    ),
+    "ses-email-isolation": (
+        ses_security.check_ses_sender_isolation,
+        "ses email isolation: static OK",
+        False,
+    ),
+    "turnstile-access-projection": (
+        turnstile_security.check_turnstile_access_projection,
+        "turnstile access projection: static OK",
         False,
     ),
 }

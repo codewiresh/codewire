@@ -3,7 +3,7 @@ use std::fmt;
 use axum::{
     Form,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
 };
 use qrcode::{QrCode, render::svg};
@@ -29,6 +29,7 @@ use crate::{
 };
 
 const SECRET_TTL_SECONDS: u32 = 10 * 60;
+const TURNSTILE_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self'; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'";
 
 #[derive(Serialize)]
 struct CredentialsRequest<'a> {
@@ -42,6 +43,9 @@ struct SignUpRequest<'a> {
     password: &'a str,
     name: &'a str,
     invite_code: &'a str,
+    reason: &'a str,
+    #[serde(rename = "turnstile_token")]
+    turnstile_token: &'a str,
 }
 
 #[derive(Serialize)]
@@ -107,6 +111,8 @@ struct SuccessResponse {
 struct AuthResponse {
     #[allow(dead_code)]
     user: AuthUserResponse,
+    #[serde(default, rename = "accessPending")]
+    access_pending: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,9 +253,13 @@ pub(super) async fn signup_action(
     }
     let query = form_query(&form);
     let error = validate_new_password(&form);
-    if !error.is_empty() || form.email.trim().is_empty() || form.name.trim().is_empty() {
+    if !error.is_empty()
+        || form.email.trim().is_empty()
+        || form.name.trim().is_empty()
+        || form.reason.trim().is_empty()
+    {
         let error = if error.is_empty() {
-            "Name and email are required.".to_owned()
+            "Name, email, and what you want to build are required.".to_owned()
         } else {
             error
         };
@@ -268,6 +278,8 @@ pub(super) async fn signup_action(
             password: &form.password,
             name: form.name.trim(),
             invite_code: form.invite_code.trim(),
+            reason: form.reason.trim(),
+            turnstile_token: form.turnstile_response.trim(),
         },
     )
     .await
@@ -290,6 +302,18 @@ pub(super) async fn signup_action(
             identity.status,
             signup_view(query, user_message(identity.status, "sign-up").to_owned()),
         );
+    }
+    if identity
+        .body
+        .as_ref()
+        .is_some_and(|body| body.access_pending)
+    {
+        return render_page(AuthStatusTemplate {
+            title: "Verify your email",
+            description: "We sent you a verification link. Once verified, your access request will be ready for review.",
+            primary_label: "Back to sign in",
+            primary_url: "/login",
+        });
     }
     let completion = completion_target(&form.auth_request_id, &form.return_to);
     forward_session_cookies(
@@ -681,10 +705,20 @@ fn valid_form_request(state: &AppState, headers: &HeaderMap, csrf: &str) -> bool
 fn auth_form_response(state: &AppState, status: StatusCode, mut view: AuthFormView) -> Response {
     let csrf = new_csrf_token();
     view.csrf_token = csrf.clone();
-    with_csrf_cookie(
+    if view.action == "/signup/_actions/sign-up" {
+        view.turnstile_site_key = state.turnstile_site_key.clone();
+    }
+    let mut response = with_csrf_cookie(
         render_template(status, AuthFormTemplate { view: &view }),
         csrf_cookie(&state.public_origin, &csrf),
-    )
+    );
+    if !view.turnstile_site_key.is_empty() {
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(TURNSTILE_CSP),
+        );
+    }
+    response
 }
 
 fn form_query(form: &AuthFormSubmission) -> AuthQuery {
@@ -711,6 +745,8 @@ fn base_view(query: AuthQuery) -> AuthFormView {
         show_confirm_password: false,
         show_name: false,
         show_invite_code: false,
+        show_reason: false,
+        turnstile_site_key: String::new(),
         show_totp_code: false,
         forgot_password_link: false,
         secondary_label: "",
@@ -735,16 +771,17 @@ fn login_view(query: AuthQuery, error: String) -> AuthFormView {
 
 fn signup_view(query: AuthQuery, error: String) -> AuthFormView {
     let mut view = base_view(query);
-    view.title = "Create your account";
-    view.description = "Start running coding agents on dedicated machines.";
+    view.title = "Request Codewire access";
+    view.description = "Tell us what you want to build with Codewire.";
     view.action = "/signup/_actions/sign-up";
-    view.submit_label = "Create account";
+    view.submit_label = "Request access";
     view.error = error;
     view.show_email = true;
     view.show_password = true;
     view.new_password = true;
     view.show_confirm_password = true;
     view.show_name = true;
+    view.show_reason = true;
     // Preserve the current UI input and raw IdP field without inventing or
     // enforcing invite policy in this presentation adapter (#1352).
     view.show_invite_code = true;
@@ -879,6 +916,8 @@ fn auth_path_from_view(path: &str, view: &AuthFormView) -> String {
         confirm_password: String::new(),
         name: String::new(),
         invite_code: String::new(),
+        reason: String::new(),
+        turnstile_response: String::new(),
         code: String::new(),
         auth_request_id: view.auth_request_id.clone(),
         return_to: view.return_to.clone(),
@@ -893,6 +932,39 @@ fn setup_continuation(query: &AuthQuery) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use askama::Template as _;
+
+    #[test]
+    fn signup_form_carries_the_access_request_and_turnstile_contract() {
+        let mut view = signup_view(AuthQuery::default(), String::new());
+        view.turnstile_site_key = "site-key-marker".into();
+        let body = AuthFormTemplate { view: &view }
+            .render()
+            .expect("render signup form");
+
+        assert!(view.show_reason);
+        assert!(body.contains("name=\"reason\""));
+        assert!(body.contains("maxlength=\"2000\""));
+        assert!(body.contains("cf-turnstile"));
+        assert!(body.contains("data-sitekey=\"site-key-marker\""));
+        assert!(body.contains("challenges.cloudflare.com/turnstile/v0/api.js"));
+    }
+
+    #[test]
+    fn signup_request_uses_the_identity_turnstile_field_name() {
+        let body = serde_json::to_value(SignUpRequest {
+            email: "person@example.test",
+            password: "CorrectHorse9#xy",
+            name: "Person",
+            invite_code: "",
+            reason: "Build isolated coding environments",
+            turnstile_token: "challenge-marker",
+        })
+        .expect("serialize signup request");
+
+        assert_eq!(body["turnstile_token"], "challenge-marker");
+        assert!(body.get("turnstileToken").is_none());
+    }
 
     #[test]
     fn passwords_and_challenges_are_not_part_of_auth_urls() {
@@ -903,6 +975,8 @@ mod tests {
             confirm_password: "VerySecretPassword9!".into(),
             name: "Person".into(),
             invite_code: "invite-secret".into(),
+            reason: "reason-secret".into(),
+            turnstile_response: "turnstile-secret".into(),
             code: "123456".into(),
             auth_request_id: "request-id".into(),
             return_to: "/dashboard".into(),
@@ -946,6 +1020,8 @@ mod tests {
             confirm_password: "weak".into(),
             name: String::new(),
             invite_code: String::new(),
+            reason: String::new(),
+            turnstile_response: String::new(),
             code: String::new(),
             auth_request_id: String::new(),
             return_to: String::new(),
