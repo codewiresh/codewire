@@ -37,8 +37,9 @@ pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
 /// Standard AWS credential field projected from the dedicated SES Secret.
 pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
 
-/// Legacy Resend credential retained only while the SES delivery path proves
-/// stable in each environment. Its removal is a separate, scheduled change.
+/// Legacy Resend credential retained only until SES delivery and the access
+/// signup flow are proved in an environment. Remove it immediately afterward
+/// through a separately qualified environment transaction.
 pub const RESEND_API_KEY_ENV: &str = "RESEND_API_KEY";
 
 const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
