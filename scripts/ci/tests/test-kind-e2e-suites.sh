@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Synthetic ownership fixtures must not inherit the caller's live CI cluster.
+export KIND_CLUSTER_NAME=codewire-e2e-ci
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SCRIPT="$ROOT/scripts/ci/verify/kind-e2e.sh"
 COMMON="$ROOT/scripts/ci/verify/kind/common.sh"

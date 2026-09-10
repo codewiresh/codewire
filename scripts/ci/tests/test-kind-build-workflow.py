@@ -441,6 +441,7 @@ class CommonConsumerContractTests(unittest.TestCase):
                 set -euo pipefail
                 export ROOT="$FIXTURE_ROOT"
                 export RUN_DIR="$FIXTURE_ROOT/run"
+                export KIND_CLUSTER_NAME=codewire-e2e-ci
                 export KIND_WORKSPACE_IMAGE=sealed-workspace:fixture
                 export KIND_INGRESS_CONTROLLER_IMAGE=''
                 export KIND_INGRESS_CERTGEN_IMAGE=''
