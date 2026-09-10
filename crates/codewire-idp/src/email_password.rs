@@ -346,7 +346,7 @@ async fn forget_password(
             Ok(token) => {
                 let reset_url = format!("{}/reset-password?token={}", state.frontend_url, token);
                 if !state.email.is_configured() {
-                    tracing::warn!(email = %req.email, "SES email delivery is not configured, skipping password reset email");
+                    tracing::warn!(email = %req.email, "transactional email delivery is not configured, skipping password reset email");
                 } else if let Err(e) =
                     send_password_reset_email(&state.email, &req.email, &reset_url).await
                 {
@@ -445,7 +445,7 @@ async fn send_verification(
     .await?;
     let verify_url = format!("{}/verify-email?token={}", state.frontend_url, token);
     if !state.email.is_configured() {
-        tracing::warn!(email = %row.email, "SES email delivery is not configured, skipping verification email");
+        tracing::warn!(email = %row.email, "transactional email delivery is not configured, skipping verification email");
     } else if let Err(e) = send_verification_email(&state.email, &row.email, &verify_url).await {
         tracing::error!(email = %row.email, error = %e, "failed to send verification email");
         return Err(AppError::InternalMsg(

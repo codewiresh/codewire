@@ -1,12 +1,12 @@
-//! Billing emails via Amazon SES.
+//! Billing emails via the shared transactional-email provider.
 //!
 //! Owns payment receipt, payment-failed, and trial-ending messages.
 
-use codewire_email::EmailClient as SesEmailClient;
+use codewire_email::EmailClient as DeliveryEmailClient;
 
 #[derive(Clone)]
 pub struct EmailClient {
-    ses: SesEmailClient,
+    delivery: DeliveryEmailClient,
 }
 
 /// Receipt email payload — mirrors `email.ReceiptData`.
@@ -27,25 +27,25 @@ pub struct ReceiptData {
 }
 
 impl EmailClient {
-    /// Builds the billing sender from its SES environment projection.
+    /// Builds the billing sender from the selected delivery configuration.
     pub async fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            ses: SesEmailClient::from_env().await?,
+            delivery: DeliveryEmailClient::from_env().await?,
         })
     }
 
     pub fn disabled() -> Self {
         Self {
-            ses: SesEmailClient::disabled(),
+            delivery: DeliveryEmailClient::disabled(),
         }
     }
 
     pub fn is_configured(&self) -> bool {
-        self.ses.is_configured()
+        self.delivery.is_configured()
     }
 
     async fn send(&self, to: &str, subject: &str, html: &str) -> anyhow::Result<()> {
-        self.ses.send_html(to, subject, html).await
+        self.delivery.send_html(to, subject, html).await
     }
 
     /// Mirrors `email.SendPaymentReceipt`.
@@ -210,6 +210,9 @@ mod tests {
     async fn unconfigured_client_reports_unavailable_delivery() {
         let c = EmailClient::disabled();
         let error = c.send_trial_expired("owner@example.com").await.unwrap_err();
-        assert_eq!(error.to_string(), "SES email delivery is not configured");
+        assert_eq!(
+            error.to_string(),
+            "transactional email delivery is not configured"
+        );
     }
 }

@@ -1,10 +1,10 @@
-//! Transactional Codewire email delivery through Amazon SES.
+//! Transactional Codewire email delivery.
 //!
-//! Mail is disabled until the workload-specific SES projection explicitly
-//! enables it and supplies both `CODEWIRE_SES_FROM` and
-//! `CODEWIRE_SES_REGION`. The sender uses only the exact standard AWS access
-//! key pair projected for that workload; it never falls through to profiles,
-//! instance metadata, or another Codewire configuration value.
+//! During the SES migration, an explicit workload-specific marker selects SES
+//! and requires its complete, narrow AWS credential projection. Without that
+//! marker, the client uses the existing Codewire Resend credential as a
+//! rollback provider. An active SES sender never falls back to Resend after a
+//! configuration or delivery error.
 
 use std::fmt;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use aws_sigv4::http_request::{
 };
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
-use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
 
 /// Environment variable holding the exact SES From address approved for this
 /// workload. It must be a single mailbox, without a display name.
@@ -37,6 +37,10 @@ pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
 /// Standard AWS credential field projected from the dedicated SES Secret.
 pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
 
+/// Legacy Resend credential retained only while the SES delivery path proves
+/// stable in each environment. Its removal is a separate, scheduled change.
+pub const RESEND_API_KEY_ENV: &str = "RESEND_API_KEY";
+
 const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
 const DISABLE_IMDS_ENV: &str = "AWS_EC2_METADATA_DISABLED";
 const IGNORE_ENDPOINTS_ENV: &str = "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS";
@@ -54,12 +58,14 @@ const ECS_CREDENTIALS_RELATIVE_URI_ENV: &str = "AWS_CONTAINER_CREDENTIALS_RELATI
 const ECS_CREDENTIALS_FULL_URI_ENV: &str = "AWS_CONTAINER_CREDENTIALS_FULL_URI";
 const ECS_AUTHORIZATION_TOKEN_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN";
 const ECS_AUTHORIZATION_TOKEN_FILE_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE";
+const RESEND_EMAIL_ENDPOINT: &str = "https://api.resend.com/emails";
+const RESEND_FROM: &str = "Codewire <ops@example.invalid>";
 
 // SendEmail has no client idempotency key. One bounded HTTP attempt avoids
 // turning an uncertain transport outcome into an automatic duplicate.
-const SES_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const SES_READ_TIMEOUT: Duration = Duration::from_secs(4);
-const SES_OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
+const EMAIL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const EMAIL_READ_TIMEOUT: Duration = Duration::from_secs(4);
+const EMAIL_OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone)]
 pub struct EmailClient {
@@ -68,7 +74,24 @@ pub struct EmailClient {
 
 enum Delivery {
     Disabled,
+    Resend(ResendDelivery),
     Ses(SesDelivery),
+}
+
+/// The active transactional-email transport. This is intentionally safe to
+/// expose for diagnostics; it contains no delivery configuration or secret.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmailProvider {
+    Disabled,
+    Resend,
+    Ses,
+}
+
+/// The legacy credential stays within the dedicated delivery client. It is
+/// deliberately neither `Clone` nor `Debug`.
+struct ResendDelivery {
+    api_key: String,
+    client: reqwest::Client,
 }
 
 /// The material required to sign a request stays within the narrowly scoped
@@ -90,73 +113,104 @@ impl fmt::Debug for EmailClient {
 }
 
 impl EmailClient {
-    /// Builds a client from public mail configuration and the dedicated AWS
-    /// credential projection. The separate marker deliberately keeps mail
-    /// disabled for local development and during an environment's cutover
-    /// until that narrowly scoped projection is present.
+    /// Builds a client from the migration configuration. An explicit SES
+    /// marker chooses SES exclusively; otherwise the legacy Resend credential
+    /// remains available as the bounded rollback provider.
     pub async fn from_env() -> Result<Self> {
-        let Some(config) = EmailConfig::from_env()? else {
+        if let Some(config) = EmailConfig::from_env()? {
+            let credentials = EmailCredentials::from_env()?;
+            assert_ses_transport_boundary()?;
+
+            // The sender has one credential source and synthesizes its SES
+            // HTTPS endpoint from the reviewed region. It does not load AWS
+            // profiles, instance metadata, endpoint overrides, or a provider
+            // chain.
+            let credentials = Credentials::new(
+                credentials.access_key_id,
+                credentials.secret_access_key,
+                None,
+                None,
+                "codewire-ses-projection",
+            );
+            return Ok(Self {
+                delivery: Arc::new(Delivery::Ses(SesDelivery {
+                    from: config.from,
+                    region: config.region,
+                    credentials,
+                    client: ses_http_client()?,
+                })),
+            });
+        }
+
+        let Some(credentials) = ResendCredentials::from_env()? else {
             return Ok(Self::disabled());
         };
-        let credentials = EmailCredentials::from_env()?;
-        assert_ses_transport_boundary()?;
-
-        // The sender has one credential source and synthesizes its SES HTTPS
-        // endpoint from the reviewed region. It does not load AWS profiles,
-        // instance metadata, endpoint overrides, or a provider chain.
-        let credentials = Credentials::new(
-            credentials.access_key_id,
-            credentials.secret_access_key,
-            None,
-            None,
-            "codewire-ses-projection",
-        );
         Ok(Self {
-            delivery: Arc::new(Delivery::Ses(SesDelivery {
-                from: config.from,
-                region: config.region,
-                credentials,
-                client: ses_http_client()?,
+            delivery: Arc::new(Delivery::Resend(ResendDelivery {
+                api_key: credentials.api_key,
+                client: resend_http_client()?,
             })),
         })
     }
 
     /// Returns a client that cannot send mail. This is intentionally explicit
-    /// in tests and local development rather than silently accepting a legacy
-    /// mail-provider credential.
+    /// in tests and local development.
     pub fn disabled() -> Self {
         Self {
             delivery: Arc::new(Delivery::Disabled),
         }
     }
 
-    /// Whether this workload received a complete SES delivery projection.
-    pub fn is_configured(&self) -> bool {
-        matches!(self.delivery.as_ref(), Delivery::Ses(..))
+    /// Returns the selected transactional-email transport without exposing
+    /// configuration or credentials.
+    pub fn provider(&self) -> EmailProvider {
+        match self.delivery.as_ref() {
+            Delivery::Disabled => EmailProvider::Disabled,
+            Delivery::Resend(..) => EmailProvider::Resend,
+            Delivery::Ses(..) => EmailProvider::Ses,
+        }
     }
 
-    /// Delivers one UTF-8 HTML email through the SES v2 `SendEmail` API.
-    pub async fn send_html(&self, to: &str, subject: &str, html: &str) -> Result<()> {
-        let Delivery::Ses(delivery) = self.delivery.as_ref() else {
-            bail!("SES email delivery is not configured");
-        };
-        validate_mailbox(to, "recipient")?;
-        validate_subject(subject)?;
+    /// Whether this workload received a complete delivery configuration.
+    pub fn is_configured(&self) -> bool {
+        self.provider() != EmailProvider::Disabled
+    }
 
-        let body = ses_email_payload(&delivery.from, to, subject, html)?;
-        let request = signed_ses_request(
-            &delivery.client,
-            &delivery.credentials,
-            &delivery.region,
-            body,
-            SystemTime::now(),
-        )?;
-        let response = delivery
-            .client
-            .execute(request)
-            .await
-            .context("send SES email")?;
-        ensure_ses_success(response.status())
+    /// Delivers one UTF-8 HTML email through the selected transport.
+    pub async fn send_html(&self, to: &str, subject: &str, html: &str) -> Result<()> {
+        match self.delivery.as_ref() {
+            Delivery::Disabled => bail!("transactional email delivery is not configured"),
+            Delivery::Resend(delivery) => {
+                validate_mailbox(to, "recipient")?;
+                validate_subject(subject)?;
+                let request =
+                    resend_email_request(&delivery.client, &delivery.api_key, to, subject, html)?;
+                let response = delivery
+                    .client
+                    .execute(request)
+                    .await
+                    .context("send Resend email")?;
+                ensure_resend_success(response.status())
+            }
+            Delivery::Ses(delivery) => {
+                validate_mailbox(to, "recipient")?;
+                validate_subject(subject)?;
+                let body = ses_email_payload(&delivery.from, to, subject, html)?;
+                let request = signed_ses_request(
+                    &delivery.client,
+                    &delivery.credentials,
+                    &delivery.region,
+                    body,
+                    SystemTime::now(),
+                )?;
+                let response = delivery
+                    .client
+                    .execute(request)
+                    .await
+                    .context("send SES email")?;
+                ensure_ses_success(response.status())
+            }
+        }
     }
 }
 
@@ -200,6 +254,35 @@ impl EmailCredentials {
     }
 }
 
+/// Legacy Resend credentials are accepted only while SES is inactive. This
+/// keeps the rollback path explicit and prevents malformed credentials from
+/// being silently treated as an unavailable sender.
+struct ResendCredentials {
+    api_key: String,
+}
+
+impl ResendCredentials {
+    fn from_env() -> Result<Option<Self>> {
+        let api_key = read_optional_env(RESEND_API_KEY_ENV)?;
+        Self::parse(api_key.as_deref())
+    }
+
+    fn parse(api_key: Option<&str>) -> Result<Option<Self>> {
+        let Some(api_key) = api_key.filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        if api_key
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        {
+            bail!("{RESEND_API_KEY_ENV} must not contain whitespace or control characters");
+        }
+        Ok(Some(Self {
+            api_key: api_key.to_owned(),
+        }))
+    }
+}
+
 impl EmailConfig {
     fn from_env() -> Result<Option<Self>> {
         let enabled = read_optional_env(ENABLED_ENV)?;
@@ -225,9 +308,7 @@ impl EmailConfig {
         let region = region
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("{REGION_ENV} is required when {FROM_ENV} is configured")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("{REGION_ENV} is required when {ENABLED_ENV}=true"))?;
         if !region
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
@@ -354,15 +435,28 @@ fn validate_ses_transport_boundary(
 
 fn ses_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        .connect_timeout(SES_CONNECT_TIMEOUT)
-        .read_timeout(SES_READ_TIMEOUT)
-        .timeout(SES_OPERATION_TIMEOUT)
+        .connect_timeout(EMAIL_CONNECT_TIMEOUT)
+        .read_timeout(EMAIL_READ_TIMEOUT)
+        .timeout(EMAIL_OPERATION_TIMEOUT)
         .https_only(true)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .build()
         .context("construct SES HTTP client")
+}
+
+fn resend_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(EMAIL_CONNECT_TIMEOUT)
+        .read_timeout(EMAIL_READ_TIMEOUT)
+        .timeout(EMAIL_OPERATION_TIMEOUT)
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()
+        .context("construct Resend HTTP client")
 }
 
 fn ses_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<Vec<u8>> {
@@ -387,6 +481,35 @@ fn ses_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<
         },
     }))
     .context("serialize SES email")
+}
+
+fn resend_email_payload(to: &str, subject: &str, html: &str) -> Result<Vec<u8>> {
+    serde_json::to_vec(&serde_json::json!({
+        "from": RESEND_FROM,
+        "to": [to],
+        "subject": subject,
+        "html": html,
+    }))
+    .context("serialize Resend email")
+}
+
+fn resend_email_request(
+    client: &reqwest::Client,
+    api_key: &str,
+    to: &str,
+    subject: &str,
+    html: &str,
+) -> Result<reqwest::Request> {
+    let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
+        .context("encode Resend authorization header")?;
+    authorization.set_sensitive(true);
+    client
+        .post(RESEND_EMAIL_ENDPOINT)
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, authorization)
+        .body(resend_email_payload(to, subject, html)?)
+        .build()
+        .context("build Resend email request")
 }
 
 fn signed_ses_request(
@@ -458,6 +581,14 @@ fn ensure_ses_success(status: reqwest::StatusCode) -> Result<()> {
     }
 }
 
+fn ensure_resend_success(status: reqwest::StatusCode) -> Result<()> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        bail!("Resend email request failed with HTTP {}", status.as_u16())
+    }
+}
+
 fn validate_mailbox(value: &str, label: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 320
@@ -466,13 +597,13 @@ fn validate_mailbox(value: &str, label: &str) -> Result<()> {
             .any(|character| character.is_control() || character.is_whitespace())
         || value.contains(['<', '>', ',', ';'])
     {
-        bail!("SES {label} must be one plain email address");
+        bail!("email {label} must be one plain email address");
     }
     let Some((local, domain)) = value.split_once('@') else {
-        bail!("SES {label} must be one plain email address");
+        bail!("email {label} must be one plain email address");
     };
     if local.is_empty() || domain.is_empty() || domain.contains('@') || !domain.contains('.') {
-        bail!("SES {label} must be one plain email address");
+        bail!("email {label} must be one plain email address");
     }
     Ok(())
 }
@@ -482,7 +613,7 @@ fn validate_subject(subject: &str) -> Result<()> {
         || subject.len() > 998
         || subject.chars().any(|character| character.is_control())
     {
-        bail!("SES email subject is invalid");
+        bail!("email subject is invalid");
     }
     Ok(())
 }
@@ -492,10 +623,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn absent_marker_disables_delivery_even_with_public_sender_configuration() {
+    fn inactive_ses_marker_leaves_the_legacy_provider_available() {
         assert_eq!(
             EmailConfig::parse(None, Some("hello@codewire.sh"), Some("eu-west-1")).unwrap(),
             None
+        );
+        assert!(
+            ResendCredentials::parse(Some("re_legacy_credential"))
+                .unwrap()
+                .is_some()
         );
     }
 
@@ -552,11 +688,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_delivery_requires_a_well_formed_resend_credential() {
+        assert!(ResendCredentials::parse(None).unwrap().is_none());
+        assert!(ResendCredentials::parse(Some("")).unwrap().is_none());
+        assert!(
+            ResendCredentials::parse(Some("re_good_credential"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(ResendCredentials::parse(Some("re credential")).is_err());
+        assert!(ResendCredentials::parse(Some("re_credential\n")).is_err());
+    }
+
+    #[test]
     fn transactional_delivery_uses_one_bounded_http_attempt() {
         assert!(ses_http_client().is_ok());
-        assert_eq!(SES_CONNECT_TIMEOUT, Duration::from_secs(2));
-        assert_eq!(SES_READ_TIMEOUT, Duration::from_secs(4));
-        assert_eq!(SES_OPERATION_TIMEOUT, Duration::from_secs(8));
+        assert!(resend_http_client().is_ok());
+        assert_eq!(EMAIL_CONNECT_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(EMAIL_READ_TIMEOUT, Duration::from_secs(4));
+        assert_eq!(EMAIL_OPERATION_TIMEOUT, Duration::from_secs(8));
     }
 
     #[test]
@@ -616,10 +766,45 @@ mod tests {
     }
 
     #[test]
+    fn legacy_resend_request_preserves_the_reviewed_sender_and_secret_boundary() {
+        let client = resend_http_client().unwrap();
+        let request = resend_email_request(
+            &client,
+            "re_test_credential",
+            "owner@example.com",
+            "Review your Codewire request",
+            "<p>review</p>",
+        )
+        .unwrap();
+
+        assert_eq!(request.url().as_str(), RESEND_EMAIL_ENDPOINT);
+        assert_eq!(request.headers()[CONTENT_TYPE], "application/json");
+        let authorization = request.headers().get(AUTHORIZATION).unwrap();
+        assert!(authorization.is_sensitive());
+        assert_eq!(authorization, "Bearer re_test_credential");
+        let body = request.body().unwrap().as_bytes().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(value["from"], RESEND_FROM);
+        assert_eq!(value["to"], serde_json::json!(["owner@example.com"]));
+        assert_eq!(value["subject"], "Review your Codewire request");
+        assert_eq!(value["html"], "<p>review</p>");
+    }
+
+    #[test]
     fn ses_response_status_must_indicate_delivery_success() {
         assert!(ensure_ses_success(reqwest::StatusCode::OK).is_ok());
         let error = ensure_ses_success(reqwest::StatusCode::FORBIDDEN).unwrap_err();
         assert_eq!(error.to_string(), "SES email request failed with HTTP 403");
+    }
+
+    #[test]
+    fn legacy_resend_response_status_must_indicate_delivery_success() {
+        assert!(ensure_resend_success(reqwest::StatusCode::ACCEPTED).is_ok());
+        let error = ensure_resend_success(reqwest::StatusCode::TOO_MANY_REQUESTS).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Resend email request failed with HTTP 429"
+        );
     }
 
     #[test]
@@ -697,11 +882,15 @@ mod tests {
     #[test]
     fn disabled_client_reports_that_delivery_is_unavailable() {
         let client = EmailClient::disabled();
+        assert_eq!(client.provider(), EmailProvider::Disabled);
         assert!(!client.is_configured());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let error = runtime
             .block_on(client.send_html("owner@example.com", "Subject", "<p>body</p>"))
             .unwrap_err();
-        assert_eq!(error.to_string(), "SES email delivery is not configured");
+        assert_eq!(
+            error.to_string(),
+            "transactional email delivery is not configured"
+        );
     }
 }

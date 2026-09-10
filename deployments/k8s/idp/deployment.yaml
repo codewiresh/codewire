@@ -56,25 +56,27 @@ spec:
             - name: AWS_IGNORE_CONFIGURED_ENDPOINT_URLS
               value: "true"
             # The IdP receives only its own SES key pair plus the activation
-            # marker. It never imports the whole Secret or billing's sender.
+            # marker. These fields stay optional while the reviewed Resend
+            # rollback path remains installed; if the marker is present, the
+            # client requires the complete SES projection and never falls back.
             - name: CODEWIRE_SES_ENABLED
               valueFrom:
                 secretKeyRef:
                   name: codewire-idp-ses
                   key: CODEWIRE_SES_ENABLED
-                  optional: false
+                  optional: true
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: codewire-idp-ses
                   key: AWS_ACCESS_KEY_ID
-                  optional: false
+                  optional: true
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: codewire-idp-ses
                   key: AWS_SECRET_ACCESS_KEY
-                  optional: false
+                  optional: true
             - name: IDP_PORT
               value: "8091"
             - name: IDP_SIGNING_KEK_DIR

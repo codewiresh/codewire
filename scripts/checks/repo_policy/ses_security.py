@@ -3,7 +3,7 @@ from .kubernetes import documents, resource_name, top_level_field
 
 
 def check_ses_sender_isolation(_: argparse.Namespace) -> int:
-    """Keep each transactional sender on its own narrow SES projection."""
+    """Keep SES activation narrow while preserving the staged rollback path."""
 
     ses_env = ["CODEWIRE_SES_ENABLED", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
     hardening_env = {
@@ -83,12 +83,22 @@ def check_ses_sender_isolation(_: argparse.Namespace) -> int:
                 rf"            secretKeyRef:\s*\n"
                 rf"              key: {re.escape(name)}\s*\n"
                 rf"              name: {re.escape(expected_secret)}\s*\n"
-                rf"              optional: false\s*$"
+                rf"              optional: true\s*$"
             )
             if not re.search(expected, entry, re.MULTILINE):
                 fail(
-                    f"{label}: {workload} must require {name} from only {expected_secret}"
+                    f"{label}: {workload} must optionally project {name} from only {expected_secret}"
                 )
+
+    def assert_legacy_resend_projection(document: str, label: str, workload: str) -> None:
+        if not re.search(
+            r"^        - secretRef:\s*\n            name: codewire-secrets\s*$",
+            document,
+            re.MULTILINE,
+        ):
+            fail(
+                f"{label}: {workload} must retain the shared codewire-secrets rollback projection"
+            )
 
     try:
         for path, active in overlays:
@@ -118,6 +128,8 @@ def check_ses_sender_isolation(_: argparse.Namespace) -> int:
                     "codewire-billing-ses",
                     "codewire-idp-ses",
                 )
+                assert_legacy_resend_projection(idp, label, "codewire-idp")
+                assert_legacy_resend_projection(billing, label, "codewire-billing")
                 for resource in resources:
                     if top_level_field(resource, "kind") != "ConfigMap":
                         continue
