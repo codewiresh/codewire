@@ -27,11 +27,16 @@ impl EnvironmentClient {
         })
     }
 
-    pub async fn list_environments(&self, org_id: &str) -> anyhow::Result<Vec<Environment>> {
+    pub async fn list_environments(
+        &self,
+        org_id: &str,
+        include_destroyed: bool,
+    ) -> anyhow::Result<Vec<Environment>> {
         let response = self
             .inner
             .list_environments(rpc::ListEnvironmentsRequest {
                 org_id: org_id.to_string(),
+                include_destroyed,
                 ..Default::default()
             })
             .await
@@ -1476,6 +1481,7 @@ mod tests {
     use super::*;
 
     const SOURCE_UPDATE_PATH: &str = "/codewire.v1.EnvironmentService/UpdateEnvironmentSources";
+    const LIST_ENVIRONMENTS_PATH: &str = "/codewire.v1.EnvironmentService/ListEnvironments";
 
     fn test_client(server: &MockServer) -> EnvironmentClient {
         EnvironmentClient {
@@ -1499,6 +1505,35 @@ mod tests {
                 profile: "platform:id:22222222-2222-4222-8222-222222222222".into(),
             }),
             profile_revision: Some(9_007_199_254_740_993),
+        }
+    }
+
+    #[tokio::test]
+    async fn environment_list_sends_the_exact_destroyed_selection() {
+        for include_destroyed in [false, true] {
+            let server = MockServer::start().await;
+            let request = rpc::ListEnvironmentsRequest {
+                org_id: "org_test".into(),
+                include_destroyed,
+                ..Default::default()
+            };
+            Mock::given(method("POST"))
+                .and(path(LIST_ENVIRONMENTS_PATH))
+                .and(body_bytes(request.encode_to_vec()))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/proto")
+                        .set_body_bytes(rpc::ListEnvironmentsResponse::default().encode_to_vec()),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let environments = test_client(&server)
+                .list_environments("org_test", include_destroyed)
+                .await
+                .unwrap();
+            assert!(environments.is_empty());
         }
     }
 

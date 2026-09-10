@@ -84,7 +84,7 @@ pub(crate) async fn resolve_named_execution_target(
     let orgs = organization_client.list_orgs().await.context("list orgs")?;
     let org_id = current_org_id(&platform, &orgs)?;
     let environments = environment_client
-        .list_environments(&org_id)
+        .list_environments(&org_id, false)
         .await
         .context("list environments")?;
     let platform_match = find_environment_match(&environments, target_ref)?;
@@ -185,7 +185,7 @@ pub(crate) async fn resolve_environment_id(
     }
 
     let environments = client
-        .list_environments(org_id)
+        .list_environments(org_id, false)
         .await
         .context("list environments")?;
     resolve_environment_id_from_list(&environments, target_ref)

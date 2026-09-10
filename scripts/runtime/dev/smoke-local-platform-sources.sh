@@ -38,7 +38,7 @@ Required environment:
   CODEWIRE_SERVER_URL=https://codewire-dev.sh
   EXPECTED_CODEWIRE_DEV_SERVER_URL=https://codewire-dev.sh
   EXPECTED_CODEWIRE_ADMIN_EMAIL    Exact authenticated account email
-  EXPECTED_CODEWIRE_ORGANIZATION_ID Exact selected organization UUID
+  EXPECTED_CODEWIRE_ORGANIZATION_ID Exact selected organization ID (32 lowercase hex)
   LOCAL_PLATFORM_ARTIFACT_ROOT     Absolute prepared native artifact directory
   LOCAL_PLATFORM_ARTIFACT_LOCK     Absolute matching native artifact lock
   LOCAL_PLATFORM_IMAGE             Published workspace registry@sha256:digest
@@ -74,8 +74,8 @@ validate_local_platform_options() {
   [[ -z "$SMOKE_EXISTING_ENV_ID" && "$SMOKE_KEEP_ENV" == 0 &&
      ${#SMOKE_ONLY_PHASES[@]} == 0 && "$SMOKE_SKIP_KUBE" == 0 ]] ||
     die 'local/platform smoke owns one fresh local environment; existing/keep/only/skip flags are unsupported'
-  [[ "$EXPECTED_CODEWIRE_ORGANIZATION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ &&
-     "$EXPECTED_CODEWIRE_ORGANIZATION_ID" != 00000000-0000-0000-0000-000000000000 ]] ||
+  [[ "$EXPECTED_CODEWIRE_ORGANIZATION_ID" =~ ^[0-9a-f]{32}$ &&
+     "$EXPECTED_CODEWIRE_ORGANIZATION_ID" != 00000000000000000000000000000000 ]] ||
     die 'an exact expected Dev organization ID is required'
   [[ "$LOCAL_PLATFORM_IMAGE" =~ ^[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] ||
     die 'LOCAL_PLATFORM_IMAGE must be the exact published workspace digest'
