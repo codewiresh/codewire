@@ -41,6 +41,15 @@ spec:
               value: http://codewire-billing:8081
             - name: CODEWIRE_BROWSER_API_ORIGIN
               value: https://codewire.sh
+            # The public widget key comes from the dedicated generated
+            # ConfigMap. Its optional empty state leaves access requests
+            # fail-closed until the separate rollout supplies both key and secret.
+            - name: TURNSTILE_SITE_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-dashboard-public-config
+                  key: TURNSTILE_SITE_KEY
+                  optional: true
           ports:
             - containerPort: 5173
               name: http

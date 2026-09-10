@@ -539,11 +539,25 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use std::process::Command;
+        use std::io::Read as _;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::{Child, Command, Stdio};
 
         use rusqlite::params;
 
         use super::*;
+
+        struct ChildGuard(Child);
+
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                // The unreaped Child owns this process birth even if an
+                // assertion fails before the pidfd is admitted.
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
 
         struct Fixture {
             _parent: tempfile::TempDir,
@@ -710,8 +724,40 @@ mod linux {
 
         #[test]
         fn kills_only_the_persisted_process_birth() {
-            let mut child = Command::new("/usr/bin/sleep").arg("30").spawn().unwrap();
-            let identity = ProcessIdentity::capture(child.id()).unwrap();
+            const CHILD_MARKER: &str = "CODEWIRE_STATE_PROBE_TEST_CHILD";
+            if std::env::var_os(CHILD_MARKER).is_some() {
+                // stdin is a private bidirectional socket, not the owner's
+                // terminal. Acknowledge only after entering this exact test;
+                // remain alive until the parent kills us or closes its end.
+                let input = std::io::stdin();
+                assert_eq!(rustix::io::write(&input, b"R").unwrap(), 1);
+                assert_eq!(rustix::io::read(&input, &mut [0_u8; 1]).unwrap(), 0);
+                return;
+            }
+            let executable = std::env::current_exe().unwrap();
+            let (mut readiness, child_socket) = UnixStream::pair().unwrap();
+            readiness
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            let mut child = ChildGuard(
+                Command::new(&executable)
+                    .args([
+                        "--exact",
+                        "linux::tests::kills_only_the_persisted_process_birth",
+                    ])
+                    .env_clear()
+                    .env(CHILD_MARKER, "1")
+                    .stdin(Stdio::from(std::os::fd::OwnedFd::from(child_socket)))
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let mut ready = [0_u8; 1];
+            readiness.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, *b"R");
+            let admitted = LiveProcess::capture_child(child.0.id(), &executable).unwrap();
+            let identity = admitted.identity().clone();
             let fixture = Fixture::new(identity.clone());
             let mut wrong = identity.clone();
             wrong.start_time_ticks += 1;
@@ -723,8 +769,12 @@ mod linux {
                 )
                 .unwrap();
             let runner = fixture.database().runner("native-smoke").unwrap();
-            assert!(LiveProcess::recover(&runner.process).is_err());
-            assert!(child.try_wait().unwrap().is_none());
+            assert!(matches!(
+                LiveProcess::recover(&runner.process),
+                Err(codewire_local_vmm::RecoveryError::IdentityMismatch)
+            ));
+            assert!(child.0.try_wait().unwrap().is_none());
+            assert!(!admitted.is_exited().unwrap());
 
             fixture
                 .writer
@@ -738,7 +788,7 @@ mod linux {
             drop(database);
             let process = LiveProcess::recover(&runner.process).unwrap();
             process.signal(Signal::KILL).unwrap();
-            assert!(!child.wait().unwrap().success());
+            assert_eq!(child.0.wait().unwrap().signal(), Some(libc::SIGKILL));
         }
 
         #[test]

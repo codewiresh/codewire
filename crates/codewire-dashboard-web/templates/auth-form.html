@@ -14,6 +14,9 @@
     <link rel="stylesheet" href="/assets/codewire/cosmos-v1.css">
     <script src="/assets/codewire/cosmos-v1.js" defer></script>
     {% endif %}
+    {% if is_signup && !view.turnstile_site_key.is_empty() %}
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    {% endif %}
   </head>
   <body class="cw-body cw-auth-body{% if is_minimal %} cw-auth-body--minimal{% endif %}" data-route="auth">
     {% if is_minimal %}
@@ -92,6 +95,18 @@
             <div class="cw-field">
               <label class="cw-label" for="invite-code">Invite code <span class="cw-muted">(optional)</span></label>
               <input class="cw-input cw-input--mono" id="invite-code" name="invite_code" autocomplete="off">
+            </div>
+            {% endif %}
+            {% if view.show_reason %}
+            <div class="cw-field">
+              <label class="cw-label" for="reason">What would you like to build?</label>
+              <textarea class="cw-input" id="reason" name="reason" rows="4" maxlength="2000" required></textarea>
+              <p class="cw-help">This helps us review your request.</p>
+            </div>
+            {% endif %}
+            {% if is_signup && !view.turnstile_site_key.is_empty() %}
+            <div class="cw-field">
+              <div class="cf-turnstile" data-sitekey="{{ view.turnstile_site_key }}" data-action="signup"></div>
             </div>
             {% endif %}
             {% if view.show_totp_code %}

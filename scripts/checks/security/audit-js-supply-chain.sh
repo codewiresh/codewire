@@ -50,8 +50,14 @@ report_matches() {
   local label="$1"
   local pattern="$2"
   shift 2
+  local -a search_paths
+  if [[ "$#" -eq 0 ]]; then
+    search_paths=("${active_paths[@]}")
+  else
+    search_paths=("$@")
+  fi
   local out
-  if out="$(git grep -nE "$pattern" -- "${active_paths[@]}" "$@" 2>/dev/null)"; then
+  if out="$(git grep -nE "$pattern" -- "${search_paths[@]}" 2>/dev/null)"; then
     echo "supply-chain audit: $label" >&2
     echo "$out" >&2
     fail=1

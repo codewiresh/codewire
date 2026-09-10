@@ -47,6 +47,10 @@ pub(crate) struct AuthFormSubmission {
     #[serde(default)]
     pub(crate) invite_code: String,
     #[serde(default)]
+    pub(crate) reason: String,
+    #[serde(default, rename = "cf-turnstile-response")]
+    pub(crate) turnstile_response: String,
+    #[serde(default)]
     pub(crate) code: String,
     #[serde(default, rename = "authRequestID")]
     pub(crate) auth_request_id: String,
@@ -64,6 +68,8 @@ impl fmt::Debug for AuthFormSubmission {
             .field("confirm_password", &redacted(&self.confirm_password))
             .field("name", &redacted(&self.name))
             .field("invite_code", &redacted(&self.invite_code))
+            .field("reason", &redacted(&self.reason))
+            .field("turnstile_response", &redacted(&self.turnstile_response))
             .field("code", &redacted(&self.code))
             .field("auth_request_id", &redacted(&self.auth_request_id))
             .field("return_to", &redacted(&self.return_to))
@@ -86,10 +92,23 @@ pub(crate) struct AuthFormView {
     pub(crate) show_confirm_password: bool,
     pub(crate) show_name: bool,
     pub(crate) show_invite_code: bool,
+    pub(crate) show_reason: bool,
+    pub(crate) turnstile_site_key: String,
     pub(crate) show_totp_code: bool,
     pub(crate) forgot_password_link: bool,
     pub(crate) secondary_label: &'static str,
     pub(crate) secondary_url: String,
+}
+
+pub(crate) struct AccountAccessView {
+    pub(crate) id: String,
+    pub(crate) email: String,
+    pub(crate) name: String,
+    pub(crate) email_verified: bool,
+    pub(crate) enabled: bool,
+    pub(crate) reason: String,
+    pub(crate) has_reason: bool,
+    pub(crate) created_at: String,
 }
 
 impl fmt::Debug for AuthFormView {
@@ -1484,6 +1503,8 @@ mod secret_debug_tests {
             confirm_password: MARKER.into(),
             name: MARKER.into(),
             invite_code: MARKER.into(),
+            reason: MARKER.into(),
+            turnstile_response: MARKER.into(),
             code: MARKER.into(),
             auth_request_id: MARKER.into(),
             return_to: MARKER.into(),

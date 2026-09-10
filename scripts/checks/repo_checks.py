@@ -6,6 +6,8 @@ from __future__ import annotations
 from repo_policy.shared import ROOT, argparse
 from repo_policy.edge_routing import check_connect_edge_routing
 from repo_policy.idp_security import check_idp_signing_kek_isolation
+from repo_policy.ses_security import check_ses_sender_isolation
+from repo_policy.turnstile_security import check_turnstile_access_projection
 from repo_policy.licensing import check_license_map
 from repo_policy.mesh import check_mesh_surface_freeze
 from repo_policy.orchestration_security import check_orchestration_host_key_authz
@@ -51,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     idp_parser.add_argument("--context", default="kind-codewire")
     idp_parser.add_argument("--namespace", default="default")
     idp_parser.set_defaults(func=check_idp_signing_kek_isolation)
+    ses_parser = subparsers.add_parser("ses-email-isolation")
+    ses_parser.set_defaults(func=check_ses_sender_isolation)
+    turnstile_parser = subparsers.add_parser("turnstile-access-projection")
+    turnstile_parser.set_defaults(func=check_turnstile_access_projection)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -7,14 +7,14 @@ use crate::{
     admin_connect::AuditLogRow,
     response::{HTMX_REQUEST, login_redirect, safe_auth_continuation, two_factor_redirect},
     templates::{
-        AdminAuditTemplate, OrganizationFormTemplate, OrganizationListTemplate,
-        SetupTwoFactorTemplate, TwoFactorRecoveryTemplate,
+        AdminAccountsTemplate, AdminAuditTemplate, OrganizationFormTemplate,
+        OrganizationListTemplate, SetupTwoFactorTemplate, TwoFactorRecoveryTemplate,
     },
     transport::browser_headers,
     view::{
-        DashboardView, OrganizationFormView, OrganizationRow, SetupTwoFactorView,
-        TwoFactorRecoveryView, apply_organization_error, valid_organization_slug,
-        validate_organization_form,
+        AccountAccessView, DashboardView, OrganizationFormView, OrganizationRow,
+        SetupTwoFactorView, TwoFactorRecoveryView, apply_organization_error,
+        valid_organization_slug, validate_organization_form,
     },
 };
 
@@ -107,6 +107,58 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
     assert!(!body.contains("<script>"));
     assert!(!body.contains("<unsafe admin>"));
     assert!(!body.contains("</pre><script>"));
+    assert!(body.contains("&lt;script&gt;") || body.contains("&#60;script&#62;"));
+}
+
+#[test]
+fn admin_accounts_template_escapes_access_request_fields() {
+    let view = DashboardView {
+        user_name: "Admin".into(),
+        is_admin: true,
+        organizations: Vec::new(),
+        has_organizations: false,
+        show_checklist: false,
+        new_organization_url: "/organizations/new/".into(),
+        settings_url: "/settings/".into(),
+        global_context_query: String::new(),
+        has_selected_organization: false,
+        selected_organization_name: String::new(),
+        selected_organization_slug: String::new(),
+        selected_organization_url: String::new(),
+        sandboxes: Vec::new(),
+        recent_sandboxes: Vec::new(),
+        sandbox_rail_available: false,
+        sandbox_total: 0,
+        sandbox_running: 0,
+        sandbox_stopped: 0,
+        sandbox_attention: 0,
+        provisioned_cpu_millicores: 0,
+        provisioned_memory_mb: 0,
+        provisioned_disk_gb: 0,
+    };
+    let accounts = vec![AccountAccessView {
+        id: "user-safe".into(),
+        email: "<unsafe@example.test>".into(),
+        name: "<script>alert('name')</script>".into(),
+        email_verified: true,
+        enabled: false,
+        reason: "</td><script>alert('reason')</script>".into(),
+        has_reason: true,
+        created_at: "2026-09-08T12:00:00".into(),
+    }];
+    let body = AdminAccountsTemplate {
+        view: &view,
+        accounts: &accounts,
+        csrf_token: "csrf-safe",
+        message: "",
+        error: "",
+    }
+    .render()
+    .expect("render admin account access page");
+
+    assert!(!body.contains("<script>"));
+    assert!(!body.contains("<unsafe@example.test>"));
+    assert!(!body.contains("</td><script>"));
     assert!(body.contains("&lt;script&gt;") || body.contains("&#60;script&#62;"));
 }
 

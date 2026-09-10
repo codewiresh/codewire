@@ -14,6 +14,7 @@ members = [
     "crates/codewire-derp",
     "crates/codewire-egress-broker",
     "crates/codewire-egress-policy",
+    "crates/codewire-email",
     "crates/codewire-gateway",
     "crates/codewire-gateway-proto",
     "crates/codewire-idp",
@@ -74,6 +75,7 @@ codewire-daemon-bridge = { path = "crates/codewire-daemon-bridge" }
 codewire-derp = { path = "crates/codewire-derp" }
 codewire-egress-broker = { path = "crates/codewire-egress-broker" }
 codewire-egress-policy = { path = "crates/codewire-egress-policy" }
+codewire-email = { path = "crates/codewire-email" }
 codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-tailnet = { path = "crates/codewire-tailnet" }
 codewire-tls = { path = "crates/codewire-tls" }
@@ -93,6 +95,9 @@ codewire-workload-secrets = { path = "crates/codewire-workload-secrets" }
 av-credential-proxy = { git = "https://github.com/noeljackson/av.git", rev = "32ef60cbbe58dfb00a3ffda76f7b2e3b8900baaa", default-features = false }
 oci-spec = { version = "=0.10.0", default-features = false, features = ["image"] }
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "stream", "rustls-tls"] }
+aws-credential-types = { version = "=1.2.14", default-features = false }
+aws-sigv4 = { version = "=1.4.5", default-features = false, features = ["sign-http", "http1"] }
+aws-smithy-runtime-api = { version = "=1.12.3", default-features = false, features = ["client", "http-1x"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 hickory-resolver = { version = "=0.26.1", default-features = false, features = ["system-config", "tokio"] }
