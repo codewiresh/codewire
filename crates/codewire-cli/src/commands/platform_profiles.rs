@@ -6,7 +6,7 @@ use anyhow::Context as _;
 use codewire_access::{AccessProfileScope, CredentialAuthKind, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 
-use super::credentials::{
+use super::credential_input::{
     CredentialOperation, ParsedProfileSelector, parse_profile_selector, supported_profile_slot,
 };
 use super::*;
@@ -114,9 +114,12 @@ async fn handle_profile(
             eprintln!("Platform access profile deleted.");
             Ok(())
         }
-        CredentialProfileCommand::Revisions(_) => anyhow::bail!(
-            "platform history listing is not supported; use --profile=NAME get --revision REVISION"
-        ),
+        CredentialProfileCommand::Revisions(args) => {
+            let _ = args;
+            anyhow::bail!(
+                "platform history listing is not supported; use --profile=NAME get --revision REVISION"
+            )
+        }
     }
 }
 

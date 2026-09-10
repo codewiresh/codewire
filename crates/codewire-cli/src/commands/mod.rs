@@ -34,14 +34,12 @@ pub(crate) use credential_broker_confinement::run_local_credential_broker_confin
 mod credential_repository;
 #[cfg(target_os = "linux")]
 pub(crate) use credential_repository::*;
+mod credential_input;
 #[cfg(target_os = "linux")]
 mod credentials;
-#[cfg(target_os = "linux")]
 mod platform_credentials;
-#[cfg(target_os = "linux")]
 mod platform_profiles;
-#[cfg(target_os = "linux")]
-pub(crate) use credentials::*;
+pub(crate) use credential_input::*;
 
 #[derive(Debug, Args)]
 pub(crate) struct CompletionArgs {
@@ -351,7 +349,6 @@ pub(crate) struct LocalGitCredentialHelperArgs {
     pub(crate) operation: String,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialsArgs {
     #[arg(
@@ -376,7 +373,6 @@ pub(crate) struct CredentialsArgs {
     pub(crate) command: CredentialsCommand,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialsCommand {
     #[command(about = "Connect an explicitly selected provider identity")]
@@ -410,7 +406,6 @@ pub(crate) enum CredentialsCommand {
     },
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialConnectArgs {
     #[arg(value_enum, value_name = "PROVIDER")]
@@ -425,15 +420,13 @@ pub(crate) struct CredentialConnectArgs {
     pub(crate) yes: bool,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum CredentialConnectProviderArg {
-    #[value(help = credentials::CODEX_DEVICE_AUTHORIZATION_GUIDANCE)]
+    #[value(help = credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE)]
     Codex,
     Github,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialAddArgs {
     #[arg(value_name = "PROVIDER")]
@@ -452,7 +445,6 @@ pub(crate) struct CredentialAddArgs {
     pub(crate) key_file: Option<PathBuf>,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialGenerateArgs {
     #[arg(value_name = "PROVIDER", value_parser = ["ssh"])]
@@ -463,14 +455,12 @@ pub(crate) struct CredentialGenerateArgs {
     pub(crate) expires_at: Option<u64>,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialListArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialGetArgs {
     #[arg(
@@ -484,7 +474,6 @@ pub(crate) struct CredentialGetArgs {
     pub(crate) output: OutputFormat,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialSelectorArgs {
     #[arg(
@@ -496,7 +485,6 @@ pub(crate) struct CredentialSelectorArgs {
     pub(crate) output: OutputFormat,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialRenameArgs {
     #[arg(
@@ -508,7 +496,6 @@ pub(crate) struct CredentialRenameArgs {
     pub(crate) name: String,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialRotateArgs {
     #[arg(
@@ -524,7 +511,6 @@ pub(crate) struct CredentialRotateArgs {
     pub(crate) expires_at: Option<u64>,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialDeleteArgs {
     #[arg(
@@ -536,7 +522,6 @@ pub(crate) struct CredentialDeleteArgs {
     pub(crate) yes: bool,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(crate) enum CredentialProfileCommand {
     List(CredentialListArgs),
@@ -547,14 +532,12 @@ pub(crate) enum CredentialProfileCommand {
     Delete(CredentialProfileDeleteArgs),
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialProfilesCommand {
     #[command(about = "List credential profile metadata")]
     List(CredentialListArgs),
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(crate) struct CredentialProfileSelectorArgs {
     pub(crate) profile: String,
@@ -562,7 +545,6 @@ pub(crate) struct CredentialProfileSelectorArgs {
     pub(crate) output: OutputFormat,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialProfileSetArgs {
     #[arg(skip)]
@@ -576,7 +558,6 @@ pub(crate) struct CredentialProfileSetArgs {
     pub(crate) credential: String,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct CredentialProfileSlotArgs {
     #[arg(skip)]
@@ -585,7 +566,6 @@ pub(crate) struct CredentialProfileSlotArgs {
     pub(crate) slot: String,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(crate) struct CredentialProfileDeleteArgs {
     pub(crate) profile: String,
