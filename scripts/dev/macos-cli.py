@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A source-only, offline macOS CLI developer loop over SSH (not a CI runner)."""
+"""A source-only, offline macOS developer build loop over SSH (not CI)."""
 
 from __future__ import annotations
 
@@ -389,31 +389,59 @@ def worker(root, run):
                 shutil.copytree(seeded / "registry", cargo / "registry", dirs_exist_ok=True)
                 import_git_seeds(seeded, cargo, command)
 
-            for argv in (["rustc", "-Vv"], ["cargo", "-V"], ["protoc", "--version"],
-                         ["xcrun", "--show-sdk-version"]):
-                command(argv)
-            common = ["--locked", "--offline"]
-            native = [*common, "--target", "aarch64-apple-darwin"]
             action = request["action"]
-            if action in ("build", "verify"):
-                command(["cargo", "build", *native, "-p", "codewire-cli-bin", "--bin", "cw"])
-                binary = root / "target/aarch64-apple-darwin/debug/cw"
-                for args in SMOKE:
-                    command([str(binary), *args, "--help"])
-                shutil.copy2(binary, run / "artifacts/cw-aarch64-apple-darwin")
-            if action in ("test", "verify"):
-                command(["cargo", "test", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin"])
-            if action in ("clippy", "verify"):
-                command(["cargo", "clippy", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin",
-                         "--all-targets", "--", "-D", "warnings"])
-            if request["intel"]:
-                command(["cargo", "build", *common, "--target", "x86_64-apple-darwin",
-                         "-p", "codewire-cli-bin", "--bin", "cw"])
-                shutil.copy2(root / "target/x86_64-apple-darwin/debug/cw",
-                             run / "artifacts/cw-x86_64-apple-darwin")
+            component = request.get("component", "cli")
+            if component == "cli":
+                for argv in (["rustc", "-Vv"], ["cargo", "-V"], ["protoc", "--version"],
+                             ["xcrun", "--show-sdk-version"]):
+                    command(argv)
+                common = ["--locked", "--offline"]
+                native = [*common, "--target", "aarch64-apple-darwin"]
+                if action in ("build", "verify"):
+                    command(["cargo", "build", *native, "-p", "codewire-cli-bin", "--bin", "cw"])
+                    binary = root / "target/aarch64-apple-darwin/debug/cw"
+                    for args in SMOKE:
+                        command([str(binary), *args, "--help"])
+                    shutil.copy2(binary, run / "artifacts/cw-aarch64-apple-darwin")
+                if action in ("test", "verify"):
+                    command(["cargo", "test", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin"])
+                if action in ("clippy", "verify"):
+                    command(["cargo", "clippy", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin",
+                             "--all-targets", "--", "-D", "warnings"])
+                if request["intel"]:
+                    command(["cargo", "build", *common, "--target", "x86_64-apple-darwin",
+                             "-p", "codewire-cli-bin", "--bin", "cw"])
+                    shutil.copy2(root / "target/x86_64-apple-darwin/debug/cw",
+                                 run / "artifacts/cw-x86_64-apple-darwin")
+            elif component == "vz-runner":
+                if action == "clippy" or request["intel"]:
+                    raise RuntimeError("VZ runner accepts build, test, or verify on native arm64 only")
+                package = source / "crates/codewire-local-vmm/macos-vz-runner"
+                scratch = root / "target/swift-vz-runner"
+                command(["xcrun", "swift", "--version"])
+                command(["xcrun", "--show-sdk-version"])
+                command([str(package / "Tests/test_ipc_system.sh")])
+                command(["xcrun", "swift-format", "lint", "--strict", "--recursive", str(package)])
+                swift = ["--package-path", str(package), "--scratch-path", str(scratch),
+                         "-Xswiftc", "-warnings-as-errors", "-Xcc", "-Werror"]
+                if action in ("build", "verify"):
+                    command(["xcrun", "swift", "build", *swift])
+                    binary = scratch / "debug/codewire-vz-runner"
+                    shutil.copy2(binary, run / "artifacts/codewire-vz-runner-arm64")
+                if action in ("test", "verify"):
+                    swiftc = Path(output(["xcrun", "--find", "swiftc"])).resolve()
+                    testing_plugin = (swiftc.parent.parent /
+                                      "lib/swift/host/plugins/testing/libTestingMacros.dylib")
+                    if not testing_plugin.is_file():
+                        raise RuntimeError(
+                            "Swift Testing macro plugin is missing from the selected toolchain")
+                    command(["xcrun", "swift", "test", *swift, "-Xswiftc",
+                             "-load-plugin-library", "-Xswiftc", str(testing_plugin)])
+            else:
+                raise RuntimeError("unknown developer build component")
             for artifact in (run / "artifacts").iterdir():
                 command(["file", str(artifact)])
-                arch = "arm64" if "aarch64" in artifact.name else "x86_64"
+                arch = "x86_64" if "x86_64" in artifact.name else "arm64"
                 command(["lipo", str(artifact), "-verify_arch", arch])
                 result["artifacts"][artifact.name] = digest(artifact)
             result["status"] = "passed"
@@ -457,7 +485,7 @@ def recover(host, remote, destination):
 import pathlib, sys, tarfile
 run = pathlib.Path(sys.argv[1])
 paths = [run / 'request.json', run / 'result.json', *run.glob('command-*.log')]
-paths += [run / 'artifacts' / name for name in ('cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin')]
+paths += [run / 'artifacts' / name for name in ('cw-aarch64-apple-darwin', 'cw-x86_64-apple-darwin', 'codewire-vz-runner-arm64')]
 if not (run / 'request.json').is_file(): raise SystemExit('run not found')
 with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
     for path in paths:
@@ -489,10 +517,14 @@ def evidence_status(evidence, run_id):
     if not commands or any(item.get("exit_code") != 0 for item in commands):
         raise RuntimeError("passed result lacks successful command evidence")
     expected = set()
-    if request["action"] in ("build", "verify"):
-        expected.add("cw-aarch64-apple-darwin")
-    if request["intel"]:
-        expected.add("cw-x86_64-apple-darwin")
+    if request.get("component", "cli") == "vz-runner":
+        if request["action"] in ("build", "verify"):
+            expected.add("codewire-vz-runner-arm64")
+    else:
+        if request["action"] in ("build", "verify"):
+            expected.add("cw-aarch64-apple-darwin")
+        if request["intel"]:
+            expected.add("cw-x86_64-apple-darwin")
     if set(result.get("artifacts", {})) != expected:
         raise RuntimeError("passed result lacks expected artifacts")
     for name, checksum in result["artifacts"].items():
@@ -507,6 +539,7 @@ def main():
         return worker(Path(sys.argv[2]), Path(sys.argv[3]))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="user@mac.example.invalid")
+    parser.add_argument("--component", choices=["cli", "vz-runner"], default="cli")
     parser.add_argument("--action", choices=["build", "test", "clippy", "verify"], default="build")
     parser.add_argument("--intel", action="store_true", help="also compile/link x86_64; never execute it")
     parser.add_argument("--seed-cargo", action="store_true", help="seed locked public source dependencies")
@@ -517,6 +550,8 @@ def main():
         parser.error("invalid SSH destination")
     if not 1 <= args.timeout <= 14400:
         parser.error("timeout must be between 1 and 14400 seconds")
+    if args.component == "vz-runner" and (args.action == "clippy" or args.intel or args.seed_cargo):
+        parser.error("VZ runner accepts build, test, or verify without --intel/--seed-cargo")
     repo = Path(output(["git", "rev-parse", "--show-toplevel"])).resolve()
     key = hashlib.sha256(str(repo).encode()).hexdigest()[:16]
     run_id = args.recover or uuid.uuid4().hex
@@ -532,7 +567,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="cw-macos-upload-") as temporary:
         stage = Path(temporary)
         request = source_archive(repo, stage / "source.tar.gz")
-        request.update({"run_id": run_id, "action": args.action, "intel": args.intel,
+        request.update({"run_id": run_id, "component": args.component,
+                        "action": args.action, "intel": args.intel,
                         "timeout": args.timeout, "host_requested": args.host})
         # Read the frozen lock bytes, not a concurrently edited working-tree file.
         with tarfile.open(stage / "source.tar.gz") as archive:

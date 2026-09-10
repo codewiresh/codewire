@@ -562,6 +562,8 @@ run_derp_contract() {
 run_transport() {
   run_rust_packages transport_pkg_
   if selected transport_pkg_codewire_local_vmm; then
+    crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh
+    python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
     cargo check --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
       --target aarch64-apple-darwin
   fi

@@ -414,6 +414,9 @@ run_paths_case curated_gateway_member_manifest pull_request refs/pull/501/head f
 run_paths_case local_vmm_host_source pull_request refs/pull/5011/head false \
   'policy transport transport_pkg_codewire_local_vmm' \
   crates/codewire-local-vmm/src/lib.rs
+run_paths_case macos_vz_runner_source pull_request refs/pull/50111/head false \
+  'policy transport transport_pkg_codewire_local_vmm' \
+  crates/codewire-local-vmm/macos-vz-runner/Sources/CodewireVZRunnerRuntime/Runtime.swift
 run_paths_case local_vmm_guest_source pull_request refs/pull/5012/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-vmm-guest-probe/src/lib.rs

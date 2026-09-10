@@ -250,11 +250,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(result["commands"], [])
         self.assertEqual(result["artifacts"], {})
 
-    def worker_fixture(self):
+    def worker_fixture(self, component="cli", action="verify"):
         run = self.root / "run"
         run.mkdir()
         request = {"run_id": "fixture", "source_sha256": "source", "lock_sha256": "lock",
-                   "helper_sha256": "helper", "timeout": 10, "action": "verify", "intel": True}
+                   "component": component,
+                   "helper_sha256": "helper", "timeout": 10, "action": action, "intel": True}
+        if component == "vz-runner":
+            request["intel"] = False
         (run / "request.json").write_text(json.dumps(request))
         with tarfile.open(run / "source.tar.gz", "w:gz") as archive:
             helper.add_bytes(archive, "fixture", b"synthetic source")
@@ -304,6 +307,90 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(all("x86_64" not in argv[0] for argv in commands))
         self.assertEqual(helper.evidence_status(run, "fixture"), "passed")
         self.assertFalse(Path(result["isolated_state"]).exists())
+
+    def test_vz_runner_worker_plan_and_artifact_collection(self):
+        run = self.worker_fixture("vz-runner")
+        reader, writer = os.pipe()
+        stdin = os.fdopen(reader, "r")
+        swiftc = self.root / "toolchain/usr/bin/swiftc"
+        testing_plugin = self.root / "toolchain/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib"
+        swiftc.parent.mkdir(parents=True)
+        testing_plugin.parent.mkdir(parents=True)
+        swiftc.touch()
+        testing_plugin.touch()
+
+        def fixture_output(argv):
+            return str(swiftc) if argv == ["xcrun", "--find", "swiftc"] else "fixture macOS"
+
+        def fixture_command(argv, cwd, env, log, cancel, deadline):
+            log.write_text("fixture command, not actual macOS evidence")
+            if argv[:3] == ["xcrun", "swift", "build"]:
+                scratch = Path(argv[argv.index("--scratch-path") + 1])
+                binary = scratch / "debug/codewire-vz-runner"
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_bytes(b"synthetic Mach-O fixture")
+            return 0
+
+        try:
+            with mock.patch.object(sys, "stdin", stdin), mock.patch.object(signal, "signal"), \
+                 mock.patch.object(helper.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(helper.platform, "machine", return_value="arm64"), \
+                 mock.patch.object(helper, "output", side_effect=fixture_output), \
+                 mock.patch.object(helper, "run_command", side_effect=fixture_command):
+                self.assertEqual(helper.worker(self.root, run), 0)
+        finally:
+            os.close(writer)
+            stdin.close()
+        result = json.loads((run / "result.json").read_text())
+        commands = [item["argv"] for item in result["commands"]]
+        self.assertEqual(commands[0][:2], ["xcrun", "swift"])
+        self.assertEqual(commands[1][:2], ["xcrun", "--show-sdk-version"])
+        self.assertTrue(commands[2][0].endswith("/Tests/test_ipc_system.sh"))
+        self.assertEqual([argv[:2] for argv in commands[3:6]], [
+            ["xcrun", "swift-format"], ["xcrun", "swift"], ["xcrun", "swift"],
+        ])
+        for argv in commands[4:6]:
+            self.assertIn("-warnings-as-errors", argv)
+            self.assertIn("-Werror", argv)
+        self.assertNotIn("-load-plugin-library", commands[4])
+        self.assertIn("-load-plugin-library", commands[5])
+        self.assertTrue(commands[5][-1].endswith(
+            "/lib/swift/host/plugins/testing/libTestingMacros.dylib"))
+        self.assertNotIn("cargo", [argv[0] for argv in commands])
+        self.assertEqual(set(result["artifacts"]), {"codewire-vz-runner-arm64"})
+        self.assertEqual(helper.evidence_status(run, "fixture"), "passed")
+
+    def test_vz_runner_build_does_not_require_testing_plugin(self):
+        run = self.worker_fixture("vz-runner", "build")
+        reader, writer = os.pipe()
+        stdin = os.fdopen(reader, "r")
+
+        def fixture_output(argv):
+            self.assertNotEqual(argv, ["xcrun", "--find", "swiftc"])
+            return "fixture macOS"
+
+        def fixture_command(argv, cwd, env, log, cancel, deadline):
+            log.write_text("fixture command, not actual macOS evidence")
+            if argv[:3] == ["xcrun", "swift", "build"]:
+                scratch = Path(argv[argv.index("--scratch-path") + 1])
+                binary = scratch / "debug/codewire-vz-runner"
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_bytes(b"synthetic Mach-O fixture")
+            return 0
+
+        try:
+            with mock.patch.object(sys, "stdin", stdin), mock.patch.object(signal, "signal"), \
+                 mock.patch.object(helper.platform, "system", return_value="Darwin"), \
+                 mock.patch.object(helper.platform, "machine", return_value="arm64"), \
+                 mock.patch.object(helper, "output", side_effect=fixture_output), \
+                 mock.patch.object(helper, "run_command", side_effect=fixture_command):
+                self.assertEqual(helper.worker(self.root, run), 0)
+        finally:
+            os.close(writer)
+            stdin.close()
+        commands = [item["argv"] for item in json.loads((run / "result.json").read_text())["commands"]]
+        self.assertIn(["xcrun", "swift", "build"], [argv[:3] for argv in commands])
+        self.assertNotIn(["xcrun", "swift", "test"], [argv[:3] for argv in commands])
 
     def test_worker_stdin_eof_cancels_owned_command(self):
         run = self.worker_fixture()
