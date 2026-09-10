@@ -22,6 +22,9 @@ INPUTS = (
     "scripts/ci/images/workspace-cache.sh",
     "scripts/ci/images/run-rust-build.sh",
     "scripts/ci/setup/select-untrusted-workspace-cache.sh",
+    "scripts/ci/setup/select-workspace-cache-experiment.py",
+    "scripts/ci/setup/prepare-workspace-cache-measurement.sh",
+    "scripts/ci/verify/workspace-cache-report.py",
 )
 MAXIMUM_ARCHIVE_BYTES = 80 * 1024 * 1024 * 1024
 MAXIMUM_DOCUMENT_BYTES = 4 * 1024 * 1024

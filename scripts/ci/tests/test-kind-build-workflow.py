@@ -82,12 +82,17 @@ class WorkflowContractTests(unittest.TestCase):
                 job = self.jobs[job_name]
                 self.assertEqual(job["needs"], ["verification-selection"])
                 self.assertEqual(job["if"], PRODUCER_IF)
+                expected_outputs = {
+                    "artifact_name": "${{ steps.export.outputs.artifact_name }}",
+                    "manifest_sha256": "${{ steps.export.outputs.manifest_sha256 }}",
+                }
+                if job_name == "kind-workspace":
+                    expected_outputs["workspace_cache_seed"] = (
+                        "${{ steps.cache-seed-report.outputs.workspace_cache_seed }}"
+                    )
                 self.assertEqual(
                     job["outputs"],
-                    {
-                        "artifact_name": "${{ steps.export.outputs.artifact_name }}",
-                        "manifest_sha256": "${{ steps.export.outputs.manifest_sha256 }}",
-                    },
+                    expected_outputs,
                 )
                 checkouts = action_steps(job, CHECKOUT)
                 self.assertEqual(len(checkouts), 1)
@@ -436,6 +441,7 @@ class CommonConsumerContractTests(unittest.TestCase):
                 set -euo pipefail
                 export ROOT="$FIXTURE_ROOT"
                 export RUN_DIR="$FIXTURE_ROOT/run"
+                export KIND_CLUSTER_NAME=codewire-e2e-ci
                 export KIND_WORKSPACE_IMAGE=sealed-workspace:fixture
                 export KIND_INGRESS_CONTROLLER_IMAGE=''
                 export KIND_INGRESS_CERTGEN_IMAGE=''

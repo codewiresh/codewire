@@ -25,3 +25,6 @@ packages/*/node_modules
 go-server/tmp
 go-server/.tmp
 **/.tmp
+**/__pycache__
+**/*.pyc
+**/*.pyo

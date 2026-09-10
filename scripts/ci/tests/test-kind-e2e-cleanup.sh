@@ -14,6 +14,8 @@ KIND_CONFIG="$FIXTURE/kind-config.yaml"
 KIND_GET_FAILURE=0
 KIND_DELETE_FAILURE=''
 DOCKER_PS_FAILURE=0
+# The fixture owns this transaction name even when hosted CI exports its own.
+export KIND_CLUSTER_NAME=codewire-e2e-ci
 
 cleanup_fixture() {
   rm -rf "$FIXTURE"
@@ -98,8 +100,9 @@ nodes:
         hostPort: 10443
 EOF
 
-# A prior cancelled run and a same-run retry are both stale on this runner.
-# An unrelated cluster remains untouched. Repeating startup is deterministic.
+# Prior cancelled runs and the current transaction name are stale on this
+# runner. Unrelated and misleading prefix names remain untouched. Repeating
+# startup is deterministic.
 reset_fixture
 cat > "$CLUSTERS" <<'EOF'
 codewire-e2e-ci-8683
@@ -111,12 +114,12 @@ EOF
 reclaim_cancelled_ci_clusters "$KIND_CONFIG"
 cat > "$FIXTURE/want-clusters" <<'EOF'
 personal-kind
-codewire-e2e-ci
 codewire-e2e-ciary-1
 EOF
 cmp -s "$FIXTURE/want-clusters" "$CLUSTERS" || fail 'unrelated Kind cluster was changed'
 cat > "$FIXTURE/want-deletions" <<'EOF'
 codewire-e2e-ci-8683
+codewire-e2e-ci
 codewire-e2e-ci-8770
 EOF
 cmp -s "$FIXTURE/want-deletions" "$DELETIONS" || fail 'CI-owned clusters were not reclaimed exactly'

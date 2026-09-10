@@ -319,9 +319,16 @@ run_paths_case sccache_host_selector_fixture pull_request refs/pull/1752/head fa
 run_paths_case workspace_cache_consumers pull_request refs/pull/2047/head false \
   'policy security' \
   scripts/ci/setup/select-untrusted-workspace-cache.sh \
+  scripts/ci/setup/prepare-workspace-cache-measurement.sh \
+  scripts/ci/setup/select-workspace-cache-experiment.py \
   scripts/ci/images/workspace-cache.sh \
   scripts/ci/tests/test-select-untrusted-workspace-cache.sh \
   scripts/ci/tests/test-workspace-cache.sh \
+  scripts/ci/tests/test-workspace-cache-experiment.py \
+  scripts/ci/verify/workspace-cache-report.py \
+  scripts/ci/tests/probe-workspace-r2-cache.sh \
+  scripts/ci/tests/test-workspace-cache-probes.py \
+  scripts/ci/verify/workspace-cache-probes.py \
   scripts/ci/tests/canary-workspace-r2-cache.sh
 run_present_paths_case workspace_cache_experiment_consumers pull_request refs/pull/2047/head false \
   'policy policy_shell security' \
@@ -1762,8 +1769,8 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 12 ]] || {
-  echo 'Codewire CI requires nine ordinary heavy groups and three parallel Kind producers' >&2
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 14 ]] || {
+  echo 'Codewire CI requires nine ordinary heavy groups, three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
@@ -1778,6 +1785,7 @@ for output in selector_version classification selection required_local_mode \
     ci_head_commit ci_head_tree \
     cw_package_state cw_package_selected desktop_package_state \
     desktop_package_selected workspace_image_state workspace_image_selected \
+    workspace_cache_experiment workspace_cache_measurement_matrix \
     tested_tree_receipt tested_tree_reason \
     tested_tree_pr tested_tree_head tested_tree_run; do
   grep -qF "      ${output}:" "$selection_block" || {
@@ -1848,8 +1856,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 15 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eight groups, three Kind producers and aggregate" >&2
+if [ "$top_level_jobs" != 17 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eight groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \

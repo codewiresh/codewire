@@ -137,6 +137,8 @@ cache_jobs=(
   kind-workspace
   kind-product
   kind-smokes
+  workspace-cache-measurement
+  workspace-cache-probes
 )
 [[ "$(grep -Fc '    enable-openid-connect: true' "$WORKFLOW")" -eq "${#cache_jobs[@]}" ]] ||
   fail 'CI OIDC is not confined to the declared cache-consuming jobs'
@@ -149,7 +151,8 @@ for job in "${cache_jobs[@]}"; do
   grep -Fq '    enable-openid-connect: true' <<<"$job_block" ||
     fail "$job cannot request its untrusted cache identity"
   cache_selector=select-untrusted-rust-cache.sh
-  if [[ "$job" == workspace-image || "$job" == kind-workspace ]]; then
+  if [[ "$job" == workspace-image || "$job" == kind-workspace \
+      || "$job" == workspace-cache-measurement || "$job" == workspace-cache-probes ]]; then
     cache_selector=select-untrusted-workspace-cache.sh
   fi
   grep -Fq "scripts/ci/setup/$cache_selector \"\$RUNNER_TEMP/codewire-sccache-r2.aws\"" \

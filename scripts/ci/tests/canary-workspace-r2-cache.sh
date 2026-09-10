@@ -11,6 +11,7 @@ if [[ "${CODEWIRE_R2_CANARY_BOUNDED_CHILD:-}" != 1 ]]; then
 fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source "$ROOT/scripts/ci/images/workspace-cache.sh"
+unset CODEWIRE_WORKSPACE_CACHE_CASE CODEWIRE_WORKSPACE_CACHE_REPORT_DIR CODEWIRE_WORKSPACE_CACHE_SEED_ID
 export CODEWIRE_SCCACHE_CREDENTIALS_FILE="$1"
 export CODEWIRE_SCCACHE_MODE=disabled CODEWIRE_BUILDKIT_CACHE_MODE=r2
 export SCCACHE_BUCKET="$WORKSPACE_CACHE_BUCKET" SCCACHE_ENDPOINT="$WORKSPACE_CACHE_ENDPOINT"
@@ -82,8 +83,22 @@ if awk '/COPY payload \/payload/ { vertex=$1 } $1 == vertex && $2 == "CACHED" { 
     "$report/cold.log"; then
   echo 'unique cold payload unexpectedly reused a COPY layer' >&2; exit 1
 fi
-awk '/COPY payload \/payload/ { vertex=$1 } $1 == vertex && $2 == "CACHED" { hit=1 } END { exit !hit }' \
-  "$report/warm.log" || { echo 'second daemon did not reuse the exported COPY layer' >&2; exit 1; }
+# BuildKit can report an imported lazy layer in either of two ways. Older
+# progress output marks the exact vertex CACHED. Current BuildKit materializes a
+# local output by printing the first daemon's exported layer digest beneath the
+# exact COPY vertex. Bind that digest across the two logs so an unrelated cache
+# line cannot satisfy the canary.
+awk '
+  FNR == NR {
+    if ($2 == "writing" && $3 == "layer" && $4 ~ /^sha256:[0-9a-f]{64}$/) exported[$4] = 1
+    next
+  }
+  /COPY payload \/payload/ { vertex=$1 }
+  $1 == vertex && ($2 == "CACHED" || $2 in exported) { hit=1 }
+  END { exit !hit }
+' "$report/cold.log" "$report/warm.log" || {
+  echo 'second daemon did not reuse the exported COPY layer' >&2; exit 1
+}
 printf 'R2 compatibility passed: pinned BuildKit, distinct daemons, exact 8 MiB payload, remote layer hit, cleanup\n' \
   >"$report/result.txt"
 cat "$report/result.txt"
