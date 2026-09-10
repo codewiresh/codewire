@@ -499,8 +499,8 @@ acquire_kind_host_lock
 grep -Eq '^flock:-w 37 [0-9]+$' "$CALLS" ||
   fail 'Kind host lock is not acquired with the configured bound'
 
-# Cancelled-run cleanup owns run-ID-suffixed CI clusters, but it must preserve
-# the unsuffixed local default and every unrelated local Kind cluster.
+# Cancelled-run cleanup owns the current transaction and run-ID-suffixed CI
+# clusters, but it must preserve every unrelated local Kind cluster.
 : >"$CALLS"
 cat >"$FIXTURE/kind-config.yaml" <<'EOF'
 hostPort: 8090
@@ -524,11 +524,12 @@ docker() {
 log() { :; }
 reclaim_cancelled_ci_clusters "$FIXTURE/kind-config.yaml"
 cat >"$FIXTURE/want-cancelled-cleanup" <<'EOF'
+kind:delete codewire-e2e-ci
 kind:delete codewire-e2e-ci-873
 EOF
 cmp -s "$FIXTURE/want-cancelled-cleanup" "$CALLS" || {
   diff -u "$FIXTURE/want-cancelled-cleanup" "$CALLS" >&2 || true
-  fail 'cancelled-run cleanup did not preserve the exact CI ownership boundary'
+  fail 'cancelled-run cleanup did not preserve the exact current/prefixed CI ownership boundary'
 }
 
 # Support services are pulled before cluster creation by immutable digest and
