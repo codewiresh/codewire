@@ -8,6 +8,8 @@
     "test": "playwright test --config playwright.config.ts",
     "test:headed": "playwright test --config playwright.config.ts --headed",
     "test:ui": "playwright test --config playwright.config.ts --ui",
+    "test:fixtures": "bun test e2e/helpers/*.test.ts",
+    "test:fixtures:database": "bun build e2e/helpers/synthetic-users.database.test.ts --target=node --packages=external --outfile=.tmp/synthetic-users.database.test.mjs && node --test .tmp/synthetic-users.database.test.mjs",
     "typecheck": "../../node_modules/.bin/tsc --project tsconfig.json"
   },
   "devDependencies": {

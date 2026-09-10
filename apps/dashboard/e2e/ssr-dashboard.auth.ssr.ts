@@ -5,7 +5,8 @@ import {
   bindSyntheticPasswordResetToken,
   cleanupUser,
   clearRateLimits,
-  verifyUserEmail,
+  getUserId,
+  seedSyntheticUser,
 } from "./helpers/db";
 import { fillField } from "./helpers/auth-flow";
 import { TEST_PASSWORD } from "./helpers/seed";
@@ -15,6 +16,7 @@ const runId = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 const authEmail = `e2e-ssr-auth-${runId}@codewire.sh`;
 const enrollmentEmail = `e2e-ssr-enrollment-${runId}@codewire.sh`;
 const resetEmail = `e2e-ssr-reset-${runId}@codewire.sh`;
+const signupSafetyEmail = `e2e-ssr-signup-${runId}@codewire.sh`;
 const replacementPassword = "ReplacementPass8!";
 
 let totpSecret = "";
@@ -136,6 +138,7 @@ test.describe.serial("server-rendered identity flows", () => {
     await cleanupUser(authEmail);
     await cleanupUser(enrollmentEmail);
     await cleanupUser(resetEmail);
+    await cleanupUser(signupSafetyEmail);
     await clearRateLimits();
   });
 
@@ -143,6 +146,7 @@ test.describe.serial("server-rendered identity flows", () => {
     await cleanupUser(authEmail);
     await cleanupUser(enrollmentEmail);
     await cleanupUser(resetEmail);
+    await cleanupUser(signupSafetyEmail);
   });
 
   test.beforeEach(async () => {
@@ -190,19 +194,29 @@ test.describe.serial("server-rendered identity flows", () => {
     ]));
   });
 
+  test("fails closed when public signup has no human-verification authority", async ({ request, isMobile }) => {
+    test.skip(!!isMobile, "desktop identity provider contract");
+
+    const response = await request.post(`${serverUrl}/api/auth/sign-up`, {
+      data: {
+        email: signupSafetyEmail,
+        password: TEST_PASSWORD,
+        name: "SSR Signup Safety Probe",
+        invite_code: "BETA-001",
+        reason: "Verify the deployed signup safety boundary",
+      },
+    });
+    expect(response.status()).toBe(503);
+    expect(await response.text()).toContain(
+      "Human verification is temporarily unavailable",
+    );
+    expect(await getUserId(signupSafetyEmail)).toBeNull();
+  });
+
   test("enrolls a seeded login in 2FA and reveals recovery codes only after verification", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop manual-enrollment contract");
 
-    const signup = await page.request.post(`${serverUrl}/api/auth/sign-up`, {
-      data: {
-        email: enrollmentEmail,
-        password: TEST_PASSWORD,
-        name: "SSR Manual Enrollment",
-        invite_code: "BETA-001",
-      },
-    });
-    expect(signup.status()).toBe(200);
-    await verifyUserEmail(enrollmentEmail);
+    await seedSyntheticUser(enrollmentEmail, "SSR Manual Enrollment");
     await clearRateLimits();
     await page.context().clearCookies();
 
@@ -257,23 +271,14 @@ test.describe.serial("server-rendered identity flows", () => {
     await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
   });
 
-  test("signs up, enables 2FA, signs out, and completes a fresh login", async ({ page, isMobile }) => {
+  test("enables 2FA for a seeded login, signs out, and completes a fresh login", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop identity mutation contract");
     test.setTimeout(90_000);
 
-    await page.goto("/signup");
-    await fillField(page, "#invite-code", "BETA-001");
-    await fillField(page, "#name", "SSR Identity User");
-    await fillField(page, "#email", authEmail);
-    await fillField(page, "#password", TEST_PASSWORD);
-    await fillField(page, "#confirm-password", TEST_PASSWORD);
-    const signup = await submitAndCapture(
-      page,
-      "/signup/_actions/sign-up",
-      /create account/i,
-    );
-    expect(signup.status()).toBe(303);
-    expect(signup.headers().location).toMatch(/^\/setup-2fa/);
+    await seedSyntheticUser(authEmail, "SSR Identity User");
+    const login = await signInThroughRust(page, authEmail, TEST_PASSWORD);
+    expect(login.status()).toBe(303);
+    expect(login.headers().location).toMatch(/^\/setup-2fa/);
 
     await expect(page.getByRole("heading", { name: "Secure your account" })).toBeVisible();
     await expect(page.getByRole("alert")).toHaveCount(0);
@@ -312,25 +317,16 @@ test.describe.serial("server-rendered identity flows", () => {
       cookie.name === "codewire.session_token"
     ))).toBe(false);
 
-    const login = await signInThroughRust(page, authEmail, TEST_PASSWORD);
-    expect(login.status()).toBe(303);
-    expect(login.headers().location).toMatch(/^\/two-factor/);
+    const freshLogin = await signInThroughRust(page, authEmail, TEST_PASSWORD);
+    expect(freshLogin.status()).toBe(303);
+    expect(freshLogin.headers().location).toMatch(/^\/two-factor/);
     await finishTwoFactorChallenge(page);
   });
 
   test("resets a password through the clean-URL HttpOnly token flow", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop password-reset mutation contract");
 
-    const signup = await page.request.post(`${serverUrl}/api/auth/sign-up`, {
-      data: {
-        email: resetEmail,
-        password: TEST_PASSWORD,
-        name: "SSR Password Reset",
-        invite_code: "BETA-001",
-      },
-    });
-    expect([200, 409]).toContain(signup.status());
-    await verifyUserEmail(resetEmail);
+    await seedSyntheticUser(resetEmail, "SSR Password Reset");
     await clearRateLimits();
 
     await page.goto("/forgot-password");

@@ -2,9 +2,11 @@ import postgres from "postgres";
 import { cleanupKubernetesSandboxes } from "./helpers/environment";
 import { USERS, TEST_PASSWORD } from "./helpers/seed";
 import { assertIdentityTopology } from "./helpers/topology";
+import { seedSyntheticIdentity } from "./helpers/synthetic-users";
+import { randomBytes } from "node:crypto";
 
 const SERVER_URL = process.env.SERVER_URL || "http://127.0.0.1:8080";
-const TOPOLOGY_PROBE_EMAIL = "e2e-topology-probe@codewire.sh";
+const TOPOLOGY_PROBE_EMAIL = `e2e-topology-probe-${randomBytes(16).toString("hex")}@codewire.sh`;
 
 function directDatabaseEndpoint(databaseUrl: string): string {
   const url = new URL(databaseUrl);
@@ -33,57 +35,27 @@ async function globalSetup() {
       directDatabaseEndpoint: directDatabaseEndpoint(databaseUrl),
       kubeContext: process.env.KUBE_CONTEXT || "kind-codewire",
       removeDirectFixture: cleanupTopologyProbe,
-      createThroughServer: () => fetch(`${SERVER_URL}/api/auth/sign-up`, {
+      seedDirectFixture: () => seedSyntheticIdentity(sql, TOPOLOGY_PROBE_EMAIL, "E2E Topology Probe"),
+      signInThroughServer: () => fetch(`${SERVER_URL}/api/auth/sign-in`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: TOPOLOGY_PROBE_EMAIL,
           password: TEST_PASSWORD,
-          name: "E2E Topology Probe",
-          invite_code: "BETA-001",
         }),
       }),
-      directFixtureExists: async () => {
-        const [user] = await sql`SELECT id FROM users WHERE email = ${TOPOLOGY_PROBE_EMAIL}`;
-        return Boolean(user);
+      directSessionExists: async () => {
+        const [session] = await sql`
+          SELECT s.id FROM sessions s JOIN users u ON u.id = s.user_id
+          WHERE u.email = ${TOPOLOGY_PROBE_EMAIL} AND s.expires_at > NOW()
+        `;
+        return Boolean(session);
       },
     });
 
     for (const [role, user] of Object.entries(USERS)) {
-      const [existing] = await sql`SELECT id FROM users WHERE email = ${user.email}`;
-      if (existing) {
-        console.log(`  [seed] ${role}: ${user.email} exists`);
-      } else {
-        // Create via the auth API so password hashing matches production.
-        const res = await fetch(`${SERVER_URL}/api/auth/sign-up`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email: user.email,
-            password: TEST_PASSWORD,
-            name: user.name,
-            invite_code: "BETA-001",
-          }),
-        });
-        if (!res.ok && res.status !== 409) {
-          throw new Error(
-            `Failed to create ${user.email}: ${res.status} ${await res.text()}`
-          );
-        }
-        console.log(`  [seed] ${role}: ${user.email} created`);
-
-        // Clear rate limits after each signup
-        await sql`DELETE FROM rate_limit`;
-      }
-
-      // Ensure email is verified and 2FA is disabled (clean state for tests)
-      await sql`UPDATE users SET email_verified = true, two_factor_enabled = false WHERE email = ${user.email}`;
-      await sql`DELETE FROM two_factor WHERE user_id = (SELECT id FROM users WHERE email = ${user.email})`;
-
-      // Set admin flag if needed
-      if (user.isAdmin) {
-        await sql`UPDATE users SET is_admin = true WHERE email = ${user.email}`;
-      }
+      await seedSyntheticIdentity(sql, user.email, user.name, user.isAdmin);
+      console.log(`  [seed] ${role}: ${user.email} prepared`);
     }
 
     // Clean environment data from previous runs
@@ -183,7 +155,7 @@ async function globalSetup() {
     `;
     await sql`DELETE FROM organizations WHERE slug LIKE 'e2e-%'`;
 
-    // Clear rate limits again for signup.spec.ts that runs after
+    // Clear the topology sign-in rate limit before browser authentication.
     await sql`DELETE FROM rate_limit`;
 
     console.log("  [seed] global setup complete");
