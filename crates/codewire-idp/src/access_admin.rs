@@ -72,7 +72,7 @@ async fn list_accounts(
                   COALESCE(email_verified, false) AS email_verified,
                   enabled,
                   access_reason,
-                  COALESCE(created_at, NOW()) AS created_at
+                  COALESCE(created_at, NOW()::timestamp) AS created_at
            FROM users
            ORDER BY enabled ASC,
                     (access_reason IS NOT NULL) DESC,

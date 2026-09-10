@@ -2814,7 +2814,7 @@ async fn session_auth_flow_against_postgres() {
     assert!(body["session"].get("token").is_none());
 
     // 4. duplicate sign-up → 409.
-    let (st, _b, _) = sess_req(
+    let (st, body, _) = sess_req(
         &app,
         "POST",
         "/api/auth/sign-up",
@@ -2824,7 +2824,7 @@ async fn session_auth_flow_against_postgres() {
         ),
     )
     .await;
-    assert_eq!(st, 409);
+    assert_eq!(st, 409, "duplicate signup: {body}");
 
     // 5. sign-in (correct) → 200 + cookie. (Proves Argon2id verify of the
     //    stored hash.)

@@ -855,7 +855,7 @@ async fn retry_pending_signup(
                   COALESCE(two_factor_enabled, false) AS two_factor_enabled,
                   enabled,
                   access_reason,
-                  COALESCE(created_at, NOW()) AS created_at
+                  COALESCE(created_at, NOW()::timestamp) AS created_at
            FROM users
            WHERE email = $1
            FOR UPDATE"#,
