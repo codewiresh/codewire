@@ -8,15 +8,16 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use aws_credential_types::Credentials;
-use aws_sdk_sesv2::types::{Body, Content, Destination, EmailContent, Message};
-use aws_sdk_sesv2::{
-    Client,
-    config::{BehaviorVersion, Region, retry::RetryConfig, timeout::TimeoutConfig},
+use aws_sigv4::http_request::{
+    SignableBody, SignableRequest, SigningParams, SigningSettings, sign,
 };
+use aws_sigv4::sign::v4;
+use aws_smithy_runtime_api::client::identity::Identity;
+use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 
 /// Environment variable holding the exact SES From address approved for this
 /// workload. It must be a single mailbox, without a display name.
@@ -54,11 +55,10 @@ const ECS_CREDENTIALS_FULL_URI_ENV: &str = "AWS_CONTAINER_CREDENTIALS_FULL_URI";
 const ECS_AUTHORIZATION_TOKEN_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN";
 const ECS_AUTHORIZATION_TOKEN_FILE_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE";
 
-// SendEmail has no client idempotency key. One bounded SDK attempt avoids
-// turning an uncertain transport outcome into an SDK-originated duplicate.
+// SendEmail has no client idempotency key. One bounded HTTP attempt avoids
+// turning an uncertain transport outcome into an automatic duplicate.
 const SES_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const SES_READ_TIMEOUT: Duration = Duration::from_secs(4);
-const SES_OPERATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const SES_OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone)]
@@ -68,7 +68,16 @@ pub struct EmailClient {
 
 enum Delivery {
     Disabled,
-    Ses { from: String, client: Client },
+    Ses(SesDelivery),
+}
+
+/// The material required to sign a request stays within the narrowly scoped
+/// delivery client. It is deliberately neither `Clone` nor `Debug`.
+struct SesDelivery {
+    from: String,
+    region: String,
+    credentials: Credentials,
+    client: reqwest::Client,
 }
 
 impl fmt::Debug for EmailClient {
@@ -90,29 +99,25 @@ impl EmailClient {
             return Ok(Self::disabled());
         };
         let credentials = EmailCredentials::from_env()?;
-        assert_sdk_transport_boundary()?;
+        assert_ses_transport_boundary()?;
 
-        // Construct the SES service configuration directly. Loading aws-config
-        // would enable its ambient profile and credential-provider machinery;
-        // this client has exactly one allowed credential source instead.
-        let sdk_config = aws_sdk_sesv2::Config::builder()
-            .behavior_version(BehaviorVersion::latest())
-            .region(Region::new(config.region))
-            .credentials_provider(Credentials::new(
-                credentials.access_key_id,
-                credentials.secret_access_key,
-                None,
-                None,
-                "codewire-ses-projection",
-            ))
-            .retry_config(ses_retry_config())
-            .timeout_config(ses_timeout_config())
-            .build();
+        // The sender has one credential source and synthesizes its SES HTTPS
+        // endpoint from the reviewed region. It does not load AWS profiles,
+        // instance metadata, endpoint overrides, or a provider chain.
+        let credentials = Credentials::new(
+            credentials.access_key_id,
+            credentials.secret_access_key,
+            None,
+            None,
+            "codewire-ses-projection",
+        );
         Ok(Self {
-            delivery: Arc::new(Delivery::Ses {
+            delivery: Arc::new(Delivery::Ses(SesDelivery {
                 from: config.from,
-                client: Client::from_conf(sdk_config),
-            }),
+                region: config.region,
+                credentials,
+                client: ses_http_client()?,
+            })),
         })
     }
 
@@ -127,43 +132,31 @@ impl EmailClient {
 
     /// Whether this workload received a complete SES delivery projection.
     pub fn is_configured(&self) -> bool {
-        matches!(self.delivery.as_ref(), Delivery::Ses { .. })
+        matches!(self.delivery.as_ref(), Delivery::Ses(..))
     }
 
     /// Delivers one UTF-8 HTML email through the SES v2 `SendEmail` API.
     pub async fn send_html(&self, to: &str, subject: &str, html: &str) -> Result<()> {
-        let Delivery::Ses { from, client } = self.delivery.as_ref() else {
+        let Delivery::Ses(delivery) = self.delivery.as_ref() else {
             bail!("SES email delivery is not configured");
         };
         validate_mailbox(to, "recipient")?;
         validate_subject(subject)?;
 
-        let subject = Content::builder()
-            .data(subject)
-            .charset("UTF-8")
-            .build()
-            .context("build SES email subject")?;
-        let html = Content::builder()
-            .data(html)
-            .charset("UTF-8")
-            .build()
-            .context("build SES HTML body")?;
-        let message = Message::builder()
-            .subject(subject)
-            .body(Body::builder().html(html).build())
-            .build();
-        let destination = Destination::builder().to_addresses(to).build();
-        let content = EmailContent::builder().simple(message).build();
-
-        client
-            .send_email()
-            .from_email_address(from)
-            .destination(destination)
-            .content(content)
-            .send()
+        let body = ses_email_payload(&delivery.from, to, subject, html)?;
+        let request = signed_ses_request(
+            &delivery.client,
+            &delivery.credentials,
+            &delivery.region,
+            body,
+            SystemTime::now(),
+        )?;
+        let response = delivery
+            .client
+            .execute(request)
             .await
             .context("send SES email")?;
-        Ok(())
+        ensure_ses_success(response.status())
     }
 }
 
@@ -269,7 +262,7 @@ fn validate_credential_value(name: &str, value: Option<&str>) -> Result<String> 
     Ok(value.to_owned())
 }
 
-fn assert_sdk_transport_boundary() -> Result<()> {
+fn assert_ses_transport_boundary() -> Result<()> {
     let disable_imds = read_optional_env(DISABLE_IMDS_ENV)?;
     let ignore_endpoints = read_optional_env(IGNORE_ENDPOINTS_ENV)?;
     let endpoint_url = read_optional_env(ENDPOINT_URL_ENV)?;
@@ -287,7 +280,7 @@ fn assert_sdk_transport_boundary() -> Result<()> {
     let ecs_credentials_full_uri = read_optional_env(ECS_CREDENTIALS_FULL_URI_ENV)?;
     let ecs_authorization_token = read_optional_env(ECS_AUTHORIZATION_TOKEN_ENV)?;
     let ecs_authorization_token_file = read_optional_env(ECS_AUTHORIZATION_TOKEN_FILE_ENV)?;
-    validate_sdk_transport_boundary(
+    validate_ses_transport_boundary(
         disable_imds.as_deref(),
         ignore_endpoints.as_deref(),
         [
@@ -330,7 +323,7 @@ fn assert_sdk_transport_boundary() -> Result<()> {
     )
 }
 
-fn validate_sdk_transport_boundary(
+fn validate_ses_transport_boundary(
     disable_imds: Option<&str>,
     ignore_endpoints: Option<&str>,
     endpoint_urls: [(&str, Option<&str>); 3],
@@ -349,10 +342,8 @@ fn validate_sdk_transport_boundary(
             bail!("{name} is not permitted for Codewire SES delivery");
         }
     }
-    // The client constructs a service config directly and supplies explicit
-    // credentials, so these values could not become an alternate source. Fail
-    // closed anyway: an enabled sender must not carry any ambient AWS
-    // credential-chain input from a broad application-secret projection.
+    // The signer never reads these values, but an enabled sender still fails
+    // closed if its projection contains any ambient AWS credential-chain input.
     for (name, value) in ambient_credential_source_inputs {
         if value.is_some_and(|value| !value.is_empty()) {
             bail!("{name} is not permitted for Codewire SES delivery");
@@ -361,17 +352,110 @@ fn validate_sdk_transport_boundary(
     Ok(())
 }
 
-fn ses_retry_config() -> RetryConfig {
-    RetryConfig::disabled()
-}
-
-fn ses_timeout_config() -> TimeoutConfig {
-    TimeoutConfig::builder()
+fn ses_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
         .connect_timeout(SES_CONNECT_TIMEOUT)
         .read_timeout(SES_READ_TIMEOUT)
-        .operation_attempt_timeout(SES_OPERATION_ATTEMPT_TIMEOUT)
-        .operation_timeout(SES_OPERATION_TIMEOUT)
+        .timeout(SES_OPERATION_TIMEOUT)
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .build()
+        .context("construct SES HTTP client")
+}
+
+fn ses_email_payload(from: &str, to: &str, subject: &str, html: &str) -> Result<Vec<u8>> {
+    serde_json::to_vec(&serde_json::json!({
+        "FromEmailAddress": from,
+        "Destination": {
+            "ToAddresses": [to],
+        },
+        "Content": {
+            "Simple": {
+                "Subject": {
+                    "Data": subject,
+                    "Charset": "UTF-8",
+                },
+                "Body": {
+                    "Html": {
+                        "Data": html,
+                        "Charset": "UTF-8",
+                    },
+                },
+            },
+        },
+    }))
+    .context("serialize SES email")
+}
+
+fn signed_ses_request(
+    client: &reqwest::Client,
+    credentials: &Credentials,
+    region: &str,
+    body: Vec<u8>,
+    time: SystemTime,
+) -> Result<reqwest::Request> {
+    let endpoint = format!("https://email.{region}.amazonaws.com/v2/email/outbound-emails");
+    let mut request = client
+        .post(&endpoint)
+        .header(CONTENT_TYPE, "application/json")
+        .build()
+        .context("build SES email request")?;
+    let headers = request
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            Ok((
+                name.as_str(),
+                value.to_str().context("read SES email request header")?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let signable_request = SignableRequest::new(
+        "POST",
+        request.url().as_str(),
+        headers.iter().copied(),
+        SignableBody::Bytes(&body),
+    )
+    .context("construct SES signable request")?;
+    let identity: Identity = credentials.clone().into();
+    let signing_params: SigningParams<'_> = v4::SigningParams::builder()
+        .identity(&identity)
+        .region(region)
+        .name("ses")
+        .time(time)
+        .settings(SigningSettings::default())
+        .build()
+        .context("build SES signing parameters")?
+        .into();
+    let (instructions, _) = sign(signable_request, &signing_params)
+        .context("sign SES email request")?
+        .into_parts();
+    let (headers, params) = instructions.into_parts();
+    if !params.is_empty() {
+        bail!("SES signing unexpectedly produced query parameters");
+    }
+    for header in headers {
+        let mut value =
+            HeaderValue::from_str(header.value()).context("encode SES signing header")?;
+        value.set_sensitive(
+            header.sensitive() || matches!(header.name(), "authorization" | "x-amz-security-token"),
+        );
+        request
+            .headers_mut()
+            .insert(HeaderName::from_static(header.name()), value);
+    }
+    *request.body_mut() = Some(body.into());
+    Ok(request)
+}
+
+fn ensure_ses_success(status: reqwest::StatusCode) -> Result<()> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        bail!("SES email request failed with HTTP {}", status.as_u16())
+    }
 }
 
 fn validate_mailbox(value: &str, label: &str) -> Result<()> {
@@ -468,16 +552,74 @@ mod tests {
     }
 
     #[test]
-    fn transactional_delivery_uses_one_bounded_sdk_attempt() {
-        assert_eq!(ses_retry_config().max_attempts(), 1);
-        let timeout = ses_timeout_config();
-        assert_eq!(timeout.connect_timeout(), Some(SES_CONNECT_TIMEOUT));
-        assert_eq!(timeout.read_timeout(), Some(SES_READ_TIMEOUT));
+    fn transactional_delivery_uses_one_bounded_http_attempt() {
+        assert!(ses_http_client().is_ok());
+        assert_eq!(SES_CONNECT_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(SES_READ_TIMEOUT, Duration::from_secs(4));
+        assert_eq!(SES_OPERATION_TIMEOUT, Duration::from_secs(8));
+    }
+
+    #[test]
+    fn ses_request_uses_the_reviewed_endpoint_and_a_sensitive_signature() {
+        let client = ses_http_client().unwrap();
+        let credentials =
+            Credentials::new("test-access-key", "test-secret-key", None, None, "test");
+        let request = signed_ses_request(
+            &client,
+            &credentials,
+            "eu-west-1",
+            b"{}".to_vec(),
+            std::time::UNIX_EPOCH + Duration::from_secs(1_726_000_000),
+        )
+        .unwrap();
+
         assert_eq!(
-            timeout.operation_attempt_timeout(),
-            Some(SES_OPERATION_ATTEMPT_TIMEOUT)
+            request.url().as_str(),
+            "https://email.eu-west-1.amazonaws.com/v2/email/outbound-emails"
         );
-        assert_eq!(timeout.operation_timeout(), Some(SES_OPERATION_TIMEOUT));
+        assert_eq!(request.headers()[CONTENT_TYPE], "application/json");
+        let authorization = request.headers().get("authorization").unwrap();
+        assert!(authorization.is_sensitive());
+        assert!(
+            authorization
+                .to_str()
+                .unwrap()
+                .starts_with("AWS4-HMAC-SHA256 Credential=test-access-key/")
+        );
+        assert!(request.headers().contains_key("x-amz-date"));
+    }
+
+    #[test]
+    fn ses_payload_uses_the_send_email_v2_shape() {
+        let payload = ses_email_payload(
+            "hello@codewire-dev.sh",
+            "owner@example.com",
+            "Review your Codewire request",
+            "<p>review</p>",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+
+        assert_eq!(value["FromEmailAddress"], "hello@codewire-dev.sh");
+        assert_eq!(
+            value["Destination"]["ToAddresses"],
+            serde_json::json!(["owner@example.com"])
+        );
+        assert_eq!(
+            value["Content"]["Simple"]["Subject"],
+            serde_json::json!({"Data": "Review your Codewire request", "Charset": "UTF-8"})
+        );
+        assert_eq!(
+            value["Content"]["Simple"]["Body"]["Html"],
+            serde_json::json!({"Data": "<p>review</p>", "Charset": "UTF-8"})
+        );
+    }
+
+    #[test]
+    fn ses_response_status_must_indicate_delivery_success() {
+        assert!(ensure_ses_success(reqwest::StatusCode::OK).is_ok());
+        let error = ensure_ses_success(reqwest::StatusCode::FORBIDDEN).unwrap_err();
+        assert_eq!(error.to_string(), "SES email request failed with HTTP 403");
     }
 
     #[test]
@@ -488,7 +630,7 @@ mod tests {
             (SES_V2_ENDPOINT_URL_ENV, None),
         ];
         assert!(
-            validate_sdk_transport_boundary(
+            validate_ses_transport_boundary(
                 Some("true"),
                 Some("true"),
                 no_endpoint_overrides,
@@ -497,7 +639,7 @@ mod tests {
             .is_ok()
         );
         assert!(
-            validate_sdk_transport_boundary(
+            validate_ses_transport_boundary(
                 Some("false"),
                 Some("true"),
                 no_endpoint_overrides,
@@ -506,7 +648,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            validate_sdk_transport_boundary(
+            validate_ses_transport_boundary(
                 Some("true"),
                 Some("true"),
                 [
@@ -541,7 +683,7 @@ mod tests {
             ECS_AUTHORIZATION_TOKEN_ENV,
             ECS_AUTHORIZATION_TOKEN_FILE_ENV,
         ] {
-            let error = validate_sdk_transport_boundary(
+            let error = validate_ses_transport_boundary(
                 Some("true"),
                 Some("true"),
                 endpoint_urls,
