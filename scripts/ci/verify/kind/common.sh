@@ -1183,8 +1183,27 @@ deploy_overlay() {
   kubectl -n "$NS" rollout status deploy/codewire-coordinator --timeout=300s
 }
 
+require_dashboard_browser_host_dependencies() {
+  local playwright chromium
+  playwright="$ROOT/apps/dashboard/node_modules/.bin/playwright"
+  if [ ! -x "$playwright" ]; then
+    echo "::error::dashboard Playwright dependencies are missing; run PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts"
+    return 1
+  fi
+
+  chromium="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
+  if [ -z "$chromium" ]; then
+    chromium="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)"
+  fi
+  if [ -z "$chromium" ] || [ ! -x "$chromium" ]; then
+    echo "::error::the Kind browser gate requires a pre-provisioned Chromium executable; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+    return 1
+  fi
+}
+
 dashboard_browser_e2e() {
   local playwright chromium workspace_image credential_fixture
+  require_dashboard_browser_host_dependencies || return $?
   workspace_image="$(kind_workspace_runtime_image)" || return $?
   credential_fixture=0
   case "${CODEWIRE_KIND_PRODUCT_IMAGE_MODE:-build-ci}" in
@@ -1212,18 +1231,9 @@ dashboard_browser_e2e() {
       ;;
   esac
   playwright="$ROOT/apps/dashboard/node_modules/.bin/playwright"
-  if [ ! -x "$playwright" ]; then
-    echo "::error::dashboard Playwright dependencies are missing; run PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 bun install --frozen-lockfile --ignore-scripts"
-    return 1
-  fi
-
   chromium="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
   if [ -z "$chromium" ]; then
     chromium="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)"
-  fi
-  if [ -z "$chromium" ] || [ ! -x "$chromium" ]; then
-    echo "::error::the Kind browser gate requires a pre-provisioned Chromium executable; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
-    return 1
   fi
 
   prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?

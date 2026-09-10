@@ -330,6 +330,26 @@ fi
 grep -Fq "missing required tool: $missing_tool" "$FIXTURE/missing-tool.out" ||
   fail 'missing Kind prerequisite did not explain its failure'
 
+# The integrated gate validates browser host inputs before it spends the image,
+# smoke-binary or cluster transaction. Exercise the shared resolver against a
+# missing frozen install and an exact local fixture.
+browser_fixture="$FIXTURE/browser-host"
+mkdir -p "$browser_fixture/apps/dashboard/node_modules/.bin" "$browser_fixture/bin"
+if (ROOT="$browser_fixture" require_dashboard_browser_host_dependencies) \
+    >"$FIXTURE/missing-browser-host.out" 2>&1; then
+  fail 'missing dashboard browser host dependencies unexpectedly succeeded'
+fi
+grep -Fq 'dashboard Playwright dependencies are missing' \
+  "$FIXTURE/missing-browser-host.out" ||
+  fail 'missing dashboard browser host dependency did not explain its failure'
+printf '#!/bin/sh\nexit 0\n' >"$browser_fixture/apps/dashboard/node_modules/.bin/playwright"
+printf '#!/bin/sh\nexit 0\n' >"$browser_fixture/bin/chromium"
+chmod 0755 "$browser_fixture/apps/dashboard/node_modules/.bin/playwright" \
+  "$browser_fixture/bin/chromium"
+ROOT="$browser_fixture" \
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$browser_fixture/bin/chromium" \
+  require_dashboard_browser_host_dependencies
+
 # No arguments retain the complete integrated gate; the retained suite requires
 # the exact two-token command and unknown input fails closed.
 : >"$CALLS"
@@ -390,11 +410,30 @@ source "$SANDBOX_SUPPLY_CHAIN"
 # shellcheck source=scripts/ci/verify/kind/suites/runtime-acceptance.sh
 source "$RUNTIME_ACCEPTANCE"
 
+# A browser prerequisite failure preserves its status and stops before the
+# temp runtime, host lock, image build or cluster lifecycle begins.
+: >"$CALLS"
+set +e
+(
+  require_tool() { :; }
+  require_dashboard_browser_host_dependencies() { record browser-prerequisites; return 29; }
+  prepare_kind_temp_runtime() { record temp-runtime; }
+  acquire_kind_host_lock() { record acquire-lock; }
+  run_integrated_kind_suite
+)
+browser_prerequisite_status=$?
+set -e
+[ "$browser_prerequisite_status" -eq 29 ] ||
+  fail "browser prerequisite failure status changed: ${browser_prerequisite_status}"
+printf '%s\n' browser-prerequisites | cmp -s - "$CALLS" ||
+  fail 'browser prerequisite failure entered the expensive Kind transaction'
+
 # The integrated suite builds before starting its disposable control plane and
 # proves API readiness after image import. Stub every expensive action so this
 # fixture proves dispatch and order without creating a cluster.
 : >"$CALLS"
 require_tool() { record "require:$1"; }
+require_dashboard_browser_host_dependencies() { record browser-prerequisites; }
 acquire_kind_host_lock() { record acquire-lock; }
 reclaim_cancelled_ci_clusters() { record reclaim; }
 # shellcheck disable=SC2329 # Invoked indirectly by the integrated EXIT trap.
@@ -432,6 +471,7 @@ require:psql
 require:python3
 require:ssh-keygen
 require:ssh-keyscan
+browser-prerequisites
 acquire-lock
 reclaim
 ingress-drift

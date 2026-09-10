@@ -21,6 +21,11 @@ run_integrated_kind_suite() {
   require_tool ssh-keygen
   require_tool ssh-keyscan
 
+  # Browser dependencies are host inputs, not cluster state. Reject a missing
+  # frozen install or browser before the expensive image, smoke-binary and
+  # disposable-control-plane transaction begins.
+  require_dashboard_browser_host_dependencies || return $?
+
   # kind serializes each image through the host temp filesystem before
   # importing it. Reject or replace a saturated default before compiling or
   # creating a cluster, rather than misreporting the later bootstrap fallout.
