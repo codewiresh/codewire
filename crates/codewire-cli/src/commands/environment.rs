@@ -643,6 +643,7 @@ enum UnifiedEnvironmentTarget {
     Platform(String),
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NativeResizeResources {
     pub(crate) vcpus: u32,
@@ -650,6 +651,7 @@ pub(crate) struct NativeResizeResources {
     pub(crate) disk_bytes: u64,
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NativeResizePlan {
     pub(crate) current: NativeResizeResources,
@@ -783,6 +785,7 @@ fn format_resize_disk(disk_gb: i32) -> String {
     format!("{disk_gb} Gi")
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn resolve_native_resize_plan(
     args: &EnvResizeArgs,
     current: NativeResizeResources,
@@ -845,6 +848,7 @@ pub(crate) fn resolve_native_resize_plan(
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn format_native_disk(bytes: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     if bytes.is_multiple_of(GIB) {
@@ -854,6 +858,7 @@ fn format_native_disk(bytes: u64) -> String {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn format_native_resize_plan(name: &str, plan: &NativeResizePlan) -> String {
     let mut output = format!(
         "Environment: {name} (local · Cloud Hypervisor)\n\n              Current   Desired\nCPU       {:<9} {}\nMemory    {:<9} {}\nDisk      {:<9} {}\n\n",
@@ -1509,6 +1514,7 @@ async fn resolve_unified_environment_daemon_target(
             command.command_name()
         )
     })?;
+    #[cfg(target_os = "linux")]
     let default_local = current.kind == "local" && current.target_ref == "local";
     #[cfg(target_os = "linux")]
     if (placement == Some(EnvironmentPlacement::Local) || (placement.is_none() && default_local))
@@ -1774,6 +1780,7 @@ async fn resolve_unified_environment_target(
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn ambiguous_environment_placement_error(
     command: &str,
     target_ref: &str,

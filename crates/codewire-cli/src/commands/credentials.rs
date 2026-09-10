@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
-use std::io::{BufRead as _, IsTerminal as _, Read as _, Write as _};
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Context as _;
+#[cfg(test)]
+use codewire_access::{AccessProfileId, CredentialId};
 use codewire_access::{
-    AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
-    CredentialId, CredentialStatus, Owner, ProviderId, builtin_provider_catalog,
+    AccessProfileName, CapabilitySlot, CredentialAuthKind, CredentialStatus, Owner, ProviderId,
+    builtin_provider_catalog,
 };
 use codewire_credential_broker::codex_enrollment::{
     CodexEnrollmentConfig, CodexEnrollmentOwner, CodexPublicationOutcome, CompletedCodexEnrollment,
@@ -19,24 +21,34 @@ use codewire_local_credentials::{
     AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord, LocalCredentialClient,
     NewCredential,
 };
-use codewire_protected_store::{
-    MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
-};
+#[cfg(test)]
+use codewire_protected_store::MAX_PROTECTED_VALUE_BYTES;
+use codewire_protected_store::{ProtectedStorePersistence, ProtectedValue};
 use serde::Serialize;
 use tokio::io::AsyncReadExt as _;
 use zeroize::Zeroizing;
 
-pub(super) mod ssh;
-
-use super::storage_placement::{
-    StoragePlacement, require_reference_placement, resolve_storage_placement,
+#[cfg(test)]
+use super::CredentialsArgs;
+use super::credential_input::{
+    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, CredentialOperation, ParsedCredentialSelector,
+    ParsedProfileSelector, parse_credential_selector, parse_profile_selector,
+    prompt_credential_material, read_ssh_import, supported_profile_slot, validate_ssh_generation,
+    validate_ssh_import,
 };
+#[cfg(test)]
+use super::credential_input::{
+    credential_command_json, read_protected_value, resolve_credential_operation,
+};
+#[cfg(test)]
+use super::storage_placement::StoragePlacement;
+#[cfg(test)]
+use super::storage_placement::resolve_storage_placement;
 use super::{
     CredentialAddArgs, CredentialConnectArgs, CredentialConnectProviderArg, CredentialDeleteArgs,
     CredentialListArgs, CredentialProfileCommand, CredentialProfileDeleteArgs,
-    CredentialProfileSelectorArgs, CredentialProfileSetArgs, CredentialProfileSlotArgs,
-    CredentialProfilesCommand, CredentialRenameArgs, CredentialRotateArgs, CredentialSelectorArgs,
-    CredentialsArgs, CredentialsCommand, EchoGuard, OutputFormat,
+    CredentialProfileSetArgs, CredentialProfileSlotArgs, CredentialRenameArgs,
+    CredentialRotateArgs, CredentialSelectorArgs, CredentialsCommand, OutputFormat,
     connect_local_credential_authority, prompt_confirm_default_no, trimmed_required,
 };
 
@@ -45,28 +57,9 @@ const GITHUB_CHILD_PATH: &str = "/usr/bin:/bin";
 const GITHUB_TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_GITHUB_TOKEN_BYTES: usize = 4 * 1024;
 
-pub(super) const CODEX_DEVICE_AUTHORIZATION_GUIDANCE: &str = "Before connecting, turn on \"Enable device code authorization for Codex\" in ChatGPT Security settings: https://chatgpt.com/#settings/Security. For a managed workspace, your administrator may need to allow device code login.";
-
-#[derive(Debug)]
-pub(super) enum CredentialOperation {
-    Credential(CredentialsCommand),
-    Profile(CredentialProfileCommand),
-}
-
-pub(crate) async fn handle_credentials_command(
-    globals: &super::Globals,
-    args: CredentialsArgs,
+pub(crate) async fn handle_local_credentials_command(
+    operation: CredentialOperation,
 ) -> anyhow::Result<()> {
-    let placement = resolve_storage_placement(
-        args.local,
-        args.platform,
-        credential_command_json(&args.command),
-    )?;
-    let operation = resolve_credential_operation(args.profile, args.command, placement)?;
-    if placement == StoragePlacement::Platform {
-        return super::platform_profiles::handle_platform_credentials(globals, operation).await;
-    }
-
     let mut client = connect_local_credential_authority().await?;
     let command = match operation {
         CredentialOperation::Profile(command) => {
@@ -78,7 +71,7 @@ pub(crate) async fn handle_credentials_command(
         CredentialsCommand::Connect(args) => connect_credential(&mut client, args).await,
         CredentialsCommand::Add(args) => add_credential(&mut client, args).await,
         CredentialsCommand::Generate(args) => {
-            let name = ssh::validate_generation(&args)?;
+            let name = validate_ssh_generation(&args)?;
             let record = client.generate_ssh_credential(name, args.expires_at).await
                 .context("generate local SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
             print_credentials(&[record], OutputFormat::Text)
@@ -107,108 +100,6 @@ pub(crate) async fn handle_credentials_command(
             unreachable!("profile operations have a separate dispatcher")
         }
     }
-}
-
-fn resolve_credential_operation(
-    profile: Option<String>,
-    command: CredentialsCommand,
-    placement: StoragePlacement,
-) -> anyhow::Result<CredentialOperation> {
-    let Some(profile) = profile else {
-        match &command {
-            CredentialsCommand::Set(_)
-            | CredentialsCommand::Unset(_)
-            | CredentialsCommand::Revisions(_) => {
-                anyhow::bail!("this operation requires --profile=NAME")
-            }
-            CredentialsCommand::Get(args) => {
-                anyhow::ensure!(
-                    args.credential.is_some(),
-                    "get requires a credential selector or --profile=NAME"
-                );
-                anyhow::ensure!(
-                    args.revision.is_none(),
-                    "--revision requires --profile=NAME"
-                );
-            }
-            CredentialsCommand::Delete(args) => anyhow::ensure!(
-                args.credential.is_some(),
-                "delete requires a credential selector or --profile=NAME"
-            ),
-            _ => {}
-        }
-        return Ok(match command {
-            CredentialsCommand::Profiles {
-                command: CredentialProfilesCommand::List(args),
-            } => CredentialOperation::Profile(CredentialProfileCommand::List(args)),
-            command => CredentialOperation::Credential(command),
-        });
-    };
-    let profile = require_reference_placement(
-        codewire_project::StorageReference::profile(&profile)?,
-        placement,
-    )?
-    .to_owned();
-    let parsed = parse_profile_selector(&profile)?;
-    if let ParsedProfileSelector::Reference(reference) = parsed {
-        anyhow::ensure!(
-            reference.scope() == codewire_access::AccessProfileScope::User,
-            "organization credential profiles are not supported by this storage adapter yet"
-        );
-    }
-    let command = match command {
-        CredentialsCommand::Set(mut args) => {
-            args.profile = profile;
-            CredentialProfileCommand::Set(args)
-        }
-        CredentialsCommand::Unset(mut args) => {
-            args.profile = profile;
-            CredentialProfileCommand::Unset(args)
-        }
-        CredentialsCommand::List(args) => {
-            CredentialProfileCommand::Get(CredentialProfileSelectorArgs {
-                profile,
-                revision: None,
-                output: args.output,
-            })
-        }
-        CredentialsCommand::Get(args) => {
-            anyhow::ensure!(
-                args.credential.is_none(),
-                "a credential selector cannot be combined with --profile get"
-            );
-            anyhow::ensure!(
-                args.revision != Some(0),
-                "profile revision must be positive"
-            );
-            CredentialProfileCommand::Get(CredentialProfileSelectorArgs {
-                profile,
-                revision: args.revision,
-                output: args.output,
-            })
-        }
-        CredentialsCommand::Revisions(args) => {
-            CredentialProfileCommand::Revisions(CredentialProfileSelectorArgs {
-                profile,
-                revision: None,
-                output: args.output,
-            })
-        }
-        CredentialsCommand::Delete(args) => {
-            anyhow::ensure!(
-                args.credential.is_none(),
-                "a credential selector cannot be combined with --profile delete"
-            );
-            CredentialProfileCommand::Delete(CredentialProfileDeleteArgs {
-                profile,
-                yes: args.yes,
-            })
-        }
-        _ => anyhow::bail!(
-            "--profile supports set, unset, list, get, revisions and delete; enrollment never binds a profile"
-        ),
-    };
-    Ok(CredentialOperation::Profile(command))
 }
 
 async fn connect_credential(
@@ -687,26 +578,12 @@ async fn run_isolated_codex_login(
         .context("complete isolated Codex enrollment")
 }
 
-fn credential_command_json(command: &CredentialsCommand) -> bool {
-    let output = match command {
-        CredentialsCommand::List(args)
-        | CredentialsCommand::Revisions(args)
-        | CredentialsCommand::Profiles {
-            command: CredentialProfilesCommand::List(args),
-        } => Some(args.output),
-        CredentialsCommand::Get(args) => Some(args.output),
-        CredentialsCommand::Revoke(args) => Some(args.output),
-        _ => None,
-    };
-    output == Some(OutputFormat::Json)
-}
-
 async fn add_credential(
     client: &mut LocalCredentialClient,
     args: CredentialAddArgs,
 ) -> anyhow::Result<()> {
     if args.provider == "ssh" {
-        let name = ssh::validate_import(&args)?;
+        let name = validate_ssh_import(&args)?;
         anyhow::ensure!(
             !client
                 .list_credentials()
@@ -715,7 +592,7 @@ async fn add_credential(
                 .any(|record| record.metadata.display_name.eq_ignore_ascii_case(&name)),
             "credential name already exists"
         );
-        let input = ssh::read_import(&args)?;
+        let input = read_ssh_import(&args)?;
         let record = client.add_ssh_credential(name, input.private_key, input.passphrase, args.expires_at).await
             .context("import local SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
         return print_credentials(&[record], OutputFormat::Text);
@@ -948,28 +825,6 @@ async fn set_profile_entry(
     Ok(())
 }
 
-pub(super) fn supported_profile_slot(
-    value: &str,
-    provider: &ProviderId,
-    kind: CredentialAuthKind,
-) -> anyhow::Result<CapabilitySlot> {
-    anyhow::ensure!(
-        matches!(value, "codex" | "openai" | "github" | "anthropic" | "ssh"),
-        "unsupported credential profile provider"
-    );
-    let slot = CapabilitySlot::parse(value).context("invalid capability slot")?;
-    let catalog = builtin_provider_catalog();
-    let policy = catalog
-        .get(provider)
-        .and_then(|definition| definition.capabilities.get(&slot))
-        .context("this provider identity/capability has no supported runtime adapter")?;
-    anyhow::ensure!(
-        policy.authentication_kinds.contains(&kind),
-        "credential authentication kind is unsupported for this capability"
-    );
-    Ok(slot)
-}
-
 async fn local_profile_for_set(
     client: &mut LocalCredentialClient,
     selector: &str,
@@ -1090,90 +945,6 @@ async fn resolve_profile(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum ParsedCredentialSelector<'a> {
-    Name(&'a str),
-    Id(CredentialId),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum ParsedProfileSelector {
-    Name(AccessProfileName),
-    Reference(AccessProfileReference),
-    Id(AccessProfileId),
-}
-
-pub(super) fn parse_credential_selector(
-    selector: &str,
-) -> anyhow::Result<ParsedCredentialSelector<'_>> {
-    let selector = trimmed_required(selector, "credential selector")?;
-    if let Some(name) = selector.strip_prefix("name:") {
-        return Ok(ParsedCredentialSelector::Name(explicit_selector_name(
-            name,
-            "credential",
-        )?));
-    }
-    if let Some(id) = selector.strip_prefix("id:") {
-        let id = canonical_selector_id(id, "credential")?;
-        return Ok(ParsedCredentialSelector::Id(
-            CredentialId::parse(id).context("invalid credential ID")?,
-        ));
-    }
-    reject_unknown_selector_prefix(selector, "credential")?;
-    Ok(ParsedCredentialSelector::Name(selector))
-}
-
-pub(super) fn parse_profile_selector(selector: &str) -> anyhow::Result<ParsedProfileSelector> {
-    let reference = codewire_project::StorageReference::profile(selector)?;
-    anyhow::ensure!(
-        reference.placement.is_none(),
-        "resolve the profile storage origin before its metadata selector"
-    );
-    let selector = reference.selector;
-    if let Some(id) = selector.strip_prefix("id:") {
-        let id = canonical_selector_id(id, "access profile")?;
-        return Ok(ParsedProfileSelector::Id(
-            AccessProfileId::parse(id).context("invalid access profile ID")?,
-        ));
-    }
-    reject_unknown_selector_prefix(selector, "access profile")?;
-    if selector.contains('/') {
-        return Ok(ParsedProfileSelector::Reference(
-            selector
-                .parse::<AccessProfileReference>()
-                .context("invalid access profile reference")?,
-        ));
-    }
-    Ok(ParsedProfileSelector::Name(
-        AccessProfileName::parse(selector).context("invalid access profile name")?,
-    ))
-}
-
-fn explicit_selector_name<'a>(name: &'a str, kind: &str) -> anyhow::Result<&'a str> {
-    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
-        anyhow::bail!("{kind} selector name must be non-empty and have no surrounding whitespace");
-    }
-    Ok(name)
-}
-
-fn canonical_selector_id<'a>(id: &'a str, kind: &str) -> anyhow::Result<&'a str> {
-    let parsed =
-        uuid::Uuid::parse_str(id).with_context(|| format!("invalid {kind} selector ID {id:?}"))?;
-    if parsed.is_nil() || parsed.to_string() != id {
-        anyhow::bail!("invalid {kind} selector ID {id:?}; expected a canonical non-nil UUID");
-    }
-    Ok(id)
-}
-
-fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<()> {
-    if let Some((prefix, _)) = selector.split_once(':') {
-        anyhow::bail!(
-            "invalid {kind} selector prefix {prefix:?}; use a bare name, name:<name>, or id:<canonical-uuid>"
-        );
-    }
-    Ok(())
-}
-
 fn select_credential_by_name(
     records: &[CredentialRecord],
     name: &str,
@@ -1211,50 +982,6 @@ fn optional_profile_by_name<'a>(
         anyhow::bail!("local access profile name {name:?} is ambiguous");
     }
     Ok(record)
-}
-
-pub(super) fn prompt_credential_material() -> anyhow::Result<ProtectedValue> {
-    let interactive = std::io::stdin().is_terminal();
-    if interactive {
-        eprint!("Credential material: ");
-        std::io::stderr()
-            .flush()
-            .context("flush credential prompt")?;
-    }
-    let echo_guard = if interactive {
-        Some(EchoGuard::disable_if_tty()?)
-    } else {
-        None
-    };
-    let stdin = std::io::stdin();
-    let value = read_protected_value(stdin.lock(), interactive);
-    drop(echo_guard);
-    value
-}
-
-fn read_protected_value<R: std::io::BufRead>(
-    reader: R,
-    single_line: bool,
-) -> anyhow::Result<ProtectedValue> {
-    let mut bytes = Zeroizing::new(Vec::new());
-    let limit = u64::try_from(MAX_PROTECTED_VALUE_BYTES + 3).expect("protected-value limit");
-    let mut reader = reader.take(limit);
-    if single_line {
-        reader
-            .read_until(b'\n', &mut bytes)
-            .context("read credential material")?;
-    } else {
-        reader
-            .read_to_end(&mut bytes)
-            .context("read credential material")?;
-    }
-    if bytes.last() == Some(&b'\n') {
-        bytes.pop();
-        if bytes.last() == Some(&b'\r') {
-            bytes.pop();
-        }
-    }
-    ProtectedValue::new(std::mem::take(&mut *bytes)).context("invalid credential material")
 }
 
 fn api_key_enrollment_kind(provider: &str) -> anyhow::Result<CredentialAuthKind> {

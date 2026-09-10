@@ -23,11 +23,14 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
+codewire-access = { workspace = true }
 codewire-client = { workspace = true }
 codewire-daemon = { workspace = true }
 codewire-project = { workspace = true }
 codewire-project-proto = { workspace = true }
+codewire-protected-store = { workspace = true }
 codewire-workload-secrets = { workspace = true }
+libc = "0.2"
 portable-pty = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
@@ -50,13 +53,10 @@ zeroize = { workspace = true }
 buffa = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }
-codewire-access = { workspace = true }
 codewire-credential-broker = { workspace = true, features = ["codex-enrollment", "ssh-agent"] }
 codewire-gateway-proto = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
-codewire-protected-store = { workspace = true }
-libc = "0.2"
 rustix = { workspace = true }
 tempfile = { workspace = true }
 
