@@ -31,9 +31,9 @@ run_integrated_kind_suite() {
   # complete local transaction before reclaiming any CI-owned prior run.
   acquire_kind_host_lock
 
-  # At job startup, every cluster with this CI-owned run-ID prefix on the
-  # current daemon is stale, including a retry of this run. The unsuffixed
-  # local default is handled narrowly by create_cluster after taking the lock.
+  # At job startup, the current transaction name and every cluster with this
+  # CI-owned run-ID prefix on the current daemon are stale. Reclaim them only
+  # after taking the host lock and before checking their fixed host ports.
   reclaim_cancelled_ci_clusters "$KIND_CONFIG"
 
   trap cleanup EXIT

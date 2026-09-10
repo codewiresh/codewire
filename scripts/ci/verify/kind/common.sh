@@ -382,7 +382,7 @@ reclaim_cancelled_ci_clusters() {
 
   while IFS= read -r cluster; do
     case "$cluster" in
-      "${ci_cluster_prefix}"*)
+      "$KIND_CLUSTER_NAME"|"${ci_cluster_prefix}"*)
         log "reclaiming cancelled-run kind cluster ${cluster}"
         if ! kind delete cluster --name "$cluster"; then
           echo "::error::failed to reclaim cancelled-run kind cluster ${cluster}"
@@ -398,7 +398,7 @@ reclaim_cancelled_ci_clusters() {
   fi
   while IFS= read -r cluster; do
     case "$cluster" in
-      "${ci_cluster_prefix}"*)
+      "$KIND_CLUSTER_NAME"|"${ci_cluster_prefix}"*)
         echo "::error::cancelled-run kind cluster ${cluster} survived cleanup"
         return 1
         ;;
