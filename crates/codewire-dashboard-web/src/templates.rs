@@ -6,8 +6,7 @@ use crate::billing_connect::BillingPageView;
 use crate::view::EnvironmentCreateFormView;
 use crate::view::{
     AccountAccessView, ApiKeysPageView, AuthFormView, CredentialSettingsView, DashboardView,
-    DevicePageView,
-    EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
+    DevicePageView, EnvironmentsPageView, InvitationPageView, MembersPageView, OrganizationContext,
     OrganizationFormView, OrganizationRow, PresetsPageView, SecretBucketPageView,
     SecretProjectsPageView, SettingsPageView, SettingsPlaceholderView, SetupTwoFactorView,
     TerminalPageView, TwoFactorRecoveryView,

@@ -42,6 +42,17 @@ const IGNORE_ENDPOINTS_ENV: &str = "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS";
 const ENDPOINT_URL_ENV: &str = "AWS_ENDPOINT_URL";
 const SES_ENDPOINT_URL_ENV: &str = "AWS_ENDPOINT_URL_SES";
 const SES_V2_ENDPOINT_URL_ENV: &str = "AWS_ENDPOINT_URL_SESV2";
+const PROFILE_ENV: &str = "AWS_PROFILE";
+const DEFAULT_PROFILE_ENV: &str = "AWS_DEFAULT_PROFILE";
+const CONFIG_FILE_ENV: &str = "AWS_CONFIG_FILE";
+const SHARED_CREDENTIALS_FILE_ENV: &str = "AWS_SHARED_CREDENTIALS_FILE";
+const WEB_IDENTITY_TOKEN_FILE_ENV: &str = "AWS_WEB_IDENTITY_TOKEN_FILE";
+const ROLE_ARN_ENV: &str = "AWS_ROLE_ARN";
+const ROLE_SESSION_NAME_ENV: &str = "AWS_ROLE_SESSION_NAME";
+const ECS_CREDENTIALS_RELATIVE_URI_ENV: &str = "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI";
+const ECS_CREDENTIALS_FULL_URI_ENV: &str = "AWS_CONTAINER_CREDENTIALS_FULL_URI";
+const ECS_AUTHORIZATION_TOKEN_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN";
+const ECS_AUTHORIZATION_TOKEN_FILE_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE";
 
 // SendEmail has no client idempotency key. One bounded SDK attempt avoids
 // turning an uncertain transport outcome into an SDK-originated duplicate.
@@ -264,6 +275,18 @@ fn assert_sdk_transport_boundary() -> Result<()> {
     let endpoint_url = read_optional_env(ENDPOINT_URL_ENV)?;
     let ses_endpoint_url = read_optional_env(SES_ENDPOINT_URL_ENV)?;
     let ses_v2_endpoint_url = read_optional_env(SES_V2_ENDPOINT_URL_ENV)?;
+    let session_token = read_optional_env(SESSION_TOKEN_ENV)?;
+    let profile = read_optional_env(PROFILE_ENV)?;
+    let default_profile = read_optional_env(DEFAULT_PROFILE_ENV)?;
+    let config_file = read_optional_env(CONFIG_FILE_ENV)?;
+    let shared_credentials_file = read_optional_env(SHARED_CREDENTIALS_FILE_ENV)?;
+    let web_identity_token_file = read_optional_env(WEB_IDENTITY_TOKEN_FILE_ENV)?;
+    let role_arn = read_optional_env(ROLE_ARN_ENV)?;
+    let role_session_name = read_optional_env(ROLE_SESSION_NAME_ENV)?;
+    let ecs_credentials_relative_uri = read_optional_env(ECS_CREDENTIALS_RELATIVE_URI_ENV)?;
+    let ecs_credentials_full_uri = read_optional_env(ECS_CREDENTIALS_FULL_URI_ENV)?;
+    let ecs_authorization_token = read_optional_env(ECS_AUTHORIZATION_TOKEN_ENV)?;
+    let ecs_authorization_token_file = read_optional_env(ECS_AUTHORIZATION_TOKEN_FILE_ENV)?;
     validate_sdk_transport_boundary(
         disable_imds.as_deref(),
         ignore_endpoints.as_deref(),
@@ -272,6 +295,38 @@ fn assert_sdk_transport_boundary() -> Result<()> {
             (SES_ENDPOINT_URL_ENV, ses_endpoint_url.as_deref()),
             (SES_V2_ENDPOINT_URL_ENV, ses_v2_endpoint_url.as_deref()),
         ],
+        &[
+            (SESSION_TOKEN_ENV, session_token.as_deref()),
+            (PROFILE_ENV, profile.as_deref()),
+            (DEFAULT_PROFILE_ENV, default_profile.as_deref()),
+            (CONFIG_FILE_ENV, config_file.as_deref()),
+            (
+                SHARED_CREDENTIALS_FILE_ENV,
+                shared_credentials_file.as_deref(),
+            ),
+            (
+                WEB_IDENTITY_TOKEN_FILE_ENV,
+                web_identity_token_file.as_deref(),
+            ),
+            (ROLE_ARN_ENV, role_arn.as_deref()),
+            (ROLE_SESSION_NAME_ENV, role_session_name.as_deref()),
+            (
+                ECS_CREDENTIALS_RELATIVE_URI_ENV,
+                ecs_credentials_relative_uri.as_deref(),
+            ),
+            (
+                ECS_CREDENTIALS_FULL_URI_ENV,
+                ecs_credentials_full_uri.as_deref(),
+            ),
+            (
+                ECS_AUTHORIZATION_TOKEN_ENV,
+                ecs_authorization_token.as_deref(),
+            ),
+            (
+                ECS_AUTHORIZATION_TOKEN_FILE_ENV,
+                ecs_authorization_token_file.as_deref(),
+            ),
+        ],
     )
 }
 
@@ -279,6 +334,7 @@ fn validate_sdk_transport_boundary(
     disable_imds: Option<&str>,
     ignore_endpoints: Option<&str>,
     endpoint_urls: [(&str, Option<&str>); 3],
+    ambient_credential_source_inputs: &[(&str, Option<&str>)],
 ) -> Result<()> {
     for (name, value) in [
         (DISABLE_IMDS_ENV, disable_imds),
@@ -289,6 +345,15 @@ fn validate_sdk_transport_boundary(
         }
     }
     for (name, value) in endpoint_urls {
+        if value.is_some_and(|value| !value.is_empty()) {
+            bail!("{name} is not permitted for Codewire SES delivery");
+        }
+    }
+    // The client constructs a service config directly and supplies explicit
+    // credentials, so these values could not become an alternate source. Fail
+    // closed anyway: an enabled sender must not carry any ambient AWS
+    // credential-chain input from a broad application-secret projection.
+    for (name, value) in ambient_credential_source_inputs {
         if value.is_some_and(|value| !value.is_empty()) {
             bail!("{name} is not permitted for Codewire SES delivery");
         }
@@ -423,12 +488,22 @@ mod tests {
             (SES_V2_ENDPOINT_URL_ENV, None),
         ];
         assert!(
-            validate_sdk_transport_boundary(Some("true"), Some("true"), no_endpoint_overrides,)
-                .is_ok()
+            validate_sdk_transport_boundary(
+                Some("true"),
+                Some("true"),
+                no_endpoint_overrides,
+                &[],
+            )
+            .is_ok()
         );
         assert!(
-            validate_sdk_transport_boundary(Some("false"), Some("true"), no_endpoint_overrides,)
-                .is_err()
+            validate_sdk_transport_boundary(
+                Some("false"),
+                Some("true"),
+                no_endpoint_overrides,
+                &[],
+            )
+            .is_err()
         );
         assert!(
             validate_sdk_transport_boundary(
@@ -439,9 +514,42 @@ mod tests {
                     (SES_ENDPOINT_URL_ENV, None),
                     (SES_V2_ENDPOINT_URL_ENV, None),
                 ],
+                &[],
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn transport_boundary_rejects_every_ambient_credential_source() {
+        let endpoint_urls = [
+            (ENDPOINT_URL_ENV, None),
+            (SES_ENDPOINT_URL_ENV, None),
+            (SES_V2_ENDPOINT_URL_ENV, None),
+        ];
+        for name in [
+            SESSION_TOKEN_ENV,
+            PROFILE_ENV,
+            DEFAULT_PROFILE_ENV,
+            CONFIG_FILE_ENV,
+            SHARED_CREDENTIALS_FILE_ENV,
+            WEB_IDENTITY_TOKEN_FILE_ENV,
+            ROLE_ARN_ENV,
+            ROLE_SESSION_NAME_ENV,
+            ECS_CREDENTIALS_RELATIVE_URI_ENV,
+            ECS_CREDENTIALS_FULL_URI_ENV,
+            ECS_AUTHORIZATION_TOKEN_ENV,
+            ECS_AUTHORIZATION_TOKEN_FILE_ENV,
+        ] {
+            let error = validate_sdk_transport_boundary(
+                Some("true"),
+                Some("true"),
+                endpoint_urls,
+                &[(name, Some("ambient-input"))],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(name));
+        }
     }
 
     #[test]
