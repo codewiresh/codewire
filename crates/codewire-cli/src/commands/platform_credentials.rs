@@ -51,6 +51,10 @@ pub(super) async fn handle(
             let enrollment = async {
                 match args.provider {
                     CredentialConnectProviderArg::Codex => {
+                        eprintln!(
+                            "{}",
+                            super::credentials::CODEX_DEVICE_AUTHORIZATION_GUIDANCE
+                        );
                         client
                             .enroll_codex(
                                 rpc::EnrollCodexRequest {
