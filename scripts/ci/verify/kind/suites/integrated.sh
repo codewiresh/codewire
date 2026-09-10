@@ -21,6 +21,11 @@ run_integrated_kind_suite() {
   require_tool ssh-keygen
   require_tool ssh-keyscan
 
+  # Browser dependencies are host inputs, not cluster state. Reject a missing
+  # frozen install or browser before the expensive image, smoke-binary and
+  # disposable-control-plane transaction begins.
+  require_dashboard_browser_host_dependencies || return $?
+
   # kind serializes each image through the host temp filesystem before
   # importing it. Reject or replace a saturated default before compiling or
   # creating a cluster, rather than misreporting the later bootstrap fallout.
@@ -31,9 +36,9 @@ run_integrated_kind_suite() {
   # complete local transaction before reclaiming any CI-owned prior run.
   acquire_kind_host_lock
 
-  # At job startup, every cluster with this CI-owned run-ID prefix on the
-  # current daemon is stale, including a retry of this run. The unsuffixed
-  # local default is handled narrowly by create_cluster after taking the lock.
+  # At job startup, the current transaction name and every cluster with this
+  # CI-owned run-ID prefix on the current daemon are stale. Reclaim them only
+  # after taking the host lock and before checking their fixed host ports.
   reclaim_cancelled_ci_clusters "$KIND_CONFIG"
 
   trap cleanup EXIT

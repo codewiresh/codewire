@@ -3,6 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 selector="$ROOT/scripts/ci/setup/select-untrusted-workspace-cache.sh"
+test_source="$(git -C "$ROOT" rev-parse HEAD)"
+test_tree="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')"
 mkdir -p "$ROOT/.tmp"
 work="$(mktemp -d "$ROOT/.tmp/workspace-cache-selector-test.XXXXXX")"
 credential_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-selector-data.XXXXXX")"
@@ -35,6 +37,9 @@ select_cache() {
   local rust="$1" layer="$2" file="$3"
   PATH="${TEST_PATH:-$work/bin:$PATH}" RUNNER_TEMP="$credential_work/runner" GITHUB_WORKSPACE="$ROOT" GITHUB_ENV="$work/env" \
     GITHUB_EVENT_NAME="${TEST_EVENT_NAME:-push}" GITHUB_EVENT_PATH="$work/event.json" \
+    GITHUB_SHA="$test_source" GITHUB_REF=refs/pull/2047/head \
+    GITHUB_REPOSITORY=codewire/codewire \
+    CODEWIRE_EXPECTED_SOURCE_SHA="$test_source" CODEWIRE_EXPECTED_SOURCE_TREE="$test_tree" \
     FETCH_CALLS="$work/fetch-calls" OPENBAO_SCCACHE_FETCHER="$work/fetch" \
     CODEWIRE_SCCACHE_REQUEST="$rust" CODEWIRE_BUILDKIT_CACHE_REQUEST="$layer" \
     "$selector" "$file"
@@ -100,6 +105,9 @@ for event in unlabeled null_labels omitted_labels exact other manual; do
     null_labels) printf '{"pull_request":{"labels":null}}\n' >"$work/event.json" ;;
     omitted_labels) printf '{"pull_request":{}}\n' >"$work/event.json" ;;
   esac
+  jq --arg source "$test_source" '.repository={full_name:"codewire/codewire"} | .pull_request += {number:2047,head:{sha:$source,ref:"ci/cache-fixture"},base:{ref:"main",repo:{full_name:"codewire/codewire"}}}' \
+    "$work/event.json" >"$work/event-complete.json"
+  mv "$work/event-complete.json" "$work/event.json"
   for request in '' auto local disabled; do
     : >"$work/env"; : >"$work/fetch-calls"
     event_name=pull_request
@@ -115,6 +123,9 @@ for event in unlabeled null_labels omitted_labels exact other manual; do
   done
 done
 printf '{"pull_request":{"labels":[{"name":"ci/r2-cache-canary"}]}}\n' >"$work/event.json"
+jq --arg source "$test_source" '.repository={full_name:"codewire/codewire"} | .pull_request += {number:2047,head:{sha:$source,ref:"ci/cache-fixture"},base:{ref:"main",repo:{full_name:"codewire/codewire"}}}' \
+  "$work/event.json" >"$work/event-complete.json"
+mv "$work/event-complete.json" "$work/event.json"
 : >"$work/env"; : >"$work/fetch-calls"
 TEST_EVENT_NAME=pull_request FETCH_RESULT=unavailable select_cache disabled '' "$credential_work/runner/label-unavailable.aws" >"$work/output"
 grep -Fxq CODEWIRE_WORKSPACE_CACHE_CANARY=true "$work/env"

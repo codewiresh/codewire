@@ -12,6 +12,11 @@ workspace_cache_validate() {
   docker_bin="${CODEWIRE_DOCKER_BIN:-docker}"
   sccache_mode="${CODEWIRE_SCCACHE_MODE:-local}"
   layer_cache_mode="${CODEWIRE_BUILDKIT_CACHE_MODE:-local}"
+  workspace_measurement_case="${CODEWIRE_WORKSPACE_CACHE_CASE:-}"
+  case "$workspace_measurement_case:$sccache_mode:$layer_cache_mode" in
+    :*|seed:r2:r2|cold:disabled:disabled|compiler:r2:disabled|warm-1:r2:r2|warm-2:r2:r2) ;;
+    *) echo 'workspace measurement cache modes differ from its case' >&2; return 2 ;;
+  esac
   for mode in "$sccache_mode" "$layer_cache_mode"; do
     case "$mode" in
       disabled|local|r2) ;;
@@ -47,11 +52,17 @@ workspace_cache_validate() {
 }
 
 workspace_cache_command() {
+  workspace_cache_timed_command 3300s "$@"
+}
+
+workspace_cache_timed_command() {
+  local duration="$1"
+  shift
   local status=0
   # Waiting on a supervised background child lets Bash run its signal trap
   # immediately. The timeout owns the child's process group, including tee or
   # a Docker client blocked in a remote request. No caller process is signalled.
-  timeout --signal=TERM --kill-after=5s 3300s "$@" <&0 &
+  timeout --signal=TERM --kill-after=5s "$duration" "$@" <&0 &
   workspace_command_pid=$!
   wait "$workspace_command_pid" || status=$?
   workspace_command_pid=''
@@ -81,18 +92,19 @@ workspace_cache_create_builder() {
   workspace_cache_command "$docker_bin" buildx create --name "$builder" --node "$node" --driver docker-container \
     "${driver_args[@]}" --buildkitd-config "$scratch_dir/buildkitd.toml" >/dev/null || return
   workspace_cache_command "$docker_bin" buildx inspect "$builder" --bootstrap >/dev/null || return
+  # Capture the owned daemon identity in every mode, including the cold case.
+  workspace_cache_command "$docker_bin" container inspect "buildx_buildkit_$node" --format '{{.Id}}' \
+      >"$scratch_dir/container-id" || return
+  builder_container="$(<"$scratch_dir/container-id")"
+  [[ "$builder_container" =~ ^[0-9a-f]{64}$ ]] || return 2
+  workspace_cache_command "$docker_bin" container inspect "$builder_container" --format '{{.Config.Image}}' \
+    >"$scratch_dir/container-image" || return
+  [[ "$(<"$scratch_dir/container-image")" == "$WORKSPACE_BUILDKIT_IMAGE" ]] || {
+    echo 'workspace cache builder image does not match its pin' >&2; return 2;
+  }
   if [[ "$layer_cache_mode" == r2 ]]; then
     # Remote DinD has a different filesystem. Stream into this exact owned
     # container; client-side bind mounts and Buildx config files are unsafe here.
-    workspace_cache_command "$docker_bin" container inspect "buildx_buildkit_$node" --format '{{.Id}}' \
-      >"$scratch_dir/container-id" || return
-    builder_container="$(<"$scratch_dir/container-id")"
-    [[ "$builder_container" =~ ^[0-9a-f]{64}$ ]] || return 2
-    workspace_cache_command "$docker_bin" container inspect "$builder_container" --format '{{.Config.Image}}' \
-      >"$scratch_dir/container-image" || return
-    [[ "$(<"$scratch_dir/container-image")" == "$WORKSPACE_BUILDKIT_IMAGE" ]] || {
-      echo 'workspace cache builder image does not match its pin' >&2; return 2;
-    }
     daemon_credentials=true # Partial writes must also be cleaned on failure.
     workspace_cache_command "$docker_bin" exec --interactive "$builder_container" sh -c \
       'umask 077; mkdir -p /run/codewire-cache && cat > /run/codewire-cache/aws-credentials' \
@@ -149,6 +161,23 @@ workspace_cache_layer_args() {
   fi
   if [[ "$layer_cache_mode" == r2 ]]; then
     common="type=s3,bucket=$WORKSPACE_CACHE_BUCKET,region=auto,endpoint_url=$WORKSPACE_CACHE_ENDPOINT,use_path_style=true,prefix=$WORKSPACE_CACHE_PREFIX"
+    if [[ -n "$workspace_measurement_case" ]]; then
+      [[ "$target" == base || "$target" == workspace ]] || return 2
+      [[ "${CODEWIRE_WORKSPACE_CACHE_SEED_ID:-}" =~ ^run-[0-9]+/tree-[0-9a-f]{40}/seed-[0-9a-f]{64}$ \
+          && "$CODEWIRE_WORKSPACE_CACHE_SEED_ID" == "run-${GITHUB_RUN_ID:?}/tree-$source_tree/"* \
+          && "$builder_container" =~ ^[0-9a-f]{64}$ ]] || return 2
+      name="$architecture/$target/experiments/$CODEWIRE_WORKSPACE_CACHE_SEED_ID"
+      if [[ "$workspace_measurement_case" == seed ]]; then
+        layer_args+=(--cache-from "$common,name=$architecture/$target/tree-$source_tree"
+          --cache-from "$common,name=$architecture/$target/main")
+      else
+        # Immutable producer binding: sibling case exports are never imports.
+        layer_args+=(--cache-from "$common,name=$name")
+        name="$name/$workspace_measurement_case-$builder_container"
+      fi
+      layer_args+=(--cache-to "$common,name=$name,mode=max,touch_refresh=24h,upload_parallelism=4,ignore-error=false")
+      return
+    fi
     name="$architecture/$target/tree-$source_tree"
     layer_args+=(--cache-from "$common,name=$name")
     # Every producer here is untrusted source CI, including main. These aliases

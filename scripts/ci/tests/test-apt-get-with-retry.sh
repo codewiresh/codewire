@@ -90,16 +90,23 @@ set -euo pipefail
 SH
 
 helper_args=(-o Acquire::https::Verify-Peer=false -o 'Acquire::https::User-Agent=codewire fixture' install -y package-one)
-cases=0 timed_out_transactions=0 total_transactions=0
+cases=0 timed_out_transactions=0 bounded_acquisitions=0 total_apt_calls=0
 
 run_case() {
-  local name="$1" results="$2" expected_status="$3" expected_calls="$4" expected_waits="$5"
-  local mode="${6:-single}"
-  local case_dir="$TEST_TMP/$name" status attempt pid pid_file state
-  local -a expected_results invocation=("$HELPER") expected_args
+  local name="$1" results="$2" expected_status="$3" kinds="$4" expected_waits="$5"
+  local mode="${6:-single}" expected_calls expected_timeouts=0 timeout_index=0
+  local case_dir="$TEST_TMP/$name" status attempt kind pid pid_file state
+  local -a expected_results expected_kinds invocation=("$HELPER") expected_args install_args
   if [[ "$mode" == chain ]]; then
     invocation=(/usr/bin/bash "$TEST_TMP/update-and-install")
   fi
+  IFS=, read -r -a expected_results <<<"$results"
+  IFS=, read -r -a expected_kinds <<<"$kinds"
+  expected_calls="${#expected_kinds[@]}"
+  [[ "${#expected_results[@]}" == "$expected_calls" ]] || fail "$name has inconsistent fixture calls"
+  for kind in "${expected_kinds[@]}"; do
+    [[ "$kind" == apply ]] || expected_timeouts=$((expected_timeouts + 1))
+  done
   mkdir "$case_dir"
   printf '0\n' >"$case_dir/apt.state"
   printf '0\n' >"$case_dir/timeout.state"
@@ -115,23 +122,32 @@ run_case() {
   status=$?
   set -e
   [[ "$status" == "$expected_status" ]] || fail "$name returned $status, expected $expected_status"
-  [[ "$(<"$case_dir/apt.state")" == "$expected_calls" ]] || fail "$name changed the APT attempt count"
-  [[ "$(<"$case_dir/timeout.state")" == "$expected_calls" ]] || fail "$name omitted a production transaction deadline"
+  [[ "$(<"$case_dir/apt.state")" == "$expected_calls" ]] || fail "$name changed the APT invocation count"
+  [[ "$(<"$case_dir/timeout.state")" == "$expected_timeouts" ]] || fail "$name changed bounded acquisition count"
   [[ "$(wc -l <"$case_dir/sleep.log")" == "$expected_waits" ]] || fail "$name changed the fixed inter-attempt waits"
-  [[ "$(grep -c '^APT transaction failed; retrying the exact command ' "$case_dir/output.log" || true)" == "$expected_waits" ]] \
+  [[ "$(grep -c '^APT acquisition failed; retrying the exact command ' "$case_dir/output.log" || true)" == "$expected_waits" ]] \
     || fail "$name changed the retry reports"
-  IFS=, read -r -a expected_results <<<"$results"
   for ((attempt = 1; attempt <= expected_calls; attempt++)); do
-    expected_args=("${helper_args[@]}")
-    if [[ "$mode" == chain && "$expected_status" == 0 && "$attempt" == "$expected_calls" ]]; then
-      expected_args=(install -y package-one)
-    fi
+    kind="${expected_kinds[$((attempt - 1))]}"
+    install_args=("${helper_args[@]}")
+    [[ "$mode" != chain ]] || install_args=(install -y package-one)
+    case "$kind" in
+      update) expected_args=("${helper_args[@]}") ;;
+      download) expected_args=("${install_args[@]}" --download-only) ;;
+      apply) expected_args=("${install_args[@]}" --no-download) ;;
+      *) fail "$name has unknown expected invocation kind $kind" ;;
+    esac
     expected_args+=(-o APT::Update::Error-Mode=any)
     printf '%s\0' "${expected_args[@]}" >"$TEST_TMP/expected-apt-argv"
-    printf '%s\0' --signal=TERM --kill-after=3s 300s apt-get "${expected_args[@]}" >"$TEST_TMP/expected-timeout-argv"
     cmp "$TEST_TMP/expected-apt-argv" "$case_dir/apt.argv.$attempt" || fail "$name changed APT argument boundaries"
-    cmp "$TEST_TMP/expected-timeout-argv" "$case_dir/timeout.argv.$attempt" || fail "$name changed the 300s/TERM/3s deadline"
+    if [[ "$kind" != apply ]]; then
+      timeout_index=$((timeout_index + 1))
+      printf '%s\0' --signal=TERM --kill-after=3s 300s apt-get "${expected_args[@]}" >"$TEST_TMP/expected-timeout-argv"
+      cmp "$TEST_TMP/expected-timeout-argv" "$case_dir/timeout.argv.$timeout_index" \
+        || fail "$name changed the 300s/TERM/3s acquisition deadline"
+    fi
     if [[ "${expected_results[$((attempt - 1))]}" == hang ]]; then
+      [[ "$kind" != apply ]] || fail "$name attempted to retry a mutating package apply"
       grep -Fxq TERM "$case_dir/apt.argv.$attempt.terminated" || fail "$name did not terminate the timed-out fake APT"
       for pid_file in "$case_dir/apt.argv.$attempt.apt-pid" "$case_dir/apt.argv.$attempt.child-pid"; do
         pid="$(<"$pid_file")"
@@ -142,23 +158,25 @@ run_case() {
     fi
   done
   cases=$((cases + 1))
-  total_transactions=$((total_transactions + expected_calls))
+  total_apt_calls=$((total_apt_calls + expected_calls))
+  bounded_acquisitions=$((bounded_acquisitions + expected_timeouts))
 }
 
 helper_args=(-o Acquire::https::Verify-Peer=false -o 'Acquire::https::User-Agent=codewire fixture' update)
-run_case partial-update-recovery partial,0,0 0 3 1 chain
-run_case partial-update-exhaustion partial,partial,partial,partial 100 4 3 chain
+run_case partial-update-recovery partial,0,0,0 0 update,update,download,apply 1 chain
+run_case partial-update-exhaustion partial,partial,partial,partial 100 update,update,update,update 3 chain
 helper_args+=(-o APT::Update::Error-Mode=persistent)
-run_case caller-cannot-weaken-update partial,0,0 0 3 1 chain
+run_case caller-cannot-weaken-update partial,0,0,0 0 update,update,download,apply 1 chain
 
 helper_args=(-o Acquire::https::Verify-Peer=false -o 'Acquire::https::User-Agent=codewire fixture' install -y package-one)
-run_case immediate-success 0 0 1 0
-run_case ordinary-recovery 42,43,0 0 3 2
-run_case ordinary-exhaustion 41,42,43,44 44 4 3
-run_case timeout-recovery hang,0 0 2 1
-run_case timeout-exhaustion hang,hang,hang,hang 124 4 3
+run_case immediate-success 0,0 0 download,apply 0
+run_case ordinary-recovery 42,43,0,0 0 download,download,download,apply 2
+run_case ordinary-exhaustion 41,42,43,44 44 download,download,download,download 3
+run_case timeout-recovery hang,0,0 0 download,download,apply 1
+run_case timeout-exhaustion hang,hang,hang,hang 124 download,download,download,download 3
+run_case apply-failure-is-not-retried 0,67 67 download,apply 0
 
 # This proves ordinary TERM-responsive children, not arbitrary detached process
 # cleanup. The enclosing BuildKit namespace owns the broader lifecycle.
-printf '[test-apt-get-with-retry] %s cases, %s transactions, %s real timeouts: bounded transaction contract passed\n' \
-  "$cases" "$total_transactions" "$timed_out_transactions"
+printf '[test-apt-get-with-retry] %s cases, %s APT calls, %s bounded acquisitions, %s real timeouts: safe acquisition/apply contract passed\n' \
+  "$cases" "$total_apt_calls" "$bounded_acquisitions" "$timed_out_transactions"

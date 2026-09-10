@@ -39,6 +39,7 @@ case "$1 $2" in
     printf 'build\n' >>"$FAKE_BUILDS"
     if [[ "${FAKE_CANARY:-}" == hang ]]; then
       printf '%s\n' "$$" >"$FAKE_CANARY_PROCESS"
+      sleep "${FAKE_CANARY_READY_DELAY:-0}"
       sleep 30 &
       child_pid=$!
       printf '%s\n' "$child_pid" >"$FAKE_CANARY_CHILD"
@@ -56,7 +57,20 @@ case "$1 $2" in
       printf '#7 [1/1] COPY payload /payload\n'
       if [[ "$FAKE_CANARY" == hit && "$(wc -l <"$FAKE_BUILDS")" == 2 ]]; then
         printf '#7 CACHED\n'
+      elif [[ "$FAKE_CANARY" == lazy-hit || "$FAKE_CANARY" == lazy-wrong ]]; then
+        digest=7
+        [[ "$FAKE_CANARY" != lazy-wrong ]] || digest=8
+        if [[ "$(wc -l <"$FAKE_BUILDS")" == 2 ]]; then
+          printf '#7 sha256:%064d 0B / 8.39MB 0.1s\n' "$digest"
+          printf '#7 sha256:%064d 8.39MB / 8.39MB 0.2s done\n' "$digest"
+        else
+          printf '#7 DONE 0.1s\n'
+        fi
       else printf '#7 DONE 0.1s\n'; fi
+      if [[ "$FAKE_CANARY" == lazy-* && "$(wc -l <"$FAKE_BUILDS")" == 1 ]]; then
+        printf '#8 exporting cache to Amazon S3\n'
+        printf '#8 writing layer sha256:%064d 0.1s done\n' 7
+      fi
       [[ "$FAKE_CANARY" != export-failure ]] || echo 'ignoring error exporting cache to Amazon S3'
     fi
     case "${FAKE_FAILURE:-}" in
@@ -167,6 +181,46 @@ for compiler in disabled local r2; do
     else ! grep -q -- '--secret' "$work/compiler-args" || exit 1; fi
     ! grep -Eq 'synthetic-workspace-(key|secret)' "$FAKE_LOG" "$work/out" "$work/layer-args" "$work/compiler-args" "$work/buildkitd.toml" || exit 1
   done
+done
+# The measured warm workers import only their successful producer. Their own
+# exports are distinct, so neither parallel replicate can seed the other.
+measurement_args() (
+  source "$ROOT/scripts/ci/images/workspace-cache.sh"
+  CODEWIRE_WORKSPACE_CACHE_CASE="$1" CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2
+  workspace_cache_validate
+  builder_container="$(printf '%064d' "$2")"
+  GITHUB_RUN_ID=2047
+  CODEWIRE_WORKSPACE_CACHE_SEED_ID="run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)"
+  workspace_cache_layer_args workspace 1111111111111111111111111111111111111111 amd64
+  printf '%s\n' "${layer_args[@]}"
+)
+for measurement in seed warm-1 warm-2; do
+  measurement_args "$measurement" 2 >"$work/$measurement.args"
+  grep -q 'ignore-error=false' "$work/$measurement.args"
+  grep -Fxq workspace-floating-tools "$work/$measurement.args"
+done
+for measurement in warm-1 warm-2; do
+  awk 'previous == "--cache-from" { print } { previous = $0 }' "$work/$measurement.args" >"$work/$measurement.imports"
+  [[ "$(wc -l <"$work/$measurement.imports")" == 1 ]]
+  grep -q "name=amd64/workspace/experiments/run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)$" \
+    "$work/$measurement.imports"
+  grep -q "seed-$(printf '%064d' 1)/$measurement-$(printf '%064d' 2),mode=max" "$work/$measurement.args"
+done
+cmp "$work/warm-1.imports" "$work/warm-2.imports"
+if cmp -s "$work/warm-1.args" "$work/warm-2.args"; then echo 'warm exports overlap' >&2; exit 1; fi
+for failure in mode run tree; do
+  if (
+    source "$ROOT/scripts/ci/images/workspace-cache.sh"
+    CODEWIRE_WORKSPACE_CACHE_CASE=warm-1 CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2
+    [[ "$failure" != mode ]] || CODEWIRE_SCCACHE_MODE=local
+    workspace_cache_validate || exit
+    builder_container="$(printf '%064d' 2)" GITHUB_RUN_ID=2047
+    CODEWIRE_WORKSPACE_CACHE_SEED_ID="run-2047/tree-1111111111111111111111111111111111111111/seed-$(printf '%064d' 1)"
+    [[ "$failure" != run ]] || GITHUB_RUN_ID=2048
+    tree=1111111111111111111111111111111111111111
+    [[ "$failure" != tree ]] || tree=2222222222222222222222222222222222222222
+    workspace_cache_layer_args workspace "$tree" amd64
+  ) >/dev/null 2>&1; then echo "accepted invalid measurement $failure" >&2; exit 1; fi
 done
 for failure in copy pin erase cleanup compile; do
   : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
@@ -308,14 +362,14 @@ if (
 grep -q 'outside the build context' "$work/context-rejection.out"
 # Run the actual bounded canary against the fake API. A generic CACHED line is
 # insufficient: the COPY vertex in the second daemon must reuse remote data.
-for canary in hit miss export-failure; do
+for canary in hit lazy-hit lazy-wrong miss export-failure; do
   : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
   set +e
   FAKE_CANARY="$canary" "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
     "$credential_work/r2.aws" "$work/report-$canary" >"$work/canary.out" 2>&1
   status=$?
   set -e
-  if [[ "$canary" == hit ]]; then
+  if [[ "$canary" == hit || "$canary" == lazy-hit ]]; then
     [[ "$status" == 0 && -s "$work/report-$canary/result.txt" ]]
     [[ "$(grep -c '^buildx create ' "$FAKE_LOG")" == 2 && "$(grep -c '^buildx rm ' "$FAKE_LOG")" == 2 ]]
   else
@@ -325,20 +379,28 @@ for canary in hit miss export-failure; do
 done
 export FAKE_CANARY_PROCESS="$work/canary-process" FAKE_CANARY_CHILD="$work/canary-child"
 : >"$FAKE_LOG"; : >"$FAKE_BUILDS"
-FAKE_CANARY=hang "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
+FAKE_CANARY=hang FAKE_CANARY_READY_DELAY=3 "$ROOT/scripts/ci/tests/canary-workspace-r2-cache.sh" \
   "$credential_work/r2.aws" "$work/report-cancel" >"$work/canary-cancel.out" 2>&1 &
 canary_pid=$!
-for ((attempt=0; attempt<100; attempt++)); do
+for ((attempt=0; attempt<200; attempt++)); do
   [[ ! -s "$FAKE_CANARY_CHILD" ]] || break
-  sleep 0.02
+  sleep 0.05
 done
-[[ -s "$FAKE_CANARY_CHILD" && -s "$FAKE_FILE" ]] || { kill -TERM "$canary_pid"; exit 1; }
+[[ -s "$FAKE_CANARY_CHILD" && -s "$FAKE_FILE" ]] || {
+  kill -TERM "$canary_pid" 2>/dev/null || true
+  wait "$canary_pid" 2>/dev/null || true
+  echo 'cache canary did not publish cancellation readiness within ten seconds' >&2
+  exit 1
+}
 kill -TERM "$canary_pid"
 set +e
 wait "$canary_pid"
 status=$?
 set -e
-[[ "$status" != 0 && ! -e "$work/report-cancel/result.txt" && ! -e "$FAKE_FILE" ]]
+[[ "$status" != 0 && ! -e "$work/report-cancel/result.txt" && ! -e "$FAKE_FILE" ]] || {
+  echo 'cache canary cancellation did not fail and clean its credential/report' >&2
+  exit 1
+}
 grep -q 'exec .* rm -f /run/codewire-cache/aws-credentials' "$FAKE_LOG"
 grep -q '^buildx rm --force codewire-workspace-' "$FAKE_LOG"
 for pid_file in "$FAKE_CANARY_PROCESS" "$FAKE_CANARY_CHILD"; do
