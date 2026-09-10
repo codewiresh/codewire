@@ -8,23 +8,33 @@
 //! broker process. It has no public listener or persistent state. Secret-bearing
 //! values must remain inside that process.
 
+pub mod anthropic;
 mod bridge;
 #[cfg(feature = "codex-enrollment")]
 pub mod codex_enrollment;
 mod codex_oauth;
+pub mod github;
+#[cfg(feature = "codex-enrollment")]
+pub mod github_enrollment;
+#[cfg(test)]
+mod http_test_support;
 mod network;
 mod openai;
 #[cfg(feature = "platform")]
 pub mod platform;
-#[cfg(feature = "codex-enrollment")]
+#[cfg(all(test, feature = "codex-enrollment"))]
+mod process_test_support;
+#[cfg(any(feature = "codex-enrollment", feature = "ssh-agent"))]
 pub mod provider_enrollment;
 mod runtime;
+#[cfg(all(feature = "ssh-agent", target_os = "linux"))]
+pub mod ssh_agent;
 
 pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
 pub use codex_oauth::{
     CanonicalCodexOAuthBundle, CodexOAuthImport, CodexOAuthMaterialError, import_codex_auth_json,
 };
-pub use network::OpenAiHttpsTransport;
+pub use network::ProviderHttpsTransport;
 pub use openai::{
     OpenAiApiKeyAdapter, OpenAiStreamingResponse, PreparedOpenAiRequest, PreparedOpenAiResponse,
     ValidatedOpenAiRequest,
@@ -108,7 +118,8 @@ pub enum CredentialBrokerError {
     InvalidCredentialMaterial,
 }
 pub use bridge::{
-    AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeResponseSink,
-    CredentialBridgeTransport, admit_credential_bridge, run_admitted_credential_bridge,
+    AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeRelayInput,
+    CredentialBridgeRelayOutput, CredentialBridgeResponseSink, CredentialBridgeTransport,
+    admit_credential_bridge, run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
     run_credential_bridge,
 };

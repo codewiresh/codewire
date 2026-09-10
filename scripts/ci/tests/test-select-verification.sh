@@ -253,6 +253,9 @@ run_paths_case repo_license_with_other_policy pull_request refs/pull/2202/head f
 run_paths_case repo_policy_fixture pull_request refs/pull/23/head false \
   'contracts contracts_proto deploy edge_kind go_consumer_interop go_support policy release runtime_confidential security security_idp_kek' \
   scripts/ci/tests/test-repo-checks-modules.py
+run_paths_case service_ssh_image_verifier pull_request refs/pull/1922/head false \
+  'policy' scripts/ci/tests/test-service-ssh-image-verifier.sh \
+  scripts/ci/verify/service-ssh-image-contract.sh scripts/ci/verify/verify-service-ssh-image.sh
 run_paths_case apt_transactions pull_request refs/pull/3/head false \
   'go_consumer_interop go_support policy release runtime_confidential' \
   scripts/ci/tests/test-apt-get-with-retry.sh
@@ -426,6 +429,15 @@ run_paths_case local_vmm_kvm_smoke pull_request refs/pull/5014/head false \
 run_paths_case native_local_environment_smoke pull_request refs/pull/5015/head false \
   'policy transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   scripts/ci/verify/smoke-native-local-environment.sh
+run_paths_case shared_stock_ssh_smoke pull_request refs/pull/5016/head false \
+  'policy runtime_dev_smoke transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  scripts/ci/verify/stock-ssh-workload.sh
+for ssh_input in scripts/runtime/dev/provider-ssh-smoke.sh scripts/runtime/tests/test-provider-ssh-smoke.sh \
+    scripts/runtime/dev/smoke-local-platform-sources.sh scripts/runtime/tests/test-local-platform-sources-smoke.sh \
+    scripts/runtime/tests/fixtures/local-platform/__local-credential-authority; do
+  run_paths_case provider_ssh_dev_smoke pull_request refs/pull/5017/head false \
+    'policy runtime_dev_smoke' "$ssh_input"
+done
 run_paths_case curated_derp_member_manifest pull_request refs/pull/502/head false \
   'policy rust_curated_locks transport transport_derp_contract transport_pkg_codewire_derp' \
   crates/codewire-derp/Cargo.toml
@@ -458,6 +470,9 @@ run_paths_case gateway_proto_source pull_request refs/pull/6011/head false \
 run_paths_case private_broker_proto_source pull_request refs/pull/6011/head false \
   'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   libs/gateway-proto/proto/broker/v1/broker.proto
+run_paths_case neutral_credential_bridge_proto_source pull_request refs/pull/6011/head false \
+  'contracts contracts_proto edge_kind go_consumer_interop go_support policy rust rust_pkg_codewire_cli rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_credential_service rust_pkg_codewire_daemon rust_pkg_codewire_gateway rust_pkg_codewire_gateway_proto rust_pkg_codewire_local_credentials rust_pkg_codewire_local_vmm rust_pkg_codewire_proto transport transport_pkg_codewire_daemon transport_pkg_codewire_gateway transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  proto/codewire/bridge/v1/bridge.proto
 run_paths_case private_broker_proto_rust_module pull_request refs/pull/6011/head false \
   'policy rust rust_pkg_codewire_credential_bridge rust_pkg_codewire_credential_broker rust_pkg_codewire_gateway_proto rust_pkg_codewire_server_core transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   crates/codewire-gateway-proto/src/lib.rs
@@ -704,6 +719,8 @@ run_paths_case generic_package pull_request refs/pull/119/head false \
   'policy web' packages/shared/src/index.ts
 run_paths_case dashboard pull_request refs/pull/12/head false \
   'policy web' apps/dashboard/playwright.config.ts
+run_paths_case dashboard_browser_gate pull_request refs/pull/1202/head false \
+  'policy web' scripts/ci/tests/test-dashboard-browser-gate.sh
 run_paths_case dashboard_design_preview pull_request refs/pull/120/head false \
   'policy web' scripts/dev/design-system-server.py
 run_paths_case marketing_brand_assets pull_request refs/pull/1201/head false \
@@ -1000,6 +1017,13 @@ contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1913/head \
   KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
 assert_contract_field kind_fixture_mixed "$contract_output" required_local_mode kind
+printf '%s\n' scripts/ci/tests/test-dashboard-browser-gate.sh \
+  scripts/ci/verify/kind/suites/dashboard-browser.sh > "$contract_paths"
+contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+  GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1914/head \
+  KIND_E2E_OPT_IN=false "$SELECTOR" "$contract_paths")"
+assert_contract_field dashboard_browser_gate_mixed "$contract_output" classification changed
+assert_contract_field dashboard_browser_gate_mixed "$contract_output" required_local_mode kind
 printf '%s\n' unexplained/new-surface.txt > "$contract_paths"
 contract_output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
   GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/192/head \
@@ -1196,6 +1220,7 @@ activity_fencing_block="$(sed -n '/^run_orchestration() {/,/^  start_orchestrati
 grep -qF "'worker::' -- --ignored" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::postgres_secrets::tests::encrypted_store_reencrypts_renames_and_deletes_final_dek'" <<<"$activity_fencing_block"
 grep -qF -- "--skip 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure'" <<<"$activity_fencing_block"
+grep -qF -- "--skip 'worker::create::projection_database_tests::'" <<<"$activity_fencing_block"
 grep -qF 'assert_passed_count "orchestration activity fencing matrix" "$logfile" 2' <<<"$activity_fencing_block"
 destroy_hint_block="$(sed -n '/logfile="$RUN_DIR\/environment-destroy-template-hint.log"/,/assert_passed_count "environment destroy template hint matrix"/p' "$integration_runner")"
 grep -qF 'worker::lifecycle::tests::destroy_template_hint_allows_missing_creation_config_but_not_database_failure' <<<"$destroy_hint_block"
@@ -1204,15 +1229,21 @@ grep -qF 'assert_passed_count "environment destroy template hint matrix" "$logfi
 grep -qF 'cargo test --locked -p codewire-credential-broker --no-default-features --features platform' "$integration_runner"
 grep -qF -- '--lib platform::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "platform broker admission matrix" "$logfile" 14' "$integration_runner"
+grep -qF -- '--features platform,ssh-agent --lib platform::tests::ssh::' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker SSH matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- '--lib platform::bridge::tests::rotation:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
-grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 2' "$integration_runner"
+grep -qF 'assert_passed_count "platform broker gRPC rotation drain matrix" "$logfile" 3' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-credential-service' "$integration_runner"
-grep -qF -- '--lib tests::database:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
+grep -qF -- '--skip tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$logfile" 3' "$integration_runner"
+grep -qF -- '--lib tests::database::projection::' "$integration_runner"
+grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 10' "$integration_runner"
+grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
+grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 5' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
 grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"
-grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 8' "$integration_runner"
+grep -qF 'assert_passed_count "public credential mutation matrix" "$logfile" 23' "$integration_runner"
 grep -qF -- '--lib runtime::tests:: -- --ignored --nocapture --test-threads=1' "$integration_runner"
 grep -qF 'assert_passed_count "isolated credential runtime matrix" "$logfile" 4' "$integration_runner"
 grep -qF -- '--lib runtime::kind::config::tests::effective_acl_guard_rejects_direct_column_and_membership_authority' "$integration_runner"
@@ -1221,9 +1252,14 @@ grep -qF 'cargo test --locked -p codewire-credential-service --features enrollme
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
 grep -qF 'cargo test --locked -p codewire-server-core --test oauth_bearer_auth' "$integration_runner"
 grep -qF 'assert_passed_count "OAuth-only restricted identity matrix" "$logfile" 6' "$integration_runner"
-grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 33' "$integration_runner"
+grep -qF 'assert_passed_count "server-core migration matrix" "$logfile" 46' "$integration_runner"
 grep -qF 'assert_passed_count "idp db_flow" "$logfile" 13' "$integration_runner"
-grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 13' "$integration_runner"
+grep -qF 'assert_passed_count "platform credential storage matrix" "$logfile" 21' "$integration_runner"
+grep -qF 'assert_passed_count "platform access profile matrix" "$logfile" 12' "$integration_runner"
+grep -qF 'cargo test --locked -p codewire-platform-credentials --test owner_sources' "$integration_runner"
+grep -qF 'assert_passed_count "platform owner-source authority matrix" "$logfile" 5' "$integration_runner"
+grep -qF -- "'worker::create::projection_database_tests::'" "$integration_runner"
+grep -qF 'assert_passed_count "environment projection capture matrix" "$logfile" 3' "$integration_runner"
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \
@@ -1290,7 +1326,13 @@ for billing_runner in \
     "$integration_runner" \
     "$ROOT/scripts/ci/verify/rust-stack-rehearsal.sh" \
     "$ROOT/scripts/ci/verify/kind/common.sh"; do
-  grep -qF -- '--test wire_contract configured_billing_wire_contract' "$billing_runner"
+  if [[ "$billing_runner" == */kind/common.sh ]]; then
+    # Kind executes the exact libtest produced by the separate build job.
+    grep -qF -- '"$binary" configured_billing_wire_contract' "$billing_runner"
+    grep -qF -- '"$RUN_DIR/billing-contract-build.jsonl"' "$billing_runner"
+  else
+    grep -qF -- '--test wire_contract configured_billing_wire_contract' "$billing_runner"
+  fi
   if rg -n '(^|[[:space:]])go test.*billing|\./billing/\.\.\.|BILLING_STRIPE_CONFIGURED.*absent|billing is not enabled' \
       "$billing_runner"; then
     echo "Automatic gate still carries a retired Go or Stripe-disabled billing contract: $billing_runner" >&2
@@ -1442,9 +1484,17 @@ while IFS='|' read -r job_id job_name runner expectation_name; do
   grep -qF "  ${job_id}:" "$block"
   grep -qF "    name: ${job_name}" "$block"
   grep -qF "    runs-on: ${runner}" "$block"
-  grep -qF \
-    "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
-    "$block"
+  if [ "$job_id" = edge-kind ]; then
+    # Its optional producer dependencies need an always() condition so edge-
+    # only selection still runs. The executable workflow fixture also proves
+    # every selected Kind producer must succeed before this job can run.
+    grep -qF "needs.verification-selection.outputs.edge_kind_expected == 'true'" "$block"
+    python3 -B "$ROOT/scripts/ci/tests/test-kind-build-workflow.py"
+  else
+    grep -qF \
+      "    if: \${{ needs.verification-selection.outputs.${expectation_name}_expected == 'true' }}" \
+      "$block"
+  fi
   if grep -qF '    strategy:' "$block"; then
     echo "${job_id}: capability dispatch retained an empty-matrix dependency" >&2
     exit 1
@@ -1717,8 +1767,8 @@ if grep -Eq '^    runs-on: (ubuntu-latest|untrusted-validation|ci-kind|kind-e2e|
   echo 'Codewire CI still depends on a legacy compatibility label' >&2
   exit 1
 fi
-[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 11 ]] || {
-  echo 'Codewire CI must declare nine ordinary heavy groups, one opted-in measurement matrix and its post-measurement probe' >&2
+[[ "$(grep -Fc '    runs-on: ci-heavy' "$WORKFLOW")" -eq 14 ]] || {
+  echo 'Codewire CI requires nine ordinary heavy groups, three parallel Kind producers, one opted-in measurement matrix and its post-measurement probe' >&2
   exit 1
 }
 [[ "$(grep -Fc '    runs-on: ci-lite' "$WORKFLOW")" -eq 3 ]] || {
@@ -1804,8 +1854,8 @@ top_level_jobs="$(awk '
   in_jobs && /^  [A-Za-z0-9_-]+:$/ { count++ }
   END { print count + 0 }
 ' "$WORKFLOW")"
-if [ "$top_level_jobs" != 14 ]; then
-  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eight groups, aggregate, opted-in measurement matrix and post-measurement probe" >&2
+if [ "$top_level_jobs" != 17 ]; then
+  echo "product CI defines ${top_level_jobs} jobs; expected selector, two artifact jobs, eight groups, three Kind producers, aggregate, opted-in measurement matrix and post-measurement probe" >&2
   exit 1
 fi
 for legacy_job in contracts rust go-support web sdk-go sdk-ts sdk-python \
@@ -2104,7 +2154,7 @@ for contract in 'Run selected Rust and transport|rust' 'Run selected Rust and tr
   }
 done
 rust_transport_protoc_line="$(grep -n -m1 \
-  'name: Install pinned protoc for guest initramfs reproduction' \
+  'name: Install pinned protoc for Rust and guest builds' \
   "$rust_transport_block" | cut -d: -f1)"
 rust_transport_run_line="$(grep -n -m1 'name: Run selected Rust and transport' \
   "$rust_transport_block" | cut -d: -f1)"
@@ -2114,12 +2164,18 @@ if [ -z "$rust_transport_protoc_line" ] \
   exit 1
 fi
 rust_transport_protoc_condition="$(grep -A1 -F \
-  'name: Install pinned protoc for guest initramfs reproduction' \
+  'name: Install pinned protoc for Rust and guest builds' \
   "$rust_transport_block")"
-grep -qF \
-  "contains(needs.verification-selection.outputs.selection, '|transport_pkg_codewire_vmm_guest_probe|')" \
+for token in rust transport transport_pkg_codewire_vmm_guest_probe; do
+  grep -qF "contains(needs.verification-selection.outputs.selection, '|${token}|')" \
+    <<<"$rust_transport_protoc_condition" || {
+    echo "rust-transport: pinned protoc omits ${token} compilation" >&2
+    exit 1
+  }
+done
+grep -qF "needs.verification-selection.outputs.desktop_package_selected == 'true'" \
   <<<"$rust_transport_protoc_condition" || {
-  echo 'rust-transport: pinned protoc is not isolated to guest-probe reproduction' >&2
+  echo 'rust-transport: pinned protoc omits desktop compilation' >&2
   exit 1
 }
 grep -qF 'protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip' \

@@ -5,12 +5,15 @@
 
 use std::ffi::OsStr;
 use std::fs::{DirBuilder, File};
+#[cfg(feature = "codex-enrollment")]
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "codex-enrollment")]
 use rustix::fs::{Mode, OFlags};
 use thiserror::Error;
+#[cfg(feature = "codex-enrollment")]
 use zeroize::Zeroizing;
 
 /// Value-blind failures for private provider login staging.
@@ -131,6 +134,7 @@ impl Drop for PrivateProviderHome {
     }
 }
 
+#[cfg(feature = "codex-enrollment")]
 pub(crate) fn read_private_file(
     home: &PrivateProviderHome,
     name: &str,

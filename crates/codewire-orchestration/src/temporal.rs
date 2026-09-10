@@ -353,6 +353,29 @@ impl EnvironmentActivities {
         .await
     }
 
+    #[activity(name = "EnvironmentRestartSourcesActivity")]
+    pub async fn restart_sources(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        cmd: EnvironmentActivityCommand,
+    ) -> Result<(), ActivityError> {
+        let setup_identity = setup_activity_identity(&ctx, &cmd)?;
+        let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
+            return Ok(());
+        };
+        run_cleanup_aware_environment_activity(
+            ctx.clone(),
+            lifecycle::handle_environment_restart_sources(
+                &self.wctx,
+                &job_payload(&cmd, "environment.restart_sources"),
+                &authority,
+                setup_identity,
+                ctx,
+            ),
+        )
+        .await
+    }
+
     #[activity(name = "EnvironmentDestroyActivity")]
     pub async fn destroy(
         self: Arc<Self>,
@@ -477,7 +500,7 @@ fn short_activity_opts() -> ActivityOptions {
 fn known_environment_action(action: &str) -> bool {
     matches!(
         action,
-        "create" | "start" | "stop" | "destroy" | "resize" | "reconcile"
+        "create" | "start" | "stop" | "destroy" | "resize" | "restart_sources" | "reconcile"
     )
 }
 
@@ -584,6 +607,14 @@ impl EnvironmentWorkflow {
                 "stop" => {
                     ctx.start_activity(
                         EnvironmentActivities::stop,
+                        activity_cmd,
+                        environment_activity_opts(),
+                    )
+                    .await?;
+                }
+                "restart_sources" => {
+                    ctx.start_activity(
+                        EnvironmentActivities::restart_sources,
                         activity_cmd,
                         environment_activity_opts(),
                     )
@@ -1330,6 +1361,7 @@ mod tests {
         );
         assert_eq!(opts.retry_policy.as_ref().unwrap().maximum_attempts, 3);
         assert!(known_environment_action("resize"));
+        assert!(known_environment_action("restart_sources"));
     }
 
     #[test]

@@ -32,14 +32,6 @@ export interface EnvironmentAccessProfile {
   personal_credentials_confirmed: boolean;
 }
 
-export interface SetEnvironmentAccessProfileRequest {
-  binding: EnvironmentAccessProfileBinding;
-  /** Omit only when no binding is expected. No fetch-and-retry is performed. */
-  expected_binding?: EnvironmentAccessProfileBinding;
-  /** Explicit consent for this exact environment/profile/revision. */
-  confirm_personal_credentials: boolean;
-}
-
 function revision(value: bigint): bigint {
   if (typeof value !== "bigint" || value <= 0n || value > 0xffff_ffff_ffff_ffffn) {
     throw new Error("access profile revision must be a positive uint64 bigint");
@@ -68,14 +60,6 @@ function fromProfile(profile: ProtoAccessProfile | undefined): AccessProfile {
       capability_slot: entry.capabilitySlot,
       credential_id: entry.credentialId,
     })),
-  };
-}
-
-function toBinding(binding: EnvironmentAccessProfileBinding) {
-  return {
-    environmentId: binding.environment_id,
-    accessProfileId: binding.access_profile_id,
-    accessProfileRevision: revision(binding.access_profile_revision),
   };
 }
 
@@ -161,24 +145,4 @@ export class AccessProfiles {
     } catch (error) { throw mapConnectError(error); }
   }
 
-  async setEnvironmentBinding(body: SetEnvironmentAccessProfileRequest): Promise<EnvironmentAccessProfileBinding> {
-    try {
-      if (typeof body.confirm_personal_credentials !== "boolean") {
-        throw new Error("confirm_personal_credentials must be an explicit boolean");
-      }
-      const response = await this.client.setEnvironmentAccessProfile({
-        binding: toBinding(body.binding),
-        expectedBinding: body.expected_binding ? toBinding(body.expected_binding) : undefined,
-        confirmPersonalCredentials: body.confirm_personal_credentials,
-      });
-      if (!response.binding) throw new Error("access profile response omitted binding");
-      return fromBinding(response.binding);
-    } catch (error) { throw mapConnectError(error); }
-  }
-
-  async clearEnvironmentBinding(expectedBinding: EnvironmentAccessProfileBinding): Promise<void> {
-    try {
-      await this.client.clearEnvironmentAccessProfile({ expectedBinding: toBinding(expectedBinding) });
-    } catch (error) { throw mapConnectError(error); }
-  }
 }

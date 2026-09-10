@@ -10,20 +10,20 @@ use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use codewire_access::{
     AccessProfileId, BrokerOperationId, BrokerRouteId,
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialId, DerivedGrant,
-    EnvironmentId, GrantPermission,
+    EnvironmentAccessBinding, EnvironmentId, GrantPermission,
 };
 use codewire_protected_store::{ProtectedStore, ProtectedValue};
 use hyper_util::rt::TokioIo;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
-use tokio::sync::{Mutex, Semaphore, oneshot};
+use tokio::sync::{Mutex, Notify, Semaphore, oneshot, watch};
 use tokio_stream::{StreamExt as _, once, pending};
 use tonic::transport::server::Connected;
 use tonic::transport::{Channel, Endpoint, Server};
@@ -39,16 +39,28 @@ use crate::control::v1::local_credential_broker_lease_service_server::{
 use crate::service::{credential_to_proto, derived_grant_to_proto};
 use crate::{
     CredentialOperationLease, CredentialOperationLeaseRequest, CredentialRefreshAdmission,
-    LocalCredentialAuthority, LocalCredentialError, protected_entry_id,
+    LocalCredentialAuthority, LocalCredentialError, PlatformCredentialBinding,
+    PlatformCredentialConnector, deny_generic_ssh_lease, protected_entry_id,
 };
 
-const BROKER_CHANNEL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const MAX_BROKER_LEASE_RPC_MESSAGE_BYTES: usize = 64 * 1024;
+mod delegation;
+mod projection;
+mod ssh;
+pub use delegation::{LocalCredentialDelegationClient, LocalCredentialDelegationOutput};
+pub use projection::LocalEnvironmentProjectionBinding;
+pub(crate) use ssh::LocalSshOperationRuntime;
+pub use ssh::{LocalSshSignError, LocalSshSignRequest, LocalSshSigner};
+
+const BROKER_CHANNEL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
+const MAX_BROKER_LEASE_RPC_MESSAGE_BYTES: usize =
+    codewire_workload_secrets::MAX_ENVIRONMENT_PROJECTION_BYTES + 64 * 1024;
+const MAX_BROKER_DELEGATION_RPC_MESSAGE_BYTES: usize =
+    codewire_gateway_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES + 8;
 const MAX_BROKER_LEASE_RPC_CONCURRENCY: usize = 16;
 const MAX_BROKER_PROTECTED_STORE_OPERATIONS: usize = 1;
 pub(crate) const MAX_RECENT_BROKER_LEASE_AUDIT_EVENTS: usize = 4_096;
 pub(crate) const MAX_BROKER_LEASE_AUDIT_LIST_LIMIT: usize = 256;
-pub const BROKER_LEASE_PROTOCOL_VERSION: u32 = 4;
+pub const BROKER_LEASE_PROTOCOL_VERSION: u32 = 8;
 
 /// Result of exact refresh admission. Recovery completes durable bookkeeping;
 /// it does not confer permission to consume material for an operation.
@@ -200,6 +212,48 @@ impl<S> LocalCredentialBrokerLeaseClient<S>
 where
     S: ProtectedStore + Clone + 'static,
 {
+    /// Execute one typed, selected SSH operation on this channel's immutable
+    /// environment generation. The unary call stays alive through the
+    /// authority's bounded worker drain; no SSH material is read client-side.
+    pub async fn ssh_operation(
+        &mut self,
+        request: codewire_gateway_proto::codewire::bridge::v1::CredentialSshRequest,
+    ) -> Result<
+        codewire_gateway_proto::codewire::bridge::v1::CredentialSshResponse,
+        BrokerLeaseChannelError,
+    > {
+        use codewire_gateway_proto::codewire::bridge::v1::credential_ssh_response::Result as SshResult;
+        let operation = codewire_gateway_proto::ssh::validate_request(&request)
+            .map_err(|_| BrokerLeaseChannelError::InvalidRequest)?;
+        let request_id = request.request_id.clone();
+        let original_deadline = request.deadline_unix_ms;
+        let remaining = codewire_gateway_proto::ssh::remaining_deadline(original_deadline)
+            .map_err(|_| BrokerLeaseChannelError::InvalidRequest)?;
+        let mut rpc_request = Request::new(v1::BrokerSshRequest {
+            protocol_version: BROKER_LEASE_PROTOCOL_VERSION,
+            request: Some(request),
+        });
+        rpc_request
+            .set_timeout(ssh::transport_timeout(remaining).min(BROKER_CHANNEL_REQUEST_TIMEOUT));
+        let response = self
+            .inner
+            .ssh_operation(rpc_request)
+            .await
+            .map_err(map_client_status)?
+            .into_inner();
+        if response.request_id != request_id
+            || codewire_gateway_proto::ssh::validate_response(&response, operation).is_err()
+        {
+            return Err(BrokerLeaseChannelError::InvalidResponse);
+        }
+        if !matches!(response.result, Some(SshResult::Failure(_)))
+            && codewire_gateway_proto::ssh::remaining_deadline(original_deadline).is_err()
+        {
+            return Err(BrokerLeaseChannelError::InvalidResponse);
+        }
+        Ok(response)
+    }
+
     pub async fn connect(
         stream: UnixStream,
         protected_store: S,
@@ -296,6 +350,8 @@ where
         {
             return Err(BrokerLeaseChannelError::InvalidResponse);
         }
+        deny_generic_ssh_lease(&credential.metadata)
+            .map_err(|_| BrokerLeaseChannelError::Denied)?;
         let entry_id = protected_entry_id(&credential.metadata.id, response.material_generation)
             .map_err(|_| BrokerLeaseChannelError::InvalidResponse)?;
         let operation_permit = Arc::clone(&self.protected_store_operations)
@@ -570,10 +626,17 @@ where
 
     /// Complete the authority-owned launch handshake only after the broker has
     /// authenticated and opened the matching guest-daemon bridge.
-    pub async fn report_ready(&mut self) -> Result<(), BrokerLeaseChannelError> {
+    pub async fn report_ready(
+        &mut self,
+        ready: codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeReady,
+    ) -> Result<(), BrokerLeaseChannelError> {
+        if !delegation::ready_matches(&self.environment_id, self.environment_generation, &ready) {
+            return Err(BrokerLeaseChannelError::InvalidRequest);
+        }
         self.inner
             .report_broker_ready(v1::BrokerReadyRequest {
                 protocol_version: BROKER_LEASE_PROTOCOL_VERSION,
+                guest_ready: Some(ready),
             })
             .await
             .map_err(map_client_status)?;
@@ -589,53 +652,100 @@ pub async fn serve_broker_lease_channel<S>(
     stream: UnixStream,
     environment_id: EnvironmentId,
     environment_generation: u64,
+    local_profile: Option<EnvironmentAccessBinding>,
 ) -> Result<(), BrokerLeaseChannelError>
 where
     S: ProtectedStore + 'static,
 {
     serve_broker_lease_channel_with_ready(
-        authority,
+        BrokerChannelRefreshLifetime::new(authority),
         stream,
         environment_id,
         environment_generation,
         Arc::new(BrokerLeaseAuditLog::default()),
         None,
+        BrokerLeaseChannelControl {
+            local_profile,
+            ..Default::default()
+        },
     )
     .await
 }
 
+#[derive(Default)]
+pub(crate) struct BrokerLeaseChannelControl {
+    pub local_profile: Option<EnvironmentAccessBinding>,
+    pub ready: Option<oneshot::Sender<()>>,
+    pub shutdown: Option<watch::Receiver<bool>>,
+    pub platform: Option<(
+        PlatformCredentialBinding,
+        Arc<dyn PlatformCredentialConnector>,
+    )>,
+    pub platform_delegated: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrokerPlatformMode {
+    Local,
+    Delegated,
+    SourcesOnly,
+}
+
 pub(crate) async fn serve_broker_lease_channel_with_ready<S>(
-    authority: Arc<LocalCredentialAuthority<S>>,
+    refresh_lifetime: Arc<BrokerChannelRefreshLifetime<S>>,
     stream: UnixStream,
     environment_id: EnvironmentId,
     environment_generation: u64,
     audit: Arc<BrokerLeaseAuditLog>,
-    ready: Option<oneshot::Sender<()>>,
+    projection: Option<LocalEnvironmentProjectionBinding>,
+    control: BrokerLeaseChannelControl,
 ) -> Result<(), BrokerLeaseChannelError>
 where
     S: ProtectedStore + 'static,
 {
+    let BrokerLeaseChannelControl {
+        local_profile,
+        ready,
+        shutdown,
+        platform,
+        platform_delegated,
+    } = control;
     if environment_generation == 0 {
         return Err(BrokerLeaseChannelError::InvalidRequest);
     }
-    let channel_id = Uuid::new_v4();
-    let refresh_lifetime = Arc::new(BrokerChannelRefreshLifetime {
-        authority: Arc::clone(&authority),
-        channel_id,
-        closed: AtomicBool::new(false),
-        active_operations: AtomicUsize::new(0),
-    });
+    let channel_id = refresh_lifetime.channel_id;
+    let authority = Arc::clone(&refresh_lifetime.authority);
     let _refresh_guard = BrokerChannelRefreshGuard {
         lifetime: Arc::clone(&refresh_lifetime),
     };
+    let platform_mode = match (&platform, platform_delegated) {
+        (None, false) => BrokerPlatformMode::Local,
+        (Some(_), true) => BrokerPlatformMode::Delegated,
+        (Some((binding, _)), false) if binding.selection.profile.is_none() => {
+            BrokerPlatformMode::SourcesOnly
+        }
+        _ => return Err(BrokerLeaseChannelError::InvalidRequest),
+    };
+    let max_rpc_message_bytes = if platform_mode == BrokerPlatformMode::Delegated {
+        MAX_BROKER_DELEGATION_RPC_MESSAGE_BYTES
+    } else {
+        MAX_BROKER_LEASE_RPC_MESSAGE_BYTES
+    };
     let service = BrokerLeaseRpc {
+        local_profile,
         authority,
         channel_id,
-        refresh_lifetime,
+        refresh_lifetime: Arc::clone(&refresh_lifetime),
         environment_id,
         environment_generation,
         audit,
         ready: Mutex::new(ready),
+        projection,
+        projection_operations: Arc::new(Semaphore::new(1)),
+        platform: Mutex::new(platform),
+        platform_mode,
+        platform_admitted: Arc::new(AtomicBool::new(false)),
+        platform_sources: Mutex::new(None),
     };
     let (closed_tx, closed_rx) = oneshot::channel();
     let stream = ObservedBrokerStream {
@@ -646,18 +756,36 @@ where
     // actual peer. A one-item stream that ends immediately would make Tonic's
     // accept future complete before the connection's RPC lifetime ends.
     let incoming = once(Ok::<_, io::Error>(stream)).chain(pending());
-    Server::builder()
+    let closing_lifetime = Arc::clone(&refresh_lifetime);
+    let result = Server::builder()
         .concurrency_limit_per_connection(MAX_BROKER_LEASE_RPC_CONCURRENCY)
         .add_service(
             LocalCredentialBrokerLeaseServiceServer::new(service)
-                .max_decoding_message_size(MAX_BROKER_LEASE_RPC_MESSAGE_BYTES)
-                .max_encoding_message_size(MAX_BROKER_LEASE_RPC_MESSAGE_BYTES),
+                .max_decoding_message_size(max_rpc_message_bytes)
+                .max_encoding_message_size(max_rpc_message_bytes),
         )
         .serve_with_incoming_shutdown(incoming, async move {
-            let _ = closed_rx.await;
+            tokio::select! {
+                _ = closed_rx => {}
+                _ = closing_lifetime.closed() => {}
+                _ = async {
+                    if let Some(mut shutdown) = shutdown {
+                        if !*shutdown.borrow() { let _ = shutdown.changed().await; }
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+            }
+            closing_lifetime.close();
         })
         .await
-        .map_err(|_| BrokerLeaseChannelError::Unavailable)
+        .map_err(|_| BrokerLeaseChannelError::Unavailable);
+    refresh_lifetime.close();
+    refresh_lifetime.wait_for_operations().await;
+    if refresh_lifetime.ssh_operations.cleanup_failed() {
+        return Err(BrokerLeaseChannelError::Unavailable);
+    }
+    result
 }
 
 struct BrokerChannelRefreshGuard<S: ProtectedStore> {
@@ -670,14 +798,43 @@ impl<S: ProtectedStore> Drop for BrokerChannelRefreshGuard<S> {
     }
 }
 
-struct BrokerChannelRefreshLifetime<S: ProtectedStore> {
+pub(crate) struct BrokerChannelRefreshLifetime<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
     channel_id: Uuid,
     closed: AtomicBool,
     active_operations: AtomicUsize,
+    drained: Notify,
+    close_notification: Notify,
+    finalization: AtomicU8,
+    ssh_operations: ssh::ChannelSshOperations,
 }
 
 impl<S: ProtectedStore> BrokerChannelRefreshLifetime<S> {
+    pub(crate) fn new(authority: Arc<LocalCredentialAuthority<S>>) -> Arc<Self> {
+        Self::new_with_ssh_runtime(authority, LocalSshOperationRuntime::new(None))
+    }
+
+    pub(crate) fn new_with_ssh_runtime(
+        authority: Arc<LocalCredentialAuthority<S>>,
+        ssh_runtime: Arc<LocalSshOperationRuntime>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            authority,
+            channel_id: Uuid::new_v4(),
+            closed: AtomicBool::new(false),
+            active_operations: AtomicUsize::new(0),
+            drained: Notify::new(),
+            close_notification: Notify::new(),
+            finalization: AtomicU8::new(0),
+            ssh_operations: ssh::ChannelSshOperations::new(ssh_runtime),
+        })
+    }
+
+    pub(crate) async fn close_and_wait(&self) {
+        self.close();
+        self.wait_for_operations().await;
+    }
+
     fn acquire(self: &Arc<Self>) -> Option<BrokerChannelRefreshOperation<S>> {
         if self.closed.load(Ordering::Acquire) {
             return None;
@@ -697,18 +854,55 @@ impl<S: ProtectedStore> BrokerChannelRefreshLifetime<S> {
     }
 
     fn close(&self) {
-        if !self.closed.swap(true, Ordering::AcqRel)
-            && self.active_operations.load(Ordering::Acquire) == 0
-        {
-            self.release_refreshes();
-        }
+        self.closed.store(true, Ordering::Release);
+        self.close_notification.notify_waiters();
+        self.ssh_operations.cancel_all();
+        self.finalize_if_idle();
     }
 
     fn release_operation(&self) {
         let previous = self.active_operations.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0);
-        if previous == 1 && self.closed.load(Ordering::Acquire) {
+        if previous == 1 {
+            self.finalize_if_idle();
+        }
+    }
+
+    fn finalize_if_idle(&self) {
+        if self.closed.load(Ordering::Acquire)
+            && self.active_operations.load(Ordering::Acquire) == 0
+            && self
+                .finalization
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
             self.release_refreshes();
+            self.finalization.store(2, Ordering::Release);
+            self.drained.notify_waiters();
+        }
+    }
+
+    async fn wait_for_operations(&self) {
+        loop {
+            let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.finalization.load(Ordering::Acquire) == 2 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn closed(&self) {
+        loop {
+            let notified = self.close_notification.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -783,6 +977,7 @@ impl Connected for ObservedBrokerStream {
 }
 
 struct BrokerLeaseRpc<S: ProtectedStore> {
+    local_profile: Option<EnvironmentAccessBinding>,
     authority: Arc<LocalCredentialAuthority<S>>,
     channel_id: Uuid,
     refresh_lifetime: Arc<BrokerChannelRefreshLifetime<S>>,
@@ -790,6 +985,29 @@ struct BrokerLeaseRpc<S: ProtectedStore> {
     environment_generation: u64,
     audit: Arc<BrokerLeaseAuditLog>,
     ready: Mutex<Option<oneshot::Sender<()>>>,
+    projection: Option<LocalEnvironmentProjectionBinding>,
+    projection_operations: Arc<Semaphore>,
+    platform: Mutex<
+        Option<(
+            PlatformCredentialBinding,
+            Arc<dyn PlatformCredentialConnector>,
+        )>,
+    >,
+    platform_mode: BrokerPlatformMode,
+    platform_admitted: Arc<AtomicBool>,
+    platform_sources: Mutex<Option<delegation::sources_only::PlatformSourceConnection>>,
+}
+
+impl<S: ProtectedStore> BrokerLeaseRpc<S> {
+    fn require_local_mode(&self) -> Result<(), Status> {
+        if self.platform_mode == BrokerPlatformMode::Delegated {
+            Err(Status::failed_precondition(
+                "local credential operation is unavailable in platform mode",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -797,13 +1015,57 @@ impl<S> LocalCredentialBrokerLeaseService for BrokerLeaseRpc<S>
 where
     S: ProtectedStore + 'static,
 {
+    type DelegateCredentialsStream = delegation::BrokerDelegationOutput;
+
+    async fn delegate_credentials(
+        &self,
+        request: Request<
+            tonic::Streaming<
+                codewire_gateway_proto::codewire::bridge::v1::CredentialBridgeGuestMessage,
+            >,
+        >,
+    ) -> Result<Response<Self::DelegateCredentialsStream>, Status> {
+        self.delegate_platform_credentials(request).await
+    }
+
+    async fn ssh_operation(
+        &self,
+        request: Request<v1::BrokerSshRequest>,
+    ) -> Result<Response<codewire_gateway_proto::codewire::bridge::v1::CredentialSshResponse>, Status>
+    {
+        self.require_local_mode()?;
+        self.run_ssh_operation(request.into_inner()).await
+    }
+
+    async fn project_environment(
+        &self,
+        request: Request<v1::BrokerEnvironmentProjectionRequest>,
+    ) -> Result<Response<v1::BrokerEnvironmentProjectionResponse>, Status> {
+        self.require_local_mode()?;
+        let request = request.into_inner();
+        let response = if self.platform_mode == BrokerPlatformMode::SourcesOnly {
+            self.project_platform_sources(request).await?
+        } else {
+            self.project_bound_environment(request).await?
+        };
+        Ok(Response::new(response))
+    }
+
     async fn report_broker_ready(
         &self,
         request: Request<v1::BrokerReadyRequest>,
     ) -> Result<Response<v1::BrokerReadyResponse>, Status> {
-        if request.into_inner().protocol_version != BROKER_LEASE_PROTOCOL_VERSION {
+        let request = request.into_inner();
+        if request.protocol_version != BROKER_LEASE_PROTOCOL_VERSION {
             return Err(Status::failed_precondition(
                 "credential broker lease protocol is incompatible",
+            ));
+        }
+        if self.platform_mode == BrokerPlatformMode::Delegated
+            && (!self.platform_admitted.load(Ordering::Acquire) || request.guest_ready.is_some())
+        {
+            return Err(Status::failed_precondition(
+                "platform credential delegation is not admitted",
             ));
         }
         let ready = self
@@ -812,6 +1074,41 @@ where
             .await
             .take()
             .ok_or_else(|| Status::failed_precondition("credential broker is already ready"))?;
+        if self.platform_mode != BrokerPlatformMode::Delegated {
+            let guest_ready = request
+                .guest_ready
+                .ok_or_else(|| Status::permission_denied("credential broker Ready is missing"))?;
+            if !delegation::ready_matches(
+                &self.environment_id,
+                self.environment_generation,
+                &guest_ready,
+            ) {
+                return Err(Status::permission_denied(
+                    "credential broker Ready is invalid",
+                ));
+            }
+            if self.platform_mode == BrokerPlatformMode::SourcesOnly {
+                self.admit_platform_sources(guest_ready).await?;
+            }
+        }
+        let authority = Arc::clone(&self.authority);
+        let environment_id = self.environment_id.clone();
+        let generation = self.environment_generation;
+        let selected = self.local_profile.clone();
+        let checked = tokio::task::spawn_blocking(move || {
+            authority.evaluate_selected_environment_grants(
+                &environment_id,
+                generation,
+                selected.as_ref(),
+            )
+        })
+        .await
+        .map_err(|_| Status::unavailable("credential broker authority is unavailable"))
+        .and_then(|result| result.map_err(map_server_error));
+        if let Err(error) = checked {
+            self.refresh_lifetime.close();
+            return Err(error);
+        }
         ready
             .send(())
             .map_err(|_| Status::unavailable("credential broker launch was cancelled"))?;
@@ -822,6 +1119,7 @@ where
         &self,
         request: Request<v1::BrokerLeaseRequest>,
     ) -> Result<Response<v1::BrokerLeaseResponse>, Status> {
+        self.require_local_mode()?;
         let request = request.into_inner();
         let request_id = Uuid::parse_str(&request.request_id)
             .map_err(|_| Status::invalid_argument("invalid broker lease request"))?;
@@ -842,8 +1140,12 @@ where
             route: route.clone(),
         };
         let authority = Arc::clone(&self.authority);
+        let selected = self.local_profile.clone();
         let admission = match tokio::task::spawn_blocking(move || {
-            authority.admit_environment_credential_operation(&admission_request)
+            authority.admit_selected_environment_credential_operation(
+                &admission_request,
+                selected.as_ref(),
+            )
         })
         .await
         {
@@ -873,6 +1175,28 @@ where
         };
         let admission = match admission {
             Ok(admission) => {
+                if deny_generic_ssh_lease(&admission.credential.metadata).is_err() {
+                    self.audit
+                        .record(BrokerLeaseAuditEvent {
+                            sequence: 0,
+                            observed_at_unix_ms: 0,
+                            environment_id: self.environment_id.clone(),
+                            environment_generation: self.environment_generation,
+                            request_id,
+                            capability_slot,
+                            operation,
+                            route,
+                            decision: BrokerLeaseAuditDecision::Denied,
+                            credential_id: None,
+                            profile_id: None,
+                            profile_revision: None,
+                            credential_revocation_generation: None,
+                        })
+                        .await;
+                    return Err(Status::permission_denied(
+                        "SSH credentials require the typed SSH operation",
+                    ));
+                }
                 self.audit
                     .record(BrokerLeaseAuditEvent {
                         sequence: 0,
@@ -930,6 +1254,7 @@ where
         &self,
         request: Request<v1::BrokerCredentialRefreshRequest>,
     ) -> Result<Response<v1::BrokerCredentialRefreshAdmission>, Status> {
+        self.require_local_mode()?;
         let request = request.into_inner();
         let refresh_id = parse_canonical_uuid(&request.refresh_id, "credential refresh")?;
         let request_id = parse_canonical_uuid(&request.request_id, "credential refresh")?;
@@ -947,6 +1272,18 @@ where
         {
             return Err(Status::invalid_argument(
                 "invalid credential refresh request",
+            ));
+        }
+        // The caller's grant is untrusted, but must name this channel's exact
+        // selection before the authority atomically rederives it. The retained
+        // refresh permit then carries that same profile through Start/recovery.
+        if !self.local_profile.as_ref().is_some_and(|selected| {
+            selected.environment_id == grant.environment_id
+                && selected.profile_id == grant.profile_id
+                && selected.profile_revision == grant.profile_revision
+        }) {
+            return Err(Status::permission_denied(
+                "credential refresh profile changed",
             ));
         }
         let admission_request = CredentialOperationLeaseRequest {
@@ -1000,6 +1337,7 @@ where
         &self,
         request: Request<v1::BrokerCredentialRefreshStartRequest>,
     ) -> Result<Response<v1::BrokerCredentialRefreshStartResponse>, Status> {
+        self.require_local_mode()?;
         let request = request.into_inner();
         let refresh_id = parse_canonical_uuid(&request.refresh_id, "credential refresh start")?;
         let request_id = parse_canonical_uuid(&request.request_id, "credential refresh start")?;
@@ -1025,6 +1363,7 @@ where
         &self,
         request: Request<v1::BrokerCredentialRefreshCommitRequest>,
     ) -> Result<Response<v1::BrokerCredentialRefreshCommitResponse>, Status> {
+        self.require_local_mode()?;
         let request = request.into_inner();
         let refresh_id = parse_canonical_uuid(&request.refresh_id, "credential refresh commit")?;
         let request_id = parse_canonical_uuid(&request.request_id, "credential refresh commit")?;
@@ -1051,6 +1390,7 @@ where
         &self,
         request: Request<v1::BrokerCredentialRefreshAbortRequest>,
     ) -> Result<Response<v1::BrokerCredentialRefreshAbortResponse>, Status> {
+        self.require_local_mode()?;
         let request = request.into_inner();
         let refresh_id = parse_canonical_uuid(&request.refresh_id, "credential refresh abort")?;
         let request_id = parse_canonical_uuid(&request.request_id, "credential refresh abort")?;
@@ -1074,6 +1414,7 @@ where
         &self,
         request: Request<v1::BrokerCredentialRefreshFailureRequest>,
     ) -> Result<Response<v1::BrokerCredentialRefreshFailureResponse>, Status> {
+        self.require_local_mode()?;
         let request = request.into_inner();
         let refresh_id = parse_canonical_uuid(&request.refresh_id, "credential refresh failure")?;
         let request_id = parse_canonical_uuid(&request.request_id, "credential refresh failure")?;
@@ -1156,9 +1497,11 @@ fn map_server_error(error: LocalCredentialError) -> Status {
         | LocalCredentialError::CredentialMaterialMissing
         | LocalCredentialError::CredentialNotFound
         | LocalCredentialError::EnvironmentBindingNotFound
+        | LocalCredentialError::StaleEnvironmentBinding
         | LocalCredentialError::ProfileNotFound
         | LocalCredentialError::ProfileRevisionNotFound
         | LocalCredentialError::StaleProfileRevision
+        | LocalCredentialError::StaleCredentialRevision
         | LocalCredentialError::Access(_) => {
             Status::failed_precondition("credential broker lease was denied")
         }
@@ -1393,12 +1736,21 @@ mod tests {
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
         let audit = Arc::new(BrokerLeaseAuditLog::default());
         let server = tokio::spawn(serve_broker_lease_channel_with_ready(
-            Arc::clone(&authority),
+            BrokerChannelRefreshLifetime::new(Arc::clone(&authority)),
             server_stream,
             environment_id.clone(),
             7,
             Arc::clone(&audit),
             None,
+            BrokerLeaseChannelControl {
+                local_profile: Some(
+                    authority
+                        .get_environment_access_binding(&environment_id)
+                        .unwrap()
+                        .binding,
+                ),
+                ..Default::default()
+            },
         ));
         let mut client = LocalCredentialBrokerLeaseClient::connect(
             client_stream,
@@ -1503,6 +1855,12 @@ mod tests {
             server_stream,
             environment_id.clone(),
             7,
+            Some(
+                authority
+                    .get_environment_access_binding(&environment_id)
+                    .unwrap()
+                    .binding,
+            ),
         ));
         let mut client = LocalCredentialBrokerLeaseClient::connect(
             client_stream,
@@ -1658,6 +2016,12 @@ mod tests {
             server_stream,
             environment_id.clone(),
             7,
+            Some(
+                authority
+                    .get_environment_access_binding(&environment_id)
+                    .unwrap()
+                    .binding,
+            ),
         ));
         let mut client = LocalCredentialBrokerLeaseClient::connect(
             client_stream,
@@ -1743,11 +2107,14 @@ mod tests {
                 .await,
             Err(BrokerLeaseChannelError::Denied)
         ));
+        let observed = authority.get_credential(&credential_id).unwrap();
         let recovered = authority
             .rotate_credential_material(
                 &credential_id,
+                observed.metadata.revocation_generation,
                 ProtectedValue::from_slice(b"synthetic-reconnected-oauth-bundle").unwrap(),
                 None,
+                observed.metadata.account_hint,
             )
             .unwrap();
         assert_eq!(
@@ -1816,11 +2183,15 @@ mod tests {
         get_control.block();
         let rotating_authority = Arc::clone(&authority);
         let rotating_id = credential.metadata.id.clone();
+        let rotating_revision = credential.metadata.revocation_generation;
+        let rotating_hint = credential.metadata.account_hint.clone();
         let rotation = tokio::task::spawn_blocking(move || {
             rotating_authority.rotate_credential_material(
                 &rotating_id,
+                rotating_revision,
                 ProtectedValue::from_slice(b"synthetic-manual-rotation").unwrap(),
                 None,
+                rotating_hint,
             )
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1908,14 +2279,9 @@ mod tests {
             .admit_environment_credential_operation(&request)
             .unwrap()
             .grant;
-        let channel_id = Uuid::new_v4();
+        let lifetime = BrokerChannelRefreshLifetime::new(Arc::clone(&authority));
+        let channel_id = lifetime.channel_id;
         let refresh_id = Uuid::new_v4();
-        let lifetime = Arc::new(BrokerChannelRefreshLifetime {
-            authority: Arc::clone(&authority),
-            channel_id,
-            closed: AtomicBool::new(false),
-            active_operations: AtomicUsize::new(0),
-        });
         let operation = lifetime.acquire().unwrap();
         let blocking_authority = Arc::clone(&authority);
         let credential_id = credential.metadata.id.clone();
@@ -1943,19 +2309,24 @@ mod tests {
         assert!(matches!(
             authority.rotate_credential_material(
                 &credential_id,
+                credential.metadata.revocation_generation,
                 ProtectedValue::from_slice(b"must-not-win").unwrap(),
                 None,
+                credential.metadata.account_hint.clone(),
             ),
             Err(LocalCredentialError::CredentialRefreshInProgress)
         ));
 
         get_control.release();
         refresh.await.unwrap().unwrap();
+        let observed = authority.get_credential(&credential_id).unwrap();
         let rotated = authority
             .rotate_credential_material(
                 &credential_id,
+                observed.metadata.revocation_generation,
                 ProtectedValue::from_slice(b"synthetic-reconnected-oauth-bundle").unwrap(),
                 None,
+                observed.metadata.account_hint,
             )
             .unwrap();
         assert_eq!(rotated.metadata.revocation_generation, 2);
@@ -2006,6 +2377,12 @@ mod tests {
             server_stream,
             environment_id.clone(),
             7,
+            Some(
+                authority
+                    .get_environment_access_binding(&environment_id)
+                    .unwrap()
+                    .binding,
+            ),
         ));
         let get_control = Arc::new(BlockingGetControl::default());
         let mut client = LocalCredentialBrokerLeaseClient::connect(
@@ -2074,8 +2451,10 @@ mod tests {
         assert!(matches!(
             authority.rotate_credential_material(
                 &credential_id,
+                credential.metadata.revocation_generation,
                 ProtectedValue::from_slice(b"must-not-win").unwrap(),
                 None,
+                credential.metadata.account_hint.clone(),
             ),
             Err(LocalCredentialError::CredentialRefreshInProgress)
         ));
@@ -2095,6 +2474,12 @@ mod tests {
             server_stream,
             environment_id.clone(),
             7,
+            Some(
+                authority
+                    .get_environment_access_binding(&environment_id)
+                    .unwrap()
+                    .binding,
+            ),
         ));
         let mut client = LocalCredentialBrokerLeaseClient::connect(
             client_stream,
@@ -2261,10 +2646,16 @@ mod tests {
 
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
         let server = tokio::spawn(serve_broker_lease_channel(
-            authority,
+            Arc::clone(&authority),
             server_stream,
             environment_id.clone(),
             7,
+            Some(
+                authority
+                    .get_environment_access_binding(&environment_id)
+                    .unwrap()
+                    .binding,
+            ),
         ));
         let get_control = BlockingGetControl::blocked();
         let client_store = store.with_blocked_gets(Arc::clone(&get_control));

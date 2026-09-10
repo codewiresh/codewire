@@ -177,6 +177,65 @@ impl ResolvedImage {
         }
         Ok(())
     }
+
+    #[cfg(feature = "synthetic-oci-input-smoke")]
+    pub(crate) fn from_cached_source(
+        source_reference: String,
+        architecture: OciArchitecture,
+        source: ResolvedDescriptor,
+        store: &ContentStore,
+    ) -> Result<Self, RegistryResolverError> {
+        validate_resolved_descriptor(&source, DescriptorKind::Source)?;
+        let source_bytes = store.read_blob(&source.digest, source.size, MAXIMUM_DOCUMENT_BYTES)?;
+        let manifest = if is_index_media_type(&source.media_type) {
+            let index = ImageIndex::from_reader(source_bytes.as_slice())
+                .map_err(|_| RegistryResolverError::InvalidIndex)?;
+            validate_index(&index)?;
+            select_platform_manifest(&index, architecture)?
+        } else {
+            source.clone()
+        };
+        let manifest_bytes =
+            store.read_blob(&manifest.digest, manifest.size, MAXIMUM_DOCUMENT_BYTES)?;
+        let decoded = ImageManifest::from_reader(manifest_bytes.as_slice())
+            .map_err(|_| RegistryResolverError::InvalidManifest)?;
+        let (config, layer_descriptors) = validate_manifest(&decoded, &manifest.media_type)?;
+        let config_bytes = store.read_blob(&config.digest, config.size, MAXIMUM_DOCUMENT_BYTES)?;
+        let diff_ids = validate_image_configuration(&config_bytes, architecture)?;
+        if diff_ids.len() != layer_descriptors.len() {
+            return Err(RegistryResolverError::InvalidConfiguration);
+        }
+        let layers = layer_descriptors
+            .into_iter()
+            .zip(diff_ids)
+            .map(|(descriptor, diff_id)| ResolvedLayer {
+                descriptor,
+                diff_id,
+            })
+            .collect();
+        let image = Self {
+            source_reference,
+            architecture,
+            source,
+            manifest,
+            config,
+            layers,
+        };
+        image.verify_cached(store)?;
+        Ok(image)
+    }
+}
+
+#[cfg(feature = "synthetic-oci-input-smoke")]
+pub(crate) fn source_descriptor_from_oci(
+    descriptor: &Descriptor,
+) -> Result<ResolvedDescriptor, RegistryResolverError> {
+    descriptor_from_oci(descriptor, DescriptorKind::Source)
+}
+
+#[cfg(feature = "synthetic-oci-input-smoke")]
+pub(crate) fn validate_layout_index(index: &ImageIndex) -> Result<(), RegistryResolverError> {
+    validate_index(index)
 }
 
 pub struct RegistryResolver<'a> {

@@ -332,6 +332,8 @@ impl DaemonHarness {
             auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
+            launch_projection: None,
+            managed_credential_clients: Default::default(),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
@@ -375,6 +377,8 @@ impl DaemonHarness {
             auth_token: DaemonAuthToken::new(TEST_DAEMON_TOKEN).unwrap(),
             process_execution: ProcessExecution::Native,
             credential_bridge: None,
+            launch_projection: None,
+            managed_credential_clients: Default::default(),
         };
         let service = GatedDaemonService {
             inner: DaemonServiceServer::new(DaemonServiceImpl::new(config))

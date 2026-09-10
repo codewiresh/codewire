@@ -1,7 +1,78 @@
-
 #[test]
 fn short_env_id_does_not_panic_on_non_ascii_refs() {
     assert_eq!(short_env_id("env😀abcdef"), "env😀a");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_delete_replacement_persists_an_existing_or_unselected_target_without_stale_identity() {
+    let data = tempfile::tempdir().unwrap();
+    config::save_current_target(data.path(), &config::CurrentTargetConfig {
+        kind: "local".into(), target_ref: "deleted-vm".into(), name: "deleted-vm".into(),
+    }).unwrap();
+    for selected in [Some("remaining-vm".to_owned()), None] {
+        let replacement = super::environment::native_current_target_after_delete(selected.clone());
+        config::save_current_target(data.path(), &replacement).unwrap();
+        let saved = config::current_target(data.path()).unwrap();
+        assert_eq!(saved, replacement);
+        assert_ne!(saved.target_ref, "deleted-vm");
+        if let Some(name) = selected { assert_eq!(saved.target_ref, name); }
+        else { assert_eq!(saved, config::default_current_target()); }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn private_environment_launcher_preserves_argument_boundary_and_requires_a_command() {
+    let cli = Cli::try_parse_from([
+        "cw",
+        "__environment-launch",
+        "--projection-socket",
+        "/run/synthetic/launch.sock",
+        "--",
+        "/usr/bin/printf",
+        "--server",
+        "%s",
+    ])
+    .unwrap();
+    let Command::EnvironmentLaunch(args) = cli.command else {
+        panic!("wrong command")
+    };
+    assert_eq!(
+        args.projection_socket,
+        PathBuf::from("/run/synthetic/launch.sock")
+    );
+    assert_eq!(
+        args.command,
+        ["/usr/bin/printf", "--server", "%s"].map(std::ffi::OsString::from)
+    );
+    assert!(
+        Cli::try_parse_from([
+            "cw",
+            "__environment-launch",
+            "--projection-socket",
+            "/run/synthetic/launch.sock",
+            "--"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["cw", "__environment-launch", "--", "/bin/true"]).is_err());
+    let help = Cli::command().render_help().to_string();
+    assert!(!help.contains("__environment-launch"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn private_launcher_failure_is_value_blind_and_does_not_dispatch_normal_cli() {
+    let error = crate::run_environment_launcher_from(["cw", "config", "inspect"]).unwrap_err();
+    assert_eq!(error.to_string(), "environment launch failed");
+    let error = crate::run_environment_launcher_from([
+        "cw",
+        "__environment-launch",
+        "--unknown=synthetic-canary",
+    ])
+    .unwrap_err();
+    assert_eq!(error.to_string(), "environment launch failed");
 }
 
 #[test]
@@ -386,7 +457,7 @@ fn platform_create_rejects_native_only_options() {
     };
     assert_eq!(
         reject_local_create_options(&args).unwrap_err().to_string(),
-        "--backend, --path, --path-mode, --file, --spec, --docker-disk, and --no-docker require `cw env create --local`"
+        "--backend, --path, --path-mode, --spec, --docker-disk, and --no-docker require `cw env create --local`"
     );
 
     let cli = Cli::try_parse_from([
@@ -396,7 +467,7 @@ fn platform_create_rejects_native_only_options() {
         "create",
         "--name",
         "dev",
-        "--access-profile",
+        "--profile",
         "user/work",
     ])
     .unwrap();
@@ -407,7 +478,7 @@ fn platform_create_rejects_native_only_options() {
     else {
         panic!("expected native local environment create");
     };
-    assert_eq!(args.access_profile.as_deref(), Some("user/work"));
+    assert_eq!(args.profile.as_deref(), Some("user/work"));
     assert!(native_create_selected(&args).unwrap());
 
     let cli = Cli::try_parse_from([
@@ -415,7 +486,7 @@ fn platform_create_rejects_native_only_options() {
         "env",
         "--platform",
         "create",
-        "--access-profile",
+        "--profile",
         "user/work",
     ])
     .unwrap();
@@ -426,10 +497,17 @@ fn platform_create_rejects_native_only_options() {
     else {
         panic!("expected platform environment create");
     };
+    reject_local_create_options(&args).unwrap();
     assert_eq!(
-        reject_local_create_options(&args).unwrap_err().to_string(),
-        "--access-profile is not yet available for platform environments"
+        prepare_platform_env_create_request(&args)
+            .unwrap()
+            .project_spec
+            .credentials
+            .unwrap()
+            .profile,
+        "user/work"
     );
+    assert!(Cli::try_parse_from(["cw", "env", "create", "--access-profile", "work"]).is_err());
 
     assert!(
         Cli::try_parse_from(["cw", "env", "create", "--local", "--path-mode", "direct",]).is_err()
@@ -579,8 +657,8 @@ fn env_create_parser_accepts_direct_create_flags() {
 fn creation_commands_reject_retired_secret_project_flags_without_echoing_the_value() {
     const MARKER: &str = "synthetic-retired-secret-project-canary";
     for args in [
-        vec!["cw", "init", "--secrets", MARKER],
-        vec!["cw", "env", "create", "--secrets", MARKER],
+        vec!["cw", "init", "--secrets-project", MARKER],
+        vec!["cw", "env", "create", "--secrets-project", MARKER],
         vec![
             "cw",
             "preset",
@@ -588,13 +666,13 @@ fn creation_commands_reject_retired_secret_project_flags_without_echoing_the_val
             "example",
             "--image",
             "workspace",
-            "--secrets",
+            "--secrets-project",
             MARKER,
         ],
     ] {
         let error = Cli::try_parse_from(args).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-        assert!(error.to_string().contains("--secrets"));
+        assert!(error.to_string().contains("--secrets-project"));
         assert!(!error.to_string().contains(MARKER));
     }
 }
@@ -663,7 +741,7 @@ fn env_create_request_builds_one_canonical_project_spec() {
     assert!(spec.secrets.project.is_empty());
     let secrets = &spec.secrets;
     assert!(!secrets.organization);
-    assert!(!secrets.user);
+    assert!(secrets.user.is_none());
 }
 
 #[test]
@@ -674,6 +752,141 @@ fn environment_commands_reject_two_preset_selectors() {
         args.extend_from_slice(&["--preset", "go", "--preset-id", "preset_123"]);
         assert!(Cli::try_parse_from(args).is_err());
     }
+}
+
+#[test]
+fn platform_create_explicit_yaml_and_flags_preserve_portable_setup_and_source_intent() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("selected.yaml");
+    fs::write(
+        &file,
+        r#"
+image: ghcr.io/example/workspace:1
+install_command: npm ci
+startup_script: npm run dev
+environment: {LOG_LEVEL: info, KEEP: present}
+agents: {install: false, tools: [codex]}
+ports: [{port: 8080, label: web, access: private}]
+cpu: "2"
+memory: "8Gi"
+disk: "40Gi"
+secrets: {project: platform:original, user: platform}
+credentials: {profile: platform:user/work}
+"#,
+    )
+    .unwrap();
+    let cli = Cli::try_parse_from([
+        "cw",
+        "env",
+        "--platform",
+        "create",
+        "--file",
+        file.to_str().unwrap(),
+        "--name",
+        "builder",
+        "--secrets=platform:replacement",
+        "--org-secrets",
+        "--env=LOG_LEVEL=debug",
+    ])
+    .unwrap();
+    let Command::Env(EnvArgs {
+        command: EnvCommand::Create(args),
+        ..
+    }) = cli.command
+    else {
+        panic!("create");
+    };
+    reject_local_create_options(&args).unwrap();
+    let request = prepare_platform_env_create_request(&args).unwrap();
+    assert_eq!(request.project_spec.install_command, "npm ci");
+    assert_eq!(request.project_spec.startup_script, "npm run dev");
+    assert_eq!(request.project_spec.environment["LOG_LEVEL"], "debug");
+    assert_eq!(request.project_spec.environment["KEEP"], "present");
+    assert_eq!(request.project_spec.agents.install, Some(false));
+    assert_eq!(request.project_spec.application_ports[0].port, 8080);
+    assert_eq!(request.project_spec.resources.cpu_millicores, Some(2000));
+    assert_eq!(request.project_spec.resources.memory_mib, Some(8192));
+    assert_eq!(request.project_spec.secrets.project, "platform:replacement");
+    assert_eq!(
+        request.project_spec.secrets.user,
+        Some(codewire_project::StoragePlacement::Platform)
+    );
+    assert!(request.project_spec.secrets.organization);
+    assert_eq!(
+        request.project_spec.credentials.unwrap().profile,
+        "platform:user/work"
+    );
+    assert_eq!(
+        request.expected_profile_revision, None,
+        "metadata resolution happens before confirmation"
+    );
+    assert!(!request.confirm_personal_credentials);
+    assert!(!request.confirm_personal_secrets);
+}
+
+#[test]
+fn platform_create_rejects_local_origins_and_local_yaml_intent() {
+    for selection in [
+        "--profile=local:work",
+        "--secrets=local:development",
+        "--user-secrets=local",
+    ] {
+        let cli = Cli::try_parse_from(["cw", "env", "create", selection]).unwrap();
+        let Command::Env(EnvArgs {
+            command: EnvCommand::Create(args),
+            ..
+        }) = cli.command
+        else {
+            panic!("create");
+        };
+        assert!(
+            prepare_platform_env_create_request(&args).is_err(),
+            "{selection}"
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("selected.yaml");
+    for yaml in [
+        "mounts: [{source: ., destination: /workspace, mode: copy}]\n",
+        "ports: [{port: 8080, host_port: 8080}]\n",
+        "secrets: {user: local}\n",
+        "credentials: {profile: local:work}\n",
+    ] {
+        fs::write(&file, yaml).unwrap();
+        let cli =
+            Cli::try_parse_from(["cw", "env", "create", "--file", file.to_str().unwrap()]).unwrap();
+        let Command::Env(EnvArgs {
+            command: EnvCommand::Create(args),
+            ..
+        }) = cli.command
+        else {
+            panic!("create");
+        };
+        assert!(
+            prepare_platform_env_create_request(&args).is_err(),
+            "{yaml}"
+        );
+    }
+    fs::write(
+        &file,
+        " ".repeat(codewire_project::MAX_PROJECT_DOCUMENT_BYTES + 1),
+    )
+    .unwrap();
+    let cli =
+        Cli::try_parse_from(["cw", "env", "create", "--file", file.to_str().unwrap()]).unwrap();
+    let Command::Env(EnvArgs {
+        command: EnvCommand::Create(args),
+        ..
+    }) = cli.command
+    else {
+        panic!("create");
+    };
+    assert!(
+        prepare_platform_env_create_request(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("maximum")
+    );
 }
 
 #[test]
@@ -727,7 +940,7 @@ fn env_create_bare_defaults_to_workspace_image() {
     assert!(request.project_spec.repositories.is_empty());
     let secrets = &request.project_spec.secrets;
     assert!(!secrets.organization);
-    assert!(!secrets.user);
+    assert!(secrets.user.is_none());
 }
 
 #[test]
@@ -901,9 +1114,7 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
         panic!("expected init command");
     };
 
-    let globals = Globals {
-        server: None,
-    };
+    let globals = Globals { server: None };
     handle_init_command(&globals, args).await.unwrap();
 
     let yaml = fs::read_to_string(&path).unwrap();
@@ -921,7 +1132,7 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
     assert_eq!(spec.resources.disk_gib, Some(40));
     assert!(spec.secrets.project.is_empty());
     assert!(!spec.secrets.organization);
-    assert!(!spec.secrets.user);
+    assert!(spec.secrets.user.is_none());
     assert_eq!(spec.agents.tools, vec!["claude-code".to_string()]);
 }
 
@@ -943,9 +1154,7 @@ async fn init_command_refuses_existing_file_without_force() {
         panic!("expected init command");
     };
 
-    let globals = Globals {
-        server: None,
-    };
+    let globals = Globals { server: None };
     let err = handle_init_command(&globals, args).await.unwrap_err();
 
     assert!(err.to_string().contains("already exists"));
@@ -959,7 +1168,7 @@ fn init_command_builds_prepare_request_for_server_side_modes() {
         "init",
         "https://github.com/codewiresh/codewire@main",
         "--repo",
-        "git@github.com:codewiresh/sdk",
+        "https://github.com/codewiresh/sdk",
         "--preset-id",
         "preset_123",
         "--name",
@@ -1000,7 +1209,7 @@ fn init_command_builds_prepare_request_for_server_side_modes() {
     assert_eq!(request.draft.project_spec.repositories[0].branch, "main");
     assert_eq!(
         request.draft.project_spec.repositories[1].source,
-        "git@github.com:codewiresh/sdk"
+        "https://github.com/codewiresh/sdk"
     );
     assert_eq!(
         request.draft.project_spec.resources.cpu_millicores,
@@ -1011,6 +1220,19 @@ fn init_command_builds_prepare_request_for_server_side_modes() {
     assert_eq!(request.draft.project_spec.environment["FOO"], "bar");
     assert_eq!(request.draft.project_spec.agents.tools, ["codex"]);
     assert!(request.draft.project_spec.secrets.project.is_empty());
+}
+
+#[test]
+fn init_repository_flags_cannot_silently_import_ssh_host_trust() {
+    let cli = Cli::try_parse_from(["cw", "init", "git@example.com:team/app.git"]).unwrap();
+    let Command::Init(args) = cli.command else {
+        panic!("expected init command")
+    };
+    let error = init_prepare_request_from_args_with_repo_detector(&args, || {
+        panic!("explicit SSH intent must not consult ambient repository configuration")
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("repositories.known_hosts"));
 }
 
 #[test]
@@ -1143,8 +1365,8 @@ fn codewire_yaml_from_request_round_trips_the_canonical_project_spec() {
     cpu: "2000m"
     memory: "4096Mi"
     disk: "40Gi"
-    secrets: {project: prod, organization: true, user: true}
-    access: {profile: user/work}
+    secrets: {project: prod, organization: true, user: platform}
+    credentials: {profile: platform:user/work}
     "#,
             )
             .unwrap()
@@ -1191,7 +1413,7 @@ fn write_resolved_codewire_yaml_creates_parent_dirs() {
     );
     assert_eq!(parsed.spec.install_command, "go mod download");
     assert!(!parsed.spec.secrets.organization);
-    assert!(!parsed.spec.secrets.user);
+    assert!(parsed.spec.secrets.user.is_none());
 }
 
 #[test]
@@ -1220,7 +1442,7 @@ fn create_preset_request_from_environment_copies_one_canonical_spec() {
                     },
                     secrets: codewire_project::SecretBindings {
                         project: "prod".to_string(),
-                        user: true,
+                        user: Some(codewire_project::StoragePlacement::Platform),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -1779,35 +2001,23 @@ fn env_access_and_share_parsers_keep_profiles_and_collaborators_separate() {
         panic!("expected env access command");
     };
     assert_eq!(args.environment.as_deref(), Some("builder"));
-    assert!(args.command.is_none());
     assert!(matches!(args.output, OutputFormat::Json));
 
-    let cli = Cli::try_parse_from([
-        "cw",
-        "env",
-        "--local",
-        "access",
-        "apply",
-        "builder",
-        "--profile",
-        "user/work",
-        "--output",
-        "json",
-    ])
-    .unwrap();
-    let Command::Env(EnvArgs { command, .. }) = cli.command else {
-        panic!("expected env command");
-    };
-    let EnvCommand::Access(args) = command else {
-        panic!("expected env access command");
-    };
-    let Some(EnvAccessCommand::Apply(args)) = args.command else {
-        panic!("expected env access apply command");
-    };
-    assert_eq!(args.environment, "builder");
-    assert_eq!(args.profile.as_deref(), Some("user/work"));
-    assert!(!args.clear);
-    assert!(matches!(args.output, OutputFormat::Json));
+    assert!(
+        Cli::try_parse_from([
+            "cw",
+            "env",
+            "--local",
+            "access",
+            "apply",
+            "builder",
+            "--profile",
+            "user/work",
+            "--output",
+            "json",
+        ])
+        .is_err()
+    );
 
     assert!(
         Cli::try_parse_from([
@@ -1911,9 +2121,7 @@ async fn env_share_rejects_local_before_platform_resolution() {
     let Command::Env(args) = cli.command else {
         panic!("expected env command");
     };
-    let globals = Globals {
-        server: None,
-    };
+    let globals = Globals { server: None };
 
     let error = handle_env_command(&globals, args).await.unwrap_err();
     assert_eq!(

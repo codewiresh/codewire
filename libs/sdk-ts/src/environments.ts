@@ -2,7 +2,10 @@ import { Environment } from "./environment.js";
 import { Files } from "./files.js";
 import { EnvironmentResizeDisruptionPolicy } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import {
+  createEnvironmentSourceSelection,
+  environmentSourceSelectionAcknowledges,
   fromProtoEnvironment,
+  fromProtoEnvironmentSourcesUpdate,
   fromProtoEnvironmentResizeOperation,
   fromProtoEnvironmentResizePlan,
   fromProtoEnvironmentPort,
@@ -12,6 +15,7 @@ import {
   toProtoCreatePortRequest,
   toProtoExecRequest,
   toProtoListEnvironmentsRequest,
+  toProtoUpdateEnvironmentSourcesRequest,
 } from "./convert.js";
 import type { CodewireClients } from "./transport.js";
 import { mapConnectError } from "./types.js";
@@ -22,11 +26,13 @@ import type {
   EnvironmentResizeOperation,
   EnvironmentResizePlan,
   EnvironmentResources,
+  EnvironmentSourcesUpdate,
   ExecRequest,
   ExecResult,
   FileEntry,
   ListEnvironmentsParams,
   ResizeEnvironmentRequest,
+  UpdateEnvironmentSourcesRequest,
 } from "./types.js";
 
 function resolveOrgId(orgId: string): string {
@@ -56,7 +62,18 @@ export class Environments {
       if (!response.environment) {
         throw new Error("environment response omitted environment");
       }
-      const environment = this.wrap(fromProtoEnvironment(response.environment));
+      const data = fromProtoEnvironment(response.environment);
+      const expectedSources = createEnvironmentSourceSelection(body);
+      if (
+        data.org_id !== resolveOrgId(this.orgId) ||
+        data.source_selection === undefined ||
+        !environmentSourceSelectionAcknowledges(data.source_selection, expectedSources)
+      ) {
+        throw new Error(
+          "environment creation returned a different organization or source selection",
+        );
+      }
+      const environment = this.wrap(data);
       if (opts?.wait) await environment.waitReady({ timeout: opts.waitTimeout });
       return environment;
     } catch (error) {
@@ -210,6 +227,31 @@ export class Environments {
         orgId: resolveOrgId(this.orgId),
         environmentId: envId,
       });
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Replace only application-secret sources and provider-profile selection.
+   * The caller supplies the exact current selection and generation as the
+   * concurrency fence; this method never fetches and retries on conflict. */
+  async updateSources(
+    envId: string,
+    request: UpdateEnvironmentSourcesRequest,
+  ): Promise<EnvironmentSourcesUpdate> {
+    try {
+      return fromProtoEnvironmentSourcesUpdate(
+        await this.clients.environments.updateEnvironmentSources(
+          toProtoUpdateEnvironmentSourcesRequest(
+            resolveOrgId(this.orgId),
+            envId,
+            request,
+          ),
+        ),
+        envId,
+        request.expected_operation_generation,
+        request.replacement,
+      );
     } catch (error) {
       throw mapConnectError(error);
     }

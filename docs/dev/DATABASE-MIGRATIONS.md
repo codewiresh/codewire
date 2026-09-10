@@ -228,8 +228,9 @@ Deployment must separately grant only these exact EXECUTE signatures to the
 restricted broker/enrollment login. That login must not own the functions or
 be able to assume the migration owner's role. Profile management remains an
 orchestration responsibility; credential CRUD and durable refresh transactions
-retain their own ordinary table privileges. Generic workload secrets are not
-part of the broker role.
+retain their own ordinary table privileges. At this schema step application
+secrets are not part of the broker role; migration 24 below adds a narrowly
+granted encrypted projection reader.
 A non-owner orchestration/profile-management login also needs the relevant
 helper EXECUTE grants, since management operations retain these same owner and
 metadata fences. Its existing management DML rights are not granted to the broker.
@@ -354,6 +355,170 @@ survives. The upgrade matrix pins version-23 bytes and proves index inventory,
 both-order predecessor transitions, current device/2FA completion ordering, and
 the no-resurrection boundary. It does not authorize a live reset,
 migration-ledger rewrite, cluster change, or credential operation.
+
+Before publication, the product branch's staged migrations 24–27 moved to
+25–28 to preserve canonical account-access migration 24. The existing
+projection, SSH and owner-source byte pins remain evidence for those unchanged
+SQL sources at their new versions. Session migration 28 was composed with the
+new enabled-account fence and has its own final bytes. None of these fixtures
+describes an applied old-number ledger.
+
+### Platform application environment projection
+
+Migration `0025_platform_environment_projection.sql` is function-only and
+retains the accepted versions 1–24. Its metadata helper exposes exact canonical
+application-source/profile selectors and ordinary configuration key names,
+never full `project_spec` or configured values. Its second helper takes SHARE
+locks on the exact creator, active organization, membership, running environment,
+backend, optional profile/binding and selected organization-owned project.
+The helpers have fixed qualified queries, migration-owner SECURITY DEFINER
+ownership, fixed `pg_catalog, pg_temp` search paths, and immediate PUBLIC
+execution revocation. They are not authentication: the isolated service must
+still verify exact live gateway/workspace Pod identities, their original
+expiry, lineage, positive operation generation and current canonical selection.
+
+Deployment grants only the two exact EXECUTE signatures and the encrypted
+reader column lists in `tests/e2e/kind/credential-broker.sql`. No application
+secret writes, full configuration reads, generic plaintext getter or new store
+are granted. The existing OpenBao workload identity additionally needs the
+corresponding tenant-scope unwrap authority; synthetic Kind proof does not
+establish Dev provisioning. The application reader holds the existing tenant
+scope advisory locks while selecting bounded key inventories and winning
+envelopes, decrypts outside SQL locks, then revalidates authority and exact
+inventory/envelope/DEK bytes under the same locks before recipient-bound sealing.
+The existing environment operation is the only generation.
+
+Upgrade fixtures independently pin migration 24 from accepted canonical
+`7dfd53dfd93ed56f7564111a4eba9fc0a730cef3`, retain the existing pins for 1–23,
+and check exact prior ledger and protected bytes, installed function bodies,
+owner/search-path/ACL, unchanged table fingerprint and second-startup no-op.
+A deliberate function collision proves failed application rolls back both DDL
+and migration ledger changes. There is no in-place downgrade. Stop new readers
+and replay version-24 source into only the disposable application `public`
+schema to roll back; the fixture preserves a separate schema. Other databases,
+cluster roles and external OpenBao keys are outside this boundary. These
+instructions do not authorize live resets or imply runtime delivery is enabled.
+
+### Typed SSH credential enrollment
+
+Migration `0026_platform_ssh_credentials.sql` adds the fresh `ssh_key`
+authentication kind and nullable `ssh_public_key`/`ssh_fingerprint` public
+metadata columns. The pair is required exactly for provider `ssh` and kind
+`ssh_key`; other credentials retain NULL in both columns. Shape/size checks
+reject partial pairs, comments, control bytes and unsupported public-key
+prefixes. The isolated authority derives and cryptographically verifies the
+public identity from the explicit key import or Ed25519 generation before
+wrapping it with the existing credential envelope. It publishes public
+metadata and protected material in one existing transaction. No previous key
+representation is imported, and storage does not enable an SSH runtime grant.
+
+Generic opaque creation/replacement rejects SSH. The dedicated prepared type
+cannot be constructed from caller-asserted metadata. OAuth-authorized requests
+retain their original deadline and authority through the existing publication
+lock/COMMIT boundary. Cancellation never detaches a blocking crypto worker;
+the tracked driver retains its capacity until that worker joins, discards late
+results, and drains publication. Cleanup may exceed the original operation
+deadline but cannot renew authorization. An uncertain COMMIT acknowledgement
+requires owner-scoped metadata reconciliation, not automatic generation retry.
+
+The existing restricted credential INSERT and public metadata SELECT grants
+suffice. No public-key UPDATE, protected-material access for metadata readers,
+new SECURITY DEFINER function, or change to the applied credential-lock
+function is required. Profile metadata loading holds that exact existing SHARE
+lock before its additional public-column read in the same transaction.
+
+The 25→26 fixture is a **staged branch upgrade**, not a claim that version25
+was deployed or merged. It pins the accepted projection component's version25
+bytes (SHA-256 `12de82cd0afc166e15fa3d4dbcb18111ae2ef2b19fdf5c8bd9a4e9476414c975`,
+PostgreSQL component proof session46208), while versions1–24 retain their
+independent accepted history pins. It preserves all prior credential/envelope
+bytes and function authority, proves the new fields remain NULL on old rows,
+and checks second-startup no-op. Fresh-schema constraints, real restricted-role
+publication/read/denial and a forced failure after additive DDL are separate
+proofs. The current schema fingerprint must be measured from real disposable
+PostgreSQL before acceptance; a pending marker is not successful proof.
+
+There is no in-place downgrade. Stop new writers and replay the selected
+version25 source into only an empty, disposable application `public` schema.
+That rollback discards credential records rather than retaining or translating
+SSH material. The test preserves another schema; cluster roles, other databases
+and external OpenBao material remain outside the reset boundary. These
+instructions do not authorize any live reset or direct credential access.
+
+### Owner-authenticated source authority
+
+Migration `0027_owner_source_authority.sql` adds only
+`codewire_platform_lock_owner_source_authority(text,text,text)`. It takes SHARE
+locks in the fixed order exact user, active organization, current nonempty-role
+membership, then optional exact organization-owned secret project. A NULL
+project means no selected project, not a wildcard. SHARE fences both deletion
+and non-key authority changes. The function returns only a boolean and neither
+reads secret values nor requires, creates or impersonates a platform environment
+or Pod.
+
+This helper is **not authentication**. The trusted caller must first retain
+`OAuthBearerAuthority::lock_for_publication` for the original user/client/token
+in the same transaction, then acquire this owner/source fence. Retain the
+original cancellation/expiry deadline and recheck it after awaited work before
+publication or release; acquiring locks cannot renew authorization. Application
+source inventory/envelope locks and profile/credential revalidation remain
+separate existing responsibilities. This schema step does not enable delegation
+or grant a general material-read API.
+
+The function has migration-owner SECURITY DEFINER ownership, fixed
+`pg_catalog, pg_temp` search path, schema-qualified fixed queries and immediate
+PUBLIC execution revocation in the SQLx migration transaction. It creates no
+role and grants no table privileges. Provisioning must separately grant only
+its exact EXECUTE signature to the trusted restricted authority login; that
+login must not own the function or assume its owner's role. Existing helpers
+and migration bytes 1–26 remain unchanged.
+
+The 26→27 proof is a **staged branch upgrade**, not deployed or merged history.
+It independently pins version26 from the accepted SSH PostgreSQL component
+proof: SHA-256 `0359fcfeeccffe93be57dcbafedb98a3f37ae7123bfddcc284de4f49b62d2483`,
+SHA-384 `a1fa99436ba0690f41f8e90f2152dcec9253c263e73086104b7de23efd12d0a09a7b6d9d93d87c299658f817bb311edf`.
+Versions1–25 retain their previous independent pins. The fixtures check fresh
+apply, exact prior ledger/rows/envelopes and function definitions, the existing
+unchanged table fingerprint, and second-startup no-op. Separate real restricted
+login checks cover allowed/denied scope, absence of direct table authority,
+function ownership/ACLs, hostile temporary objects/search paths, and observed
+concurrent row-lock ordering for revocation and project deletion. A synthetic
+disposable-database event trigger forces failure after function creation to
+prove DDL and ledger rollback before a successful retry. Test execution requires
+the existing isolated database fixture administrator with role/event-trigger
+creation authority; authored tests are not database acceptance evidence.
+
+There is no in-place downgrade. After stopping new callers, rollback replays
+the selected version26 source into only an empty, disposable application
+`public` schema. The test proves removal of the new helper and credential rows,
+restoration of the prior schema/functions, and preservation of another schema.
+Other databases, cluster roles and external OpenBao keys are outside this reset
+boundary. These instructions authorize no live reset or direct credential use.
+
+### Browser-session credential-mutation authority
+
+Migration `0028_credential_session_mutation_authority.sql` adds two fixed
+SECURITY DEFINER helpers. `codewire_authenticate_credential_session(text)`
+performs the existing digest-only, enabled-account live-session validation and eight-hour
+sliding update while returning only the exact row identity, user, administrator
+flag and post-slide expiry. `codewire_lock_credential_session_authority(...)`
+locks user then exact session in the credential publication transaction.
+
+The isolated credential login receives only exact EXECUTE grants, never direct
+session-table SELECT or UPDATE. The process retains the row ID, digest, user
+and captured expiry, not the cookie. Later authentication may extend the stored
+expiry, so publication accepts a current expiry at least as late as the
+captured value, while both wall and monotonic operation deadlines remain fixed.
+Deletion by logout makes the publication lock fail; deletion racing an already
+held SHARE lock serializes after that publication. Existing OAuth publication
+and OAuth-only delegation are unchanged.
+
+This staged 27→28 change adds no tables or credential formats and does not
+rewrite versions 1–27. Fresh/no-op, helper owner/search-path/ACL, restricted
+EXECUTE-only admission, fixed-expiry, sliding-session and logout/publication
+ordering proofs are required before acceptance. Rollback requires stopping new
+credential-mutation callers and resetting only a disposable application schema;
+it authorizes no live reset.
 
 ## Mesh Database
 

@@ -18,7 +18,7 @@
 //!   dispatcher code runs. The shared policy admits only Connect protocol
 //!   content types (`application/json`, `application/proto`,
 //!   `application/connect+json`, `application/connect+proto`); exactly the
-//!   Coordinator and EnvironmentSessionService mounts opt into native gRPC
+//!   Coordinator, EnvironmentSessionService and CredentialDelegationService mounts opt into native gRPC
 //!   (`application/grpc`, `application/grpc+proto`) for their public CLI edge.
 //!   No policy admits gRPC-Web. This makes every accepted POST non-simple in the
 //!   CSRF sense (a browser cannot emit one without a preflight) and
@@ -60,9 +60,10 @@ use http::{HeaderValue, Method, StatusCode, header};
 use sha2::{Digest, Sha256};
 
 use crate::auth::{
-    AuthState, AuthUser, CredentialContext, OAuthBearerAuthority, authenticate_product_credential,
-    bearer_token, require_product_access, resolve_authentication,
-    resolve_oauth_bearer_authentication, session_cookie,
+    AuthState, AuthUser, CredentialContext, CredentialMutationAuthority, OAuthBearerAuthority,
+    authenticate_product_credential, bearer_token, require_product_access, resolve_authentication,
+    resolve_credential_mutation_authentication, resolve_oauth_bearer_authentication,
+    session_cookie,
 };
 use crate::connect_error::{ConnectCode, ConnectError, ConnectErrorDetail};
 use crate::error::AppError;
@@ -79,7 +80,7 @@ pub const ACCEPT_POST_WITH_GRPC: &str = "application/connect+json, application/c
 /// Wire protocols admitted by one Connect-RPC mount.
 ///
 /// Every mount defaults to [`Self::ConnectOnly`]. CoordinatorService and
-/// EnvironmentSessionService are the two explicit exceptions: their public-edge
+/// EnvironmentSessionService and CredentialDelegationService are explicit exceptions: their public-edge
 /// CLI legs need native gRPC while their direct h2c legs continue to use
 /// Connect. gRPC-Web is never admitted.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -200,7 +201,7 @@ struct ValidatedRpcProtocol(&'static str);
 /// credential, mirroring `api/internal.rs`). User-facing mounts go through
 /// [`connect_router_with_auth`].
 pub fn connect_router(connect: connectrpc::Router) -> axum::Router {
-    build_connect_router(connect, None, None, ProtocolPolicy::ConnectOnly, None)
+    build_connect_router(connect, None, None, ProtocolPolicy::ConnectOnly, None, None)
 }
 
 /// [`connect_router`] with an explicit wire-protocol policy.
@@ -212,7 +213,7 @@ pub fn connect_router_with_protocol_policy(
     connect: connectrpc::Router,
     protocol_policy: ProtocolPolicy,
 ) -> axum::Router {
-    build_connect_router(connect, None, None, protocol_policy, None)
+    build_connect_router(connect, None, None, protocol_policy, None, None)
 }
 
 /// [`connect_router`] with a [`ConnectAuthLayer`] in front of the dispatcher
@@ -226,7 +227,14 @@ pub fn connect_router_with_auth(
     connect: connectrpc::Router,
     auth: ConnectAuthLayer,
 ) -> axum::Router {
-    build_connect_router(connect, Some(auth), None, ProtocolPolicy::ConnectOnly, None)
+    build_connect_router(
+        connect,
+        Some(auth),
+        None,
+        ProtocolPolicy::ConnectOnly,
+        None,
+        None,
+    )
 }
 
 /// [`connect_router_with_auth`] with an explicit wire-protocol policy.
@@ -240,7 +248,26 @@ pub fn connect_router_with_auth_and_protocol_policy(
     auth: ConnectAuthLayer,
     protocol_policy: ProtocolPolicy,
 ) -> axum::Router {
-    build_connect_router(connect, Some(auth), None, protocol_policy, None)
+    build_connect_router(connect, Some(auth), None, protocol_policy, None, None)
+}
+
+/// An explicitly bounded authenticated streaming mount. The caller supplies
+/// its checked protocol envelope ceiling; other mounts retain the unchanged
+/// dispatcher defaults. This changes neither authentication nor deadline policy.
+pub fn connect_router_with_auth_protocol_and_limits(
+    connect: connectrpc::Router,
+    auth: ConnectAuthLayer,
+    protocol_policy: ProtocolPolicy,
+    limits: connectrpc::Limits,
+) -> axum::Router {
+    build_connect_router(
+        connect,
+        Some(auth),
+        None,
+        protocol_policy,
+        None,
+        Some(limits),
+    )
 }
 
 /// [`connect_router_with_auth`] for an all-unary product service.
@@ -262,6 +289,7 @@ pub fn connect_unary_router_with_auth(
         None,
         ProtocolPolicy::ConnectOnly,
         Some(deadline_policy),
+        None,
     )
 }
 
@@ -282,6 +310,7 @@ pub fn connect_unary_router_with_mesh_authorization(
         Some(authorization),
         ProtocolPolicy::ConnectOnly,
         Some(deadline_policy),
+        None,
     )
 }
 
@@ -291,6 +320,7 @@ fn build_connect_router(
     mesh_authorization: Option<MeshAuthorizationLayer>,
     protocol_policy: ProtocolPolicy,
     deadline_policy: Option<connectrpc::DeadlinePolicy>,
+    limits: Option<connectrpc::Limits>,
 ) -> axum::Router {
     // Distinct fully-qualified service names, e.g.
     // "codewire.testing.v1.PingService" from "codewire.testing.v1.PingService/Ping".
@@ -301,6 +331,9 @@ fn build_connect_router(
         .collect();
 
     let mut service = connectrpc::ConnectRpcService::new(connect);
+    if let Some(limits) = limits {
+        service = service.with_limits(limits);
+    }
     if let Some(deadline_policy) = deadline_policy {
         service = service.with_deadline_policy(deadline_policy);
     }
@@ -390,6 +423,9 @@ async fn unbuffer_streaming_responses(
 /// - [`ConnectAuthLayer::oauth_bearer_only`] — isolated services accept only
 ///   an opaque OAuth bearer with product scope. Cookies never supply identity;
 ///   API keys never enter their lookup or bookkeeping paths.
+/// - [`ConnectAuthLayer::credential_mutation`] — the isolated credential
+///   mutation service accepts exact-Origin browser sessions or OAuth bearers;
+///   API keys remain denied before lookup.
 /// - self-authenticating internal services mount without this product-user
 ///   auth layer ([`connect_router`]); their handlers must validate their
 ///   dedicated machine identity before any domain lookup.
@@ -416,6 +452,7 @@ async fn unbuffer_streaming_responses(
 pub struct ConnectAuthLayer {
     state: AuthState,
     credential_policy: ConnectCredentialPolicy,
+    session_origin: Option<HeaderValue>,
     admin_mount: bool,
     public_methods: BTreeSet<String>,
     admin_methods: BTreeSet<String>,
@@ -426,6 +463,7 @@ pub struct ConnectAuthLayer {
 enum ConnectCredentialPolicy {
     Product,
     OAuthBearerOnly,
+    CredentialMutation,
 }
 
 impl ConnectAuthLayer {
@@ -434,6 +472,7 @@ impl ConnectAuthLayer {
         Self {
             state,
             credential_policy: ConnectCredentialPolicy::Product,
+            session_origin: None,
             admin_mount: false,
             public_methods: BTreeSet::new(),
             admin_methods: BTreeSet::new(),
@@ -453,6 +492,18 @@ impl ConnectAuthLayer {
     pub fn oauth_bearer_only(state: AuthState) -> Self {
         Self {
             credential_policy: ConnectCredentialPolicy::OAuthBearerOnly,
+            ..Self::authenticated(state)
+        }
+    }
+
+    /// Credential-mutation mount: accept either an exact original OAuth bearer
+    /// or a live browser session arriving from the configured public origin.
+    /// API keys are rejected before lookup. This mode is intentionally not
+    /// reusable by delegation or general product mounts.
+    pub fn credential_mutation(state: AuthState, session_origin: HeaderValue) -> Self {
+        Self {
+            credential_policy: ConnectCredentialPolicy::CredentialMutation,
+            session_origin: Some(session_origin),
             ..Self::authenticated(state)
         }
     }
@@ -859,19 +910,33 @@ async fn enforce_connect_auth(
     let request_headers = req.headers().clone();
     let auth_timeout = connect_auth_resolution_timeout(req.headers());
     let is_get = req.method() == Method::GET;
-    let auth = match bounded_authentication(
+    let resolved = match bounded_authentication(
         async {
             match layer.credential_policy {
-                ConnectCredentialPolicy::Product => {
-                    resolve_authentication(
+                ConnectCredentialPolicy::Product => resolve_authentication(
+                    &layer.state,
+                    session_cookie(&request_headers),
+                    bearer_token(&request_headers),
+                )
+                .await
+                .map(|auth| (auth, None)),
+                ConnectCredentialPolicy::OAuthBearerOnly => {
+                    resolve_oauth_bearer_authentication(&layer.state, &request_headers)
+                        .await
+                        .map(|auth| (auth, None))
+                }
+                ConnectCredentialPolicy::CredentialMutation => {
+                    let origin = layer
+                        .session_origin
+                        .as_ref()
+                        .expect("credential mutation policy has a session origin");
+                    resolve_credential_mutation_authentication(
                         &layer.state,
-                        session_cookie(&request_headers),
-                        bearer_token(&request_headers),
+                        &request_headers,
+                        origin,
                     )
                     .await
-                }
-                ConnectCredentialPolicy::OAuthBearerOnly => {
-                    resolve_oauth_bearer_authentication(&layer.state, &request_headers).await
+                    .map(|(auth, authority)| (auth, Some(authority)))
                 }
             }
         },
@@ -889,6 +954,7 @@ async fn enforce_connect_auth(
             );
         }
     };
+    let (auth, mutation_authority) = resolved;
 
     let credential = RpcCredentialKind(auth.credential.kind().as_str());
     let principal_evidence =
@@ -915,6 +981,9 @@ async fn enforce_connect_auth(
     }
 
     if let Some(authority) = auth.oauth_bearer_authority {
+        req.extensions_mut().insert(authority);
+    }
+    if let Some(authority) = mutation_authority {
         req.extensions_mut().insert(authority);
     }
     req.extensions_mut().insert(auth.credential);
@@ -1045,6 +1114,20 @@ pub fn oauth_bearer_authority(
         .get::<OAuthBearerAuthority>()
         .ok_or_else(|| {
             connectrpc::ConnectError::unauthenticated("request has no original OAuth authority")
+        })
+}
+
+/// Extract the exact session-or-OAuth authority installed only by the
+/// credential-mutation mount.
+pub fn credential_mutation_authority(
+    ctx: &connectrpc::RequestContext,
+) -> Result<&CredentialMutationAuthority, connectrpc::ConnectError> {
+    ctx.extensions()
+        .get::<CredentialMutationAuthority>()
+        .ok_or_else(|| {
+            connectrpc::ConnectError::unauthenticated(
+                "request has no original credential-mutation authority",
+            )
         })
 }
 

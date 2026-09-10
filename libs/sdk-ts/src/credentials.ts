@@ -1,6 +1,9 @@
 import {
+  CredentialSchema,
   CredentialAuthenticationKind,
   CredentialStatus,
+  EnrollCodexRequestSchema,
+  SshPublicKeySchema,
   type Credential as ProtoCredential,
   type EnrollCodexResponse,
 } from "@codewire/proto-ts/gen/codewire/v1/credential_pb";
@@ -12,12 +15,31 @@ export interface Credential {
   id: string;
   name: string;
   provider: string;
-  authentication_kind: "oauth" | "api_key" | "access_token" | "github_app";
+  authentication_kind:
+    | "oauth"
+    | "api_key"
+    | "access_token"
+    | "github_app"
+    | "ssh_key";
   account_hint?: string;
   status: "active" | "revoked" | "expired" | "refresh_failed";
   /** Hard credential-use deadline, not provider access-token expiry. */
   expires_at_unix?: bigint;
   revocation_generation: bigint;
+  /** Public registration data for an SSH identity; never private key bytes. */
+  ssh_public_key?: SshPublicKey;
+}
+
+export interface SshPublicKey {
+  openssh: string;
+  fingerprint: string;
+}
+
+export interface CodexEnrollmentOptions {
+  signal?: AbortSignal;
+  /** Reconnect one exact existing identity; supply both fields or neither. */
+  credential_id?: string;
+  expected_revocation_generation?: bigint;
 }
 
 /** The one-time code is for the requesting user, never routine logs. */
@@ -50,6 +72,36 @@ function generation(value: bigint): bigint {
   return value;
 }
 
+function assertFields(
+  name: string,
+  fields: readonly { number: number; name: string }[],
+  expected: ReadonlyMap<number, string>,
+): void {
+  if (fields.length !== expected.size) {
+    throw new Error(`${name} converter covers ${expected.size} descriptor fields, expected ${fields.length}`);
+  }
+  for (const field of fields) {
+    if (expected.get(field.number) !== field.name) {
+      throw new Error(`${name} converter does not cover descriptor field ${field.name}`);
+    }
+  }
+}
+
+/** Throws when credential metadata or Codex reconnect gains an unmapped field. */
+export function assertCredentialConverterCoverage(): void {
+  assertFields("credential", CredentialSchema.fields, new Map([
+    [1, "id"], [2, "name"], [3, "provider"], [4, "authentication_kind"],
+    [5, "account_hint"], [6, "status"], [7, "expires_at_unix"],
+    [8, "revocation_generation"], [9, "ssh_public_key"],
+  ]));
+  assertFields("SSH public key", SshPublicKeySchema.fields, new Map([
+    [1, "openssh"], [2, "fingerprint"],
+  ]));
+  assertFields("Codex enrollment", EnrollCodexRequestSchema.fields, new Map([
+    [1, "name"], [2, "credential_id"], [3, "expected_revocation_generation"],
+  ]));
+}
+
 function fromCredential(value: ProtoCredential | undefined): Credential {
   if (!value) throw new Error("credential response omitted credential");
   const kinds = {
@@ -57,6 +109,7 @@ function fromCredential(value: ProtoCredential | undefined): Credential {
     [CredentialAuthenticationKind.API_KEY]: "api_key",
     [CredentialAuthenticationKind.ACCESS_TOKEN]: "access_token",
     [CredentialAuthenticationKind.GITHUB_APP]: "github_app",
+    [CredentialAuthenticationKind.SSH_KEY]: "ssh_key",
   } as const;
   const authentication_kind = kinds[value.authenticationKind as keyof typeof kinds];
   const statuses = {
@@ -67,12 +120,25 @@ function fromCredential(value: ProtoCredential | undefined): Credential {
   if (!authentication_kind || !status) {
     throw new Error("credential response contains unsupported metadata");
   }
+  if (
+    (authentication_kind === "ssh_key") !== (value.sshPublicKey !== undefined)
+  ) {
+    throw new Error(
+      "credential response must contain SSH public metadata exactly for SSH credentials",
+    );
+  }
   return {
     id: value.id, name: value.name, provider: value.provider, authentication_kind,
     account_hint: value.accountHint,
     status,
     expires_at_unix: value.expiresAtUnix,
     revocation_generation: generation(value.revocationGeneration),
+    ssh_public_key: value.sshPublicKey
+      ? {
+          openssh: value.sshPublicKey.openssh,
+          fingerprint: value.sshPublicKey.fingerprint,
+        }
+      : undefined,
   };
 }
 
@@ -113,7 +179,23 @@ export class Credentials {
   /** Consume the challenge immediately, then committed metadata. Breaking the
    * loop closes the original stream. Use signal to cancel a pending read.
    * Cancellation never proves rollback: reconcile by name before retrying. */
-  async *enrollCodex(name: string, options: { signal?: AbortSignal } = {}): AsyncGenerator<CodexEnrollmentEvent> {
+  async *enrollCodex(
+    name: string,
+    options: CodexEnrollmentOptions = {},
+  ): AsyncGenerator<CodexEnrollmentEvent> {
+    const credentialId = options.credential_id;
+    const expectedGeneration = options.expected_revocation_generation;
+    if ((credentialId === undefined) !== (expectedGeneration === undefined)) {
+      throw new Error(
+        "Codex reconnect requires credential_id and expected_revocation_generation together",
+      );
+    }
+    if (credentialId !== undefined && credentialId.length === 0) {
+      throw new Error("Codex reconnect credential_id must not be empty");
+    }
+    const reconnectGeneration = expectedGeneration === undefined
+      ? undefined
+      : generation(expectedGeneration);
     const cancellation = new AbortController();
     let challenged = false;
     let iterator: AsyncIterator<EnrollCodexResponse> | undefined;
@@ -136,7 +218,11 @@ export class Credentials {
     if (options.signal?.aborted) cancel();
     try {
       if (cancellation.signal.aborted) throw new EnrollmentOutcomeUnknownError();
-      const stream = this.mutations.enrollCodex({ name }, {
+      const stream = this.mutations.enrollCodex({
+        name,
+        credentialId,
+        expectedRevocationGeneration: reconnectGeneration,
+      }, {
         signal: cancellation.signal, timeoutMs: ENROLLMENT_TIMEOUT_MS,
       });
       iterator = stream[Symbol.asyncIterator]();

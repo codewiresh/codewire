@@ -9,6 +9,7 @@ fn main() {
     // by `codewire-admin-proto`, so command-line/customer consumers do not
     // build BillingCatalogService.
     let protos = [
+        "codewire/bridge/v1/bridge.proto",
         "codewire/console/v1/account.proto",
         "codewire/console/v1/billing.proto",
         "codewire/console/v1/environment_setup.proto",
@@ -19,6 +20,7 @@ fn main() {
         "codewire/v1/api_key.proto",
         "codewire/v1/common.proto",
         "codewire/v1/credential.proto",
+        "codewire/v1/credential_delegation.proto",
         "codewire/v1/environment.proto",
         "codewire/v1/environment_session.proto",
         "codewire/v1/exec.proto",

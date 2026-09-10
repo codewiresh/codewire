@@ -9,6 +9,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from unittest.mock import patch
 from test_access_profiles import AccessProfilesTestCase
 from test_credentials import CredentialsTestCase
+from test_environment_sources import EnvironmentSourcesTestCase
 
 import httpx
 from connectrpc.code import Code
@@ -29,6 +30,7 @@ from codewire.v1.api_key_pb2 import (
 )
 from codewire.v1.common_pb2 import (
     ProjectSkillSource,
+    ProjectStoragePlacement,
     ProjectSpec,
 )
 from codewire.v1.environment_connect import EnvironmentServiceWSGIApplication
@@ -707,9 +709,12 @@ class SDKTestCase(unittest.TestCase):
                     "agents": ["codex"],
                 }],
                 "resources": {"cpu_millicores": 2000, "memory_mib": 16384},
-                "secrets": {"project": "development", "user": True},
-                "access": {"profile": "user/work"},
+                "secrets": {"project": "platform:development", "user": "platform"},
+                "credentials": {"profile": "platform:work"},
             },
+            expected_profile_revision=1,
+            confirm_personal_credentials=True,
+            confirm_personal_secrets=True,
         )
         project = ControlPlaneFixture.last_create_project_spec
         self.assertIsNotNone(project)
@@ -718,8 +723,9 @@ class SDKTestCase(unittest.TestCase):
             ProjectSkillSource.PROJECT_SKILL_SOURCE_USER,
         )
         self.assertEqual(project.repositories[0].revision, "deadbeef")
-        self.assertEqual(project.secrets.project, "development")
-        self.assertEqual(project.access.profile, "user/work")
+        self.assertEqual(project.secrets.project, "platform:development")
+        self.assertEqual(project.secrets.user, ProjectStoragePlacement.PROJECT_STORAGE_PLACEMENT_PLATFORM)
+        self.assertEqual(project.credentials.profile, "platform:work")
 
     def test_environment_get(self):
         env = self.cw.environments.get("env_123")

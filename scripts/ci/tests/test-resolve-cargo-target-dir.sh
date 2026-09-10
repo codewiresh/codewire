@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RESOLVER="$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-unset CARGO_TARGET_DIR
+unset CARGO_TARGET_DIR CODEWIRE_CARGO_TARGET_MODE
 
 fail() {
   echo "test-resolve-cargo-target-dir: $*" >&2

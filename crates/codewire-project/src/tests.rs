@@ -108,7 +108,7 @@ fn reserved_runtime_environment_keys_are_rejected_at_yaml_and_typed_boundaries()
 }
 
 #[test]
-fn normalizes_repositories_workdir_skills_and_access_profile() {
+fn normalizes_repositories_workdir_skills_and_credential_profile() {
     let document = parse_project_yaml(
         r#"
 repositories:
@@ -116,13 +116,15 @@ repositories:
     branch: main
     destination: /workspace/services/api
   - source: git@example.com:org/web.git
+    known_hosts:
+      - example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx
 skills:
   - source: repository
     path: .agents/skills/rust
     agents: [claude-code, codex]
   - source: user
     name: personal
-access: {profile: user/work}
+credentials: {profile: user/work}
 "#,
     )
     .unwrap();
@@ -133,9 +135,9 @@ access: {profile: user/work}
     assert_eq!(
         document
             .spec
-            .access
+            .credentials
             .as_ref()
-            .expect("access binding")
+            .expect("credential binding")
             .profile
             .to_string(),
         "user/work"
@@ -292,23 +294,99 @@ fn rejects_unknown_unsafe_overlapping_and_nonportable_shapes() {
 
 #[test]
 fn accepts_remote_https_ssh_and_scp_repository_sources() {
-    for (source, name) in [
-        ("https://example.com/org/app.git", "app"),
+    for (source, name, known_hosts) in [
+        ("https://example.com/org/app.git", "app", ""),
         (
             "https://example.com:8443/org/app%20with%20spaces.git",
             "app%20with%20spaces",
+            "",
         ),
-        ("ssh://git@example.com/org/app.git", "app"),
-        ("git://example.com/org/app.git", "app"),
-        ("git@example.com:org/app.git", "app"),
+        (
+            "ssh://git@example.com/org/app.git",
+            "app",
+            "known_hosts: [example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx]",
+        ),
+        ("git://example.com/org/app.git", "app", ""),
+        (
+            "git@example.com:org/app.git",
+            "app",
+            "known_hosts: [example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx]",
+        ),
     ] {
-        let yaml = format!("repositories: [{{source: {source:?}}}]\n");
+        let yaml = format!("repositories: [{{source: {source:?}, {known_hosts}}}]\n");
         let project = parse_project_yaml(&yaml).unwrap().spec;
         assert_eq!(
             project.repositories[0].destination,
             format!("/workspace/{name}")
         );
     }
+}
+
+#[test]
+fn ssh_repository_host_trust_is_exact_bounded_and_canonical() {
+    const KEY: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx";
+    let yaml = format!(
+        "repositories:\n  - source: ssh://git@Example.COM:2222/org/app.git\n    known_hosts:\n      - ' [example.com]:2222   ssh-ed25519   {KEY}   owner supplied '\n      - '[example.com]:2222 ssh-rsa QUJDRA=='\n"
+    );
+    let project = parse_project_yaml(&yaml).unwrap().spec;
+    assert_eq!(
+        project.repositories[0].known_hosts,
+        [
+            format!("[example.com]:2222 ssh-ed25519 {KEY} owner supplied"),
+            "[example.com]:2222 ssh-rsa QUJDRA==".to_owned(),
+        ]
+    );
+    project.validate().unwrap();
+    let mut noncanonical = project.clone();
+    noncanonical.repositories[0].known_hosts.reverse();
+    assert!(noncanonical.validate().is_err());
+
+    for yaml in [
+        "repositories: [{source: 'git@example.com:org/app.git'}]\n".to_owned(),
+        format!("repositories: [{{source: https://example.com/org/app.git, known_hosts: [example.com ssh-ed25519 {KEY}]}}]\n"),
+        format!("repositories: [{{source: 'ssh://git@example.com:2222/org/app.git', known_hosts: [example.com ssh-ed25519 {KEY}]}}]\n"),
+        format!("repositories: [{{source: 'git@example.com:org/app.git', known_hosts: ['*.example.com ssh-ed25519 {KEY}']}}]\n"),
+        format!("repositories: [{{source: 'git@example.com:org/app.git', known_hosts: ['example.com,alias.example.com ssh-ed25519 {KEY}']}}]\n"),
+        format!("repositories: [{{source: 'git@example.com:org/app.git', known_hosts: ['@cert-authority example.com ssh-ed25519 {KEY}']}}]\n"),
+        "repositories: [{source: 'git@example.com:org/app.git', known_hosts: ['example.com ssh-ed25519 A']} ]\n".to_owned(),
+        format!("repositories:\n  - source: 'git@example.com:org/app.git'\n    known_hosts: [\"example.com ssh-ed25519 {KEY}\\nother.invalid ssh-ed25519 {KEY}\"]\n"),
+    ] {
+        assert!(parse_project_yaml(&yaml).is_err(), "accepted {yaml:?}");
+    }
+
+    let too_many = vec![format!("example.com ssh-ed25519 {KEY}"); MAX_REPOSITORY_KNOWN_HOSTS + 1];
+    let spec = ProjectSpec {
+        repositories: vec![RepositorySpec {
+            source: "git@example.com:org/app.git".into(),
+            destination: "/workspace/app".into(),
+            known_hosts: too_many,
+            ..Default::default()
+        }],
+        working_directory: "/workspace/app".into(),
+        ..Default::default()
+    };
+    assert!(matches!(
+        spec.validate(),
+        Err(ProjectError::TooManyEntries {
+            field: "repositories.known_hosts",
+            ..
+        })
+    ));
+    let mut oversized = spec;
+    oversized.repositories[0].known_hosts = vec![format!(
+        "example.com ssh-ed25519 {}",
+        "A".repeat(MAX_REPOSITORY_KNOWN_HOST_LINE_BYTES)
+    )];
+    assert!(oversized.validate().is_err());
+    oversized.repositories[0].known_hosts = (0..MAX_REPOSITORY_KNOWN_HOSTS)
+        .map(|index| {
+            format!(
+                "example.com ssh-ed25519 {} key-{index}",
+                "A".repeat(MAX_REPOSITORY_KNOWN_HOSTS_BYTES / MAX_REPOSITORY_KNOWN_HOSTS)
+            )
+        })
+        .collect();
+    assert!(oversized.validate().is_err());
 }
 
 #[test]
@@ -448,8 +526,8 @@ fn canonicalization_is_idempotent_for_generated_valid_specs() {
 fn repository_destination_helper_preserves_inferred_defaults() {
     assert_eq!(
         validate_repository_destinations([
-            ("https://example.com/org/app.git", ""),
-            ("git@host:org/api.git", "/workspace/services/api"),
+            ("git@example.com:org/app.git", ""),
+            ("https://host/org/api.git", "/workspace/services/api"),
             (
                 "https://github.com/codewiresh/codewire.git",
                 "/workspace/codewire",
@@ -462,13 +540,14 @@ fn repository_destination_helper_preserves_inferred_defaults() {
             "/workspace/codewire"
         ]
     );
+    assert!(validate_repository_destinations([("SSH://git@host/org/api.git", "")]).is_err());
     assert_eq!(repository_name("git@host:org/app.git"), "app");
 }
 
 #[test]
 fn typed_specs_validate_before_crossing_adapter_boundaries() {
     let mut spec = parse_project_yaml(
-        "agents: {tools: [claude-code]}\nskills: [{source: repository, path: .agents/skills/rust}]\naccess: {profile: user/work}\n",
+        "agents: {tools: [claude-code]}\nskills: [{source: repository, path: .agents/skills/rust}]\ncredentials: {profile: user/work}\n",
     )
     .unwrap()
     .spec;

@@ -9,7 +9,7 @@ from codewire.environment import Environment
 from codewire.errors import CodewireError
 from codewire.files import Files
 from codewire.credentials import (
-    Credentials, Credential, CodexDeviceChallenge, CodexEnrollmentEvent,
+    Credentials, Credential, SshPublicKey, CodexDeviceChallenge, CodexEnrollmentEvent,
     EnrollmentOutcomeUnknownError,
 )
 from codewire.access_profiles import (
@@ -44,6 +44,7 @@ __all__ = [
     "Files",
     "Credentials",
     "Credential",
+    "SshPublicKey",
     "CodexDeviceChallenge",
     "CodexEnrollmentEvent",
     "EnrollmentOutcomeUnknownError",

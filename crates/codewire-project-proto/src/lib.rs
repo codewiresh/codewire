@@ -13,18 +13,24 @@ pub fn from_proto(
     let agents = value.agents.into_option().unwrap_or_default();
     let resources = value.resources.into_option().unwrap_or_default();
     let secrets = value.secrets.into_option().unwrap_or_default();
-    let access = value
-        .access
-        .into_option()
-        .map(|access| {
-            access
-                .profile
-                .parse()
-                .map(|profile| project::AccessBinding { profile })
-                .map_err(|_| project::ProjectError::InvalidField {
-                    field: "project_spec.access.profile",
-                    detail: "must be a canonical scope-qualified profile reference".to_string(),
-                })
+    let credentials =
+        value
+            .credentials
+            .into_option()
+            .map(|credentials| project::CredentialBinding {
+                profile: credentials.profile,
+            });
+    let user = secrets
+        .user
+        .map(|placement| match placement.as_known() {
+            Some(proto::ProjectStoragePlacement::Local) => Ok(project::StoragePlacement::Local),
+            Some(proto::ProjectStoragePlacement::Platform) => {
+                Ok(project::StoragePlacement::Platform)
+            }
+            _ => invalid(
+                "project_spec.secrets.user",
+                "must specify local or platform",
+            ),
         })
         .transpose()?;
     let mut skills = Vec::with_capacity(value.skills.len());
@@ -56,6 +62,7 @@ pub fn from_proto(
                 revision: repository.revision,
                 branch: repository.branch,
                 destination: repository.destination,
+                known_hosts: repository.known_hosts,
             })
             .collect(),
         working_directory: value.working_directory,
@@ -84,9 +91,9 @@ pub fn from_proto(
         secrets: project::SecretBindings {
             project: secrets.project,
             organization: secrets.organization,
-            user: secrets.user,
+            user,
         },
-        access,
+        credentials,
     };
     spec.validate()?;
     Ok(spec)
@@ -107,13 +114,18 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
     let secrets = (!value.secrets.is_empty()).then(|| proto::ProjectSecretBindings {
         project: value.secrets.project,
         organization: value.secrets.organization,
-        user: value.secrets.user,
+        user: value.secrets.user.map(|placement| match placement {
+            project::StoragePlacement::Local => proto::ProjectStoragePlacement::Local.into(),
+            project::StoragePlacement::Platform => proto::ProjectStoragePlacement::Platform.into(),
+        }),
         ..Default::default()
     });
-    let access = value.access.map(|access| proto::ProjectAccessBinding {
-        profile: access.profile.to_string(),
-        ..Default::default()
-    });
+    let credentials = value
+        .credentials
+        .map(|credentials| proto::ProjectCredentialBinding {
+            profile: credentials.profile,
+            ..Default::default()
+        });
     proto::ProjectSpec {
         schema_version: value.schema_version,
         preset: value.preset,
@@ -126,6 +138,7 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
                 branch: repository.branch,
                 destination: repository.destination,
                 revision: repository.revision,
+                known_hosts: repository.known_hosts,
                 ..Default::default()
             })
             .collect(),
@@ -161,7 +174,7 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
             .collect(),
         resources: resources.into(),
         secrets: secrets.into(),
-        access: access.into(),
+        credentials: credentials.into(),
         ..Default::default()
     }
 }
@@ -199,8 +212,8 @@ ports: [{port: 8080, label: web, access: private}]
 cpu: "2"
 memory: "16Gi"
 disk: "40Gi"
-secrets: {project: dev, organization: false, user: true}
-access: {profile: user/work}
+secrets: {project: platform:dev, organization: false, user: local}
+credentials: {profile: platform:work}
 "#,
         )
         .unwrap()
@@ -225,8 +238,8 @@ access: {profile: user/work}
         let proto = proto::ProjectSpec {
             schema_version: project::PROJECT_SCHEMA_VERSION,
             working_directory: "/workspace".to_string(),
-            access: Some(proto::ProjectAccessBinding {
-                profile: "work".to_string(),
+            credentials: Some(proto::ProjectCredentialBinding {
+                profile: "unknown:work".to_string(),
                 ..Default::default()
             })
             .into(),
@@ -242,5 +255,34 @@ access: {profile: user/work}
                 "unexpected {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn public_repository_host_trust_round_trips_and_validates_through_one_model() {
+        let known_host = "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAx";
+        let original = project::parse_project_yaml(&format!(
+            "repositories: [{{source: 'git@example.com:org/app.git', destination: /workspace/app, known_hosts: [{known_host:?}]}}]\n"
+        ))
+        .unwrap()
+        .spec;
+        let encoded = to_proto(original.clone());
+        assert_eq!(
+            encoded.repositories[0].known_hosts,
+            vec![known_host.to_owned()]
+        );
+        assert_eq!(from_proto(encoded).unwrap(), original);
+
+        let invalid = proto::ProjectSpec {
+            schema_version: project::PROJECT_SCHEMA_VERSION,
+            working_directory: "/workspace/app".into(),
+            repositories: vec![proto::RepositorySpec {
+                source: "https://example.com/org/app.git".into(),
+                destination: "/workspace/app".into(),
+                known_hosts: vec![known_host.into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(from_proto(invalid).is_err());
     }
 }

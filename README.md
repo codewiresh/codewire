@@ -139,9 +139,12 @@ isolated host broker. Credential and access-profile commands treat a bare
 selector as a name. Use `name:<name>` for a name that resembles selector syntax,
 `id:<canonical-uuid>` for a record ID, and `user/<name>` for an exact
 scope-qualified access-profile reference. Malformed prefixes are rejected.
-Preset, install/startup, environment, agent-installation,
-and secret options still fail explicitly while the remaining Forgejo #1910
-slices are completed. Repository, copy-mount, and direct-mount skills are
+Selected application secrets reach install/startup and managed launches under
+their original names; provider profiles keep private credentials outside the
+VM. See [Secrets and credentials](docs/dev/SECRETS-AND-CREDENTIALS.md) for
+selection, update and clear commands. Presets and automatic agent installation
+remain explicitly unsupported in the native preview. Repository, copy-mount,
+and direct-mount skills are
 captured into immutable environment-owned generations at create time and on
 explicit skill refresh. An owner-only SQLite WAL is the authoritative
 supervisor state. Preview JSON is not imported, and older SQLite schemas are

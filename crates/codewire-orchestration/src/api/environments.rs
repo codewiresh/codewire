@@ -49,6 +49,10 @@ pub struct Environment {
     pub retry_count: i32,
     pub setup_phase: i32,
     pub setup_complete: bool,
+    pub operation_generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub source_selection: Option<super::environment_sources::EnvironmentSourceSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -132,6 +136,10 @@ pub(crate) fn compute_preview_url(
 /// create handler's `WITH ins AS (...)` CTE can reuse them.
 pub(crate) const ENV_SELECT_COLS: &str = r#"e.id, e.org_id, e.created_by, e.preset_id, e.type, e.name,
     e.state, e.desired_state, e.error_reason, e.recoverable, e.state_changed_at, e.retry_count,
+    e.environment_operation_generation,
+    jsonb_build_object('secrets',COALESCE(e.project_spec->'secrets','{}'::jsonb),
+                       'credentials',e.project_spec->'credentials') AS source_spec,
+    ab.profile_id AS source_profile_id, ab.profile_revision AS source_profile_revision,
     COALESCE(b.setup_phase, 0) AS setup_phase, COALESCE(b.setup_complete, false) AS setup_complete,
     COALESCE(b.setup_error, '') AS setup_error,
     e.ttl_seconds, e.shutdown_at,
@@ -142,10 +150,24 @@ pub(crate) const ENV_SELECT_COLS: &str = r#"e.id, e.org_id, e.created_by, e.pres
     t.name AS preset_name"#;
 
 pub(crate) const ENV_SELECT_JOINS: &str = r#"LEFT JOIN environment_presets t ON e.preset_id = t.id
-    LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id"#;
+    LEFT JOIN sandbox_environment_backend b ON b.environment_id = e.id
+    LEFT JOIN platform_environment_access_bindings ab ON ab.environment_id = e.id"#;
 
 pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> {
     let setup_error: String = row.try_get("setup_error")?;
+    // Read only canonical selections, not the ordinary environment configuration
+    // or resolved values. This shares the row's MVCC statement with the profile
+    // pin and operation fence so clients can submit an exact replacement CAS.
+    let source_spec = row.try_get("source_spec")?;
+    let profile_id: Option<String> = row.try_get("source_profile_id")?;
+    let revision: Option<i64> = row.try_get("source_profile_revision")?;
+    // Terminal cleanup releases the profile pin while retaining saved intent.
+    // Inconsistent/missing metadata is explicitly unavailable, never an inferred
+    // empty selection that a caller could use to overwrite unseen sources.
+    let source_selection = source_selection_metadata(source_spec, profile_id, revision);
+    let operation_generation =
+        u64::try_from(row.try_get::<i64, _>("environment_operation_generation")?)
+            .map_err(|_| invalid_source_metadata())?;
     Ok(Environment {
         id: row.try_get("id")?,
         org_id: row.try_get("org_id")?,
@@ -161,6 +183,8 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         retry_count: row.try_get("retry_count")?,
         setup_phase: row.try_get("setup_phase")?,
         setup_complete: row.try_get("setup_complete")?,
+        operation_generation,
+        source_selection,
         setup_error: if setup_error.trim().is_empty() {
             None
         } else {
@@ -186,6 +210,39 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         network: None,
         ports: Vec::new(),
     })
+}
+
+fn invalid_source_metadata() -> sqlx::Error {
+    sqlx::Error::Decode(std::io::Error::other("invalid stored environment source metadata").into())
+}
+
+fn source_selection_metadata(
+    source_spec: serde_json::Value,
+    profile_id: Option<String>,
+    revision: Option<i64>,
+) -> Option<super::environment_sources::EnvironmentSourceSelection> {
+    // The SQL projection intentionally contains only selector metadata, not a
+    // whole ProjectSpec (or its required schema/work-directory fields). Decode
+    // only those selected fields without reading ordinary application values.
+    #[derive(Deserialize)]
+    struct SourceMetadata {
+        #[serde(default)]
+        secrets: codewire_project::SecretBindings,
+        #[serde(default)]
+        credentials: Option<codewire_project::CredentialBinding>,
+    }
+    let selected = serde_json::from_value::<SourceMetadata>(source_spec).ok()?;
+    let spec = codewire_project::ProjectSpec {
+        secrets: selected.secrets,
+        credentials: selected.credentials,
+        ..Default::default()
+    };
+    let binding = match (profile_id, revision) {
+        (None, None) => None,
+        (Some(id), Some(revision)) => Some((id, revision)),
+        _ => return None,
+    };
+    super::environment_sources::selection_from_spec(&spec, binding.as_ref()).ok()
 }
 
 /// Mirrors `requireEnvironmentAccess` (permission hierarchy
@@ -1430,6 +1487,8 @@ mod tests {
             retry_count: 0,
             setup_phase: 0,
             setup_complete: false,
+            operation_generation: 7,
+            source_selection: Some(Default::default()),
             setup_error: None,
             ttl_seconds: None,
             shutdown_at: None,
@@ -1465,6 +1524,36 @@ mod tests {
         }
         assert_eq!(v["type"], "sandbox");
         assert_eq!(v["state_changed_at"], "2026-06-12T00:00:00Z");
+    }
+
+    #[test]
+    fn source_read_metadata_is_canonical_value_free_and_unavailable_on_inconsistent_pin() {
+        let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let spec = serde_json::json!({
+            "environment": {"SYNTHETIC_CANARY": "never-return-this-value"},
+            "secrets": {"user": "platform", "project": format!("platform:id:{id}")},
+            "credentials": {"profile": format!("platform:id:{id}")}
+        });
+        let selected = source_selection_metadata(spec.clone(), Some(id.into()), Some(3)).unwrap();
+        assert_eq!(selected.profile_revision, Some(3));
+        assert!(
+            !serde_json::to_string(&selected)
+                .unwrap()
+                .contains("never-return-this-value")
+        );
+        assert!(source_selection_metadata(spec.clone(), None, None).is_none());
+        assert!(source_selection_metadata(spec.clone(), Some("other".into()), Some(3)).is_none());
+        assert!(source_selection_metadata(spec, Some(id.into()), None).is_none());
+        assert!(
+            source_selection_metadata(serde_json::json!({}), Some(id.into()), Some(3)).is_none()
+        );
+        assert_eq!(
+            source_selection_metadata(serde_json::json!({}), None, None),
+            Some(Default::default())
+        );
+        assert!(ENV_SELECT_COLS.contains("e.project_spec->'secrets'"));
+        assert!(ENV_SELECT_COLS.contains("e.project_spec->'credentials'"));
+        assert!(!ENV_SELECT_COLS.contains("e.project_spec->'environment'"));
     }
 
     #[test]

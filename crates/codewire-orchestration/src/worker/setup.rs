@@ -38,6 +38,25 @@ const SETUP_EXEC_QUIESCENCE: Duration = Duration::from_secs(6);
 const SETUP_POD_RECOVERY_TIMEOUT: Duration = Duration::from_secs(180);
 const SETUP_POD_RECOVERY_POLL: Duration = Duration::from_millis(500);
 const SETUP_MUTATION_STATES: &[&str] = &["running"];
+// Every chain now launches through the shared projection/provider channel.
+// Leave room beneath its unchanged 16-request bound for provider traffic.
+const SETUP_REPOSITORY_CONCURRENCY: usize = 4;
+
+mod ssh_checkout;
+
+async fn observe_repository_chains<F: std::future::Future>(
+    chains: impl IntoIterator<Item = F>,
+) -> Vec<F::Output> {
+    use futures::StreamExt as _;
+
+    // Preserve input/error ordering and observe every started sibling. A
+    // failure must not short-circuit and drop attached workspace operations;
+    // existing per-chain authority/reaping checks fence queued launches.
+    futures::stream::iter(chains)
+        .buffered(SETUP_REPOSITORY_CONCURRENCY)
+        .collect()
+        .await
+}
 
 macro_rules! setup_fencing_evidence {
     ($event:expr) => {{
@@ -120,6 +139,7 @@ pub struct Repo {
     pub revision: String,
     pub branch: String,
     pub mount_path: String,
+    pub known_hosts: Vec<String>,
 }
 
 /// Mirrors `environmentsetup.Inputs`.
@@ -576,6 +596,7 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
             revision: repository.revision.clone(),
             branch: repository.branch.clone(),
             mount_path: repository.destination.clone(),
+            known_hosts: repository.known_hosts.clone(),
         });
     }
     input
@@ -1076,7 +1097,26 @@ impl WorkerSetupOps<'_> {
         } else {
             Ok(true)
         };
-        guard.commit().await?;
+        if let Err(error) = guard.commit().await {
+            // Attachment may already have dispatched the daemon command. A
+            // failed lock/transaction release is not proof of non-execution.
+            // Drop the transport and retain the existing exact-Pod recovery
+            // obligation, including when the database is temporarily unavailable.
+            drop(attach);
+            self.mark_launch_group_reaping();
+            self.recover_current_exec(
+                &Inputs {
+                    environment_id: env_id.to_string(),
+                    namespace: namespace.to_string(),
+                    pod_name: pod.name.clone(),
+                    ..Default::default()
+                },
+                self.active_phase,
+                true,
+            )
+            .await?;
+            return Err(classify_setup_recovery_error(error));
+        }
         let handle = match attach {
             Ok(Ok(handle)) if pod_still_exact.as_ref().is_ok_and(|exact| *exact) => handle,
             Ok(Ok(_handle)) => {
@@ -1217,23 +1257,20 @@ impl WorkerSetupOps<'_> {
         Ok(())
     }
 
-    /// Mirrors `syncWorkspaceEnv` (warn-only).
+    /// Publish the complete ordinary defaults before clone/install, including an
+    /// empty map after clearing values. Resolved application secrets never enter
+    /// this file; the first write gets canonical defaults as explicit overrides.
     async fn sync_workspace_env(&self, namespace: &str) -> anyhow::Result<()> {
-        if self.env.project_spec.environment.is_empty() {
-            return Ok(());
-        }
         let script = build_workspace_env_script(&self.env.project_spec.environment);
-        let cmd = vec!["sh".to_string(), "-c".to_string(), script];
-        if let Err(e) = self
-            .workspace_exec(namespace, &self.env.id, &cmd, "", &BTreeMap::new())
-            .await
-        {
-            if is_setup_control_flow(&e) {
-                return Err(e);
-            }
-            tracing::warn!(environment_id = self.env.id, error = %e, "post-boot: failed to sync workspace env");
-        }
-        Ok(())
+        let cmd = vec!["/bin/sh".to_string(), "-c".to_string(), script];
+        self.workspace_exec(
+            namespace,
+            &self.env.id,
+            &cmd,
+            "",
+            &self.env.project_spec.environment,
+        )
+        .await
     }
 
     /// Applies non-secret Git author metadata through the fenced setup executor.
@@ -1390,6 +1427,12 @@ impl SetupOps for WorkerSetupOps<'_> {
                 .iter()
                 .map(|repo| (repo.url.as_str(), repo.mount_path.as_str())),
         )?;
+        // Validate every trust/selection input before even the first checkout
+        // removal. Missing metadata must never select an ambient SSH agent.
+        let ssh_commands = ssh_checkout::commands(
+            &input.repos,
+            self.env.managed_credential_clients.as_ref().ok().copied(),
+        )?;
         // Observe every launched sibling before returning an error. Dropping a
         // sibling future could otherwise detach an unobserved workspace exec.
         *self.recovery_lock.lock().await = false;
@@ -1398,71 +1441,79 @@ impl SetupOps for WorkerSetupOps<'_> {
         self.launch_group_active
             .store(true, std::sync::atomic::Ordering::Release);
         let this: &WorkerSetupOps<'_> = self;
-        let clones = input.repos.iter().map(|repo| {
-            let repo = repo.clone();
-            let namespace = input.namespace.clone();
-            let env_id = input.environment_id.clone();
-            async move {
-                this.phase_authority
-                    .ensure_active(this.active_phase)
-                    .await?;
-                let dir = canonical_repository_mount(&repo.url, &repo.mount_path)?;
-                let rm: Vec<String> = vec!["rm".into(), "-rf".into(), dir.clone()];
-                if let Err(error) = this
-                    .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
-                    .await
-                    && is_setup_control_flow(&error)
-                {
-                    return Err(error);
-                }
-                this.phase_authority
-                    .ensure_active(this.active_phase)
-                    .await?;
-                #[cfg(feature = "kind-e2e")]
-                let clone = super::fencing_evidence::clone_fixture_command(&repo.url)
-                    .unwrap_or_else(|| {
-                        vec!["git".into(), "clone".into(), repo.url.clone(), dir.clone()]
-                    });
-                #[cfg(not(feature = "kind-e2e"))]
-                let clone: Vec<String> =
-                    vec!["git".into(), "clone".into(), repo.url.clone(), dir.clone()];
-                if let Err(e) = this
-                    .workspace_exec(&namespace, &env_id, &clone, "", &BTreeMap::new())
-                    .await
-                {
-                    if is_setup_control_flow(&e) {
-                        return Err(e);
+        // Materialize the unpolled futures before crossing the async-trait
+        // boundary; only observe_repository_chains admits them for execution.
+        let clones: Vec<_> = input
+            .repos
+            .iter()
+            .zip(ssh_commands)
+            .map(|(repo, ssh_command)| {
+                let repo = repo.clone();
+                let namespace = input.namespace.clone();
+                let env_id = input.environment_id.clone();
+                async move {
+                    this.phase_authority
+                        .ensure_active(this.active_phase)
+                        .await?;
+                    let dir = canonical_repository_mount(&repo.url, &repo.mount_path)?;
+                    let rm: Vec<String> = vec!["rm".into(), "-rf".into(), dir.clone()];
+                    if let Err(error) = this
+                        .workspace_exec(&namespace, &env_id, &rm, "", &BTreeMap::new())
+                        .await
+                        && is_setup_control_flow(&error)
+                    {
+                        return Err(error);
                     }
-                    let error = e.context(format!("git clone {}", repo.url));
-                    return Err(this.fence_failed_launch_group(input, error).await);
-                }
-                let selector = if repo.revision.is_empty() {
-                    &repo.branch
-                } else {
-                    &repo.revision
-                };
-                if !selector.is_empty() {
-                    let mut checkout: Vec<String> = vec!["git".into(), "checkout".into()];
-                    if !repo.revision.is_empty() {
-                        checkout.push("--detach".into());
-                    }
-                    checkout.push(selector.clone());
+                    this.phase_authority
+                        .ensure_active(this.active_phase)
+                        .await?;
+                    #[cfg(feature = "kind-e2e")]
+                    let clone = super::fencing_evidence::clone_fixture_command(&repo.url)
+                        .unwrap_or_else(|| {
+                            vec!["git".into(), "clone".into(), repo.url.clone(), dir.clone()]
+                        });
+                    #[cfg(not(feature = "kind-e2e"))]
+                    let clone: Vec<String> =
+                        vec!["git".into(), "clone".into(), repo.url.clone(), dir.clone()];
+                    let clone = ssh_command.unwrap_or(clone);
                     if let Err(e) = this
-                        .workspace_exec(&namespace, &env_id, &checkout, &dir, &BTreeMap::new())
+                        .workspace_exec(&namespace, &env_id, &clone, "", &BTreeMap::new())
                         .await
                     {
                         if is_setup_control_flow(&e) {
                             return Err(e);
                         }
-                        let error =
-                            e.context(format!("git checkout {} for {}", selector, repo.url));
+                        let error = e.context(format!("git clone {}", repo.url));
                         return Err(this.fence_failed_launch_group(input, error).await);
                     }
+                    let selector = if repo.revision.is_empty() {
+                        &repo.branch
+                    } else {
+                        &repo.revision
+                    };
+                    if !selector.is_empty() {
+                        let mut checkout: Vec<String> = vec!["git".into(), "checkout".into()];
+                        if !repo.revision.is_empty() {
+                            checkout.push("--detach".into());
+                        }
+                        checkout.push(selector.clone());
+                        if let Err(e) = this
+                            .workspace_exec(&namespace, &env_id, &checkout, &dir, &BTreeMap::new())
+                            .await
+                        {
+                            if is_setup_control_flow(&e) {
+                                return Err(e);
+                            }
+                            let error =
+                                e.context(format!("git checkout {} for {}", selector, repo.url));
+                            return Err(this.fence_failed_launch_group(input, error).await);
+                        }
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-        });
-        let results = futures::future::join_all(clones).await;
+            })
+            .collect();
+        let results = observe_repository_chains(clones).await;
         setup_fencing_evidence!(SetupFencingEvidence::CloneGroupJoined {
             environment_id: input.environment_id.clone(),
             launched: results.len(),
@@ -1806,6 +1857,9 @@ pub async fn handle_post_start_configuration(
 }
 
 #[cfg(test)]
+mod repository_schedule_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
@@ -1968,6 +2022,7 @@ mod tests {
                 revision: String::new(),
                 branch: "".into(),
                 mount_path: "/workspace/app".into(),
+                known_hosts: Vec::new(),
             }],
             working_directory: "/workspace/app".into(),
             install_command: "npm ci".into(),
@@ -2277,6 +2332,9 @@ mod tests {
             disk_gb: 10,
             ttl_seconds: Some(3600),
             project_spec: codewire_project::ProjectSpec::default(),
+            operation_generation: 7,
+            projection_selection: Ok(None),
+            managed_credential_clients: Ok(Default::default()),
         };
         let backend = BackendRow {
             namespace: "ns".into(),
@@ -2319,6 +2377,14 @@ mod tests {
         assert_eq!(
             input.app_ports,
             vec![(8080, "api".to_string(), String::new())]
+        );
+        env.project_spec.repositories[0].source = "git@example.com:org/app.git".into();
+        env.project_spec.repositories[0].known_hosts =
+            vec!["example.com ssh-ed25519 QUJDRA== public-pin".into()];
+        let input = to_setup_inputs(&env, &backend);
+        assert_eq!(
+            input.repos[0].known_hosts,
+            env.project_spec.repositories[0].known_hosts
         );
     }
 

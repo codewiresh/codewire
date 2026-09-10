@@ -13,6 +13,9 @@ ADD --checksum=sha256:821a86343191aa1cbab74bd42f9e93c9a63bf85e4742945f40d3ae8419
 FROM sccache-${TARGETARCH} AS sccache-archive
 
 FROM rust:1.91.1-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65 AS cw-toolchain
+ADD --checksum=sha256:6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7 \
+  https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-linux-x86_64.zip \
+  /tmp/protoc.zip
 COPY images/workspace/debian.sources /etc/apt/sources.list.d/debian.sources
 COPY images/base/apt-transport.conf /etc/apt/apt.conf.d/80-codewire-transport
 COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-get-with-retry
@@ -20,8 +23,12 @@ RUN rm -f /etc/apt/sources.list && \
     apt-get-with-retry update && \
     grep -RqsF 'snapshot.debian.org/archive/debian/20251208T000000Z/' /etc/apt/sources.list.d && \
     ! grep -RqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d && \
-    apt-get-with-retry install -y --no-install-recommends libprotobuf-dev protobuf-compiler && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get-with-retry install -y --no-install-recommends unzip && \
+    rm -rf /var/lib/apt/lists/* && \
+    unzip -q /tmp/protoc.zip -d /opt/protoc && \
+    rm /tmp/protoc.zip && \
+    test "$(/opt/protoc/bin/protoc --version)" = 'libprotoc 35.1'
+ENV PROTOC=/opt/protoc/bin/protoc
 RUN rustup component add --toolchain 1.91.1 rustfmt clippy
 COPY --from=sccache-archive /sccache.tar.gz /tmp/sccache.tar.gz
 RUN mkdir /tmp/sccache && \
@@ -49,6 +56,33 @@ RUN --mount=type=bind,target=/src,readonly \
       -p codewire-cli-bin --bin cw --target-dir /tmp/cargo-target && \
     install -D -m 0755 /tmp/cargo-target/release/cw /out/cw && \
     rm -rf /tmp/cargo-target
+
+# Prepare the loopback SSH acceptance target once, at image-build time. Extract
+# signed, version-pinned packages without executing maintainer scripts: this
+# neither enables a system SSH service nor creates image-wide host keys.
+FROM ${BASE_IMAGE_REF} AS stock-ssh-fixture
+USER root
+ARG TARGETARCH
+RUN set -euo pipefail; \
+    test "$(dpkg --print-architecture)" = "$TARGETARCH"; \
+    grep -RqsF 'snapshot.ubuntu.com/ubuntu/20260803T000000Z/' /etc/apt/sources.list.d; \
+    ! grep -RqsE '(archive|security|ports)\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d; \
+    apt-get-with-retry -o APT::Update::Error-Mode=any update; \
+    install -d -m 0755 /packages /out; \
+    cd /packages; \
+    apt-get-with-retry download openssh-server=1:9.6p1-3ubuntu13.18 libwrap0=7.6.q-33; \
+    packages=(*.deb); test "${#packages[@]}" = 2; \
+    for package in "${packages[@]}"; do \
+      identity="$(dpkg-deb --show --showformat='${Package} ${Version} ${Architecture}' "$package")"; \
+      case "$identity" in \
+        "openssh-server 1:9.6p1-3ubuntu13.18 $TARGETARCH"|"libwrap0 7.6.q-33 $TARGETARCH") ;; \
+        *) echo 'unexpected SSH fixture package identity' >&2; exit 1 ;; \
+      esac; \
+      dpkg-deb --extract "$package" /out; \
+    done; \
+    test -x /out/usr/sbin/sshd; \
+    host_keys="$(find /out -name 'ssh_host_*' -print -quit)"; test -z "$host_keys"; \
+    chown -R root:root /out; chmod -R go-w /out
 
 FROM ${BASE_IMAGE_REF} AS workspace-foundation
 USER root
@@ -149,6 +183,7 @@ RUN npm install --prefix /opt/codewire/agents/npm -g --ignore-scripts \
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.
 USER root
+COPY --from=stock-ssh-fixture /out/ /opt/codewire/fixtures/openssh/
 COPY --from=cw-builder /out/cw /usr/local/bin/cw
 RUN /usr/local/bin/cw --version
 

@@ -3,85 +3,212 @@
 use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, CredentialStatus, ProviderId,
 };
-use codewire_credential_broker::codex_enrollment::{
-    CodexPublicationOutcome, CompletedCodexEnrollment,
+use codewire_platform_credentials::{
+    CredentialRegistration, PreparedCredentialCreation, PreparedCredentialReplacement,
 };
-use codewire_platform_credentials::{CredentialRegistration, PreparedCredentialCreation};
 use codewire_protected_store::ProtectedValue;
 use sqlx::{Acquire, Postgres, Transaction};
 use tokio::time::Instant;
 
+use super::enrollment::{Completed, Outcome};
 use super::{
-    Error, MUTATION_TIMEOUT, Scope, Shared, authority_error, enrollment_error, store_error,
+    EnrollmentTarget, Error, MUTATION_TIMEOUT, Scope, Shared, authority_error, store_error,
 };
 
 pub(super) struct Publication<T> {
-    pub outcome: CodexPublicationOutcome,
+    pub outcome: Outcome,
     pub result: Result<T, Error>,
 }
 
 enum Mutation {
     Create(Box<PreparedCredentialCreation>),
-    Revoke { id: CredentialId, revision: u64 },
-    Delete { id: CredentialId, revision: u64 },
+    Replace(Box<PreparedCredentialReplacement>),
+    Rename {
+        id: CredentialId,
+        revision: u64,
+        expected_name: String,
+        name: String,
+    },
+    Revoke {
+        id: CredentialId,
+        revision: u64,
+    },
+    Delete {
+        id: CredentialId,
+        revision: u64,
+    },
 }
 
 pub(super) async fn enroll(
     shared: &Shared,
     scope: &Scope,
-    completed: &mut CompletedCodexEnrollment,
-    name: String,
+    completed: &mut Completed,
+    target: EnrollmentTarget,
 ) -> Publication<CredentialMetadata> {
     let prepared = async {
         scope.check()?;
-        let imported = completed.take_import().map_err(enrollment_error)?;
-        let (bundle, account_hint) = imported.into_parts();
-        let mut bytes = bundle.into_bytes();
-        let material = ProtectedValue::new(std::mem::take(&mut *bytes))
-            .map_err(|_| Error::EnrollmentFailed)?;
-        let registration = CredentialRegistration {
-            provider: ProviderId::parse("openai").expect("built-in provider"),
-            authentication_kind: CredentialAuthKind::OAuth,
-            display_name: name,
-            account_hint,
-            expires_at_unix: None,
-        };
+        let (material, account_hint) = completed.take_material()?;
         // All provider/envelope work precedes the identity/publication locks.
-        scope
-            .wait(
-                completed.wait_for_publication(shared.store.prepare_creation(
-                    &scope.owner,
-                    registration,
-                    &material,
-                )),
-            )
-            .await?
-            .map_err(enrollment_error)?
-            .map_err(store_error)
+        match target {
+            EnrollmentTarget::Create(name) => {
+                let registration = CredentialRegistration {
+                    provider: ProviderId::parse(completed.provider()).expect("built-in provider"),
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: name,
+                    account_hint,
+                    expires_at_unix: None,
+                };
+                let prepared = scope
+                    .wait(
+                        completed.wait_for_publication(shared.store.prepare_creation(
+                            &scope.owner,
+                            registration,
+                            &material,
+                        )),
+                    )
+                    .await??
+                    .map_err(store_error)?;
+                Ok(Mutation::Create(Box::new(prepared)))
+            }
+            EnrollmentTarget::Reconnect(expected) => {
+                let prepared = scope
+                    .wait(
+                        completed.wait_for_publication(shared.store.prepare_replacement(
+                            &scope.owner,
+                            &expected,
+                            &material,
+                            account_hint,
+                        )),
+                    )
+                    .await??
+                    .map_err(store_error)?;
+                Ok(Mutation::Replace(Box::new(prepared)))
+            }
+        }
     }
     .await;
     let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             return Publication {
-                outcome: CodexPublicationOutcome::NotPublished,
+                outcome: Outcome::NotPublished,
                 result: Err(error),
             };
         }
     };
-    let result = publish(
-        shared,
-        scope,
-        Some(completed),
-        Mutation::Create(Box::new(prepared)),
-    )
-    .await;
+    let result = publish(shared, scope, Some(completed), prepared).await;
     Publication {
         outcome: result.outcome,
         result: result
             .result
             .and_then(|metadata| metadata.ok_or(Error::PublicationUnknown)),
     }
+}
+
+pub(super) async fn add_api_key(
+    shared: &Shared,
+    scope: &Scope,
+    registration: CredentialRegistration,
+    material: ProtectedValue,
+) -> Result<CredentialMetadata, Error> {
+    let prepared = scope
+        .wait(
+            shared
+                .store
+                .prepare_creation(&scope.owner, registration, &material),
+        )
+        .await?
+        .map_err(store_error)?;
+    drop(material);
+    publish(shared, scope, None, Mutation::Create(Box::new(prepared)))
+        .await
+        .result?
+        .ok_or(Error::PublicationUnknown)
+}
+
+pub(super) async fn rename(
+    shared: &Shared,
+    scope: &Scope,
+    id: CredentialId,
+    revision: u64,
+    expected_name: String,
+    name: String,
+) -> Result<CredentialMetadata, Error> {
+    publish(
+        shared,
+        scope,
+        None,
+        Mutation::Rename {
+            id,
+            revision,
+            expected_name,
+            name,
+        },
+    )
+    .await
+    .result?
+    .ok_or(Error::PublicationUnknown)
+}
+
+pub(super) async fn rotate_api_key(
+    shared: &Shared,
+    scope: &Scope,
+    id: CredentialId,
+    revision: u64,
+    material: ProtectedValue,
+    expires_at_unix: Option<u64>,
+) -> Result<CredentialMetadata, Error> {
+    let expected = scope
+        .wait(shared.store.record(&scope.owner, &id))
+        .await?
+        .map_err(store_error)?;
+    if expected.metadata.revocation_generation != revision {
+        return Err(Error::StaleRevision);
+    }
+    if expected.metadata.authentication_kind != CredentialAuthKind::ApiKey {
+        return Err(Error::InvalidInput);
+    }
+    super::validate_api_key(
+        expected.metadata.provider.as_str(),
+        &expected.metadata.display_name,
+        material.expose_secret(),
+        expires_at_unix,
+    )?;
+    let prepared = scope
+        .wait(shared.store.prepare_api_key_replacement(
+            &scope.owner,
+            &expected,
+            &material,
+            expires_at_unix,
+        ))
+        .await?
+        .map_err(store_error)?;
+    drop(material);
+    publish(shared, scope, None, Mutation::Replace(Box::new(prepared)))
+        .await
+        .result?
+        .ok_or(Error::PublicationUnknown)
+}
+
+pub(super) async fn add_ssh(
+    shared: &Shared,
+    scope: &Scope,
+    name: String,
+    expires_at_unix: Option<u64>,
+    prepared: codewire_protected_store::ssh_material::PreparedSshCredential,
+) -> Result<CredentialMetadata, Error> {
+    let prepared = scope
+        .wait(
+            shared
+                .store
+                .prepare_ssh_creation(&scope.owner, name, expires_at_unix, prepared),
+        )
+        .await?
+        .map_err(store_error)?;
+    publish(shared, scope, None, Mutation::Create(Box::new(prepared)))
+        .await
+        .result?
+        .ok_or(Error::PublicationUnknown)
 }
 
 pub(super) async fn lifecycle(
@@ -102,7 +229,7 @@ pub(super) async fn lifecycle(
 async fn publish(
     shared: &Shared,
     scope: &Scope,
-    completed: Option<&CompletedCodexEnrollment>,
+    completed: Option<&Completed>,
     mutation: Mutation,
 ) -> Publication<Option<CredentialMetadata>> {
     let deadline = scope.deadline.min(Instant::now() + MUTATION_TIMEOUT);
@@ -111,7 +238,7 @@ async fn publish(
         Ok(Ok(Ok(connection))) => connection,
         _ => {
             return Publication {
-                outcome: CodexPublicationOutcome::NotPublished,
+                outcome: Outcome::NotPublished,
                 result: Err(Error::Unavailable),
             };
         }
@@ -142,7 +269,7 @@ async fn publish(
         // issuing COMMIT. A cancellation after issuance cannot uncommit it.
         let admitted = scope.check().and_then(|()| {
             if let Some(completed) = completed {
-                completed.check_active().map_err(enrollment_error)?;
+                completed.check_active()?;
             }
             if Instant::now() >= deadline {
                 return Err(Error::Expired);
@@ -160,7 +287,7 @@ async fn publish(
     .await;
     match result {
         Ok(Ok(metadata)) => Publication {
-            outcome: CodexPublicationOutcome::Published,
+            outcome: Outcome::Published,
             result: Ok(metadata),
         },
         result => {
@@ -175,12 +302,12 @@ async fn publish(
             drop(connection.detach());
             if commit_issued {
                 Publication {
-                    outcome: CodexPublicationOutcome::Unknown,
+                    outcome: Outcome::Unknown,
                     result: Err(Error::PublicationUnknown),
                 }
             } else {
                 Publication {
-                    outcome: CodexPublicationOutcome::NotPublished,
+                    outcome: Outcome::NotPublished,
                     result: Err(match result {
                         Ok(Err(error)) => error,
                         _ => Error::Unavailable,
@@ -201,6 +328,23 @@ async fn apply(
         Mutation::Create(prepared) => shared
             .store
             .create_prepared_in(tx, &scope.owner, *prepared)
+            .await
+            .map(|record| Some(record.metadata))
+            .map_err(store_error),
+        Mutation::Replace(prepared) => shared
+            .store
+            .replace_prepared_in(tx, &scope.owner, *prepared)
+            .await
+            .map(|record| Some(record.metadata))
+            .map_err(store_error),
+        Mutation::Rename {
+            id,
+            revision,
+            expected_name,
+            name,
+        } => shared
+            .store
+            .rename_in(tx, &scope.owner, &id, revision, &expected_name, name)
             .await
             .map(|record| Some(record.metadata))
             .map_err(store_error),

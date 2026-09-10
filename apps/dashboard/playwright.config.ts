@@ -77,6 +77,7 @@ export default defineConfig({
       CODEWIRE_DASHBOARD_LISTEN_ADDR: "127.0.0.1:5173",
       CODEWIRE_PUBLIC_ORIGIN: dashboardUrl,
       CODEWIRE_API_ORIGIN: apiOrigin,
+      CODEWIRE_CREDENTIAL_ORIGIN: apiOrigin,
       CODEWIRE_IDENTITY_ORIGIN: identityOrigin,
       CODEWIRE_BILLING_ORIGIN: billingOrigin,
       CODEWIRE_BROWSER_API_ORIGIN: browserApiOrigin,

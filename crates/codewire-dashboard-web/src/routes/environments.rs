@@ -49,7 +49,7 @@ const MAX_APP_PORTS: usize = 16;
 const MAX_FIELD: usize = 16_384;
 const DEFAULT_TTL: &str = "infinity";
 const PROTECTED_SECRET_ACCESS_UNAVAILABLE: &str =
-    "Saved secrets cannot be attached to a Sandbox until protected access is available.";
+    crate::environment_source_forms::INVALID_SELECTION;
 const PROJECT_SPEC_INVALID: &str = "The Sandbox service returned an invalid project configuration.";
 const PROJECT_FEATURE_UNAVAILABLE: &str =
     "This project uses features that the current platform Sandbox editor cannot execute safely.";
@@ -64,6 +64,8 @@ pub(super) struct EnvironmentsQuery {
     destroyed: bool,
     #[serde(default)]
     ports: String,
+    #[serde(default)]
+    sources: String,
     #[serde(default)]
     trust: String,
     #[serde(default)]
@@ -142,11 +144,9 @@ struct EnvironmentSubmission {
     isolation_tier: String,
     repositories: Vec<(String, String, String)>,
     agents: Vec<String>,
-    secret_project_supplied: bool,
-    include_org_secrets: bool,
-    include_user_secrets: bool,
     app_ports: Vec<(String, String, String)>,
     agent_secret_supplied: bool,
+    sources: Result<crate::environment_source_forms::SourceSubmission, ()>,
 }
 
 impl EnvironmentSubmission {
@@ -155,7 +155,6 @@ impl EnvironmentSubmission {
         let mut repositories = BTreeMap::<usize, (String, String, String)>::new();
         let mut app_ports = BTreeMap::<usize, (String, String, String)>::new();
         let mut agents = Vec::new();
-        let mut secret_project_supplied = false;
         let mut agent_secret_supplied = false;
 
         for (key, value) in url::form_urlencoded::parse(bytes) {
@@ -199,10 +198,8 @@ impl EnvironmentSubmission {
                     return Err(());
                 }
                 app_ports.entry(index).or_default().2 = value;
-            } else if key == "secret_project" {
-                if !value.trim().is_empty() {
-                    secret_project_supplied = true;
-                }
+            } else if matches!(key.as_str(), "secret_project" | "credential_profile") {
+                // Parsed exactly once by the metadata-only source adapter below.
             } else if key.starts_with("agent_secret_") {
                 if !value.trim().is_empty() {
                     agent_secret_supplied = true;
@@ -226,15 +223,17 @@ impl EnvironmentSubmission {
             isolation_tier: take(&mut values, "isolation_tier"),
             repositories: repositories.into_values().collect(),
             agents,
-            secret_project_supplied,
-            include_org_secrets: values.contains_key("include_org_secrets"),
-            include_user_secrets: values.contains_key("include_user_secrets"),
             app_ports: app_ports.into_values().collect(),
             agent_secret_supplied,
+            sources: crate::environment_source_forms::SourceSubmission::parse(bytes),
         })
     }
 
     fn form_view(&self, token: String) -> EnvironmentCreateFormView {
+        let mut sources = crate::view::EnvironmentSourceFieldsView::default();
+        if let Ok(submission) = &self.sources {
+            submission.hydrate(&mut sources);
+        }
         EnvironmentCreateFormView {
             csrf_token: token,
             expanded: true,
@@ -256,6 +255,7 @@ impl EnvironmentSubmission {
             app_ports: app_port_rows(&self.app_ports),
             presets: Vec::new(),
             agents: Vec::new(),
+            sources,
             repo_error: String::new(),
             image_error: String::new(),
             name_error: String::new(),
@@ -331,6 +331,7 @@ impl EnvironmentSubmission {
                     revision: String::new(),
                     branch: branch.trim().to_owned(),
                     destination: workspace_mount_path(mount_path),
+                    known_hosts: Vec::new(),
                 })
             })
             .collect();
@@ -417,11 +418,7 @@ impl EnvironmentSubmission {
             });
         }
 
-        if self.secret_project_supplied
-            || self.include_org_secrets
-            || self.include_user_secrets
-            || self.agent_secret_supplied
-        {
+        if self.agent_secret_supplied || self.sources.is_err() {
             form.form_error = PROTECTED_SECRET_ACCESS_UNAVAILABLE.to_owned();
         }
 
@@ -455,7 +452,7 @@ impl EnvironmentSubmission {
             form.form_error = "The Sandbox project configuration is invalid.".to_owned();
             return None;
         }
-        Some(CreateEnvironmentRequest {
+        let mut request = CreateEnvironmentRequest {
             org_id: org_id.to_owned(),
             preset_id: nonempty(self.preset_id.trim()),
             name: nonempty(self.name.trim()),
@@ -463,11 +460,22 @@ impl EnvironmentSubmission {
             isolation_tier: isolation_tier.into(),
             project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
             ..Default::default()
-        })
+        };
+        if self
+            .sources
+            .as_ref()
+            .ok()?
+            .apply_create(&mut request)
+            .is_err()
+        {
+            form.form_error = PROTECTED_SECRET_ACCESS_UNAVAILABLE.to_owned();
+            return None;
+        }
+        Some(request)
     }
 }
 
-fn validated_secret_free_project_spec(
+fn validated_dashboard_project_spec(
     draft: &CreateEnvironmentRequest,
     presets: &[crate::view::EnvironmentPresetOption],
 ) -> Result<ProjectSpec, &'static str> {
@@ -491,8 +499,15 @@ fn validated_secret_free_project_spec(
             .is_some_and(|preset| !preset.uses_protected_secret_bindings),
         None => true,
     };
-    if !project_spec.secrets.is_empty() || !preset_is_safe {
+    if crate::environment_source_forms::create_selection(draft).is_err() || !preset_is_safe {
         return Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE);
+    }
+    if (project_spec.secrets.user.is_some() && !draft.confirm_personal_secrets)
+        || (project_spec.credentials.is_some() && !draft.confirm_personal_credentials)
+    {
+        return Err(
+            "Confirm personal application secrets and provider access independently before creating the Sandbox.",
+        );
     }
     ensure_dashboard_project_support(&project_spec)?;
     Ok(project_spec)
@@ -519,7 +534,6 @@ fn ensure_dashboard_project_support(project_spec: &ProjectSpec) -> Result<(), &'
         || project_spec.working_directory != expected_working_directory
         || !project_spec.environment.is_empty()
         || !project_spec.skills.is_empty()
-        || project_spec.access.is_some()
         || !repositories_supported
         || !ports_supported
         || !agents_supported
@@ -531,12 +545,12 @@ fn ensure_dashboard_project_support(project_spec: &ProjectSpec) -> Result<(), &'
     Ok(())
 }
 
-fn with_secret_free_draft<T>(
+fn with_dashboard_draft<T>(
     draft: CreateEnvironmentRequest,
     presets: &[crate::view::EnvironmentPresetOption],
     dispatch: impl FnOnce(CreateEnvironmentRequest) -> T,
 ) -> Result<T, &'static str> {
-    validated_secret_free_project_spec(&draft, presets)?;
+    validated_dashboard_project_spec(&draft, presets)?;
     Ok(dispatch(draft))
 }
 
@@ -630,6 +644,7 @@ pub(super) async fn list_fragment(
     let page = EnvironmentsPageView {
         environments,
         create_form: default_create_form(token, false),
+        source_editor: None,
         port_panel: None,
         trust_summary: None,
         resize_confirmation: None,
@@ -704,7 +719,7 @@ pub(super) async fn create(
         .await;
     };
 
-    let create = match with_secret_free_draft(draft, &form.presets, |draft| {
+    let create = match with_dashboard_draft(draft, &form.presets, |draft| {
         environment_connect::create_environment(&state, cookie.clone(), draft)
     }) {
         Ok(create) => create,
@@ -771,6 +786,77 @@ pub(super) async fn start(
         },
     )
     .await
+}
+
+pub(super) async fn update_sources(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    RawForm(bytes): RawForm,
+) -> Response {
+    let mut identity = HashMap::new();
+    for (key, value) in url::form_urlencoded::parse(&bytes) {
+        if matches!(key.as_ref(), "_csrf" | "environment_id")
+            && (value.len() > MAX_FIELD
+                || identity
+                    .insert(key.into_owned(), value.into_owned())
+                    .is_some())
+        {
+            return error_page(WebError::CsrfRejected);
+        }
+    }
+    let csrf = take(&mut identity, "_csrf");
+    let environment = take(&mut identity, "environment_id");
+    if !valid_identifier(&environment) {
+        return error_page(WebError::CsrfRejected);
+    }
+    let (_, organization, cookie) =
+        match action_context(&state, &headers, &slug, &csrf, environments_path(&slug)).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let request = match crate::environment_source_forms::update_request(
+        &bytes,
+        &organization.id,
+        &environment,
+    ) {
+        Ok(request) => request,
+        Err(()) => {
+            return mutation_redirect(
+                &state,
+                environments_path(&slug),
+                "",
+                "The source selection changed or is invalid. Reload and review it again.",
+                &headers,
+            );
+        }
+    };
+    match environment_connect::update_environment_sources(&state, cookie, request).await {
+        Ok(outcome) => mutation_redirect(&state, environments_path(&slug), outcome, "", &headers),
+        Err(error) if error.code == ErrorCode::Unauthenticated => {
+            login_redirect(&environments_path(&slug), &headers)
+        }
+        Err(error) => mutation_redirect(
+            &state,
+            environments_path(&slug),
+            "",
+            match error.code {
+                ErrorCode::Aborted | ErrorCode::AlreadyExists => {
+                    "The Sandbox operation or sources changed. Reload before trying again."
+                }
+                ErrorCode::FailedPrecondition => {
+                    "Review the selected profile revision, personal-access confirmations and restart confirmation, then try again."
+                }
+                ErrorCode::PermissionDenied => {
+                    "You do not have permission to change this Sandbox's sources."
+                }
+                _ => {
+                    "The source change could not be confirmed. Reload to check the current selection before trying again."
+                }
+            },
+            &headers,
+        ),
+    }
 }
 
 pub(super) async fn stop(
@@ -1205,6 +1291,31 @@ async fn build_page(
         &mut form,
         environment_connect::create_options(state, cookie.clone(), &organization.id).await?,
     );
+    let source_editor = if valid_identifier(&query.sources) {
+        environments
+            .iter()
+            .find(|environment| {
+                environment.id == query.sources
+                    && environment.can_destroy
+                    && environment.confidential_actions_allowed
+            })
+            .and_then(|environment| {
+                environment.sources.as_ref().map(|expected| {
+                    let mut fields = form.sources.clone();
+                    fields.select_bound(&expected.selection);
+                    fields.personal_secrets_confirmed = false;
+                    fields.personal_credentials_confirmed = false;
+                    crate::view::EnvironmentSourcesEditView {
+                        environment_id: environment.id.clone(),
+                        environment_name: environment.name.clone(),
+                        expected: expected.clone(),
+                        fields,
+                    }
+                })
+            })
+    } else {
+        None
+    };
     form.show_confidential_controls = confidential_actions_allowed;
     form.confidential_available &= confidential_actions_allowed;
     let port_panel = if valid_identifier(&query.ports) {
@@ -1274,6 +1385,7 @@ async fn build_page(
     Ok(EnvironmentsPageView {
         environments,
         create_form: form,
+        source_editor,
         port_panel,
         trust_summary,
         resize_confirmation: None,
@@ -1426,6 +1538,7 @@ fn default_create_form(token: String, expanded: bool) -> EnvironmentCreateFormVi
         app_ports: Vec::new(),
         presets: Vec::new(),
         agents: Vec::new(),
+        sources: Default::default(),
         repo_error: String::new(),
         image_error: String::new(),
         name_error: String::new(),
@@ -1442,6 +1555,9 @@ fn hydrate_options(form: &mut EnvironmentCreateFormView, options: EnvironmentCre
     form.agents = options.agents;
     form.confidential_available = options.confidential_available;
     form.confidential_price = options.confidential_price;
+    let mut sources = options.sources;
+    sources.retain_submission(&form.sources);
+    form.sources = sources;
 }
 
 fn apply_create_error(form: &mut EnvironmentCreateFormView, error: &ConnectError) {
@@ -1681,6 +1797,9 @@ fn page_message(value: &str) -> &'static str {
         "environment-started" => "Sandbox start requested.",
         "environment-stopping" => "Sandbox stop requested.",
         "environment-destroying" => "Sandbox destruction requested.",
+        "environment-sources-unchanged" => "Sandbox sources are unchanged.",
+        "environment-sources-stored" => "Sandbox sources saved. The Sandbox remains stopped.",
+        "environment-sources-restarting" => "Sandbox sources saved; managed restart requested.",
         "port-created" => "Port created.",
         "port-deleted" => "Port deleted.",
         _ => "",
@@ -1904,8 +2023,10 @@ mod tests {
                 confidential_actions_allowed: false,
                 vscode_url: "https://vscode.invalid".into(),
                 ports: Vec::new(),
+                sources: None,
             }],
             create_form: default_create_form("csrf".into(), false),
+            source_editor: None,
             port_panel: None,
             trust_summary: None,
             resize_confirmation: None,
@@ -1967,12 +2088,14 @@ mod tests {
     }
 
     #[test]
-    fn direct_secret_sources_are_rejected_without_retaining_values() {
+    fn invalid_or_retired_source_fields_are_rejected_without_retaining_values() {
         for bytes in [
             &b"image=example.test%2Fworkspace&secret_project=development"[..],
             &b"image=example.test%2Fworkspace&secret_project=&secret_project=development"[..],
             &b"image=example.test%2Fworkspace&include_org_secrets=true"[..],
             &b"image=example.test%2Fworkspace&include_user_secrets=true"[..],
+            &b"image=example.test%2Fworkspace&credential_profile=profile-id%407"[..],
+            &b"image=example.test%2Fworkspace&credential_profile=&credential_profile=profile-id%407"[..],
             &b"image=example.test%2Fworkspace&agent_secret_OPENAI_API_KEY=write-only-marker"[..],
             &b"image=example.test%2Fworkspace&agent_secret_forged-name=write-only-marker"[..],
             &b"image=example.test%2Fworkspace&agent_secret_OPENAI_API_KEY=&agent_secret_OPENAI_API_KEY=write-only-marker&agent_secret_OPENAI_API_KEY="[..],
@@ -1991,7 +2114,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_submissions_emit_one_canonical_secret_free_project_spec() {
+    fn no_selection_emits_one_canonical_source_free_project_spec() {
         let submission =
             EnvironmentSubmission::parse(b"image=example.test%2Fworkspace").expect("submission");
         let mut form = submission.form_view("token".to_owned());
@@ -2000,9 +2123,146 @@ mod tests {
             .validate_and_draft("org-test", &mut form)
             .expect("safe draft");
 
-        let project_spec = validated_secret_free_project_spec(&draft, &[]).expect("project spec");
+        let project_spec = validated_dashboard_project_spec(&draft, &[]).expect("project spec");
         assert_eq!(project_spec.image, "example.test/workspace");
         assert!(project_spec.secrets.is_empty());
+    }
+
+    #[test]
+    fn selected_create_preserves_choices_and_independent_confirmations_on_rerender() {
+        let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let submission = EnvironmentSubmission::parse(format!(
+            "image=example.test%2Fworkspace&secret_project={id}&credential_profile={id}%407&include_user_secrets=platform&confirm_personal_secrets=true&confirm_personal_credentials=true"
+        ).as_bytes()).unwrap();
+        let mut form = submission.form_view("token".into());
+        let options = || EnvironmentCreateOptions {
+            presets: vec![],
+            agents: vec![],
+            confidential_available: false,
+            confidential_price: String::new(),
+            sources: crate::view::EnvironmentSourceFieldsView {
+                application_selection_enabled: true,
+                credential_selection_enabled: true,
+                projects: vec![crate::view::EnvironmentSecretProjectOption {
+                    id: id.into(),
+                    name: "development".into(),
+                    selected: false,
+                }],
+                profiles: vec![crate::view::EnvironmentCredentialProfileOption {
+                    id: id.into(),
+                    name: "work".into(),
+                    revision: 7,
+                    identity_count: 2,
+                    bound_revision: false,
+                    selected: false,
+                }],
+                ..Default::default()
+            },
+        };
+        hydrate_options(&mut form, options());
+        let draft = submission
+            .validate_and_draft("org-test", &mut form)
+            .unwrap();
+        let spec = validated_dashboard_project_spec(&draft, &[]).unwrap();
+        assert_eq!(spec.secrets.project, format!("platform:id:{id}"));
+        assert_eq!(draft.expected_profile_revision, Some(7));
+        assert!(draft.confirm_personal_secrets && draft.confirm_personal_credentials);
+        form.name_error = "Choose another name.".into();
+        hydrate_options(&mut form, options());
+        assert!(form.sources.projects[0].selected && form.sources.profiles[0].selected);
+        assert!(
+            form.sources.personal_secrets_confirmed && form.sources.personal_credentials_confirmed
+        );
+        let mut no_credentials_consent = draft;
+        no_credentials_consent.confirm_personal_credentials = false;
+        assert!(validated_dashboard_project_spec(&no_credentials_consent, &[]).is_err());
+    }
+
+    #[test]
+    fn edit_form_preserves_exact_cas_and_can_clear_a_deleted_bound_project() {
+        let id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let selection = crate::environment_source_forms::SourceSubmission::parse(
+            format!("secret_project={id}&include_user_secrets=platform").as_bytes(),
+        )
+        .unwrap()
+        .selection;
+        let mut fields = crate::view::EnvironmentSourceFieldsView {
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            ..Default::default()
+        };
+        fields.select_bound(&selection);
+        let mut page = EnvironmentsPageView {
+            environments: vec![],
+            create_form: default_create_form("csrf-token".into(), false),
+            source_editor: Some(crate::view::EnvironmentSourcesEditView {
+                environment_id: id.into(),
+                environment_name: "<unsafe>".into(),
+                fields,
+                expected: crate::view::EnvironmentSourcesSummaryView {
+                    selection,
+                    operation_generation: 9,
+                    project: format!("platform:id:{id}"),
+                    organization: false,
+                    personal: true,
+                    profile: String::new(),
+                    profile_revision: String::new(),
+                },
+            }),
+            port_panel: None,
+            trust_summary: None,
+            resize_confirmation: None,
+            resize_operation: None,
+            search: String::new(),
+            state: "all".into(),
+            message: String::new(),
+            error: String::new(),
+        };
+        let organization = test_organization();
+        let render = |page: &EnvironmentsPageView| {
+            OrganizationEnvironmentsContentTemplate {
+                organization: &organization,
+                page,
+            }
+            .render()
+            .unwrap()
+        };
+        let html = render(&page);
+        assert!(html.contains("name=\"expected_operation_generation\" value=\"9\""));
+        assert!(html.contains(&format!("name=\"expected_secret_project\" value=\"{id}\"")));
+        assert!(html.contains("name=\"expected_include_user_secrets\" value=\"platform\""));
+        assert!(html.contains("name=\"confirm_personal_secrets\" value=\"true\">"));
+        assert!(html.contains("name=\"confirm_personal_credentials\" value=\"true\">"));
+        assert!(html.contains("type=\"submit\">Save sources</button>"));
+        assert!(!html.contains("<unsafe>"));
+        let request = crate::environment_source_forms::update_request(format!(
+            "expected_operation_generation=9&expected_secret_project={id}&expected_include_user_secrets=platform&secret_project=&credential_profile="
+        ).as_bytes(), "org", id).unwrap();
+        assert_eq!(
+            request
+                .expected
+                .as_option()
+                .unwrap()
+                .secrets
+                .as_option()
+                .unwrap()
+                .project,
+            format!("platform:id:{id}")
+        );
+        assert!(
+            request
+                .replacement
+                .as_option()
+                .unwrap()
+                .secrets
+                .as_option()
+                .unwrap()
+                .project
+                .is_empty()
+        );
+        assert!(!request.confirm_personal_secrets && !request.confirm_personal_credentials);
+        page.source_editor.as_mut().unwrap().fields.project_error = "Catalog unavailable".into();
+        assert!(render(&page).contains("type=\"submit\" disabled>Save sources</button>"));
     }
 
     #[test]
@@ -2012,7 +2272,7 @@ mod tests {
             presets: &[crate::view::EnvironmentPresetOption],
         ) {
             let dispatched = std::cell::Cell::new(false);
-            let result = with_secret_free_draft(draft, presets, |_| dispatched.set(true));
+            let result = with_dashboard_draft(draft, presets, |_| dispatched.set(true));
             assert_eq!(result, Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE));
             assert!(!dispatched.get());
         }
@@ -2022,7 +2282,7 @@ mod tests {
             ..Default::default()
         };
         let dispatched = std::cell::Cell::new(false);
-        let missing = with_secret_free_draft(CreateEnvironmentRequest::default(), &[], |_| {
+        let missing = with_dashboard_draft(CreateEnvironmentRequest::default(), &[], |_| {
             dispatched.set(true)
         });
         assert_eq!(missing, Err(PROJECT_SPEC_INVALID));
@@ -2033,11 +2293,7 @@ mod tests {
                 ..Default::default()
             },
             codewire_project::SecretBindings {
-                organization: true,
-                ..Default::default()
-            },
-            codewire_project::SecretBindings {
-                user: true,
+                user: Some(codewire_project::StoragePlacement::Local),
                 ..Default::default()
             },
         ] {
@@ -2073,7 +2329,7 @@ mod tests {
         );
 
         let dispatched = std::cell::Cell::new(false);
-        let result = with_secret_free_draft(
+        let result = with_dashboard_draft(
             CreateEnvironmentRequest {
                 preset_id: Some("safe-preset".to_owned()),
                 ..safe
@@ -2117,6 +2373,7 @@ mod tests {
                 official: false,
             }],
             agents: Vec::new(),
+            sources: Default::default(),
         };
 
         submission.apply_selected_preset_defaults(&options);
@@ -2129,9 +2386,12 @@ mod tests {
         assert_eq!(submission.install_command, "install-dependencies");
         assert_eq!(submission.startup_script, "start-services");
         assert_eq!(submission.agents, vec!["codex"]);
-        assert!(!submission.secret_project_supplied);
-        assert!(!submission.include_org_secrets);
-        assert!(!submission.include_user_secrets);
+        let sources = submission.sources.as_ref().ok().unwrap();
+        assert!(sources.selection.credentials.is_unset());
+        assert_eq!(
+            sources.selection.secrets.as_option().unwrap(),
+            &codewire_proto::codewire::v1::ProjectSecretBindings::default()
+        );
         assert_eq!(submission.app_ports[0].0, "3000");
 
         let mut form = submission.form_view("token".to_owned());
@@ -2140,7 +2400,7 @@ mod tests {
             .validate_and_draft("org-test", &mut form)
             .expect("source-free submitted fields");
         assert_eq!(
-            validated_secret_free_project_spec(&draft, &form.presets),
+            validated_dashboard_project_spec(&draft, &form.presets),
             Err(PROTECTED_SECRET_ACCESS_UNAVAILABLE)
         );
     }
@@ -2255,13 +2515,15 @@ mod tests {
                 "retired surface remains: {retired}"
             );
         }
-        assert!(html.contains(PROTECTED_SECRET_ACCESS_UNAVAILABLE));
-        for forbidden in [
-            "name=\"secret_project\"",
-            "name=\"include_org_secrets\"",
-            "name=\"include_user_secrets\"",
-            "name=\"agent_secret_",
-        ] {
+        assert!(
+            html.contains("Application-secret selection is not available in this dashboard yet.")
+        );
+        assert!(
+            html.contains("Credential-profile selection is not available in this dashboard yet.")
+        );
+        assert!(html.contains("<fieldset class=\"cw-source-fields\" aria-describedby=\"environment-create-secrets-help\" disabled>"));
+        assert!(html.contains("<fieldset class=\"cw-source-fields\" aria-describedby=\"environment-create-credentials-help\" disabled>"));
+        for forbidden in ["name=\"agent_secret_", "name=\"exposed", "name=\"exposure"] {
             assert!(!html.contains(forbidden), "unexpected field {forbidden}");
         }
     }
@@ -2285,6 +2547,7 @@ mod tests {
         let page = EnvironmentsPageView {
             environments: Vec::new(),
             create_form: default_create_form("csrf-token".to_owned(), false),
+            source_editor: None,
             port_panel: None,
             trust_summary: None,
             resize_confirmation: Some(crate::view::EnvironmentResizeConfirmationView {

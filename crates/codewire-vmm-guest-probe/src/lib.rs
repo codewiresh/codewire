@@ -10,7 +10,7 @@ mod direct_share;
 ///
 /// Provider credentials are never stored here. The directory contains only
 /// guest-visible configuration and Codex's own workspace-local state.
-pub const CODEX_GUEST_HOME_PATH: &str = "/run/codewire-agent/codex";
+pub const CODEX_GUEST_HOME_PATH: &str = codewire_access::CODEX_NATIVE_HOME;
 mod newc;
 mod progress;
 mod seed;

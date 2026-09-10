@@ -80,10 +80,10 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
                 if any(rule["backend"] != "coordinator" for rule in here):
                     fail(f"{file}: coordinator-owned {service} is also routed to another binary")
             elif owner == "credential-service":
-                if service != "codewire.v1.CredentialMutationService":
+                if service not in ISOLATED_CREDENTIAL_SERVICES:
                     fail(f"{file}: isolated credential authority cannot own {service}")
                 if len(here) != 1 or here[0]["backend"] != "credential-service":
-                    fail(f"{file}: credential mutations need one isolated credential-service route")
+                    fail(f"{file}: {service} needs one isolated credential-service route")
             elif owner == "testing":
                 is_local = file in local_ingress_files
                 if is_local:
@@ -99,6 +99,7 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
 
     assert_mesh_connect_backend_topology(ownership, owners, per_file, fail)
     assert_credential_mutation_edges(per_file, fail)
+    assert_credential_delegation_edges(per_file, fail)
     assert_internal_connect_listener_exemption(unrouted, per_file, fail)
     assert_mesh_primary_origin_rest_edge(fail)
     if getattr(_args, "self_test", False):
@@ -108,6 +109,8 @@ def check_connect_edge_routing(_args: argparse.Namespace) -> int:
             mesh_coordinator_transport_self_test()
             mesh_primary_origin_rest_edge_self_test()
             credential_mutation_edges_self_test(per_file)
+            credential_delegation_edges_self_test(per_file)
+            native_grpc_opt_in_sites_self_test()
         except RuntimeError as error:
             fail(f"Connect edge self-test: {error}")
 
@@ -144,6 +147,11 @@ INTERNAL_CONNECT_SERVICES = {
     "codewire.internal.v1.MeshAuthorizationService": (
         "codewire_orchestration::connect::mesh_authorization::router"
     ),
+}
+
+ISOLATED_CREDENTIAL_SERVICES = {
+    "codewire.v1.CredentialMutationService",
+    "codewire.v1.CredentialDelegationService",
 }
 
 
@@ -204,15 +212,139 @@ def credential_mutation_edges_self_test(per_file: dict[str, dict[str, Any]]) -> 
         ("Caddyfile", "/codewire.*", "/broker.v1.CredentialBrokerService/*", "private credential broker"),
     ]:
         original = read_text(file)
-        if before not in original:
+        # The delegation edge also uses :8086/http and unbuffered streaming.
+        # Mutate the mutation service's exact existing object, not whichever
+        # credential-service route happens to appear first in the file.
+        scope = original
+        if wanted != "private credential broker":
+            if file.startswith("Caddyfile"):
+                scope = caddy_handle_block(original, f"/{service}/*") or ""
+            else:
+                scope = connect_fallback_ingress_document(original, file, lambda _: None) or ""
+        if before not in scope:
             raise RuntimeError(f"{file}: missing credential edge negative fixture")
-        changed = original.replace(before, after, 1)
+        changed = original.replace(scope, scope.replace(before, after, 1), 1)
         failures = []
         assert_credential_mutation_edges(
             per_file, failures.append, lambda path: changed if path == file else read_text(path)
         )
         if not any(file in message and wanted in message for message in failures):
             raise RuntimeError(f"{file}: accepted broken credential edge: {wanted}")
+
+
+def assert_credential_delegation_ingress_shape(
+    document: str | None, label: str, fail: Callable[[str], None]
+) -> None:
+    # The two admitted first-party bidi paths share the existing object and its
+    # TLS/host patches, but retain distinct exact Service/port backends.
+    assert_environment_session_ingress_shape(document, label, fail)
+    if document is None:
+        return
+    paths = re.findall(r"^\s*(?:-\s+)?path:\s+(\S+)\s*$", document, re.MULTILINE)
+    expected_paths = {
+        r"/codewire\.v1\.EnvironmentSessionService/",
+        r"/codewire\.v1\.CredentialDelegationService/",
+    }
+    if len(paths) != 2 or set(paths) != expected_paths:
+        fail(f"{label}: native-bidi ingress must share only the two exact session/delegation paths")
+    flat = re.sub(r"\s+", " ", document)
+    for service, backend, port in [
+        ("EnvironmentSessionService", "codewire-orchestration-grpc", "grpc"),
+        ("CredentialDelegationService", "codewire-credential-service", "http"),
+    ]:
+        expected = (
+            f"path: /codewire\\.v1\\.{service}/ pathType: ImplementationSpecific "
+            f"backend: service: name: {backend} port: name: {port}"
+        )
+        # kustomize emits backend before path; source uses path before backend.
+        # Accept only these exact route/backend/port tuples in either ordering.
+        rendered = (
+            f"backend: service: name: {backend} port: name: {port} "
+            f"path: /codewire\\.v1\\.{service}/ pathType: ImplementationSpecific"
+        )
+        if expected not in flat and rendered not in flat:
+            fail(f"{label}: {service} must target exact {backend}:{port} on the native-bidi edge")
+
+
+def assert_credential_delegation_edges(
+    per_file: dict[str, dict[str, Any]],
+    fail: Callable[[str], None],
+    reader: Callable[[str], str] = read_text,
+) -> None:
+    service = "codewire.v1.CredentialDelegationService"
+    for file, data in per_file.items():
+        rules = [rule for rule in data["rules"] if rule["service"] == service]
+        if len(rules) != 1 or rules[0]["backend"] != "credential-service":
+            fail(f"{file}: credential delegation needs one exact isolated public listener route")
+        text = reader(file)
+        if file.startswith("Caddyfile"):
+            block = caddy_handle_block(text, f"/{service}/*") or ""
+            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8086\b", block):
+                fail(f"{file}: credential delegation must use public port 8086")
+            if not re.search(r"transport\s+http\s*\{[\s\S]*?versions\s+h2c\s+2\b", block):
+                fail(f"{file}: credential delegation backend must enable versions h2c 2")
+            if not re.search(r"flush_interval\s+-1\b", block):
+                fail(f"{file}: credential delegation must stream without buffering")
+        else:
+            assert_credential_delegation_ingress_shape(
+                environment_session_ingress_document(text, file, fail), file, fail
+            )
+            if rules and rules[0].get("backend_service") != "codewire-credential-service":
+                fail(f"{file}: credential delegation needs the exact credential-service Service")
+
+
+def credential_delegation_edges_self_test(per_file: dict[str, dict[str, Any]]) -> None:
+    service = "codewire.v1.CredentialDelegationService"
+    for file in per_file:
+        for attack in ["missing", "wrong backend", "duplicate"]:
+            broken = copy.deepcopy(per_file)
+            rules = broken[file]["rules"]
+            selected = next((rule for rule in rules if rule["service"] == service), None)
+            if selected is None:
+                raise RuntimeError(f"{file}: missing delegation route positive fixture")
+            if attack == "missing":
+                rules.remove(selected)
+            elif attack == "wrong backend":
+                selected["backend"] = "orchestration"
+            else:
+                rules.append(copy.deepcopy(selected))
+            failures: list[str] = []
+            assert_credential_delegation_edges(broken, failures.append)
+            if not any(file in message and "one exact isolated public listener" in message for message in failures):
+                raise RuntimeError(f"{file}: accepted {attack} delegation routing")
+
+        original = read_text(file)
+        if file.startswith("Caddyfile"):
+            scope = caddy_handle_block(original, f"/{service}/*") or ""
+            mutations = [
+                (":8086", ":9443", "public port 8086"),
+                ("versions h2c 2", "versions 1.1", "versions h2c 2"),
+                ("flush_interval -1", "flush_interval 1s", "without buffering"),
+            ]
+        else:
+            scope = environment_session_ingress_document(original, file, lambda _: None) or ""
+            mutations = [
+                ("name: codewire-credential-service", "name: codewire-orchestration", "exact codewire-credential-service:http"),
+                ("name: http", "name: broker-tls", "exact codewire-credential-service:http"),
+                ('backend-protocol: "GRPC"', 'backend-protocol: "HTTP"', "backend-protocol GRPC"),
+                ('service-upstream: "true"', 'service-upstream: "false"', "dedicated Service ClusterIP"),
+                ('proxy-request-buffering: "off"', 'proxy-request-buffering: "on"', "proxy-request-buffering must be off"),
+                ('proxy-buffering: "off"', 'proxy-buffering: "on"', "proxy-buffering must be off"),
+                ('proxy-read-timeout: "3600"', 'proxy-read-timeout: "30"', "proxy-read-timeout must be 3600"),
+                ('proxy-send-timeout: "3600"', 'proxy-send-timeout: "30"', "proxy-send-timeout must be 3600"),
+                (r"/codewire\.v1\.EnvironmentSessionService/", r"/codewire\.v1\.CredentialMutationService/", "EnvironmentSessionService Ingress"),
+                (r"/codewire\.v1\.CredentialDelegationService/", r"/codewire\.v1\.CredentialService/", "share only the two exact"),
+            ]
+        for before, after, wanted in mutations:
+            if before not in scope:
+                raise RuntimeError(f"{file}: missing delegation transport negative fixture: {before}")
+            changed = original.replace(scope, scope.replace(before, after, 1), 1)
+            failures = []
+            assert_credential_delegation_edges(
+                per_file, failures.append, lambda path: changed if path == file else read_text(path)
+            )
+            if not any(file in message and wanted in message for message in failures):
+                raise RuntimeError(f"{file}: accepted broken delegation transport: {wanted}; {failures!r}")
 
 
 MESH_KUBERNETES_BACKENDS = {
@@ -961,27 +1093,69 @@ def assert_environment_session_transport_shape(
     )
 
 
-def assert_native_grpc_opt_in_sites(fail: Callable[[str], None]) -> None:
+def assert_native_grpc_opt_in_sites(
+    fail: Callable[[str], None],
+    reader: Callable[[str], str] = read_text,
+    sources: list[str] | None = None,
+) -> None:
     expected = {
         "crates/codewire-coordinator/src/connect.rs": 1,
         "crates/codewire-mesh/src/server.rs": 1,
         "crates/codewire-orchestration/src/main.rs": 1,
+        "crates/codewire-credential-service/src/delegation/wire.rs": 1,
     }
     actual: dict[str, int] = {}
-    for rel_path in git_source_files():
-        if not rel_path.endswith(".rs") or "/tests/" in rel_path:
+    for rel_path in git_source_files() if sources is None else sources:
+        if (
+            not rel_path.endswith(".rs")
+            or "/tests/" in rel_path
+            or rel_path.endswith("/tests.rs")
+        ):
             continue
         if rel_path == "crates/codewire-server-core/src/connect.rs":
             continue
-        count = read_text(rel_path).count("ProtocolPolicy::ConnectAndGrpc")
+        count = reader(rel_path).count("ProtocolPolicy::ConnectAndGrpc")
         if count:
             actual[rel_path] = count
     if actual != expected:
         fail(
             "native-gRPC policy opt-ins must be exactly CoordinatorService, "
-            "MeshCoordinatorService, and EnvironmentSessionService: "
+            "MeshCoordinatorService, EnvironmentSessionService, and the isolated CredentialDelegationService: "
             f"got {actual}, want {expected}"
         )
+
+
+def native_grpc_opt_in_sites_self_test() -> None:
+    paths = [
+        "crates/codewire-coordinator/src/connect.rs",
+        "crates/codewire-mesh/src/server.rs",
+        "crates/codewire-orchestration/src/main.rs",
+        "crates/codewire-credential-service/src/delegation/wire.rs",
+    ]
+    baseline = {path: read_text(path) for path in paths}
+    with_tests = dict(baseline)
+    for path in [
+        "crates/codewire-credential-service/src/delegation/wire/lifetime/tests.rs",
+        "crates/codewire-credential-service/src/delegation/authority/tests/public_wire.rs",
+    ]:
+        with_tests[path] = "ProtocolPolicy::ConnectAndGrpc"
+    failures: list[str] = []
+    assert_native_grpc_opt_in_sites(failures.append, with_tests.__getitem__, list(with_tests))
+    if failures:
+        raise RuntimeError(f"native-gRPC ownership counted test-only mounts: {failures!r}")
+    for attack in ["missing delegation opt-in", "duplicate delegation opt-in", "mutation opt-in"]:
+        changed = dict(baseline)
+        delegation = "crates/codewire-credential-service/src/delegation/wire.rs"
+        if attack == "missing delegation opt-in":
+            changed[delegation] = changed[delegation].replace("ProtocolPolicy::ConnectAndGrpc", "ProtocolPolicy::ConnectOnly")
+        elif attack == "duplicate delegation opt-in":
+            changed[delegation] += "\nProtocolPolicy::ConnectAndGrpc\n"
+        else:
+            changed["crates/codewire-credential-service/src/wire.rs"] = "ProtocolPolicy::ConnectAndGrpc"
+        failures: list[str] = []
+        assert_native_grpc_opt_in_sites(failures.append, changed.__getitem__, list(changed))
+        if not any("native-gRPC policy opt-ins must be exactly" in message for message in failures):
+            raise RuntimeError(f"native-gRPC ownership accepted {attack}")
 
 
 def ingress_document_by_name(text: str, name: str, label: str, fail: Callable[[str], None]) -> str | None:
@@ -1066,6 +1240,11 @@ def assert_rendered_dev_ingress_identities(fail: Callable[[str], None]) -> None:
     general_connect = ingress_document_by_name(result.stdout, "codewire-connect", label, fail)
     assert_coordinator_ingress_shape(coordinator_connect, f"{label} codewire-coordinator-connect", fail)
     assert_environment_session_ingress_shape(
+        environment_session,
+        f"{label} codewire-environment-session-grpc",
+        fail,
+    )
+    assert_credential_delegation_ingress_shape(
         environment_session,
         f"{label} codewire-environment-session-grpc",
         fail,

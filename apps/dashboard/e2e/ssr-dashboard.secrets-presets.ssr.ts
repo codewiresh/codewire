@@ -150,6 +150,9 @@ test.describe.serial("server-rendered secrets and presets", () => {
     page.on("request", (request) => browserRequests.push(new URL(request.url()).pathname));
 
     await page.goto(`/${slug}/secrets/`);
+    await expect(page.getByRole("link", { name: "Personal Your personal application secrets" })).toBeVisible();
+    await expect(page.locator("#organization-content")).toContainText("Write-only application secrets");
+    await expect(page.locator("#organization-content")).not.toContainText("Write-only credentials");
     await expect(page.locator(".cw-sidebar-slot .cw-org-switcher-label")).toHaveText(orgName);
     await expect(page.getByLabel("Organization navigation").getByRole("link", {
       name: "Secrets",
@@ -159,6 +162,7 @@ test.describe.serial("server-rendered secrets and presets", () => {
       "page",
     );
     await page.getByText("New Project", { exact: true }).click();
+    await expect(page.getByText("A project is not a deployment stage.", { exact: false })).toBeVisible();
     await page.getByLabel("Project name").fill(projectName);
     await page.getByRole("button", { name: "Create Project" }).click();
     await expect(page.getByRole("status")).toContainText("Secret project created");

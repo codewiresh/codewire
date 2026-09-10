@@ -511,14 +511,14 @@ class WorkflowContract(unittest.TestCase):
             "needs.verification-selection.outputs.workspace_cache_experiment == 'true' && "
             "needs.workspace-cache-measurement.result == 'success' && "
             "((contains(needs.verification-selection.outputs.selection, '|kind|') && "
-            "needs.edge-kind.result == 'success' && needs.edge-kind.outputs.workspace_cache_seed != '') || "
+            "needs.kind-workspace.result == 'success' && needs.kind-workspace.outputs.workspace_cache_seed != '') || "
             "(!contains(needs.verification-selection.outputs.selection, '|kind|') && "
             "needs.workspace-image.result == 'success' && needs.workspace-image.outputs.workspace_cache_seed != ''))")
         self.assertEqual([line for line in body.splitlines() if line.startswith("    if: ")],
                          ["    if: " + chr(36) + "{{ " + request + " }}"])
         self.assertIn("needs.workspace-cache-measurement.result == 'success'", body)
         self.assertIn("workspace_cache_experiment == 'true'", body)
-        self.assertIn("    needs: [verification-selection, workspace-image, edge-kind, workspace-cache-measurement]", body)
+        self.assertIn("    needs: [verification-selection, workspace-image, kind-workspace, workspace-cache-measurement]", body)
         self.assertIn("    runs-on: ci-heavy\n", body)
         self.assertIn("    timeout-minutes: 55\n", body)
         self.assertNotIn("continue-on-error", body)
@@ -526,7 +526,7 @@ class WorkflowContract(unittest.TestCase):
         self.assertLess(body.index("Clean probe cache credential"), body.index("Finalize separate cache probe report"))
         self.assertIn("        if: " + chr(36) + "{{ always() }}", body)
         self.assertIn("          persist-credentials: false", body)
-        for owner in ("edge-kind", "workspace-image"):
+        for owner in ("kind-workspace", "workspace-image"):
             self.assertIn(f"needs.{owner}.result == 'success' && needs.{owner}.outputs.workspace_cache_seed != ''", body)
         ordinary = workflow.split("\n  required-verification:\n", 1)[1]
         dependencies = ordinary.split("    needs:\n", 1)[1].split("    steps:\n", 1)[0]

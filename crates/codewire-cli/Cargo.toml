@@ -10,6 +10,7 @@ description = "Rust landing zone for the Codewire cw CLI migration."
 [features]
 local-broker-synthetic-smoke = [
   "codewire-credential-broker/local-broker-synthetic-smoke",
+  "codewire-local-vmm/synthetic-oci-input-smoke",
 ]
 
 [lib]
@@ -46,13 +47,18 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+buffa = { workspace = true }
+futures = { workspace = true }
+prost = { workspace = true }
 codewire-access = { workspace = true }
-codewire-credential-broker = { workspace = true, features = ["codex-enrollment"] }
+codewire-credential-broker = { workspace = true, features = ["codex-enrollment", "ssh-agent"] }
+codewire-gateway-proto = { workspace = true }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
 codewire-protected-store = { workspace = true }
 libc = "0.2"
 rustix = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 buffa = { workspace = true }

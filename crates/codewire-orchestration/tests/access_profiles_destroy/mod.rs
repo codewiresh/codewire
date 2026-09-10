@@ -10,15 +10,17 @@ const UNRELATED_ENV: &str = "synthetic-unrelated-environment";
 
 async fn bind_profile(h: &Harness, name: &str, environment: &str) -> Result<Value> {
     let profile = h.rpc.create(name, CREDENTIAL).await?;
-    let mut selected = binding(&profile);
-    selected["environmentId"] = json!(environment);
-    h.rpc
-        .ok(
-            "SetEnvironmentAccessProfile",
-            Auth::Alice,
-            set(&selected, None, true),
-        )
+    sqlx::query("UPDATE environments SET state='stopped',desired_state='stopped' WHERE id=$1")
+        .bind(environment)
+        .execute(&h.db)
         .await?;
+    admit_sources(
+        &h.db,
+        &source_actor(ALICE),
+        environment,
+        &source_replacement(Default::default(), source_binding(&profile)),
+    )
+    .await?;
     Ok(profile)
 }
 
@@ -105,7 +107,7 @@ async fn terminal_cleanup_unbinds_only_target_and_releases_public_profile_deleti
                  (id,org_id,created_by,type,preset_id,state,desired_state, \
                   environment_operation_generation,project_spec) \
                  SELECT $2,org_id,created_by,type,preset_id,state,desired_state, \
-                        environment_operation_generation,project_spec \
+                        environment_operation_generation,project_spec - 'credentials' - 'secrets' \
                  FROM environments WHERE id=$1",
             )
             .bind(ENV)
@@ -130,16 +132,18 @@ async fn terminal_cleanup_unbinds_only_target_and_releases_public_profile_deleti
             .bind(already_destroyed)
             .execute(&h.db)
             .await?;
-            // This is the user-visible orphan: neither public clearing nor
+            // This is the user-visible orphan: neither source replacement nor
             // profile deletion can remove the reference before final cleanup.
-            h.rpc
-                .error(
-                    "ClearEnvironmentAccessProfile",
-                    Auth::Alice,
-                    json!({"expectedBinding":binding(&profile)}),
-                    "not_found",
+            ensure!(matches!(
+                admit_sources(
+                    &h.db,
+                    &source_actor(ALICE),
+                    ENV,
+                    &source_replacement(source_binding(&profile), Default::default())
                 )
-                .await?;
+                .await,
+                Err(codewire_server_core::AppError::NotFound(_))
+            ));
             h.rpc
                 .error(
                     "DeleteAccessProfile",

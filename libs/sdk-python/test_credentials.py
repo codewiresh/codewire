@@ -7,6 +7,7 @@ from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 
 from codewire import Codewire, CodewireError, EnrollmentOutcomeUnknownError
+from codewire.credentials import _credential
 from codewire.v1 import credential_pb2 as pb
 from codewire.v1.credential_connect import (
     CredentialServiceWSGIApplication, CredentialMutationServiceWSGIApplication,
@@ -46,6 +47,13 @@ class CredentialFixture:
         self.record("GetCredential", request, ctx)
         if request.credential_id == "missing":
             return pb.GetCredentialResponse()
+        if request.name == "ssh":
+            value = self.credential()
+            value.provider = "ssh"
+            value.authentication_kind = pb.CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY
+            value.ssh_public_key.CopyFrom(pb.SshPublicKey(
+                openssh="ssh-ed25519 synthetic-public-key", fingerprint="SHA256:synthetic"))
+            return pb.GetCredentialResponse(credential=value)
         statuses = {"revoked": pb.CREDENTIAL_STATUS_REVOKED, "expired": pb.CREDENTIAL_STATUS_EXPIRED,
                     "refresh_failed": pb.CREDENTIAL_STATUS_REFRESH_FAILED}
         return pb.GetCredentialResponse(credential=self.credential(statuses.get(request.name, pb.CREDENTIAL_STATUS_ACTIVE)))
@@ -59,6 +67,16 @@ class CredentialFixture:
     def delete_credential(self, request, ctx):
         self.record("DeleteCredential", request, ctx)
         return pb.DeleteCredentialResponse()
+
+    def unsupported_mutation(self, request, ctx):
+        raise AssertionError("this fixture does not exercise this mutation")
+
+    enroll_github = unsupported_mutation
+    add_api_key_credential = unsupported_mutation
+    rename_credential = unsupported_mutation
+    rotate_api_key_credential = unsupported_mutation
+    generate_ssh_credential = unsupported_mutation
+    add_ssh_credential = unsupported_mutation
 
     def enroll_codex(self, request, ctx):
         self.record("EnrollCodex", request, ctx)
@@ -108,6 +126,7 @@ class CredentialsTestCase(unittest.TestCase):
         self.assertEqual(values[0]["revocation_generation"], EXACT)
         self.assertEqual(values[0]["expires_at_unix"], MAXIMUM)
         self.assertIsNone(values[0]["account_hint"])
+        self.assertIsNone(values[0]["ssh_public_key"])
         self.assertEqual([request.page_token for _, request in self.fixture.calls], ["", "page-two"])
         self.cw.credentials.get("credential-one")
         self.assertEqual(self.fixture.calls[-1][1].WhichOneof("selector"), "credential_id")
@@ -116,6 +135,24 @@ class CredentialsTestCase(unittest.TestCase):
             self.assertEqual(self.fixture.calls[-1][1].WhichOneof("selector"), "name")
         with self.assertRaisesRegex(RuntimeError, "omitted credential"):
             self.cw.credentials.get("missing")
+
+    def test_ssh_metadata_preserves_public_registration_data(self):
+        value = self.cw.credentials.get_by_name("ssh")
+        self.assertEqual(value["authentication_kind"], "ssh_key")
+        self.assertEqual(value["ssh_public_key"], {
+            "openssh": "ssh-ed25519 synthetic-public-key", "fingerprint": "SHA256:synthetic"})
+        self.assertEqual(self.paths, ["/codewire.v1.CredentialService/GetCredential"])
+        self.assertNotIn("private_key", value)
+
+    def test_mismatched_ssh_metadata_is_not_a_valid_credential(self):
+        value = self.fixture.credential()
+        value.authentication_kind = pb.CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY
+        with self.assertRaisesRegex(RuntimeError, "mismatched SSH"):
+            _credential(value)
+        value.authentication_kind = pb.CREDENTIAL_AUTHENTICATION_KIND_OAUTH
+        value.ssh_public_key.CopyFrom(pb.SshPublicKey(openssh="synthetic-public-key"))
+        with self.assertRaisesRegex(RuntimeError, "mismatched SSH"):
+            _credential(value)
 
     def test_lifecycle_exact_cas_and_no_retry(self):
         self.assertEqual(self.cw.credentials.revoke("credential-one", EXACT)["status"], "revoked")
@@ -149,7 +186,11 @@ class CredentialsTestCase(unittest.TestCase):
             next(stream)
         self.assertEqual(self.fixture.closed, 1)
         self.assertEqual(self.paths, ["/codewire.v1.CredentialMutationService/EnrollCodex"])
-        self.assertEqual(list(self.fixture.calls[0][1].DESCRIPTOR.fields_by_name), ["name"])
+        request = self.fixture.calls[0][1]
+        self.assertEqual({field.name: field.number for field in request.DESCRIPTOR.fields}, {
+            "name": 1, "credential_id": 2, "expected_revocation_generation": 3})
+        self.assertFalse(request.HasField("credential_id"))
+        self.assertFalse(request.HasField("expected_revocation_generation"))
 
     def test_missing_error_or_duplicate_ack_is_uncertain_without_retry(self):
         for name in ["eof", "error", "duplicate"]:

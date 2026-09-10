@@ -14,7 +14,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     enforce_count("skills", raw.skills.len(), MAX_SKILLS)?;
     enforce_count("mounts", raw.mounts.len(), MAX_LOCAL_MOUNTS)?;
 
-    let repositories = normalize_repositories(raw.repositories)?;
+    let repositories = normalize_repositories(raw.repositories, RepositoryTrust::Required)?;
     let mounts = normalize_mounts(raw.mounts)?;
     let working_directory_explicit = !raw.working_directory.trim().is_empty();
     let working_directory =
@@ -28,9 +28,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
         disk_gib: raw.disk.map(normalize_disk).transpose()?,
     };
     let secrets = normalize_secrets(raw.secrets)?;
-    let access = raw.access.map(|access| AccessBinding {
-        profile: access.profile,
-    });
+    let credentials = raw.credentials;
     validate_workspace_input_destinations(&repositories, &mounts)?;
     let environment = normalize_environment("environment", raw.environment)?;
 
@@ -49,7 +47,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             application_ports,
             resources,
             secrets,
-            access,
+            credentials,
         },
         local: LocalProjectIntent { mounts, host_ports },
         working_directory_explicit,
@@ -86,8 +84,10 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
                 revision: repository.revision.clone(),
                 branch: repository.branch.clone(),
                 destination: repository.destination.clone(),
+                known_hosts: repository.known_hosts.clone(),
             })
             .collect(),
+        RepositoryTrust::Required,
     )?;
     if repositories != spec.repositories {
         return invalid("repositories", "must already be in canonical form");
@@ -151,11 +151,24 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
     }
 
     ensure_short_value("secrets.project", &spec.secrets.project)?;
+    if !spec.secrets.project.is_empty() {
+        spec.secrets.project_reference()?;
+    }
+    if let Some(credentials) = &spec.credentials {
+        credentials.reference()?;
+    }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum RepositoryTrust {
+    Required,
+    DestinationOnly,
 }
 
 fn normalize_repositories(
     repositories: Vec<RawRepository>,
+    trust: RepositoryTrust,
 ) -> Result<Vec<RepositorySpec>, ProjectError> {
     let mut normalized = Vec::with_capacity(repositories.len());
     for (index, repository) in repositories.into_iter().enumerate() {
@@ -170,6 +183,15 @@ fn normalize_repositories(
             );
         }
         validate_repository_source(index, &source)?;
+        let known_hosts = match trust {
+            RepositoryTrust::Required => {
+                canonical_repository_known_hosts(&source, repository.known_hosts)?
+            }
+            RepositoryTrust::DestinationOnly => {
+                parse_repository_ssh_host(&source)?;
+                Vec::new()
+            }
+        };
         let revision = short_value("repositories.revision", &repository.revision)?;
         let branch = short_value("repositories.branch", &repository.branch)?;
         if !revision.is_empty() && !branch.is_empty() {
@@ -198,6 +220,7 @@ fn normalize_repositories(
             revision,
             branch,
             destination,
+            known_hosts,
         });
     }
 
@@ -724,8 +747,10 @@ pub fn validate_repository_destinations<'a>(
                 destination: destination.to_string(),
                 revision: String::new(),
                 branch: String::new(),
+                known_hosts: Vec::new(),
             })
             .collect(),
+        RepositoryTrust::DestinationOnly,
     )
     .map(|repositories| {
         repositories

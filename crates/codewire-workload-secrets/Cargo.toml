@@ -8,4 +8,15 @@ license.workspace = true
 description = "Bounded workload-secret metadata resolution and validation"
 
 [dependencies]
+crypto_box = { version = "0.9", features = ["seal"] }
+curve25519-dalek = "4"
+rand = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["event", "net", "param"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -25,7 +25,7 @@ pub(crate) const WORKSPACE_PLAN_PATH: &str = "/generation/workspace-plan.json";
 pub(crate) const ACTIVE_WORKSPACE_PLAN_PATH: &str = "/run/codewire/workspace-plan.json";
 pub(crate) const CONTAINER_PLAN_PATH: &str = "/run/codewire-runtime/plan.json";
 
-pub(crate) const PLAN_SCHEMA_VERSION: u32 = 5;
+pub(crate) const PLAN_SCHEMA_VERSION: u32 = 6;
 pub(crate) const MAX_PLAN_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_FILE_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_ENTRIES: usize = 65_536;
@@ -64,6 +64,10 @@ pub(crate) struct WorkspacePlan {
     pub schema_version: u32,
     pub root_generation: String,
     pub project_sha256: String,
+    /// Active-only binding to the exact ordinary plan before client routing.
+    /// This is neither a new generation nor authority supplied by the workload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_plan_sha256: Option<String>,
     pub identity: WorkspaceIdentity,
     pub environment: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -86,6 +90,7 @@ impl fmt::Debug for WorkspacePlan {
             .field("schema_version", &self.schema_version)
             .field("root_generation", &self.root_generation)
             .field("project_sha256", &self.project_sha256)
+            .field("active", &self.installation_plan_sha256.is_some())
             .field("identity", &self.identity)
             .field("environment_count", &self.environment.len())
             .field(
@@ -134,6 +139,9 @@ impl WorkspacePlan {
             merge_environment(&mut environment, entries)?;
         }
         for (key, value) in &project.environment {
+            if key == "CODEX_HOME" {
+                return Err(WorkspacePlanError::Project);
+            }
             validate_environment_key(key)?;
             validate_value(value)?;
             environment.insert(key.clone(), value.clone());
@@ -153,9 +161,10 @@ impl WorkspacePlan {
         environment
             .entry("LANG".to_owned())
             .or_insert_with(|| "C.UTF-8".to_owned());
-        // This is a credential-free Codewire route, not inherited image or
-        // project authority. Reserve the variable so every daemon exec and
-        // image workload uses the same fail-closed protected-provider path.
+        // Native agent-home ownership predates credential routing: this fixed
+        // mount preserves skills and session state independently of profiles.
+        // Only this boot's selected client decides whether provider config is
+        // published there; the directory itself grants no provider access.
         environment.insert(
             "CODEX_HOME".to_owned(),
             crate::CODEX_GUEST_HOME_PATH.to_owned(),
@@ -196,6 +205,7 @@ impl WorkspacePlan {
             schema_version: PLAN_SCHEMA_VERSION,
             root_generation: header.root_generation.to_string(),
             project_sha256: Sha256Value::calculate(project_bytes).to_string(),
+            installation_plan_sha256: None,
             identity,
             environment: environment
                 .into_iter()
@@ -211,6 +221,72 @@ impl WorkspacePlan {
         };
         plan.validate()?;
         Ok(plan)
+    }
+
+    /// Overlay only this boot's selected client routes on the active copy.
+    /// The durable image/project plan remains unchanged for update and clear.
+    pub(crate) fn with_managed_credential_clients(
+        mut self,
+        clients: codewire_access::ManagedCredentialClients,
+    ) -> Result<Self, WorkspacePlanError> {
+        self.require_ordinary()?;
+        if self
+            .explicit_environment_keys
+            .iter()
+            .any(|key| key == "CODEX_HOME")
+        {
+            return Err(WorkspacePlanError::Plan);
+        }
+        clients
+            .check_collisions(self.explicit_environment_keys.iter().map(String::as_str))
+            .map_err(|_| WorkspacePlanError::Plan)?;
+        let installation_plan_sha256 = Sha256Value::calculate(&self.encode()?).to_string();
+        let projection =
+            clients.for_placement(codewire_access::ManagedCredentialClientPlacement::Native);
+        let mut environment: BTreeMap<String, String> = self
+            .environment
+            .iter()
+            .map(|entry| {
+                entry
+                    .split_once('=')
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .ok_or(WorkspacePlanError::Plan)
+            })
+            .collect::<Result<_, _>>()?;
+        environment.extend(projection.environment);
+        self.environment = environment
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        self.installation_plan_sha256 = Some(installation_plan_sha256);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub(crate) fn require_ordinary(&self) -> Result<(), WorkspacePlanError> {
+        self.validate()?;
+        if self.installation_plan_sha256.is_some() {
+            return Err(WorkspacePlanError::Plan);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_active(&self) -> Result<(), WorkspacePlanError> {
+        self.validate()?;
+        if self.installation_plan_sha256.is_none() {
+            return Err(WorkspacePlanError::Plan);
+        }
+        Ok(())
+    }
+
+    /// Installation belongs to immutable image/project intent, whereas the
+    /// active plan's encoding still binds this boot's Ready/ack messages.
+    pub(crate) fn installation_identity(&self) -> Result<Sha256Value, WorkspacePlanError> {
+        let bytes = self.encode()?;
+        match &self.installation_plan_sha256 {
+            Some(hash) => Sha256Value::parse_hex(hash).map_err(|_| WorkspacePlanError::Plan),
+            None => Ok(Sha256Value::calculate(&bytes)),
+        }
     }
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>, WorkspacePlanError> {
@@ -238,6 +314,10 @@ impl WorkspacePlan {
         if self.schema_version != PLAN_SCHEMA_VERSION
             || !valid_sha256(&self.root_generation)
             || !valid_sha256(&self.project_sha256)
+            || self
+                .installation_plan_sha256
+                .as_ref()
+                .is_some_and(|hash| !valid_sha256(hash) || hash.bytes().all(|byte| byte == b'0'))
             || self.identity.username.is_empty()
             || self.identity.username.len() > 256
             || !valid_account_name(&self.identity.username)
@@ -876,6 +956,154 @@ mod tests {
             WorkspacePlan::decode(&plan.encode().unwrap()).unwrap(),
             plan
         );
+    }
+
+    #[test]
+    fn selected_clients_are_applied_to_each_active_copy_without_stale_setup_routing() {
+        use codewire_access::ManagedCredentialClients;
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let persisted =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        let bytes = persisted.encode().unwrap();
+        let installation_identity = Sha256Value::calculate(&bytes);
+        assert!(persisted.installation_plan_sha256.is_none());
+        assert!(persisted.require_ordinary().is_ok());
+        assert!(persisted.require_active().is_err());
+        for (slots, codex, openai, anthropic, ssh) in [
+            (vec![], false, false, false, false),
+            (vec!["codex"], true, false, false, false),
+            (vec!["openai"], false, true, false, false),
+            (vec!["anthropic"], false, false, true, false),
+            (vec!["ssh"], false, false, false, true),
+            (
+                vec!["codex", "openai", "anthropic", "ssh"],
+                true,
+                true,
+                true,
+                true,
+            ),
+            (vec![], false, false, false, false),
+        ] {
+            let clients = ManagedCredentialClients::from_profile_slots(slots).unwrap();
+            let active = WorkspacePlan::decode(&bytes)
+                .unwrap()
+                .with_managed_credential_clients(clients)
+                .unwrap();
+            let env: BTreeMap<_, _> = active
+                .environment
+                .iter()
+                .map(|entry| entry.split_once('=').unwrap())
+                .collect();
+            assert_eq!(env["CODEX_HOME"], crate::CODEX_GUEST_HOME_PATH);
+            assert_eq!(
+                clients.contains(codewire_access::ManagedCredentialClient::Codex),
+                codex
+            );
+            assert_eq!(env.contains_key("OPENAI_BASE_URL"), openai);
+            assert_eq!(env.contains_key("ANTHROPIC_BASE_URL"), anthropic);
+            assert_eq!(
+                env.get("SSH_AUTH_SOCK").copied(),
+                ssh.then_some(codewire_access::SSH_NATIVE_AUTH_SOCK)
+            );
+            assert_eq!(active.project_sha256, persisted.project_sha256);
+            assert_eq!(
+                active.installation_identity().unwrap(),
+                installation_identity
+            );
+            assert!(active.require_active().is_ok());
+            assert!(active.require_ordinary().is_err());
+            assert_eq!(
+                WorkspacePlan::decode(&active.encode().unwrap()).unwrap(),
+                active
+            );
+            assert!(
+                active
+                    .with_managed_credential_clients(ManagedCredentialClients::default())
+                    .is_err()
+            );
+            assert_eq!(persisted.encode().unwrap(), bytes);
+        }
+        let mut declared = persisted.clone();
+        declared.explicit_environment_keys.push("CODEX_HOME".into());
+        declared.explicit_environment_keys.sort();
+        assert!(
+            declared
+                .clone()
+                .with_managed_credential_clients(ManagedCredentialClients::default())
+                .is_err()
+        );
+        let mut declared_ssh = persisted.clone();
+        declared_ssh
+            .environment
+            .push("SSH_AUTH_SOCK=/project/ssh-agent.sock".into());
+        declared_ssh.environment.sort();
+        declared_ssh
+            .explicit_environment_keys
+            .push("SSH_AUTH_SOCK".into());
+        declared_ssh.explicit_environment_keys.sort();
+        assert!(
+            declared_ssh
+                .clone()
+                .with_managed_credential_clients(ManagedCredentialClients::default())
+                .is_ok()
+        );
+        assert!(
+            declared_ssh
+                .with_managed_credential_clients(
+                    ManagedCredentialClients::from_profile_slots(["ssh"]).unwrap()
+                )
+                .is_err()
+        );
+        assert!(
+            declared
+                .with_managed_credential_clients(
+                    ManagedCredentialClients::from_profile_slots(["codex"]).unwrap()
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn installation_binding_requires_current_canonical_nonzero_digest_and_active_admission() {
+        let root = root();
+        let config = config(json!({}));
+        let header = setup(&config);
+        let ordinary =
+            WorkspacePlan::from_verified_setup(&project(), &config, &header, root.path()).unwrap();
+        let active = ordinary
+            .clone()
+            .with_managed_credential_clients(codewire_access::ManagedCredentialClients::default())
+            .unwrap();
+        assert_eq!(
+            active.installation_plan_sha256,
+            Some(Sha256Value::calculate(&ordinary.encode().unwrap()).to_string())
+        );
+        for hash in [
+            String::new(),
+            "0".repeat(64),
+            "A".repeat(64),
+            "g".repeat(64),
+            "a".repeat(63),
+            "a".repeat(65),
+            format!("sha256:{}", "a".repeat(64)),
+        ] {
+            let mut invalid = active.clone();
+            invalid.installation_plan_sha256 = Some(hash);
+            assert!(invalid.require_active().is_err());
+            assert!(invalid.installation_identity().is_err());
+            assert!(invalid.encode().is_err());
+            assert!(WorkspacePlan::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        }
+        let mut missing = active;
+        missing.installation_plan_sha256 = None;
+        assert!(missing.require_active().is_err());
+        for version in 1..PLAN_SCHEMA_VERSION {
+            let mut retired = ordinary.clone();
+            retired.schema_version = version;
+            assert!(WorkspacePlan::decode(&serde_json::to_vec(&retired).unwrap()).is_err());
+        }
     }
 
     #[test]

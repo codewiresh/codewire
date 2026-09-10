@@ -45,6 +45,62 @@ RUN mkdir /codex && tar -xzf /codex.tgz -C /codex --strip-components=4 \
 
 FROM codex-${TARGETARCH} AS codex-enrollment
 
+# Same pinned official GitHub CLI artifacts as images/base/Dockerfile.
+# Only the selected architecture is fetched; no package/install scripts run.
+FROM ${DEBIAN_IMAGE} AS github-amd64
+ADD --checksum=sha256:a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112 \
+    https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_amd64.tar.gz /gh.tgz
+RUN mkdir /gh && tar -xzf /gh.tgz -C /gh --strip-components=1
+
+FROM ${DEBIAN_IMAGE} AS github-arm64
+ADD --checksum=sha256:73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5 \
+    https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_arm64.tar.gz /gh.tgz
+RUN mkdir /gh && tar -xzf /gh.tgz -C /gh --strip-components=1
+
+FROM github-${TARGETARCH} AS github-enrollment
+
+# Only the two selected-agent tools and their missing crypto library are
+# extracted. These official Bookworm artifacts are independently checksum
+# pinned for both architectures; no package scripts or dependency resolver run.
+# Immutable Debian snapshots use the dependency origin already admitted by CI.
+# Debian tracks CVE-2026-73281 as postponed in this OpenSSH version. Its
+# lock/session-bind path is not exposed by our identities/sign-only adapter;
+# the private agent is never forwarded and is drained after each Sign.
+FROM ${DEBIAN_IMAGE} AS ssh-tools-amd64
+ADD --checksum=sha256:42c250b8b9110382488c53c066a960bc564ddac2cb9e449f47b6cdbb5fc1cb60 \
+    https://snapshot.debian.org/archive/debian/20260505T204143Z/pool/main/o/openssh/openssh-client_9.2p1-2%2Bdeb12u10_amd64.deb /openssh.deb
+ADD --checksum=sha256:89be24b41bff568ee6e7caf5680a3d808e80315ed92e407056ce0fa7a5bda025 \
+    https://snapshot.debian.org/archive/debian/20260612T023739Z/pool/main/o/openssl/libssl3_3.0.20-1%7Edeb12u2_amd64.deb /libssl.deb
+RUN dpkg-deb --extract /openssh.deb /payload && \
+    dpkg-deb --extract /libssl.deb /payload && \
+    install -D /payload/usr/bin/ssh-agent /out/usr/bin/ssh-agent && \
+    install -D /payload/usr/bin/ssh-add /out/usr/bin/ssh-add && \
+    install -Dm644 /payload/usr/lib/x86_64-linux-gnu/libcrypto.so.3 /out/usr/lib/x86_64-linux-gnu/libcrypto.so.3 && \
+    install -Dm644 /payload/usr/share/doc/openssh-client/copyright /out/usr/share/doc/openssh-client/copyright && \
+    install -Dm644 /payload/usr/share/doc/libssl3/copyright /out/usr/share/doc/libssl3/copyright
+
+FROM ${DEBIAN_IMAGE} AS ssh-tools-arm64
+ADD --checksum=sha256:72f7cb7eb432038a62cd89e0552b352a514e880fe3907e73dc50ca2ef6d088d7 \
+    https://snapshot.debian.org/archive/debian/20260505T204143Z/pool/main/o/openssh/openssh-client_9.2p1-2%2Bdeb12u10_arm64.deb /openssh.deb
+ADD --checksum=sha256:a256e03cc3abd7243ac5c6ee91a9deb56478221ef0d3c2b0748551e13140c0bf \
+    https://snapshot.debian.org/archive/debian/20260612T023739Z/pool/main/o/openssl/libssl3_3.0.20-1%7Edeb12u2_arm64.deb /libssl.deb
+RUN dpkg-deb --extract /openssh.deb /payload && \
+    dpkg-deb --extract /libssl.deb /payload && \
+    install -D /payload/usr/bin/ssh-agent /out/usr/bin/ssh-agent && \
+    install -D /payload/usr/bin/ssh-add /out/usr/bin/ssh-add && \
+    install -Dm644 /payload/usr/lib/aarch64-linux-gnu/libcrypto.so.3 /out/usr/lib/aarch64-linux-gnu/libcrypto.so.3 && \
+    install -Dm644 /payload/usr/share/doc/openssh-client/copyright /out/usr/share/doc/openssh-client/copyright && \
+    install -Dm644 /payload/usr/share/doc/libssl3/copyright /out/usr/share/doc/libssl3/copyright
+
+FROM ssh-tools-${TARGETARCH} AS selected-ssh-tools
+
+# This same minimal runtime stage can be qualified without recompiling the
+# product. The final services image inherits these exact files and helper.
+FROM ${DEBIAN_IMAGE} AS ssh-runtime
+COPY --from=selected-ssh-tools /out/ /
+COPY --chmod=755 crates/codewire-credential-broker/src/ssh_agent/askpass.sh /usr/local/libexec/codewire/ssh-askpass
+USER 65532:65532
+
 FROM codewire-rust-base AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -105,7 +161,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
       cp "$credential_fixture" /out/kind-fixtures/credential-service; \
     fi
 
-FROM ${DEBIAN_IMAGE}
+FROM ssh-runtime
 COPY --from=builder /out/codewire-idp /codewire-idp
 COPY --from=builder /out/codewire-orchestration /codewire-orchestration
 COPY --from=builder /out/sidecar-smoke /sidecar-smoke
@@ -119,6 +175,8 @@ COPY --from=builder /out/codewire-credential-service /codewire-credential-servic
 COPY --from=builder /out/kind-fixtures/ /codewire-kind-fixtures/
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=codex-enrollment /codex/codex /usr/local/bin/codex
+COPY --from=github-enrollment /gh/bin/gh /usr/local/bin/gh
+COPY --from=github-enrollment /gh/LICENSE /usr/share/licenses/gh/LICENSE
 COPY deployments/docker/licenses/codex-LICENSE deployments/docker/licenses/codex-NOTICE /usr/share/licenses/codex/
 USER 65532:65532
 # No ENTRYPOINT: each deployment sets `command` to pick its binary.

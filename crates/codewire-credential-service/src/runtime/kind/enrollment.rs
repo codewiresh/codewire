@@ -5,6 +5,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 use codewire_credential_broker::codex_enrollment::CodexEnrollmentConfig;
+use codewire_credential_broker::github_enrollment::GitHubEnrollmentConfig;
 use codewire_credential_broker::provider_enrollment::validate_private_tmpfs_runtime;
 use serde_json::json;
 use tempfile::TempDir;
@@ -15,13 +16,18 @@ use super::provider::{ACCOUNT, access_token, refresh_token};
 const SCRIPT: &str = include_str!(
     "../../../../codewire-credential-broker/src/codex_enrollment/tests/synthetic-codex.sh"
 );
+const GITHUB_SCRIPT: &str = include_str!(
+    "../../../../codewire-credential-broker/src/github_enrollment/tests/synthetic-gh.sh"
+);
 
 pub(super) struct Fixture {
     directory: TempDir,
 }
 
 impl Fixture {
-    pub(super) fn create(runtime: &Path) -> Result<(Self, CodexEnrollmentConfig), RuntimeError> {
+    pub(super) fn create(
+        runtime: &Path,
+    ) -> Result<(Self, CodexEnrollmentConfig, GitHubEnrollmentConfig), RuntimeError> {
         let mut directory = tempfile::Builder::new()
             .prefix("kind-credential-fixture-")
             .permissions(std::fs::Permissions::from_mode(0o700))
@@ -36,8 +42,14 @@ impl Fixture {
             "tokens":{"id_token":format!("e30.{id_payload}.synthetic-kind-signature"),"access_token":access,
             "refresh_token":refresh_token(0),"account_id":ACCOUNT}})).map_err(|_| RuntimeError::Enrollment)?;
         let script = directory.path().join("codex");
+        let github_token = "gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let github_hosts = format!(
+            "github.com:\n    users:\n        synthetic-user:\n            oauth_token: {github_token}\n    git_protocol: https\n    oauth_token: {github_token}\n    user: synthetic-user\n"
+        );
         for (name, bytes, mode) in [
             ("codex", SCRIPT.as_bytes(), 0o700),
+            ("gh", GITHUB_SCRIPT.as_bytes(), 0o700),
+            ("hosts.fixture.yml", github_hosts.as_bytes(), 0o600),
             ("synthetic-auth.fixture.json", auth.as_slice(), 0o600),
             // Device completion is automatic in this non-network fixture.
             // The real enrollment owner still emits its challenge first.
@@ -55,10 +67,16 @@ impl Fixture {
         let config =
             CodexEnrollmentConfig::new(script, directory.path().to_owned(), "/usr/bin:/bin".into())
                 .map_err(|_| RuntimeError::Enrollment)?;
+        let github = GitHubEnrollmentConfig::new(
+            directory.path().join("gh"),
+            directory.path().to_owned(),
+            "/usr/bin:/bin".into(),
+        )
+        .map_err(|_| RuntimeError::Enrollment)?;
         // Once handed to the runtime, an implicit drop cannot prove drain.
         // Retain on cancellation/unwind too; only explicit success may close.
         directory.disable_cleanup(true);
-        Ok((Self { directory }, config))
+        Ok((Self { directory }, config, github))
     }
 
     pub(super) fn close(self) -> Result<(), RuntimeError> {
@@ -107,7 +125,7 @@ fn fixture_is_private_with_permissive_umask() {
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in("/dev/shm")
         .unwrap();
-    let (fixture, _config) = Fixture::create(runtime.path()).unwrap();
+    let (fixture, _codex_config, _github_config) = Fixture::create(runtime.path()).unwrap();
     validate_private_tmpfs_runtime(fixture.directory.path()).unwrap();
     assert_eq!(
         fixture

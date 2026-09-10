@@ -11,10 +11,12 @@ use super::super::{Listeners, RuntimeError};
 pub(super) const NAMESPACE: &str = "codewire-e2e";
 const DATABASE_URL: &str = "postgres://codewire_credential_broker:kind-credential-broker-synthetic-only@postgres.codewire-e2e.svc.cluster.local:5432/codewire?sslmode=disable";
 const ROLE: &str = "codewire_credential_broker";
+const PUBLIC_ORIGIN: &str = "http://127.0.0.1:8090";
 
 pub(super) struct Config {
     pub(super) database_url: Zeroizing<String>,
     pub(super) listeners: Listeners,
+    pub(super) public_origin: http::HeaderValue,
     pub(super) runtime_directory: PathBuf,
 }
 
@@ -75,8 +77,14 @@ impl Config {
             path("CREDENTIAL_BROKER_TLS_KEY_FILE")?,
         )
         .map_err(|_| RuntimeError::Tls)?;
+        if required("CREDENTIAL_PUBLIC_ORIGIN")? != PUBLIC_ORIGIN {
+            return Err(RuntimeError::Configuration(
+                "managed Kind credential public origin",
+            ));
+        }
         Ok(Self {
             database_url,
+            public_origin: http::HeaderValue::from_static(PUBLIC_ORIGIN),
             listeners: Listeners {
                 public: ([0, 0, 0, 0], 8086).into(),
                 private: ([0, 0, 0, 0], 9443).into(),
@@ -129,7 +137,8 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
                  'users','organizations','org_members','environments','environment_presets', \
                  'sandbox_environment_backend','oidc_access_tokens','oidc_clients', \
                  'platform_access_profiles','platform_access_profile_revisions', \
-                 'platform_access_profile_entries','platform_environment_access_bindings' \
+                 'platform_access_profile_entries','platform_environment_access_bindings', \
+                 'tenant_secrets','tenant_secret_deks','secret_projects' \
              ]::text[]) AS authority(name) \
              WHERE pg_catalog.has_table_privilege(current_user,'public.'||authority.name, \
                  'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') \
@@ -138,11 +147,22 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
          ) \
          AND NOT EXISTS ( \
              SELECT 1 FROM unnest(ARRAY[ \
-                 'tenant_secrets','tenant_secret_deks','tenant_secret_kek_canary', \
+                 'tenant_secret_kek_canary', \
                  'confidential_storage_keys','sessions','api_keys','oidc_refresh_tokens','jwks' \
              ]::text[]) AS material(name) \
              WHERE pg_catalog.has_any_column_privilege(current_user,'public.'||material.name,'SELECT') \
          ) \
+         AND NOT pg_catalog.has_table_privilege(current_user,'public.tenant_secrets','SELECT') \
+         AND NOT pg_catalog.has_table_privilege(current_user,'public.tenant_secret_deks','SELECT') \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid='public.tenant_secrets'::regclass AND a.attnum>0 AND NOT a.attisdropped \
+             AND a.attname<>ALL(ARRAY['path','key','scope','scope_id','dek_id','ciphertext','nonce','format','storage_contract_version']) \
+             AND pg_catalog.has_column_privilege(current_user,a.attrelid,a.attnum,'SELECT')) \
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid='public.tenant_secret_deks'::regclass AND a.attnum>0 AND NOT a.attisdropped \
+             AND a.attname<>ALL(ARRAY['dek_id','scope','scope_id','provider','key_name','key_version','wrapped_dek','format','revision']) \
+             AND pg_catalog.has_column_privilege(current_user,a.attrelid,a.attnum,'SELECT')) \
+         AND NOT pg_catalog.has_column_privilege(current_user,'public.environments','project_spec','SELECT') \
          AND NOT pg_catalog.has_column_privilege(current_user,'public.oidc_clients','secret','SELECT') \
          AND NOT pg_catalog.has_column_privilege(current_user,'public.users','email','SELECT') \
          FROM pg_catalog.pg_roles r CROSS JOIN pg_catalog.pg_database d \
@@ -200,7 +220,11 @@ mod tests {
                 for privilege in [
                     "UPDATE ON public.environments",
                     "UPDATE (is_admin) ON public.users",
-                    "SELECT (ciphertext) ON public.tenant_secrets",
+                    "SELECT (created_at) ON public.tenant_secrets",
+                    "SELECT ON public.tenant_secrets",
+                    "SELECT (created_at) ON public.tenant_secret_deks",
+                    "SELECT (project_spec) ON public.environments",
+                    "UPDATE (ciphertext) ON public.tenant_secrets",
                     "SELECT (email) ON public.users",
                     "SELECT (secret) ON public.oidc_clients",
                 ] {

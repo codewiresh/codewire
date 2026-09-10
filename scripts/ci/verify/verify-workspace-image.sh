@@ -47,7 +47,6 @@ fi
 mkdir -p "$ROOT/.tmp"
 # A fresh failed attempt must never leave an older acceptance marker behind.
 [[ ! -L "$receipt" && ! -L "$ROOT/.tmp" ]] || { echo 'invalid workspace receipt destination' >&2; exit 2; }
-rm -f -- "$receipt"
 umask 077
 if [[ -n "$workspace_measurement_case" ]]; then
   report_dir="${CODEWIRE_WORKSPACE_CACHE_REPORT_DIR:?measurement report directory is required}"
@@ -58,6 +57,9 @@ if [[ -n "$workspace_measurement_case" ]]; then
 fi
 work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-workspace-image-verify.XXXXXX")"
 build_log_root="${report_dir:-$work}"
+archive_work="$(mktemp -d "$ROOT/.tmp/.workspace-oci.XXXXXX")"
+workspace_archive="$archive_work/workspace.oci.tar"
+previous_receipt="$archive_work/previous-receipt.json"
 base_layout="$work/base.oci"
 base_metadata="$work/base-metadata.json"
 workspace_id=''
@@ -105,23 +107,27 @@ cleanup() {
   fi
   if [[ "$status" -eq 0 ]]; then
     # No acceptance marker may survive a failed contract or builder cleanup.
-    CODEWIRE_BUILDKIT_CACHE_FALLBACK="$workspace_cache_fallback" \
-      python3 "$artifact_tool" seal "$ROOT" "$receipt" "$workspace_id" "$base_digest" || status=$?
-    if [[ "$status" == 0 && -n "$report_dir" ]]; then
-      cp -- "$receipt" "$report_dir/receipt.json" || status=$?
+    local -a prior_receipt=()
+    [[ ! -e "$previous_receipt" ]] || prior_receipt+=("$previous_receipt")
+    if [[ -n "$report_dir" ]]; then
       printf '%s\n' "$(( $(date +%s) - started_at ))" >"$report_dir/elapsed-seconds" || status=$?
     fi
   fi
-  if [[ "$status" != 0 ]]; then
-    # This attempt removed the previous marker before building. A late report
-    # write failure must also remove the newly sealed ordinary image receipt.
-    rm -f -- "$receipt"
+  if [[ "$status" -eq 0 ]]; then
+    CODEWIRE_BUILDKIT_CACHE_FALLBACK="$workspace_cache_fallback" \
+      python3 "$artifact_tool" seal "$ROOT" "$receipt" "$workspace_id" \
+        "$base_digest" "$workspace_archive" "${prior_receipt[@]}" || status=$?
   fi
+  rm -rf "$archive_work"
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [[ -e "$receipt" ]]; then
+  [[ -f "$receipt" ]] || { echo 'invalid workspace receipt destination' >&2; exit 2; }
+  mv -- "$receipt" "$previous_receipt"
+fi
 
 started_at="$(date +%s)"
 workspace_cache_create_builder "$work"
@@ -198,11 +204,14 @@ workspace_cache_build workspace "$source_tree" "$architecture" "$build_log_root/
   --label "dev.codewire.workspace-contract=$contract_sha" \
   --label dev.codewire.build.profile=workspace-verify \
   --label dev.codewire.promotable=false \
+  --provenance=false --sbom=false \
+  --output "type=oci,dest=$workspace_archive" \
   --load \
   "${compiler_args[@]}" \
   --build-arg "BASE_IMAGE_REF=$base_context_name" \
   --file "$ROOT/images/workspace/Dockerfile" \
   "$ROOT"
+chmod 0400 "$workspace_archive"
 
 # Loaded runtime bytes do not depend on BuildKit. Remove its provider file and
 # state before any runtime inspection or potentially slow agent command.

@@ -49,6 +49,84 @@ pub enum Auth {
     Expired,
 }
 
+/// Direct transaction-helper proof, not an HTTP route or a runtime-delivery
+/// fixture. Only stopped changes may commit without workflow dispatch.
+pub async fn admit_sources(
+    pool: &PgPool,
+    user: &codewire_server_core::auth::AuthUser,
+    environment: &str,
+    body: &codewire_orchestration::api::environment_sources::UpdateEnvironmentSourcesBody,
+) -> Result<
+    codewire_orchestration::api::environment_sources::EnvironmentSourcesUpdate,
+    codewire_server_core::AppError,
+> {
+    use codewire_orchestration::api::environment_sources::{
+        EnvironmentSourcesUpdateOutcome, replace_environment_sources_in,
+    };
+    let profiles = codewire_platform_credentials::PlatformAccessProfileStore::new(
+        pool.clone(),
+        codewire_access::builtin_provider_catalog(),
+    );
+    let mut tx = profiles.begin_transaction().await.map_err(|_| {
+        codewire_server_core::AppError::ServiceUnavailable(
+            "source fixture transaction unavailable".into(),
+        )
+    })?;
+    let result =
+        replace_environment_sources_in(&mut tx, &profiles, user, ORG, environment, body).await?;
+    if result.outcome == EnvironmentSourcesUpdateOutcome::RestartRequired {
+        return Err(codewire_server_core::AppError::Precondition(
+            "source fixture does not dispatch runtime changes".into(),
+        ));
+    }
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub fn source_actor(user: &str) -> codewire_server_core::auth::AuthUser {
+    codewire_server_core::auth::AuthUser {
+        user_id: user.into(),
+        org_id: None,
+        is_admin: true,
+        via_api_key: false,
+    }
+}
+
+pub fn source_binding(
+    profile: &Value,
+) -> codewire_orchestration::api::environment_sources::EnvironmentSourceSelection {
+    codewire_orchestration::api::environment_sources::EnvironmentSourceSelection {
+        credentials: Some(codewire_project::CredentialBinding {
+            profile: format!(
+                "platform:id:{}",
+                profile["id"].as_str().expect("profile ID")
+            ),
+        }),
+        profile_revision: Some(
+            profile["revision"]
+                .as_str()
+                .expect("revision")
+                .parse()
+                .expect("integer revision"),
+        ),
+        ..Default::default()
+    }
+}
+
+pub fn source_replacement(
+    expected: codewire_orchestration::api::environment_sources::EnvironmentSourceSelection,
+    replacement: codewire_orchestration::api::environment_sources::EnvironmentSourceSelection,
+) -> codewire_orchestration::api::environment_sources::UpdateEnvironmentSourcesBody {
+    codewire_orchestration::api::environment_sources::UpdateEnvironmentSourcesBody {
+        expected_operation_generation: 7,
+        expected,
+        replacement,
+        allow_restart: false,
+        confirm_personal_credentials: true,
+        confirm_personal_secrets: false,
+    }
+}
+
 fn oauth(user: &str) -> String {
     format!("synthetic-opaque-profile-oauth-{user}")
 }
@@ -131,14 +209,6 @@ pub fn entries(credential: &str) -> Value {
 pub fn binding(profile: &Value) -> Value {
     json!({ "environmentId": ENV, "accessProfileId": profile["id"],
         "accessProfileRevision": profile["revision"] })
-}
-
-pub fn set(binding: &Value, expected: Option<&Value>, confirm: bool) -> Value {
-    let mut request = json!({"binding": binding, "confirmPersonalCredentials": confirm});
-    if let Some(expected) = expected {
-        request["expectedBinding"] = expected.clone();
-    }
-    request
 }
 
 pub fn id(profile: &Value) -> Result<&str> {

@@ -12,17 +12,25 @@ from codewire.v1.credential_connect import (
 )
 
 
+class SshPublicKey(TypedDict):
+    """Public registration data only; never the private key."""
+
+    openssh: str
+    fingerprint: str
+
+
 class Credential(TypedDict):
     """Metadata only; no provider token or protected-store reference."""
 
     id: str
     name: str
     provider: str
-    authentication_kind: Literal["oauth", "api_key", "access_token", "github_app"]
+    authentication_kind: Literal["oauth", "api_key", "access_token", "github_app", "ssh_key"]
     account_hint: str | None
     status: Literal["active", "revoked", "expired", "refresh_failed"]
     expires_at_unix: int | None
     revocation_generation: int
+    ssh_public_key: SshPublicKey | None
 
 
 class CodexDeviceChallenge(TypedDict):
@@ -73,6 +81,7 @@ def _credential(value: pb.Credential) -> Credential:
         pb.CREDENTIAL_AUTHENTICATION_KIND_API_KEY: "api_key",
         pb.CREDENTIAL_AUTHENTICATION_KIND_ACCESS_TOKEN: "access_token",
         pb.CREDENTIAL_AUTHENTICATION_KIND_GITHUB_APP: "github_app",
+        pb.CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY: "ssh_key",
     }
     statuses = {
         pb.CREDENTIAL_STATUS_ACTIVE: "active", pb.CREDENTIAL_STATUS_REVOKED: "revoked",
@@ -80,6 +89,9 @@ def _credential(value: pb.Credential) -> Credential:
     }
     if value.authentication_kind not in kinds or value.status not in statuses:
         raise RuntimeError("credential response contains unsupported metadata")
+    if ((value.authentication_kind == pb.CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY)
+            != value.HasField("ssh_public_key")):
+        raise RuntimeError("credential response contains mismatched SSH public metadata")
     return {
         "id": value.id, "name": value.name, "provider": value.provider,
         "authentication_kind": kinds[value.authentication_kind],
@@ -87,6 +99,10 @@ def _credential(value: pb.Credential) -> Credential:
         "status": statuses[value.status],
         "expires_at_unix": value.expires_at_unix if value.HasField("expires_at_unix") else None,
         "revocation_generation": _generation(value.revocation_generation),
+        "ssh_public_key": {
+            "openssh": value.ssh_public_key.openssh,
+            "fingerprint": value.ssh_public_key.fingerprint,
+        } if value.HasField("ssh_public_key") else None,
     }
 
 

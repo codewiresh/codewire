@@ -1,4 +1,3 @@
-
 #[test]
 fn parse_env_overrides_requires_key_value_shape() {
     let parsed = parse_env_overrides(&["FOO=bar".to_string(), "EMPTY=".to_string()]).unwrap();
@@ -481,30 +480,6 @@ fn format_secret_metadata_list_text_reports_custom_empty_message() {
         format_secret_metadata_list_text(&[], "No user secrets found."),
         "No user secrets found.\n"
     );
-}
-
-#[test]
-fn find_secret_project_by_name_matches_exact_name_only() {
-    let projects = vec![
-        test_secret_project("prod", 1),
-        SecretProject {
-            id: "sp_exact".to_string(),
-            name: "sp_exact".to_string(),
-            ..test_secret_project("other", 0)
-        },
-    ];
-
-    assert_eq!(
-        find_secret_project_by_name(&projects, "prod").unwrap().id,
-        "sp_prod"
-    );
-    assert_eq!(
-        find_secret_project_by_name(&projects, "sp_exact")
-            .unwrap()
-            .name,
-        "sp_exact"
-    );
-    assert!(find_secret_project_by_name(&projects, "sp_other").is_none());
 }
 
 fn test_preset(id: &str, name: &str, slug: &str, image: &str) -> Preset {

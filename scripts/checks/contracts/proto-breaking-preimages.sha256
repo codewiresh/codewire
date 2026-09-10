@@ -12,3 +12,5 @@ replace  d71d3714cfc91ab96ac0dad03573822859aa56d9efb8947c4726e29d3c62f324  proto
 replace  ebf2fd9ba329d9bd01fd9298de9dd438ad922360d2b702a7d307707e7e0080c1  proto/codewire/v1/api_key.proto
 replace  a6ebaf2c5af7d462ecbbc5d86c574b31b78e11b4c431d026c9e57430ab23b290  proto/codewire/internal/v1/gateway_binding.proto
 replace  53005818202cf4ed4a6390b96210df89490f0d9c3b3f55efd4e82805b5f1839b  proto/codewire/v1/organization.proto
+replace  654b174d8b535f24a7c7abf9ad5882f5df1227b3dd2f51ac0dcd906eb6df03d5  proto/codewire/v1/common.proto
+replace  aca686b3bb465fe2e6461c5ec5973d86ca89c1cc3b3987b6ded75d40b7f665be  proto/codewire/v1/access_profile.proto

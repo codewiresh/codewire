@@ -68,17 +68,6 @@ class AccessProfileFixture:
         return pb.GetEnvironmentAccessProfileResponse(
             binding=pb.EnvironmentAccessProfileBinding(**BINDING), personal_credentials_confirmed=True)
 
-    def set_environment_access_profile(self, request, ctx):
-        self.record("SetEnvironmentAccessProfile", request, ctx)
-        if not request.confirm_personal_credentials:
-            raise ConnectError(Code.FAILED_PRECONDITION, "explicit consent required")
-        return pb.SetEnvironmentAccessProfileResponse(binding=request.binding)
-
-    def clear_environment_access_profile(self, request, ctx):
-        self.record("ClearEnvironmentAccessProfile", request, ctx)
-        return pb.ClearEnvironmentAccessProfileResponse()
-
-
 class AccessProfilesTestCase(unittest.TestCase):
     def setUp(self):
         self.fixture = AccessProfileFixture()
@@ -141,30 +130,16 @@ class AccessProfilesTestCase(unittest.TestCase):
                 self.cw.access_profiles.get("profile-one", revision=revision)
         self.assertEqual(self.fixture.calls, [])
 
-    def test_binding_presence_explicit_consent_and_exact_cas(self):
+    def test_binding_read_preserves_presence_and_stored_consent(self):
         self.assertEqual(self.cw.access_profiles.get_environment_binding("unbound"),
                          {"binding": None, "personal_credentials_confirmed": False})
         self.assertEqual(self.cw.access_profiles.get_environment_binding("environment-one"),
                          {"binding": BINDING, "personal_credentials_confirmed": True})
-        with self.assertRaises(CodewireError) as denied:
-            self.cw.access_profiles.set_environment_binding(BINDING, confirm_personal_credentials=False)
-        self.assertEqual(denied.exception.status, 400)
-        self.assertFalse(self.fixture.calls[-1][1].confirm_personal_credentials)
-        self.assertFalse(self.fixture.calls[-1][1].HasField("expected_binding"))
-        expected = {**BINDING, "access_profile_id": "previous-profile", "access_profile_revision": EXACT - 3}
-        self.assertEqual(self.cw.access_profiles.set_environment_binding(
-            BINDING, confirm_personal_credentials=True, expected_binding=expected), BINDING)
-        request = self.fixture.calls[-1][1]
-        self.assertEqual(request.expected_binding, pb.EnvironmentAccessProfileBinding(**expected))
-        self.cw.access_profiles.clear_environment_binding(expected)
-        self.assertEqual(self.fixture.calls[-1][1].expected_binding, pb.EnvironmentAccessProfileBinding(**expected))
-        self.assertEqual(self.paths[-1], "/codewire.v1.AccessProfileService/ClearEnvironmentAccessProfile")
+        self.assertEqual(self.paths[-1], "/codewire.v1.AccessProfileService/GetEnvironmentAccessProfile")
 
-    def test_omitted_or_nonboolean_consent_never_defaults_to_true(self):
-        with self.assertRaises(TypeError):
-            self.cw.access_profiles.set_environment_binding(BINDING)
-        with self.assertRaisesRegex(ValueError, "explicit boolean"):
-            self.cw.access_profiles.set_environment_binding(BINDING, confirm_personal_credentials=1)
+    def test_retired_binding_mutation_methods_are_absent(self):
+        self.assertFalse(hasattr(self.cw.access_profiles, "set_environment_binding"))
+        self.assertFalse(hasattr(self.cw.access_profiles, "clear_environment_binding"))
         self.assertEqual(self.fixture.calls, [])
 
     def test_stale_cas_and_not_found_map_without_automatic_retry(self):

@@ -45,6 +45,24 @@ const (
 	// CredentialMutationServiceEnrollCodexProcedure is the fully-qualified name of the
 	// CredentialMutationService's EnrollCodex RPC.
 	CredentialMutationServiceEnrollCodexProcedure = "/codewire.v1.CredentialMutationService/EnrollCodex"
+	// CredentialMutationServiceEnrollGithubProcedure is the fully-qualified name of the
+	// CredentialMutationService's EnrollGithub RPC.
+	CredentialMutationServiceEnrollGithubProcedure = "/codewire.v1.CredentialMutationService/EnrollGithub"
+	// CredentialMutationServiceAddApiKeyCredentialProcedure is the fully-qualified name of the
+	// CredentialMutationService's AddApiKeyCredential RPC.
+	CredentialMutationServiceAddApiKeyCredentialProcedure = "/codewire.v1.CredentialMutationService/AddApiKeyCredential"
+	// CredentialMutationServiceRenameCredentialProcedure is the fully-qualified name of the
+	// CredentialMutationService's RenameCredential RPC.
+	CredentialMutationServiceRenameCredentialProcedure = "/codewire.v1.CredentialMutationService/RenameCredential"
+	// CredentialMutationServiceRotateApiKeyCredentialProcedure is the fully-qualified name of the
+	// CredentialMutationService's RotateApiKeyCredential RPC.
+	CredentialMutationServiceRotateApiKeyCredentialProcedure = "/codewire.v1.CredentialMutationService/RotateApiKeyCredential"
+	// CredentialMutationServiceGenerateSshCredentialProcedure is the fully-qualified name of the
+	// CredentialMutationService's GenerateSshCredential RPC.
+	CredentialMutationServiceGenerateSshCredentialProcedure = "/codewire.v1.CredentialMutationService/GenerateSshCredential"
+	// CredentialMutationServiceAddSshCredentialProcedure is the fully-qualified name of the
+	// CredentialMutationService's AddSshCredential RPC.
+	CredentialMutationServiceAddSshCredentialProcedure = "/codewire.v1.CredentialMutationService/AddSshCredential"
 	// CredentialMutationServiceRevokeCredentialProcedure is the fully-qualified name of the
 	// CredentialMutationService's RevokeCredential RPC.
 	CredentialMutationServiceRevokeCredentialProcedure = "/codewire.v1.CredentialMutationService/RevokeCredential"
@@ -161,6 +179,13 @@ type CredentialMutationServiceClient interface {
 	// Missing terminal metadata is an uncertain outcome: reconcile by name using
 	// GetCredential, never automatically reenroll or revoke the provider login.
 	EnrollCodex(context.Context, *connect.Request[v1.EnrollCodexRequest]) (*connect.ServerStreamForClient[v1.EnrollCodexResponse], error)
+	// Same owned challenge/publication protocol, using the pinned GitHub CLI.
+	EnrollGithub(context.Context, *connect.Request[v1.EnrollGithubRequest]) (*connect.ServerStreamForClient[v1.EnrollGithubResponse], error)
+	AddApiKeyCredential(context.Context, *connect.Request[v1.AddApiKeyCredentialRequest]) (*connect.Response[v1.AddApiKeyCredentialResponse], error)
+	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
+	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
+	GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error)
+	AddSshCredential(context.Context, *connect.Request[v1.AddSshCredentialRequest]) (*connect.Response[v1.AddSshCredentialResponse], error)
 	RevokeCredential(context.Context, *connect.Request[v1.RevokeCredentialRequest]) (*connect.Response[v1.RevokeCredentialResponse], error)
 	DeleteCredential(context.Context, *connect.Request[v1.DeleteCredentialRequest]) (*connect.Response[v1.DeleteCredentialResponse], error)
 }
@@ -182,6 +207,42 @@ func NewCredentialMutationServiceClient(httpClient connect.HTTPClient, baseURL s
 			connect.WithSchema(credentialMutationServiceMethods.ByName("EnrollCodex")),
 			connect.WithClientOptions(opts...),
 		),
+		enrollGithub: connect.NewClient[v1.EnrollGithubRequest, v1.EnrollGithubResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceEnrollGithubProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("EnrollGithub")),
+			connect.WithClientOptions(opts...),
+		),
+		addApiKeyCredential: connect.NewClient[v1.AddApiKeyCredentialRequest, v1.AddApiKeyCredentialResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceAddApiKeyCredentialProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("AddApiKeyCredential")),
+			connect.WithClientOptions(opts...),
+		),
+		renameCredential: connect.NewClient[v1.RenameCredentialRequest, v1.RenameCredentialResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceRenameCredentialProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("RenameCredential")),
+			connect.WithClientOptions(opts...),
+		),
+		rotateApiKeyCredential: connect.NewClient[v1.RotateApiKeyCredentialRequest, v1.RotateApiKeyCredentialResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceRotateApiKeyCredentialProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("RotateApiKeyCredential")),
+			connect.WithClientOptions(opts...),
+		),
+		generateSshCredential: connect.NewClient[v1.GenerateSshCredentialRequest, v1.GenerateSshCredentialResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceGenerateSshCredentialProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("GenerateSshCredential")),
+			connect.WithClientOptions(opts...),
+		),
+		addSshCredential: connect.NewClient[v1.AddSshCredentialRequest, v1.AddSshCredentialResponse](
+			httpClient,
+			baseURL+CredentialMutationServiceAddSshCredentialProcedure,
+			connect.WithSchema(credentialMutationServiceMethods.ByName("AddSshCredential")),
+			connect.WithClientOptions(opts...),
+		),
 		revokeCredential: connect.NewClient[v1.RevokeCredentialRequest, v1.RevokeCredentialResponse](
 			httpClient,
 			baseURL+CredentialMutationServiceRevokeCredentialProcedure,
@@ -199,14 +260,50 @@ func NewCredentialMutationServiceClient(httpClient connect.HTTPClient, baseURL s
 
 // credentialMutationServiceClient implements CredentialMutationServiceClient.
 type credentialMutationServiceClient struct {
-	enrollCodex      *connect.Client[v1.EnrollCodexRequest, v1.EnrollCodexResponse]
-	revokeCredential *connect.Client[v1.RevokeCredentialRequest, v1.RevokeCredentialResponse]
-	deleteCredential *connect.Client[v1.DeleteCredentialRequest, v1.DeleteCredentialResponse]
+	enrollCodex            *connect.Client[v1.EnrollCodexRequest, v1.EnrollCodexResponse]
+	enrollGithub           *connect.Client[v1.EnrollGithubRequest, v1.EnrollGithubResponse]
+	addApiKeyCredential    *connect.Client[v1.AddApiKeyCredentialRequest, v1.AddApiKeyCredentialResponse]
+	renameCredential       *connect.Client[v1.RenameCredentialRequest, v1.RenameCredentialResponse]
+	rotateApiKeyCredential *connect.Client[v1.RotateApiKeyCredentialRequest, v1.RotateApiKeyCredentialResponse]
+	generateSshCredential  *connect.Client[v1.GenerateSshCredentialRequest, v1.GenerateSshCredentialResponse]
+	addSshCredential       *connect.Client[v1.AddSshCredentialRequest, v1.AddSshCredentialResponse]
+	revokeCredential       *connect.Client[v1.RevokeCredentialRequest, v1.RevokeCredentialResponse]
+	deleteCredential       *connect.Client[v1.DeleteCredentialRequest, v1.DeleteCredentialResponse]
 }
 
 // EnrollCodex calls codewire.v1.CredentialMutationService.EnrollCodex.
 func (c *credentialMutationServiceClient) EnrollCodex(ctx context.Context, req *connect.Request[v1.EnrollCodexRequest]) (*connect.ServerStreamForClient[v1.EnrollCodexResponse], error) {
 	return c.enrollCodex.CallServerStream(ctx, req)
+}
+
+// EnrollGithub calls codewire.v1.CredentialMutationService.EnrollGithub.
+func (c *credentialMutationServiceClient) EnrollGithub(ctx context.Context, req *connect.Request[v1.EnrollGithubRequest]) (*connect.ServerStreamForClient[v1.EnrollGithubResponse], error) {
+	return c.enrollGithub.CallServerStream(ctx, req)
+}
+
+// AddApiKeyCredential calls codewire.v1.CredentialMutationService.AddApiKeyCredential.
+func (c *credentialMutationServiceClient) AddApiKeyCredential(ctx context.Context, req *connect.Request[v1.AddApiKeyCredentialRequest]) (*connect.Response[v1.AddApiKeyCredentialResponse], error) {
+	return c.addApiKeyCredential.CallUnary(ctx, req)
+}
+
+// RenameCredential calls codewire.v1.CredentialMutationService.RenameCredential.
+func (c *credentialMutationServiceClient) RenameCredential(ctx context.Context, req *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error) {
+	return c.renameCredential.CallUnary(ctx, req)
+}
+
+// RotateApiKeyCredential calls codewire.v1.CredentialMutationService.RotateApiKeyCredential.
+func (c *credentialMutationServiceClient) RotateApiKeyCredential(ctx context.Context, req *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error) {
+	return c.rotateApiKeyCredential.CallUnary(ctx, req)
+}
+
+// GenerateSshCredential calls codewire.v1.CredentialMutationService.GenerateSshCredential.
+func (c *credentialMutationServiceClient) GenerateSshCredential(ctx context.Context, req *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error) {
+	return c.generateSshCredential.CallUnary(ctx, req)
+}
+
+// AddSshCredential calls codewire.v1.CredentialMutationService.AddSshCredential.
+func (c *credentialMutationServiceClient) AddSshCredential(ctx context.Context, req *connect.Request[v1.AddSshCredentialRequest]) (*connect.Response[v1.AddSshCredentialResponse], error) {
+	return c.addSshCredential.CallUnary(ctx, req)
 }
 
 // RevokeCredential calls codewire.v1.CredentialMutationService.RevokeCredential.
@@ -227,6 +324,13 @@ type CredentialMutationServiceHandler interface {
 	// Missing terminal metadata is an uncertain outcome: reconcile by name using
 	// GetCredential, never automatically reenroll or revoke the provider login.
 	EnrollCodex(context.Context, *connect.Request[v1.EnrollCodexRequest], *connect.ServerStream[v1.EnrollCodexResponse]) error
+	// Same owned challenge/publication protocol, using the pinned GitHub CLI.
+	EnrollGithub(context.Context, *connect.Request[v1.EnrollGithubRequest], *connect.ServerStream[v1.EnrollGithubResponse]) error
+	AddApiKeyCredential(context.Context, *connect.Request[v1.AddApiKeyCredentialRequest]) (*connect.Response[v1.AddApiKeyCredentialResponse], error)
+	RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error)
+	RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error)
+	GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error)
+	AddSshCredential(context.Context, *connect.Request[v1.AddSshCredentialRequest]) (*connect.Response[v1.AddSshCredentialResponse], error)
 	RevokeCredential(context.Context, *connect.Request[v1.RevokeCredentialRequest]) (*connect.Response[v1.RevokeCredentialResponse], error)
 	DeleteCredential(context.Context, *connect.Request[v1.DeleteCredentialRequest]) (*connect.Response[v1.DeleteCredentialResponse], error)
 }
@@ -242,6 +346,42 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 		CredentialMutationServiceEnrollCodexProcedure,
 		svc.EnrollCodex,
 		connect.WithSchema(credentialMutationServiceMethods.ByName("EnrollCodex")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceEnrollGithubHandler := connect.NewServerStreamHandler(
+		CredentialMutationServiceEnrollGithubProcedure,
+		svc.EnrollGithub,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("EnrollGithub")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceAddApiKeyCredentialHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceAddApiKeyCredentialProcedure,
+		svc.AddApiKeyCredential,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("AddApiKeyCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceRenameCredentialHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceRenameCredentialProcedure,
+		svc.RenameCredential,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("RenameCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceRotateApiKeyCredentialHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceRotateApiKeyCredentialProcedure,
+		svc.RotateApiKeyCredential,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("RotateApiKeyCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceGenerateSshCredentialHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceGenerateSshCredentialProcedure,
+		svc.GenerateSshCredential,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("GenerateSshCredential")),
+		connect.WithHandlerOptions(opts...),
+	)
+	credentialMutationServiceAddSshCredentialHandler := connect.NewUnaryHandler(
+		CredentialMutationServiceAddSshCredentialProcedure,
+		svc.AddSshCredential,
+		connect.WithSchema(credentialMutationServiceMethods.ByName("AddSshCredential")),
 		connect.WithHandlerOptions(opts...),
 	)
 	credentialMutationServiceRevokeCredentialHandler := connect.NewUnaryHandler(
@@ -260,6 +400,18 @@ func NewCredentialMutationServiceHandler(svc CredentialMutationServiceHandler, o
 		switch r.URL.Path {
 		case CredentialMutationServiceEnrollCodexProcedure:
 			credentialMutationServiceEnrollCodexHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceEnrollGithubProcedure:
+			credentialMutationServiceEnrollGithubHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceAddApiKeyCredentialProcedure:
+			credentialMutationServiceAddApiKeyCredentialHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceRenameCredentialProcedure:
+			credentialMutationServiceRenameCredentialHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceRotateApiKeyCredentialProcedure:
+			credentialMutationServiceRotateApiKeyCredentialHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceGenerateSshCredentialProcedure:
+			credentialMutationServiceGenerateSshCredentialHandler.ServeHTTP(w, r)
+		case CredentialMutationServiceAddSshCredentialProcedure:
+			credentialMutationServiceAddSshCredentialHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceRevokeCredentialProcedure:
 			credentialMutationServiceRevokeCredentialHandler.ServeHTTP(w, r)
 		case CredentialMutationServiceDeleteCredentialProcedure:
@@ -275,6 +427,30 @@ type UnimplementedCredentialMutationServiceHandler struct{}
 
 func (UnimplementedCredentialMutationServiceHandler) EnrollCodex(context.Context, *connect.Request[v1.EnrollCodexRequest], *connect.ServerStream[v1.EnrollCodexResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.EnrollCodex is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) EnrollGithub(context.Context, *connect.Request[v1.EnrollGithubRequest], *connect.ServerStream[v1.EnrollGithubResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.EnrollGithub is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) AddApiKeyCredential(context.Context, *connect.Request[v1.AddApiKeyCredentialRequest]) (*connect.Response[v1.AddApiKeyCredentialResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.AddApiKeyCredential is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) RenameCredential(context.Context, *connect.Request[v1.RenameCredentialRequest]) (*connect.Response[v1.RenameCredentialResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.RenameCredential is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) RotateApiKeyCredential(context.Context, *connect.Request[v1.RotateApiKeyCredentialRequest]) (*connect.Response[v1.RotateApiKeyCredentialResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.RotateApiKeyCredential is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) GenerateSshCredential(context.Context, *connect.Request[v1.GenerateSshCredentialRequest]) (*connect.Response[v1.GenerateSshCredentialResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.GenerateSshCredential is not implemented"))
+}
+
+func (UnimplementedCredentialMutationServiceHandler) AddSshCredential(context.Context, *connect.Request[v1.AddSshCredentialRequest]) (*connect.Response[v1.AddSshCredentialResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialMutationService.AddSshCredential is not implemented"))
 }
 
 func (UnimplementedCredentialMutationServiceHandler) RevokeCredential(context.Context, *connect.Request[v1.RevokeCredentialRequest]) (*connect.Response[v1.RevokeCredentialResponse], error) {

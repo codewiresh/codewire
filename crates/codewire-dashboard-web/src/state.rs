@@ -6,6 +6,7 @@ use crate::{Config, RuntimeMode};
 pub(crate) struct AppState {
     pub(crate) public_origin: String,
     pub(crate) api_origin: http::Uri,
+    pub(crate) credential_origin: http::Uri,
     pub(crate) identity_origin_string: String,
     pub(crate) browser_api_origin: String,
     pub(crate) billing_origin: http::Uri,
@@ -14,6 +15,7 @@ pub(crate) struct AppState {
     pub(crate) confidential_storage_enabled: bool,
     pub(crate) confidential_admin_only: bool,
     pub(crate) http: reqwest::Client,
+    pub(crate) credential_http: reqwest::Client,
 }
 
 impl AppState {
@@ -21,6 +23,7 @@ impl AppState {
         Self {
             public_origin: config.public_origin,
             api_origin: config.api_origin,
+            credential_origin: config.credential_origin,
             identity_origin_string: config.identity_origin_string,
             browser_api_origin: config.browser_api_origin,
             billing_origin: config.billing_origin,
@@ -32,6 +35,10 @@ impl AppState {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("static dashboard HTTP client configuration"),
+            credential_http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("static dashboard credential HTTP client configuration"),
         }
     }
 }

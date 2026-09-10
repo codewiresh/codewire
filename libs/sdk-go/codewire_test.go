@@ -22,15 +22,16 @@ import (
 
 type environmentServiceHandler struct {
 	codewirev1connect.UnimplementedEnvironmentServiceHandler
-	list       func(context.Context, *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error)
-	create     func(context.Context, *connect.Request[codewirev1.CreateEnvironmentRequest]) (*connect.Response[codewirev1.CreateEnvironmentResponse], error)
-	get        func(context.Context, *connect.Request[codewirev1.GetEnvironmentRequest]) (*connect.Response[codewirev1.GetEnvironmentResponse], error)
-	planResize func(context.Context, *connect.Request[codewirev1.PlanEnvironmentResizeRequest]) (*connect.Response[codewirev1.PlanEnvironmentResizeResponse], error)
-	resize     func(context.Context, *connect.Request[codewirev1.ResizeEnvironmentRequest]) (*connect.Response[codewirev1.ResizeEnvironmentResponse], error)
-	getResize  func(context.Context, *connect.Request[codewirev1.GetEnvironmentResizeOperationRequest]) (*connect.Response[codewirev1.GetEnvironmentResizeOperationResponse], error)
-	delete     func(context.Context, *connect.Request[codewirev1.DeleteEnvironmentRequest]) (*connect.Response[codewirev1.DeleteEnvironmentResponse], error)
-	stop       func(context.Context, *connect.Request[codewirev1.StopEnvironmentRequest]) (*connect.Response[codewirev1.StopEnvironmentResponse], error)
-	start      func(context.Context, *connect.Request[codewirev1.StartEnvironmentRequest]) (*connect.Response[codewirev1.StartEnvironmentResponse], error)
+	list          func(context.Context, *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error)
+	create        func(context.Context, *connect.Request[codewirev1.CreateEnvironmentRequest]) (*connect.Response[codewirev1.CreateEnvironmentResponse], error)
+	get           func(context.Context, *connect.Request[codewirev1.GetEnvironmentRequest]) (*connect.Response[codewirev1.GetEnvironmentResponse], error)
+	planResize    func(context.Context, *connect.Request[codewirev1.PlanEnvironmentResizeRequest]) (*connect.Response[codewirev1.PlanEnvironmentResizeResponse], error)
+	resize        func(context.Context, *connect.Request[codewirev1.ResizeEnvironmentRequest]) (*connect.Response[codewirev1.ResizeEnvironmentResponse], error)
+	getResize     func(context.Context, *connect.Request[codewirev1.GetEnvironmentResizeOperationRequest]) (*connect.Response[codewirev1.GetEnvironmentResizeOperationResponse], error)
+	delete        func(context.Context, *connect.Request[codewirev1.DeleteEnvironmentRequest]) (*connect.Response[codewirev1.DeleteEnvironmentResponse], error)
+	stop          func(context.Context, *connect.Request[codewirev1.StopEnvironmentRequest]) (*connect.Response[codewirev1.StopEnvironmentResponse], error)
+	start         func(context.Context, *connect.Request[codewirev1.StartEnvironmentRequest]) (*connect.Response[codewirev1.StartEnvironmentResponse], error)
+	updateSources func(context.Context, *connect.Request[codewirev1.UpdateEnvironmentSourcesRequest]) (*connect.Response[codewirev1.UpdateEnvironmentSourcesResponse], error)
 }
 
 func (h environmentServiceHandler) ListEnvironments(ctx context.Context, req *connect.Request[codewirev1.ListEnvironmentsRequest]) (*connect.Response[codewirev1.ListEnvironmentsResponse], error) {
@@ -86,6 +87,12 @@ func (h environmentServiceHandler) StartEnvironment(ctx context.Context, req *co
 		return h.start(ctx, req)
 	}
 	return h.UnimplementedEnvironmentServiceHandler.StartEnvironment(ctx, req)
+}
+func (h environmentServiceHandler) UpdateEnvironmentSources(ctx context.Context, req *connect.Request[codewirev1.UpdateEnvironmentSourcesRequest]) (*connect.Response[codewirev1.UpdateEnvironmentSourcesResponse], error) {
+	if h.updateSources != nil {
+		return h.updateSources(ctx, req)
+	}
+	return h.UnimplementedEnvironmentServiceHandler.UpdateEnvironmentSources(ctx, req)
 }
 
 type execServiceHandler struct {
@@ -549,6 +556,89 @@ func TestEnvironmentsCRUD(t *testing.T) {
 	// Delete
 	if err := client.Environments.Delete(ctx, "env_123"); err != nil {
 		t.Fatalf("delete: %v", err)
+	}
+}
+
+func TestUpdateEnvironmentSourcesPreservesExactCASAndConfirmations(t *testing.T) {
+	const exact uint64 = 9_007_199_254_741_009
+	local := codewire.ProjectStoragePlacementLocal
+	platform := codewire.ProjectStoragePlacementPlatform
+	expected := codewire.EnvironmentSourceSelection{
+		Secrets: &codewire.ProjectSecretBindings{Project: "platform:id:project-old", User: &local},
+	}
+	replacement := codewire.EnvironmentSourceSelection{
+		Secrets:         &codewire.ProjectSecretBindings{Organization: true, User: &platform},
+		Credentials:     &codewire.ProjectCredentialBinding{Profile: "platform:id:profile-new"},
+		ProfileRevision: uint64Ptr(exact),
+	}
+	var calls atomic.Int32
+	client, _ := testRuntimeServer(t, environmentServiceHandler{
+		updateSources: func(_ context.Context, req *connect.Request[codewirev1.UpdateEnvironmentSourcesRequest]) (*connect.Response[codewirev1.UpdateEnvironmentSourcesResponse], error) {
+			calls.Add(1)
+			if req.Msg.GetEnvironmentId() == "stale" {
+				return nil, connect.NewError(connect.CodeAborted, errors.New("stale source selection"))
+			}
+			if req.Msg.GetOrgId() != "org_test" || req.Msg.GetEnvironmentId() != "env_123" || req.Msg.GetExpectedOperationGeneration() != exact {
+				t.Errorf("source update CAS changed: %#v", req.Msg)
+			}
+			if req.Msg.GetExpected().GetSecrets().GetProject() != "platform:id:project-old" || req.Msg.GetExpected().GetSecrets().GetUser() != codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_LOCAL {
+				t.Errorf("expected selection changed: %#v", req.Msg.GetExpected())
+			}
+			if req.Msg.GetReplacement().GetCredentials().GetProfile() != "platform:id:profile-new" || req.Msg.GetReplacement().GetProfileRevision() != exact || req.Msg.GetReplacement().GetSecrets().GetUser() != codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_PLATFORM {
+				t.Errorf("replacement selection changed: %#v", req.Msg.GetReplacement())
+			}
+			if !req.Msg.GetAllowRestart() || !req.Msg.GetConfirmPersonalCredentials() || !req.Msg.GetConfirmPersonalSecrets() {
+				t.Errorf("explicit restart/confirmations changed: %#v", req.Msg)
+			}
+			return connect.NewResponse(&codewirev1.UpdateEnvironmentSourcesResponse{
+				EnvironmentId: "env_123", OperationGeneration: exact, Selection: req.Msg.Replacement,
+				Outcome: codewirev1.EnvironmentSourcesUpdateOutcome_ENVIRONMENT_SOURCES_UPDATE_OUTCOME_STORED,
+			}), nil
+		},
+	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
+	result, err := client.Environments.UpdateEnvironmentSources(context.Background(), "env_123", codewire.UpdateEnvironmentSourcesRequest{
+		ExpectedOperationGeneration: exact, Expected: expected, Replacement: replacement,
+		AllowRestart: true, ConfirmPersonalCredentials: true, ConfirmPersonalSecrets: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EnvironmentID != "env_123" || result.OperationGeneration != exact || result.Outcome != codewire.EnvironmentSourcesUpdateOutcomeStored || result.Selection.ProfileRevision == nil || *result.Selection.ProfileRevision != exact {
+		t.Fatalf("source update response changed: %#v", result)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("source update retried: %d", calls.Load())
+	}
+	_, err = client.Environments.UpdateEnvironmentSources(context.Background(), "stale", codewire.UpdateEnvironmentSourcesRequest{
+		ExpectedOperationGeneration: exact, Expected: expected, Replacement: replacement,
+	})
+	var sdkError *codewire.Error
+	if !errors.As(err, &sdkError) || sdkError.StatusCode != 409 || calls.Load() != 2 {
+		t.Fatalf("source conflict retried or changed error: %v calls=%d", err, calls.Load())
+	}
+}
+
+func TestUpdateEnvironmentSourcesRejectsIncompleteCASWithoutTransport(t *testing.T) {
+	var calls atomic.Int32
+	client, _ := testRuntimeServer(t, environmentServiceHandler{
+		updateSources: func(_ context.Context, req *connect.Request[codewirev1.UpdateEnvironmentSourcesRequest]) (*connect.Response[codewirev1.UpdateEnvironmentSourcesResponse], error) {
+			calls.Add(1)
+			return nil, connect.NewError(connect.CodeInternal, errors.New("must not be reached"))
+		},
+	}, execServiceHandler{}, fileServiceHandler{}, portServiceHandler{})
+	credential := &codewire.ProjectCredentialBinding{Profile: "platform:id:profile"}
+	for _, body := range []codewire.UpdateEnvironmentSourcesRequest{
+		{},
+		{ExpectedOperationGeneration: 1, Replacement: codewire.EnvironmentSourceSelection{Credentials: credential}},
+		{ExpectedOperationGeneration: 1, Replacement: codewire.EnvironmentSourceSelection{ProfileRevision: uint64Ptr(1)}},
+		{ExpectedOperationGeneration: 1, Replacement: codewire.EnvironmentSourceSelection{Credentials: credential, ProfileRevision: uint64Ptr(0)}},
+	} {
+		if _, err := client.Environments.UpdateEnvironmentSources(context.Background(), "env_123", body); err == nil {
+			t.Fatalf("invalid source update accepted: %#v", body)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("invalid source update reached transport: %d", calls.Load())
 	}
 }
 
@@ -1546,7 +1636,32 @@ func environmentProto(data codewire.EnvironmentData) *codewirev1.Environment {
 		StoppedAt: testTimestampPointer(data.StoppedAt), DestroyedAt: testTimestampPointer(data.DestroyedAt), Protected: data.Protected,
 		DeletionRequestedAt: testTimestampPointer(data.DeletionRequestedAt), DeletionGraceUntil: testTimestampPointer(data.DeletionGraceUntil),
 		PresetName: valueOrEmpty(data.PresetName), Network: valueOrEmpty(data.Network),
+		OperationGeneration: data.OperationGeneration, SourceSelection: testSourceSelection(data.SourceSelection),
 	}
+}
+
+func testSourceSelection(value *codewire.EnvironmentSourceSelection) *codewirev1.EnvironmentSourceSelection {
+	if value == nil {
+		return nil
+	}
+	result := &codewirev1.EnvironmentSourceSelection{ProfileRevision: value.ProfileRevision}
+	if value.Secrets != nil {
+		result.Secrets = &codewirev1.ProjectSecretBindings{Project: value.Secrets.Project, Organization: value.Secrets.Organization}
+		if value.Secrets.User != nil {
+			placement := codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_UNSPECIFIED
+			switch *value.Secrets.User {
+			case codewire.ProjectStoragePlacementLocal:
+				placement = codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_LOCAL
+			case codewire.ProjectStoragePlacementPlatform:
+				placement = codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_PLATFORM
+			}
+			result.Secrets.User = &placement
+		}
+	}
+	if value.Credentials != nil {
+		result.Credentials = &codewirev1.ProjectCredentialBinding{Profile: value.Credentials.Profile}
+	}
+	return result
 }
 
 func portProto(data codewire.EnvironmentPort) *codewirev1.Port {
@@ -1581,6 +1696,8 @@ func testDesiredState(value string) codewirev1.DesiredState {
 		return codewirev1.DesiredState_DESIRED_STATE_UNSPECIFIED
 	}
 }
+
+func uint64Ptr(value uint64) *uint64 { return &value }
 
 func testPortAccess(value string) codewirev1.PortAccess {
 	switch value {

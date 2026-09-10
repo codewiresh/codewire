@@ -12,7 +12,7 @@ use codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
 use codewire_gateway_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
 };
-use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::codewire::bridge::v1;
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tempfile::TempDir;
@@ -665,45 +665,92 @@ async fn real_h2_https_authority_is_normalized_only_after_exact_ingress_validati
     .await
     .unwrap();
     let transport = tokio::spawn(connection);
-    let mut accepted = client.clone();
-    let http = tokio::spawn(async move {
-        accepted
-            .send_request(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(format!("https://{AUTHORITY}/v1/responses"))
-                    .header("authorization", WORKSPACE_ONE)
-                    .header("content-type", "application/json")
-                    .body(Full::new(Bytes::from_static(b"{}")))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-    });
-    let mut call = fixture.call().await;
-    call.accept();
-    let forwarded = call.request().await;
-    assert_eq!(forwarded.path, "/responses");
-    assert!(forwarded.query.is_empty());
-    call.start(&forwarded.request_id).await;
-    let response = bounded(http).await.unwrap();
-    assert_eq!(response.version(), Version::HTTP_2);
-    assert_eq!(response.status(), StatusCode::OK);
-    call.finish(&forwarded.request_id, b"synthetic-h2").await;
-    assert_eq!(
-        bounded(response.into_body().collect())
-            .await
-            .unwrap()
-            .to_bytes()
-            .as_ref(),
-        b"synthetic-h2"
-    );
-    call.closed().await;
+    for (method, uri, slot, route, path, query) in [
+        (
+            Method::POST,
+            "/v1/responses",
+            "codex",
+            "openai-api",
+            "/responses",
+            "",
+        ),
+        (
+            Method::POST,
+            "/_codewire/openai/v1/responses",
+            "openai",
+            "openai-api",
+            "/responses",
+            "",
+        ),
+        (
+            Method::POST,
+            "/v1/messages?beta=true",
+            "anthropic",
+            "anthropic-api",
+            "/messages",
+            "beta=true",
+        ),
+        (
+            Method::GET,
+            "/_codewire/github/owner/repo.git/info/refs?service=git-upload-pack",
+            "github",
+            "github-https",
+            "/owner/repo.git/info/refs",
+            "service=git-upload-pack",
+        ),
+    ] {
+        let mut accepted = client.clone();
+        let expected_method = method.clone();
+        let http = tokio::spawn(async move {
+            accepted
+                .send_request(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("https://{AUTHORITY}{uri}"))
+                        .header("authorization", WORKSPACE_ONE)
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from_static(b"{}")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        let mut call = fixture.call().await;
+        call.accept();
+        let forwarded = call.request().await;
+        assert_eq!(
+            (
+                forwarded.capability_slot.as_str(),
+                forwarded.route.as_str(),
+                forwarded.method.as_str(),
+                forwarded.path.as_str(),
+                forwarded.query.as_str()
+            ),
+            (slot, route, expected_method.as_str(), path, query)
+        );
+        call.start(&forwarded.request_id).await;
+        let response = bounded(http).await.unwrap();
+        assert_eq!(response.version(), Version::HTTP_2);
+        assert_eq!(response.status(), StatusCode::OK);
+        call.finish(&forwarded.request_id, b"synthetic-h2").await;
+        assert_eq!(
+            bounded(response.into_body().collect())
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            b"synthetic-h2"
+        );
+        call.closed().await;
+    }
 
     for uri in [
         "https://foreign.internal:8443/v1/responses",
         "http://env-synthetic.gateway.internal:8443/v1/responses",
         "https://env-synthetic.gateway.internal:8443/v1/responses?not=canonical",
+        "https://api.github.com/graphql",
+        "https://env-synthetic.gateway.internal:8443/v1/messages?beta=false",
+        "https://env-synthetic.gateway.internal:8443/_codewire/github/owner/repo.git/arbitrary",
     ] {
         let response = bounded(
             client.send_request(

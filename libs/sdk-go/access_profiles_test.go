@@ -96,18 +96,6 @@ func (f *accessProfileFixture) GetEnvironmentAccessProfile(_ context.Context, re
 	return connect.NewResponse(&codewirev1.GetEnvironmentAccessProfileResponse{Binding: &codewirev1.EnvironmentAccessProfileBinding{
 		EnvironmentId: "environment-one", AccessProfileId: "profile-one", AccessProfileRevision: accessExact}, PersonalCredentialsConfirmed: true}), nil
 }
-func (f *accessProfileFixture) SetEnvironmentAccessProfile(_ context.Context, request *connect.Request[codewirev1.SetEnvironmentAccessProfileRequest]) (*connect.Response[codewirev1.SetEnvironmentAccessProfileResponse], error) {
-	f.record("SetEnvironmentAccessProfile", request.Msg)
-	if !request.Msg.ConfirmPersonalCredentials {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("explicit consent required"))
-	}
-	return connect.NewResponse(&codewirev1.SetEnvironmentAccessProfileResponse{Binding: request.Msg.Binding}), nil
-}
-func (f *accessProfileFixture) ClearEnvironmentAccessProfile(_ context.Context, request *connect.Request[codewirev1.ClearEnvironmentAccessProfileRequest]) (*connect.Response[codewirev1.ClearEnvironmentAccessProfileResponse], error) {
-	f.record("ClearEnvironmentAccessProfile", request.Msg)
-	return connect.NewResponse(&codewirev1.ClearEnvironmentAccessProfileResponse{}), nil
-}
-
 func testAccessProfileServer(t *testing.T) (*codewire.Client, *accessProfileFixture) {
 	t.Helper()
 	f := &accessProfileFixture{t: t}
@@ -173,7 +161,7 @@ func TestAccessProfilesListAndExactSelectors(t *testing.T) {
 	}
 }
 
-func TestAccessProfilesMutationAndBindingCAS(t *testing.T) {
+func TestAccessProfilesMutationAndBindingMetadata(t *testing.T) {
 	client, fixture := testAccessProfileServer(t)
 	ctx := context.Background()
 	entry := codewire.AccessProfileEntry{CapabilitySlot: "codex", CredentialID: "credential-one"}
@@ -205,32 +193,6 @@ func TestAccessProfilesMutationAndBindingCAS(t *testing.T) {
 	if err != nil || !bound.PersonalCredentialsConfirmed || *bound.Binding != accessBinding() {
 		t.Fatalf("bound metadata: %v %v", bound, err)
 	}
-	binding := accessBinding()
-	if _, err := client.AccessProfiles.SetEnvironmentBinding(ctx, binding, nil, false); err == nil {
-		t.Fatal("false consent was not sent to server")
-	}
-	set := fixture.last().(*codewirev1.SetEnvironmentAccessProfileRequest)
-	if set.ConfirmPersonalCredentials || set.ExpectedBinding != nil {
-		t.Fatal("SDK inferred consent or existing binding")
-	}
-	expected := binding
-	expected.AccessProfileID = "previous-profile"
-	expected.AccessProfileRevision = accessExact - 3
-	result, err := client.AccessProfiles.SetEnvironmentBinding(ctx, binding, &expected, true)
-	if err != nil || *result != binding {
-		t.Fatalf("binding result: %v %v", result, err)
-	}
-	set = fixture.last().(*codewirev1.SetEnvironmentAccessProfileRequest)
-	if !set.ConfirmPersonalCredentials || set.ExpectedBinding.AccessProfileId != expected.AccessProfileID || set.ExpectedBinding.AccessProfileRevision != expected.AccessProfileRevision {
-		t.Fatal("exact caller-provided binding CAS was replaced")
-	}
-	if err := client.AccessProfiles.ClearEnvironmentBinding(ctx, expected); err != nil {
-		t.Fatal(err)
-	}
-	clear := fixture.last().(*codewirev1.ClearEnvironmentAccessProfileRequest)
-	if !proto.Equal(clear.ExpectedBinding, set.ExpectedBinding) {
-		t.Fatal("clear did not preserve exact expected binding")
-	}
 }
 
 func TestAccessProfilesRejectDuplicateSlotsAndZeroRevisionWithoutTransport(t *testing.T) {
@@ -249,11 +211,6 @@ func TestAccessProfilesRejectDuplicateSlotsAndZeroRevisionWithoutTransport(t *te
 	}
 	if err := client.AccessProfiles.Delete(ctx, "profile-one", 0); err == nil {
 		t.Fatal("zero CAS accepted")
-	}
-	binding := accessBinding()
-	binding.AccessProfileRevision = 0
-	if _, err := client.AccessProfiles.SetEnvironmentBinding(ctx, binding, nil, true); err == nil {
-		t.Fatal("zero binding revision accepted")
 	}
 	if fixture.count() != 0 {
 		t.Fatal("invalid local input reached transport")

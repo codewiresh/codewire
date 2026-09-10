@@ -5,10 +5,12 @@
 [data-dashboard-app] .cw-settings-subnav-heading strong { font-size: .9rem; font-weight: 600; }
 [data-dashboard-app] .cw-settings-subnav-heading span { overflow: hidden; color: #606060; font: .62rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 [data-dashboard-app] .cw-settings-subnav nav { display: grid; gap: .08rem; }
+[data-dashboard-app] .cw-settings-subnav nav ul { display: grid; gap: .08rem; margin: 0; padding: 0; list-style: none; }
+[data-dashboard-app] .cw-settings-subnav nav li { display: grid; }
 [data-dashboard-app] .cw-settings-subnav .cw-context-nav-label { margin: 14px 6px 5px; color: #5c5c5c; font: 500 10px/14px var(--font-mono); letter-spacing: .09em; text-transform: uppercase; }
 [data-dashboard-app] .cw-settings-subnav .cw-context-nav-label:first-child { margin-top: 0; }
 [data-dashboard-app] .cw-settings-subnav small { margin-left: auto; color: #565656; font: 9px/12px var(--font-mono); text-transform: uppercase; }
-[data-dashboard-app] .cw-settings-subnav a { padding: .48rem .6rem; border-radius: 999px; color: #888; font-size: .75rem; }
+[data-dashboard-app] .cw-settings-subnav a { display: flex; padding: .48rem .6rem; border-radius: 999px; color: #888; font-size: .75rem; }
 [data-dashboard-app] .cw-settings-subnav a:hover,
 [data-dashboard-app] .cw-settings-subnav a[aria-current="page"] { background: #191919; color: #ededed; }
 [data-dashboard-app] .cw-settings-content { width: min(100%, 52rem); min-width: 0; padding: 1.5rem 1.25rem 3rem; }
@@ -26,6 +28,9 @@
 [data-dashboard-app] .cw-mono { font-family: var(--font-mono); }
 [data-dashboard-app] .cw-settings-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-top: 1rem; padding: 1rem; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
 [data-dashboard-app] .cw-settings-form > .cw-button { align-self: end; justify-self: start; }
+[data-dashboard-app] .cw-credential-add-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+[data-dashboard-app] .cw-credential-add-grid .cw-settings-form { grid-template-columns: 1fr; margin-top: 0; }
+[data-dashboard-app] .cw-credential-add-grid h3 { margin: 0; font-size: .76rem; }
 [data-dashboard-app] .cw-settings-account-links { display: flex; flex-wrap: wrap; align-items: center; gap: .85rem; }
 [data-dashboard-app] .cw-settings-account-links > a { color: #3aa7c2; font-size: .72rem; }
 [data-dashboard-app] .cw-settings-account-links form { margin-left: auto; }
@@ -33,6 +38,36 @@
 [data-dashboard-app] .cw-settings-details div { display: grid; grid-template-columns: 8rem 1fr; gap: 1rem; }
 [data-dashboard-app] .cw-settings-details dt { color: #777; }
 [data-dashboard-app] .cw-settings-details dd { margin: 0; }
+[data-dashboard-app] .cw-credential-list,
+[data-dashboard-app] .cw-profile-list { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
+[data-dashboard-app] .cw-credential-row,
+[data-dashboard-app] .cw-profile-row { display: grid; gap: .75rem; padding: .9rem; border: 1px solid #222; border-radius: .5rem; background: #0b0b0b; }
+[data-dashboard-app] .cw-credential-row > div:first-child { display: grid; gap: .2rem; }
+[data-dashboard-app] .cw-credential-row > div:first-child span,
+[data-dashboard-app] .cw-profile-row header p,
+[data-dashboard-app] .cw-profile-row header small { margin: 0; color: #777; font-size: .7rem; }
+[data-dashboard-app] .cw-credential-status { justify-self: start; padding: .18rem .45rem; border: 1px solid #333; border-radius: 999px; font: .62rem var(--font-mono); }
+[data-dashboard-app] .cw-credential-status--success { border-color: #245a42; color: #67c891; }
+[data-dashboard-app] .cw-credential-status--warning { border-color: #665425; color: #d8b85b; }
+[data-dashboard-app] .cw-credential-status--danger { border-color: #6b3030; color: #e57f7f; }
+[data-dashboard-app] .cw-public-key { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .45rem .75rem; align-items: center; }
+[data-dashboard-app] .cw-public-key > span,
+[data-dashboard-app] .cw-public-key > small { grid-column: 1 / -1; color: #777; font-size: .68rem; }
+[data-dashboard-app] .cw-public-key code { overflow-wrap: anywhere; font-size: .68rem; }
+[data-dashboard-app] .cw-credential-actions { display: grid; gap: .55rem; border-top: 1px solid #222; padding-top: .75rem; }
+[data-dashboard-app] .cw-credential-actions details { color: #888; font-size: .72rem; }
+[data-dashboard-app] .cw-credential-actions summary { cursor: pointer; }
+[data-dashboard-app] .cw-credential-actions form { margin-top: .65rem; }
+[data-dashboard-app] .cw-credential-actions form:not(.cw-settings-form) { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+[data-dashboard-app] .cw-credential-actions p { margin: 0; line-height: 1.5; }
+[data-dashboard-app] .cw-profile-form { margin-top: 0; }
+[data-dashboard-app] .cw-profile-form .cw-profile-name { grid-column: 1 / -1; }
+[data-dashboard-app] .cw-profile-row header { display: flex; justify-content: space-between; gap: 1rem; }
+[data-dashboard-app] .cw-profile-row h3 { margin: 0 0 .25rem; font-size: .78rem; }
+[data-dashboard-app] .cw-profile-delete { border-top: 1px solid #222; padding-top: .75rem; color: #888; font-size: .72rem; }
+[data-dashboard-app] .cw-profile-delete summary { cursor: pointer; }
+[data-dashboard-app] .cw-profile-delete form { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding-top: .75rem; }
+[data-dashboard-app] .cw-profile-delete p { margin: 0; }
 
 @media (max-width: 63.9375rem) {
   [data-dashboard-app] .cw-settings-layout { min-height: calc(100vh - 3.5rem); }
@@ -43,10 +78,18 @@
   [data-dashboard-app] .cw-settings-subnav { width: 100%; min-width: 0; overflow: hidden; padding: .7rem .8rem; border-right: 0; border-bottom: 1px solid #1e1e1e; }
   [data-dashboard-app] .cw-settings-subnav-heading { padding: 0 0 .55rem; }
   [data-dashboard-app] .cw-settings-subnav nav { display: flex; width: 100%; min-width: 0; gap: .25rem; overflow-x: auto; overflow-y: hidden; }
+  [data-dashboard-app] .cw-settings-subnav nav ul { display: flex; flex: none; gap: .25rem; }
   [data-dashboard-app] .cw-settings-subnav a { flex: none; }
   [data-dashboard-app] .cw-settings-content { padding: 1rem .8rem 2rem; }
   [data-dashboard-app] .cw-settings-form { grid-template-columns: 1fr; }
+  [data-dashboard-app] .cw-credential-add-grid { grid-template-columns: 1fr; }
   [data-dashboard-app] .cw-settings-account-links { align-items: stretch; flex-direction: column; }
   [data-dashboard-app] .cw-settings-account-links form { width: 100%; margin-left: 0; }
   [data-dashboard-app] .cw-settings-account-links form .cw-button { width: 100%; }
+  [data-dashboard-app] .cw-public-key { grid-template-columns: 1fr; }
+  [data-dashboard-app] .cw-public-key > span,
+  [data-dashboard-app] .cw-public-key > small { grid-column: auto; }
+  [data-dashboard-app] .cw-profile-row header,
+  [data-dashboard-app] .cw-profile-delete form,
+  [data-dashboard-app] .cw-credential-actions form:not(.cw-settings-form) { align-items: stretch; flex-direction: column; }
 }

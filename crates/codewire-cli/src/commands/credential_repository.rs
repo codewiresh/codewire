@@ -6,7 +6,9 @@ use std::path::Path;
 use anyhow::Context as _;
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalRepositoryGitProcessSpawner,
-    LocalRepositoryProcessConfig, run_git_credential_helper, run_local_repository_executor,
+    LocalRepositoryProcessConfig, LocalRepositoryTransport, run_git_credential_helper_for_endpoint,
+    run_local_repository_executor, run_local_ssh_repository_executor,
+    run_platform_repository_executor,
 };
 use codewire_protected_store::ConnectedOsProtectedStore;
 use uuid::Uuid;
@@ -14,6 +16,9 @@ use uuid::Uuid;
 use super::{LocalGitCredentialHelperArgs, LocalGitRepositoryExecutorArgs};
 
 const GIT: &str = "/usr/bin/git";
+
+mod ssh;
+pub(crate) use ssh::run_git_ssh_helper;
 
 pub(crate) async fn run_local_git_repository_executor(
     args: LocalGitRepositoryExecutorArgs,
@@ -27,39 +32,76 @@ pub(crate) async fn run_local_git_repository_executor(
     let config = LocalRepositoryProcessConfig {
         request_id,
         staging_directory: args.staging_directory,
+        platform_delegated: args.platform_delegated,
+        transport: match args.transport.as_str() {
+            "github-oauth" => LocalRepositoryTransport::GitHubOAuth,
+            "ssh" => LocalRepositoryTransport::Ssh,
+            _ => anyhow::bail!("invalid repository transport"),
+        },
+        ssh_runtime_directory: args.ssh_runtime_directory,
     };
     // SAFETY: FD 3 is created by the authority immediately before exec and is
     // the only descriptor deliberately retained across that exec. Ownership is
     // transferred exactly once into this process.
     let authority_fd = unsafe { OwnedFd::from_raw_fd(args.authority_fd) };
+    // Only the isolated executor owns this inherited capability. Git and its
+    // helpers must neither use it nor keep the authority channel alive.
+    rustix::io::fcntl_setfd(&authority_fd, rustix::io::FdFlags::CLOEXEC)
+        .context("confine repository authority channel")?;
     let authority_stream = std::os::unix::net::UnixStream::from(authority_fd);
     authority_stream
         .set_nonblocking(true)
         .context("prepare repository lease channel")?;
     let authority_stream = tokio::net::UnixStream::from_std(authority_stream)
         .context("admit repository lease channel")?;
-    let store = ConnectedOsProtectedStore::connect()
-        .context("connect repository executor protected store")?;
     let executable = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .context("resolve repository credential helper")?;
-    let credential_runtime_directory = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .context("repository executor requires XDG_RUNTIME_DIR")?;
     let git_spawner = ConfinedGitSpawner {
         parent_pid: unsafe { libc::getpid() },
     };
-    run_local_repository_executor(
-        authority_stream,
-        store,
-        config,
-        &credential_runtime_directory,
-        Path::new(GIT),
-        &executable,
-        &git_spawner,
-    )
-    .await
-    .context("prepare protected GitHub repository")
+    match config.transport {
+        LocalRepositoryTransport::GitHubOAuth => {
+            let credential_runtime_directory = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(std::path::PathBuf::from)
+                .context("repository executor requires XDG_RUNTIME_DIR")?;
+            if config.platform_delegated {
+                return run_platform_repository_executor(
+                    authority_stream,
+                    config,
+                    &credential_runtime_directory,
+                    Path::new(GIT),
+                    &executable,
+                    &git_spawner,
+                )
+                .await
+                .context("prepare platform repository");
+            }
+            let store = ConnectedOsProtectedStore::connect()
+                .context("connect repository executor protected store")?;
+            run_local_repository_executor(
+                authority_stream,
+                store,
+                config,
+                &credential_runtime_directory,
+                Path::new(GIT),
+                &executable,
+                &git_spawner,
+            )
+            .await
+        }
+        LocalRepositoryTransport::Ssh => {
+            run_local_ssh_repository_executor(
+                authority_stream,
+                config,
+                Path::new(GIT),
+                &executable,
+                &git_spawner,
+            )
+            .await
+        }
+    }
+    .context("prepare protected repository")
 }
 
 struct ConfinedGitSpawner {
@@ -102,9 +144,10 @@ pub(crate) fn run_local_git_credential_helper(
     verify_credential_helper_confinement()?;
     let stdin = io::stdin();
     let stdout = io::stdout();
-    run_git_credential_helper(
+    run_git_credential_helper_for_endpoint(
         &args.operation,
         &args.credential_socket,
+        args.brokered_endpoint.as_deref(),
         stdin.lock(),
         stdout.lock(),
     )

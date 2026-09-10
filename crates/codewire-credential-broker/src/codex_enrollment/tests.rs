@@ -1,4 +1,5 @@
 use super::*;
+use crate::process_test_support::{assert_group_exited, observe_group};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 
@@ -8,10 +9,16 @@ const PROMPT: &str = "\nWelcome to Codex [v\x1b[90m0.149.0\x1b[0m]\n\x1b[90mOpen
 
 #[test]
 fn pinned_prompt_accepts_every_chunk_boundary_and_only_typed_challenge() {
-    for split in 0..=PROMPT.len() {
+    for version in ["0.149.0", "0.153.4"] {
+        assert_pinned_prompt(&PROMPT.replace("0.149.0", version));
+    }
+}
+
+fn assert_pinned_prompt(prompt: &str) {
+    for split in 0..=prompt.len() {
         let mut parser = ChallengeParser::new(1234);
-        let first = parser.push(&PROMPT.as_bytes()[..split]).unwrap();
-        let second = parser.push(&PROMPT.as_bytes()[split..]).unwrap();
+        let first = parser.push(&prompt.as_bytes()[..split]).unwrap();
+        let second = parser.push(&prompt.as_bytes()[split..]).unwrap();
         let challenge = first.or(second).expect("one challenge");
         parser.finish().unwrap();
         assert_eq!(
@@ -24,7 +31,7 @@ fn pinned_prompt_accepts_every_chunk_boundary_and_only_typed_challenge() {
     }
     let mut parser = ChallengeParser::new(1234);
     let mut count = 0;
-    for byte in PROMPT.bytes() {
+    for byte in prompt.bytes() {
         count += usize::from(parser.push(&[byte]).unwrap().is_some());
     }
     parser.finish().unwrap();
@@ -282,7 +289,20 @@ fn private_result_rejects_file_modes_links_fifo_size_and_removes_all_staging() {
 
 #[tokio::test]
 async fn completed_publication_cleans_private_home_without_logout() {
+    for newer in [false, true] {
+        assert_completed_publication(newer).await;
+    }
+}
+
+async fn assert_completed_publication(newer: bool) {
     let fixture = Fixture::new();
+    if newer {
+        std::fs::write(
+            fixture.root.path().join("codex-0.153.4"),
+            b"synthetic version",
+        )
+        .unwrap();
+    }
     let mut completed = fixture.completed().await;
     assert_eq!(
         completed.take_import().unwrap().account_hint(),
@@ -389,39 +409,17 @@ async fn publication_wait_keeps_original_deadline_and_preserves_a_late_commit() 
     assert!(!fixture.root.path().join("logout.called").exists());
 }
 
-fn assert_not_running(root: &Path, name: &str) {
-    let pid: i32 = std::fs::read_to_string(root.join(name))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    let status = std::fs::read_to_string(format!("/proc/{pid}/stat"));
-    match status {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(status) => {
-            // Grandchildren are reaped by their normal parent/init, not a
-            // process-wide subreaper. A zombie has no executing code or writer.
-            let state = status.rsplit_once(") ").unwrap().1.as_bytes()[0];
-            assert!(
-                state == b'Z' || state == b'X',
-                "synthetic group member remains live"
-            );
-        }
-        Err(_) => panic!("inspect exact synthetic child status"),
-    }
-}
-
 #[tokio::test]
 async fn cancellation_drains_wrapper_and_native_child_before_home_cleanup() {
     let fixture = Fixture::new();
     let pending = fixture.ready().await;
+    let processes = observe_group(fixture.root.path());
     tokio::time::timeout(Duration::from_secs(5), pending.cancel())
         .await
         .unwrap()
         .unwrap();
     assert!(fixture.homes().is_empty());
-    assert_not_running(fixture.root.path(), "wrapper.pid");
-    assert_not_running(fixture.root.path(), "native.pid");
+    assert_group_exited(processes).await;
     fixture.release();
     assert!(!fixture.root.path().join("native.finished").exists());
     fixture.assert_clean().await;
@@ -431,13 +429,13 @@ async fn cancellation_drains_wrapper_and_native_child_before_home_cleanup() {
 async fn owner_shutdown_drains_dropped_pending_and_rejects_new_admission() {
     let fixture = Fixture::new();
     let pending = fixture.ready().await;
+    let processes = observe_group(fixture.root.path());
     drop(pending);
     tokio::time::timeout(Duration::from_secs(5), fixture.owner.shutdown())
         .await
         .unwrap()
         .unwrap();
-    assert_not_running(fixture.root.path(), "wrapper.pid");
-    assert_not_running(fixture.root.path(), "native.pid");
+    assert_group_exited(processes).await;
     assert!(fixture.homes().is_empty());
     assert!(fixture.owner.start().is_err());
 }
@@ -449,6 +447,7 @@ async fn original_deadline_expires_pending_exchange_and_drains_the_group() {
     // The process remains blocked after printing a valid challenge; receiving it
     // does not restart the original lifetime.
     pending.challenge().await.unwrap();
+    let processes = observe_group(fixture.root.path());
     tokio::time::pause();
     tokio::time::advance(ENROLLMENT_LIFETIME).await;
     tokio::time::resume();
@@ -456,8 +455,7 @@ async fn original_deadline_expires_pending_exchange_and_drains_the_group() {
         .await
         .unwrap();
     assert_eq!(result.err(), Some(CodexEnrollmentError::Expired));
-    assert_not_running(fixture.root.path(), "wrapper.pid");
-    assert_not_running(fixture.root.path(), "native.pid");
+    assert_group_exited(processes).await;
     fixture.assert_clean().await;
 }
 

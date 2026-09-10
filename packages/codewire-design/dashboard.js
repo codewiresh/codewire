@@ -42,8 +42,11 @@ if (app) {
     // A rejected native form submission renders the open drawer at its POST URL.
     // Keep that response visible, including when background fragments refresh.
     const actionUrl = drawer?.querySelector("form")?.getAttribute("action");
-    return [createUrl, actionUrl].some((url) => url
-      && new URL(url, window.location.origin).pathname === window.location.pathname);
+    return [createUrl, actionUrl].some((url) => {
+      if (!url) return false;
+      const target = new URL(url, window.location.origin);
+      return target.pathname === window.location.pathname && target.search === window.location.search;
+    });
   };
 
   const focusDrawer = (drawer) => {
@@ -68,6 +71,9 @@ if (app) {
     const drawer = currentDrawer();
     if (!drawer) return false;
     const target = new URL(href || drawer.getAttribute("data-create-url"), window.location.origin);
+    const rendered = new URL(drawer.getAttribute("data-create-url"), window.location.origin);
+    // A different form needs fresh server-rendered selection and concurrency metadata.
+    if (target.pathname !== rendered.pathname || target.search !== rendered.search) return false;
     setDrawerOpen(true);
     if (target.pathname !== window.location.pathname || target.search !== window.location.search) {
       window.history.pushState({ codewireDrawer: true }, "", `${target.pathname}${target.search}${target.hash}`);

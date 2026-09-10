@@ -8,8 +8,10 @@ if [ "${1-}" = native ]; then
   printf '%s\n' "$$" > "$fixture_root/native.pid"
   # Split even ANSI escape sequences across writes, as a piped npm/native pair
   # may do. Only these typed challenge fields may escape the enrollment owner.
+  fixture_version=0.149.0
+  if [ -f "$fixture_root/codex-0.153.4" ]; then fixture_version=0.153.4; fi
   printf '\nWelcome to Codex [v\033[9'
-  printf '0m0.149.0\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n'
+  printf '0m%s\033[0m]\n\033[90mOpenAI\047s command-line coding agent\033[0m\n\n' "$fixture_version"
   printf 'Follow these steps to sign in with ChatGPT using device code authorization:\n\n'
   printf '1. Open this link in your browser and sign in to your account\n   \033[94mhttps://auth.openai.com/codex/device\033[0m\n\n'
   printf '2. Enter this one-time code \033[90m(expires in 15 minutes)\033[0m\n   \033[94mABCD-EFGH\033[0m\n\n'

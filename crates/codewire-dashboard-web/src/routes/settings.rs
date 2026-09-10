@@ -90,10 +90,11 @@ pub(super) async fn update_identity_action(
     headers: HeaderMap,
     Form(form): Form<GitIdentitySubmission>,
 ) -> Response {
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query.org).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
+    let cookie =
+        match mutation_cookie(&state, &headers, &form.csrf, &query.org, SETTINGS_PATH).await {
+            Ok(cookie) => cookie,
+            Err(response) => return response,
+        };
     if form.git_name.len() > 256 || form.git_email.len() > 320 {
         return settings_redirect("identity-invalid", true, &query.org, &headers);
     }
@@ -180,13 +181,14 @@ async fn placeholder(
     })
 }
 
-async fn mutation_cookie(
+pub(super) async fn mutation_cookie(
     state: &AppState,
     headers: &HeaderMap,
     csrf: &str,
     selected_slug: &str,
+    path: &str,
 ) -> Result<axum::http::HeaderValue, Response> {
-    let continuation = global_settings_path(SETTINGS_PATH, selected_slug);
+    let continuation = global_settings_path(path, selected_slug);
     let identity = authenticated_identity(state, headers)
         .await
         .map_err(|error| match error {

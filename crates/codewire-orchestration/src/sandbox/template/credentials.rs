@@ -1,8 +1,8 @@
-//! Material-free platform Codex configuration and purpose-specific mounts.
+//! Selected material-free stock-client configuration and purpose-specific mounts.
 
 use codewire_access::{
     CODEX_PLATFORM_HOME, CODEX_PLATFORM_ROOTS_FILE, CODEX_PLATFORM_TOKEN_FILE,
-    CodexProviderProjection,
+    ManagedCredentialClient, ManagedCredentialClientPlacement,
 };
 use codewire_gateway_proto::{
     CREDENTIAL_GATEWAY_TOKEN_AUDIENCE, CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
@@ -16,6 +16,22 @@ pub const CREDENTIAL_GATEWAY_ISSUER_NAME: &str = "codewire-credential-gateway";
 const GATEWAY_TOKEN_DIRECTORY: &str = "/run/codewire-credentials/gateway";
 const GATEWAY_TLS_DIRECTORY: &str = "/run/codewire-credentials/gateway-tls";
 const BROKER_ROOTS_DIRECTORY: &str = "/run/codewire-credentials/broker-roots";
+const PROJECTION_SHA256_ENV: &str = "CODEWIRE_ENVIRONMENT_PROJECTION_SHA256";
+pub const MANAGED_CREDENTIAL_CLIENTS_ENV: &str = "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS";
+
+pub(super) fn projection_environment(opts: &TemplateOpts) -> Option<Value> {
+    let digest = opts.projection_selection_sha256?;
+    assert!(
+        opts.credential_runtime.is_some(),
+        "selected sources require credential runtime trust"
+    );
+    assert_ne!(
+        digest, [0; 32],
+        "selected projection digest must be nonzero"
+    );
+    Some(json!({"name":PROJECTION_SHA256_ENV,
+        "value":digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()}))
+}
 
 const INPUTS: [&str; 3] = [
     "SANDBOX_CREDENTIAL_BROKER_NAMESPACE",
@@ -169,14 +185,17 @@ pub fn render_credential_gateway_certificate(
 pub fn render_credential_codex_config(namespace: &str, opts: &TemplateOpts) -> Option<Value> {
     let cfg = opts.credential_runtime.as_ref()?;
     cfg.assert_namespace(namespace);
-    let projection = CodexProviderProjection::for_platform_gateway(&cfg.gateway_dns(opts))
-        .expect("validated credential gateway DNS");
+    let projection = opts
+        .managed_credential_clients
+        .for_placement(ManagedCredentialClientPlacement::Platform)
+        .codex?;
     Some(json!({"apiVersion":"v1","kind":"ConfigMap",
         "metadata":{"name":credential_codex_config_name(&opts.environment_id),"namespace":namespace,"labels":labels(opts)},
         "data":{"config.toml":projection.config_toml()}}))
 }
 
 pub(super) fn gateway_environment(opts: &TemplateOpts) -> Vec<Value> {
+    let projection = projection_environment(opts);
     let Some(cfg) = &opts.credential_runtime else {
         return Vec::new();
     };
@@ -184,7 +203,7 @@ pub(super) fn gateway_environment(opts: &TemplateOpts) -> Vec<Value> {
         opts.operation_generation > 0,
         "credential operation generation must be captured"
     );
-    [
+    let mut environment: Vec<_> = [
         (
             "CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",
             opts.operation_generation.to_string(),
@@ -220,7 +239,9 @@ pub(super) fn gateway_environment(opts: &TemplateOpts) -> Vec<Value> {
     ]
     .into_iter()
     .map(|(name, value)| json!({"name":name,"value":value}))
-    .collect()
+    .collect();
+    environment.extend(projection);
+    environment
 }
 
 fn projected_token(name: &str, audience: &str) -> Value {
@@ -259,35 +280,67 @@ pub(super) fn workspace_volumes(opts: &TemplateOpts) -> Vec<Value> {
         .credential_runtime
         .as_ref()
         .expect("credential runtime enabled");
-    vec![
+    let mut volumes = vec![
         projected_token(
             "credential-workspace-identity",
             CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE,
         ),
         json!({"name":"credential-gateway-roots","configMap":{"name":cfg.gateway_roots_configmap}}),
-        json!({"name":"credential-codex-config","configMap":{"name":credential_codex_config_name(&opts.environment_id)}}),
+    ];
+    volumes.extend(workspace_client_volumes(opts));
+    volumes
+}
+
+pub(super) fn workspace_mounts(opts: &TemplateOpts) -> Vec<Value> {
+    let mut mounts = vec![
+        json!({"name":"credential-workspace-identity","mountPath":CODEX_PLATFORM_TOKEN_FILE.rsplit_once('/').unwrap().0,"readOnly":true}),
+        json!({"name":"credential-gateway-roots","mountPath":CODEX_PLATFORM_ROOTS_FILE.rsplit_once('/').unwrap().0,"readOnly":true}),
+    ];
+    mounts.extend(workspace_client_mounts(opts));
+    mounts
+}
+
+pub(super) fn workspace_client_volumes(opts: &TemplateOpts) -> Vec<Value> {
+    if !opts
+        .managed_credential_clients
+        .contains(ManagedCredentialClient::Codex)
+    {
+        return Vec::new();
+    }
+    vec![
+        json!({"name":"credential-codex-config","configMap":{"name":credential_codex_config_name(&opts.environment_id),"defaultMode":0o644}}),
         json!({"name":"credential-codex-home","emptyDir":{"medium":"Memory","sizeLimit":"256Mi"}}),
     ]
 }
 
-pub(super) fn workspace_mounts() -> Vec<Value> {
+pub(super) fn workspace_client_mounts(opts: &TemplateOpts) -> Vec<Value> {
+    if !opts
+        .managed_credential_clients
+        .contains(ManagedCredentialClient::Codex)
+    {
+        return Vec::new();
+    }
     vec![
-        json!({"name":"credential-workspace-identity","mountPath":CODEX_PLATFORM_TOKEN_FILE.rsplit_once('/').unwrap().0,"readOnly":true}),
-        json!({"name":"credential-gateway-roots","mountPath":CODEX_PLATFORM_ROOTS_FILE.rsplit_once('/').unwrap().0,"readOnly":true}),
         json!({"name":"credential-codex-home","mountPath":CODEX_PLATFORM_HOME.rsplit_once('/').unwrap().0}),
     ]
 }
 
-pub(super) fn workspace_environment() -> [Value; 2] {
-    // Codex writes only within its ephemeral per-Pod home. Other tools retain
-    // their normal trust; this does not globally override SSL_CERT_FILE.
-    [
-        json!({"name":"CODEX_HOME","value":CODEX_PLATFORM_HOME}),
-        json!({"name":"CODEX_CA_CERTIFICATE","value":CODEX_PLATFORM_ROOTS_FILE}),
-    ]
+pub(super) fn workspace_environment(opts: &TemplateOpts) -> Vec<Value> {
+    opts.managed_credential_clients
+        .for_placement(ManagedCredentialClientPlacement::Platform)
+        .environment
+        .into_iter()
+        .map(|(name, value)| json!({"name":name,"value":value}))
+        .collect()
 }
 
-pub(super) fn configure_bootstrap(init: &mut Value) {
+pub(super) fn configure_bootstrap(init: &mut Value, opts: &TemplateOpts) {
+    if !opts
+        .managed_credential_clients
+        .contains(ManagedCredentialClient::Codex)
+    {
+        return;
+    }
     let command = init["command"][2].as_str().expect("trusted init command");
     init["command"][2] = format!("{command} && mkdir -p -m 0700 {CODEX_PLATFORM_HOME} && cp /codewire/codex-bootstrap/config.toml {CODEX_PLATFORM_HOME}/config.toml").into();
     let mounts = init["volumeMounts"]

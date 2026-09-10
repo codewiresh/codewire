@@ -53,6 +53,7 @@ grep -qF 'no checkout, download, installation, or build required' <<<"$workspace
   fail 'workspace no-op does not prove its cheap behavior'
 grep -qF 'name: Resolve container contract scope' <<<"$workspace_job" ||
   fail 'container job does not resolve its workspace, dashboard, and iOS scope'
+# shellcheck disable=SC2016 # Match literal workflow expressions.
 grep -qF 'WORKSPACE_IMAGE_SELECTED: ${{ needs.verification-selection.outputs.workspace_image_selected }}' \
   <<<"$workspace_job" || fail 'container scope omits canonical workspace-image selection'
 grep -qF "steps.container-scope.outputs.selected != 'true'" <<<"$workspace_job" ||
@@ -63,6 +64,7 @@ grep -qF "workspace_image_selected == 'true'" <<<"$workspace_job" ||
   fail 'workspace positive path does not use canonical planner selection'
 grep -qF "trusted_adapter='.trusted-ci-policy/scripts/ci/plan/apply-verification-plan.py'" \
   "$WORKFLOW" || fail 'artifact facts do not come from the trusted adapter'
+# shellcheck disable=SC2016 # Match the workflow's literal shell variables.
 grep -qF 'python3 "$trusted_adapter" --plan "$plan_output"' "$WORKFLOW" ||
   fail 'trusted artifact adapter is not applied directly'
 grep -qF -- '--unclassified' "$WORKFLOW" ||
@@ -95,12 +97,16 @@ if grep -Eq 'docker (buildx )?build.*--push|docker push' "$VERIFY"; then
 fi
 [[ "$(grep -Ec '^workspace_cache_build (base|workspace) ' "$VERIFY")" -eq 2 ]] ||
   fail 'verification does not build the exact local base/workspace pair'
+# shellcheck disable=SC2016 # Match the verifier's literal shell variables.
 grep -qF -- '--output "type=oci,dest=$base_layout,tar=false"' "$VERIFY" ||
   fail 'base verification does not export a local OCI layout'
+# shellcheck disable=SC2016 # Match the verifier's literal shell variables.
 grep -qF -- '--metadata-file "$base_metadata"' "$VERIFY" ||
   fail 'base verification does not capture its immutable output digest'
+# shellcheck disable=SC2016 # Match the verifier's literal shell variables.
 grep -qF -- '--build-context "$base_context_name=oci-layout://$base_layout@$base_digest"' \
   "$VERIFY" || fail 'workspace verification does not consume its exact OCI base digest'
+# shellcheck disable=SC2016 # Match the verifier's literal shell variables.
 grep -qF -- '--build-arg "BASE_IMAGE_REF=$base_context_name"' "$VERIFY" ||
   fail 'workspace verification does not bind FROM to the local OCI context'
 grep -qF -- '--load' "$VERIFY" ||
@@ -273,10 +279,14 @@ case "${1:-} ${2:-}" in
       exit 143
     fi
     metadata_file=''
+    archive_file=''
     : >"$FAKE_IMAGE_LABELS.next"
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --metadata-file) metadata_file="$2"; shift ;;
+        --output)
+          if [[ "$2" == type=oci,dest=*.oci.tar ]]; then archive_file="${2#type=oci,dest=}"; fi
+          shift ;;
         --label) printf '%s\n' "$2" >>"$FAKE_IMAGE_LABELS.next"; shift ;;
       esac
       shift
@@ -304,6 +314,26 @@ case "${1:-} ${2:-}" in
       fi
       [[ "$CODEWIRE_BUILDKIT_CACHE_MODE" != r2 ]] || printf '#9 exporting cache to Amazon S3\n#9 DONE 0.1s\n'
     fi
+    if [[ -n "$archive_file" ]]; then
+      python3 - "$FAKE_OCI_FIXTURE" "$archive_file" "$FAKE_IMAGE_ID" <<'PY'
+import hashlib, json, os, platform, runpy, sys
+from pathlib import Path
+fixture = runpy.run_path(sys.argv[1])
+config_value = {'os': 'linux',
+                'architecture': {'x86_64': 'amd64', 'aarch64': 'arm64'}[platform.machine()],
+                'rootfs': {'type': 'layers', 'diff_ids': []}}
+if os.environ.get('FAKE_FAIL') == 'receipt':
+    config_value['config'] = {'Env': ['SYNTHETIC_EXPORT_FAILURE=1']}
+config = json.dumps(config_value, sort_keys=True).encode()
+change = None
+if os.environ.get('FAKE_ARCHIVE_VARIANT') == 'true':
+    change = lambda entries: entries.update({
+        'oci-layout': b'{ "imageLayoutVersion": "1.0.0" }\n',
+    })
+fixture['write_archive'](Path(sys.argv[2]), config=config, change=change)
+Path(sys.argv[3]).write_text('sha256:' + hashlib.sha256(config).hexdigest())
+PY
+    fi
     ;;
   'buildx rm')
     [[ "${FAKE_FAIL:-}" != cleanup ]] || exit 43
@@ -322,13 +352,13 @@ case "${1:-} ${2:-}" in
   'exec --interactive') cat >"$FAKE_DAEMON_FILE" ;;
   'image inspect')
     if [[ "${4:-}" == --format ]]; then
-      printf 'sha256:%064d\n' 3
+      cat "$FAKE_IMAGE_ID"
     else
-      python3 - "$FAKE_IMAGE_LABELS" <<'PY'
+      python3 - "$FAKE_IMAGE_LABELS" "$FAKE_IMAGE_ID" <<'PY'
 import json, platform, sys
 from pathlib import Path
 labels = dict(line.split('=', 1) for line in Path(sys.argv[1]).read_text().splitlines())
-print(json.dumps([{'Id': 'sha256:' + '3'.zfill(64), 'Os': 'linux',
+print(json.dumps([{'Id': Path(sys.argv[2]).read_text(), 'Os': 'linux',
                   'Architecture': {'x86_64': 'amd64', 'aarch64': 'arm64'}[platform.machine()],
                   'Config': {'Labels': labels}}]))
 PY
@@ -357,6 +387,11 @@ PY
     fi
     if [[ "$*" == *'--mounted-home-agents'* ]]; then
       [[ "${FAKE_FAIL:-}" != mounted ]] || exit 42
+      if [[ "${FAKE_FAIL:-}" == receipt ]]; then
+        # Force atomic receipt replacement to fail only after both contracts
+        # pass. This must retire the newly exported, distinct archive.
+        mkdir "$FAKE_RECEIPT"
+      fi
     else
       [[ "${FAKE_FAIL:-}" != full ]] || exit 41
     fi
@@ -381,13 +416,6 @@ PY
 esac
 EOF
 chmod +x "$work/bin/docker" "$work/bin/git"
-cat >"$work/bin/cp" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${FAKE_FAIL:-}" == report-copy && "$*" == *'/receipt.json'* ]]; then exit 72; fi
-exec /usr/bin/cp "$@"
-EOF
-chmod +x "$work/bin/cp"
 printf '{"repository":{"full_name":"codewire/codewire"},"pull_request":{"number":2047,"base":{"ref":"main","repo":{"full_name":"codewire/codewire"}},"head":{"ref":"experiment/workspace-r2-cache/fixture","sha":"%040d"},"labels":[]}}\n' 1 >"$work/measurement-event.json"
 mkdir "$work/measurement"
 
@@ -412,6 +440,10 @@ run_mock_verifier() {
     FAKE_METADATA_MODE="${2:-valid}" \
     FAKE_SELECTED_DRIVER="${3:-docker-container}" \
     FAKE_IMAGE_LABELS="$work/image-labels" \
+    FAKE_IMAGE_ID="$work/image-id" \
+    FAKE_OCI_FIXTURE="$ROOT/scripts/ci/tests/test-workspace-image-artifact.py" \
+    FAKE_ARCHIVE_VARIANT="${MOCK_ARCHIVE_VARIANT:-false}" \
+    FAKE_RECEIPT="$fixture_receipt" \
     FAKE_DAEMON_FILE="$work/daemon.aws" \
     FAKE_CONTRACT_PROCESS="$work/contract-process" \
     FAKE_CONTRACT_CHILD="$work/contract-child" \
@@ -435,7 +467,7 @@ grep -q -- '--output type=oci\\,dest=.*base.oci\\,tar=false' "$work/docker.log" 
 grep -q -- '--build-context codewire-verified-base=oci-layout://.*base.oci@sha256:' "$work/docker.log" || fail 'exact base handoff missing'
 grep -q -- '--no-cache-filter workspace-floating-tools' "$work/docker.log" || fail 'floating tools could be reused'
 grep -q -- '--build-arg CODEWIRE_SCCACHE_MODE=local' "$work/docker.log" || fail 'compiler policy missing'
-image_id="$(printf 'sha256:%064d' 3)"
+image_id="$(cat "$work/image-id")"
 grep -Eq "run --rm --interactive --pids-limit=2048 --name codewire-workspace-[^ ]+-full --user codewire --entrypoint bash $image_id -eu -s " "$work/docker.log" || fail 'full image contract omitted'
 grep -q -- '--tmpfs /home/codewire:rw.* --entrypoint bash .* --mounted-home-agents' "$work/docker.log" || fail 'mounted-home contract omitted'
 cleanup_line="$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)"
@@ -443,11 +475,28 @@ seal_line="$(grep -n '^image tag ' "$work/docker.log" | cut -d: -f1)"
 contract_line="$(grep -n -- '--mounted-home-agents' "$work/docker.log" | cut -d: -f1)"
 [[ "$cleanup_line" -lt "$contract_line" && "$contract_line" -lt "$seal_line" ]] || fail 'builder outlived contracts or seal preceded acceptance'
 [[ -s "$fixture_receipt" && "$(stat -c %a "$fixture_receipt")" == 600 ]] || fail 'private receipt missing'
+archive_name="$(jq -er '.workspace_oci.file' "$fixture_receipt")"
+[[ "$(stat -c '%a %h' "$fixture_root/.tmp/$archive_name")" == '400 1' ]] ||
+  fail 'verified OCI archive is not immutable and single-linked'
+grep -q -- '--output type=oci\\,dest=.*workspace.oci.tar' "$work/docker.log" ||
+  fail 'workspace build did not export the verified image for native use'
+grep -q -- '--provenance=false --sbom=false' "$work/docker.log" ||
+  fail 'verification-only OCI export unexpectedly contains attestations'
 
 : >"$work/docker.log"
 run_mock_verifier reuse >/dev/null
 [[ "$(wc -l <"$work/docker.log")" == 2 ]] || fail 'exact-tree reuse rebuilt or reran contracts'
 ! grep -Eq '^buildx |^run ' "$work/docker.log" || fail 'verified image reuse performed duplicate qualification'
+
+# Fresh verification invalidates the old marker immediately, but successful
+# publication still retires that marker's exact previously verified archive.
+previous_archive="$fixture_root/.tmp/$archive_name"
+: >"$work/docker.log"
+MOCK_REUSE=disabled MOCK_ARCHIVE_VARIANT=true run_mock_verifier replacement >/dev/null
+replacement_archive="$(jq -er '.workspace_oci.file' "$fixture_receipt")"
+[[ "$replacement_archive" != "$archive_name" ]] || fail 'replacement fixture did not produce distinct archive bytes'
+[[ ! -e "$previous_archive" && -s "$fixture_root/.tmp/$replacement_archive" ]] ||
+  fail 'successful fresh verification did not retire only its prior archive'
 
 # Explicit experiments must build even when an identical receipt exists. A
 # failed fresh attempt invalidates the old receipt before it can be consumed.
@@ -465,6 +514,18 @@ for failure in full mounted cleanup cancel; do
 done
 grep -q 'workspace cache cleanup: phase=builder-removal status=43 elapsed_seconds=' \
   "$work/cleanup.out" || fail 'builder removal failure omitted its bounded diagnostic'
+
+: >"$work/docker.log"
+archives_before="$(find "$fixture_root/.tmp" -maxdepth 1 -name 'workspace-image-*.oci.tar' -printf '%f\n' | sort)"
+if run_mock_verifier receipt valid docker receipt >/dev/null 2>&1; then
+  fail 'verifier accepted atomic receipt failure'
+fi
+[[ -d "$fixture_receipt" ]] || fail 'receipt-failure fixture was not reached'
+rmdir "$fixture_receipt"
+[[ "$(find "$fixture_root/.tmp" -maxdepth 1 -name 'workspace-image-*.oci.tar' -printf '%f\n' | sort)" == "$archives_before" ]] ||
+  fail 'receipt failure leaked a new archive or removed an existing artifact'
+[[ -z "$(find "$fixture_root/.tmp" -maxdepth 1 -name '.workspace-oci.*' -print -quit)" ]] ||
+  fail 'receipt failure leaked its staging directory'
 
 : >"$work/docker.log"
 MOCK_REUSE=disabled run_mock_verifier slow-cleanup valid docker slow-cleanup >"$work/slow-cleanup.out" 2>&1
@@ -531,7 +592,7 @@ done
 
 # Exercise the complete measurement lifecycle against the absolute fake client.
 # Reports are finalized only after the job-owned credential finisher succeeds.
-for measurement in seed sampler-crash sampler-bookkeeping report-copy; do
+for measurement in seed sampler-crash sampler-bookkeeping; do
   status=0
   rm -f "$work/sampler-process"
   : >"$work/docker.log"
@@ -549,11 +610,7 @@ for measurement in seed sampler-crash sampler-bookkeeping report-copy; do
     [[ "$status" != 0 && ! -e "$fixture_receipt" && ! -e "$directory/result.json" ]] || fail 'sampler failure emitted an acceptance marker'
     continue
   fi
-  if [[ "$measurement" == report-copy ]]; then
-    [[ "$status" != 0 && ! -e "$fixture_receipt" ]] || fail 'late report failure left a newly sealed image receipt'
-    continue
-  fi
-  [[ "$status" == 0 && -s "$directory/receipt.json" ]] || {
+  [[ "$status" == 0 && -s "$fixture_receipt" ]] || {
     cat "$work/$measurement.log" >&2
     fail 'measurement verifier did not complete its ordinary contracts'
   }
@@ -561,7 +618,7 @@ for measurement in seed sampler-crash sampler-bookkeeping report-copy; do
   env RUNNER_TEMP="$work/measurement" GITHUB_OUTPUT="$work/measurement-output" \
     CODEWIRE_EXPECTED_SOURCE_SHA="$(printf '%040d' 1)" CODEWIRE_EXPECTED_SOURCE_TREE="$(printf '%040d' 2)" \
     CODEWIRE_SCCACHE_MODE=r2 CODEWIRE_BUILDKIT_CACHE_MODE=r2 \
-    python3 "$ROOT/scripts/ci/verify/workspace-cache-report.py" finalize "$directory" "$directory/receipt.json" \
+    python3 "$ROOT/scripts/ci/verify/workspace-cache-report.py" finalize "$directory" "$fixture_receipt" \
     >"$work/$measurement-report.log" 2>&1 || status=$?
   [[ "$status" == 0 && -s "$directory/result.json" ]] || {
     cat "$work/$measurement-report.log" >&2

@@ -11,12 +11,13 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use temporalio_sdk::activities::ActivityContext;
 
-use super::activity_authority::{ActivityAuthority, is_authority_lost};
+use super::activity_authority::{ActivityAuthority, AuthorityLost, is_authority_lost};
 use super::create::{
     SandboxWorkerCfg, authorize_confidential_runtime_for_environment,
-    environment_per_env_template_name, environment_template_opts, ready_timeout_for_isolation,
-    reconcile_confidential_runtime_before_replacement, reconcile_runtime_identity,
-    requires_running_runtime_identity,
+    environment_per_env_template_name, environment_template_opts, load_environment_template_opts,
+    ready_timeout_for_isolation, reconcile_or_refresh_runtime_identity,
+    reconcile_runtime_identity_for_pod, refresh_workspace_bootstrap,
+    requires_running_runtime_identity, run_template_mutation,
 };
 use super::env_data::{load_backend_row, load_environment};
 use super::env_log::emit_authoritative_environment_log_for_states;
@@ -28,7 +29,9 @@ use super::setup::{
 };
 use super::{JobPayload, WorkerContext};
 use crate::lifecycle::{Action, PgLifecycleStore, Service, Snapshot};
-use crate::sandbox::client::{ProbeResult, SandboxClient, WorkspacePodIdentity};
+use crate::sandbox::client::{
+    ProbeResult, SandboxClient, WorkspacePodIdentity, WorkspaceSandboxIdentity,
+};
 
 const DELETED_TIMEOUT: Duration = Duration::from_secs(120);
 const POD_IP_POLL_TIMEOUT: Duration = Duration::from_secs(300); // start: 5-minute pod IP poll
@@ -37,6 +40,7 @@ const RUNNING_RUNTIME_RECOVERY_POLL: Duration = Duration::from_millis(500);
 const START_MUTATION_STATES: &[&str] = &["starting"];
 const RUNNING_MUTATION_STATES: &[&str] = &["running"];
 const STOP_MUTATION_STATES: &[&str] = &["stopping"];
+const SOURCE_RESTART_POD_POLL: Duration = Duration::from_millis(250);
 const DESTROY_MUTATION_STATES: &[&str] = &["destroying"];
 const DESTROY_CLEANUP_MUTATION_STATES: &[&str] = &["destroying", "destroyed"];
 
@@ -109,7 +113,7 @@ fn snapshot(id: &str, state: &str, desired: &str, external_cleanup_complete: boo
     }
 }
 
-fn start_runtime_is_ready(probe: &ProbeResult) -> bool {
+pub(super) fn start_runtime_is_ready(probe: &ProbeResult) -> bool {
     probe.claim_exists
         && probe.claim_ready
         && probe.pod_exists
@@ -163,29 +167,17 @@ async fn reconcile_running_runtime_identity(
             }
         })
         .await?;
-    if backend.pod_name != probe.pod_name || backend.pod_ip != probe.pod_ip {
-        authority
-            .execute_for_states(
-                RUNNING_MUTATION_STATES,
-                sqlx::query(
-                    "UPDATE sandbox_environment_backend
-                        SET pod_name = $1, pod_ip = $2
-                      WHERE environment_id = $3",
-                )
-                .bind(&probe.pod_name)
-                .bind(&probe.pod_ip)
-                .bind(&environment.id),
-            )
-            .await?;
-    }
-    reconcile_runtime_identity(
+    reconcile_or_refresh_runtime_identity(
         ctx,
         environment,
         &backend,
         authority,
         RUNNING_MUTATION_STATES,
+        &probe,
+        true,
     )
     .await
+    .map(|_| ())
 }
 
 fn sandbox_client(ctx: &WorkerContext, namespace: &str) -> anyhow::Result<SandboxClient> {
@@ -214,11 +206,15 @@ async fn ensure_gateway_stack_for_env(
         authority.operation_generation(),
         &auth_tokens.coordinate,
         &auth_tokens.daemon,
-    );
+    )?;
     let client = sandbox_client(ctx, namespace)?;
-    authority
-        .run_external_mutation(START_MUTATION_STATES, client.ensure_gateway_stack(&opts))
-        .await?;
+    run_template_mutation(
+        authority,
+        &opts,
+        START_MUTATION_STATES,
+        client.ensure_gateway_stack(&opts),
+    )
+    .await?;
     authority
         .run_while_authoritative_for_states(
             START_MUTATION_STATES,
@@ -298,9 +294,7 @@ pub async fn handle_environment_stop(
         .await?;
     if !proceed {
         if requires_running_runtime_identity(&env.state, &env.desired_state) {
-            let backend = load_backend_row(&ctx.pool, env_id).await?;
-            reconcile_runtime_identity(ctx, &env, &backend, authority, RUNNING_MUTATION_STATES)
-                .await?;
+            reconcile_running_runtime_identity(ctx, &env, authority).await?;
         }
         tracing::info!(
             environment_id = env_id,
@@ -321,13 +315,29 @@ pub async fn handle_environment_stop(
 
     // Scale the sandbox down to 0 replicas (keeps the claim/sandbox, deletes pod).
     let client = sandbox_client(ctx, &backend.namespace)?;
+    let claim_opts = workspace_claim_opts(&env);
+    let previous = authority
+        .run_while_authoritative_for_states(
+            STOP_MUTATION_STATES,
+            source_restart_pods(&client, env_id, &backend.pod_name),
+        )
+        .await?;
     if let Err(e) = authority
-        .run_external_mutation(STOP_MUTATION_STATES, client.set_replicas(env_id, 0))
+        .run_external_mutation(
+            STOP_MUTATION_STATES,
+            client.suspend_workspace(&claim_opts, &backend.claim_name, &backend.claim_uid),
+        )
         .await
     {
         record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
         return Err(anyhow::anyhow!("set replicas 0: {e:#}"));
     }
+    authority
+        .run_while_authoritative_for_states(
+            STOP_MUTATION_STATES,
+            wait_for_workspace_suspension(&client, &env, &backend, &previous, DELETED_TIMEOUT),
+        )
+        .await?;
     if let Err(e) = authority
         .run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(env_id))
         .await
@@ -374,6 +384,288 @@ pub async fn handle_environment_stop(
 
     tracing::info!(environment_id = env_id, "environment.stop completed");
     Ok(())
+}
+
+/// Resume the durable source-change intent, never an implicit public Stop/Start
+/// request. Temporal serializes this with the environment's existing command
+/// queue/generation. The stopping -> stopped CAS selects the one activity that
+/// may proceed to start; replayed signals cannot suspend a replacement runtime.
+pub async fn handle_environment_restart_sources(
+    ctx: &WorkerContext,
+    payload: &JobPayload,
+    authority: &ActivityAuthority,
+    setup_identity: super::setup_lease::SetupActivityIdentity,
+    activity_ctx: ActivityContext,
+) -> anyhow::Result<()> {
+    if activity_ctx.is_cancelled() {
+        return Err(super::setup::SetupActivityCancelled.into());
+    }
+    authority.ensure().await?;
+    let env = load_environment(&ctx.pool, &payload.environment_id).await?;
+    if !source_restart_pending(&env.state, &env.desired_state) {
+        return Ok(());
+    }
+    authority.ensure_for_states(STOP_MUTATION_STATES).await?;
+    let backend = load_backend_row(&ctx.pool, &env.id).await?;
+    let client = sandbox_client(ctx, &backend.namespace)?;
+    let claim_opts = workspace_claim_opts(&env);
+    let previous = await_reconcile_or_cancel(
+        &activity_ctx,
+        authority.run_while_authoritative_for_states(
+            STOP_MUTATION_STATES,
+            source_restart_pods(&client, &env.id, &backend.pod_name),
+        ),
+    )
+    .await?;
+    await_reconcile_or_cancel(
+        &activity_ctx,
+        authority.run_external_mutation(
+            STOP_MUTATION_STATES,
+            client.suspend_workspace(&claim_opts, &backend.claim_name, &backend.claim_uid),
+        ),
+    )
+    .await?;
+    // An acknowledged suspend/delete is not evidence of Pod termination. Keep
+    // state=stopping (and grants revoked) until the exact old UIDs are gone and
+    // the environment has no replacement Pod. A timeout/error retains durable
+    // restart intent for the normal reconciler; it must not reset setup history.
+    await_reconcile_or_cancel(
+        &activity_ctx,
+        authority.run_while_authoritative_for_states(
+            STOP_MUTATION_STATES,
+            wait_for_workspace_suspension(&client, &env, &backend, &previous, DELETED_TIMEOUT),
+        ),
+    )
+    .await?;
+    await_reconcile_or_cancel(
+        &activity_ctx,
+        authority.run_external_mutation(STOP_MUTATION_STATES, client.delete_gateway_stack(&env.id)),
+    )
+    .await?;
+    let svc = Service::for_activity(ctx.pool.clone(), authority.clone());
+    if activity_ctx.is_cancelled() {
+        return Err(super::setup::SetupActivityCancelled.into());
+    }
+    authority.ensure_for_states(STOP_MUTATION_STATES).await?;
+    if let Err(error) = svc.complete_stop(&env.id).await {
+        // Another attempt or a newer lifecycle intention won the state CAS.
+        // Never let this activity continue into a second start in that case.
+        if error
+            .to_string()
+            .contains(crate::lifecycle::STATE_NOT_TRANSITIONED)
+        {
+            return Err(AuthorityLost.into());
+        }
+        return Err(error);
+    }
+    svc.mark_stopped(&env.id).await?;
+    authority
+        .execute_for_states(
+            &["stopped"],
+            sqlx::query(
+                "UPDATE sandbox_environment_backend SET pod_ip=NULL WHERE environment_id=$1",
+            )
+            .bind(&env.id),
+        )
+        .await?;
+    authority.ensure_for_states(&["stopped"]).await?;
+    handle_environment_start(ctx, payload, authority, setup_identity, activity_ctx).await
+}
+
+fn source_restart_pending(state: &str, desired: &str) -> bool {
+    state == "stopping" && desired == "started"
+}
+
+async fn source_restart_pods(
+    client: &SandboxClient,
+    environment: &str,
+    known_name: &str,
+) -> anyhow::Result<Vec<WorkspacePodIdentity>> {
+    let mut pods = client.list_workspace_pod_identities(environment).await?;
+    if !known_name.is_empty()
+        && let Some(pod) = client
+            .get_workspace_pod_identity_by_name(known_name)
+            .await?
+        && !pods
+            .iter()
+            .any(|current| current.name == pod.name && current.uid == pod.uid)
+    {
+        pods.push(pod);
+    }
+    anyhow::ensure!(
+        pods.iter()
+            .all(|pod| !pod.name.is_empty() && !pod.uid.is_empty()),
+        "workspace Pod identity is incomplete before source restart"
+    );
+    Ok(pods)
+}
+
+async fn source_restart_pods_absent(
+    client: &SandboxClient,
+    environment: &str,
+    known_name: &str,
+    previous: &[WorkspacePodIdentity],
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        previous
+            .iter()
+            .all(|pod| !pod.name.is_empty() && !pod.uid.is_empty()),
+        "previous workspace Pod identity is incomplete"
+    );
+    if !source_restart_pods(client, environment, known_name)
+        .await?
+        .is_empty()
+    {
+        return Ok(false);
+    }
+    for previous in previous {
+        if client
+            .get_workspace_pod_identity_by_name(&previous.name)
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn wait_for_source_restart_pods_absent(
+    client: &SandboxClient,
+    environment: &str,
+    known_name: &str,
+    previous: &[WorkspacePodIdentity],
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    within_workspace_deadline(deadline, async {
+        loop {
+            if source_restart_pods_absent(client, environment, known_name, previous).await? {
+                return Ok(());
+            }
+            tokio::time::sleep(SOURCE_RESTART_POD_POLL).await;
+        }
+    })
+    .await
+}
+
+pub(super) async fn within_workspace_deadline<T>(
+    deadline: tokio::time::Instant,
+    future: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        tokio::time::Instant::now() < deadline,
+        "workspace lifecycle observation timed out"
+    );
+    let result = tokio::time::timeout_at(deadline, future)
+        .await
+        .map_err(|_| anyhow::anyhow!("workspace lifecycle observation timed out"))??;
+    // A future that becomes ready after monopolizing its poll cannot turn a
+    // late observation into timely completion.
+    anyhow::ensure!(
+        tokio::time::Instant::now() < deadline,
+        "workspace lifecycle observation timed out"
+    );
+    Ok(result)
+}
+
+fn workspace_claim_opts(env: &super::env_data::EnvironmentRow) -> crate::sandbox::ClaimOpts {
+    crate::sandbox::ClaimOpts {
+        environment_id: env.id.clone(),
+        org_id: env.org_id.clone(),
+        operation_generation: env.operation_generation,
+        ..Default::default()
+    }
+}
+
+async fn wait_for_workspace_suspension(
+    client: &SandboxClient,
+    env: &super::env_data::EnvironmentRow,
+    backend: &super::env_data::BackendRow,
+    previous: &[WorkspacePodIdentity],
+    timeout: Duration,
+) -> anyhow::Result<WorkspaceSandboxIdentity> {
+    let opts = workspace_claim_opts(env);
+    let deadline = tokio::time::Instant::now() + timeout;
+    within_workspace_deadline(deadline, async {
+        let suspended = loop {
+            if let Some(identity) = client
+                .workspace_suspension_observed(&opts, &backend.claim_name, &backend.claim_uid)
+                .await?
+            {
+                break identity;
+            }
+            tokio::time::sleep(SOURCE_RESTART_POD_POLL).await;
+        };
+        wait_for_source_restart_pods_absent(
+            client,
+            &env.id,
+            &backend.pod_name,
+            previous,
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await?;
+        Ok(suspended)
+    })
+    .await
+}
+
+/// One cold-bootstrap path for an explicit start and a stale-generation retry.
+/// Neither setup completion/history nor workspace storage is reset. Retain the
+/// exact suspended Sandbox across recipe publication and conditional resume.
+pub(super) async fn restart_workspace_bootstrap(
+    ctx: &WorkerContext,
+    env: &super::env_data::EnvironmentRow,
+    backend: &super::env_data::BackendRow,
+    opts: &crate::sandbox::template::TemplateOpts,
+    authority: &ActivityAuthority,
+    states: &[&str],
+) -> anyhow::Result<()> {
+    let client = sandbox_client(ctx, &backend.namespace)?;
+    let claim_opts = workspace_claim_opts(env);
+    super::create::authorize_confidential_runtime(ctx, opts, authority, states).await?;
+    let deadline = tokio::time::Instant::now() + DELETED_TIMEOUT;
+    let suspended = within_workspace_deadline(deadline, async {
+        let previous = authority
+            .run_while_authoritative_for_states(
+                states,
+                source_restart_pods(&client, &env.id, &backend.pod_name),
+            )
+            .await?;
+        authority
+            .run_external_mutation(
+                states,
+                client.suspend_workspace(&claim_opts, &backend.claim_name, &backend.claim_uid),
+            )
+            .await?;
+        authority
+            .run_while_authoritative_for_states(
+                states,
+                wait_for_workspace_suspension(
+                    &client,
+                    env,
+                    backend,
+                    &previous,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                ),
+            )
+            .await
+    })
+    .await?;
+    refresh_workspace_bootstrap(ctx, env, backend, opts, &suspended, authority, states).await?;
+    run_template_mutation(
+        authority,
+        opts,
+        states,
+        client.set_replicas_for_identity(
+            &claim_opts,
+            &backend.claim_name,
+            &backend.claim_uid,
+            &suspended,
+            1,
+        ),
+    )
+    .await
 }
 
 /// Mirrors `HandleEnvironmentStart`.
@@ -463,88 +755,22 @@ pub async fn handle_environment_start(
     };
 
     let ready_timeout = ready_timeout_for_isolation(&env.isolation_tier);
-    let mut confidential_runtime_authorized = false;
-    if env.state == "error" {
-        let stale = match client.workspace_pod_replacement_candidate(env_id).await {
-            Ok(stale) => stale,
-            Err(error) => {
-                record_environment_error(
-                    &svc,
-                    authority,
-                    env_id,
-                    &format!("inspect workspace Pod before retry: {error:#}"),
-                )
-                .await?;
-                return Err(error);
-            }
-        };
-        if let Some(stale) = stale {
-            tracing::info!(
-                environment_id = env_id,
-                pod = %stale.name,
-                "environment.start: replacing terminal workspace Pod"
-            );
-            if let Err(error) = await_reconcile_or_cancel(&activity_ctx, async {
-                reconcile_confidential_runtime_before_replacement(
-                    ctx,
-                    &env,
-                    confidential_storage_manifest_uri
-                        .as_deref()
-                        .unwrap_or_default(),
-                    authority,
-                    START_MUTATION_STATES,
-                    &client,
-                    &stale,
-                )
-                .await?;
-                confidential_runtime_authorized = true;
-                authority
-                    .run_external_mutation(
-                        START_MUTATION_STATES,
-                        client.delete_workspace_pod_if_uid(&stale.name, &stale.uid),
-                    )
-                    .await?;
-                authority
-                    .run_while_authoritative_for_states(
-                        START_MUTATION_STATES,
-                        client.wait_for_replacement_workspace_pod(
-                            &stale.name,
-                            &stale.uid,
-                            ready_timeout,
-                        ),
-                    )
-                    .await
-            })
-            .await
-            {
-                if is_lifecycle_control_loss(&error) {
-                    return Err(error);
-                }
-                record_environment_error(
-                    &svc,
-                    authority,
-                    env_id,
-                    &format!("replace terminal workspace Pod: {error:#}"),
-                )
-                .await?;
-                return Err(error);
-            }
-        }
-    }
-
-    if let Some(manifest_uri) = confidential_storage_manifest_uri.as_deref()
-        && !confidential_runtime_authorized
-        && let Err(error) = await_reconcile_or_cancel(
-            &activity_ctx,
-            authorize_confidential_runtime_for_environment(
-                ctx,
-                &env,
-                manifest_uri,
-                authority,
-                START_MUTATION_STATES,
-            ),
-        )
-        .await
+    let mut runtime_opts =
+        load_environment_template_opts(ctx, &env, authority.operation_generation()).await?;
+    runtime_opts.confidential_storage_manifest_uri =
+        confidential_storage_manifest_uri.unwrap_or_default();
+    if let Err(error) = await_reconcile_or_cancel(
+        &activity_ctx,
+        restart_workspace_bootstrap(
+            ctx,
+            &env,
+            &backend,
+            &runtime_opts,
+            authority,
+            START_MUTATION_STATES,
+        ),
+    )
+    .await
     {
         if is_lifecycle_control_loss(&error) {
             return Err(error);
@@ -553,24 +779,10 @@ pub async fn handle_environment_start(
             &svc,
             authority,
             env_id,
-            &format!("init-data authorization: {error:#}"),
+            "workspace bootstrap reconciliation failed",
         )
         .await?;
         return Err(error);
-    }
-
-    // Scale the sandbox back up to 1 replica.
-    if let Err(e) = await_reconcile_or_cancel(
-        &activity_ctx,
-        authority.run_external_mutation(START_MUTATION_STATES, client.set_replicas(env_id, 1)),
-    )
-    .await
-    {
-        if is_lifecycle_control_loss(&e) {
-            return Err(e);
-        }
-        record_environment_error(&svc, authority, env_id, &format!("{e:#}")).await?;
-        return Err(anyhow::anyhow!("set replicas 1: {e:#}"));
     }
 
     // Wait for the sandbox to become ready again.
@@ -630,6 +842,16 @@ pub async fn handle_environment_start(
     )
     .await?;
 
+    reconcile_runtime_identity_for_pod(
+        ctx,
+        &env,
+        &backend,
+        authority,
+        START_MUTATION_STATES,
+        Some(&pod),
+    )
+    .await?;
+
     if let Err(e) = authority
         .execute_for_states(
             START_MUTATION_STATES,
@@ -652,8 +874,6 @@ pub async fn handle_environment_start(
         record_environment_error(&svc, authority, env_id, &format!("gateway stack: {e:#}")).await?;
         return Err(e);
     }
-
-    reconcile_runtime_identity(ctx, &env, &backend, authority, START_MUTATION_STATES).await?;
 
     // Persist the current Pod name/IP only after observing a ready claim and
     // a running Pod with a nonempty UID. The backend schema does not persist
@@ -905,14 +1125,30 @@ pub async fn handle_environment_reconcile(
     authority.ensure().await?;
     let env = load_environment(&ctx.pool, env_id).await?;
     let svc = Service::for_activity(ctx.pool.clone(), authority.clone());
-    let action = svc
-        .reconcile(&snapshot(
+    let action = if resume_completed_workspace(&env.state, &env.desired_state) {
+        let backend = load_backend_row(&ctx.pool, env_id).await?;
+        if backend.setup_complete {
+            // A source restart interrupted during Start must not re-enter
+            // full Create/reset_for_retry and erase installation completion.
+            Action::Start
+        } else {
+            svc.reconcile(&snapshot(
+                &env.id,
+                &env.state,
+                &env.desired_state,
+                env.external_cleanup_completed_at.is_some(),
+            ))
+            .await?
+        }
+    } else {
+        svc.reconcile(&snapshot(
             &env.id,
             &env.state,
             &env.desired_state,
             env.external_cleanup_completed_at.is_some(),
         ))
-        .await?;
+        .await?
+    };
 
     match action {
         Action::Noop if env.state == "destroyed" && env.desired_state == "destroyed" => {
@@ -1009,6 +1245,17 @@ pub async fn handle_environment_reconcile(
             .await?;
             Ok(ReconcileOutcome::Continue)
         }
+        Action::RestartSources => {
+            Box::pin(handle_environment_restart_sources(
+                ctx,
+                payload,
+                authority,
+                setup_identity,
+                activity_ctx,
+            ))
+            .await?;
+            Ok(ReconcileOutcome::Continue)
+        }
         Action::Destroy => {
             await_reconcile_or_cancel(
                 &activity_ctx,
@@ -1029,9 +1276,221 @@ pub async fn handle_environment_reconcile(
     }
 }
 
+fn resume_completed_workspace(state: &str, desired: &str) -> bool {
+    desired == "started" && matches!(state, "starting" | "error")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_restart_client(
+        responses: Vec<(axum::http::StatusCode, serde_json::Value)>,
+    ) -> SandboxClient {
+        source_restart_delayed_client(responses, Some(Duration::ZERO))
+    }
+
+    fn source_restart_delayed_client(
+        responses: Vec<(axum::http::StatusCode, serde_json::Value)>,
+        delay: Option<Duration>,
+    ) -> SandboxClient {
+        use axum::{
+            Router,
+            body::Body,
+            http::{Request, Response, header},
+        };
+        use std::{
+            collections::VecDeque,
+            sync::{Arc, Mutex},
+        };
+        let queued = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let service = Router::new().fallback(move |request: Request<Body>| {
+            let queued = queued.clone();
+            async move {
+                match delay {
+                    Some(duration) => tokio::time::sleep(duration).await,
+                    None => std::future::pending::<()>().await,
+                }
+                assert_eq!(
+                    request.method(),
+                    axum::http::Method::GET,
+                    "termination observation must be read-only"
+                );
+                let (status, body) = queued
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected Kubernetes request");
+                Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        SandboxClient::new(kube::Client::new(service, "default"), "dev-sandboxes")
+    }
+
+    fn old_pod() -> WorkspacePodIdentity {
+        WorkspacePodIdentity {
+            name: "workspace-old".into(),
+            uid: "uid-old".into(),
+        }
+    }
+
+    fn pod_list(items: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":items})
+    }
+
+    fn pod(uid: &str) -> serde_json::Value {
+        serde_json::json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"workspace-old","uid":uid},"status":{"phase":"Running"}})
+    }
+
+    fn missing_pod() -> (axum::http::StatusCode, serde_json::Value) {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}),
+        )
+    }
+
+    #[test]
+    fn restart_and_completed_workspace_recovery_require_exact_durable_intent() {
+        assert!(source_restart_pending("stopping", "started"));
+        for state in [
+            "pending",
+            "creating",
+            "starting",
+            "running",
+            "stopped",
+            "error",
+            "destroying",
+            "destroyed",
+        ] {
+            assert!(!source_restart_pending(state, "started"));
+        }
+        for desired in ["stopped", "destroyed", "resized"] {
+            assert!(!source_restart_pending("stopping", desired));
+            assert!(!resume_completed_workspace("starting", desired));
+        }
+        assert!(resume_completed_workspace("starting", "started"));
+        assert!(resume_completed_workspace("error", "started"));
+        assert!(!resume_completed_workspace("pending", "started"));
+    }
+
+    #[tokio::test]
+    async fn source_restart_requires_old_uid_and_every_workspace_pod_to_be_absent() {
+        use axum::http::StatusCode;
+        let mut terminating = pod("uid-old");
+        terminating["metadata"]["deletionTimestamp"] = serde_json::json!("2026-09-07T12:00:00Z");
+        let client = source_restart_client(vec![(StatusCode::OK, pod_list(vec![terminating]))]);
+        assert!(
+            !source_restart_pods_absent(&client, "environment", "", &[old_pod()])
+                .await
+                .unwrap()
+        );
+        // Losing an environment label cannot turn a still-present old Pod into
+        // a successful termination observation. A new UID at the old stable
+        // name also blocks scale-up until the suspended controller removes it.
+        for uid in ["uid-old", "uid-replacement"] {
+            let client = source_restart_client(vec![
+                (StatusCode::OK, pod_list(vec![])),
+                (StatusCode::OK, pod(uid)),
+            ]);
+            assert!(
+                !source_restart_pods_absent(&client, "environment", "", &[old_pod()])
+                    .await
+                    .unwrap()
+            );
+        }
+        let client = source_restart_client(vec![(StatusCode::OK, pod_list(vec![])), missing_pod()]);
+        assert!(
+            source_restart_pods_absent(&client, "environment", "", &[old_pod()])
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn source_restart_rechecks_known_backend_name_and_fails_closed_on_unknown_uid() {
+        use axum::http::StatusCode;
+        let client = source_restart_client(vec![
+            (StatusCode::OK, pod_list(vec![])),
+            (StatusCode::OK, pod("uid-old")),
+        ]);
+        let identities = source_restart_pods(&client, "environment", "workspace-old")
+            .await
+            .unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].uid, "uid-old");
+        let client = source_restart_client(vec![(StatusCode::OK, pod_list(vec![pod("")]))]);
+        assert!(
+            source_restart_pods(&client, "environment", "")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn source_restart_deadline_bounds_stalled_gets_and_late_success() {
+        use axum::http::StatusCode;
+        for delay in [None, Some(Duration::from_millis(200))] {
+            let client = source_restart_delayed_client(
+                vec![(StatusCode::OK, pod_list(vec![])), missing_pod()],
+                delay,
+            );
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                wait_for_source_restart_pods_absent(
+                    &client,
+                    "environment",
+                    "",
+                    &[old_pod()],
+                    Duration::from_millis(20),
+                ),
+            )
+            .await
+            .expect("original deadline must interrupt the GET");
+            assert!(result.unwrap_err().to_string().contains("timed out"));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        let result = within_workspace_deadline(deadline, async {
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err(), "late-ready futures cannot bypass deadline");
+    }
+
+    #[tokio::test]
+    async fn source_restart_does_not_treat_timeout_as_pod_deletion() {
+        use axum::http::StatusCode;
+        let client = source_restart_client(vec![(StatusCode::OK, pod_list(vec![pod("uid-old")]))]);
+        assert!(
+            wait_for_source_restart_pods_absent(
+                &client,
+                "environment",
+                "",
+                &[old_pod()],
+                Duration::ZERO
+            )
+            .await
+            .is_err()
+        );
+        let client = source_restart_client(vec![
+            (StatusCode::OK, pod_list(vec![pod("uid-old")])),
+            (StatusCode::OK, pod_list(vec![])),
+            missing_pod(),
+        ]);
+        wait_for_source_restart_pods_absent(
+            &client,
+            "environment",
+            "",
+            &[old_pod()],
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL"]

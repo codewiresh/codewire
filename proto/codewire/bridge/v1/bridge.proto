@@ -1,0 +1,178 @@
+syntax = "proto3";
+
+package codewire.bridge.v1;
+
+// Material-free frames shared by the private native and platform credential
+// bridges. These messages carry filtered HTTP bytes, recipient-encrypted
+// application projections, public SSH keys and signatures; they never carry
+// provider credentials or plaintext application values.
+message CredentialBridgeOpen {
+  uint32 protocol_version = 1;
+  string environment_id = 2;
+  uint64 environment_generation = 3;
+}
+
+message CredentialHttpHeader {
+  string name = 1;
+  bytes value = 2;
+}
+
+message CredentialBridgeResponseStart {
+  string request_id = 1;
+  uint32 status_code = 2;
+  repeated CredentialHttpHeader headers = 3;
+}
+
+message CredentialBridgeResponseBody {
+  string request_id = 1;
+  bytes data = 2;
+}
+
+message CredentialBridgeResponseEnd {
+  string request_id = 1;
+}
+
+enum CredentialBridgeFailureReason {
+  CREDENTIAL_BRIDGE_FAILURE_REASON_UNSPECIFIED = 0;
+  CREDENTIAL_BRIDGE_FAILURE_REASON_DENIED = 1;
+  CREDENTIAL_BRIDGE_FAILURE_REASON_UNAVAILABLE = 2;
+  CREDENTIAL_BRIDGE_FAILURE_REASON_UPSTREAM_FAILED = 3;
+  CREDENTIAL_BRIDGE_FAILURE_REASON_RESPONSE_TOO_LARGE = 4;
+}
+
+message CredentialBridgeResponseFailure {
+  string request_id = 1;
+  CredentialBridgeFailureReason reason = 2;
+}
+
+message CredentialBridgeHostMessage {
+  oneof payload {
+    CredentialBridgeOpen open = 1;
+    CredentialBridgeResponseStart response_start = 2;
+    CredentialBridgeResponseBody response_body = 3;
+    CredentialBridgeResponseEnd response_end = 4;
+    CredentialBridgeResponseFailure response_failure = 5;
+    EnvironmentProjectionResponse environment_projection = 6;
+    CredentialSshResponse ssh = 7;
+  }
+}
+
+message CredentialBridgeReady {
+  uint32 protocol_version = 1;
+  string environment_id = 2;
+  uint64 environment_generation = 3;
+}
+
+message CredentialBridgeRequest {
+  string request_id = 1;
+  string method = 2;
+  string path = 3;
+  string query = 4;
+  repeated CredentialHttpHeader headers = 5;
+  bytes body = 6;
+  // Closed capability/route IDs. Neither field can name a destination or
+  // confer authority; the broker rederives the exact selected-profile grant.
+  string capability_slot = 7;
+  string route = 8;
+}
+
+message CredentialBridgeCancel {
+  string request_id = 1;
+}
+
+message CredentialBridgeGuestMessage {
+  oneof payload {
+    CredentialBridgeReady ready = 1;
+    CredentialBridgeRequest request = 2;
+    CredentialBridgeCancel cancel = 3;
+    EnvironmentProjectionRequest environment_projection = 4;
+    CredentialSshRequest ssh = 5;
+  }
+}
+
+// Closed, material-free operations for the selected ssh identity. The authority
+// infers slot=ssh, route=ssh-agent and identities/sign permission; callers cannot
+// select an arbitrary credential, destination, agent command or provider route.
+// The original deadline covers every hop and is never refreshed by a relay.
+message CredentialSshRequest {
+  string request_id = 1;
+  uint64 deadline_unix_ms = 2;
+  oneof operation {
+    CredentialSshIdentitiesRequest identities = 3;
+    CredentialSshSignRequest sign = 4;
+  }
+}
+
+message CredentialSshIdentitiesRequest {}
+
+message CredentialSshSignRequest {
+  bytes public_key_blob = 1;
+  bytes data = 2 [debug_redact = true];
+  uint32 flags = 3;
+}
+
+// Exactly one authority-selected public identity. Imported comments are never
+// carried across this boundary. The SSH wire adapter uses a fixed comment.
+message CredentialSshIdentity {
+  bytes public_key_blob = 1;
+}
+
+message CredentialSshSignature {
+  // SSH-encoded algorithm and signature, checked by the selected-agent owner.
+  bytes signature_blob = 1 [debug_redact = true];
+}
+
+message CredentialSshResponse {
+  string request_id = 1;
+  oneof result {
+    CredentialSshIdentity identity = 2;
+    CredentialSshSignature signature = 3;
+    CredentialBridgeFailureReason failure = 4;
+  }
+}
+
+// One actual launcher asks for the environment's already-selected application
+// sources. No arbitrary key, project, owner or provider is request-selectable.
+// The peer checks selection_sha256 against current authoritative metadata,
+// authenticates the existing environment generation and rechecks before reply.
+message EnvironmentProjectionRequest {
+  string request_id = 1;
+  bytes recipient_public_key = 2;
+  bytes selection_sha256 = 3;
+  uint64 deadline_unix_ms = 4;
+  // Only an authenticated native owner adds its complete selected LOCAL
+  // inventories. A workload request must leave this empty. These names choose
+  // no platform scope; the remote authority retains its admitted selection.
+  repeated EnvironmentProjectionInventory local_inventories = 5;
+}
+
+message EnvironmentProjectionResponse {
+  string request_id = 1;
+  oneof result {
+    bytes sealed_projection = 2;
+    CredentialBridgeFailureReason failure = 3;
+    // Returned only to the composing native owner, never to a workload.
+    EnvironmentProjectionComposition composition = 4;
+  }
+}
+
+enum EnvironmentProjectionSource {
+  ENVIRONMENT_PROJECTION_SOURCE_UNSPECIFIED = 0;
+  ENVIRONMENT_PROJECTION_SOURCE_ORGANIZATION = 1;
+  ENVIRONMENT_PROJECTION_SOURCE_PROJECT = 2;
+  ENVIRONMENT_PROJECTION_SOURCE_USER = 3;
+}
+
+// Complete, bounded names for one exact already-selected source. The owning
+// request/response field fixes Local or Platform; the sender cannot choose a
+// contributor role. No plaintext value or protected-store identifier is here.
+message EnvironmentProjectionInventory {
+  EnvironmentProjectionSource source = 1;
+  string source_identity = 2;
+  repeated string keys = 3;
+}
+
+message EnvironmentProjectionComposition {
+  bytes sealed_platform_fragment = 1;
+  repeated EnvironmentProjectionInventory platform_inventories = 2;
+}

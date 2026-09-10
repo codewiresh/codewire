@@ -32,12 +32,14 @@ mod linux {
     use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
     use rustix::process::Signal;
     use serde::{Deserialize, Serialize};
+    use sha2::{Digest as _, Sha256};
     use uuid::Uuid;
 
     const DATABASE_APPLICATION_ID: i64 = 0x4357_564d;
-    const DATABASE_SCHEMA_VERSION: i64 = 10;
+    const DATABASE_SCHEMA_VERSION: i64 = 11;
     const DATABASE_FILE: &str = "supervisor.db";
     const MAXIMUM_OPERATIONS: usize = 128;
+    const MAXIMUM_WORKSPACE_METADATA_BYTES: usize = 512 * 1024;
     const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
     type ProbeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -49,9 +51,11 @@ mod linux {
         RunnerErrorCode,
         ActiveArtifactGeneration,
         RunnerArtifactGeneration,
+        BuiltWorkspaceIdentity,
         Empty,
         Contract,
         ResizeOperation,
+        SourceOperation,
         JournalComplete,
         JournalSummary,
         Ownership,
@@ -98,6 +102,11 @@ mod linux {
         kind: String,
         phase: String,
         checkpoint: u32,
+    }
+
+    #[derive(Deserialize)]
+    struct BuiltWorkspaceIdentity {
+        root_generation: String,
     }
 
     pub(super) fn run(arguments: impl IntoIterator<Item = String>) -> ProbeResult<()> {
@@ -161,9 +170,11 @@ mod linux {
                 "runner_error_code" => Ok(Self::RunnerErrorCode),
                 "active_artifact_generation" => Ok(Self::ActiveArtifactGeneration),
                 "runner_artifact_generation" => Ok(Self::RunnerArtifactGeneration),
+                "built_workspace_identity" => Ok(Self::BuiltWorkspaceIdentity),
                 "empty" => Ok(Self::Empty),
                 "contract" => Ok(Self::Contract),
                 "resize_operation" => Ok(Self::ResizeOperation),
+                "source_operation" => Ok(Self::SourceOperation),
                 "journal_complete" => Ok(Self::JournalComplete),
                 "journal_summary" => Ok(Self::JournalSummary),
                 "ownership" => Ok(Self::Ownership),
@@ -233,6 +244,24 @@ mod linux {
                     require(valid_sha256(&generation))?;
                     Ok(generation)
                 }
+                Field::BuiltWorkspaceIdentity => {
+                    // Return only the immutable root identity and a digest of
+                    // its complete build record, never the embedded project
+                    // configuration. Bound the SQL result before allocation.
+                    let encoded: Vec<u8> = self.connection.query_row(
+                        "SELECT active_workspace_generation_json FROM environments \
+                         WHERE name = ?1 AND length(active_workspace_generation_json) BETWEEN 1 AND ?2",
+                        rusqlite::params![name, MAXIMUM_WORKSPACE_METADATA_BYTES],
+                        |row| row.get(0),
+                    )?;
+                    let built: BuiltWorkspaceIdentity = serde_json::from_slice(&encoded)?;
+                    require(valid_sha256(&built.root_generation))?;
+                    Ok(format!(
+                        "{}:{:x}",
+                        built.root_generation,
+                        Sha256::digest(&encoded)
+                    ))
+                }
                 Field::Empty => {
                     let count: i64 = self.connection.query_row(
                         "SELECT count(*) FROM environments",
@@ -272,6 +301,22 @@ mod linux {
                              WHERE kind IN ('restart', 'grow_disk') \
                              ORDER BY created_unix_ms DESC LIMIT 1",
                             [],
+                            decode_operation,
+                        )
+                        .optional()?
+                        .ok_or_else(failed)?;
+                    row.validate()?;
+                    Ok(row.summary())
+                }
+                Field::SourceOperation => {
+                    let row = self
+                        .connection
+                        .query_row(
+                            "SELECT kind, phase, checkpoint FROM operations \
+                             WHERE kind = 'update_environment_sources' AND environment_id = \
+                             (SELECT id FROM environments WHERE name = ?1) \
+                             ORDER BY created_unix_ms DESC, operation_id DESC LIMIT 1",
+                            [name],
                             decode_operation,
                         )
                         .optional()?
@@ -406,7 +451,7 @@ mod linux {
             "restart" => Some(9),
             "grow_disk" => Some(6),
             "update_workspace" | "rollback_workspace" => Some(10),
-            "apply_environment_access" => Some(3),
+            "update_environment_sources" => Some(10),
             "delete" => Some(6),
             "reconcile" => Some(2),
             _ => None,
@@ -522,7 +567,8 @@ mod linux {
                         "CREATE TABLE supervisor_metadata(key TEXT, value TEXT);
                          CREATE TABLE environments(
                            id TEXT, name TEXT, runner_json BLOB,
-                           active_artifact_generation TEXT
+                           active_artifact_generation TEXT,
+                           active_workspace_generation_json BLOB
                          );
                          CREATE TABLE supervisor_settings(
                            singleton INTEGER, current_environment_id TEXT
@@ -530,11 +576,12 @@ mod linux {
                          CREATE TABLE owned_objects(environment_id TEXT);
                          CREATE TABLE operations(
                            operation_id TEXT, kind TEXT, phase TEXT,
-                           checkpoint INTEGER, created_unix_ms INTEGER
+                           checkpoint INTEGER, created_unix_ms INTEGER,
+                           environment_id TEXT
                          );
                          INSERT INTO supervisor_settings VALUES (1, NULL);
                          PRAGMA application_id = 1129797197;
-                         PRAGMA user_version = 10;",
+                         PRAGMA user_version = 11;",
                     )
                     .unwrap();
                 fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
@@ -542,11 +589,16 @@ mod linux {
                 let runner = runner_record(process);
                 writer
                     .execute(
-                        "INSERT INTO environments VALUES (?1, 'native-smoke', ?2, ?3)",
+                        "INSERT INTO environments VALUES (?1, 'native-smoke', ?2, ?3, ?4)",
                         params![
                             environment_id,
                             serde_json::to_vec(&runner).unwrap(),
-                            "a".repeat(64)
+                            "a".repeat(64),
+                            serde_json::to_vec(&serde_json::json!({
+                                "root_generation": "c".repeat(64),
+                                "project_spec_json": "synthetic-private-build-sentinel"
+                            }))
+                            .unwrap()
                         ],
                     )
                     .unwrap();
@@ -555,8 +607,8 @@ mod linux {
                     .unwrap();
                 writer
                     .execute(
-                        "INSERT INTO operations VALUES ('op-a', 'create', 'completed', 9, 1)",
-                        [],
+                        "INSERT INTO operations VALUES ('op-a', 'create', 'completed', 9, 1, ?1)",
+                        [&environment_id],
                     )
                     .unwrap();
                 Self {
@@ -702,6 +754,155 @@ mod linux {
         }
 
         #[test]
+        fn requires_the_current_schema_without_an_implicit_upgrade() {
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::Contract, "native-smoke")
+                    .unwrap(),
+                "1129797197:11:wal:ok"
+            );
+            fixture
+                .writer
+                .pragma_update(None, "user_version", 10)
+                .unwrap();
+            assert!(ProbeDatabase::open(&fixture.root).is_err());
+            assert_eq!(
+                fixture
+                    .writer
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                10
+            );
+        }
+
+        #[test]
+        fn build_identity_is_a_bounded_digest_not_project_configuration() {
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+            let encoded: Vec<u8> = fixture.writer.query_row(
+                "SELECT active_workspace_generation_json FROM environments WHERE name = 'native-smoke'",
+                [], |row| row.get(0),
+            ).unwrap();
+            let original = fixture
+                .database()
+                .value(Field::BuiltWorkspaceIdentity, "native-smoke")
+                .unwrap();
+            assert_eq!(
+                original,
+                format!("{}:{:x}", "c".repeat(64), Sha256::digest(&encoded))
+            );
+            assert!(!original.contains("synthetic-private-build-sentinel"));
+            assert_eq!(original.len(), 129);
+            let changed = serde_json::to_vec(&serde_json::json!({
+                "root_generation": "c".repeat(64),
+                "project_spec_json": "another-synthetic-private-build-sentinel"
+            }))
+            .unwrap();
+            fixture
+                .writer
+                .execute(
+                    "UPDATE environments SET active_workspace_generation_json = ?1",
+                    [changed],
+                )
+                .unwrap();
+            assert_ne!(
+                fixture
+                    .database()
+                    .value(Field::BuiltWorkspaceIdentity, "native-smoke")
+                    .unwrap(),
+                original
+            );
+        }
+
+        #[test]
+        fn build_identity_rejects_missing_malformed_or_unbounded_metadata() {
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+            for encoded in [
+                None,
+                Some(b"not-json".to_vec()),
+                Some(b"{}".to_vec()),
+                Some(br#"{"root_generation":"../outside"}"#.to_vec()),
+                Some(vec![b' '; MAXIMUM_WORKSPACE_METADATA_BYTES + 1]),
+            ] {
+                fixture
+                    .writer
+                    .execute(
+                        "UPDATE environments SET active_workspace_generation_json = ?1",
+                        [encoded],
+                    )
+                    .unwrap();
+                assert!(
+                    fixture
+                        .database()
+                        .value(Field::BuiltWorkspaceIdentity, "native-smoke")
+                        .is_err()
+                );
+            }
+        }
+
+        #[test]
+        fn source_receipt_is_environment_scoped_and_completion_is_exact() {
+            let fixture = Fixture::new(ProcessIdentity::capture(std::process::id()).unwrap());
+            assert!(
+                fixture
+                    .database()
+                    .value(Field::SourceOperation, "native-smoke")
+                    .is_err()
+            );
+            fixture.writer.execute(
+                "INSERT INTO operations VALUES ('source-a', 'update_environment_sources', 'completed', 9, 2, ?1)",
+                [&fixture.environment_id],
+            ).unwrap();
+            fixture.writer.execute(
+                "INSERT INTO operations VALUES ('source-other', 'update_environment_sources', 'completed', 10, 3, ?1)",
+                [Uuid::new_v4().to_string()],
+            ).unwrap();
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::SourceOperation, "native-smoke")
+                    .unwrap(),
+                "update_environment_sources:completed:9"
+            );
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::JournalComplete, "native-smoke")
+                    .unwrap(),
+                "no"
+            );
+            fixture
+                .writer
+                .execute(
+                    "UPDATE operations SET checkpoint = 10 WHERE operation_id = 'source-a'",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::SourceOperation, "native-smoke")
+                    .unwrap(),
+                "update_environment_sources:completed:10"
+            );
+            assert_eq!(
+                fixture
+                    .database()
+                    .value(Field::JournalComplete, "native-smoke")
+                    .unwrap(),
+                "yes"
+            );
+            assert!(
+                fixture
+                    .database()
+                    .value(Field::SourceOperation, "missing-environment")
+                    .is_err()
+            );
+            assert_eq!(terminal_checkpoint("apply_environment_access"), None);
+        }
+
+        #[test]
         fn parser_accepts_only_fixed_actions_and_fields() {
             let args = Args::parse([
                 "value".to_owned(),
@@ -714,6 +915,16 @@ mod linux {
             .unwrap();
             assert!(matches!(args.action, Action::Value(Field::RunnerPid)));
             assert!(Args::parse(["value".to_owned(), "payload".to_owned()]).is_err());
+            assert_eq!(
+                Field::parse("built_workspace_identity").unwrap(),
+                Field::BuiltWorkspaceIdentity
+            );
+            assert_eq!(
+                Field::parse("source_operation").unwrap(),
+                Field::SourceOperation
+            );
+            assert!(Field::parse("project_spec_json").is_err());
+            assert!(Field::parse("apply_environment_access").is_err());
         }
     }
 }

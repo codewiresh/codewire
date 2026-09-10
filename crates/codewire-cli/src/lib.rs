@@ -1,6 +1,7 @@
 pub mod config;
 mod console_client;
 mod environment_client;
+mod hosted_exec;
 mod mesh;
 mod organization_client;
 mod presentation;
@@ -8,6 +9,8 @@ mod secret_client;
 mod tailnet_ssh;
 mod terminal_attach;
 mod update;
+
+pub use hosted_exec::run_hosted_exec_from;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
@@ -55,6 +58,24 @@ pub fn prepare_local_credential_broker_process() -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// The repository executor gives Git this private symlink to the current cw
+/// binary, allowing a shell-free SSH trampoline before normal CLI startup.
+#[cfg(target_os = "linux")]
+pub fn is_local_git_ssh_helper(program: &std::ffi::OsStr) -> bool {
+    std::path::Path::new(program).file_name()
+        == Some(std::ffi::OsStr::new(
+            codewire_local_credentials::SSH_HELPER_BASENAME,
+        ))
+}
+
+/// Execute fixed stock SSH under the isolated repository's captured parent,
+/// pinned public host trust and selected agent. No normal configuration loads.
+#[cfg(target_os = "linux")]
+pub fn run_local_git_ssh_helper(arguments: Vec<std::ffi::OsString>) -> std::io::Result<()> {
+    commands::run_git_ssh_helper(arguments)
+        .map_err(|_| std::io::Error::other("repository SSH failed"))
 }
 const LOCAL_WORKSPACE_PATH: &str = "/workspace";
 const DEFAULT_LOCAL_MESH_URL: &str = "http://127.0.0.1:18090";
@@ -199,6 +220,9 @@ enum Command {
     #[command(name = "__local-credential-broker", hide = true)]
     LocalCredentialBroker(LocalCredentialBrokerArgs),
     #[cfg(target_os = "linux")]
+    #[command(name = "__environment-launch", hide = true)]
+    EnvironmentLaunch(EnvironmentLaunchArgs),
+    #[cfg(target_os = "linux")]
     #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
     LocalCredentialBrokerConfinementProbe,
     #[cfg(target_os = "linux")]
@@ -229,6 +253,27 @@ pub async fn run() -> anyhow::Result<()> {
         *program = "cw".to_string();
     }
     run_from(args).await
+}
+
+/// One-shot launch trampoline. The thin binary calls this before creating an
+/// async runtime or loading normal CLI configuration. Errors are deliberately
+/// finite: neither command arguments nor child-visible values are diagnostics.
+#[cfg(target_os = "linux")]
+pub fn run_environment_launcher_from<I, T>(args: I) -> std::io::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let invalid = || std::io::Error::other("environment launch failed");
+    let cli = Cli::try_parse_from(args).map_err(|_| invalid())?;
+    let Command::EnvironmentLaunch(args) = cli.command else {
+        return Err(invalid());
+    };
+    if cli.server.is_some() {
+        return Err(invalid());
+    }
+    codewire_daemon::execution::run_environment_launcher(&args.projection_socket, &args.command)
+        .map_err(|_| invalid())
 }
 
 /// Preserve the fixed private worker failure taxonomy across the thin binary
@@ -337,6 +382,12 @@ where
         }
         #[cfg(target_os = "linux")]
         Command::LocalCredentialBroker(args) => run_local_credential_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::EnvironmentLaunch(args) => codewire_daemon::execution::run_environment_launcher(
+            &args.projection_socket,
+            &args.command,
+        )
+        .map_err(|_| anyhow::anyhow!("environment launch failed")),
         #[cfg(target_os = "linux")]
         Command::LocalCredentialBrokerConfinementProbe => {
             run_local_credential_broker_confinement_probe().await

@@ -3,22 +3,37 @@ package codewire
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
 	codewirev1 "github.com/codewiresh/codewire/libs/gen-go/codewire/v1"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
+
+var (
+	credentialConverterCoverageOnce sync.Once
+	credentialConverterCoverageErr  error
+)
+
+// SSHPublicKey is public registration metadata; private key bytes never have a
+// credential metadata representation.
+type SSHPublicKey struct {
+	OpenSSH     string `json:"openssh"`
+	Fingerprint string `json:"fingerprint"`
+}
 
 // Credential is personal platform metadata, without a provider token or store reference.
 type Credential struct {
-	ID                   string  `json:"id"`
-	Name                 string  `json:"name"`
-	Provider             string  `json:"provider"`
-	AuthenticationKind   string  `json:"authentication_kind"`
-	AccountHint          *string `json:"account_hint,omitempty"`
-	Status               string  `json:"status"`
-	ExpiresAtUnix        *uint64 `json:"expires_at_unix,omitempty"`
-	RevocationGeneration uint64  `json:"revocation_generation"`
+	ID                   string        `json:"id"`
+	Name                 string        `json:"name"`
+	Provider             string        `json:"provider"`
+	AuthenticationKind   string        `json:"authentication_kind"`
+	AccountHint          *string       `json:"account_hint,omitempty"`
+	Status               string        `json:"status"`
+	ExpiresAtUnix        *uint64       `json:"expires_at_unix,omitempty"`
+	RevocationGeneration uint64        `json:"revocation_generation"`
+	SSHPublicKey         *SSHPublicKey `json:"ssh_public_key,omitempty"`
 }
 
 // CodexDeviceChallenge contains a one-time code for the requesting user, never routine logs.
@@ -54,6 +69,9 @@ func credentialGeneration(value uint64) error {
 }
 
 func fromProtoCredential(value *codewirev1.Credential) (*Credential, error) {
+	if err := ensureCredentialConverterCoverage(); err != nil {
+		return nil, err
+	}
 	if value == nil {
 		return nil, fmt.Errorf("codewire: credential response omitted credential")
 	}
@@ -65,6 +83,7 @@ func fromProtoCredential(value *codewirev1.Credential) (*Credential, error) {
 		codewirev1.CredentialAuthenticationKind_CREDENTIAL_AUTHENTICATION_KIND_API_KEY:      "api_key",
 		codewirev1.CredentialAuthenticationKind_CREDENTIAL_AUTHENTICATION_KIND_ACCESS_TOKEN: "access_token",
 		codewirev1.CredentialAuthenticationKind_CREDENTIAL_AUTHENTICATION_KIND_GITHUB_APP:   "github_app",
+		codewirev1.CredentialAuthenticationKind_CREDENTIAL_AUTHENTICATION_KIND_SSH_KEY:      "ssh_key",
 	}
 	statuses := map[codewirev1.CredentialStatus]string{
 		codewirev1.CredentialStatus_CREDENTIAL_STATUS_ACTIVE:         "active",
@@ -76,9 +95,32 @@ func fromProtoCredential(value *codewirev1.Credential) (*Credential, error) {
 	if kind == "" || status == "" {
 		return nil, fmt.Errorf("codewire: credential response contains unsupported metadata")
 	}
+	if (kind == "ssh_key") != (value.GetSshPublicKey() != nil) {
+		return nil, fmt.Errorf("codewire: credential response contains inconsistent SSH metadata")
+	}
+	var sshPublicKey *SSHPublicKey
+	if value.GetSshPublicKey() != nil {
+		sshPublicKey = &SSHPublicKey{OpenSSH: value.GetSshPublicKey().GetOpenssh(), Fingerprint: value.GetSshPublicKey().GetFingerprint()}
+	}
 	return &Credential{ID: value.GetId(), Name: value.GetName(), Provider: value.GetProvider(),
 		AuthenticationKind: kind, AccountHint: value.AccountHint, Status: status,
-		ExpiresAtUnix: value.ExpiresAtUnix, RevocationGeneration: value.GetRevocationGeneration()}, nil
+		ExpiresAtUnix: value.ExpiresAtUnix, RevocationGeneration: value.GetRevocationGeneration(), SSHPublicKey: sshPublicKey}, nil
+}
+
+func ensureCredentialConverterCoverage() error {
+	credentialConverterCoverageOnce.Do(func() {
+		messages := codewirev1.File_codewire_v1_credential_proto.Messages()
+		credentialConverterCoverageErr = ensureDescriptorCoverage("credential metadata", messages.ByName("Credential"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "id", 2: "name", 3: "provider", 4: "authentication_kind", 5: "account_hint", 6: "status", 7: "expires_at_unix", 8: "revocation_generation", 9: "ssh_public_key",
+		})
+		if credentialConverterCoverageErr != nil {
+			return
+		}
+		credentialConverterCoverageErr = ensureDescriptorCoverage("SSH public key", messages.ByName("SshPublicKey"), map[protoreflect.FieldNumber]protoreflect.Name{
+			1: "openssh", 2: "fingerprint",
+		})
+	})
+	return credentialConverterCoverageErr
 }
 
 // List consumes every page with the server's default page size.

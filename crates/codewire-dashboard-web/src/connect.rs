@@ -22,6 +22,7 @@ fn transport(state: &AppState, cookie: Option<HeaderValue>) -> BrowserTransport 
     BrowserTransport {
         http: state.http.clone(),
         cookie,
+        origin: None,
     }
 }
 

@@ -73,7 +73,9 @@ fi
 }
 
 cd "$ROOT"
-shellcheck_timeout_seconds="${SHELLCHECK_TIMEOUT_SECONDS:-180}"
+# The full tracked-script analysis takes roughly three minutes on CI workers;
+# retain a bounded deadline with headroom for ordinary runner variance.
+shellcheck_timeout_seconds="${SHELLCHECK_TIMEOUT_SECONDS:-300}"
 if [[ ! "$shellcheck_timeout_seconds" =~ ^[0-9]+$ ]] \
     || (( 10#$shellcheck_timeout_seconds < 1 )) \
     || (( 10#$shellcheck_timeout_seconds > 900 )); then

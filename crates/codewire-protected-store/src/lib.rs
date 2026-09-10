@@ -14,6 +14,8 @@
 pub mod openbao_workload_identity;
 #[cfg(feature = "platform")]
 pub mod secret_envelope;
+#[cfg(feature = "ssh-material")]
+pub mod ssh_material;
 
 use std::collections::BTreeMap;
 use std::fmt;

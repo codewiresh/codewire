@@ -1,10 +1,16 @@
-//! Personal OAuth-only credential mutation inside the isolated authority.
+//! Personal session-or-OAuth credential mutation inside the isolated authority.
 //!
 //! Constructing this owner or its generated router binds no listener. Runtime
-//! integration must mount it with the shared OAuth-only policy and await
-//! shutdown before terminating Tokio. Provider material never enters DTOs.
+//! integration must mount it with the dedicated credential-mutation policy and await
+//! shutdown before terminating Tokio. Only typed import accepts write-only
+//! API keys and explicitly imported SSH keys; provider material
+//! never enters response DTOs.
 
+mod enrollment;
+mod github;
+mod keys;
 mod publication;
+mod ssh;
 #[cfg(test)]
 pub(crate) mod tests;
 mod wire;
@@ -12,11 +18,17 @@ mod wire;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use codewire_access::{CredentialId, CredentialMetadata, Owner, OwnerId};
+use codewire_access::{
+    CredentialAuthKind, CredentialId, CredentialMetadata, Owner, OwnerId, ProviderId,
+};
 use codewire_credential_broker::codex_enrollment::{CodexEnrollmentError, CodexEnrollmentOwner};
-use codewire_platform_credentials::{PlatformCredentialError, PlatformCredentialStore};
+use codewire_credential_broker::github_enrollment::GitHubEnrollmentOwner;
+use codewire_platform_credentials::{
+    CredentialRecord, CredentialRegistration, PlatformCredentialError, PlatformCredentialStore,
+};
+use codewire_protected_store::ProtectedValue;
 use codewire_proto::codewire::v1::{EnrollCodexResponse, enroll_codex_response};
-use codewire_server_core::auth::{OAuthBearerAuthority, OAuthBearerAuthorityError};
+use codewire_server_core::auth::{CredentialMutationAuthority, CredentialMutationAuthorityError};
 use sqlx::PgPool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::time::Instant;
@@ -51,6 +63,7 @@ struct Shared {
     pool: PgPool,
     store: Arc<PlatformCredentialStore>,
     enrollment: Arc<CodexEnrollmentOwner>,
+    github_enrollment: Arc<GitHubEnrollmentOwner>,
 }
 
 /// Bounded owner of request drivers as well as the shared enrollment workers.
@@ -70,12 +83,14 @@ impl CredentialMutationOwner {
         pool: PgPool,
         store: Arc<PlatformCredentialStore>,
         enrollment: CodexEnrollmentOwner,
+        github_enrollment: GitHubEnrollmentOwner,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 pool,
                 store,
                 enrollment: Arc::new(enrollment),
+                github_enrollment: Arc::new(github_enrollment),
             }),
             accepting: Mutex::new(true),
             capacity: Arc::new(Semaphore::new(MAX_OPERATIONS)),
@@ -84,7 +99,7 @@ impl CredentialMutationOwner {
         }
     }
 
-    /// Generated handlers only. The caller must use the shared OAuth-only
+    /// Generated handlers only. The caller must use the session-or-OAuth
     /// Connect mount; handlers independently require its opaque authority.
     pub fn router(self: &Arc<Self>) -> connectrpc::Router {
         wire::router(self.clone())
@@ -109,15 +124,30 @@ impl CredentialMutationOwner {
     pub async fn shutdown(&self) -> Result<(), Error> {
         self.start_shutdown();
         self.workers.wait().await;
-        self.shared
+        let codex = self
+            .shared
             .enrollment
             .shutdown()
             .await
-            .map_err(enrollment_error)
+            .map_err(enrollment_error);
+        let github = self
+            .shared
+            .github_enrollment
+            .shutdown()
+            .await
+            .map_err(enrollment::github_error);
+        codex.and(github)
     }
 
-    fn enroll(&self, authority: OAuthBearerAuthority, name: String) -> Result<Events, Error> {
+    fn enroll(
+        &self,
+        authority: CredentialMutationAuthority,
+        name: String,
+        credential_id: Option<String>,
+        expected_revision: Option<u64>,
+    ) -> Result<Events, Error> {
         validate_name(&name)?;
+        let replacement = replacement_selector(credential_id, expected_revision)?;
         let scope = Scope::new(authority, self.stop.child_token(), ENROLLMENT_TIMEOUT)?;
         let accepting = self.accepting.lock().map_err(|_| Error::Unavailable)?;
         let permit = self.admit(*accepting)?;
@@ -128,7 +158,7 @@ impl CredentialMutationOwner {
         let shared = self.shared.clone();
         self.workers.spawn(async move {
             let _permit = permit;
-            if let Err(error) = run_enrollment(shared, &scope, name, &sender).await {
+            if let Err(error) = run_enrollment(shared, &scope, name, replacement, &sender).await {
                 // Never hold admission waiting for a disconnected or slow
                 // response consumer; at most one closed error is buffered.
                 let _ = sender.try_send(Err(error));
@@ -141,9 +171,49 @@ impl CredentialMutationOwner {
         })
     }
 
+    async fn add_api_key(
+        &self,
+        authority: CredentialMutationAuthority,
+        provider: String,
+        name: String,
+        material: ProtectedValue,
+        expires_at_unix: Option<u64>,
+    ) -> Result<CredentialMetadata, Error> {
+        validate_api_key(&provider, &name, material.expose_secret(), expires_at_unix)?;
+        let registration = CredentialRegistration {
+            provider: ProviderId::parse(provider).map_err(|_| Error::InvalidInput)?,
+            authentication_kind: CredentialAuthKind::ApiKey,
+            display_name: name,
+            account_hint: None,
+            expires_at_unix,
+        };
+        let scope = Scope::new(authority, self.stop.child_token(), MUTATION_TIMEOUT)?;
+        let deadline = scope.deadline;
+        let cancelled = scope.cancel.clone();
+        let _guard = cancelled.clone().drop_guard();
+        let (sender, receiver) = oneshot::channel();
+        {
+            let accepting = self.accepting.lock().map_err(|_| Error::Unavailable)?;
+            let permit = self.admit(*accepting)?;
+            let shared = self.shared.clone();
+            self.workers.spawn(async move {
+                let _permit = permit;
+                let result =
+                    publication::add_api_key(&shared, &scope, registration, material).await;
+                let _ = sender.send(result);
+            });
+        }
+        tokio::select! {
+            biased;
+            _ = cancelled.cancelled() => Err(Error::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(Error::PublicationUnknown),
+            result = receiver => result.map_err(|_| Error::PublicationUnknown)?,
+        }
+    }
+
     async fn lifecycle(
         &self,
-        authority: OAuthBearerAuthority,
+        authority: CredentialMutationAuthority,
         id: String,
         revision: u64,
         delete: bool,
@@ -194,7 +264,7 @@ impl Drop for CredentialMutationOwner {
 }
 
 struct Scope {
-    authority: OAuthBearerAuthority,
+    authority: CredentialMutationAuthority,
     owner: Owner,
     deadline: Instant,
     expires_at_unix: u64,
@@ -203,15 +273,12 @@ struct Scope {
 
 impl Scope {
     fn new(
-        authority: OAuthBearerAuthority,
+        authority: CredentialMutationAuthority,
         cancel: CancellationToken,
         limit: Duration,
     ) -> Result<Self, Error> {
         let started = Instant::now();
-        let captured_wall = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::Unavailable)?
-            .as_secs();
+        let captured_wall = unix_now()?;
         let lifetime = authority
             .remaining_lifetime()
             .map_err(authority_error)?
@@ -254,18 +321,38 @@ impl Scope {
     }
 }
 
-struct Events {
-    receiver: mpsc::Receiver<Result<EnrollCodexResponse, Error>>,
+struct Events<T = EnrollCodexResponse> {
+    receiver: mpsc::Receiver<Result<T, Error>>,
     _cancel: DropGuard,
+}
+
+enum EnrollmentTarget {
+    Create(String),
+    Reconnect(CredentialRecord),
+}
+
+fn replacement_selector(
+    id: Option<String>,
+    revision: Option<u64>,
+) -> Result<Option<(CredentialId, u64)>, Error> {
+    match (id, revision) {
+        (None, None) => Ok(None),
+        (Some(id), Some(revision)) if revision > 0 && revision <= i64::MAX as u64 => Ok(Some((
+            CredentialId::parse(id).map_err(|_| Error::InvalidInput)?,
+            revision,
+        ))),
+        _ => Err(Error::InvalidInput),
+    }
 }
 
 async fn run_enrollment(
     shared: Arc<Shared>,
     scope: &Scope,
     name: String,
+    replacement: Option<(CredentialId, u64)>,
     sender: &mpsc::Sender<Result<EnrollCodexResponse, Error>>,
 ) -> Result<(), Error> {
-    scope.check()?;
+    let target = enrollment_target(&shared, scope, "openai", name, replacement).await?;
     let mut pending = shared.enrollment.start().map_err(enrollment_error)?;
     let challenge = scope
         .wait(pending.challenge())
@@ -287,11 +374,13 @@ async fn run_enrollment(
         .wait(sender.send(Ok(response)))
         .await?
         .map_err(|_| Error::Cancelled)?;
-    let mut completed = scope
-        .wait(pending.complete())
-        .await?
-        .map_err(enrollment_error)?;
-    let result = publication::enroll(&shared, scope, &mut completed, name).await;
+    let mut completed = enrollment::Completed::Codex(
+        scope
+            .wait(pending.complete())
+            .await?
+            .map_err(enrollment_error)?,
+    );
+    let result = publication::enroll(&shared, scope, &mut completed, target).await;
     // An issued COMMIT is never followed by NotPublished, even when its
     // acknowledgement was lost. Cleanup never revokes possibly stored tokens.
     completed
@@ -311,6 +400,38 @@ async fn run_enrollment(
     Ok(())
 }
 
+async fn enrollment_target(
+    shared: &Shared,
+    scope: &Scope,
+    provider: &str,
+    name: String,
+    replacement: Option<(CredentialId, u64)>,
+) -> Result<EnrollmentTarget, Error> {
+    scope.check()?;
+    // Validate the exact owner/name/kind/full version before starting a provider
+    // child or emitting its challenge. Keep this record through publication;
+    // neither a concurrent refresh nor revoke can be silently overwritten.
+    let target = if let Some((id, revision)) = replacement {
+        let record = scope
+            .wait(shared.store.record(&scope.owner, &id))
+            .await?
+            .map_err(store_error)?;
+        if record.metadata.display_name != name
+            || record.metadata.provider.as_str() != provider
+            || record.metadata.authentication_kind != CredentialAuthKind::OAuth
+        {
+            return Err(Error::InvalidInput);
+        }
+        if record.version.revocation_generation != revision {
+            return Err(Error::StaleRevision);
+        }
+        EnrollmentTarget::Reconnect(record)
+    } else {
+        EnrollmentTarget::Create(name)
+    };
+    Ok(target)
+}
+
 fn validate_name(name: &str) -> Result<(), Error> {
     if name.is_empty()
         || name.len() > 256
@@ -320,6 +441,49 @@ fn validate_name(name: &str) -> Result<(), Error> {
         Err(Error::InvalidInput)
     } else {
         Ok(())
+    }
+}
+
+fn unix_now() -> Result<u64, Error> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .map_err(|_| Error::Unavailable)
+}
+
+fn validate_api_key(
+    provider: &str,
+    name: &str,
+    material: &[u8],
+    expiry: Option<u64>,
+) -> Result<(), Error> {
+    validate_name(name)?;
+    if material.is_empty()
+        || material.len() > 1024
+        || expiry.is_some_and(|value| value > i64::MAX as u64)
+    {
+        return Err(Error::InvalidInput);
+    }
+    let valid = match provider {
+        "openai" => {
+            let token = material
+                .iter()
+                .position(|byte| *byte == b'=')
+                .unwrap_or(material.len());
+            token > 0
+                && material[..token].iter().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+                })
+                && material[token..].iter().all(|byte| *byte == b'=')
+        }
+        "anthropic" => material.iter().all(u8::is_ascii_graphic),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput)
     }
 }
 
@@ -335,10 +499,10 @@ fn enrollment_error(error: CodexEnrollmentError) -> Error {
     }
 }
 
-fn authority_error(error: OAuthBearerAuthorityError) -> Error {
+fn authority_error(error: CredentialMutationAuthorityError) -> Error {
     match error {
-        OAuthBearerAuthorityError::Denied => Error::Denied,
-        OAuthBearerAuthorityError::Unavailable => Error::Unavailable,
+        CredentialMutationAuthorityError::Denied => Error::Denied,
+        CredentialMutationAuthorityError::Unavailable => Error::Unavailable,
     }
 }
 

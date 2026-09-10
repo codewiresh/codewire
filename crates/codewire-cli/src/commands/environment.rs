@@ -3,6 +3,8 @@ use std::path::Path;
 
 use super::*;
 
+mod sources;
+
 // Match the server-owned sandbox lifecycle first, then give daemon setup its
 // own post-running window. Confidential guests deliberately have a longer boot
 // horizon; one fixed three-minute stopwatch reports false failure while the
@@ -120,6 +122,9 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         EnvCommand::Create(create) => {
             handle_unified_environment_create(globals, placement, create).await
         }
+        EnvCommand::Update(update) => {
+            handle_unified_environment_update(globals, placement, update).await
+        }
         EnvCommand::List(list) => handle_unified_environment_list(globals, placement, list).await,
         EnvCommand::Info(info) => handle_unified_environment_info(globals, placement, info).await,
         EnvCommand::Resize(resize) => {
@@ -173,7 +178,7 @@ pub(crate) async fn handle_env_command(globals: &Globals, args: EnvArgs) -> anyh
         command => {
             if placement.is_some() {
                 anyhow::bail!(
-                    "--local and --platform currently support only create, list, info, start, stop, restart, refresh-skills, rm, cp, access, share, and daemon diagnostics"
+                    "--local and --platform currently support only create, update, list, info, start, stop, restart, refresh-skills, rm, cp, access, share, and daemon diagnostics"
                 );
             }
             handle_platform_env_command(globals, command).await
@@ -315,7 +320,7 @@ pub(crate) async fn handle_platform_env_command(
 
     match command {
         EnvCommand::Create(args) => {
-            let request = prepare_platform_env_create_request(&args)?;
+            let mut request = prepare_platform_env_create_request(&args)?;
             if let Some(bootstrap) = resolve_env_create_mesh_bootstrap(
                 &paths,
                 &env,
@@ -331,6 +336,14 @@ pub(crate) async fn handle_platform_env_command(
                     bootstrap.mesh.mesh_url
                 );
             }
+            sources::prepare_create_sources(
+                &platform,
+                &environment_client,
+                &org_id,
+                &args,
+                &mut request,
+            )
+            .await?;
             let environment = environment_client
                 .create_environment(&org_id, &request)
                 .await
@@ -358,6 +371,9 @@ pub(crate) async fn handle_platform_env_command(
             if matches!(args.output, OutputFormat::Text) && args.follow && !args.no_wait {
                 follow_environment_logs(&environment_client, &org_id, &environment.id).await?;
             }
+        }
+        EnvCommand::Update(args) => {
+            sources::update_platform_sources(&platform, &environment_client, &org_id, args).await?;
         }
         EnvCommand::List(args) => {
             let environments = environment_client
@@ -556,14 +572,9 @@ pub(crate) async fn handle_platform_env_command(
                 .context("extend TTL")?;
             print_env_extend_status(&args.environment, &response, hours, args.output)?;
         }
-        EnvCommand::Access(args) => match args.command {
-            None => anyhow::bail!(
-                "environment access-profile inspection is not yet available for platform environments"
-            ),
-            Some(EnvAccessCommand::Apply(_)) => anyhow::bail!(
-                "environment access-profile apply is not yet available for platform environments"
-            ),
-        },
+        EnvCommand::Access(_) => anyhow::bail!(
+            "environment credential-profile inspection is not yet available for platform environments"
+        ),
         EnvCommand::Share(args) => {
             handle_env_share_command(&environment_client, &org_id, args.command).await?;
         }
@@ -1031,7 +1042,7 @@ async fn handle_unified_environment_create(
             #[cfg(target_os = "linux")]
             {
                 native_create_selected(&args)?;
-                let environment = create_native_environment(*args).await?;
+                let environment = create_native_environment(globals, *args).await?;
                 if matches!(output, OutputFormat::Text) {
                     eprintln!("Local environment created: {}.", environment.name);
                 }
@@ -1046,6 +1057,27 @@ async fn handle_unified_environment_create(
         Some(EnvironmentPlacement::Platform) | None => {
             reject_local_create_options(&args)?;
             handle_platform_env_command(globals, EnvCommand::Create(args)).await
+        }
+    }
+}
+
+async fn handle_unified_environment_update(
+    globals: &Globals,
+    placement: Option<EnvironmentPlacement>,
+    mut args: EnvUpdateArgs,
+) -> anyhow::Result<()> {
+    sources::validate_update_args(&args)?;
+    let target =
+        resolve_unified_environment_target(globals, placement, &args.environment, "update").await?;
+    match target {
+        #[cfg(target_os = "linux")]
+        UnifiedEnvironmentTarget::NativeLocal(name) => {
+            args.environment = name;
+            handle_native_environment_update(globals, args).await
+        }
+        UnifiedEnvironmentTarget::Platform(id) => {
+            args.environment = id;
+            handle_platform_env_command(globals, EnvCommand::Update(args)).await
         }
     }
 }
@@ -1616,12 +1648,7 @@ async fn reconcile_native_current_after_delete(deleted_name: &str) {
         return;
     }
     let replacement = match native_selected_environment().await {
-        Ok(Some(environment)) => config::CurrentTargetConfig {
-            kind: "local".to_owned(),
-            target_ref: environment.name.clone(),
-            name: environment.name,
-        },
-        Ok(None) => config::CurrentTargetConfig::default(),
+        Ok(environment) => native_current_target_after_delete(environment.map(|value| value.name)),
         Err(error) => {
             eprintln!("Warning: could not reconcile the current local target: {error}");
             return;
@@ -1629,6 +1656,20 @@ async fn reconcile_native_current_after_delete(deleted_name: &str) {
     };
     if let Err(error) = config::save_current_target(&paths.mesh_data_dir, &replacement) {
         eprintln!("Warning: could not save the current local target: {error}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn native_current_target_after_delete(
+    selected: Option<String>,
+) -> config::CurrentTargetConfig {
+    match selected {
+        Some(name) => config::CurrentTargetConfig {
+            kind: "local".to_owned(),
+            target_ref: name.clone(),
+            name,
+        },
+        None => config::default_current_target(),
     }
 }
 
@@ -1686,7 +1727,7 @@ async fn resolve_unified_environment_target(
 
     let platform = match resolve_platform(globals, &paths, &env) {
         Ok(platform) => platform,
-        Err(error) if placement.is_none() => {
+        Err(error) if placement.is_none() && command != "update" => {
             #[cfg(target_os = "linux")]
             if let Some(environment) = native {
                 return Ok(UnifiedEnvironmentTarget::NativeLocal(environment.name));
@@ -1746,17 +1787,13 @@ pub(crate) fn reject_local_create_options(args: &EnvCreateArgs) -> anyhow::Resul
     if args.backend.is_some()
         || args.path.is_some()
         || args.path_mode.is_some()
-        || args.file.is_some()
         || args.spec.is_some()
         || args.docker_disk.is_some()
         || args.no_docker
     {
         anyhow::bail!(
-            "--backend, --path, --path-mode, --file, --spec, --docker-disk, and --no-docker require `cw env create --local`"
+            "--backend, --path, --path-mode, --spec, --docker-disk, and --no-docker require `cw env create --local`"
         );
-    }
-    if args.access_profile.is_some() {
-        anyhow::bail!("--access-profile is not yet available for platform environments");
     }
     Ok(())
 }
@@ -2022,63 +2059,94 @@ pub(crate) fn env_create_request_from_args(
         .map(parse_go_duration_seconds)
         .transpose()
         .context("invalid --ttl duration")?;
-    let repositories = collect_env_create_repos(
-        &args.repo_urls,
-        &args.repo_flags,
-        args.branch.as_deref().and_then(trimmed_str),
-    )?;
     let preset_id = trimmed_optional(args.preset_id.clone());
-    let preset_slug = trimmed_optional(args.preset_slug.clone()).unwrap_or_default();
-    let image = args
-        .image
-        .as_deref()
-        .and_then(trimmed_str)
-        .map(|image| {
-            if image.contains('/') {
-                image.to_string()
-            } else {
-                expand_image_ref(image)
+    // Only the explicitly named file supplies defaults. Neither the working
+    // directory nor `cw use` selects a source or a management write target.
+    let mut project_spec = match args.file.as_deref() {
+        Some(path) => sources::load_platform_document(path)?,
+        None => codewire_project::ProjectSpec::default(),
+    };
+    if let Some(preset) = &args.preset_slug {
+        project_spec.preset = preset.trim().to_owned();
+    } else if preset_id.is_some() {
+        project_spec.preset.clear();
+    }
+    if let Some(image) = args.image.as_deref().and_then(trimmed_str) {
+        project_spec.image = if image.contains('/') {
+            image.to_owned()
+        } else {
+            expand_image_ref(image)
+        };
+    }
+    if !args.repo_urls.is_empty() || !args.repo_flags.is_empty() {
+        project_spec.repositories = collect_env_create_repos(
+            &args.repo_urls,
+            &args.repo_flags,
+            args.branch.as_deref().and_then(trimmed_str),
+        )?;
+        project_spec.working_directory = match project_spec.repositories.as_slice() {
+            [repository] => repository.destination.clone(),
+            _ => "/workspace".to_owned(),
+        };
+    } else if let Some(branch) = args.branch.as_deref().and_then(trimmed_str) {
+        match project_spec.repositories.as_mut_slice() {
+            [repository] => {
+                repository.branch = branch.to_owned();
+                repository.revision.clear();
             }
-        })
-        .unwrap_or_default();
-    let agent = trimmed_optional(args.coding_agent.clone())
-        .map(|agent| config::canonical_agent_id(&agent))
-        .unwrap_or_default();
-    let agents = if agent.is_empty() {
-        Vec::new()
-    } else {
-        vec![agent]
-    };
-    let working_directory = match repositories.as_slice() {
-        [repository] => repository.destination.clone(),
-        _ => "/workspace".to_string(),
-    };
-    let project_spec = codewire_project::ProjectSpec {
-        schema_version: codewire_project::PROJECT_SCHEMA_VERSION,
-        preset: preset_slug,
-        image,
-        repositories,
-        working_directory,
-        install_command: trimmed_optional(args.install.clone()).unwrap_or_default(),
-        startup_script: trimmed_optional(args.startup.clone()).unwrap_or_default(),
-        environment: parse_env_overrides(&args.env)?,
-        agents: codewire_project::AgentsSpec {
+            [] if args.file.is_some() => anyhow::bail!("--branch requires a repository"),
+            // `cw init --branch` detects its repository after constructing
+            // this draft. Keep that existing deferred discovery intact.
+            [] => {}
+            _ => anyhow::bail!(
+                "--branch is ambiguous with multiple YAML repositories; specify --repo"
+            ),
+        }
+    }
+    if let Some(install) = &args.install {
+        project_spec.install_command = install.trim().to_owned();
+    }
+    if let Some(startup) = &args.startup {
+        project_spec.startup_script = startup.trim().to_owned();
+    }
+    project_spec
+        .environment
+        .extend(parse_env_overrides(&args.env)?);
+    if let Some(agent) = args.coding_agent.as_deref().and_then(trimmed_str) {
+        project_spec.agents = codewire_project::AgentsSpec {
             install: None,
-            tools: agents,
-        },
-        resources: codewire_project::ResourceSpec {
-            cpu_millicores: positive_i32(parse_platform_create_quantity(
-                args.cpu.as_deref(),
-                "CPU",
-            )?)
-            .map(|value| value as u32),
-            memory_mib: positive_i32(parse_create_memory(args.memory.as_deref())?)
-                .map(|value| value as u64),
-            disk_gib: positive_i32(parse_create_disk(args.disk.as_deref())?)
-                .map(|value| value as u64),
-        },
-        ..codewire_project::ProjectSpec::default()
-    };
+            tools: vec![config::canonical_agent_id(agent)],
+        };
+    }
+    if args.cpu.is_some() {
+        project_spec.resources.cpu_millicores =
+            positive_i32(parse_platform_create_quantity(args.cpu.as_deref(), "CPU")?)
+                .map(|value| value as u32);
+    }
+    if args.memory.is_some() {
+        project_spec.resources.memory_mib =
+            positive_i32(parse_create_memory(args.memory.as_deref())?).map(|value| value as u64);
+    }
+    if args.disk.is_some() {
+        project_spec.resources.disk_gib =
+            positive_i32(parse_create_disk(args.disk.as_deref())?).map(|value| value as u64);
+    }
+    if let Some(project) = &args.secrets {
+        codewire_project::StorageReference::project(project)?;
+        project_spec.secrets.project = project.clone();
+    }
+    if let Some(user) = args.user_secrets {
+        project_spec.secrets.user = Some(sources::placement(user));
+    }
+    if args.org_secrets {
+        project_spec.secrets.organization = true;
+    }
+    if let Some(profile) = &args.profile {
+        codewire_project::StorageReference::profile(profile)?;
+        project_spec.credentials = Some(codewire_project::CredentialBinding {
+            profile: profile.clone(),
+        });
+    }
     project_spec.validate()?;
     Ok(CreateEnvironmentRequest {
         preset_id,
@@ -2086,6 +2154,7 @@ pub(crate) fn env_create_request_from_args(
         ttl_seconds,
         isolation_tier: args.isolation.clone().unwrap_or_default(),
         project_spec,
+        ..Default::default()
     })
 }
 
@@ -2123,6 +2192,7 @@ pub(crate) fn prepare_platform_env_create_request(
     args: &EnvCreateArgs,
 ) -> anyhow::Result<CreateEnvironmentRequest> {
     let mut request = env_create_request_from_args(args)?;
+    request.project_spec.ensure_platform_compatible()?;
     if request.preset_id.is_none()
         && request.project_spec.preset.is_empty()
         && request.project_spec.repositories.is_empty()
@@ -2164,7 +2234,7 @@ pub(crate) struct ResolvedCodewireYaml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) disk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) access: Option<ResolvedCodewireAccessYaml>,
+    pub(crate) credentials: Option<ResolvedCodewireCredentialsYaml>,
 }
 
 #[derive(serde::Serialize)]
@@ -2197,7 +2267,8 @@ pub(crate) struct ResolvedCodewireAgentsYaml {
 #[derive(serde::Serialize)]
 pub(crate) struct ResolvedCodewireSecretsYaml {
     pub(crate) organization: bool,
-    pub(crate) user: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) user: Option<codewire_project::StoragePlacement>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) project: String,
 }
@@ -2214,7 +2285,7 @@ pub(crate) struct ResolvedCodewireSkillYaml {
 }
 
 #[derive(serde::Serialize)]
-pub(crate) struct ResolvedCodewireAccessYaml {
+pub(crate) struct ResolvedCodewireCredentialsYaml {
     pub(crate) profile: String,
 }
 
@@ -2296,11 +2367,11 @@ pub(crate) fn codewire_yaml_from_request(
             .map(|value| format!("{value}m")),
         memory: spec.resources.memory_mib.map(|value| format!("{value}Mi")),
         disk: spec.resources.disk_gib.map(|value| format!("{value}Gi")),
-        access: spec
-            .access
+        credentials: spec
+            .credentials
             .as_ref()
-            .map(|access| ResolvedCodewireAccessYaml {
-                profile: access.profile.to_string(),
+            .map(|credentials| ResolvedCodewireCredentialsYaml {
+                profile: credentials.profile.clone(),
             }),
     }
 }
@@ -2386,6 +2457,7 @@ pub(crate) fn collect_env_create_repos(
                 branch,
                 destination,
                 revision: String::new(),
+                known_hosts: Vec::new(),
             },
         )
         .collect())

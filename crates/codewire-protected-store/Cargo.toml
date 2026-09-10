@@ -9,6 +9,9 @@ description = "Opaque fail-closed protected credential storage for Codewire auth
 
 [features]
 default = []
+# Pure, bounded SSH credential preparation. This does not enable an OS-store
+# backend, platform services, SSH processes, or a runnable credential grant.
+ssh-material = ["dep:ssh-key", "dep:rsa", "dep:rand"]
 # Platform authorities opt into authenticated envelopes and pod-bound OpenBao
 # identities. Local OS-store consumers do not enable these dependencies.
 platform = [
@@ -40,9 +43,11 @@ k8s-openapi = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["std"], optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+ssh-key = { workspace = true, features = ["encryption", "rsa"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }

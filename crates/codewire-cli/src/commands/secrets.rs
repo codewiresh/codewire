@@ -1,11 +1,14 @@
 use serde::Serialize;
 use std::path::Path;
 
+use super::storage_placement::{
+    StoragePlacement, require_reference_placement, resolve_storage_placement,
+};
 use super::*;
 
 #[cfg(target_os = "linux")]
 use codewire_local_credentials::{
-    LocalCredentialClient, LocalSecretProject, WorkloadSecretMetadata, WorkloadSecretSelection,
+    LocalCredentialClient, LocalSecretProject, WorkloadSecretMetadata,
 };
 #[cfg(target_os = "linux")]
 use codewire_protected_store::ProtectedValue;
@@ -16,24 +19,16 @@ use codewire_workload_secrets::{
 use std::io::{BufRead as _, Read as _};
 use zeroize::Zeroizing;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SecretPlacement {
-    Local,
-    Platform,
-    All,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub(crate) struct SecretInventoryView {
-    pub(crate) placement: &'static str,
-    pub(crate) scope: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) project: Option<String>,
-    pub(crate) key: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) created_at: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub(crate) updated_at: String,
+#[derive(Debug)]
+pub(crate) enum SecretOperation {
+    User(ScopedSecretCommand),
+    Organization(ScopedSecretCommand),
+    Project {
+        name: String,
+        command: ScopedSecretCommand,
+    },
+    Projects(SecretProjectCommand),
+    Preview(SecretPreviewArgs),
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -48,7 +43,7 @@ pub(crate) struct SecretResolutionView {
 pub(crate) struct SecretPreviewIntent {
     pub(crate) organization: bool,
     pub(crate) project: Option<String>,
-    pub(crate) user: bool,
+    pub(crate) user: Option<StoragePlacement>,
     pub(crate) explicit_environment_keys: BTreeSet<String>,
 }
 
@@ -56,123 +51,172 @@ pub(crate) async fn handle_secrets_command(
     globals: &Globals,
     args: SecretsArgs,
 ) -> anyhow::Result<()> {
-    let placement = secret_placement(&args)?;
-    validate_secret_command_placement(placement, &args.command)?;
+    let local = args.local;
+    let platform = args.platform;
+    let operation = resolve_secret_operation(args)?;
+    let placement = resolve_storage_placement(local, platform, secret_operation_json(&operation))?;
+    validate_secret_operation_placement(&operation, placement)?;
+    if placement == StoragePlacement::Local && matches!(operation, SecretOperation::Organization(_))
+    {
+        anyhow::bail!("organization workload secrets are unsupported locally; use --platform");
+    }
     match placement {
-        SecretPlacement::Platform => handle_platform_secrets_command(globals, args.command).await,
-        SecretPlacement::Local => handle_local_secrets_command(args.command).await,
-        SecretPlacement::All => {
-            let SecretsCommand::List(list) = args.command else {
-                unreachable!("all-placement mutation rejected above")
-            };
-            let mut inventory = local_secret_inventory().await?;
-            inventory.extend(platform_secret_inventory(globals).await?);
-            inventory.sort_by(|left, right| {
-                (
-                    left.placement,
-                    left.scope,
-                    left.project.as_deref(),
-                    left.key.as_str(),
-                )
-                    .cmp(&(
-                        right.placement,
-                        right.scope,
-                        right.project.as_deref(),
-                        right.key.as_str(),
-                    ))
-            });
-            print_secret_inventory(&inventory, list.output)
-        }
+        StoragePlacement::Platform => handle_platform_secrets_command(globals, operation).await,
+        StoragePlacement::Local => handle_local_secrets_command(operation).await,
     }
 }
 
-fn validate_secret_command_placement(
-    placement: SecretPlacement,
-    command: &SecretsCommand,
+pub(crate) fn parse_secret_project_name(value: &str) -> Result<String, String> {
+    let reference =
+        codewire_project::StorageReference::project(value).map_err(|error| error.to_string())?;
+    if reference.placement.is_some() || reference.selector.starts_with("id:") {
+        return Err("project creation requires a bare project name".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
+pub(crate) fn parse_secret_project_reference(value: &str) -> Result<String, String> {
+    codewire_project::StorageReference::project(value).map_err(|error| error.to_string())?;
+    Ok(value.to_owned())
+}
+
+pub(crate) fn project_selector_for_placement(
+    value: &str,
+    placement: StoragePlacement,
+) -> anyhow::Result<&str> {
+    let selector = require_reference_placement(
+        codewire_project::StorageReference::project(value)?,
+        placement,
+    )?;
+    if let Some(id) = selector.strip_prefix("id:") {
+        let parsed = uuid::Uuid::parse_str(id).context("invalid secret project ID")?;
+        anyhow::ensure!(
+            !parsed.is_nil() && parsed.to_string() == id,
+            "secret project ID must be canonical and non-nil"
+        );
+    }
+    Ok(selector)
+}
+
+fn validate_secret_operation_placement(
+    operation: &SecretOperation,
+    placement: StoragePlacement,
 ) -> anyhow::Result<()> {
-    if placement == SecretPlacement::All && !matches!(command, SecretsCommand::List(_)) {
-        anyhow::bail!("--all-placements is available only for 'cw secrets list'");
+    match operation {
+        SecretOperation::Project { name, .. } => {
+            project_selector_for_placement(name, placement)?;
+        }
+        SecretOperation::Projects(SecretProjectCommand::Delete(args)) => {
+            project_selector_for_placement(&args.name, placement)?;
+        }
+        _ => {}
     }
     Ok(())
 }
 
-fn secret_placement(args: &SecretsArgs) -> anyhow::Result<SecretPlacement> {
-    match (args.local, args.platform, args.all_placements) {
-        (true, false, false) => Ok(SecretPlacement::Local),
-        (false, true, false) => Ok(SecretPlacement::Platform),
-        (false, false, true) => Ok(SecretPlacement::All),
-        (false, false, false) => anyhow::bail!(
-            "secret placement is required: pass --local, --platform, or --all-placements"
-        ),
-        _ => anyhow::bail!(
-            "secret placement must be exactly one of --local, --platform, or --all-placements"
-        ),
-    }
+pub(crate) fn parse_secret_key(value: &str) -> Result<String, String> {
+    codewire_workload_secrets::validate_workload_secret_key(value)
+        .map_err(|_| "invalid secret key: use a nonempty environment-variable name".to_owned())?;
+    Ok(value.to_owned())
 }
 
-pub(crate) fn print_secret_inventory(
-    inventory: &[SecretInventoryView],
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(inventory)?),
-        OutputFormat::Text if inventory.is_empty() => println!("No workload secrets found."),
-        OutputFormat::Text => {
-            println!(
-                "{:<10} {:<14} {:<24} {:<32} UPDATED",
-                "PLACEMENT", "SCOPE", "PROJECT", "KEY"
+fn resolve_secret_operation(args: SecretsArgs) -> anyhow::Result<SecretOperation> {
+    let scope_count = usize::from(args.project.is_some())
+        + usize::from(args.user)
+        + usize::from(args.organization);
+    let command = match args.command {
+        SecretsCommand::Preview(preview) => {
+            anyhow::ensure!(
+                scope_count == 0,
+                "preview reads source selectors from --file; scope flags do not apply"
             );
-            for secret in inventory {
-                println!(
-                    "{:<10} {:<14} {:<24} {:<32} {}",
-                    secret.placement,
-                    secret.scope,
-                    secret.project.as_deref().unwrap_or("-"),
-                    secret.key,
-                    secret.updated_at,
-                );
-            }
+            return Ok(SecretOperation::Preview(preview));
         }
+        SecretsCommand::Projects { command } => {
+            anyhow::ensure!(
+                scope_count == 0,
+                "projects commands take their own project name; scope flags do not apply"
+            );
+            return Ok(SecretOperation::Projects(command));
+        }
+        SecretsCommand::List(args) => ScopedSecretCommand::List(args),
+        SecretsCommand::Set(args) => ScopedSecretCommand::Set(args),
+        SecretsCommand::Delete(args) => ScopedSecretCommand::Delete(args),
+        SecretsCommand::Rename(args) => ScopedSecretCommand::Rename(args),
+    };
+    anyhow::ensure!(
+        scope_count == 1,
+        "key operations require exactly one of --project=NAME, --user, or --organization; no project is inferred"
+    );
+    if let Some(name) = args.project {
+        Ok(SecretOperation::Project { name, command })
+    } else if args.user {
+        Ok(SecretOperation::User(command))
+    } else {
+        Ok(SecretOperation::Organization(command))
     }
-    Ok(())
+}
+
+fn secret_operation_json(operation: &SecretOperation) -> bool {
+    match operation {
+        SecretOperation::Preview(args) => args.output == OutputFormat::Json,
+        SecretOperation::Projects(SecretProjectCommand::List(args))
+        | SecretOperation::User(ScopedSecretCommand::List(args))
+        | SecretOperation::Organization(ScopedSecretCommand::List(args))
+        | SecretOperation::Project {
+            command: ScopedSecretCommand::List(args),
+            ..
+        } => args.output == OutputFormat::Json,
+        _ => false,
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn handle_local_secrets_command(_command: SecretsCommand) -> anyhow::Result<()> {
-    anyhow::bail!("local workload-secret management is not available on this operating system")
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn local_secret_inventory() -> anyhow::Result<Vec<SecretInventoryView>> {
+async fn handle_local_secrets_command(_command: SecretOperation) -> anyhow::Result<()> {
     anyhow::bail!("local workload-secret management is not available on this operating system")
 }
 
 #[cfg(target_os = "linux")]
-async fn handle_local_secrets_command(command: SecretsCommand) -> anyhow::Result<()> {
+async fn handle_local_secrets_command(command: SecretOperation) -> anyhow::Result<()> {
     let mut client = connect_local_credential_authority().await?;
     match command {
-        SecretsCommand::List(args) => {
-            let inventory = local_secret_inventory_with_client(&mut client).await?;
-            print_secret_inventory(&inventory, args.output)
-        }
-        SecretsCommand::Preview(args) => {
+        SecretOperation::Preview(args) => {
             let intent = load_secret_preview_intent(&args.file)?;
-            let secrets = client
-                .resolve_workload_secret_metadata(WorkloadSecretSelection {
-                    organization: intent.organization,
-                    project: intent.project,
-                    user: intent.user,
-                    explicit_environment_keys: intent.explicit_environment_keys,
-                })
-                .await
-                .context("preview local workload-secret resolution")?;
+            validate_secret_preview_placement(&intent, StoragePlacement::Local)?;
+            let mut source_keys = Vec::new();
+            if let Some(selector) = &intent.project {
+                let project = resolve_local_project_by_name(&mut client, selector).await?;
+                for metadata in client.list_project_workload_secrets(project.id).await? {
+                    source_keys.push((WorkloadSecretSource::Project, metadata.key));
+                }
+            }
+            if intent.user.is_some() {
+                for metadata in client.list_user_workload_secrets().await? {
+                    source_keys.push((WorkloadSecretSource::User, metadata.key));
+                }
+            }
+            source_keys.extend(
+                intent
+                    .explicit_environment_keys
+                    .into_iter()
+                    .map(|key| (WorkloadSecretSource::ExplicitEnvironment, key)),
+            );
+            let secrets = codewire_workload_secrets::resolve_workload_secret_metadata(
+                source_keys
+                    .iter()
+                    .map(|(source, key)| (*source, key.as_str())),
+            )
+            .context("preview local workload-secret resolution")?;
             print_secret_resolution("local", &secrets, args.output)
         }
-        SecretsCommand::Organization { .. } => {
+        SecretOperation::Organization(_) => {
             anyhow::bail!("organization workload secrets are unsupported locally")
         }
-        SecretsCommand::User { command } => local_user_command(&mut client, command).await,
-        SecretsCommand::Project { command } => local_project_command(&mut client, command).await,
+        SecretOperation::User(command) => local_user_command(&mut client, command).await,
+        SecretOperation::Project { name, command } => {
+            local_project_key_command(&mut client, &name, command).await
+        }
+        SecretOperation::Projects(command) => local_project_command(&mut client, command).await,
     }
 }
 
@@ -191,6 +235,24 @@ pub(crate) fn load_secret_preview_intent(path: &Path) -> anyhow::Result<SecretPr
         user: document.spec.secrets.user,
         explicit_environment_keys: document.spec.environment.into_keys().collect(),
     })
+}
+
+pub(crate) fn validate_secret_preview_placement(
+    intent: &SecretPreviewIntent,
+    placement: StoragePlacement,
+) -> anyhow::Result<()> {
+    if let Some(project) = &intent.project {
+        project_selector_for_placement(project, placement)?;
+    }
+    anyhow::ensure!(
+        intent.user.is_none_or(|origin| origin == placement),
+        "user secret origin conflicts with selected storage; cross-origin preview is not supported by this adapter"
+    );
+    anyhow::ensure!(
+        placement != StoragePlacement::Local || !intent.organization,
+        "organization workload secrets are unsupported in local preview; use --platform"
+    );
+    Ok(())
 }
 
 pub(crate) fn print_secret_resolution(
@@ -315,23 +377,45 @@ async fn local_project_command(
                 .list_secret_projects()
                 .await
                 .context("list local secret projects")?;
-            if let Some(name) = args.project_name.as_deref() {
-                let project = resolve_local_project(&projects, name)?;
-                let secrets = client
-                    .list_project_workload_secrets(project.id)
-                    .await
-                    .context("list local project secrets")?;
-                print_local_secret_metadata(
-                    &secrets,
-                    &format!("No local secrets in project {:?}.", project.name),
-                    args.output,
-                )
-            } else {
-                print_local_secret_projects(&projects, args.output)
-            }
+            print_local_secret_projects(&projects, args.output)
         }
-        SecretProjectCommand::Set(args) => {
-            let project = resolve_local_project_by_name(client, &args.project).await?;
+        SecretProjectCommand::Delete(args) => {
+            let project = resolve_local_project_by_name(client, &args.name).await?;
+            let target = format!("local secret project {:?} ({})", project.name, project.id);
+            if !confirm_secret_project_delete(&target, args.yes)? {
+                eprintln!("Canceled.");
+                return Ok(());
+            }
+            client
+                .delete_secret_project(project.id)
+                .await
+                .context("delete local secret project")?;
+            eprintln!("Local secret project {:?} deleted.", project.name);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn local_project_key_command(
+    client: &mut LocalCredentialClient,
+    project_name: &str,
+    command: ScopedSecretCommand,
+) -> anyhow::Result<()> {
+    let project = resolve_local_project_by_name(client, project_name).await?;
+    match command {
+        ScopedSecretCommand::List(args) => {
+            let secrets = client
+                .list_project_workload_secrets(project.id)
+                .await
+                .context("list local project secrets")?;
+            print_local_secret_metadata(
+                &secrets,
+                &format!("No local secrets in project {:?}.", project.name),
+                args.output,
+            )
+        }
+        ScopedSecretCommand::Set(args) => {
             let key = trimmed_required(&args.key, "secret key")?.to_owned();
             let value = prompt_workload_secret_value()?;
             client
@@ -341,38 +425,19 @@ async fn local_project_command(
             eprintln!("Local secret {key} set in project {:?}.", project.name);
             Ok(())
         }
-        SecretProjectCommand::Delete(args) => {
-            let project = resolve_local_project_by_name(client, &args.project).await?;
-            if let Some(key) = args.key.as_deref() {
-                let key = trimmed_required(key, "secret key")?.to_owned();
-                client
-                    .delete_project_workload_secret(project.id, key.clone())
-                    .await
-                    .context("delete local project secret")?;
-                eprintln!(
-                    "Local secret {key} deleted from project {:?}.",
-                    project.name
-                );
-            } else {
-                if !args.yes
-                    && !prompt_confirm_default_yes(&format!(
-                        "Delete local secret project {:?} and all its secrets? [Y/n]",
-                        project.name
-                    ))?
-                {
-                    eprintln!("Canceled.");
-                    return Ok(());
-                }
-                client
-                    .delete_secret_project(project.id)
-                    .await
-                    .context("delete local secret project")?;
-                eprintln!("Local secret project {:?} deleted.", project.name);
-            }
+        ScopedSecretCommand::Delete(args) => {
+            let key = trimmed_required(&args.key, "secret key")?.to_owned();
+            client
+                .delete_project_workload_secret(project.id, key.clone())
+                .await
+                .context("delete local project secret")?;
+            eprintln!(
+                "Local secret {key} deleted from project {:?}.",
+                project.name
+            );
             Ok(())
         }
-        SecretProjectCommand::Rename(args) => {
-            let project = resolve_local_project_by_name(client, &args.project).await?;
+        ScopedSecretCommand::Rename(args) => {
             let key = trimmed_required(&args.old_key, "old secret key")?.to_owned();
             let new_key = trimmed_required(&args.new_key, "new secret key")?.to_owned();
             client
@@ -386,6 +451,40 @@ async fn local_project_command(
             Ok(())
         }
     }
+}
+
+pub(crate) fn confirm_secret_project_delete(target: &str, yes: bool) -> anyhow::Result<bool> {
+    if yes {
+        eprintln!("Deleting {target} and all its keys.");
+        return Ok(true);
+    }
+    anyhow::ensure!(
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+        "project deletion requires --yes when noninteractive"
+    );
+    read_secret_project_delete_confirmation(
+        target,
+        std::io::stdin().lock(),
+        std::io::stderr().lock(),
+    )
+}
+
+fn read_secret_project_delete_confirmation(
+    target: &str,
+    reader: impl std::io::BufRead,
+    mut writer: impl std::io::Write,
+) -> anyhow::Result<bool> {
+    write!(writer, "Delete {target} and all its keys? [y/N]: ")
+        .context("write project deletion confirmation")?;
+    writer
+        .flush()
+        .context("flush project deletion confirmation")?;
+    let mut input = String::new();
+    let count = reader
+        .take(65)
+        .read_line(&mut input)
+        .context("read project deletion confirmation")?;
+    Ok(count > 0 && count < 65 && matches!(input.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
 }
 
 #[cfg(target_os = "linux")]
@@ -405,61 +504,21 @@ fn resolve_local_project<'a>(
     projects: &'a [LocalSecretProject],
     name: &str,
 ) -> anyhow::Result<&'a LocalSecretProject> {
-    let name = trimmed_required(name, "secret project name")?;
-    projects
+    let selector = project_selector_for_placement(name, StoragePlacement::Local)?;
+    let mut matches = projects
         .iter()
-        .find(|project| project.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| anyhow::anyhow!("local secret project {name:?} not found"))
-}
-
-#[cfg(target_os = "linux")]
-async fn local_secret_inventory() -> anyhow::Result<Vec<SecretInventoryView>> {
-    let mut client = connect_local_credential_authority().await?;
-    local_secret_inventory_with_client(&mut client).await
-}
-
-#[cfg(target_os = "linux")]
-async fn local_secret_inventory_with_client(
-    client: &mut LocalCredentialClient,
-) -> anyhow::Result<Vec<SecretInventoryView>> {
-    let mut inventory = client
-        .list_user_workload_secrets()
-        .await
-        .context("list local user secrets")?
-        .into_iter()
-        .map(|secret| local_inventory_entry("user", None, secret))
-        .collect::<Vec<_>>();
-    for project in client
-        .list_secret_projects()
-        .await
-        .context("list local secret projects")?
-    {
-        inventory.extend(
-            client
-                .list_project_workload_secrets(project.id)
-                .await
-                .context("list local project secrets")?
-                .into_iter()
-                .map(|secret| local_inventory_entry("project", Some(project.name.clone()), secret)),
-        );
-    }
-    Ok(inventory)
-}
-
-#[cfg(target_os = "linux")]
-fn local_inventory_entry(
-    scope: &'static str,
-    project: Option<String>,
-    secret: WorkloadSecretMetadata,
-) -> SecretInventoryView {
-    SecretInventoryView {
-        placement: "local",
-        scope,
-        project,
-        key: secret.key,
-        created_at: format_unix_millis(secret.created_at_unix_ms),
-        updated_at: format_unix_millis(secret.updated_at_unix_ms),
-    }
+        .filter(|project| match selector.strip_prefix("id:") {
+            Some(id) => project.id.to_string() == id,
+            None => project.name.eq_ignore_ascii_case(selector),
+        });
+    let project = matches
+        .next()
+        .context("local secret project was not found")?;
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "local secret project name is ambiguous; select an exact id"
+    );
+    Ok(project)
 }
 
 #[cfg(target_os = "linux")]
@@ -546,7 +605,7 @@ fn read_workload_secret_bytes<R: std::io::BufRead>(
 ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let mut bytes = Zeroizing::new(Vec::new());
     let limit =
-        u64::try_from(MAX_WORKLOAD_SECRET_VALUE_BYTES + 2).expect("workload-secret value limit");
+        u64::try_from(MAX_WORKLOAD_SECRET_VALUE_BYTES + 3).expect("workload-secret value limit");
     let mut reader = reader.take(limit);
     if single_line {
         reader
@@ -578,35 +637,260 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_secret_grammar_is_placement_explicit_and_legacy_forms_are_gone() {
-        let Command::Secrets(args) = Cli::try_parse_from([
-            "cw",
-            "secrets",
-            "--local",
-            "project",
-            "set",
-            "development",
-            "API_TOKEN",
-        ])
-        .unwrap()
-        .command
-        else {
+    fn oversized_stdin_after_maximum_crlf_is_not_silently_truncated() {
+        let mut input = vec![b'x'; MAX_WORKLOAD_SECRET_VALUE_BYTES];
+        input.extend_from_slice(b"\r\n");
+        assert_eq!(
+            read_workload_secret_bytes(input.as_slice(), false)
+                .unwrap()
+                .len(),
+            MAX_WORKLOAD_SECRET_VALUE_BYTES
+        );
+        input.extend_from_slice(b"suffix");
+        assert!(read_workload_secret_bytes(input.as_slice(), false).is_err());
+    }
+
+    #[test]
+    fn canonical_secret_key_grammar_requires_an_explicit_scope() {
+        for placement in ["--local", "--platform"] {
+            for scope in ["--project=development", "--user", "--organization"] {
+                for tail in [
+                    vec!["set", "DATABASE_URL"],
+                    vec!["list", "--output", "json"],
+                    vec!["delete", "DATABASE_URL"],
+                    vec!["rename", "DATABASE_URL", "DATABASE_URL_NEXT"],
+                ] {
+                    let mut argv = vec!["cw", "secrets", placement, scope];
+                    argv.extend(tail);
+                    let args = secret_args(&argv);
+                    let operation = resolve_secret_operation(args).unwrap();
+                    match (scope, operation) {
+                        ("--project=development", SecretOperation::Project { name, .. }) => {
+                            assert_eq!(name, "development")
+                        }
+                        ("--user", SecretOperation::User(_))
+                        | ("--organization", SecretOperation::Organization(_)) => {}
+                        other => panic!("wrong secret scope: {other:?}"),
+                    }
+                }
+            }
+        }
+        for tail in [
+            vec!["set", "DATABASE_URL"],
+            vec!["delete", "DATABASE_URL"],
+            vec!["list"],
+            vec!["rename", "A", "B"],
+        ] {
+            let mut argv = vec!["cw", "secrets", "--local"];
+            argv.extend(tail);
+            assert!(
+                resolve_secret_operation(secret_args(&argv))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("--project=NAME")
+            );
+        }
+    }
+
+    fn secret_args(argv: &[&str]) -> SecretsArgs {
+        let Command::Secrets(args) = Cli::try_parse_from(argv).unwrap().command else {
             panic!("expected secrets command")
         };
-        assert!(args.local);
-        assert!(matches!(
-            args.command,
-            SecretsCommand::Project {
-                command: SecretProjectCommand::Set(_)
+        args
+    }
+
+    #[test]
+    fn retired_secret_grammar_and_conflicting_selections_are_rejected() {
+        for argv in [
+            vec![
+                "cw",
+                "secrets",
+                "--local",
+                "project",
+                "set",
+                "development",
+                "KEY",
+            ],
+            vec!["cw", "secrets", "--local", "user", "list"],
+            vec!["cw", "secrets", "--platform", "organization", "list"],
+            vec!["cw", "secrets", "--all-placements", "list"],
+            vec!["cw", "secrets", "--local", "--platform", "--user", "list"],
+            vec![
+                "cw",
+                "secrets",
+                "--local",
+                "--project=development",
+                "--user",
+                "list",
+            ],
+            vec![
+                "cw",
+                "secrets",
+                "--platform",
+                "--user",
+                "--organization",
+                "list",
+            ],
+            vec![
+                "cw",
+                "secrets",
+                "--local",
+                "--project=development",
+                "set",
+                "KEY",
+                "raw-value-must-not-be-an-argument",
+            ],
+            vec![
+                "cw",
+                "secrets",
+                "--local",
+                "projects",
+                "list",
+                "development",
+            ],
+            vec![
+                "cw",
+                "secrets",
+                "--local",
+                "projects",
+                "set",
+                "development",
+                "KEY",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "accepted retired/conflicting grammar: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_deletion_never_becomes_project_deletion_for_missing_or_blank_keys() {
+        for placement in ["--local", "--platform"] {
+            for scope in ["--project=development", "--user", "--organization"] {
+                assert!(
+                    Cli::try_parse_from(["cw", "secrets", placement, scope, "delete"]).is_err()
+                );
+                for key in ["", " ", "\t", "INVALID KEY", "1INVALID"] {
+                    assert!(
+                        Cli::try_parse_from(["cw", "secrets", placement, scope, "delete", key])
+                            .is_err()
+                    );
+                }
             }
-        ));
-        assert!(Cli::try_parse_from(["cw", "secrets", "set", "development", "TOKEN"]).is_err());
-        assert!(Cli::try_parse_from(["cw", "secrets", "--local", "org", "list"]).is_err());
+            let operation = resolve_secret_operation(secret_args(&[
+                "cw",
+                "secrets",
+                placement,
+                "--project=development",
+                "delete",
+                "DATABASE_URL",
+            ]))
+            .unwrap();
+            assert!(
+                matches!(operation, SecretOperation::Project { name, command: ScopedSecretCommand::Delete(args) }
+                if name == "development" && args.key == "DATABASE_URL")
+            );
+        }
+    }
+
+    #[test]
+    fn project_lifecycle_requires_its_own_nonblank_name_and_no_scope_flags() {
+        for placement in ["--local", "--platform"] {
+            for command in ["create", "delete"] {
+                assert!(
+                    Cli::try_parse_from(["cw", "secrets", placement, "projects", command]).is_err()
+                );
+                for name in ["", " "] {
+                    assert!(
+                        Cli::try_parse_from([
+                            "cw", "secrets", placement, "projects", command, name
+                        ])
+                        .is_err()
+                    );
+                }
+                assert!(matches!(
+                    resolve_secret_operation(secret_args(&[
+                        "cw",
+                        "secrets",
+                        placement,
+                        "projects",
+                        command,
+                        "development"
+                    ]))
+                    .unwrap(),
+                    SecretOperation::Projects(_)
+                ));
+                assert!(
+                    resolve_secret_operation(secret_args(&[
+                        "cw",
+                        "secrets",
+                        placement,
+                        "--project=other",
+                        "projects",
+                        command,
+                        "development"
+                    ]))
+                    .is_err()
+                );
+            }
+            assert!(
+                Cli::try_parse_from(["cw", "secrets", placement, "--project=", "list"]).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn project_deletion_is_default_no_and_eof_never_confirms() {
+        for (input, expected) in [
+            ("", false),
+            ("\n", false),
+            ("no\n", false),
+            ("y\n", true),
+            ("yes\n", true),
+        ] {
+            let mut output = Vec::new();
+            assert_eq!(
+                read_secret_project_delete_confirmation(
+                    "local secret project \"development\" (project-id)",
+                    input.as_bytes(),
+                    &mut output
+                )
+                .unwrap(),
+                expected
+            );
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                "Delete local secret project \"development\" (project-id) and all its keys? [y/N]: "
+            );
+        }
+        let oversized = format!("yes{}unread", " ".repeat(128));
         assert!(
-            Cli::try_parse_from(["cw", "secrets", "--local", "--platform", "user", "list"])
-                .is_err()
+            !read_secret_project_delete_confirmation(
+                "development",
+                oversized.as_bytes(),
+                Vec::new()
+            )
+            .unwrap()
         );
-        assert!(Cli::try_parse_from(["cw", "secrets", "--all-placements", "list"]).is_ok());
+    }
+
+    #[test]
+    fn scoped_secret_metadata_never_contains_values() {
+        let metadata = SecretMetadata {
+            key: "DATABASE_URL".to_owned(),
+            created_at: "2026-09-03T00:00:00Z".to_owned(),
+            updated_at: "2026-09-03T00:00:01Z".to_owned(),
+        };
+        let json = serde_json::to_value(metadata).unwrap();
+        assert_eq!(json["key"], "DATABASE_URL");
+        assert_eq!(json.as_object().unwrap().len(), 3);
+        assert!(json.get("value").is_none());
+    }
+
+    #[test]
+    fn metadata_preview_stays_explicit_read_only_and_json_never_prompts() {
         for placement in ["--local", "--platform"] {
             let Command::Secrets(args) = Cli::try_parse_from([
                 "cw",
@@ -629,31 +913,32 @@ mod tests {
             assert_eq!(preview.file, PathBuf::from("project.yaml"));
             assert_eq!(preview.output, OutputFormat::Json);
         }
-        let Command::Secrets(args) =
-            Cli::try_parse_from(["cw", "secrets", "--all-placements", "preview"])
-                .unwrap()
-                .command
-        else {
-            panic!("expected secrets command")
-        };
-        let placement = secret_placement(&args).unwrap();
-        assert_eq!(placement, SecretPlacement::All);
-        assert!(validate_secret_command_placement(placement, &args.command).is_err());
-    }
-
-    #[test]
-    fn secret_inventory_text_names_placement_and_never_has_a_value_field() {
-        let inventory = vec![SecretInventoryView {
-            placement: "local",
-            scope: "user",
-            project: None,
-            key: "DATABASE_URL".into(),
-            created_at: "2026-09-03T00:00:00Z".into(),
-            updated_at: "2026-09-03T00:00:01Z".into(),
-        }];
-        let json = serde_json::to_string(&inventory).unwrap();
-        assert!(json.contains("\"placement\":\"local\""));
-        assert!(!json.contains("value"));
+        assert!(
+            resolve_secret_operation(secret_args(&[
+                "cw",
+                "secrets",
+                "--local",
+                "--project=development",
+                "preview"
+            ]))
+            .is_err()
+        );
+        for tail in [
+            vec!["--project=development", "list"],
+            vec!["--user", "list"],
+            vec!["--organization", "list"],
+            vec!["projects", "list"],
+            vec!["preview"],
+        ] {
+            let mut argv = vec!["cw", "secrets"];
+            argv.extend(tail);
+            argv.extend(["--output", "json"]);
+            let operation = resolve_secret_operation(secret_args(&argv)).unwrap();
+            assert!(secret_operation_json(&operation));
+            assert!(
+                resolve_storage_placement(false, false, secret_operation_json(&operation)).is_err()
+            );
+        }
     }
 
     #[test]
@@ -666,7 +951,7 @@ mod tests {
 secrets:
   organization: true
   project: development
-  user: true
+  user: platform
 environment:
   Z_TOKEN: synthetic-z
   A_TOKEN: synthetic-a
@@ -676,7 +961,7 @@ environment:
 
         let intent = load_secret_preview_intent(&path).unwrap();
         assert!(intent.organization);
-        assert!(intent.user);
+        assert_eq!(intent.user, Some(StoragePlacement::Platform));
         assert_eq!(intent.project.as_deref(), Some("development"));
         assert_eq!(
             intent
@@ -685,6 +970,45 @@ environment:
                 .collect::<Vec<_>>(),
             ["A_TOKEN", "Z_TOKEN"]
         );
+    }
+
+    #[test]
+    fn secret_preview_rejects_unsupported_and_mismatched_source_origins() {
+        for placement in [StoragePlacement::Local, StoragePlacement::Platform] {
+            let mut intent = SecretPreviewIntent {
+                organization: false,
+                project: Some("development".to_owned()),
+                user: None,
+                explicit_environment_keys: BTreeSet::new(),
+            };
+            validate_secret_preview_placement(&intent, placement).unwrap();
+            for origin in ["local", "platform", "unknown"] {
+                intent.project = Some(format!("{origin}:development"));
+                let expected = matches!(
+                    (origin, placement),
+                    ("local", StoragePlacement::Local) | ("platform", StoragePlacement::Platform)
+                );
+                assert_eq!(
+                    validate_secret_preview_placement(&intent, placement).is_ok(),
+                    expected
+                );
+            }
+            intent.project = None;
+            intent.user = Some(placement);
+            validate_secret_preview_placement(&intent, placement).unwrap();
+            intent.user = Some(if placement == StoragePlacement::Local {
+                StoragePlacement::Platform
+            } else {
+                StoragePlacement::Local
+            });
+            assert!(validate_secret_preview_placement(&intent, placement).is_err());
+            intent.user = None;
+            intent.organization = true;
+            assert_eq!(
+                validate_secret_preview_placement(&intent, placement).is_ok(),
+                placement == StoragePlacement::Platform
+            );
+        }
     }
 
     #[test]

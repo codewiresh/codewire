@@ -5,9 +5,12 @@
 //! endpoint and daemon token, while platform environments use Connect through
 //! the public environment-session service.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_gateway_proto::codewire::bridge::v1 as bridge_v1;
 pub use codewire_gateway_proto::daemon::v1;
+use codewire_gateway_proto::ssh::{self, SshOperation};
 use codewire_gateway_proto::{
     CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, DAEMON_AUTH_TOKEN_HEADER, DAEMON_CAPABILITY_ATTACH,
     DAEMON_CAPABILITY_SESSIONS,
@@ -19,6 +22,19 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Streaming};
 use uuid::Uuid;
+use zeroize::Zeroizing;
+
+pub const HOSTED_WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization-bin";
+
+mod hosted;
+pub use hosted::HostedCredentialBridgeDrain;
+
+/// The admitted hosted daemon response, still inactive until the broker opens
+/// it. Its request producer remains owned by the separately returned drain.
+pub type HostedCredentialBridgePrepared = (
+    PreparedHostedCredentialBridge,
+    Streaming<bridge_v1::CredentialBridgeGuestMessage>,
+);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionClientError {
@@ -64,15 +80,55 @@ pub struct SessionAttachmentInput {
 /// bytes. This API has no credential field; callers must redact all protected
 /// material before constructing response headers or body frames.
 pub struct CredentialBridgeConnection {
-    input: mpsc::Sender<v1::CredentialBridgeHostMessage>,
-    output: Streaming<v1::CredentialBridgeGuestMessage>,
+    input: mpsc::Sender<bridge_v1::CredentialBridgeHostMessage>,
+    output: Streaming<bridge_v1::CredentialBridgeGuestMessage>,
 }
 
 /// Cloneable response-only half of an authenticated credential bridge.
 /// Callers must send only provider-filtered, already-redacted bytes.
 #[derive(Clone)]
 pub struct CredentialBridgeResponseSender {
-    input: mpsc::Sender<v1::CredentialBridgeHostMessage>,
+    input: mpsc::Sender<bridge_v1::CredentialBridgeHostMessage>,
+    _hosted_lifetime: Option<Arc<hosted::HostedLifetime>>,
+}
+
+/// An inactive hosted stream. No Open has been sent and no live daemon epoch
+/// replaced. Its fixed-purpose token is never exposed by Debug or a session RPC.
+pub struct PreparedHostedCredentialBridge {
+    input: mpsc::Sender<bridge_v1::CredentialBridgeHostMessage>,
+    ready: bridge_v1::CredentialBridgeReady,
+    workspace_authorization: Zeroizing<Vec<u8>>,
+    hosted_lifetime: Arc<hosted::HostedLifetime>,
+}
+
+impl PreparedHostedCredentialBridge {
+    pub fn ready(&self) -> &bridge_v1::CredentialBridgeReady {
+        &self.ready
+    }
+    pub fn workspace_authorization(&self) -> &[u8] {
+        &self.workspace_authorization
+    }
+
+    /// Call only after the isolated broker returned authenticated admission
+    /// headers for this stream's real Ready and both exact Pod tokens.
+    pub async fn activate(self) -> Result<CredentialBridgeResponseSender, SessionClientError> {
+        self.input
+            .send(bridge_v1::CredentialBridgeHostMessage {
+                payload: Some(bridge_v1::credential_bridge_host_message::Payload::Open(
+                    bridge_v1::CredentialBridgeOpen {
+                        protocol_version: self.ready.protocol_version,
+                        environment_id: self.ready.environment_id.clone(),
+                        environment_generation: self.ready.environment_generation,
+                    },
+                )),
+            })
+            .await
+            .map_err(|_| SessionClientError::RequestClosed)?;
+        Ok(CredentialBridgeResponseSender {
+            input: self.input,
+            _hosted_lifetime: Some(self.hosted_lifetime),
+        })
+    }
 }
 
 impl SessionClient {
@@ -174,6 +230,17 @@ impl SessionClient {
             .into_inner())
     }
 
+    /// Request the trusted guest's fixed lifecycle action, without starting a
+    /// workload or resolving application values. VM exit, not this RPC's ACK,
+    /// is the runner's completion proof; poweroff may close the transport first.
+    pub async fn poweroff_guest(&self) -> Result<(), SessionClientError> {
+        self.inner
+            .clone()
+            .poweroff_guest(self.authorized(v1::PoweroffGuestRequest {}))
+            .await?;
+        Ok(())
+    }
+
     pub async fn open_credential_bridge(
         &self,
         environment_id: Uuid,
@@ -184,9 +251,9 @@ impl SessionClient {
         }
         let (input, receiver) = mpsc::channel(32);
         input
-            .send(v1::CredentialBridgeHostMessage {
-                payload: Some(v1::credential_bridge_host_message::Payload::Open(
-                    v1::CredentialBridgeOpen {
+            .send(bridge_v1::CredentialBridgeHostMessage {
+                payload: Some(bridge_v1::credential_bridge_host_message::Payload::Open(
+                    bridge_v1::CredentialBridgeOpen {
                         protocol_version:
                             codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                         environment_id: environment_id.to_string(),
@@ -202,6 +269,95 @@ impl SessionClient {
             .await?
             .into_inner();
         Ok(CredentialBridgeConnection { input, output })
+    }
+
+    /// Prepare the existing private RPC without eagerly sending Open. Hosted
+    /// daemons return token metadata and Ready before activation; local daemons
+    /// do not support this ordering. The whole preparation has a finite bound.
+    pub fn prepare_hosted_credential_bridge(
+        &self,
+        environment_id: Uuid,
+        environment_generation: u64,
+    ) -> Result<
+        (
+            HostedCredentialBridgeDrain,
+            impl std::future::Future<
+                Output = Result<HostedCredentialBridgePrepared, SessionClientError>,
+            > + Send
+            + 'static,
+        ),
+        SessionClientError,
+    > {
+        if environment_id.is_nil()
+            || environment_generation == 0
+            || environment_generation > i64::MAX as u64
+        {
+            return Err(SessionClientError::InvalidCredential);
+        }
+        let (input, body, hosted_lifetime, drain) = hosted::channel();
+        let client_owner = self.clone();
+        // The caller owns the drain BEFORE polling any network operation.
+        // Dropping this future, a prepared result, or the last response sender
+        // cancels the outgoing producer; callers still await its terminal ack.
+        let preparation = async move {
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                let mut client = client_owner.inner.clone();
+                let response = client
+                    .credential_bridge(client_owner.authorized(body))
+                    .await?;
+                let mut values = response
+                    .metadata()
+                    .get_all_bin(HOSTED_WORKSPACE_AUTHORIZATION)
+                    .iter();
+                let workspace = match (values.next(), values.next()) {
+                    (Some(value), None) => value
+                        .to_bytes()
+                        .map_err(|_| SessionClientError::InvalidCredential)?,
+                    _ => return Err(SessionClientError::InvalidCredential),
+                };
+                let workspace_authorization = Zeroizing::new(workspace.to_vec());
+                let token = workspace_authorization
+                    .strip_prefix(b"Bearer ")
+                    .ok_or(SessionClientError::InvalidCredential)?;
+                if token.is_empty()
+                    || token.len() > 16 * 1024
+                    || !token.iter().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+                {
+                    return Err(SessionClientError::InvalidCredential);
+                }
+                let mut output = response.into_inner();
+                let ready = output
+                    .message()
+                    .await?
+                    .ok_or(SessionClientError::RequestClosed)?;
+                let Some(bridge_v1::credential_bridge_guest_message::Payload::Ready(ready)) =
+                    ready.payload
+                else {
+                    return Err(SessionClientError::InvalidCredential);
+                };
+                if ready.protocol_version
+                    != codewire_gateway_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+                    || ready.environment_id != environment_id.to_string()
+                    || ready.environment_generation != environment_generation
+                {
+                    return Err(SessionClientError::InvalidCredential);
+                }
+                Ok((
+                    PreparedHostedCredentialBridge {
+                        input,
+                        ready,
+                        workspace_authorization,
+                        hosted_lifetime,
+                    },
+                    output,
+                ))
+            })
+            .await
+            .map_err(|_| SessionClientError::Connect)?
+        };
+        Ok((drain, preparation))
     }
 
     pub async fn launch(
@@ -351,98 +507,159 @@ impl CredentialBridgeConnection {
     pub fn response_sender(&self) -> CredentialBridgeResponseSender {
         CredentialBridgeResponseSender {
             input: self.input.clone(),
+            _hosted_lifetime: None,
         }
     }
 
     pub async fn receive(
         &mut self,
-    ) -> Result<Option<v1::CredentialBridgeGuestMessage>, SessionClientError> {
-        self.output
+    ) -> Result<Option<bridge_v1::CredentialBridgeGuestMessage>, SessionClientError> {
+        let message = self
+            .output
             .message()
             .await
-            .map_err(SessionClientError::from)
+            .map_err(SessionClientError::from)?;
+        if let Some(message) = &message {
+            validate_credential_bridge_guest_message(message)?;
+        }
+        Ok(message)
     }
 
     pub async fn send_response_start(
         &self,
-        response: v1::CredentialBridgeResponseStart,
+        response: bridge_v1::CredentialBridgeResponseStart,
     ) -> Result<(), SessionClientError> {
         self.response_sender().send_response_start(response).await
     }
 
     pub async fn send_response_body(
         &self,
-        response: v1::CredentialBridgeResponseBody,
+        response: bridge_v1::CredentialBridgeResponseBody,
     ) -> Result<(), SessionClientError> {
         self.response_sender().send_response_body(response).await
     }
 
     pub async fn send_response_end(
         &self,
-        response: v1::CredentialBridgeResponseEnd,
+        response: bridge_v1::CredentialBridgeResponseEnd,
     ) -> Result<(), SessionClientError> {
         self.response_sender().send_response_end(response).await
     }
 
     pub async fn send_response_failure(
         &self,
-        response: v1::CredentialBridgeResponseFailure,
+        response: bridge_v1::CredentialBridgeResponseFailure,
     ) -> Result<(), SessionClientError> {
         self.response_sender().send_response_failure(response).await
+    }
+
+    pub async fn send_ssh(
+        &self,
+        response: bridge_v1::CredentialSshResponse,
+    ) -> Result<(), SessionClientError> {
+        self.response_sender().send_ssh(response).await
     }
 }
 
 impl CredentialBridgeResponseSender {
+    pub async fn send_environment_projection(
+        &self,
+        response: bridge_v1::EnvironmentProjectionResponse,
+    ) -> Result<(), SessionClientError> {
+        self.send(
+            bridge_v1::credential_bridge_host_message::Payload::EnvironmentProjection(response),
+        )
+        .await
+    }
+
     pub async fn send_response_start(
         &self,
-        response: v1::CredentialBridgeResponseStart,
+        response: bridge_v1::CredentialBridgeResponseStart,
     ) -> Result<(), SessionClientError> {
-        self.send(v1::credential_bridge_host_message::Payload::ResponseStart(
-            response,
-        ))
-        .await
+        self.send(bridge_v1::credential_bridge_host_message::Payload::ResponseStart(response))
+            .await
     }
 
     pub async fn send_response_body(
         &self,
-        response: v1::CredentialBridgeResponseBody,
+        response: bridge_v1::CredentialBridgeResponseBody,
     ) -> Result<(), SessionClientError> {
-        self.send(v1::credential_bridge_host_message::Payload::ResponseBody(
-            response,
-        ))
-        .await
+        self.send(bridge_v1::credential_bridge_host_message::Payload::ResponseBody(response))
+            .await
     }
 
     pub async fn send_response_end(
         &self,
-        response: v1::CredentialBridgeResponseEnd,
+        response: bridge_v1::CredentialBridgeResponseEnd,
     ) -> Result<(), SessionClientError> {
-        self.send(v1::credential_bridge_host_message::Payload::ResponseEnd(
+        self.send(bridge_v1::credential_bridge_host_message::Payload::ResponseEnd(response))
+            .await
+    }
+
+    pub async fn send_response_failure(
+        &self,
+        response: bridge_v1::CredentialBridgeResponseFailure,
+    ) -> Result<(), SessionClientError> {
+        self.send(bridge_v1::credential_bridge_host_message::Payload::ResponseFailure(response))
+            .await
+    }
+
+    /// Forward a response already correlated and validated by the shared
+    /// credential bridge. This transport repeats bounded shape validation;
+    /// only the shared bridge owns the pending request's operation and may
+    /// prove that a failure or success matches it.
+    pub async fn send_ssh(
+        &self,
+        response: bridge_v1::CredentialSshResponse,
+    ) -> Result<(), SessionClientError> {
+        validate_ssh_response_shape(&response)?;
+        self.send(bridge_v1::credential_bridge_host_message::Payload::Ssh(
             response,
         ))
         .await
     }
 
-    pub async fn send_response_failure(
-        &self,
-        response: v1::CredentialBridgeResponseFailure,
-    ) -> Result<(), SessionClientError> {
-        self.send(v1::credential_bridge_host_message::Payload::ResponseFailure(response))
-            .await
-    }
-
     async fn send(
         &self,
-        payload: v1::credential_bridge_host_message::Payload,
+        payload: bridge_v1::credential_bridge_host_message::Payload,
     ) -> Result<(), SessionClientError> {
         self.input
-            .send(v1::CredentialBridgeHostMessage {
+            .send(bridge_v1::CredentialBridgeHostMessage {
                 payload: Some(payload),
             })
             .await
             .map_err(|_| SessionClientError::RequestClosed)
     }
 }
+
+fn validate_credential_bridge_guest_message(
+    message: &bridge_v1::CredentialBridgeGuestMessage,
+) -> Result<(), SessionClientError> {
+    if let Some(bridge_v1::credential_bridge_guest_message::Payload::Ssh(request)) =
+        &message.payload
+    {
+        ssh::validate_request(request).map_err(SessionClientError::Status)?;
+    }
+    Ok(())
+}
+
+fn validate_ssh_response_shape(
+    response: &bridge_v1::CredentialSshResponse,
+) -> Result<(), SessionClientError> {
+    use bridge_v1::credential_ssh_response::Result;
+    let operation = match response.result.as_ref() {
+        Some(Result::Identity(_)) => SshOperation::Identities,
+        Some(Result::Signature(_)) => SshOperation::Sign,
+        // A closed failure is valid for either operation. Request correlation
+        // remains in CredentialBridge::relay_ssh, not this shallow transport.
+        Some(Result::Failure(_)) | None => SshOperation::Identities,
+    };
+    ssh::validate_response(response, operation).map_err(SessionClientError::Status)
+}
+
+#[cfg(test)]
+#[path = "client/credential_bridge_tests.rs"]
+mod credential_bridge_tests;
 
 impl SessionAttachment {
     pub fn input_handle(&self) -> SessionAttachmentInput {

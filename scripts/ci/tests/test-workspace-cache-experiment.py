@@ -335,7 +335,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("    enable-openid-connect: true\n", body)
         self.assertNotIn("continue-on-error", body)
         self.assertIn("workspace_cache_experiment == 'true'", body)
-        for owner in ("edge-kind", "workspace-image"):
+        for owner in ("kind-workspace", "workspace-image"):
             self.assertIn(f"needs.{owner}.result == 'success' && needs.{owner}.outputs.workspace_cache_seed != ''", body)
         self.assertLess(body.index("Bind successful exact-source producer"), body.index("Select independent measurement caches"))
         self.assertLess(body.index("Clean measurement cache credential"), body.index("Finalize workspace measurement"))
@@ -345,9 +345,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(re.findall(r"^      - (.*)$", needs, re.M), [
             "verification-selection", "cw-release-assets", "workspace-image", "policy", "standard", "tooling",
             "rust-transport", "database", "services-control", "services-runtime", "edge-kind"])
-        for owner in ("workspace-image", "edge-kind"):
+        for owner in ("workspace-image", "kind-workspace"):
             self.assertIn("prepare-workspace-cache-measurement.sh seed", workflow_job(owner))
-            self.assertIn("success() && needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.workspace_cache_experiment", workflow_job(owner))
+            self.assertIn("success() &&", workflow_job(owner))
+            self.assertIn("needs.verification-selection.outputs.workspace_cache_experiment == 'true'", workflow_job(owner))
+            self.assertIn("$GITHUB_WORKSPACE/.tmp/codewire-workspace-image-verification.json", workflow_job(owner))
+        self.assertNotIn("prepare-workspace-cache-measurement.sh seed", workflow_job("edge-kind"))
 
 
 if __name__ == "__main__":

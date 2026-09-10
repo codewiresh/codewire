@@ -184,8 +184,15 @@ impl OpenAiChatGptOAuthAdapter {
         }
         let (body, prepared_redaction) = prepared.into_body_and_redaction();
         drop(prepared_redaction);
+        let authorization = headers
+            .get(http::header::AUTHORIZATION)
+            .ok_or(CredentialBrokerError::InvalidProviderPolicy)?;
+        // This bearer-only route has no body substitutions. Retain both AV
+        // injection inputs, including encodings of the complete outbound
+        // header, while adding the separately injected account identifier.
         let redaction = RedactionSet::new([
             credential.access_token().as_bytes(),
+            authorization.as_bytes(),
             credential.account_id().as_bytes(),
         ]);
         let response = PreparedOpenAiResponse {
@@ -253,12 +260,26 @@ pub struct PreparedOpenAiResponse {
 }
 
 impl PreparedOpenAiResponse {
+    /// Reuse the reviewed AV/F0 header and stream boundary for another fixed
+    /// provider policy. Provider-specific media admission remains its adapter's job.
+    pub(crate) fn from_route_redaction(
+        route: &ProxyRouteConfig,
+        redaction: RedactionSet,
+    ) -> Result<Self, CredentialBrokerError> {
+        Ok(Self {
+            allowed_headers: response_header_names(route)?,
+            max_body_bytes: route.max_response_bytes,
+            redaction,
+        })
+    }
+
     /// Filter and redact the upstream headers, then consume this policy into a
     /// bounded streaming body redactor.
     pub fn begin(
         self,
         upstream_headers: &HeaderMap,
     ) -> Result<(HeaderMap, OpenAiStreamingResponse), CredentialBrokerError> {
+        validate_response_encoding(upstream_headers)?;
         let mut headers = HeaderMap::new();
         for name in &self.allowed_headers {
             let values = upstream_headers.get_all(name).iter().collect::<Vec<_>>();
@@ -283,6 +304,30 @@ impl PreparedOpenAiResponse {
             },
         ))
     }
+}
+
+/// The broker redacts identity bytes; it does not decode content codings.
+/// Admit encoding before filtering headers or polling a provider body, so a
+/// removed Content-Encoding header cannot disguise opaque encoded bytes.
+pub(crate) fn validate_response_encoding(headers: &HeaderMap) -> Result<(), CredentialBrokerError> {
+    let mut values = headers.get_all(http::header::CONTENT_ENCODING).iter();
+    let Some(value) = values.next() else {
+        return Ok(());
+    };
+    if values.next().is_some() {
+        return Err(CredentialBrokerError::ResponseDenied);
+    }
+    let mut value = value.as_bytes();
+    while value.starts_with(b" ") || value.starts_with(b"\t") {
+        value = &value[1..];
+    }
+    while value.ends_with(b" ") || value.ends_with(b"\t") {
+        value = &value[..value.len() - 1];
+    }
+    if !value.eq_ignore_ascii_case(b"identity") {
+        return Err(CredentialBrokerError::ResponseDenied);
+    }
+    Ok(())
 }
 
 /// Bounded streaming response redactor for one prepared provider operation.
@@ -349,7 +394,7 @@ fn validate_lease(lease: &impl BrokerCredentialLease) -> Result<(), CredentialBr
     let permission = lease.permission();
     if metadata.provider.as_str() != PROVIDER_NAME
         || metadata.authentication_kind != CredentialAuthKind::ApiKey
-        || grant.capability_slot != CapabilitySlot::codex()
+        || !matches!(grant.capability_slot.as_str(), "codex" | "openai")
         || grant.credential_id != metadata.id
         || permission.operation.as_str() != OPERATION_NAME
         || permission.route.as_str() != ROUTE_NAME
@@ -512,6 +557,75 @@ fn chatgpt_codex_responses_route() -> ProxyRouteConfig {
 }
 
 #[cfg(test)]
+pub(crate) mod response_admission_test_cases {
+    use http::{HeaderMap, HeaderName, HeaderValue};
+
+    pub(crate) fn encoding_headers(values: &[&[u8]]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (index, value) in values.iter().enumerate() {
+            let name = if index % 2 == 0 {
+                "Content-Encoding"
+            } else {
+                "content-encoding"
+            };
+            headers.append(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    pub(crate) fn accepted_encodings() -> Vec<HeaderMap> {
+        [
+            vec![],
+            vec![b"identity".as_slice()],
+            vec![b"IDENTITY".as_slice()],
+            vec![b"Identity".as_slice()],
+            vec![b" \tidentity\t ".as_slice()],
+        ]
+        .iter()
+        .map(|values| encoding_headers(values))
+        .collect()
+    }
+
+    pub(crate) fn denied_encodings() -> Vec<HeaderMap> {
+        let mut cases = [
+            b"gzip".as_slice(),
+            b"br",
+            b"deflate",
+            b"zstd",
+            b"compress",
+            b"x-gzip",
+            b"*",
+            b"",
+            b" \t ",
+            b"identity, identity",
+            b"gzip, identity",
+            b"identity, gzip",
+            b"identity,",
+            b"\"identity\"",
+            b"identity;q=1",
+            b"ident ity",
+            b"ident\tity",
+            b"identity\xff",
+        ]
+        .iter()
+        .map(|value| encoding_headers(&[value]))
+        .collect::<Vec<_>>();
+        for values in [
+            [b"identity".as_slice(), b"identity".as_slice()],
+            [b"identity", b"gzip"],
+            [b"gzip", b"identity"],
+            [b"gzip", b"gzip"],
+        ] {
+            cases.push(encoding_headers(&values));
+        }
+        cases
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::{
         cell::Cell,
@@ -533,7 +647,39 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    use super::response_admission_test_cases::{accepted_encodings, denied_encodings};
     use super::*;
+
+    #[test]
+    fn explicit_openai_slot_accepts_api_key_but_never_codex_oauth() {
+        let api = crate::http_test_support::Lease::new(
+            "openai",
+            CredentialAuthKind::ApiKey,
+            "openai",
+            "responses",
+            "openai-api",
+        );
+        assert_eq!(validate_lease(&api), Ok(()));
+        let oauth = crate::http_test_support::Lease::new(
+            "openai",
+            CredentialAuthKind::OAuth,
+            "openai",
+            "responses",
+            "openai-api",
+        );
+        assert_eq!(
+            validate_oauth_lease(&oauth),
+            Err(CredentialBrokerError::UnsupportedLease)
+        );
+        let codex = crate::http_test_support::Lease::new(
+            "openai",
+            CredentialAuthKind::OAuth,
+            "codex",
+            "responses",
+            "openai-api",
+        );
+        assert_eq!(validate_oauth_lease(&codex), Ok(()));
+    }
     use crate::CanonicalCodexOAuthBundle;
 
     const SYNTHETIC_KEY: &str = "CW_TEST_OPENAI_VALUE_123";
@@ -1328,5 +1474,155 @@ mod tests {
             response.begin(&upstream_headers),
             Err(CredentialBrokerError::ResponseDenied)
         ));
+    }
+
+    fn response_admission_prepared(
+        kind: CredentialAuthKind,
+        token: &str,
+    ) -> (HeaderMap, PreparedOpenAiResponse) {
+        let validator = OpenAiApiKeyAdapter::new().unwrap();
+        let request = validator
+            .validate_request(
+                &Method::POST,
+                "/responses",
+                None,
+                request_headers(),
+                br#"{"input":"hello"}"#.to_vec(),
+            )
+            .unwrap();
+        let prepared = match kind {
+            CredentialAuthKind::ApiKey => validator
+                .prepare_validated(lease("openai", kind, token.as_bytes()), request)
+                .unwrap(),
+            CredentialAuthKind::OAuth => {
+                let bundle = oauth_bundle(false);
+                let mut material: serde_json::Value =
+                    serde_json::from_slice(bundle.as_bytes()).unwrap();
+                material["access_token"] = json!(token);
+                let adapter = OpenAiChatGptOAuthAdapter::new().unwrap();
+                let credential = adapter
+                    .credential_from_lease(lease(
+                        "openai",
+                        kind,
+                        &serde_json::to_vec(&material).unwrap(),
+                    ))
+                    .unwrap();
+                adapter.prepare_credential(credential, request).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        let (_, _, headers, _, response) = prepared.into_parts();
+        (headers, response)
+    }
+
+    fn assert_full_authorization_reflections(kind: CredentialAuthKind, in_headers: bool) {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::{
+            STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
+        };
+
+        for suffix in ["", "a", "ab"] {
+            let token = format!("cw-f0-~~~~~~{suffix}");
+            for engine in [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD] {
+                let (outbound_headers, response) = response_admission_prepared(kind, &token);
+                let authorization = outbound_headers.get(header::AUTHORIZATION).unwrap();
+                assert!(authorization.is_sensitive());
+                let encoded = engine.encode(authorization.as_bytes());
+                // This regression must exercise a full-header encoding, not
+                // accidentally match the existing raw-token encoding pattern.
+                assert!(!encoded.contains(&engine.encode(token.as_bytes())));
+                let mut upstream_headers = HeaderMap::new();
+                if in_headers {
+                    upstream_headers.insert(
+                        "x-request-id",
+                        HeaderValue::from_str(&format!("before:{encoded}:after")).unwrap(),
+                    );
+                }
+                let (headers, mut response) = response.begin(&upstream_headers).unwrap();
+                if in_headers {
+                    assert_eq!(
+                        headers.get("x-request-id").unwrap(),
+                        "before:[REDACTED]:after"
+                    );
+                    continue;
+                }
+
+                let mut output = Vec::new();
+                let mut expected = Vec::new();
+                // Reuse one prepared response, separating each split case
+                // with benign framing, rather than reopening an authority
+                // for every possible chunk boundary.
+                for split in 0..=encoded.len() {
+                    output.extend(response.push(b"before:").unwrap());
+                    output.extend(response.push(&encoded.as_bytes()[..split]).unwrap());
+                    output.extend(response.push(b"").unwrap());
+                    output.extend(response.push(&encoded.as_bytes()[split..]).unwrap());
+                    output.extend(response.push(b":after\n").unwrap());
+                    expected.extend_from_slice(b"before:[REDACTED]:after\n");
+                }
+                for byte in encoded.as_bytes() {
+                    output.extend(response.push(std::slice::from_ref(byte)).unwrap());
+                }
+                expected.extend_from_slice(b"[REDACTED]");
+                output.extend(response.finish().unwrap());
+                assert_eq!(output, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn response_admission_oauth_redacts_full_authorization_header_encodings() {
+        assert_full_authorization_reflections(CredentialAuthKind::OAuth, true);
+    }
+
+    #[test]
+    fn response_admission_oauth_redacts_full_authorization_at_every_chunk_boundary() {
+        assert_full_authorization_reflections(CredentialAuthKind::OAuth, false);
+    }
+
+    #[test]
+    fn response_admission_api_key_retains_full_authorization_redaction() {
+        assert_full_authorization_reflections(CredentialAuthKind::ApiKey, true);
+        assert_full_authorization_reflections(CredentialAuthKind::ApiKey, false);
+    }
+
+    #[test]
+    fn response_admission_rejects_nonidentity_or_ambiguous_encoding_before_headers() {
+        for kind in [CredentialAuthKind::ApiKey, CredentialAuthKind::OAuth] {
+            for mut upstream_headers in denied_encodings() {
+                upstream_headers.insert("x-request-id", HeaderValue::from_static("benign"));
+                let (_, response) = response_admission_prepared(kind, SYNTHETIC_KEY);
+                assert!(
+                    matches!(
+                        response.begin(&upstream_headers),
+                        Err(CredentialBrokerError::ResponseDenied)
+                    ),
+                    "{kind:?}: {upstream_headers:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn response_admission_accepts_absent_or_single_identity_encoding() {
+        for kind in [CredentialAuthKind::ApiKey, CredentialAuthKind::OAuth] {
+            for mut upstream_headers in accepted_encodings() {
+                upstream_headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                let (_, response) = response_admission_prepared(kind, SYNTHETIC_KEY);
+                let (headers, mut response) = response.begin(&upstream_headers).unwrap();
+                assert!(!headers.contains_key(header::CONTENT_ENCODING));
+                assert_eq!(
+                    headers.get(header::CONTENT_TYPE).unwrap(),
+                    "text/event-stream"
+                );
+                let mut output = response.push(b"before:CW_TEST_OPENAI_").unwrap();
+                output.extend(response.push(b"VALUE_123:after").unwrap());
+                output.extend(response.finish().unwrap());
+                assert_eq!(output, b"before:[REDACTED]:after");
+            }
+        }
     }
 }

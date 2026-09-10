@@ -204,7 +204,7 @@ impl RunningService {
         let stopped = tokio::time::timeout(TIMEOUT, self.server)
             .await
             .context("generated test listener did not stop")?;
-        drained?;
+        drained??;
         stopped??;
         Ok(())
     }
@@ -217,6 +217,8 @@ fn request_frame() -> (String, v1::CredentialBridgeGuestMessage) {
         v1::CredentialBridgeGuestMessage {
             payload: Some(v1::credential_bridge_guest_message::Payload::Request(
                 v1::CredentialBridgeRequest {
+                    capability_slot: "codex".into(),
+                    route: "openai-api".into(),
                     request_id: id,
                     method: "POST".into(),
                     path: "/responses".into(),
@@ -267,7 +269,7 @@ async fn successful_response(
     .context("fresh generated response did not complete")?
 }
 
-async fn rotation_drain(shutdown: bool) -> Result<()> {
+async fn rotation_drain(shutdown: bool, direct: bool) -> Result<()> {
     // TEST_DATABASE_URL is required by this fixture: explicitly selecting an
     // ignored test cannot silently skip database acceptance.
     let fixture = DatabaseFixture::create_for_bridge().await?;
@@ -276,13 +278,29 @@ async fn rotation_drain(shutdown: bool) -> Result<()> {
     let result = async {
         listeners.push(RunningService::start(&fixture, upstream.clone()).await?);
         let service = listeners[0].service.clone();
-        let (input, mut output) = listeners[0].open(&fixture).await?;
+        let (input, mut output): (_, BoxStream<'static, Result<v1::CredentialBridgeHostMessage, Status>>) = if direct {
+            let (input, receiver) = mpsc::channel(4);
+            input.send(v1::CredentialBridgeGuestMessage {
+                payload: Some(v1::credential_bridge_guest_message::Payload::Ready(v1::CredentialBridgeReady {
+                    protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                    environment_id: fixture.context.environment_id.to_string(),
+                    environment_generation: fixture.context.environment_generation,
+                })),
+            }).await?;
+            let output = tokio::time::timeout(TIMEOUT, service.serve_authenticated(async {
+                Ok((fixture.authority.clone(), ReceiverStream::new(receiver).map(Ok)))
+            })).await.context("typed database bridge admission timed out")??;
+            (input, output.boxed())
+        } else {
+            let (input, output) = listeners[0].open(&fixture).await?;
+            (input, output.boxed())
+        };
         input.send(request_frame().1).await?;
         tokio::time::timeout(TIMEOUT, async {
             tokio::select! {
                 _ = upstream.accepted.notified() => Ok(()),
-                frame = output.message() => {
-                    match frame.ok().flatten().and_then(|frame| frame.payload) {
+                frame = output.next() => {
+                    match frame.and_then(|frame| frame.ok()).and_then(|frame| frame.payload) {
                         Some(v1::credential_bridge_host_message::Payload::ResponseFailure(failure)) => {
                             anyhow::bail!("synthetic request denied before provider acceptance (reason={})", failure.reason)
                         }
@@ -319,10 +337,16 @@ async fn rotation_drain(shutdown: bool) -> Result<()> {
             Some(input)
         } else {
             drop(retained_output.take());
-            // A response owner must release both halves. A remote tonic
-            // response-half drop alone is not an HTTP/2 cancellation signal.
-            drop(input);
-            None
+            if direct {
+                // The direct receiver's drop IS observable without input EOF.
+                // Retain the input while proving the same publication drain.
+                Some(input)
+            } else {
+                // A remote tonic response-half drop alone is not an HTTP/2
+                // cancellation signal: that owner must release both halves.
+                drop(input);
+                None
+            }
         };
 
         upstream.release.notify_one();
@@ -375,7 +399,7 @@ async fn rotation_drain(shutdown: bool) -> Result<()> {
         if shutdown {
             tokio::time::timeout(TIMEOUT, &mut shutdown_wait)
                 .await
-                .context("shutdown did not acknowledge completed publication")?;
+                .context("shutdown did not acknowledge completed publication")??;
         }
         drop(shutdown_wait);
         drop((retained_input, retained_output));
@@ -453,11 +477,17 @@ async fn rotation_drain(shutdown: bool) -> Result<()> {
 #[tokio::test]
 #[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
 async fn generated_service_rpc_disconnect_drains_durable_oauth_rotation() -> Result<()> {
-    rotation_drain(false).await
+    rotation_drain(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
 async fn generated_service_shutdown_drains_durable_oauth_rotation() -> Result<()> {
-    rotation_drain(true).await
+    rotation_drain(true, false).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated synthetic PostgreSQL via TEST_DATABASE_URL"]
+async fn trusted_receiver_drop_drains_durable_oauth_rotation_with_input_retained() -> Result<()> {
+    rotation_drain(false, true).await
 }

@@ -40,6 +40,7 @@ let ownerId = "";
 let orgId = "";
 let presetId = "";
 let environmentId = "";
+let secretProjectId = "";
 
 function watchDisallowedBrowserCalls(page: Page) {
   const calls: string[] = [];
@@ -323,16 +324,15 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
     await expect(page.getByLabel("Container port")).toHaveValue("3000");
     await expect(page.getByLabel("Port label")).toHaveValue("web");
-    await expect(page.getByRole("heading", { name: "Secrets", exact: true })).toBeVisible();
-    await expect(page.getByText(
-      "Saved secrets cannot be attached to a Sandbox until protected access is available.",
-      { exact: true },
-    )).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Application secrets", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Provider credentials", exact: true })).toBeVisible();
+    await expect(page.getByLabel("Personal secrets", { exact: false })).toBeEnabled();
+    await expect(page.getByLabel("Organization secrets", { exact: false })).toBeEnabled();
+    await expect(page.getByLabel("Secret project", { exact: true })).toBeEnabled();
+    await expect(page.getByLabel("Credential profile", { exact: true })).toBeEnabled();
     await expect(page.locator([
-      'input[name="secret_project"]',
-      'input[name="include_org_secrets"]',
-      'input[name="include_user_secrets"]',
       'input[name^="agent_secret_"]',
+      'input[name^="exposure"]',
     ].join(","))).toHaveCount(0);
     await expect(page.getByLabel("Install Command")).toHaveValue("bun install");
     await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
@@ -409,10 +409,30 @@ test.describe.serial("server-rendered environments", () => {
     }));
     expect(dimensions.clientWidth).toBeGreaterThan(0);
     expect(dimensions.scrollWidth - dimensions.clientWidth).toBeLessThanOrEqual(1);
-    await expect(page.getByText(
-      "Saved secrets cannot be attached to a Sandbox until protected access is available.",
-      { exact: true },
-    )).toBeVisible();
+    await expect(page.getByLabel("Secret project", { exact: true })).toBeEnabled();
+  });
+
+  test("selects a platform secret project and preserves it after a form error", async ({ page, isMobile }) => {
+    test.skip(!!isMobile, "desktop source-selection contract");
+    // This browser proof exercises source metadata. Actual values are covered by
+    // the native and Dev application-secret journey, without putting values in traces.
+    await page.goto(`/${slug}/secrets/`);
+    await page.getByText("New Project", { exact: true }).click();
+    await page.getByLabel("Project name").fill(`source-${runId}`);
+    await page.getByRole("button", { name: "Create Project" }).click();
+    await expect(page.getByRole("status")).toContainText("Secret project created");
+    const [project] = await sql`SELECT id FROM secret_projects WHERE org_id = ${orgId} AND name = ${`source-${runId}`}`;
+    expect(project?.id).toBeTruthy();
+    secretProjectId = project.id;
+    await openConfiguredImageForm(page);
+    await page.getByLabel("Secret project", { exact: true }).selectOption(secretProjectId);
+    await page.getByLabel("TTL").fill("invalid-ttl");
+    const response = page.waitForResponse((candidate) => candidate.url().endsWith(`/${slug}/_actions/sandboxes/create`) && candidate.request().method() === "POST");
+    await page.getByRole("button", { name: "Create Sandbox" }).click();
+    expect((await response).status()).toBe(422);
+    await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
+    await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
+    await expect(page.locator('[name="confirm_personal_credentials"]')).not.toBeChecked();
   });
 
   test("creates, runs, exposes a port, stops, starts, and destroys through real Kind", async ({ page, isMobile }) => {
@@ -440,6 +460,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Memory", { exact: true })).toHaveValue("2048");
     await expect(page.getByLabel("Disk", { exact: true })).toHaveValue("10");
     await page.getByLabel("Name").fill(environmentName);
+    await page.getByLabel("Secret project", { exact: true }).selectOption(secretProjectId);
     await page.getByRole("button", { name: "Create Sandbox" }).click();
     await expect(page).toHaveURL(
       `${ssrUrl}/${slug}/?message=environment-created`,
@@ -507,7 +528,7 @@ test.describe.serial("server-rendered environments", () => {
       application_ports: [{ port: 3000, label: "web", access: "creator" }],
       resources: { cpu_millicores: 1000, memory_mib: 2048, disk_gib: 10 },
     });
-    expect(created.project_spec).not.toHaveProperty("secrets");
+    expect(created.project_spec.secrets).toMatchObject({ project: `platform:id:${secretProjectId}` });
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await page.reload();
     let row = page.locator("tr", { hasText: environmentName }).first();
@@ -611,6 +632,22 @@ test.describe.serial("server-rendered environments", () => {
     await page.reload();
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("stopped");
+
+    await openRowActions(row);
+    await row.getByText("Secrets and credentials", { exact: true }).click();
+    await row.getByRole("link", { name: "Edit secrets and credentials", exact: true }).click();
+    const sourceEditor = page.getByRole("dialog", { name: "Edit Sandbox sources", exact: true });
+    await expect(sourceEditor).toBeVisible();
+    await expect(sourceEditor.getByLabel("Secret project", { exact: true })).toHaveValue(secretProjectId);
+    await expect(sourceEditor.locator('[name="expected_secret_project"]')).toHaveValue(secretProjectId);
+    await expect(sourceEditor.locator('[name="confirm_personal_secrets"]')).not.toBeChecked();
+    await expect(sourceEditor.locator('[name="confirm_personal_credentials"]')).not.toBeChecked();
+    await sourceEditor.getByLabel("Secret project", { exact: true }).selectOption("");
+    await sourceEditor.getByRole("button", { name: "Save sources", exact: true }).click();
+    await expect(page.getByRole("status")).toContainText("Sandbox sources saved. The Sandbox remains stopped.");
+    const [cleared] = await sql`SELECT project_spec, state FROM environments WHERE id = ${environmentId}`;
+    expect(cleared.project_spec).not.toHaveProperty("secrets");
+    expect(cleared.state).toBe("stopped");
 
     await openRowActions(row);
     await row.getByRole("button", { name: "Start" }).click();

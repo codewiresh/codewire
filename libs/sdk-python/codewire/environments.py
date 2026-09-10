@@ -9,8 +9,12 @@ from codewire._convert import (
     assert_environment_converter_coverage,
     environment_resize_operation_to_dict,
     environment_resize_plan_to_dict,
+    environment_source_selection_from_dict,
+    environment_sources_update_to_dict,
     environment_to_dict,
+    explicit_bool,
     port_to_dict,
+    positive_uint64,
     project_spec_from_dict,
 )
 from codewire.environment import Environment
@@ -29,6 +33,7 @@ from codewire.v1.environment_pb2 import (
     ResizeEnvironmentRequest,
     StartEnvironmentRequest,
     StopEnvironmentRequest,
+    UpdateEnvironmentSourcesRequest,
     IsolationTier,
 )
 from codewire.v1.port_connect import PortServiceClientSync
@@ -79,6 +84,9 @@ class Environments:
         name: str | None = None,
         ttl_seconds: int | None = None,
         isolation_tier: str | None = None,
+        expected_profile_revision: int | None = None,
+        confirm_personal_credentials: bool = False,
+        confirm_personal_secrets: bool = False,
         wait: bool = False,
         wait_timeout: float = 300,
     ) -> Environment:
@@ -87,7 +95,17 @@ class Environments:
         request = CreateEnvironmentRequest(
             org_id=self._context.resolve_org_id(),
             isolation_tier=_isolation_tier(isolation_tier),
+            confirm_personal_credentials=explicit_bool(
+                confirm_personal_credentials, "confirm_personal_credentials"
+            ),
+            confirm_personal_secrets=explicit_bool(
+                confirm_personal_secrets, "confirm_personal_secrets"
+            ),
         )
+        if expected_profile_revision is not None:
+            request.expected_profile_revision = positive_uint64(
+                expected_profile_revision, "expected profile revision"
+            )
         if preset_id is not None:
             request.preset_id = preset_id
         if name is not None:
@@ -95,6 +113,8 @@ class Environments:
         if ttl_seconds is not None:
             request.ttl_seconds = ttl_seconds
         request.project_spec.CopyFrom(project_spec_from_dict(project_spec))
+        if request.project_spec.HasField("credentials") != request.HasField("expected_profile_revision"):
+            raise ValueError("codewire: credential profile selection requires its exact revision")
 
         response = self._context.unary(self._client.create_environment, request)
         if not response.HasField("environment"):
@@ -103,6 +123,43 @@ class Environments:
         if wait:
             environment.wait_ready(timeout=wait_timeout)
         return environment
+
+    def update_sources(
+        self,
+        env_id: str,
+        *,
+        expected_operation_generation: int,
+        expected: dict[str, Any],
+        replacement: dict[str, Any],
+        allow_restart: bool = False,
+        confirm_personal_credentials: bool = False,
+        confirm_personal_secrets: bool = False,
+    ) -> dict[str, Any]:
+        """Replace exactly the caller-observed selection; never fetch or retry CAS.
+
+        An empty replacement clears sources. Restart and personal-source consent
+        default to denied. The returned outcome is not a readiness assertion.
+        """
+        request = UpdateEnvironmentSourcesRequest(
+            org_id=self._context.resolve_org_id(),
+            environment_id=env_id,
+            expected_operation_generation=positive_uint64(
+                expected_operation_generation, "expected operation generation"
+            ),
+            expected=environment_source_selection_from_dict(expected),
+            replacement=environment_source_selection_from_dict(replacement),
+            allow_restart=explicit_bool(allow_restart, "allow_restart"),
+            confirm_personal_credentials=explicit_bool(
+                confirm_personal_credentials, "confirm_personal_credentials"
+            ),
+            confirm_personal_secrets=explicit_bool(
+                confirm_personal_secrets, "confirm_personal_secrets"
+            ),
+        )
+        response = self._context.unary(self._client.update_environment_sources, request)
+        if response.environment_id != env_id:
+            raise RuntimeError("source update response changed environment identity")
+        return environment_sources_update_to_dict(response)
 
     def list(
         self, *, type: str | None = None, state: str | None = None

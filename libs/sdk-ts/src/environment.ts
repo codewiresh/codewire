@@ -2,6 +2,7 @@ import { Files } from "./files.js";
 import { EnvironmentResizeDisruptionPolicy } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import {
   fromProtoEnvironment,
+  fromProtoEnvironmentSourcesUpdate,
   fromProtoEnvironmentResizeOperation,
   fromProtoEnvironmentResizePlan,
   fromProtoEnvironmentPort,
@@ -9,6 +10,7 @@ import {
   pollIntervalMs,
   toProtoCreatePortRequest,
   toProtoExecRequest,
+  toProtoUpdateEnvironmentSourcesRequest,
 } from "./convert.js";
 import type { CodewireClients } from "./transport.js";
 import {
@@ -20,10 +22,13 @@ import {
   type EnvironmentResizeOperation,
   type EnvironmentResizePlan,
   type EnvironmentResources,
+  type EnvironmentSourceSelection,
+  type EnvironmentSourcesUpdate,
   type ExecRequest,
   type ExecResult,
   type IsolationTier,
   type ResizeEnvironmentRequest,
+  type UpdateEnvironmentSourcesRequest,
 } from "./types.js";
 
 export class Environment implements EnvironmentData {
@@ -59,6 +64,8 @@ export class Environment implements EnvironmentData {
   readonly destroyed_at: string | undefined;
   readonly ports: EnvironmentPort[] | undefined;
   readonly preset_name: string | undefined;
+  readonly operation_generation: bigint;
+  readonly source_selection: EnvironmentSourceSelection | undefined;
   readonly files: Files;
 
   constructor(
@@ -100,6 +107,8 @@ export class Environment implements EnvironmentData {
     this.destroyed_at = data.destroyed_at ?? undefined;
     this.ports = data.ports;
     this.preset_name = data.preset_name ?? undefined;
+    this.operation_generation = data.operation_generation;
+    this.source_selection = data.source_selection;
     this.files = new Files(
       clients.files,
       clients.fileUploads,
@@ -140,6 +149,24 @@ export class Environment implements EnvironmentData {
         orgId: this.orgId,
         environmentId: this.id,
       });
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Replace only source selection under the caller's exact concurrency fence. */
+  async updateSources(
+    request: UpdateEnvironmentSourcesRequest,
+  ): Promise<EnvironmentSourcesUpdate> {
+    try {
+      return fromProtoEnvironmentSourcesUpdate(
+        await this.clients.environments.updateEnvironmentSources(
+          toProtoUpdateEnvironmentSourcesRequest(this.orgId, this.id, request),
+        ),
+        this.id,
+        request.expected_operation_generation,
+        request.replacement,
+      );
     } catch (error) {
       throw mapConnectError(error);
     }

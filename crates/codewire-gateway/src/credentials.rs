@@ -14,9 +14,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::{Body, BodyDataStream, to_bytes};
-use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Uri, Version};
+#[cfg(test)]
+use axum::http::Method;
+use axum::http::{HeaderMap, Request, Response, StatusCode, Uri, Version};
 use bytes::Bytes;
-use codewire_credential_bridge::CredentialBridge;
+use codewire_credential_bridge::{CredentialBridge, classify_http_request};
 use codewire_gateway_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
 use codewire_gateway_proto::{
     CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_BYTES,
@@ -353,12 +355,6 @@ fn prepare_request(
     mut request: Request<Body>,
     authority: &str,
 ) -> Result<(Request<Body>, Zeroizing<Vec<u8>>), StatusCode> {
-    if request.method() != Method::POST
-        || request.uri().path() != "/v1/responses"
-        || request.uri().query().is_some()
-    {
-        return Err(StatusCode::FORBIDDEN);
-    }
     match request.version() {
         Version::HTTP_2 => {
             if request.uri().scheme_str() != Some("https")
@@ -415,7 +411,15 @@ fn prepare_request(
     }
     // HTTP/2 puts :scheme and :authority in Uri. Normalize only after exact
     // ingress validation; the shared bridge retains its anti-proxy contract.
-    *request.uri_mut() = Uri::from_static("/v1/responses");
+    let origin = request
+        .uri()
+        .path_and_query()
+        .ok_or(StatusCode::FORBIDDEN)?
+        .as_str()
+        .parse::<Uri>()
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    *request.uri_mut() = origin;
+    classify_http_request(request.method(), request.uri(), request.headers())?;
     Ok((request, workspace))
 }
 
@@ -446,7 +450,7 @@ fn canonical_bearer(bytes: &[u8]) -> bool {
     bytes.strip_prefix(b"Bearer ").is_some_and(canonical_token)
 }
 
-fn credential_metadata(
+pub(crate) fn credential_metadata(
     gateway: &str,
     workspace: &[u8],
 ) -> Result<tonic::metadata::MetadataMap, StatusCode> {
@@ -462,7 +466,9 @@ fn credential_metadata(
     Ok(metadata)
 }
 
-async fn read_gateway_token(path: &std::path::Path) -> Result<Zeroizing<String>, StatusCode> {
+pub(crate) async fn read_gateway_token(
+    path: &std::path::Path,
+) -> Result<Zeroizing<String>, StatusCode> {
     // Kubernetes atomically rotates a projected volume using symlinks. The
     // configured path is trusted; every fresh RPC rereads its current target.
     let mut options = tokio::fs::OpenOptions::new();
