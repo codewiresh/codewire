@@ -9,6 +9,9 @@ description = "Opaque fail-closed protected credential storage for Codewire auth
 
 [features]
 default = []
+# Opt-in macOS Keychain backend. Consumers that need only the protected-value
+# types must not acquire a CoreFoundation SDK link dependency.
+apple-keychain = ["dep:keyring"]
 # Pure, bounded SSH credential preparation. This does not enable an OS-store
 # backend, platform services, SSH processes, or a runnable credential grant.
 ssh-material = ["dep:ssh-key", "dep:rsa", "dep:rand"]
@@ -60,7 +63,7 @@ futures-lite = { workspace = true }
 secret-service = { workspace = true, features = ["rt-async-io-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
+keyring = { workspace = true, features = ["apple-native"], optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }

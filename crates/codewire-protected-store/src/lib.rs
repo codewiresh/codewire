@@ -235,7 +235,7 @@ impl ProtectedStore for OsProtectedStore {
         {
             linux_get(id)
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "apple-keychain"))]
         {
             let entry = keyring_entry(id)?;
             match entry.get_secret() {
@@ -244,7 +244,10 @@ impl ProtectedStore for OsProtectedStore {
                 Err(error) => Err(map_keyring_error(error)),
             }
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            all(target_os = "macos", feature = "apple-keychain")
+        )))]
         {
             let _ = id;
             Err(ProtectedStoreError::UnsupportedPlatform)
@@ -260,13 +263,16 @@ impl ProtectedStore for OsProtectedStore {
         {
             linux_put(id, value)
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "apple-keychain"))]
         {
             keyring_entry(id)?
                 .set_secret(value.expose_secret())
                 .map_err(map_keyring_error)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            all(target_os = "macos", feature = "apple-keychain")
+        )))]
         {
             let _ = (id, value);
             Err(ProtectedStoreError::UnsupportedPlatform)
@@ -278,14 +284,17 @@ impl ProtectedStore for OsProtectedStore {
         {
             linux_delete(id)
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "apple-keychain"))]
         {
             match keyring_entry(id)?.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                 Err(error) => Err(map_keyring_error(error)),
             }
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            all(target_os = "macos", feature = "apple-keychain")
+        )))]
         {
             let _ = id;
             Err(ProtectedStoreError::UnsupportedPlatform)
@@ -396,6 +405,11 @@ async fn linux_get_with_service(
     protected_value_from_store(value).map(Some)
 }
 
+#[cfg(any(
+    test,
+    target_os = "linux",
+    all(target_os = "macos", feature = "apple-keychain")
+))]
 fn protected_value_from_store(value: Vec<u8>) -> Result<ProtectedValue, ProtectedStoreError> {
     ProtectedValue::new(value).map_err(|_| ProtectedStoreError::CorruptEntry)
 }
@@ -566,13 +580,13 @@ fn map_linux_secret_service_error(error: secret_service::Error) -> ProtectedStor
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "apple-keychain"))]
 fn keyring_entry(id: &ProtectedEntryId) -> Result<keyring::Entry, ProtectedStoreError> {
     keyring::Entry::new(CODEWIRE_CREDENTIAL_SERVICE, id.expose_reference())
         .map_err(map_keyring_error)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "apple-keychain"))]
 fn map_keyring_error(error: keyring::Error) -> ProtectedStoreError {
     match error {
         keyring::Error::NoStorageAccess(_) => ProtectedStoreError::AccessDenied,
@@ -728,7 +742,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "apple-keychain"))]
     #[test]
     fn keyring_errors_are_flattened_without_sources_or_payloads() {
         let secret = b"synthetic-secret-that-must-not-escape".to_vec();
@@ -743,6 +757,27 @@ mod tests {
                 "synthetic-secret-that-must-not-escape".into(),
             )),
             ProtectedStoreError::InvalidEntryId
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "apple-keychain")))]
+    #[test]
+    fn os_store_fails_closed_without_keychain_feature() {
+        let store = OsProtectedStore;
+        let id = entry("credentials/synthetic/generations/1");
+        let value = ProtectedValue::new(b"synthetic-value".to_vec()).unwrap();
+
+        assert!(matches!(
+            store.get(&id),
+            Err(ProtectedStoreError::UnsupportedPlatform)
+        ));
+        assert_eq!(
+            store.put(&id, &value),
+            Err(ProtectedStoreError::UnsupportedPlatform)
+        );
+        assert_eq!(
+            store.delete(&id),
+            Err(ProtectedStoreError::UnsupportedPlatform)
         );
     }
 
