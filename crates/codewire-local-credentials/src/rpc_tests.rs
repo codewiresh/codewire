@@ -1580,7 +1580,6 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
     })
     .await
     .unwrap();
-    assert_eq!(child_pids.lock().unwrap().len(), 2);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), material_rx.recv())
             .await
@@ -1588,6 +1587,10 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
             .unwrap(),
         FIRST_MATERIAL
     );
+    // A launch is recorded before spawn finishes. The lease reply proves the
+    // replacement child and its authority channel are ready before counting it.
+    assert_eq!(launches.lock().unwrap().len(), 2);
+    assert_eq!(child_pids.lock().unwrap().len(), 2);
     let audit = owner
         .list_recent_broker_lease_audit_events(8)
         .await
