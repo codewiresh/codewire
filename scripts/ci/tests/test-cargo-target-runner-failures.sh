@@ -135,6 +135,8 @@ if record['tool'] == 'cargo' and sys.argv[1] == os.environ.get('COMPOSITION_FAIL
 tool.chmod(0o755)
 for helper in ('scripts/ci/tests/test-openbao-only-secret-authority.sh',
                'scripts/ci/tests/test-admin-proto-boundary.sh',
+               'crates/codewire-local-vmm/macos-vz-runner/Tests/test_ipc_system.sh',
+               'crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py',
                'scripts/ci/verify/build-local-vmm-initramfs.sh',
                'scripts/ci/release/package-codewire-desktop.sh'):
     destination = fixture / helper
@@ -196,6 +198,8 @@ records, _ = run(special)
 assert generic(records) == expected('-p', 'codewire-alpha') + expected('-p', 'codewire-local-vmm', '-p', 'codewire-vmm-guest-probe')
 assert sum(r['tool'] == 'package-codewire-desktop.sh' for r in records) == 1
 assert sum(r['tool'] == 'build-local-vmm-initramfs.sh' for r in records) == 1
+assert sum(r['tool'] == 'test_ipc_system.sh' for r in records) == 1
+assert sum(r['tool'] == 'test_static_contract.py' for r in records) == 1
 assert sum('--target' in r['args'] and 'aarch64-apple-darwin' in r['args'] for r in records) == 1
 
 for command in ('fmt', 'build', 'clippy', 'test'):
