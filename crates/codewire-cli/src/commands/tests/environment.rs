@@ -479,6 +479,7 @@ fn platform_create_rejects_native_only_options() {
         panic!("expected native local environment create");
     };
     assert_eq!(args.profile.as_deref(), Some("user/work"));
+    #[cfg(target_os = "linux")]
     assert!(native_create_selected(&args).unwrap());
 
     let cli = Cli::try_parse_from([

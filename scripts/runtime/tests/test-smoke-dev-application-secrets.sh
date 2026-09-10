@@ -5,7 +5,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck disable=SC1091 # The tested script is sourced without its main entrypoint.
 source "$REPO_ROOT/scripts/runtime/dev/smoke-dev-commodity.sh"
-APP_TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cw-dev-app-fixtures.XXXXXXXX")"
+mkdir -p "$REPO_ROOT/.tmp"
+APP_TEST_ROOT="$(mktemp -d "$REPO_ROOT/.tmp/cw-dev-app-fixtures.XXXXXXXX")"
 APP_TEST_OWNER="$BASHPID"
 trap 'if [[ "$BASHPID" == "$APP_TEST_OWNER" ]]; then rm -rf -- "$APP_TEST_ROOT"; fi' EXIT
 APP_TEST_COUNT=0

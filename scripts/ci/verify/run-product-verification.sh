@@ -195,6 +195,7 @@ run_policy_core() {
   scripts/ci/tests/test-retired-local-sdk-contract.sh
   scripts/ci/tests/test-integration-postgres.sh
   python3 scripts/ci/tests/test-repo-checks-modules.py
+  python3 scripts/dev/test-macos-cli.py
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py permanent-raw-surface --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source

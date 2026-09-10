@@ -3,12 +3,15 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
-scratch="$(mktemp -d "${TMPDIR:-/tmp}/codewire-ssh-image-verifier.XXXXXX")"
+mkdir -p "$ROOT/.tmp"
+scratch="$(mktemp -d "$ROOT/.tmp/codewire-ssh-image-verifier.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 mkdir "$scratch/bin" "$scratch/config"
 cat >"$scratch/bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${1:-}" != fixture-probe ]] || exit 0
+touch "$SSH_FIXTURE_STATE/docker-invoked"
 image="sha256:$(printf '%064d' 1)"
 id="$(printf '%064d' 2)"
 case "$1" in
@@ -46,6 +49,9 @@ case "$1" in
 esac
 SH
 chmod 755 "$scratch/bin/docker"
+# Fail before any PATH lookup could fall through to a real Docker CLI when the
+# fixture directory is unexpectedly mounted noexec.
+"$scratch/bin/docker" fixture-probe
 
 for mode in response-loss cleanup-failure wrong-owner success; do
   state="$scratch/$mode"
@@ -55,6 +61,10 @@ for mode in response-loss cleanup-failure wrong-owner success; do
     SSH_FIXTURE_MODE="$mode" SSH_FIXTURE_STATE="$state" \
     "$ROOT/scripts/ci/verify/verify-service-ssh-image.sh" synthetic-image \
     >"$state/output" 2>&1 || status=$?
+  [[ -e "$state/docker-invoked" ]] || {
+    echo 'SSH verifier fixture did not execute its isolated Docker stub' >&2
+    exit 1
+  }
   if [[ "$mode" == success ]]; then
     [[ "$status" -eq 0 && ! -e "$state/created" ]]
     grep -Fq 'services SSH packaged tools/helper passed:' "$state/output"
