@@ -3,7 +3,10 @@
 use anyhow::Context as _;
 use codewire_client::{self as rpc, CodewireClient};
 
-use super::credentials::{ParsedCredentialSelector, parse_credential_selector};
+use super::credential_input::{
+    CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, parse_credential_selector,
+    prompt_credential_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
+};
 use super::*;
 
 pub(super) async fn handle(
@@ -12,7 +15,7 @@ pub(super) async fn handle(
 ) -> anyhow::Result<()> {
     match command {
         CredentialsCommand::Generate(args) => {
-            let name = super::credentials::ssh::validate_generation(&args)?;
+            let name = validate_ssh_generation(&args)?;
             let response = client.generate_ssh_credential(rpc::GenerateSshCredentialRequest {
                 name, expires_at_unix: args.expires_at, ..Default::default()
             }).await.context("generate platform SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
@@ -51,10 +54,7 @@ pub(super) async fn handle(
             let enrollment = async {
                 match args.provider {
                     CredentialConnectProviderArg::Codex => {
-                        eprintln!(
-                            "{}",
-                            super::credentials::CODEX_DEVICE_AUTHORIZATION_GUIDANCE
-                        );
+                        eprintln!("{}", CODEX_DEVICE_AUTHORIZATION_GUIDANCE);
                         client
                             .enroll_codex(
                                 rpc::EnrollCodexRequest {
@@ -182,14 +182,14 @@ pub(super) async fn handle(
         }
         CredentialsCommand::Add(args) => {
             if args.provider == "ssh" {
-                let name = super::credentials::ssh::validate_import(&args)?;
+                let name = validate_ssh_import(&args)?;
                 // Confirm owner-scoped access and name availability before
                 // reading the explicitly selected private file or passphrase.
                 anyhow::ensure!(
                     find_named(client, &name).await?.is_none(),
                     "credential name already exists"
                 );
-                let mut input = super::credentials::ssh::read_import(&args)?;
+                let mut input = read_ssh_import(&args)?;
                 let response = client.add_ssh_credential(rpc::AddSshCredentialRequest {
                     name,
                     private_key: std::mem::take(&mut *input.private_key),
@@ -206,7 +206,7 @@ pub(super) async fn handle(
                 );
             }
             validate_key_arguments(&args)?;
-            let material = super::credentials::prompt_credential_material()?;
+            let material = prompt_credential_material()?;
             let response = client.add_api_key_credential(rpc::AddApiKeyCredentialRequest {
                 provider: args.provider,
                 name: args.name.trim().to_owned(),
@@ -243,7 +243,7 @@ pub(super) async fn handle(
             let current = resolve(client, &args.credential).await?;
             let expected = rotation_metadata(&current, args.expires_at)?;
             eprintln!("{}", rotation_notice(&current, args.expires_at));
-            let material = super::credentials::prompt_credential_material()?;
+            let material = prompt_credential_material()?;
             let response = client.rotate_api_key_credential(rpc::RotateApiKeyCredentialRequest {
                 credential_id: current.id,
                 expected_revocation_generation: current.revocation_generation,
