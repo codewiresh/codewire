@@ -428,6 +428,7 @@ pub(crate) struct CredentialConnectArgs {
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum CredentialConnectProviderArg {
+    #[value(help = credentials::CODEX_DEVICE_AUTHORIZATION_GUIDANCE)]
     Codex,
     Github,
 }
