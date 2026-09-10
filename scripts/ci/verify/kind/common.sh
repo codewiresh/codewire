@@ -1199,6 +1199,12 @@ require_dashboard_browser_host_dependencies() {
     echo "::error::the Kind browser gate requires a pre-provisioned Chromium executable; set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
     return 1
   fi
+
+  # Keep the early host-input boundary identical to the browser suite's own
+  # runtime check. An arbitrary system Chromium is present on many developer
+  # hosts, but accepting it here only defers a deterministic version or backing
+  # failure until after the expensive image and cluster transaction.
+  prepare_playwright_browser_runtime "$chromium" "$ROOT" || return $?
 }
 
 dashboard_browser_e2e() {

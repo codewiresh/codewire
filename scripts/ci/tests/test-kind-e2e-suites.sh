@@ -334,7 +334,10 @@ grep -Fq "missing required tool: $missing_tool" "$FIXTURE/missing-tool.out" ||
 # smoke-binary or cluster transaction. Exercise the shared resolver against a
 # missing frozen install and an exact local fixture.
 browser_fixture="$FIXTURE/browser-host"
-mkdir -p "$browser_fixture/apps/dashboard/node_modules/.bin" "$browser_fixture/bin"
+mkdir -p \
+  "$browser_fixture/apps/dashboard/node_modules/.bin" \
+  "$browser_fixture/bin" \
+  "$browser_fixture/scripts/ci"
 if (ROOT="$browser_fixture" require_dashboard_browser_host_dependencies) \
     >"$FIXTURE/missing-browser-host.out" 2>&1; then
   fail 'missing dashboard browser host dependencies unexpectedly succeeded'
@@ -343,9 +346,23 @@ grep -Fq 'dashboard Playwright dependencies are missing' \
   "$FIXTURE/missing-browser-host.out" ||
   fail 'missing dashboard browser host dependency did not explain its failure'
 printf '#!/bin/sh\nexit 0\n' >"$browser_fixture/apps/dashboard/node_modules/.bin/playwright"
-printf '#!/bin/sh\nexit 0\n' >"$browser_fixture/bin/chromium"
+printf "readonly chromium_version='145.0.7632.6'\n" \
+  >"$browser_fixture/scripts/ci/install-pinned-playwright-chromium.sh"
+printf '#!/bin/sh\nprintf "Chromium 151.0.7922.71\\n"\n' \
+  >"$browser_fixture/bin/chromium"
 chmod 0755 "$browser_fixture/apps/dashboard/node_modules/.bin/playwright" \
   "$browser_fixture/bin/chromium"
+if ROOT="$browser_fixture" \
+    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$browser_fixture/bin/chromium" \
+    require_dashboard_browser_host_dependencies \
+    >"$FIXTURE/wrong-browser-version.out" 2>&1; then
+  fail 'wrong dashboard browser version unexpectedly passed the early prerequisite'
+fi
+grep -Fq 'expected pinned Chromium 145.0.7632.6' \
+  "$FIXTURE/wrong-browser-version.out" ||
+  fail 'wrong dashboard browser version did not explain the pinned requirement'
+printf '#!/bin/sh\nprintf "Chromium 145.0.7632.6\\n"\n' \
+  >"$browser_fixture/bin/chromium"
 ROOT="$browser_fixture" \
 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$browser_fixture/bin/chromium" \
   require_dashboard_browser_host_dependencies
