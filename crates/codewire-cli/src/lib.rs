@@ -176,7 +176,6 @@ enum Command {
     },
     #[command(about = "Manage secrets and secret projects")]
     Secrets(SecretsArgs),
-    #[cfg(target_os = "linux")]
     #[command(about = "Manage protected credentials and access profiles")]
     Credentials(CredentialsArgs),
     #[command(
@@ -359,7 +358,6 @@ where
         Command::ApiKeys { command } => handle_api_keys_command(&globals, command).await,
         Command::Preset { command } => handle_preset_command(&globals, command).await,
         Command::Secrets(args) => handle_secrets_command(&globals, args).await,
-        #[cfg(target_os = "linux")]
         Command::Credentials(args) => handle_credentials_command(&globals, args).await,
         Command::Network { command } => handle_network_command(&globals, command).await,
         Command::Mesh { command } => handle_mesh_command(&globals, command).await,
