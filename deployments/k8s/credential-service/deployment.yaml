@@ -97,6 +97,16 @@ spec:
                 configMapKeyRef:
                   name: codewire-credential-service-config
                   key: CREDENTIAL_BAO_TRANSIT_MOUNT
+            - name: CREDENTIAL_APPLICATION_BAO_ROLE
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-credential-service-config
+                  key: CREDENTIAL_APPLICATION_BAO_ROLE
+            - name: CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-credential-service-config
+                  key: CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT
             - name: CREDENTIAL_BAO_EXPECTED_CLUSTER_ID
               valueFrom:
                 configMapKeyRef:

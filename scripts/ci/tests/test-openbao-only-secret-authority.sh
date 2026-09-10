@@ -255,6 +255,14 @@ yq ea -o=json -I=0 \
   'select(.kind == "Deployment" and .metadata.name == "codewire-orchestration")' \
   "$render_root/production.yaml" >"$render_root/production-orchestration.json"
 yq ea -o=json -I=0 \
+  'select(.kind == "Deployment" and .metadata.name == "codewire-credential-service")' \
+  deployments/k8s/credential-service/deployment.yaml \
+  >"$render_root/credential-service.json"
+yq ea -o=json -I=0 \
+  'select(.kind == "ConfigMap" and .metadata.name == "codewire-credential-service-config") | .data' \
+  tests/e2e/kind/credential-fixture-config.yaml \
+  >"$render_root/kind-credential-config.json"
+yq ea -o=json -I=0 \
   'select(.kind == "ConfigMap") | .data' \
   "$render_root/production.yaml" >"$render_root/production-config.json"
 
@@ -347,5 +355,29 @@ jq -e '
   ] |
   all(. != "tenant-secret-openbao-token" and . != "confidential-storage-openbao-token")
 ' "$render_root/production-orchestration.json" >/dev/null
+
+# Credential records and application projections intentionally use two
+# separately authorized Transit mounts. Both consume the same explicit
+# cluster/workload identity coordinates, with no tenant-writer compatibility
+# input or authority fallback in the isolated service.
+jq -e '
+  def named($items; $name): [$items[] | select(.name == $name)];
+  .spec.template.spec.containers[0].env as $env |
+  named($env; "CREDENTIAL_BAO_ROLE")[0].valueFrom.configMapKeyRef.key == "CREDENTIAL_BAO_ROLE" and
+  named($env; "CREDENTIAL_BAO_TRANSIT_MOUNT")[0].valueFrom.configMapKeyRef.key == "CREDENTIAL_BAO_TRANSIT_MOUNT" and
+  named($env; "CREDENTIAL_APPLICATION_BAO_ROLE")[0].valueFrom.configMapKeyRef.key == "CREDENTIAL_APPLICATION_BAO_ROLE" and
+  named($env; "CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT")[0].valueFrom.configMapKeyRef.key == "CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT" and
+  (named($env; "CREDENTIAL_BAO_ADDR") | length) == 1 and
+  (named($env; "CREDENTIAL_BAO_AUTH_MOUNT") | length) == 1 and
+  (named($env; "CREDENTIAL_BAO_EXPECTED_CLUSTER_ID") | length) == 1 and
+  (named($env; "CREDENTIAL_BAO_AUDIENCE") | length) == 1 and
+  [$env[].name | select(startswith("TENANT_SECRET_"))] == []
+' "$render_root/credential-service.json" >/dev/null
+jq -e '
+  .CREDENTIAL_BAO_ROLE == "unused-kind-fixture" and
+  .CREDENTIAL_BAO_TRANSIT_MOUNT == "unused-kind-fixture" and
+  .CREDENTIAL_APPLICATION_BAO_ROLE == "unused-kind-application-fixture" and
+  .CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT == "unused-kind-application-fixture"
+' "$render_root/kind-credential-config.json" >/dev/null
 
 printf 'OpenBao-only secret authority contract: OK\n'

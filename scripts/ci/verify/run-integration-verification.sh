@@ -286,7 +286,7 @@ run_database() {
     cargo test --locked -p codewire-credential-service --features enrollment \
       --lib delegation::authority::tests:: \
       -- --ignored --nocapture --test-threads=1 | tee "$logfile"
-  assert_passed_count "owner-local delegation authority matrix" "$logfile" 5
+  assert_passed_count "owner-local delegation authority matrix" "$logfile" 6
 
   logfile="$RUN_DIR/oauth-bearer-identity.log"
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \

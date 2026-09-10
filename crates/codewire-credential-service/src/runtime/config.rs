@@ -54,7 +54,8 @@ pub struct CredentialServiceConfig {
     pub(super) codex_executable: PathBuf,
     pub(super) github_executable: PathBuf,
     pub(super) runtime_directory: PathBuf,
-    pub(super) openbao: OpenBaoTransitConfig,
+    pub(super) credential_openbao: OpenBaoTransitConfig,
+    pub(super) application_openbao: OpenBaoTransitConfig,
 }
 
 impl CredentialServiceConfig {
@@ -102,19 +103,40 @@ impl CredentialServiceConfig {
             path("CREDENTIAL_BROKER_TLS_KEY_FILE")?,
         )
         .map_err(|_| RuntimeError::Configuration("credential broker TLS files"))?;
-        let openbao = OpenBaoTransitConfig::new(
-            required("CREDENTIAL_BAO_ADDR")?
-                .parse()
-                .map_err(|_| RuntimeError::Configuration("CREDENTIAL_BAO_ADDR"))?,
-            required("CREDENTIAL_BAO_AUTH_MOUNT")?,
+        let openbao_address: Url = required("CREDENTIAL_BAO_ADDR")?
+            .parse()
+            .map_err(|_| RuntimeError::Configuration("CREDENTIAL_BAO_ADDR"))?;
+        let openbao_auth_mount = required("CREDENTIAL_BAO_AUTH_MOUNT")?;
+        let openbao_expected_cluster_id = required("CREDENTIAL_BAO_EXPECTED_CLUSTER_ID")?;
+        let credential_transit_mount = required("CREDENTIAL_BAO_TRANSIT_MOUNT")?;
+        let application_transit_mount = required("CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT")?;
+        if credential_transit_mount == application_transit_mount {
+            return Err(RuntimeError::Configuration(
+                "distinct credential and application OpenBao authorities",
+            ));
+        }
+        let credential_openbao = OpenBaoTransitConfig::new(
+            openbao_address.clone(),
+            openbao_auth_mount.clone(),
             required("CREDENTIAL_BAO_ROLE")?,
-            required("CREDENTIAL_BAO_TRANSIT_MOUNT")?,
+            credential_transit_mount,
             // The existing derived tenant-dek primitive, in its dedicated
             // credential Transit mount: not a new envelope or generic secret.
             "tenant-dek".to_owned(),
-            required("CREDENTIAL_BAO_EXPECTED_CLUSTER_ID")?,
+            openbao_expected_cluster_id.clone(),
         )
         .map_err(|_| RuntimeError::Configuration("credential OpenBao authority"))?;
+        let application_openbao = OpenBaoTransitConfig::new(
+            openbao_address,
+            openbao_auth_mount,
+            required("CREDENTIAL_APPLICATION_BAO_ROLE")?,
+            application_transit_mount,
+            // Application projections use the existing tenant-secret envelope
+            // key in the independently authorized tenant Transit mount.
+            "tenant-dek".to_owned(),
+            openbao_expected_cluster_id,
+        )
+        .map_err(|_| RuntimeError::Configuration("application OpenBao authority"))?;
         Ok(Self {
             database_url,
             public_listen,
@@ -124,7 +146,8 @@ impl CredentialServiceConfig {
             codex_executable: path("CREDENTIAL_CODEX_EXECUTABLE")?,
             github_executable: path("CREDENTIAL_GITHUB_EXECUTABLE")?,
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
-            openbao,
+            credential_openbao,
+            application_openbao,
         })
     }
 }
@@ -212,6 +235,14 @@ mod tests {
             ("CREDENTIAL_BAO_AUTH_MOUNT", "kubernetes"),
             ("CREDENTIAL_BAO_ROLE", "credential-service"),
             ("CREDENTIAL_BAO_TRANSIT_MOUNT", "credentials"),
+            (
+                "CREDENTIAL_APPLICATION_BAO_ROLE",
+                "credential-service-application",
+            ),
+            (
+                "CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT",
+                "codewire-tenant-test",
+            ),
             ("CREDENTIAL_BAO_EXPECTED_CLUSTER_ID", "synthetic-cluster"),
         ]
         .into_iter()
@@ -264,6 +295,19 @@ mod tests {
         ] {
             assert!(parse_public_origin(value).is_err(), "accepted {value}");
         }
+    }
+
+    #[test]
+    fn credential_and_application_transit_mounts_must_be_distinct() {
+        let mut values = inputs();
+        let credential_mount = values["CREDENTIAL_BAO_TRANSIT_MOUNT"].clone();
+        values.insert("CREDENTIAL_APPLICATION_BAO_TRANSIT_MOUNT", credential_mount);
+        assert_eq!(
+            CredentialServiceConfig::from_lookup(|name| values.get(name).cloned())
+                .err()
+                .unwrap(),
+            RuntimeError::Configuration("distinct credential and application OpenBao authorities")
+        );
     }
 
     #[test]
