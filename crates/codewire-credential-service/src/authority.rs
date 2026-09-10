@@ -14,6 +14,8 @@ use codewire_credential_broker::platform::bridge::{
 use codewire_credential_broker::platform::{
     PlatformPodIdentity, PlatformRuntimeAuthority, PlatformRuntimeError, PlatformRuntimeSession,
 };
+#[cfg(feature = "enrollment")]
+use codewire_platform_credentials::PlatformCredentialStore;
 use codewire_platform_credentials::{
     PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError,
 };
@@ -39,6 +41,52 @@ const ASCII_WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization"
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
 const AUTHORITY_TIMEOUT: Duration = Duration::from_secs(5);
 type Error = PlatformRuntimeError;
+
+/// One explicit authority assignment for the three runtime consumers. Keeping
+/// these constructors together prevents normal composition from silently
+/// reusing the credential-material authority for application values.
+#[cfg(any(feature = "enrollment", test))]
+pub(crate) struct RuntimeKekAuthorities {
+    #[cfg(feature = "enrollment")]
+    credential: Arc<dyn KekProvider>,
+    application: Arc<dyn KekProvider>,
+}
+
+#[cfg(any(feature = "enrollment", test))]
+impl RuntimeKekAuthorities {
+    pub(crate) fn new(
+        _credential: Arc<dyn KekProvider>,
+        application: Arc<dyn KekProvider>,
+    ) -> Self {
+        Self {
+            #[cfg(feature = "enrollment")]
+            credential: _credential,
+            application,
+        }
+    }
+
+    #[cfg(feature = "enrollment")]
+    pub(crate) fn credential_store(&self, pool: PgPool) -> Arc<PlatformCredentialStore> {
+        Arc::new(PlatformCredentialStore::new(
+            pool,
+            self.credential.clone(),
+            builtin_provider_catalog(),
+        ))
+    }
+
+    pub(crate) fn kubernetes_authenticator(
+        &self,
+        client: Client,
+        pool: PgPool,
+    ) -> KubernetesPlatformBridgeAuthenticator {
+        KubernetesPlatformBridgeAuthenticator::new(client, pool, self.application.clone())
+    }
+
+    #[cfg(feature = "enrollment")]
+    pub(crate) fn delegation_provider(&self) -> Arc<dyn KekProvider> {
+        self.application.clone()
+    }
+}
 
 /// Production-only construction: callers cannot inject purported verified IDs.
 ///

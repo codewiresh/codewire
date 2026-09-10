@@ -1241,7 +1241,7 @@ grep -qF 'assert_passed_count "platform runtime restricted identity matrix" "$lo
 grep -qF -- '--lib tests::database::projection::' "$integration_runner"
 grep -qF 'assert_passed_count "platform runtime projection matrix" "$logfile" 10' "$integration_runner"
 grep -qF -- '--lib delegation::authority::tests::' "$integration_runner"
-grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 5' "$integration_runner"
+grep -qF 'assert_passed_count "owner-local delegation authority matrix" "$logfile" 6' "$integration_runner"
 grep -qF 'cargo test --locked -p codewire-orchestration --test access_profiles' "$integration_runner"
 grep -qF 'assert_passed_count "public access profile restricted API matrix" "$logfile" 7' "$integration_runner"
 grep -qF 'assert_passed_count "public credential metadata matrix" "$logfile" 3' "$integration_runner"

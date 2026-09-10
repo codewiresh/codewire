@@ -323,6 +323,7 @@ run_web() {
   install_bun_dependencies
   cargo test --locked -p codewire-dashboard-web --lib
   bun run --cwd apps/dashboard typecheck
+  bun run --cwd apps/dashboard test:fixtures
   ./apps/dashboard/node_modules/.bin/playwright test \
     --config apps/dashboard/playwright.config.ts --list
   scripts/ci/tests/test-dashboard-browser-gate.sh

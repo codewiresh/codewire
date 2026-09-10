@@ -62,6 +62,7 @@ cw() {
       project="$(jq -r .secrets.project "$APP_SECRET_DOCUMENT")"
       jq -n --arg project "$project" --arg name "$SMOKE_NAME" \
         '[{id:"00000000-0000-4000-8000-000000000099",name:$name,state:"running",operation_generation:1,
+          setup_complete:true,setup_error:null,
           source_selection:{secrets:{project:$project},credentials:null,profile_revision:null}}]' >"$TMPDIR_SMOKE/environments.db"
       printf 'ID: 00000000-0000-4000-8000-000000000099\n' ;;
     'env --platform info '*" --output json")
@@ -94,7 +95,13 @@ cw() {
   esac
 }
 
-run_kube_assertions() { :; }
+run_kube_assertions() {
+  # The API readiness read must precede Pod discovery. A running Pod may still
+  # belong to a setup attempt that recovery is about to replace.
+  [[ -f "$TMPDIR_SMOKE/app-environment.json" ]] || fail 'Pod assertions preceded setup readiness'
+  jq -e '.setup_complete == true and .setup_error == null' \
+    "$TMPDIR_SMOKE/app-environment.json" >/dev/null || fail 'Pod assertions preceded completed setup'
+}
 kubectl_dev() {
   if [[ "$*" == *' get sandboxclaim '* ]]; then printf 'owned-claim-uid'; return; fi
   [[ "$*" == *' get pod '* ]] || fail 'unexpected Kubernetes fixture operation'
@@ -223,6 +230,18 @@ fixture
 ENV_ID=synthetic-env
 printf '[{"id":"synthetic-env","state":"running","operation_generation":3}]\n' >"$TMPDIR_SMOKE/environments.db"
 expect_failure missing-clear-metadata application_environment_ready '' 2
+
+fixture
+prepare_application_secrets
+create_environment
+project="platform:id:${APP_SECRET_IDS[0]}"
+application_environment_ready "$project" 0
+pass
+cp "$TMPDIR_SMOKE/environments.db" "$TMPDIR_SMOKE/setup-complete.json"
+for filter in '.[0].setup_complete=false' 'del(.[0].setup_complete)' '.[0].setup_complete="true"' '.[0].setup_error="setup failed"'; do
+  jq "$filter" "$TMPDIR_SMOKE/setup-complete.json" >"$TMPDIR_SMOKE/environments.db"
+  expect_failure incomplete-or-failed-setup application_environment_ready "$project" 0
+done
 
 # Exercise the generated check against isolated ordinary/session files. Only
 # fixed test paths are substituted; the production script never accepts paths.

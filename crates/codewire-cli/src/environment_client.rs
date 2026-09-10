@@ -27,11 +27,16 @@ impl EnvironmentClient {
         })
     }
 
-    pub async fn list_environments(&self, org_id: &str) -> anyhow::Result<Vec<Environment>> {
+    pub async fn list_environments(
+        &self,
+        org_id: &str,
+        include_destroyed: bool,
+    ) -> anyhow::Result<Vec<Environment>> {
         let response = self
             .inner
             .list_environments(rpc::ListEnvironmentsRequest {
                 org_id: org_id.to_string(),
+                include_destroyed,
                 ..Default::default()
             })
             .await
@@ -1163,6 +1168,9 @@ fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment
             .map(timestamp_to_rfc3339)
             .unwrap_or_default(),
         retry_count: value.retry_count,
+        setup_phase: value.setup_phase,
+        setup_complete: value.setup_complete,
+        setup_error: empty_to_none(value.setup_error),
         ttl_seconds: value.ttl_seconds,
         shutdown_at: value.shutdown_at.into_option().map(timestamp_to_rfc3339),
         cpu_millicores: value.cpu_millicores,
@@ -1476,6 +1484,7 @@ mod tests {
     use super::*;
 
     const SOURCE_UPDATE_PATH: &str = "/codewire.v1.EnvironmentService/UpdateEnvironmentSources";
+    const LIST_ENVIRONMENTS_PATH: &str = "/codewire.v1.EnvironmentService/ListEnvironments";
 
     fn test_client(server: &MockServer) -> EnvironmentClient {
         EnvironmentClient {
@@ -1499,6 +1508,35 @@ mod tests {
                 profile: "platform:id:22222222-2222-4222-8222-222222222222".into(),
             }),
             profile_revision: Some(9_007_199_254_740_993),
+        }
+    }
+
+    #[tokio::test]
+    async fn environment_list_sends_the_exact_destroyed_selection() {
+        for include_destroyed in [false, true] {
+            let server = MockServer::start().await;
+            let request = rpc::ListEnvironmentsRequest {
+                org_id: "org_test".into(),
+                include_destroyed,
+                ..Default::default()
+            };
+            Mock::given(method("POST"))
+                .and(path(LIST_ENVIRONMENTS_PATH))
+                .and(body_bytes(request.encode_to_vec()))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/proto")
+                        .set_body_bytes(rpc::ListEnvironmentsResponse::default().encode_to_vec()),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let environments = test_client(&server)
+                .list_environments("org_test", include_destroyed)
+                .await
+                .unwrap();
+            assert!(environments.is_empty());
         }
     }
 
@@ -1958,6 +1996,41 @@ credentials: {profile: platform:user/work}
             ..Default::default()
         });
         assert_eq!(grant.created_at, "2026-01-01 00:00:00.123456+00");
+    }
+
+    #[test]
+    fn environment_setup_metadata_is_independent_from_running_state() {
+        let running = environment_from_proto(rpc::Environment {
+            state: rpc::EnvironmentState::Running.into(),
+            setup_phase: 4,
+            setup_complete: false,
+            setup_error: "startup failed".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(running.state, "running");
+        assert_eq!(running.setup_phase, 4);
+        assert!(!running.setup_complete);
+        assert_eq!(running.setup_error.as_deref(), Some("startup failed"));
+        let running_json = serde_json::to_value(&running).unwrap();
+        assert_eq!(running_json["state"], "running");
+        assert_eq!(running_json["setup_phase"], 4);
+        assert_eq!(running_json["setup_complete"], false);
+        assert_eq!(running_json["setup_error"], "startup failed");
+
+        let complete = environment_from_proto(rpc::Environment {
+            state: rpc::EnvironmentState::Running.into(),
+            setup_phase: 7,
+            setup_complete: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(complete.setup_complete);
+        assert_eq!(complete.setup_phase, 7);
+        assert_eq!(complete.setup_error, None);
+        let complete_json = serde_json::to_value(complete).unwrap();
+        assert_eq!(complete_json["setup_complete"], true);
+        assert_eq!(complete_json.get("setup_error"), None);
     }
 
     #[test]

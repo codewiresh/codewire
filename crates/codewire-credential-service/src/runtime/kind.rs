@@ -12,6 +12,7 @@ mod enrollment;
 mod provider;
 
 use super::*;
+use codewire_platform_credentials::PlatformCredentialStore;
 use codewire_protected_store::secret_envelope::TestKekProvider;
 
 const TARGET: &str = "codewire_kind_credential_fixture";

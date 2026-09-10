@@ -85,11 +85,12 @@ async fn admitted(
     f: &Fixture,
     provider: Arc<ObservedProvider>,
 ) -> Result<Arc<crate::KubernetesPlatformRuntimeAuthority>> {
-    Ok(
-        KubernetesPlatformBridgeAuthenticator::new(f.kube.client(), f.pool.clone(), provider)
-            .authenticate(&headers(unix_now()? + 600))
-            .await?,
-    )
+    let authorities =
+        crate::authority::RuntimeKekAuthorities::new(Arc::new(TestKekProvider), provider);
+    Ok(authorities
+        .kubernetes_authenticator(f.kube.client(), f.pool.clone())
+        .authenticate(&headers(unix_now()? + 600))
+        .await?)
 }
 
 fn now_ms() -> u64 {

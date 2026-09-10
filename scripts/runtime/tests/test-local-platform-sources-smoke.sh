@@ -31,7 +31,7 @@ KEY_ID=11111111-1111-4111-8111-111111111111
 PROFILE_ID=22222222-2222-4222-8222-222222222222
 VM_ID=33333333-3333-4333-8333-333333333333
 USER_ID=44444444-4444-4444-8444-444444444444
-ORG_ID=55555555-5555-4555-8555-555555555555
+ORG_ID=55555555555545558555555555555555
 PROJECT_ID=66666666-6666-4666-8666-666666666666
 HOST_KEY='[127.0.0.1]:22222 ssh-ed25519 AAAATestPublicHostMetadata'
 fail() { printf 'local/platform fixture: %s\n' "$*" >&2; exit 1; }
@@ -87,6 +87,20 @@ for invalid in saved-login wrong-auth missing-email api-key alternate-server org
   expect_failure "$invalid" invalid_options
 done
 expect_failure unsupported-option local_platform_parse --keep
+
+# Organization creation emits UUID simple() strings; the acceptance must use
+# that exact current ID format while still rejecting ambiguous input.
+for invalid_org in '' 00000000000000000000000000000000 \
+  55555555-5555-4555-8555-555555555555 ABCDEF01234545678901234567890123 \
+  g5555555555545558555555555555555 5555555555545558555555555555555 \
+  555555555555455585555555555555555; do
+  invalid_organization() {
+    fixture
+    EXPECTED_CODEWIRE_ORGANIZATION_ID="$invalid_org"
+    validate_local_platform_options
+  }
+  expect_failure organization-format invalid_organization
+done
 
 cw_with_timeout() {
   shift

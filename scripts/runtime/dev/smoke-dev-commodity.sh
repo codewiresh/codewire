@@ -1081,8 +1081,13 @@ application_environment_ready() {
   local project="$1" previous_generation="$2"
   cw_with_timeout 30 env --platform info "$ENV_ID" --output json \
     >"$TMPDIR_SMOKE/app-environment.json" 2>"$TMPDIR_SMOKE/app-info.err" || return 1
+  if jq -e '.setup_error | type == "string" and length > 0' \
+      "$TMPDIR_SMOKE/app-environment.json" >/dev/null; then
+    die 'application environment setup failed; output suppressed'
+  fi
   jq -e --arg id "$ENV_ID" --arg project "$project" --argjson previous "$previous_generation" '
     .id == $id and .state == "running" and .operation_generation > $previous and
+    .setup_complete == true and .setup_error == null and
     (.source_selection | type == "object") and (.source_selection.secrets | type == "object") and
     .source_selection.credentials == null and .source_selection.profile_revision == null and
     (.source_selection.secrets.project // "") == $project and
@@ -1178,7 +1183,6 @@ assert_application_source_update() {
 
 run_application_secrets_smoke() {
   local phase expected project generation=0 previous_uid='' guest_script
-  run_kube_assertions
   for phase in a b clear; do
     case "$phase" in
       a) project="platform:id:${APP_SECRET_IDS[0]}"; expected="${APP_SECRET_HASHES[0]}" ;;
@@ -1204,8 +1208,11 @@ run_application_secrets_smoke() {
         assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
         ;;
     esac
-    wait_until 'current application source generation' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
+    wait_until 'current application source generation and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
       application_environment_ready "$project" "$generation"
+    # Running precedes setup. Setup recovery may replace the workspace Pod, so
+    # discover and assert its current identity only after setup has committed.
+    if [[ "$phase" == a ]]; then run_kube_assertions; fi
     generation="$(jq -er .operation_generation "$TMPDIR_SMOKE/app-environment.json")"
     capture_application_pod "$phase" "$generation"
     if [[ -n "$previous_uid" ]]; then

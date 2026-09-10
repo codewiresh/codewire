@@ -25,8 +25,10 @@ use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
 };
 use codewire_credential_broker::{BrokerUpstreamTransport, ProviderHttpsTransport};
-use codewire_platform_credentials::{PlatformAccessProfileStore, PlatformCredentialStore};
-use codewire_protected_store::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
+use codewire_platform_credentials::PlatformAccessProfileStore;
+use codewire_protected_store::openbao_workload_identity::{
+    KubernetesOpenBaoWorkloadIdentity, OpenBaoWorkloadIdentity,
+};
 use codewire_protected_store::secret_envelope::{KekProvider, OpenBaoTransitProvider};
 use codewire_server_core::auth::AuthState;
 use codewire_server_core::connect::ConnectAuthLayer;
@@ -38,6 +40,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 use crate::KubernetesPlatformBridgeAuthenticator;
 use crate::mutation::CredentialMutationOwner;
 pub use config::CredentialServiceConfig;
@@ -114,17 +117,28 @@ async fn run_connected(
     // Explicit in-cluster configuration never searches the user's kubeconfig.
     let kube_config = kube::Config::incluster().map_err(|_| RuntimeError::Kubernetes)?;
     let client = kube::Client::try_from(kube_config).map_err(|_| RuntimeError::Kubernetes)?;
-    let identity =
+    let identity: Arc<dyn OpenBaoWorkloadIdentity> = Arc::new(
         KubernetesOpenBaoWorkloadIdentity::from_env(client.clone(), "CREDENTIAL_BAO_AUDIENCE")
-            .map_err(|_| RuntimeError::Kubernetes)?;
-    let provider = Arc::new(
-        OpenBaoTransitProvider::new(config.openbao, Arc::new(identity))
+            .map_err(|_| RuntimeError::Kubernetes)?,
+    );
+    let credential_openbao = Arc::new(
+        OpenBaoTransitProvider::new(config.credential_openbao, identity.clone())
             .map_err(|_| RuntimeError::OpenBao)?,
     );
-    provider
+    let application_openbao = Arc::new(
+        OpenBaoTransitProvider::new(config.application_openbao, identity)
+            .map_err(|_| RuntimeError::OpenBao)?,
+    );
+    credential_openbao
         .authority_id()
         .await
         .map_err(|_| RuntimeError::OpenBao)?;
+    application_openbao
+        .authority_id()
+        .await
+        .map_err(|_| RuntimeError::OpenBao)?;
+    let authorities =
+        crate::authority::RuntimeKekAuthorities::new(credential_openbao, application_openbao);
     // The platform process serves many environments. Resolve the finite product
     // destination families; each operation still requires its exact profile lease.
     let upstream = ProviderHttpsTransport::resolve(&std::collections::BTreeSet::from([
@@ -137,17 +151,9 @@ async fn run_connected(
     .map_err(|_| RuntimeError::Provider)?;
     let enrollment = enrollment_config(config.codex_executable, config.runtime_directory.clone())?;
     let github = github_enrollment_config(config.github_executable, &config.runtime_directory)?;
-    let store = Arc::new(PlatformCredentialStore::new(
-        pool.clone(),
-        provider.clone(),
-        builtin_provider_catalog(),
-    ));
+    let store = authorities.credential_store(pool.clone());
     let bridge = PlatformCredentialBridgeService::new(
-        Arc::new(KubernetesPlatformBridgeAuthenticator::new(
-            client,
-            pool.clone(),
-            provider.clone(),
-        )),
+        Arc::new(authorities.kubernetes_authenticator(client, pool.clone())),
         store.clone(),
         PlatformAccessProfileStore::new(pool.clone(), builtin_provider_catalog()),
         upstream,
@@ -167,7 +173,7 @@ async fn run_connected(
         },
         config.public_origin,
         pool,
-        provider,
+        authorities.delegation_provider(),
         mutation,
         bridge,
         shutdown,

@@ -1,7 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { seedSyntheticIdentity } from "./synthetic-users";
 
 const sql = postgres(process.env.DATABASE_URL!);
+
+export async function seedSyntheticUser(email: string, name: string, isAdmin = false) {
+  await seedSyntheticIdentity(sql, email, name, isAdmin);
+}
 
 export async function clearRateLimits() {
   await sql`DELETE FROM rate_limit`;
