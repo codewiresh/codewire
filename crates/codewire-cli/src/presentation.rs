@@ -24,6 +24,10 @@ pub struct Environment {
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,
+    pub setup_phase: i32,
+    pub setup_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_error: Option<String>,
     pub ttl_seconds: Option<i32>,
     pub shutdown_at: Option<String>,
     pub cpu_millicores: i32,

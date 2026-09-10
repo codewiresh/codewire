@@ -377,7 +377,7 @@ pub(crate) async fn handle_platform_env_command(
         }
         EnvCommand::List(args) => {
             let environments = environment_client
-                .list_environments(&org_id)
+                .list_environments(&org_id, args.all)
                 .await
                 .context("list environments")?;
             let filtered = filter_environments(
@@ -452,7 +452,7 @@ pub(crate) async fn handle_platform_env_command(
         }
         EnvCommand::Prune(args) => {
             let environments = environment_client
-                .list_environments(&org_id)
+                .list_environments(&org_id, false)
                 .await
                 .context("list environments")?;
             let states = parse_prune_states(&args.state);
@@ -491,7 +491,7 @@ pub(crate) async fn handle_platform_env_command(
         }
         EnvCommand::Nuke(args) => {
             let environments = environment_client
-                .list_environments(&org_id)
+                .list_environments(&org_id, false)
                 .await
                 .context("list environments")?;
             let selection = select_nuke_environments(&environments);
@@ -1109,7 +1109,7 @@ async fn handle_unified_environment_list(
         let orgs = organization_client.list_orgs().await.context("list orgs")?;
         let org_id = current_org_id(&platform, &orgs)?;
         let environments = environment_client
-            .list_environments(&org_id)
+            .list_environments(&org_id, args.all)
             .await
             .context("list environments")?;
         let filtered = filter_environments(
@@ -1741,7 +1741,7 @@ async fn resolve_unified_environment_target(
     let orgs = organization_client.list_orgs().await.context("list orgs")?;
     let org_id = current_org_id(&platform, &orgs)?;
     let environments = environment_client
-        .list_environments(&org_id)
+        .list_environments(&org_id, false)
         .await
         .context("list environments")?;
     let platform_match = find_environment_match(&environments, target_ref)?;

@@ -55,6 +55,8 @@ const PROBE: &str = concat!(
     "\"$PROJECTION_EXPLICIT\" \"${PROJECTION_EMPTY+x}\" \"$PROJECTION_EMPTY\" ",
     "\"$PROJECTION_ROTATING\" \"$TERM\" \"$tty\" \"$IMAGE_ONLY\" \"$REQUEST_ONLY\"",
 );
+const TRANSIENT_PROBE: &str =
+    "printf 'CW_TRANSIENT_RESULT|%s|%s\\n' \"$CW_DEV_PRECEDENCE\" \"$PROJECTION_ROTATING\"";
 
 async fn bounded<F: Future>(future: F) -> F::Output {
     tokio::time::timeout(BOUND, future)
@@ -168,6 +170,7 @@ struct Harness {
     stderr: JoinHandle<Vec<u8>>,
     stop_projection: Option<oneshot::Sender<()>>,
     projection: Option<JoinHandle<usize>>,
+    session_client: SessionClient,
     client: DaemonServiceClient<Channel>,
     root: tempfile::TempDir,
 }
@@ -232,12 +235,13 @@ impl Harness {
         let client = bounded(DaemonServiceClient::connect(endpoint.clone()))
             .await
             .unwrap();
-        let bridge_client = bounded(SessionClient::connect(endpoint, TOKEN))
+        let session_client = bounded(SessionClient::connect(endpoint, TOKEN))
             .await
             .unwrap();
-        let mut connection = bounded(bridge_client.open_credential_bridge(environment, GENERATION))
-            .await
-            .unwrap();
+        let mut connection =
+            bounded(session_client.open_credential_bridge(environment, GENERATION))
+                .await
+                .unwrap();
         let ready = bounded(connection.receive()).await.unwrap().unwrap();
         let Some(bridge_v1::credential_bridge_guest_message::Payload::Ready(ready)) = ready.payload
         else {
@@ -292,6 +296,10 @@ impl Harness {
                         rotating.as_bytes().to_vec().into(),
                     ),
                     ("TERM".into(), b"projected-term".to_vec().into()),
+                    (
+                        "CW_DEV_PRECEDENCE".into(),
+                        b"projected-shadow".to_vec().into(),
+                    ),
                 ])
                 .unwrap();
                 let sealed = seal_environment_projection(
@@ -324,6 +332,7 @@ impl Harness {
             stderr,
             stop_projection: Some(stop_projection),
             projection: Some(projection),
+            session_client,
             client,
             root,
         }
@@ -439,6 +448,46 @@ impl Harness {
             0
         );
     }
+}
+
+async fn assert_transient_projection(client: &SessionClient, rotating: &str) {
+    let mut stream = bounded(client.exec_transient(v1::ExecStartRequest {
+        command: vec!["/bin/sh".into(), "-c".into(), TRANSIENT_PROBE.into()],
+        working_dir: String::new(),
+        env: vec!["CW_DEV_PRECEDENCE=ordinary-config".into()],
+    }))
+    .await
+    .unwrap();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit = None;
+    while let Some(message) = bounded(stream.message()).await.unwrap() {
+        assert!(exit.is_none(), "transient exec emitted a frame after Exit");
+        match message.payload.unwrap() {
+            v1::exec_message::Payload::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+            v1::exec_message::Payload::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+            v1::exec_message::Payload::Exit(status) => exit = Some(status.code),
+            _ => panic!("transient exec emitted an unexpected frame"),
+        }
+    }
+    assert_eq!(exit, Some(0));
+    assert!(stderr.is_empty());
+    let stdout = String::from_utf8(stdout).unwrap();
+    let receipts: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.starts_with("CW_TRANSIENT_RESULT|"))
+        .collect();
+    let expected = format!("CW_TRANSIENT_RESULT|ordinary-config|{rotating}");
+    assert_eq!(receipts, [expected.as_str()]);
+    assert!(!stdout.contains("CW_TRANSIENT_RESULT|projected-shadow|"));
+}
+
+#[tokio::test]
+async fn transient_projection_preserves_override_and_terminal_exit_twice() {
+    let harness = Harness::start().await;
+    assert_transient_projection(&harness.session_client, FIRST).await;
+    assert_transient_projection(&harness.session_client, SECOND).await;
+    harness.stop().await;
 }
 
 async fn launch_and_restart(pty: bool) {
