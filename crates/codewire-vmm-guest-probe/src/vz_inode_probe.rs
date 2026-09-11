@@ -8,10 +8,52 @@ pub const VZ_INODE_PROBE_FRAME_LEN: usize = 88;
 pub const VZ_INODE_PROBE_SEED_LEN: usize = 4_096;
 
 const FRAME_MAGIC: &[u8; 8] = b"CWVINOD1";
+const STAGE_FRAME_MAGIC: &[u8; 8] = b"CWVSTG1\0";
 const FRAME_BODY_LEN: usize = 56;
 const DOMAIN: &[u8] = b"codewire-vz-exact-inode-probe-v1\0";
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Non-success progress emitted only by the synthetic exact-inode fixture.
+///
+/// These records deliberately carry no authentication and can never satisfy
+/// readiness. They make a failed entitlement-gated hardware attempt locally
+/// diagnosable before the guest has read the seed needed for the final HMAC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VzInodeProbeStage {
+    Started = 1,
+    FilesystemsMounted = 2,
+    SeedRead = 3,
+    DataIdentified = 4,
+}
+
+pub fn encode_vz_inode_probe_stage_frame(
+    stage: VzInodeProbeStage,
+) -> [u8; VZ_INODE_PROBE_FRAME_LEN] {
+    let mut frame = [0_u8; VZ_INODE_PROBE_FRAME_LEN];
+    frame[..8].copy_from_slice(STAGE_FRAME_MAGIC);
+    frame[8] = stage as u8;
+    frame
+}
+
+pub fn decode_vz_inode_probe_stage_frame(
+    frame: &[u8],
+) -> Result<VzInodeProbeStage, VzInodeProbeError> {
+    if frame.len() != VZ_INODE_PROBE_FRAME_LEN
+        || &frame[..8] != STAGE_FRAME_MAGIC
+        || frame[9..].iter().any(|byte| *byte != 0)
+    {
+        return Err(VzInodeProbeError::InvalidFrame);
+    }
+    match frame[8] {
+        1 => Ok(VzInodeProbeStage::Started),
+        2 => Ok(VzInodeProbeStage::FilesystemsMounted),
+        3 => Ok(VzInodeProbeStage::SeedRead),
+        4 => Ok(VzInodeProbeStage::DataIdentified),
+        _ => Err(VzInodeProbeError::InvalidFrame),
+    }
+}
 
 pub fn encode_vz_inode_probe_frame(
     seed: &[u8],
@@ -119,6 +161,38 @@ mod tests {
             verify_vz_inode_probe_frame(&frame, &seed, uuid, wrong_challenge),
             Err(VzInodeProbeError::AuthenticationFailed)
         );
+    }
+
+    #[test]
+    fn diagnostic_stages_are_fixed_distinct_non_success_frames() {
+        for (stage, code) in [
+            (VzInodeProbeStage::Started, 1),
+            (VzInodeProbeStage::FilesystemsMounted, 2),
+            (VzInodeProbeStage::SeedRead, 3),
+            (VzInodeProbeStage::DataIdentified, 4),
+        ] {
+            let frame = encode_vz_inode_probe_stage_frame(stage);
+            assert_eq!(frame.len(), VZ_INODE_PROBE_FRAME_LEN);
+            assert_eq!(&frame[..8], STAGE_FRAME_MAGIC);
+            assert_eq!(frame[8], code);
+            assert!(frame[9..].iter().all(|byte| *byte == 0));
+            assert_ne!(&frame[..8], FRAME_MAGIC);
+            assert_eq!(decode_vz_inode_probe_stage_frame(&frame), Ok(stage));
+        }
+
+        let valid = encode_vz_inode_probe_stage_frame(VzInodeProbeStage::Started);
+        assert_eq!(
+            decode_vz_inode_probe_stage_frame(&valid[..87]),
+            Err(VzInodeProbeError::InvalidFrame)
+        );
+        for offset in [0, 8, 20] {
+            let mut malformed = valid;
+            malformed[offset] ^= if offset == 8 { 0xff } else { 1 };
+            assert_eq!(
+                decode_vz_inode_probe_stage_frame(&malformed),
+                Err(VzInodeProbeError::InvalidFrame)
+            );
+        }
     }
 
     #[test]

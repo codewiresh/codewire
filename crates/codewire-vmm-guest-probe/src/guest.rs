@@ -60,7 +60,8 @@ use crate::{
     SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN, SKILL_SNAPSHOT_CONTENT_PATH,
     SKILL_SNAPSHOT_PLAN_PATH, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
     SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan, VZ_INODE_PROBE_CHALLENGE_LEN,
-    VZ_INODE_PROBE_SEED_LEN, VZ_INODE_PROBE_VSOCK_PORT, encode_vz_inode_probe_frame,
+    VZ_INODE_PROBE_SEED_LEN, VZ_INODE_PROBE_VSOCK_PORT, VzInodeProbeStage,
+    encode_vz_inode_probe_frame, encode_vz_inode_probe_stage_frame,
 };
 
 mod bootstrap;
@@ -468,60 +469,86 @@ pub fn run_vz_inode_probe() -> Result<()> {
         unsafe { libc::getpid() } == 1,
         "VZ inode probe must run as PID 1"
     );
-    mount_minimal_filesystems()?;
-    let seed_device = wait_for_disk_by_serial(
-        Path::new(SYS_BLOCK_PATH),
-        Path::new(DEV_PATH),
-        SEED_DISK_SERIAL,
-        DISK_DISCOVERY_TIMEOUT,
-    )?;
-    let state_device = wait_for_disk_by_serial(
-        Path::new(SYS_BLOCK_PATH),
-        Path::new(DEV_PATH),
-        STATE_DISK_SERIAL,
-        DISK_DISCOVERY_TIMEOUT,
-    )?;
-    ensure!(seed_device != state_device, "probe disks must be distinct");
-    validate_block_device(&seed_device)?;
-    validate_block_device(&state_device)?;
-
-    let seed =
-        read_bounded(&seed_device, VZ_INODE_PROBE_SEED_LEN).context("read VZ inode probe seed")?;
-    ensure!(
-        seed.len() == VZ_INODE_PROBE_SEED_LEN,
-        "VZ inode probe seed has invalid length"
-    );
-    let filesystem_uuid = read_ext4_uuid_bytes(&state_device)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("create VZ inode probe runtime")?;
     runtime.block_on(async move {
-        let listener =
-            VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, VZ_INODE_PROBE_VSOCK_PORT))
-                .context("bind VZ inode probe vsock")?;
-        loop {
-            let (mut stream, peer) = listener.accept().await.context("accept VZ inode probe")?;
-            if !is_host_cid(peer.cid()) {
-                continue;
-            }
-            let mut challenge = [0_u8; VZ_INODE_PROBE_CHALLENGE_LEN];
-            tokio::time::timeout(
-                PROGRESS_REQUEST_TIMEOUT,
-                AsyncReadExt::read_exact(&mut stream, &mut challenge),
-            )
+        let mut stream = tokio::time::timeout(
+            PROGRESS_REQUEST_TIMEOUT,
+            VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, VZ_INODE_PROBE_VSOCK_PORT)),
+        )
+        .await
+        .context("connect VZ inode probe to host timed out")??;
+        let mut challenge = [0_u8; VZ_INODE_PROBE_CHALLENGE_LEN];
+        tokio::time::timeout(
+            PROGRESS_REQUEST_TIMEOUT,
+            AsyncReadExt::read_exact(&mut stream, &mut challenge),
+        )
+        .await
+        .context("VZ inode probe challenge timed out")??;
+        write_vz_inode_probe_stage(&mut stream, VzInodeProbeStage::Started).await?;
+
+        mount_minimal_filesystems()?;
+        write_vz_inode_probe_stage(&mut stream, VzInodeProbeStage::FilesystemsMounted).await?;
+        let seed_device = wait_for_disk_by_serial(
+            Path::new(SYS_BLOCK_PATH),
+            Path::new(DEV_PATH),
+            SEED_DISK_SERIAL,
+            DISK_DISCOVERY_TIMEOUT,
+        )?;
+        validate_block_device(&seed_device)?;
+        let seed = read_bounded(&seed_device, VZ_INODE_PROBE_SEED_LEN)
+            .context("read VZ inode probe seed")?;
+        ensure!(
+            seed.len() == VZ_INODE_PROBE_SEED_LEN,
+            "VZ inode probe seed has invalid length"
+        );
+        write_vz_inode_probe_stage(&mut stream, VzInodeProbeStage::SeedRead).await?;
+
+        let state_device = wait_for_disk_by_serial(
+            Path::new(SYS_BLOCK_PATH),
+            Path::new(DEV_PATH),
+            STATE_DISK_SERIAL,
+            DISK_DISCOVERY_TIMEOUT,
+        )?;
+        ensure!(seed_device != state_device, "probe disks must be distinct");
+        validate_block_device(&state_device)?;
+        let filesystem_uuid = read_ext4_uuid_bytes(&state_device)?;
+        write_vz_inode_probe_stage(&mut stream, VzInodeProbeStage::DataIdentified).await?;
+
+        let frame = encode_vz_inode_probe_frame(&seed, filesystem_uuid, challenge)
+            .context("encode VZ inode probe readiness")?;
+        AsyncWriteExt::write_all(&mut stream, &frame)
             .await
-            .context("VZ inode probe challenge timed out")??;
-            let frame = encode_vz_inode_probe_frame(&seed, filesystem_uuid, challenge)
-                .context("encode VZ inode probe readiness")?;
-            AsyncWriteExt::write_all(&mut stream, &frame)
-                .await
-                .context("write VZ inode probe readiness")?;
-            AsyncWriteExt::flush(&mut stream)
-                .await
-                .context("flush VZ inode probe readiness")?;
-        }
+            .context("write VZ inode probe readiness")?;
+        AsyncWriteExt::flush(&mut stream)
+            .await
+            .context("flush VZ inode probe readiness")?;
+
+        // The helper owns this connection and the VM. An authenticated frame
+        // is readiness, not permission for PID 1 to exit; remain alive until
+        // helper death tears down the VZ process boundary.
+        let mut unexpected = [0_u8; 1];
+        let count = AsyncReadExt::read(&mut stream, &mut unexpected)
+            .await
+            .context("wait for VZ inode probe helper ownership")?;
+        ensure!(count != 0, "VZ inode probe helper connection closed");
+        bail!("VZ inode probe received an unexpected post-readiness byte");
     })
+}
+
+async fn write_vz_inode_probe_stage(
+    stream: &mut VsockStream,
+    stage: VzInodeProbeStage,
+) -> Result<()> {
+    let frame = encode_vz_inode_probe_stage_frame(stage);
+    AsyncWriteExt::write_all(stream, &frame)
+        .await
+        .context("write VZ inode probe diagnostic stage")?;
+    AsyncWriteExt::flush(stream)
+        .await
+        .context("flush VZ inode probe diagnostic stage")
 }
 
 fn read_ext4_uuid_bytes(path: &Path) -> Result<[u8; 16]> {
