@@ -349,17 +349,25 @@ grep -qx application-secret-check-ok "$TMPDIR_SMOKE/check.out"
 pass
 expect_failure stale-cleared-value env DATABASE_URL=synthetic-application CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
 
-# Actual local PTY utility plus a synthetic CLI, not a VM or API.
+# A synthetic CLI requires terminal stdin for size detection and nonterminal
+# stdout for exit propagation, then allocates an actual guest PTY on --tty.
 (
   eval "$REAL_APPLICATION_PTY"
   CW_BIN="$TMPDIR_SMOKE/cw-pty-fixture"
   # shellcheck disable=SC2016 # Literal synthetic executable, not host expansion.
-  printf '%s\n' '#!/bin/sh' 'while test "$#" -gt 0 && test "$1" != --; do shift; done' 'shift' 'exec "$@"' >"$CW_BIN"
+  printf '%s\n' '#!/bin/bash' 'set -euo pipefail' 'test -t 0; ! test -t 1; stty size >/dev/null' \
+    'tty=0; while (($#)) && [[ "$1" != -- ]]; do [[ "$1" != --tty ]] || tty=1; shift; done' \
+    '[[ "$tty" == 1 ]]; shift' \
+    'if [[ "${APP_PTY_WITHOUT_TERMINAL:-0}" == 1 ]]; then exec "$@"; fi' \
+    'printf -v command "%q " "$@"' 'exec script -qefc "$command" /dev/null </dev/null' >"$CW_BIN"
   chmod 0700 "$CW_BIN"
   unset CODEWIRE_DEV_SMOKE_API_KEY CODEWIRE_API_KEY
   run_application_secret_pty "printf 'application-secret-check-ok\\n'" actual
   expect_failure pty-exit-status run_application_secret_pty "printf 'application-secret-check-ok\\n'; exit 7" failure
+  export APP_PTY_WITHOUT_TERMINAL=1
+  expect_failure missing-guest-pty run_application_secret_pty "printf 'application-secret-check-ok\\n'" no-pty
 )
+pass
 pass
 pass
 printf 'Dev application-source shell fixtures passed: %s\n' "$APP_TEST_COUNT"

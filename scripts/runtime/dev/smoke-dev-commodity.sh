@@ -1179,11 +1179,16 @@ SCRIPT
 }
 
 run_application_secret_pty() {
-  local guest_script="$1" phase="$2" command
-  printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run "$ENV_ID" -- \
+  local guest_script="$1" phase="$2" command receipt
+  # cw needs terminal stdin to read its initial size. Redirect cw's stdout
+  # inside that host PTY so attach is noninteractive and propagates the guest
+  # exit status, rather than waiting for the interactive detach chord.
+  printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty "$ENV_ID" -- \
     /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
+  printf -v receipt '%q' "$TMPDIR_SMOKE/app-pty-$phase.log"
+  command+=" >$receipt"
   if ! timeout --foreground --kill-after=5s "$SMOKE_EXEC_TIMEOUT" \
-      env SHELL=/bin/bash script -qefc "$command" "$TMPDIR_SMOKE/app-pty-$phase.log" </dev/null \
+      env SHELL=/bin/bash script -qefc "$command" /dev/null </dev/null \
       >"$TMPDIR_SMOKE/app-pty-$phase.out" 2>"$TMPDIR_SMOKE/app-pty-$phase.err"; then
     die 'application-secret PTY launch failed; output suppressed'
   fi
