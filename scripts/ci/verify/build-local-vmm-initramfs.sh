@@ -16,7 +16,15 @@ readonly REQUIRED_PROTOC='libprotoc 35.1'
 readonly DEFAULT_TARGET='x86_64-unknown-linux-musl'
 readonly ARM64_TARGET='aarch64-unknown-linux-musl'
 readonly REQUIRED_RUNC_VERSION='1.5.1'
-readonly REQUIRED_RUNC_SHA256='177df879d50c913eb205e898d5c1c05a18f574053c0ce5524c471208eaf06f6f'
+readonly X86_64_RUNC_SHA256='177df879d50c913eb205e898d5c1c05a18f574053c0ce5524c471208eaf06f6f'
+# Official runc v1.5.1 release asset runc.arm64:
+# https://github.com/opencontainers/runc/releases/download/v1.5.1/runc.arm64
+readonly ARM64_RUNC_SHA256='ca70e7dbd6616ca782a59b5d3ac86909123fdaa9fa3f89dcf29051c70eee7ce9'
+# bin/busybox.static from Alpine v3.23 busybox-static 1.37.0-r30. The signed
+# aarch64 APK has SHA-256 44c9abdfb970f398fa72c8382fe2d8808eea16beaf82daf6ac708b92f1b8659e
+# and exact aports commit 1e823a60eb85606954b3a5af5f8e5bbd1ea680cf:
+# https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/busybox-static-1.37.0-r30.apk
+readonly ARM64_BUSYBOX_SHA256='198f6f675a49ac734082e054b823d3e2e947180ca2f632852ae1c09e950fd676'
 
 usage() {
   printf '%s\n' \
@@ -25,7 +33,7 @@ usage() {
     '  build-local-vmm-initramfs.sh --verify [--target TARGET] [--output ABSOLUTE_PATH]' \
     '  build-local-vmm-initramfs.sh --verify-root --busybox ABSOLUTE_PATH' \
     '    --busybox-sha256 SHA256 --runc ABSOLUTE_PATH' \
-    '    --runc-sha256 SHA256 [--target x86_64-unknown-linux-musl]' \
+    '    --runc-sha256 SHA256 [--target TARGET]' \
     '    [--output ABSOLUTE_PATH]' \
     '' \
     '--probe/--output creates a deterministic archive from caller-supplied bytes.' \
@@ -36,10 +44,11 @@ usage() {
     'each required binary twice and fails closed on any drift. With --output,' \
     'the verified archive' \
     'is published atomically' \
-    'after comparison. --verify-root applies the same proof and adds a static' \
-    'x86_64 BusyBox plus the reviewed official static runc 1.5.1 binary. Exact' \
+    'after comparison. --verify-root applies the same proof and adds static' \
+    'target-architecture BusyBox and official runc 1.5.1 binaries. Exact' \
     'lowercase SHA-256 values must be supplied; runc must match the built-in' \
-    'reviewed release digest. Arm64 root inputs remain unadmitted.' \
+    'reviewed release digest. Arm64 BusyBox must also match its built-in' \
+    'reviewed Alpine package payload digest.' \
     'Artifact provenance remains a separate gate.' >&2
 }
 
@@ -116,6 +125,14 @@ validate_target() {
   esac
 }
 
+required_runc_sha256() {
+  case "$TARGET" in
+    "$DEFAULT_TARGET") printf '%s\n' "$X86_64_RUNC_SHA256" ;;
+    "$ARM64_TARGET") printf '%s\n' "$ARM64_RUNC_SHA256" ;;
+    *) die "unsupported static guest target: $TARGET" ;;
+  esac
+}
+
 build_one() {
   local target_dir="$1" build_target="$2"
   local cargo_home remap_flags
@@ -179,14 +196,11 @@ verify_reproducible() {
   local requested_output="$1" root_busybox="$2" root_busybox_sha256="$3"
   local root_runc="$4" root_runc_sha256="$5"
   local target_a target_b binary_a binary_b packer_a packer_b
-  local archive_a archive_b runc_version
+  local archive_a archive_b required_runc_sha runc_version
   if [[ -n "$requested_output" ]]; then
     requested_output="$(absolute_output "$requested_output")"
   fi
   validate_target
-  if [[ -n "$root_busybox" && "$TARGET" != "$DEFAULT_TARGET" ]]; then
-    die '--verify-root accepts only x86_64-unknown-linux-musl until arm64 BusyBox and runc inputs are reviewed'
-  fi
   require_exact_toolchain
   if [[ -n "$root_busybox" ]]; then
     root_busybox="$(absolute_existing_file BusyBox "$root_busybox")"
@@ -194,18 +208,24 @@ verify_reproducible() {
       die "--busybox-sha256 must be exactly 64 lowercase hexadecimal characters"
     [[ "$(sha256sum "$root_busybox" | awk '{print $1}')" == "$root_busybox_sha256" ]] ||
       die "BusyBox digest differs from --busybox-sha256"
-    verify_static_elf BusyBox "$root_busybox" "$DEFAULT_TARGET"
+    if [[ "$TARGET" == "$ARM64_TARGET" && "$root_busybox_sha256" != "$ARM64_BUSYBOX_SHA256" ]]; then
+      die 'BusyBox digest is not the reviewed Alpine arm64 static payload digest'
+    fi
+    verify_static_elf BusyBox "$root_busybox" "$TARGET"
     root_runc="$(absolute_existing_file runc "$root_runc")"
     [[ "$root_runc_sha256" =~ ^[0-9a-f]{64}$ ]] ||
       die "--runc-sha256 must be exactly 64 lowercase hexadecimal characters"
-    [[ "$root_runc_sha256" == "$REQUIRED_RUNC_SHA256" ]] ||
+    required_runc_sha="$(required_runc_sha256)"
+    [[ "$root_runc_sha256" == "$required_runc_sha" ]] ||
       die "runc digest is not the reviewed static v$REQUIRED_RUNC_VERSION release digest"
     [[ "$(sha256sum "$root_runc" | awk '{print $1}')" == "$root_runc_sha256" ]] ||
       die "runc digest differs from --runc-sha256"
-    verify_static_elf runc "$root_runc" "$DEFAULT_TARGET"
-    runc_version="$(env -i PATH=/usr/bin:/bin "$root_runc" --version | sed -n '1s/^runc version //p')"
-    [[ "$runc_version" == "$REQUIRED_RUNC_VERSION" ]] ||
-      die "runc did not report exact version $REQUIRED_RUNC_VERSION"
+    verify_static_elf runc "$root_runc" "$TARGET"
+    if [[ "$TARGET" == "$DEFAULT_TARGET" ]]; then
+      runc_version="$(env -i PATH=/usr/bin:/bin "$root_runc" --version | sed -n '1s/^runc version //p')"
+      [[ "$runc_version" == "$REQUIRED_RUNC_VERSION" ]] ||
+        die "runc did not report exact version $REQUIRED_RUNC_VERSION"
+    fi
   fi
   VERIFY_WORK="$(mktemp -d "${TMPDIR:-/tmp}/codewire-local-vmm-initramfs.XXXXXX")"
   trap cleanup EXIT
