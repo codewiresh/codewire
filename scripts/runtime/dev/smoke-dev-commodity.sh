@@ -1086,7 +1086,9 @@ application_environment_ready() {
     die 'application environment setup failed; output suppressed'
   fi
   jq -e --arg id "$ENV_ID" --arg project "$project" --argjson previous "$previous_generation" '
-    .id == $id and .state == "running" and .operation_generation > $previous and
+    .id == $id and .state == "running" and
+    (.operation_generation | type == "number" and . > 0) and
+    ($previous == 0 or .operation_generation == $previous) and
     .setup_complete == true and .setup_error == null and
     (.source_selection | type == "object") and (.source_selection.secrets | type == "object") and
     .source_selection.credentials == null and .source_selection.profile_revision == null and
@@ -1238,7 +1240,9 @@ run_application_secrets_smoke() {
         assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
         ;;
     esac
-    wait_until 'current application source generation and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
+    # Generation fences the owning Temporal workflow, not each source edit.
+    # Restart completion additionally requires a new exact Pod UID below.
+    wait_until 'current application source, workflow authority and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
       application_environment_ready "$project" "$generation"
     # Running precedes setup. Setup recovery may replace the workspace Pod, so
     # discover and assert its current identity only after setup has committed.

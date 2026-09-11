@@ -27,6 +27,7 @@ fixture() {
   APP_KUBE_RESOURCE=''; APP_KUBE_MUTATION='.'; APP_ANNOTATED_POD=0
   printf '[]\n' >"$TMPDIR_SMOKE/projects.db"
   printf '[]\n' >"$TMPDIR_SMOKE/environments.db"
+  printf '1\n' >"$TMPDIR_SMOKE/pod-incarnation"
   : >"$TMPDIR_SMOKE/calls"
 }
 
@@ -77,9 +78,11 @@ cw() {
       local project='' before
       before="$(jq '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")"
       [[ " $* " != *' --secrets '* ]] || project="$6"
-      jq --arg project "$project" '.[0].operation_generation += 1 | .[0].source_selection.secrets.project=$project' \
+      # The real workflow retains its generation across source restarts.
+      jq --arg project "$project" '.[0].source_selection.secrets.project=$project' \
         "$TMPDIR_SMOKE/environments.db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/environments.db"
+      printf '%s\n' "$(( $(<"$TMPDIR_SMOKE/pod-incarnation") + 1 ))" >"$TMPDIR_SMOKE/pod-incarnation"
       if [[ "$APP_FAILURE" == bad-update || ( "$APP_FAILURE" == bad-clear && "$project" == '' ) ]]; then
         printf '{"outcome":"restart_required"}\n'
       else
@@ -108,7 +111,7 @@ kubectl_dev() {
   printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   generation="$(jq -r '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")"
   project="$(jq -r '.[0].source_selection.secrets.project' "$TMPDIR_SMOKE/environments.db")"
-  pod_uid="pod-$generation"
+  pod_uid="pod-$(<"$TMPDIR_SMOKE/pod-incarnation")"
   [[ "$APP_FAILURE" != stale-pod ]] || pod_uid='pod-1'
   [[ "$APP_ANNOTATED_POD" != 1 ]] || pod_name=annotated-pod
   case "$*" in
@@ -183,7 +186,8 @@ jq -e '.version == 1 and (has("schema_version") | not) and .secrets.project == "
 pass
 create_environment
 run_application_secrets_smoke
-[[ "$(jq -r '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")" == 3 ]]
+[[ "$(jq -r '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")" == 1 ]]
+[[ "$(<"$TMPDIR_SMOKE/pod-incarnation")" == 3 ]]
 cleanup_application_secrets
 [[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]]
 [[ "$(jq -r '.[0].state' "$TMPDIR_SMOKE/environments.db")" == destroyed ]]
@@ -310,8 +314,12 @@ create_environment
 project="platform:id:${APP_SECRET_IDS[0]}"
 application_environment_ready "$project" 0
 pass
+application_environment_ready "$project" 1
+pass
+expect_failure stale-workflow-authority application_environment_ready "$project" 2
 cp "$TMPDIR_SMOKE/environments.db" "$TMPDIR_SMOKE/setup-complete.json"
-for filter in '.[0].setup_complete=false' 'del(.[0].setup_complete)' '.[0].setup_complete="true"' '.[0].setup_error="setup failed"'; do
+for filter in '.[0].setup_complete=false' 'del(.[0].setup_complete)' '.[0].setup_complete="true"' '.[0].setup_error="setup failed"' \
+  '.[0].state="stopping"' '.[0].operation_generation=0' '.[0].operation_generation=null' '.[0].operation_generation="1"'; do
   jq "$filter" "$TMPDIR_SMOKE/setup-complete.json" >"$TMPDIR_SMOKE/environments.db"
   expect_failure incomplete-or-failed-setup application_environment_ready "$project" 0
 done
