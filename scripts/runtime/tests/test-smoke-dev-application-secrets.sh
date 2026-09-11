@@ -341,6 +341,13 @@ DATABASE_URL=synthetic-application CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c 
 grep -qx application-secret-check-ok "$TMPDIR_SMOKE/check.out"
 pass
 expect_failure missing-projection env -u DATABASE_URL CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
+grep -qx 'application check failed: missing-projection' "$APP_TEST_ROOT/failure.err"
+expect_failure wrong-projection env DATABASE_URL=wrong-synthetic-value CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
+grep -qx 'application check failed: current-projection' "$APP_TEST_ROOT/failure.err"
+printf 'old-startup\n' >"$guest/workspace/.cw-app-smoke/startup-sha"
+expect_failure stale-startup env DATABASE_URL=synthetic-application CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
+grep -qx 'application check failed: startup-projection' "$APP_TEST_ROOT/failure.err"
+printf '%s\n' "$expected" >"$guest/workspace/.cw-app-smoke/startup-sha"
 printf '{"DATABASE_URL":"forbidden-ordinary-value","CW_DEV_PRECEDENCE":"ordinary-config"}\n' >"$guest/home/.codewire/environment.json"
 expect_failure persisted-ordinary-value env DATABASE_URL=synthetic-application CW_DEV_PRECEDENCE=ordinary-config /bin/sh -c "$check"
 printf '{"CW_DEV_PRECEDENCE":"ordinary-config"}\n' >"$guest/home/.codewire/environment.json"

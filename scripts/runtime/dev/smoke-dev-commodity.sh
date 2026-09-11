@@ -1153,15 +1153,19 @@ application_guest_check() {
   local expected="$1"
   cat <<SCRIPT
 set -eu
-test "\$CW_DEV_PRECEDENCE" = ordinary-config
-test "\$(cat /workspace/.cw-app-smoke/install-count)" = 1
-test "\$(cat /workspace/.cw-app-smoke/preserved)" = workspace-preserved
-if test '$expected' = absent; then test "\${DATABASE_URL+x}" != x; else
-  test "\$(printf %s "\$DATABASE_URL" | sha256sum | cut -d ' ' -f 1)" = '$expected'
+application_fail() { printf 'application check failed: %s\\n' "\$1" >&2; exit 1; }
+test "\${CW_DEV_PRECEDENCE:-}" = ordinary-config || application_fail ordinary-precedence
+test "\$(cat /workspace/.cw-app-smoke/install-count)" = 1 || application_fail install-count
+test "\$(cat /workspace/.cw-app-smoke/preserved)" = workspace-preserved || application_fail workspace-preservation
+if test '$expected' = absent; then
+  test "\${DATABASE_URL+x}" != x || application_fail cleared-projection
+else
+  test "\${DATABASE_URL+x}" = x || application_fail missing-projection
+  test "\$(printf %s "\$DATABASE_URL" | sha256sum | cut -d ' ' -f 1)" = '$expected' || application_fail current-projection
 fi
 attempt=0
 while test "\$(cat /workspace/.cw-app-smoke/startup-sha 2>/dev/null || true)" != '$expected'; do
-  attempt=\$((attempt + 1)); test "\$attempt" -lt 100; sleep 0.1
+  attempt=\$((attempt + 1)); test "\$attempt" -lt 100 || application_fail startup-projection; sleep 0.1
 done
 python3 - <<'PY'
 import json
