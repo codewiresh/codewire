@@ -38,6 +38,10 @@ grep -qF 'COPY --chmod=0755 images/base/apt-get-with-retry /usr/local/sbin/apt-g
   fail 'workspace build stage does not install the bounded APT transaction helper'
 grep -qxF 'USER codewire' "$DOCKERFILE" ||
   fail 'base image does not drop to the codewire runtime user'
+grep -qF 'groupadd --gid 1000 codewire &&' "$DOCKERFILE" ||
+  fail 'base image does not reserve the platform primary GID before docker'
+grep -qF 'useradd codewire --create-home --shell=/bin/bash --uid=1000 --gid=1000 &&' "$DOCKERFILE" ||
+  fail 'base image does not bind the codewire passwd identity to platform UID:GID 1000:1000'
 grep -qxF 'ENTRYPOINT ["/entrypoint.sh"]' "$DOCKERFILE" ||
   fail 'base image entrypoint contract is missing'
 grep -qF 'openssh-client postgresql-client' "$DOCKERFILE" ||
