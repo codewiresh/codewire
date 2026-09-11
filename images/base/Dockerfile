@@ -78,8 +78,9 @@ RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
 
 RUN userdel -r ubuntu 2>/dev/null || true && \
+    groupadd --gid 1000 codewire && \
     groupadd -f docker && \
-    useradd codewire --create-home --shell=/bin/bash --uid=1000 --user-group && \
+    useradd codewire --create-home --shell=/bin/bash --uid=1000 --gid=1000 && \
     echo "codewire ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/nopasswd && \
     usermod -aG docker codewire
 

@@ -484,7 +484,7 @@ grep -q -- '--build-context codewire-verified-base=oci-layout://.*base.oci@sha25
 grep -q -- '--no-cache-filter workspace-floating-tools' "$work/docker.log" || fail 'floating tools could be reused'
 grep -q -- '--build-arg CODEWIRE_SCCACHE_MODE=local' "$work/docker.log" || fail 'compiler policy missing'
 image_id="$(cat "$work/image-id")"
-grep -Eq "run --rm --interactive --pids-limit=2048 --name codewire-workspace-[^ ]+-full --user codewire --entrypoint bash $image_id -eu -s " "$work/docker.log" || fail 'full image contract omitted'
+grep -Eq "run --rm --interactive --pids-limit=2048 --name codewire-workspace-[^ ]+-full --user 1000:1000 --entrypoint bash $image_id -eu -s " "$work/docker.log" || fail 'full image contract omitted'
 grep -q -- '--tmpfs /home/codewire:rw.* --entrypoint bash .* --mounted-home-agents' "$work/docker.log" || fail 'mounted-home contract omitted'
 cleanup_line="$(grep -n '^buildx rm ' "$work/docker.log" | cut -d: -f1)"
 seal_line="$(grep -n '^image tag ' "$work/docker.log" | cut -d: -f1)"
