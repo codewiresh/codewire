@@ -5,6 +5,26 @@ validating a fixed Virtualization.framework configuration on macOS 26 or later
 on Apple Silicon. It is not linked from Cargo, `codewire-local-vmm`, or `cw`, and
 it does not start or manage a VM.
 
+The separately invoked `inode-probe` subcommand is source for one synthetic
+hardware fixture, not product lifecycle wiring. Its parent is
+`scripts/dev/macos-vz-inode-probe.py`. The parent copies caller-supplied
+reviewed kernel/initramfs and synthetic ext4 data bytes into a private
+directory, generates a synthetic 4 KiB seed, sends exactly four descriptors,
+waits for descriptor admission, closes its copies, and atomically replaces all
+four pathnames with zero-filled decoys. Only then does it send the one-byte
+start command. A dedicated PID-1 mode from the same initramfs returns native
+vsock readiness authenticated by the original seed bytes and including the
+original ext4 UUID. The parent then SIGKILLs the helper and requires both the
+process result and control-channel EOF to classify ownership termination.
+
+The harness never signs. It requires exact reviewed SHA-256 values for its
+private helper copy, kernel and initramfs plus the exact synthetic ext4 UUID,
+and refuses a helper without the separately authorized
+`com.apple.security.virtualization` entitlement. Merely building or testing
+this package therefore cannot start a VM. The synthetic PID-1 response is not
+production guest readiness; production still requires the distinct state,
+root, and seed storage contract to be implemented.
+
 The parent supplies one bounded, sorted-key canonical JSON frame over an
 inherited private connected `AF_UNIX` stream socket. A four-byte big-endian
 length prefix gives the stream an explicit frame boundary. The first send

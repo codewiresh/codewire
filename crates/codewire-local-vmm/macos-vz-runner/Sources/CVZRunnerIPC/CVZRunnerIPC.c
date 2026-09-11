@@ -267,3 +267,48 @@ int cw_vz_send_response(int socket_fd, const uint8_t *buffer, size_t size) {
     }
     return 0;
 }
+
+int cw_vz_receive_start(int socket_fd) {
+    if (socket_fd < 0) {
+        return CW_VZ_IPC_INVALID_ARGUMENT;
+    }
+    int validation = validate_private_socket(socket_fd);
+    if (validation != 0) {
+        return validation;
+    }
+    uint8_t frame[CW_VZ_FRAME_HEADER_BYTES + 1] = {0};
+    size_t consumed = 0;
+    while (consumed < sizeof(frame)) {
+        struct iovec vector = {
+            .iov_base = frame + consumed,
+            .iov_len = sizeof(frame) - consumed,
+        };
+        union {
+            struct cmsghdr alignment;
+            uint8_t bytes[CMSG_SPACE(sizeof(int) * CW_VZ_MAX_RECEIVED_DESCRIPTORS)];
+        } control = {0};
+        struct msghdr message = {0};
+        message.msg_iov = &vector;
+        message.msg_iovlen = 1;
+        message.msg_control = control.bytes;
+        message.msg_controllen = sizeof(control.bytes);
+        ssize_t part;
+        do {
+            part = recvmsg(socket_fd, &message, 0);
+        } while (part < 0 && errno == EINTR);
+        if (part <= 0) {
+            return CW_VZ_IPC_FRAME_INVALID;
+        }
+        if (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC) ||
+            CMSG_FIRSTHDR(&message) != NULL) {
+            close_message_descriptors(&message);
+            return CW_VZ_IPC_DESCRIPTOR_SET_INVALID;
+        }
+        consumed += (size_t)part;
+    }
+    if (frame[0] != 0 || frame[1] != 0 || frame[2] != 0 || frame[3] != 1 ||
+        frame[4] != 1) {
+        return CW_VZ_IPC_FRAME_INVALID;
+    }
+    return 0;
+}

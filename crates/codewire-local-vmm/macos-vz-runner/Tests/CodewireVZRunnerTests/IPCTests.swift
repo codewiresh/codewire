@@ -148,6 +148,50 @@ extension CodewireVZRunnerTests {
     }
 
     @Test
+    func testStartCommandIsExactAndFramed() throws {
+      for (frame, accepted) in [
+        ([UInt8](arrayLiteral: 0, 0, 0, 1, 1), true),
+        ([UInt8](arrayLiteral: 0, 0, 0, 1, 2), false),
+        ([UInt8](arrayLiteral: 0, 0, 0, 2, 1), false),
+        ([UInt8](arrayLiteral: 0, 0, 0, 0, 1), false),
+      ] {
+        var sockets = [Int32](repeating: -1, count: 2)
+        try #require(cw_vz_fixture_socketpair(&sockets) == 0)
+        defer { closeAll(sockets) }
+        let written = frame.withUnsafeBytes { raw in
+          write(sockets[0], raw.baseAddress, frame.count)
+        }
+        try #require(written == frame.count)
+        if accepted {
+          try PrivateIPC.receiveStart(controlDescriptor: sockets[1])
+        } else {
+          #expect(throws: (any Error).self) {
+            try PrivateIPC.receiveStart(controlDescriptor: sockets[1])
+          }
+        }
+      }
+
+      var sockets = [Int32](repeating: -1, count: 2)
+      try #require(cw_vz_fixture_socketpair(&sockets) == 0)
+      defer { closeAll(sockets) }
+      let descriptor = try fixtureDescriptors(count: 1)[0]
+      defer { _ = close(descriptor) }
+      let payload = Data([1])
+      let sent = payload.withUnsafeBytes { raw in
+        [descriptor].withUnsafeBufferPointer { descriptors in
+          cw_vz_fixture_send_request(
+            sockets[0], raw.bindMemory(to: UInt8.self).baseAddress, payload.count,
+            descriptors.baseAddress, descriptors.count
+          )
+        }
+      }
+      try #require(sent == 0)
+      #expect(throws: (any Error).self) {
+        try PrivateIPC.receiveStart(controlDescriptor: sockets[1])
+      }
+    }
+
+    @Test
     func testDatagramSocketIsRejectedBeforeReading() throws {
       var sockets = [Int32](repeating: -1, count: 2)
       try #require(socketpair(AF_UNIX, socketTypeDatagram(), 0, &sockets) == 0)

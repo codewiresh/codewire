@@ -11,6 +11,11 @@ import Testing
       #expect(configuration.vmID == "00000000-0000-4000-8000-000000000001")
       #expect(configuration.dataDisk.size == 256 * 1024 * 1024)
       #expect(RunnerProtocol.guestKernelCommandLine == "console=ttyS0 rdinit=/init panic=-1")
+      #expect(
+        RunnerProtocol.inodeProbeKernelCommandLine
+          == "console=ttyS0 rdinit=/init panic=-1 -- vz-inode-probe"
+      )
+      #expect(RunnerProtocol.inodeProbeVsockPort == 7775)
     }
 
     @Test
