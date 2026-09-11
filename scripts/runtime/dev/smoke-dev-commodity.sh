@@ -1097,14 +1097,39 @@ application_environment_ready() {
 }
 
 capture_application_pod() {
-  local phase="$1" generation="$2" claim_uid
-  claim_uid="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxclaim "$CLAIM_NAME" -o 'jsonpath={.metadata.uid}')"
-  [[ -n "$claim_uid" ]] || die 'application smoke claim identity is unavailable'
-  kubectl_dev -n "$SANDBOX_NAMESPACE" get pod -l "agents.x-k8s.io/claim-uid=$claim_uid" -o json |
-    jq -e --arg claim "$claim_uid" --arg id "$ENV_ID" --arg generation "$generation" --arg phase "$phase" '
-      if (.items | length) != 1 then error("expected one exact workspace Pod") else .items[0] end |
+  local phase="$1" generation="$2" claim_identity claim_uid sandbox_name sandbox_identity sandbox_uid pod_name
+  # Match the product authority chain. Agent Sandbox does not copy a Claim UID
+  # label onto the Pod; labels alone would not prove controller ownership.
+  claim_identity="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxclaim "$CLAIM_NAME" -o json |
+    jq -er --arg name "$CLAIM_NAME" --arg ns "$SANDBOX_NAMESPACE" --arg id "$ENV_ID" '
+      select(.metadata.name == $name and .metadata.namespace == $ns and .metadata.deletionTimestamp == null and
+        .metadata.labels["codewire.sh/environment-id"] == $id and .metadata.labels["codewire.sh/type"] == "sandbox") |
+      [.metadata.uid, .status.sandbox.name] |
+      select(all(.[]; type == "string" and test("^[a-z0-9][a-z0-9.-]*$"))) | @tsv')" ||
+    die 'application smoke claim identity is unavailable'
+  IFS=$'\t' read -r claim_uid sandbox_name <<<"$claim_identity"
+  sandbox_identity="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get sandbox "$sandbox_name" -o json |
+    jq -er --arg name "$sandbox_name" --arg ns "$SANDBOX_NAMESPACE" --arg claim "$CLAIM_NAME" --arg uid "$claim_uid" '
+      select(.metadata.name == $name and .metadata.namespace == $ns and .metadata.deletionTimestamp == null) |
+      select([.metadata.ownerReferences[]? | select(.controller == true)] |
+        length == 1 and (.[0] | .apiVersion == "extensions.agents.x-k8s.io/v1beta1" and
+          .kind == "SandboxClaim" and .name == $claim and .uid == $uid)) |
+      [.metadata.uid, (.metadata.annotations["agents.x-k8s.io/pod-name"] // .metadata.name)] |
+      select(all(.[]; type == "string" and test("^[a-z0-9][a-z0-9.-]*$"))) | @tsv')" ||
+    die 'application smoke Sandbox is not controlled by the exact Claim'
+  IFS=$'\t' read -r sandbox_uid pod_name <<<"$sandbox_identity"
+  kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$pod_name" -o json |
+    jq -e --arg claim "$claim_uid" --arg sandbox "$sandbox_name" --arg sandbox_uid "$sandbox_uid" \
+      --arg pod "$pod_name" --arg ns "$SANDBOX_NAMESPACE" --arg id "$ENV_ID" --arg generation "$generation" --arg phase "$phase" '
       select(.metadata.deletionTimestamp == null and .status.phase == "Running" and
-        .metadata.labels["agents.x-k8s.io/claim-uid"] == $claim) |
+        .metadata.name == $pod and .metadata.namespace == $ns and
+        .metadata.labels["codewire.sh/environment-id"] == $id and
+        .metadata.labels["codewire.sh/type"] == "workspace" and
+        .metadata.labels["codewire.sh/environment-operation-generation"] == $generation) |
+      select([.metadata.ownerReferences[]? | select(.controller == true)] |
+        length == 1 and (.[0] | .apiVersion == "agents.x-k8s.io/v1beta1" and
+          .kind == "Sandbox" and .name == $sandbox and .uid == $sandbox_uid)) |
+      select([.spec.containers[] | select(.name == "workspace")] | length == 1) |
       [.spec.containers[] | select(.name == "workspace") | .env[]?] as $env |
       select(all($env[]; .name != "DATABASE_URL")) |
       select(if $phase == "clear" then

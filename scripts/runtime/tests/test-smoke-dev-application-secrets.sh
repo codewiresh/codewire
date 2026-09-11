@@ -24,6 +24,7 @@ fixture() {
   CODEWIRE_SERVER_URL=https://synthetic.invalid; EXPECTED_CODEWIRE_DEV_SERVER_URL="$CODEWIRE_SERVER_URL"
   CODEWIRE_DEV_SMOKE_API_KEY=synthetic-test-only; EXPECTED_CODEWIRE_SMOKE_USER_EMAIL=synthetic@example.invalid
   SANDBOX_NAMESPACE=synthetic; APP_FAILURE=''
+  APP_KUBE_RESOURCE=''; APP_KUBE_MUTATION='.'; APP_ANNOTATED_POD=0
   printf '[]\n' >"$TMPDIR_SMOKE/projects.db"
   printf '[]\n' >"$TMPDIR_SMOKE/environments.db"
   : >"$TMPDIR_SMOKE/calls"
@@ -103,20 +104,41 @@ run_kube_assertions() {
     "$TMPDIR_SMOKE/app-environment.json" >/dev/null || fail 'Pod assertions preceded completed setup'
 }
 kubectl_dev() {
-  if [[ "$*" == *' get sandboxclaim '* ]]; then printf 'owned-claim-uid'; return; fi
-  [[ "$*" == *' get pod '* ]] || fail 'unexpected Kubernetes fixture operation'
-  local generation project pod_uid
+  local generation project pod_uid pod_name=owned-sandbox resource object
+  printf '%q ' "$@" >>"$TMPDIR_SMOKE/calls"; printf '\n' >>"$TMPDIR_SMOKE/calls"
   generation="$(jq -r '.[0].operation_generation' "$TMPDIR_SMOKE/environments.db")"
   project="$(jq -r '.[0].source_selection.secrets.project' "$TMPDIR_SMOKE/environments.db")"
   pod_uid="pod-$generation"
   [[ "$APP_FAILURE" != stale-pod ]] || pod_uid='pod-1'
-  jq -n --arg id "$ENV_ID" --arg generation "$generation" --arg project "$project" --arg uid "$pod_uid" '
-    {items:[{metadata:{uid:$uid,labels:{"agents.x-k8s.io/claim-uid":"owned-claim-uid"}},status:{phase:"Running"},spec:{
-      volumes:[{name:"workspace",persistentVolumeClaim:{claimName:"owned-pvc"}}],containers:[{name:"workspace",env:
-        (if $project == "" then [] else [
-          {name:"CODEWIRE_ENVIRONMENT_ID",value:$id},
-          {name:"CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",value:$generation},
-          {name:"CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",value:("a" * 64)}] end)}]}}]}'
+  [[ "$APP_ANNOTATED_POD" != 1 ]] || pod_name=annotated-pod
+  case "$*" in
+    '-n synthetic get sandboxclaim fixture-claim -o json')
+      resource=claim
+      object="$(jq -n --arg id "$ENV_ID" '{metadata:{name:"fixture-claim",namespace:"synthetic",uid:"owned-claim-uid",
+        labels:{"codewire.sh/environment-id":$id,"codewire.sh/type":"sandbox"}},status:{sandbox:{name:"owned-sandbox"}}}')" ;;
+    '-n synthetic get sandbox owned-sandbox -o json')
+      resource=sandbox
+      object="$(jq -n --arg pod "$pod_name" --argjson annotated "$APP_ANNOTATED_POD" '
+        {metadata:{name:"owned-sandbox",namespace:"synthetic",uid:"owned-sandbox-uid",
+          annotations:(if $annotated == 1 then {"agents.x-k8s.io/pod-name":$pod} else {} end),
+          ownerReferences:[{apiVersion:"extensions.agents.x-k8s.io/v1beta1",kind:"SandboxClaim",
+            name:"fixture-claim",uid:"owned-claim-uid",controller:true}]}}')" ;;
+    "-n synthetic get pod $pod_name -o json")
+      [[ "$APP_FAILURE" != missing-pod ]] || return 1
+      resource=pod
+      object="$(jq -n --arg id "$ENV_ID" --arg generation "$generation" --arg project "$project" --arg uid "$pod_uid" --arg name "$pod_name" '
+        {metadata:{name:$name,namespace:"synthetic",uid:$uid,
+          labels:{"codewire.sh/environment-id":$id,"codewire.sh/type":"workspace","codewire.sh/environment-operation-generation":$generation},
+          ownerReferences:[{apiVersion:"agents.x-k8s.io/v1beta1",kind:"Sandbox",name:"owned-sandbox",uid:"owned-sandbox-uid",controller:true}]},
+          status:{phase:"Running"},spec:{volumes:[{name:"workspace",persistentVolumeClaim:{claimName:"owned-pvc"}}],containers:[{name:"workspace",env:
+            (if $project == "" then [] else [
+              {name:"CODEWIRE_ENVIRONMENT_ID",value:$id},
+              {name:"CODEWIRE_ENVIRONMENT_OPERATION_GENERATION",value:$generation},
+              {name:"CODEWIRE_ENVIRONMENT_PROJECTION_SHA256",value:("a" * 64)}] end)}]}}')" ;;
+    *) fail "unexpected Kubernetes fixture operation: $*" ;;
+  esac
+  if [[ "$APP_KUBE_RESOURCE" == "$resource" ]]; then jq "$APP_KUBE_MUTATION" <<<"$object";
+  else printf '%s\n' "$object"; fi
 }
 run_application_secret_pty() {
   [[ "$1" == *'DATABASE_URL'* ]] || fail 'PTY did not receive the application assertion'
@@ -223,6 +245,57 @@ for variant in scope leak; do
 done
 reject_stale_pod() { fixture; prepare_application_secrets; create_environment; APP_FAILURE=stale-pod; run_application_secrets_smoke; }
 expect_failure stale-pod reject_stale_pod
+
+# Real topology has no claim-uid Pod label. Pin the controller UIDs instead;
+# hostile labels, ambiguous controllers and stale incarnations cannot pass.
+fixture
+prepare_application_secrets
+create_environment
+capture_application_pod a 1
+grep -Fq 'get sandbox owned-sandbox -o json' "$TMPDIR_SMOKE/calls"
+grep -Fq 'get pod owned-sandbox -o json' "$TMPDIR_SMOKE/calls"
+if grep -Fq 'get pod -l' "$TMPDIR_SMOKE/calls"; then fail 'Pod discovery used label fallback'; fi
+pass
+APP_ANNOTATED_POD=1
+capture_application_pod a 1
+grep -Fq 'get pod annotated-pod -o json' "$TMPDIR_SMOKE/calls"
+pass
+APP_FAILURE=missing-pod
+expect_failure missing-annotated-pod capture_application_pod a 1
+APP_FAILURE=''; APP_ANNOTATED_POD=0
+for variant in \
+  'claim|del(.status.sandbox)' \
+  'claim|.status.sandbox.name=""' \
+  'claim|.metadata.uid=""' \
+  'claim|.metadata.name="other"' \
+  'claim|.metadata.labels["codewire.sh/environment-id"]="other"' \
+  'claim|.metadata.deletionTimestamp="deleting"' \
+  'sandbox|.metadata.uid=""' \
+  'sandbox|.metadata.deletionTimestamp="deleting"' \
+  'sandbox|.metadata.ownerReferences[0].uid="foreign-claim"' \
+  'sandbox|.metadata.ownerReferences[0].name="foreign-claim"' \
+  'sandbox|.metadata.ownerReferences[0].apiVersion="agents.x-k8s.io/v1beta1"' \
+  'sandbox|.metadata.ownerReferences[0].controller=false' \
+  'sandbox|.metadata.ownerReferences += .metadata.ownerReferences' \
+  'sandbox|.metadata.annotations["agents.x-k8s.io/pod-name"]="wrong-pod"' \
+  'pod|.metadata.uid=""' \
+  'pod|.metadata.namespace="other"' \
+  'pod|.metadata.name="other"' \
+  'pod|.metadata.deletionTimestamp="deleting"' \
+  'pod|.status.phase="Pending"' \
+  'pod|.metadata.ownerReferences[0].uid="foreign-sandbox"' \
+  'pod|.metadata.ownerReferences[0].name="foreign-sandbox"' \
+  'pod|.metadata.ownerReferences[0].apiVersion="extensions.agents.x-k8s.io/v1beta1"' \
+  'pod|.metadata.ownerReferences[0].controller=false' \
+  'pod|.metadata.ownerReferences += .metadata.ownerReferences' \
+  'pod|.metadata.labels["codewire.sh/environment-id"]="other"' \
+  'pod|.metadata.labels["codewire.sh/type"]="gateway"' \
+  'pod|.metadata.labels["codewire.sh/environment-operation-generation"]="2"' \
+  'pod|.spec.containers += .spec.containers'; do
+  APP_KUBE_RESOURCE="${variant%%|*}"; APP_KUBE_MUTATION="${variant#*|}"
+  expect_failure "$variant" capture_application_pod a 1
+done
+
 reject_cleanup() { fixture; prepare_application_secrets; APP_FAILURE=cleanup; cleanup_application_secrets; }
 expect_failure cleanup reject_cleanup
 
