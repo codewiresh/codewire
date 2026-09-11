@@ -41,4 +41,8 @@ int cw_vz_descriptors_are_distinct_files(
 
 int cw_vz_send_response(int socket_fd, const uint8_t *buffer, size_t size);
 
+// Receive the one-byte start command in a normal length-prefixed frame after
+// descriptor admission. No further descriptors or authority can be added.
+int cw_vz_receive_start(int socket_fd);
+
 #endif

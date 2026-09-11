@@ -52,6 +52,22 @@ import Foundation
     static func buildConfiguration(for request: ReceivedRequest) throws
       -> VZVirtualMachineConfiguration
     {
+      try buildConfiguration(
+        for: request, commandLine: RunnerProtocol.guestKernelCommandLine
+      )
+    }
+
+    static func buildInodeProbeConfiguration(for request: ReceivedRequest) throws
+      -> VZVirtualMachineConfiguration
+    {
+      try buildConfiguration(
+        for: request, commandLine: RunnerProtocol.inodeProbeKernelCommandLine
+      )
+    }
+
+    private static func buildConfiguration(
+      for request: ReceivedRequest, commandLine: String
+    ) throws -> VZVirtualMachineConfiguration {
       try validateHost()
       let configuration = request.configuration
       let descriptors = request.descriptors
@@ -84,7 +100,7 @@ import Foundation
       bootLoader.initialRamdiskURL = descriptorURL(
         descriptors.descriptor(for: .initialRamdisk)
       )
-      bootLoader.commandLine = RunnerProtocol.guestKernelCommandLine
+      bootLoader.commandLine = commandLine
       result.bootLoader = bootLoader
       result.cpuCount = configuration.cpuCount
       result.memorySize = memoryBytes
@@ -103,9 +119,9 @@ import Foundation
         synchronizationMode: .full
       )
       let seed = VZVirtioBlockDeviceConfiguration(attachment: seedAttachment)
-      seed.blockDeviceIdentifier = "cw-seed"
+      seed.blockDeviceIdentifier = "CWSEED1"
       let data = VZVirtioBlockDeviceConfiguration(attachment: dataAttachment)
-      data.blockDeviceIdentifier = "cw-data"
+      data.blockDeviceIdentifier = "CWSTATE1"
       result.storageDevices = [seed, data]
       result.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
       result.socketDevices = [VZVirtioSocketDeviceConfiguration()]
@@ -187,6 +203,44 @@ import Foundation
       return [0..<4, 4..<6, 6..<8, 8..<10, 10..<16]
         .map { range in uuid[range].map { String(format: "%02x", $0) }.joined() }
         .joined(separator: "-")
+    }
+
+    static func inodeProbeSeed(for request: ReceivedRequest) throws -> Data {
+      let descriptor = request.descriptors.descriptor(for: .seedDisk)
+      return try readExact(descriptor: descriptor, size: Int(request.configuration.seedDisk.size))
+    }
+
+    static func inodeProbeFilesystemUUID(for request: ReceivedRequest) throws -> [UInt8] {
+      let value = try readExt4FilesystemUUID(
+        descriptor: request.descriptors.descriptor(for: .dataDisk)
+      )
+      let compact = value.replacingOccurrences(of: "-", with: "")
+      guard compact.count == 32 else { throw RuntimeError.dataDiskFormatInvalid }
+      return try stride(from: 0, to: compact.count, by: 2).map { offset in
+        let start = compact.index(compact.startIndex, offsetBy: offset)
+        let end = compact.index(start, offsetBy: 2)
+        guard let byte = UInt8(compact[start..<end], radix: 16) else {
+          throw RuntimeError.dataDiskFormatInvalid
+        }
+        return byte
+      }
+    }
+
+    private static func readExact(descriptor: Int32, size: Int) throws -> Data {
+      var bytes = [UInt8](repeating: 0, count: size)
+      var consumed = 0
+      while consumed < bytes.count {
+        let requested = bytes.count - consumed
+        let count = bytes.withUnsafeMutableBytes { raw in
+          pread(
+            descriptor, raw.baseAddress?.advanced(by: consumed), requested,
+            off_t(consumed)
+          )
+        }
+        guard count > 0 else { throw RuntimeError.descriptorInvalid }
+        consumed += count
+      }
+      return Data(bytes)
     }
 
     private static func validateRegular(

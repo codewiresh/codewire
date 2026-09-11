@@ -30,9 +30,11 @@ required_configuration = [
     'schemaVersion = 1',
     'maxFrameBytes = 16 * 1024',
     "guestDaemonVsockPort: UInt32 = 7_777",
+    "inodeProbeVsockPort: UInt32 = 7_775",
     "encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]",
     "daemonVsockPort == RunnerProtocol.guestDaemonVsockPort",
     'guestKernelCommandLine = "console=ttyS0 rdinit=/init panic=-1"',
+    '"console=ttyS0 rdinit=/init panic=-1 -- vz-inode-probe"',
     'Set(root.keys) == [',
     'seedDisk.size == 4096',
     'dataDisk.size >= 256 * 1024 * 1024',
@@ -51,6 +53,7 @@ for required in (
     "CW_VZ_FRAME_HEADER_BYTES", "payload_size",
     "MSG_TRUNC | MSG_CTRUNC", "FD_CLOEXEC", "close_message_descriptors",
     "cw_vz_descriptors_are_distinct_files", "st_dev", "st_ino",
+    "cw_vz_receive_start", "frame[4] != 1", "CMSG_FIRSTHDR(&message) != NULL",
 ):
     if required not in ipc:
         fail(f"IPC lost fail-closed primitive: {required}")
@@ -67,6 +70,8 @@ for required in (
     "result.directorySharingDevices = []", "result.graphicsDevices = []",
     "result.audioDevices = []", "result.usbControllers = []",
     "readExt4FilesystemUUID", "0x53, 0xef", "identity.filesystemUUID",
+    'seed.blockDeviceIdentifier = "CWSEED1"',
+    'data.blockDeviceIdentifier = "CWSTATE1"',
 ):
     if required not in runtime:
         fail(f"runtime lost fixed topology assertion: {required}")
@@ -78,6 +83,22 @@ for forbidden in (
     if forbidden in runtime:
         fail(f"runtime gained prohibited capability: {forbidden}")
 
+inode_probe = source("Sources/CodewireVZRunnerRuntime/InodeProbe.swift")
+for required in (
+    "VZVirtualMachine(configuration: configuration, queue: queue)",
+    "device.connect(toPort: RunnerProtocol.inodeProbeVsockPort)",
+    'sendResponse("descriptors-admitted"', 'sendResponse("guest-ready"',
+    "HMAC<SHA256>.isValidAuthenticationCode", "Darwin.read(controlDescriptor",
+):
+    if required not in inode_probe:
+        fail(f"inode probe lost lifecycle assertion: {required}")
+for forbidden in (
+    "VZNATNetworkDeviceAttachment", "VZBridgedNetworkDeviceAttachment",
+    "VZVirtioFileSystemDeviceConfiguration", "Process(", "Docker", "Credential",
+):
+    if forbidden in inode_probe:
+        fail(f"inode probe gained prohibited capability: {forbidden}")
+
 for relative in (
     "Cargo.toml",
     "crates/codewire-cli/Cargo.toml",
@@ -86,6 +107,25 @@ for relative in (
 ):
     if "codewire-vz-runner" in (ROOT / relative).read_text(encoding="utf-8"):
         fail(f"helper became reachable from {relative}")
+
+parent = (ROOT / "scripts/dev/macos-vz-inode-probe.py").read_text(encoding="utf-8")
+for required in (
+    "socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)",
+    "socket.SCM_RIGHTS", 'expect_response(parent, "descriptors-admitted")',
+    "for descriptor in descriptors:", "descriptors.clear()", "os.replace(decoy, path)",
+    'parent.sendall(framed(b"\\x01"))', 'expect_response(parent, "guest-ready")',
+    "os.kill(process.pid, signal.SIGKILL)", 'parent.recv(1) != b""',
+    "os.killpg(process.pid, 0)",
+    'entitlements.get("com.apple.security.virtualization") is not True',
+    "helper_sha256 = exact_sha256",
+    "kernel_sha256 = exact_sha256", "initramfs_sha256 = exact_sha256",
+    "data_uuid = exact_uuid", "private_helper = root / \"codewire-vz-runner\"",
+):
+    if required not in parent:
+        fail(f"inode-probe parent lost kill/swap assertion: {required}")
+for forbidden in ('"codesign", "-s"', "ssh", "scp", "http://", "https://"):
+    if forbidden in parent:
+        fail(f"inode-probe parent gained prohibited operation: {forbidden}")
 
 for relative in (
     "Tests/CodewireVZRunnerTests/ConfigurationTests.swift",

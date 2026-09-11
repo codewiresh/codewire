@@ -59,7 +59,8 @@ use crate::{
     PROGRESS_REQUEST_LEN, ProgressFrame, ProgressRequest, ROOT_DISK_SERIAL, SEED_DISK_SERIAL,
     SEED_LEN, SETUP_DISK_SERIAL, SETUP_HEADER_LEN, SKILL_SNAPSHOT_CONTENT_PATH,
     SKILL_SNAPSHOT_PLAN_PATH, STATE_DISK_SERIAL, Seed, SetupArchitecture, SetupBinding,
-    SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan,
+    SetupHeader, Sha256Value, SkillProjectionRoot, SkillSnapshotPlan, VZ_INODE_PROBE_CHALLENGE_LEN,
+    VZ_INODE_PROBE_SEED_LEN, VZ_INODE_PROBE_VSOCK_PORT, encode_vz_inode_probe_frame,
 };
 
 mod bootstrap;
@@ -453,6 +454,103 @@ pub fn run_init() -> Result<()> {
     record_boot_stage("daemon-started")?;
     let daemon = daemon.0.take().expect("daemon start child is present");
     supervise_guest(daemon, workspace, network.into_child()?, docker, poweroff)
+}
+
+/// Run only the entitlement-gated macOS `/dev/fd` hardware fixture.
+///
+/// This is deliberately not production guest readiness: it admits only the
+/// synthetic seed and state identities needed to prove that VZ consumed the
+/// already-open kernel, initramfs and disk inodes after their pathnames were
+/// replaced. The production init path above still requires state, root and
+/// seed disks and remains unchanged.
+pub fn run_vz_inode_probe() -> Result<()> {
+    ensure!(
+        unsafe { libc::getpid() } == 1,
+        "VZ inode probe must run as PID 1"
+    );
+    mount_minimal_filesystems()?;
+    let seed_device = wait_for_disk_by_serial(
+        Path::new(SYS_BLOCK_PATH),
+        Path::new(DEV_PATH),
+        SEED_DISK_SERIAL,
+        DISK_DISCOVERY_TIMEOUT,
+    )?;
+    let state_device = wait_for_disk_by_serial(
+        Path::new(SYS_BLOCK_PATH),
+        Path::new(DEV_PATH),
+        STATE_DISK_SERIAL,
+        DISK_DISCOVERY_TIMEOUT,
+    )?;
+    ensure!(seed_device != state_device, "probe disks must be distinct");
+    validate_block_device(&seed_device)?;
+    validate_block_device(&state_device)?;
+
+    let seed =
+        read_bounded(&seed_device, VZ_INODE_PROBE_SEED_LEN).context("read VZ inode probe seed")?;
+    ensure!(
+        seed.len() == VZ_INODE_PROBE_SEED_LEN,
+        "VZ inode probe seed has invalid length"
+    );
+    let filesystem_uuid = read_ext4_uuid_bytes(&state_device)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create VZ inode probe runtime")?;
+    runtime.block_on(async move {
+        let listener =
+            VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, VZ_INODE_PROBE_VSOCK_PORT))
+                .context("bind VZ inode probe vsock")?;
+        loop {
+            let (mut stream, peer) = listener.accept().await.context("accept VZ inode probe")?;
+            if !is_host_cid(peer.cid()) {
+                continue;
+            }
+            let mut challenge = [0_u8; VZ_INODE_PROBE_CHALLENGE_LEN];
+            tokio::time::timeout(
+                PROGRESS_REQUEST_TIMEOUT,
+                AsyncReadExt::read_exact(&mut stream, &mut challenge),
+            )
+            .await
+            .context("VZ inode probe challenge timed out")??;
+            let frame = encode_vz_inode_probe_frame(&seed, filesystem_uuid, challenge)
+                .context("encode VZ inode probe readiness")?;
+            AsyncWriteExt::write_all(&mut stream, &frame)
+                .await
+                .context("write VZ inode probe readiness")?;
+            AsyncWriteExt::flush(&mut stream)
+                .await
+                .context("flush VZ inode probe readiness")?;
+        }
+    })
+}
+
+fn read_ext4_uuid_bytes(path: &Path) -> Result<[u8; 16]> {
+    const EXT4_SUPERBLOCK_OFFSET: u64 = 1_024;
+    const EXT4_MAGIC_OFFSET: u64 = 0x38;
+    const EXT4_UUID_OFFSET: u64 = 0x68;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .with_context(|| format!("open ext4 identity device {}", path.display()))?;
+    let mut magic = [0_u8; 2];
+    read_exact_at(
+        &file,
+        &mut magic,
+        EXT4_SUPERBLOCK_OFFSET + EXT4_MAGIC_OFFSET,
+    )?;
+    ensure!(magic == [0x53, 0xef], "probe data disk is not ext4");
+    let mut uuid = [0_u8; 16];
+    read_exact_at(&file, &mut uuid, EXT4_SUPERBLOCK_OFFSET + EXT4_UUID_OFFSET)?;
+    ensure!(uuid.iter().any(|byte| *byte != 0), "probe ext4 UUID is nil");
+    Ok(uuid)
+}
+
+fn read_exact_at(file: &File, output: &mut [u8], offset: u64) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+
+    file.read_exact_at(output, offset)
+        .context("read probe disk identity")
 }
 
 fn require_persisted_workspace_plan(plan: Option<WorkspacePlan>) -> Result<WorkspacePlan> {

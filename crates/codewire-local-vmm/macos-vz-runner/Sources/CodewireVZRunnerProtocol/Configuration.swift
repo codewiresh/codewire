@@ -5,7 +5,10 @@ public enum RunnerProtocol {
   public static let descriptorCount = 4
   public static let maxFrameBytes = 16 * 1024
   public static let guestDaemonVsockPort: UInt32 = 7_777
+  public static let inodeProbeVsockPort: UInt32 = 7_775
   public static let guestKernelCommandLine = "console=ttyS0 rdinit=/init panic=-1"
+  public static let inodeProbeKernelCommandLine =
+    "console=ttyS0 rdinit=/init panic=-1 -- vz-inode-probe"
 }
 
 public enum ConfigurationError: Error, Equatable, CustomStringConvertible {

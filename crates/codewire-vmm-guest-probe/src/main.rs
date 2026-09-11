@@ -55,6 +55,13 @@ fn entrypoint() -> anyhow::Result<()> {
                 .context("create guest network-agent Tokio runtime")?;
             runtime.block_on(guest::run_network_agent())
         }
+        Some("vz-inode-probe") => {
+            ensure!(
+                arguments.next().is_none(),
+                "VZ inode probe accepts no arguments"
+            );
+            guest::run_vz_inode_probe()
+        }
         Some("identity") => {
             ensure!(arguments.next().is_none(), "identity accepts no arguments");
             guest::run_identity()
