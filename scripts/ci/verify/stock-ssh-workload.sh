@@ -55,6 +55,27 @@ require_installed() {
   [[ -f "$SERVER_CONFIG" && ! -L "$SERVER_CONFIG" ]] || fail 'server config is unavailable'
 }
 
+prepare_authorization() {
+  local owner mode expected
+  [[ "$(authorization_command_state)" == strict-modes-safe ]] ||
+    fail 'stock authorization command path is unsafe'
+  [[ -f "$STATE_ROOT/client_key.pub" && ! -L "$STATE_ROOT/client_key.pub" ]] ||
+    fail 'preserved public authorization is unavailable'
+  expected="restrict $(cat -- "$STATE_ROOT/client_key.pub")"
+  if [[ -e "$AUTHORIZED_KEYS" || -L "$AUTHORIZED_KEYS" ]]; then
+    [[ -f "$AUTHORIZED_KEYS" && ! -L "$AUTHORIZED_KEYS" ]] ||
+      fail 'authorization file collided with another object'
+    read -r owner mode < <(stat -Lc '%u %a' -- "$AUTHORIZED_KEYS") ||
+      fail 'authorization file cannot be inspected'
+    [[ "$owner" == "$(id -u)" && "$mode" == 600 &&
+       "$(cat -- "$AUTHORIZED_KEYS")" == "$expected" ]] ||
+      fail 'authorization file ownership, mode, or public value drifted'
+  else
+    (umask 077; set -o noclobber; printf '%s\n' "$expected" >"$AUTHORIZED_KEYS") ||
+      fail 'could not restore public authorization'
+  fi
+}
+
 process_state_start() {
   local pid="$1" process_stat
   local -a process_fields
@@ -178,10 +199,9 @@ install_fixture() {
   install -d -m 0700 -- "$STATE_ROOT" "$CLIENT_ROOT" "$STATE_ROOT/remote"
   # Only per-run public authorization, synthetic host keys and mutable target
   # state are created here. The prepared server needs no network or sudo.
-  printf 'restrict %s %s\n' "$algorithm" "$blob" >"$AUTHORIZED_KEYS"
-  chmod 0600 "$AUTHORIZED_KEYS"
   printf '%s %s\n' "$algorithm" "$blob" >"$STATE_ROOT/client_key.pub"
   chmod 0600 "$STATE_ROOT/client_key.pub"
+  prepare_authorization
   /usr/bin/ssh-keygen -q -t ed25519 -N '' -C codewire-stock-ssh-smoke \
     -f "$STATE_ROOT/ssh_host_ed25519_key"
   chmod 0600 "$STATE_ROOT/ssh_host_ed25519_key"
@@ -192,7 +212,13 @@ ListenAddress $LISTEN_HOST
 Port $LISTEN_PORT
 HostKey $STATE_ROOT/ssh_host_ed25519_key
 PidFile $SERVER_PID
-AuthorizedKeysFile $AUTHORIZED_KEYS
+# The workspace PVC is intentionally group-writable through fsGroup, so an
+# absolute AuthorizedKeysFile below it cannot pass OpenSSH StrictModes. The
+# stock root-owned helper emits only this owned public authorization as the
+# target user; no private provider material enters the workspace.
+AuthorizedKeysCommand /usr/bin/cat $AUTHORIZED_KEYS
+AuthorizedKeysCommandUser $TARGET_USER
+AuthorizedKeysFile none
 AllowUsers $TARGET_USER
 AuthenticationMethods publickey
 PubkeyAuthentication yes
@@ -237,6 +263,7 @@ EOF
 start_fixture() {
   local pid pid_file started launched_start='' state attempt multiarch stopped=0
   require_installed
+  prepare_authorization
   if pid="$(current_server_pid)"; then
     printf 'stock-ssh-workload-ready\n'
     return
@@ -379,6 +406,112 @@ has_diagnostic_line() {
   grep -qxF -e "$expected" -e "$expected"$'\r' "$diagnostic"
 }
 
+strict_modes_component_state() {
+  local owner="$1" mode="$2" target_uid="$3"
+  [[ "$owner" =~ ^[0-9]+$ && "$mode" =~ ^[0-7]+$ && "$target_uid" =~ ^[0-9]+$ ]] || return 1
+  if [[ "$owner" != 0 && "$owner" != "$target_uid" ]] || (( (8#$mode & 8#022) != 0 )); then
+    printf '%s\n' unsafe
+  else
+    printf '%s\n' safe
+  fi
+}
+
+authorization_command_state() {
+  local path owner mode target_uid
+  target_uid=0
+  path="$(readlink -f /usr/bin/cat)" || return 1
+  while [[ "$path" == /* ]]; do
+    read -r owner mode < <(stat -Lc '%u %a' -- "$path" 2>/dev/null) || return 1
+    if [[ "$(strict_modes_component_state "$owner" "$mode" "$target_uid")" != safe ]]; then
+      printf '%s\n' strict-modes-unsafe
+      return
+    fi
+    path="${path%/*}"
+    [[ -n "$path" ]] || path=/
+    [[ "$path" != / ]] || {
+      read -r owner mode < <(stat -Lc '%u %a' -- / 2>/dev/null) || return 1
+      [[ "$(strict_modes_component_state "$owner" "$mode" "$target_uid")" == safe ]] || {
+        printf '%s\n' strict-modes-unsafe
+        return
+      }
+      break
+    }
+  done
+  printf '%s\n' strict-modes-safe
+}
+
+authorized_keys_command_failure() {
+  local log="$1" line status
+  if line="$(grep -E 'AuthorizedKeysCommand.*(exited|status)[^0-9]*[0-9]+' "$log" 2>/dev/null | tail -n 1)" &&
+      [[ -n "$line" ]]; then
+    status="$(sed -E 's/.*(exited|status)[^0-9]*([0-9]+).*/\2/' <<<"$line")"
+    [[ "$status" =~ ^[0-9]+$ ]] || status=unknown
+    printf 'helper-exit %s\n' "$status"
+  elif grep -Eqi 'AuthorizedKeysCommand.*(stat|ownership|mode|unsafe)' "$log" 2>/dev/null; then
+    printf 'helper-path unknown\n'
+  elif grep -Eqi 'AuthorizedKeysCommand.*(setresgid|setresuid|setgid|setuid|initgroups)' "$log" 2>/dev/null; then
+    printf 'helper-identity unknown\n'
+  elif grep -Eqi 'AuthorizedKeysCommand.*(exec|execute|subprocess|fork)' "$log" 2>/dev/null; then
+    printf 'helper-exec unknown\n'
+  elif grep -qF 'AuthorizedKeysCommand' "$log" 2>/dev/null; then
+    printf 'helper-other unknown\n'
+  else
+    printf 'not-reported none\n'
+  fi
+}
+
+report_authentication_failure() {
+  local list_status signing_status selected_state server_state command_state identities helper_state helper_status
+  local algorithm blob listed_algorithm listed_blob _comment process_uid process_gid passwd_uid passwd_gid
+
+  if identities="$(bounded_client /usr/bin/ssh-add -L 2>/dev/null)"; then
+    list_status=available
+    selected_state=absent
+    read -r algorithm blob _comment <"$STATE_ROOT/client_key.pub"
+    while read -r listed_algorithm listed_blob _comment; do
+      if [[ "$listed_algorithm" == "$algorithm" && "$listed_blob" == "$blob" ]]; then
+        selected_state=present
+        break
+      fi
+    done <<<"$identities"
+  else
+    list_status=unavailable-or-empty
+    selected_state=unknown
+  fi
+  identities=''
+  if bounded_client /usr/bin/ssh-add -T "$STATE_ROOT/client_key.pub" >/dev/null 2>&1; then
+    signing_status=allowed
+  else
+    signing_status=denied-or-unavailable
+  fi
+
+  read -r helper_state helper_status < <(authorized_keys_command_failure "$SERVER_LOG")
+  server_state=unknown
+  if [[ "$helper_state" != not-reported ]]; then
+    server_state=authorized-keys-command
+  elif grep -qF "User $TARGET_USER not allowed because account is locked" "$SERVER_LOG" 2>/dev/null; then
+    server_state=account-locked
+  elif grep -qF "Authentication refused: bad ownership or modes" "$SERVER_LOG" 2>/dev/null; then
+    server_state=strict-modes-rejected
+  elif grep -qF "Failed publickey for $TARGET_USER " "$SERVER_LOG" 2>/dev/null; then
+    server_state=publickey-rejected
+  elif grep -qF "Connection closed by authenticating user $TARGET_USER " "$SERVER_LOG" 2>/dev/null; then
+    server_state=no-accepted-offer
+  fi
+  command_state="$(authorization_command_state 2>/dev/null || printf '%s\n' inspection-unavailable)"
+  process_uid="$(id -u 2>/dev/null || printf unknown)"
+  process_gid="$(id -g 2>/dev/null || printf unknown)"
+  IFS=: read -r _comment _comment passwd_uid passwd_gid _comment < <(getent passwd "$TARGET_USER" 2>/dev/null) || {
+    passwd_uid=unknown
+    passwd_gid=unknown
+  }
+  [[ "$passwd_uid" =~ ^[0-9]+$ ]] || passwd_uid=unknown
+  [[ "$passwd_gid" =~ ^[0-9]+$ ]] || passwd_gid=unknown
+  printf '[stock-ssh-workload] AUTH_DIAGNOSTIC agent_list=%s selected_identity=%s signing=%s authorization_command=%s helper=%s helper_status=%s process_uid=%s process_gid=%s passwd_uid=%s passwd_gid=%s server=%s\n' \
+    "$list_status" "$selected_state" "$signing_status" "$command_state" "$helper_state" "$helper_status" \
+    "$process_uid" "$process_gid" "$passwd_uid" "$passwd_gid" "$server_state" >&2
+}
+
 expect_host_denied() {
   local pins="$1" diagnostic="$2" before_pid after_pid stderr
   local -a denied_options
@@ -412,7 +545,7 @@ expect_host_denied() {
 }
 
 prove_fixture() {
-  local expected_host_key="$1" before after fingerprint wrapper upload download sftp_download clone
+  local expected_host_key="$1" before after fingerprint wrapper upload download sftp_download clone command_output
   local -a scp_options sftp_options
   require_installed
   : "${SSH_AUTH_SOCK:?managed SSH agent is required}"
@@ -423,9 +556,12 @@ prove_fixture() {
   before="$(accepted_count)"
   [[ "$before" == 0 ]] || fail 'target has prior successful authentications'
 
-  [[ "$(bounded_client /usr/bin/ssh "${SSH_OPTIONS[@]}" \
-    "$TARGET_USER@$LISTEN_HOST" 'printf stock-ssh-exec-ok')" == 'stock-ssh-exec-ok' ]] ||
+  if ! command_output="$(bounded_client /usr/bin/ssh "${SSH_OPTIONS[@]}" \
+      "$TARGET_USER@$LISTEN_HOST" 'printf stock-ssh-exec-ok')"; then
+    report_authentication_failure
     fail 'stock SSH command failed'
+  fi
+  [[ "$command_output" == 'stock-ssh-exec-ok' ]] || fail 'stock SSH command output drifted'
 
   upload="$CLIENT_ROOT/upload.bin"
   download="$CLIENT_ROOT/scp-download.bin"

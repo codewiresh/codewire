@@ -126,9 +126,18 @@ run_provider_ssh_smoke() {
   host_key="$(cat "$TMPDIR_SMOKE/provider-ssh-host-key")"
   [[ "$host_key" =~ ^\[127\.0\.0\.1\]:22222\ ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]] ||
     die 'SSH fixture returned invalid exact loopback host trust'
-  cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- /bin/bash "$PROVIDER_SSH_SCRIPT" prove "$host_key" \
-    >"$TMPDIR_SMOKE/provider-ssh-proof.out" 2>"$TMPDIR_SMOKE/provider-ssh-proof.err" ||
+  if ! cw_with_timeout "$SMOKE_EXEC_TIMEOUT" run --no-tty "$ENV_ID" -- \
+      /bin/bash "$PROVIDER_SSH_SCRIPT" prove "$host_key" \
+      >"$TMPDIR_SMOKE/provider-ssh-proof.out" 2>"$TMPDIR_SMOKE/provider-ssh-proof.err"; then
+    # Preserve the synthetic loopback server's private evidence before normal
+    # cleanup removes the environment. It contains public fixture metadata and
+    # server diagnostics only, never provider private key material.
+    cw_with_timeout 30 run --no-tty "$ENV_ID" -- \
+      /bin/cat /workspace/.cw-ssh-smoke/sshd.log \
+      >"$TMPDIR_SMOKE/provider-ssh-sshd.log" 2>"$TMPDIR_SMOKE/provider-ssh-sshd-collect.err" || true
+    chmod 0600 "$TMPDIR_SMOKE/provider-ssh-sshd.log" 2>/dev/null || true
     die 'placed platform SSH/SCP/SFTP/Git protected-route proof failed'
+  fi
   grep -qx stock-ssh-workload-proved "$TMPDIR_SMOKE/provider-ssh-proof.out" ||
     die 'placed stock-client proof omitted its completion marker'
   # Admit this workload while the selected key is active. After revocation,

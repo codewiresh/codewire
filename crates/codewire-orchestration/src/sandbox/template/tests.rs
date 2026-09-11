@@ -1676,7 +1676,7 @@ mod tests {
                 "codewire-runtime",
                 &TemplateOpts {
                     name: format!("tmpl-dind-memory-{name}"),
-                    image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into(),
+                    image: "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into(),
                     runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
             gateway_token: "test-coordinate-token".into(),
             daemon_auth_token: "test-daemon-token".into(),
@@ -1706,7 +1706,7 @@ mod tests {
             "codewire-runtime",
             &TemplateOpts {
                 name: "tmpl-dind-image".into(),
-                image: "ghcr.io/codewiresh/workspace@sha256:03571275319488cd317d7f405fc22057214906fba0c6727160090286a17f7467".into(),
+                image: "ghcr.io/codewiresh/workspace@sha256:18af6b9ff1ac123754aff20b3229ecf882b5553117d9c5fbe43ab2f36f282cff".into(),
                 dind_image: image.into(),
                 runtime_profile: RUNTIME_PROFILE_COMMODITY.into(),
                 gateway_token: "test-coordinate-token".into(),
