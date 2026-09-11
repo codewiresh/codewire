@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
+EXECUTABLE_TEMP_ROOT = ROOT / ".tmp"
 SPEC = importlib.util.spec_from_file_location("cache_probes", ROOT / "scripts/ci/verify/workspace-cache-probes.py")
 probes = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(probes)
@@ -205,7 +206,10 @@ else:
 
 class ProbeFixture(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="codewire-cache-probe-test-", dir=os.environ.get("TMPDIR"))
+        EXECUTABLE_TEMP_ROOT.mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(
+            prefix="codewire-cache-probe-test-", dir=EXECUTABLE_TEMP_ROOT
+        )
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name)
         self.root = self.work / "source"
@@ -300,6 +304,11 @@ class ProbeFixture(unittest.TestCase):
 
     def test_actual_wrapper_replay_binds_observed_failure(self):
         self.report.mkdir()
+        replay_root = self.work / "replay-source"
+        helper_source = ROOT / "scripts/ci/images/workspace-cache.sh"
+        helper = replay_root / "scripts/ci/images/workspace-cache.sh"
+        helper.parent.mkdir(parents=True)
+        shutil.copy2(helper_source, helper)
         for index, (text, status, retried) in enumerate((
             ("ERROR: failed to build: failed to solve: failed to load cache: S3 GetObject NoSuchKey", 1, True),
             ("ERROR: failed to build: failed to solve: failed to load cache: S3 GetObject NoSuchKey", 51, False),
@@ -314,10 +323,14 @@ class ProbeFixture(unittest.TestCase):
             (directory / "status").write_text(str(status))
             work = self.work / str(index)
             work.mkdir()
-            probes.replay(ROOT, self.report, "native-missing-blob", work, self.credential)
+            probes.replay(replay_root, self.report, "native-missing-blob", work, self.credential)
             value = probes.read(directory / "wrapper-replay.json")
             self.assertEqual(value["cold_retry"], retried)
             self.assertEqual(value["invocation_count"], 2 if retried else 1)
+            self.assertEqual(
+                value["helper_sha256"],
+                hashlib.sha256(helper_source.read_bytes()).hexdigest(),
+            )
             self.assertEqual(value["input_log_sha256"], hashlib.sha256(text.encode()).hexdigest())
 
     def fixture_repository(self):
