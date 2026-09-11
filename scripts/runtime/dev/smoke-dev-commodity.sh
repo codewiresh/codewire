@@ -1086,7 +1086,9 @@ application_environment_ready() {
     die 'application environment setup failed; output suppressed'
   fi
   jq -e --arg id "$ENV_ID" --arg project "$project" --argjson previous "$previous_generation" '
-    .id == $id and .state == "running" and .operation_generation > $previous and
+    .id == $id and .state == "running" and
+    (.operation_generation | type == "number" and . > 0) and
+    ($previous == 0 or .operation_generation == $previous) and
     .setup_complete == true and .setup_error == null and
     (.source_selection | type == "object") and (.source_selection.secrets | type == "object") and
     .source_selection.credentials == null and .source_selection.profile_revision == null and
@@ -1097,14 +1099,39 @@ application_environment_ready() {
 }
 
 capture_application_pod() {
-  local phase="$1" generation="$2" claim_uid
-  claim_uid="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxclaim "$CLAIM_NAME" -o 'jsonpath={.metadata.uid}')"
-  [[ -n "$claim_uid" ]] || die 'application smoke claim identity is unavailable'
-  kubectl_dev -n "$SANDBOX_NAMESPACE" get pod -l "agents.x-k8s.io/claim-uid=$claim_uid" -o json |
-    jq -e --arg claim "$claim_uid" --arg id "$ENV_ID" --arg generation "$generation" --arg phase "$phase" '
-      if (.items | length) != 1 then error("expected one exact workspace Pod") else .items[0] end |
+  local phase="$1" generation="$2" claim_identity claim_uid sandbox_name sandbox_identity sandbox_uid pod_name
+  # Match the product authority chain. Agent Sandbox does not copy a Claim UID
+  # label onto the Pod; labels alone would not prove controller ownership.
+  claim_identity="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get sandboxclaim "$CLAIM_NAME" -o json |
+    jq -er --arg name "$CLAIM_NAME" --arg ns "$SANDBOX_NAMESPACE" --arg id "$ENV_ID" '
+      select(.metadata.name == $name and .metadata.namespace == $ns and .metadata.deletionTimestamp == null and
+        .metadata.labels["codewire.sh/environment-id"] == $id and .metadata.labels["codewire.sh/type"] == "sandbox") |
+      [.metadata.uid, .status.sandbox.name] |
+      select(all(.[]; type == "string" and test("^[a-z0-9][a-z0-9.-]*$"))) | @tsv')" ||
+    die 'application smoke claim identity is unavailable'
+  IFS=$'\t' read -r claim_uid sandbox_name <<<"$claim_identity"
+  sandbox_identity="$(kubectl_dev -n "$SANDBOX_NAMESPACE" get sandbox "$sandbox_name" -o json |
+    jq -er --arg name "$sandbox_name" --arg ns "$SANDBOX_NAMESPACE" --arg claim "$CLAIM_NAME" --arg uid "$claim_uid" '
+      select(.metadata.name == $name and .metadata.namespace == $ns and .metadata.deletionTimestamp == null) |
+      select([.metadata.ownerReferences[]? | select(.controller == true)] |
+        length == 1 and (.[0] | .apiVersion == "extensions.agents.x-k8s.io/v1beta1" and
+          .kind == "SandboxClaim" and .name == $claim and .uid == $uid)) |
+      [.metadata.uid, (.metadata.annotations["agents.x-k8s.io/pod-name"] // .metadata.name)] |
+      select(all(.[]; type == "string" and test("^[a-z0-9][a-z0-9.-]*$"))) | @tsv')" ||
+    die 'application smoke Sandbox is not controlled by the exact Claim'
+  IFS=$'\t' read -r sandbox_uid pod_name <<<"$sandbox_identity"
+  kubectl_dev -n "$SANDBOX_NAMESPACE" get pod "$pod_name" -o json |
+    jq -e --arg claim "$claim_uid" --arg sandbox "$sandbox_name" --arg sandbox_uid "$sandbox_uid" \
+      --arg pod "$pod_name" --arg ns "$SANDBOX_NAMESPACE" --arg id "$ENV_ID" --arg generation "$generation" --arg phase "$phase" '
       select(.metadata.deletionTimestamp == null and .status.phase == "Running" and
-        .metadata.labels["agents.x-k8s.io/claim-uid"] == $claim) |
+        .metadata.name == $pod and .metadata.namespace == $ns and
+        .metadata.labels["codewire.sh/environment-id"] == $id and
+        .metadata.labels["codewire.sh/type"] == "workspace" and
+        .metadata.labels["codewire.sh/environment-operation-generation"] == $generation) |
+      select([.metadata.ownerReferences[]? | select(.controller == true)] |
+        length == 1 and (.[0] | .apiVersion == "agents.x-k8s.io/v1beta1" and
+          .kind == "Sandbox" and .name == $sandbox and .uid == $sandbox_uid)) |
+      select([.spec.containers[] | select(.name == "workspace")] | length == 1) |
       [.spec.containers[] | select(.name == "workspace") | .env[]?] as $env |
       select(all($env[]; .name != "DATABASE_URL")) |
       select(if $phase == "clear" then
@@ -1126,15 +1153,19 @@ application_guest_check() {
   local expected="$1"
   cat <<SCRIPT
 set -eu
-test "\$CW_DEV_PRECEDENCE" = ordinary-config
-test "\$(cat /workspace/.cw-app-smoke/install-count)" = 1
-test "\$(cat /workspace/.cw-app-smoke/preserved)" = workspace-preserved
-if test '$expected' = absent; then test "\${DATABASE_URL+x}" != x; else
-  test "\$(printf %s "\$DATABASE_URL" | sha256sum | cut -d ' ' -f 1)" = '$expected'
+application_fail() { printf 'application check failed: %s\\n' "\$1" >&2; exit 1; }
+test "\${CW_DEV_PRECEDENCE:-}" = ordinary-config || application_fail ordinary-precedence
+test "\$(cat /workspace/.cw-app-smoke/install-count)" = 1 || application_fail install-count
+test "\$(cat /workspace/.cw-app-smoke/preserved)" = workspace-preserved || application_fail workspace-preservation
+if test '$expected' = absent; then
+  test "\${DATABASE_URL+x}" != x || application_fail cleared-projection
+else
+  test "\${DATABASE_URL+x}" = x || application_fail missing-projection
+  test "\$(printf %s "\$DATABASE_URL" | sha256sum | cut -d ' ' -f 1)" = '$expected' || application_fail current-projection
 fi
 attempt=0
 while test "\$(cat /workspace/.cw-app-smoke/startup-sha 2>/dev/null || true)" != '$expected'; do
-  attempt=\$((attempt + 1)); test "\$attempt" -lt 100; sleep 0.1
+  attempt=\$((attempt + 1)); test "\$attempt" -lt 100 || application_fail startup-projection; sleep 0.1
 done
 python3 - <<'PY'
 import json
@@ -1154,11 +1185,16 @@ SCRIPT
 }
 
 run_application_secret_pty() {
-  local guest_script="$1" phase="$2" command
-  printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run "$ENV_ID" -- \
+  local guest_script="$1" phase="$2" command receipt
+  # cw needs terminal stdin to read its initial size. Redirect cw's stdout
+  # inside that host PTY so attach is noninteractive and propagates the guest
+  # exit status, rather than waiting for the interactive detach chord.
+  printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty "$ENV_ID" -- \
     /bin/sh -c "set -eu; test -t 0; test -t 1; $guest_script"
+  printf -v receipt '%q' "$TMPDIR_SMOKE/app-pty-$phase.log"
+  command+=" >$receipt"
   if ! timeout --foreground --kill-after=5s "$SMOKE_EXEC_TIMEOUT" \
-      env SHELL=/bin/bash script -qefc "$command" "$TMPDIR_SMOKE/app-pty-$phase.log" </dev/null \
+      env SHELL=/bin/bash script -qefc "$command" /dev/null </dev/null \
       >"$TMPDIR_SMOKE/app-pty-$phase.out" 2>"$TMPDIR_SMOKE/app-pty-$phase.err"; then
     die 'application-secret PTY launch failed; output suppressed'
   fi
@@ -1208,7 +1244,9 @@ run_application_secrets_smoke() {
         assert_application_source_update "$TMPDIR_SMOKE/app-update-clear.json" "$project" "$generation"
         ;;
     esac
-    wait_until 'current application source generation and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
+    # Generation fences the owning Temporal workflow, not each source edit.
+    # Restart completion additionally requires a new exact Pod UID below.
+    wait_until 'current application source, workflow authority and completed setup' "$(( $(seconds_now) + SMOKE_TIMEOUT_SECONDS ))" \
       application_environment_ready "$project" "$generation"
     # Running precedes setup. Setup recovery may replace the workspace Pod, so
     # discover and assert its current identity only after setup has committed.

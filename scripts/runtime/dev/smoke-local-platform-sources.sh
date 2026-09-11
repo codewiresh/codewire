@@ -149,7 +149,7 @@ SCRIPT
 }
 
 local_platform_application_phase() {
-  local phase="$1" project="$2" expected="$3" guest command
+  local phase="$1" project="$2" expected="$3" guest command receipt
   local_platform_binding "$project" "$LP_GENERATION" || die 'local VM source/profile/authority binding drifted'
   LP_GENERATION="$(jq -er .generation "$TMPDIR_SMOKE/local-environment.json")"
   guest="$(local_platform_guest_check "$expected")"
@@ -157,14 +157,20 @@ local_platform_application_phase() {
     >"$TMPDIR_SMOKE/local-app-$phase.out" 2>"$TMPDIR_SMOKE/local-app-$phase.err" ||
     die 'platform application projection failed in the local VM'
   grep -qx application-secret-check-ok "$TMPDIR_SMOKE/local-app-$phase.out" || die 'local application receipt is missing'
+  # cw needs terminal stdin to read its initial size. Redirect cw's stdout
+  # inside that host PTY so attach is noninteractive and propagates the guest
+  # exit status, rather than waiting for the interactive detach chord.
   printf -v command '%q ' "$CW_BIN" --server "$CODEWIRE_SERVER_URL" run --tty -- \
-    /bin/sh -c "test -t 0 && test -t 1 || exit 77; $guest"
-  (
+    /bin/sh -c "set -eu; test -t 0; test -t 1; $guest"
+  printf -v receipt '%q' "$TMPDIR_SMOKE/local-pty-$phase.log"
+  command+=" >$receipt"
+  if ! (
     cd "$LP_WORKSPACE"
     env -i "${LP_ENV[@]}" timeout --foreground --kill-after=5s 60 \
-      script -qefc "$command" "$TMPDIR_SMOKE/local-pty-$phase.log" </dev/null
-  ) >"$TMPDIR_SMOKE/local-pty-$phase.out" 2>"$TMPDIR_SMOKE/local-pty-$phase.err" ||
+      script -qefc "$command" /dev/null </dev/null
+  ) >"$TMPDIR_SMOKE/local-pty-$phase.out" 2>"$TMPDIR_SMOKE/local-pty-$phase.err"; then
     die 'platform application projection failed in a local PTY'
+  fi
   grep -Eq $'^application-secret-check-ok\r?$' "$TMPDIR_SMOKE/local-pty-$phase.log" ||
     die 'local PTY application receipt is missing'
 }

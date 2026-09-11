@@ -13,6 +13,7 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck disable=SC1091
 source "$REPO_ROOT/scripts/runtime/dev/smoke-local-platform-sources.sh"
+REAL_LOCAL_PLATFORM_APPLICATION_PHASE="$(declare -f local_platform_application_phase)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cw-local-platform-tests.XXXXXXXX")"
 TEST_OWNER="$BASHPID"
 cleanup_test() {
@@ -224,6 +225,40 @@ expect_failure term-resistant-owner local_platform_stop_owners
 ! kill -0 "$resistant_pid" 2>/dev/null || fail 'exact TERM-resistant authority survived cleanup'
 wait "$resistant_pid" 2>/dev/null || true
 resistant_pid=''
+pass
+
+# A synthetic CLI requires terminal stdin for size detection and nonterminal
+# stdout for exit propagation, then allocates an actual guest PTY on --tty.
+LP_WORKSPACE="$TMPDIR_SMOKE"
+(
+  eval "$REAL_LOCAL_PLATFORM_APPLICATION_PHASE"
+  CW_BIN="$TMPDIR_SMOKE/cw-local-pty-fixture"
+  # shellcheck disable=SC2016 # Literal synthetic executable, not host expansion.
+  printf '%s\n' '#!/bin/bash' 'set -euo pipefail' 'test -t 0; ! test -t 1; stty size >/dev/null' \
+    'tty=0; while (($#)) && [[ "$1" != -- ]]; do [[ "$1" != --tty ]] || tty=1; shift; done' \
+    '[[ "$tty" == 1 ]]; shift' \
+    'if [[ "${LOCAL_PTY_WITHOUT_TERMINAL:-0}" == 1 ]]; then exec "$@"; fi' \
+    'printf -v command "%q " "$@"' 'exec script -qefc "$command" /dev/null </dev/null' >"$CW_BIN"
+  chmod 0700 "$CW_BIN"
+  LP_ENV=(PATH=/usr/bin:/bin HOME="$TMPDIR_SMOKE/home")
+  CODEWIRE_SERVER_URL=synthetic
+  cw_with_timeout() {
+    shift
+    [[ "$*" == 'run --no-tty -- /bin/sh -c '* ]] || fail 'unexpected non-PTY application command'
+    printf 'application-secret-check-ok\n'
+  }
+  local_platform_binding() { printf '{"generation":1}\n' >"$TMPDIR_SMOKE/local-environment.json"; }
+  local_platform_guest_check() { printf '%s' "$SYNTHETIC_GUEST_CHECK"; }
+  SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'"
+  local_platform_application_phase actual synthetic expected
+  SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'; exit 7"
+  expect_failure pty-exit-status local_platform_application_phase failure synthetic expected
+  SYNTHETIC_GUEST_CHECK="printf 'application-secret-check-ok\\n'"
+  LP_ENV+=(LOCAL_PTY_WITHOUT_TERMINAL=1)
+  expect_failure missing-guest-pty local_platform_application_phase no-pty synthetic expected
+)
+pass
+pass
 pass
 
 # Execute the complete journey with public-command doubles. Preparation and
