@@ -29,8 +29,12 @@ Release tags, manual publication/recovery, production or unusual live mutation,
 and direct credential access require explicit action-scoped authority. Ordinary
 merge consequences already declared at the canonical base—CI, support-image
 publication, standard Dev delivery, and GitHub mirroring—inherit merge
-authority. New destinations, workflow changes, reruns, releases, recovery, and
-production actions do not.
+authority. New destinations, workflow changes, releases, recovery, and
+production actions do not. Routine retries or reruns of existing verification
+within an already-authorized task inherit that authority and need no separate
+approval. First diagnose why the prior attempt did not produce reusable
+evidence, preserve the selected gate, and honor any explicit named exclusion
+for the exact run it names.
 
 ## Method and risk
 
